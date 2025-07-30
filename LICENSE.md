@@ -1,4 +1,4 @@
-Third-Party Notices Report for Inventory for Triton_Kernel_Agent
+Third-Party Notices Report for Inventory for GEAK-agent
 
 
             AMD copyrighted code (Apache-2.0)
