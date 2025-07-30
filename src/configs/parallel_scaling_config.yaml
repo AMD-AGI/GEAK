@@ -1,0 +1,18 @@
+statis_path: "~/TB-eval/TritonBench/data/TritonBench_G_v1.json"
+py_folder: "~/TB-eval/TritonBench/data/TritonBench_G_v1"
+instruction_path: "~/TB-eval/TritonBench/data/TritonBench_G_comp_alpac_v1_fixed_with_difficulty.json"
+corpus_path: "./dataloaders/TB_eval/train_crawl.json"
+golden_metrics: "~/TB-eval/TritonBench/performance_metrics/perf_G/golden_metrics"
+perf_ref_folder: "~/TB-eval/TritonBench/performance_metrics/perf_G/golden_results"
+perf_G_path: "~/TB-eval/TritonBench/performance_metrics/perf_G"
+py_interpreter: "python"
+data_len: 184
+
+output_file: ../outputs/parallel_scaling.jsonl
+file_list: [
+  "outputs/reflexion1_oneshot_gpt41_9.jsonl",
+  "outputs/reflexion2_oneshot_gpt41_9.jsonl",
+  "outputs/reflexion3_oneshot_gpt41_9.jsonl",
+  "outputs/reflexion4_oneshot_gpt41_9.jsonl",
+  "outputs/reflexion5_oneshot_gpt41_9.jsonl",
+]

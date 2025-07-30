@@ -1,0 +1,23 @@
+# LLM model
+api_key: ""
+model_id: "dvue-aoai-001-gpt-4.1"
+temperature: 1.0
+
+# ROCm (Check the paths from GEAK-eval)
+statis_path: "TB-eval-smol/tb_eval/data/ROCm/data/ROCm_eval_complex_instruct_v1.json"
+py_folder: "TB-eval-smol/tb_eval/data/ROCm/data/ROCm_v1_autotune"
+instruction_path: "TB-eval-smol/tb_eval/data/ROCm/data/ROCm_eval_complex_instruct_v1.json"
+corpus_path: "./dataloaders/TB_eval/train_crawl.json"
+py_interpreter: "python"
+result_path: null
+mem_file: null
+start_iter: 0
+datalen: null
+start_idx: 0
+
+
+# agent
+output_path: "../outputs/gaagent_gpt41_rocm.jsonl"
+max_iteration: 20
+multi_thread: true
+ancestor_num: 5
