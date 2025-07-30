@@ -2,11 +2,10 @@
 
 This is an LLM-based multi-agent framework, which can generate functional and efficient gpu kernels automatically.
 
-The framework is extendable and flexible. You can easily make you own coding agent and test it on our update TritonBench (some bugs are fixed) https://github.com/AMD-AIG-AIMA/TB-eval
+The framework is extendable and flexible. You can easily make you own coding agent and test it on our GEAK-eval https://github.com/AMD-AIG-AIMA/GEAK-eval.
+We provide a baseline agent to let you run directly.
 
-We also provide two predefined agents, Reflexion_oneshot and OptimAgent to let you run directly.
-
-## OptimAgent
+## GEAK-agent
 <img width="443" alt="image" src="https://github.com/user-attachments/assets/f5841a54-e3f1-4256-a380-0c75cff086e4" />
 
 It contains a Generator, a Reflector, an Evaluator and an Optimizer. The actor generates codes according to the query and context information. The Reflector is responsible for reflecting on the generated code and the error trace if the code failed to run. The Evaluator has a cascade structure. It tests the generated code for the functionality first. If the generated code doesn't pass the functionality test, the error trace will be fedback to the Reflector. Otherwise, the Evaluator will evaluate the performance including latency and efficiency. The Optimizer gets the generated codes, which pass the evaluator's tests, and gives a strategy to optimize the code in terms of latency and efficiency.
