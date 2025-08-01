@@ -1,3 +1,5 @@
+## Technical report [![arXiv](https://img.shields.io/badge/arXiv-2507.23194-b31b1b.svg)](https://arxiv.org/abs/2507.23194)
+
 ## Introduction
 
 This is an LLM-based multi-agent framework, which can generate functional and efficient gpu kernels automatically.
