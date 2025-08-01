@@ -116,3 +116,18 @@ start_iter: 11
    - write_file(file_path)
      
      Serializes and saves the current result to the specified file path.
+
+#### Citation
+If you find this work useful in your research or applications, please consider citing:
+
+```bibtex
+@misc{wang2025geakintroducingtritonkernel,
+      title={Geak: Introducing Triton Kernel AI Agent & Evaluation Benchmarks}, 
+      author={Jianghui Wang and Vinay Joshi and Saptarshi Majumder and Xu Chao and Bin Ding and Ziqiong Liu and Pratik Prabhanjan Brahma and Dong Li and Zicheng Liu and Emad Barsoum},
+      year={2025},
+      eprint={2507.23194},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2507.23194}, 
+}
+```
