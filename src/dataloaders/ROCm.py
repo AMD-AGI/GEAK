@@ -84,9 +84,9 @@ class ROCm:
                 f.write(json.dumps(output) + "\n")
 
     def test_opt_correctness(self, code, filename, tmp_dir="temp", save_scripts=True, exe_dir="pass_exe"):
-        # tmp_dir = os.path.join(self.log_root, tmp_dir)
+        tmp_dir = os.path.join(self.log_root, tmp_dir)
         os.makedirs(tmp_dir, exist_ok=True)
-        # exe_dir = os.path.join(self.log_root, exe_dir)
+        exe_dir = os.path.join(self.log_root, exe_dir)
         # Ensure the final executional script dir exists.
         os.makedirs(exe_dir, exist_ok=True)
         logger.info(f"Testing correctness for {filename} in {tmp_dir}")
