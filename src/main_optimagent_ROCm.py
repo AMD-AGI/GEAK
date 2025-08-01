@@ -1,4 +1,4 @@
-from agents.OptimAgent import OptimAgent
+from agents.OptimAgent_ROCm import OptimAgent
 from models.OpenAI import OpenAIModel
 from dataloaders.ROCm import ROCm
 from args_config import load_config
