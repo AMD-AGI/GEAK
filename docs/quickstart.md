@@ -486,7 +486,7 @@ Now you're good to go! The only thing to keep in mind is to
 1. Reference the model together with the provider, e.g., `openai/gpt-5` (rather than just `gpt-5`)
 2. Select a config file without temperature setting, e.g., [`mini_no_temp.yaml`](https://github.com/SWE-agent/mini-swe-agent/blob/main/src/minisweagent/config/mini_no_temp.yaml)
 
-Here's a few example
+Here's a few examples:
 
 === "GPT-5"
 
