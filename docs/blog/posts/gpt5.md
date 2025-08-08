@@ -127,7 +127,7 @@ So the real winner in my opinion is `GPT-5-mini`!
     Check out our [notes](../../quickstart.md#gpt-5) on how to run `mini` with GPT-5.
 
     You can reproduce our numbers in this blog by following the [swebench](../../usage/swebench.md) tutorial, but
-    the tl;dr is to run (remove the temperature setting from the `swebench.yaml` file first, 
+    the tl;dr is to run (remove the temperature setting from the `swebench.yaml` file first,
     because it's not supported by the `GPT-5-*` models):
 
     ```bash
