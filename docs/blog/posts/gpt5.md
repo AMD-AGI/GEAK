@@ -14,6 +14,7 @@ Results will be added to the [*SWE-bench (bash-only)* leaderboard](https://swebe
     * GPT-5 is as good as Sonnet 4, but quite a bit cheaper
     * For sacrificing only a little bit of performance (5%pt), GPT-5-mini is _incredibly_ cheap
     * `GPT-5-nano` is even cheaper, I would say you pay half for half the performance
+    * You can reproduce our numbers for just $18 (with GPT-5-mini) using the command at the bottom!
 
 <!-- more -->
 
@@ -123,14 +124,15 @@ So the real winner in my opinion is `GPT-5-mini`!
 
 !!! tip "Want to run `mini` with GPT-5?"
 
-    Check out our [notes](../../quickstart.md#gpt-5) on how to run with GPT-5.
+    Check out our [notes](../../quickstart.md#gpt-5) on how to run `mini` with GPT-5.
 
-    You can reproduce our numbers by following the [swebench](../../usage/swebench.md) tutorial, but
-    the tl;dr is to run (remove the temperature setting from the `swebench.yaml` file first):
+    You can reproduce our numbers in this blog by following the [swebench](../../usage/swebench.md) tutorial, but
+    the tl;dr is to run (remove the temperature setting from the `swebench.yaml` file first, 
+    because it's not supported by the `GPT-5-*` models):
 
     ```bash
     mini-extra swebench --subset verified --split test --shuffle \
-      --model openai/gpt-5-mini -o gpt-5-mini --workers 20
+      --model openai/gpt-5-mini -o gpt-5-mini --workers 10
     ```
 
     and to evaluate
@@ -140,3 +142,4 @@ So the real winner in my opinion is `GPT-5-mini`!
     sb-cli submit swe-bench_verified test --predictions_path preds.json --run_id gpt-5-mini
     ```
 
+    GPT-5-mini ran in around 1.5h for $18.
