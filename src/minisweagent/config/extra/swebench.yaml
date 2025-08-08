@@ -159,15 +159,15 @@ agent:
     ```
 
     ## Submission
-    When you've completed your changes or can't make further progress
+    When you've completed your work (reading, editing, testing), and cannot make further progress
     issue exactly the following command:
 
     ```bash
-    echo MINI_SWE_AGENT_FINAL_OUTPUT && git add -A && git diff --cached
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached
     ```
 
-    This command will submit your changes.
-    You cannot continue working on this task after submitting.
+    This command will submit your work.
+    You cannot continue working (reading, editing, testing) in any way on this task after submitting.
     </instructions>
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
@@ -225,5 +225,5 @@ environment:
 model:
   model_name: "claude-sonnet-4-20250514"
   model_kwargs:
-    temperature: 0.0
     drop_params: true
+    temperature: 0.0
