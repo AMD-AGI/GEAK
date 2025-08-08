@@ -88,7 +88,7 @@
         Or pick a [run script](https://github.com/SWE-agent/mini-swe-agent/tree/main/src/minisweagent/run):
 
         ```bash
-        python minisweagent/run/hello_world.py
+        python src/minisweagent/run/hello_world.py
         ```
 
         If you are planning to contribute, please also install the dev dependencies
