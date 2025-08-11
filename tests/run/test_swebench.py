@@ -7,6 +7,7 @@ import pytest
 from minisweagent import package_dir
 from minisweagent.models.test_models import DeterministicModel
 from minisweagent.run.extra.swebench import (
+    EnvironmentType,
     filter_instances,
     get_swebench_docker_image_name,
     main,
@@ -33,6 +34,7 @@ def test_swebench_end_to_end(github_test_data, tmp_path, workers):
             workers=workers,
             filter_spec="swe-agent__test-repo-1",
             config=package_dir / "config" / "extra" / "swebench.yaml",
+            environment=EnvironmentType.docker,
         )
 
     traj_file_path = package_dir.parent.parent / "tests" / "test_data" / "github_issue.traj.json"
@@ -355,6 +357,7 @@ def test_redo_existing_true_overwrites_existing(github_test_data, tmp_path):
             filter_spec="swe-agent__test-repo-1",
             redo_existing=True,
             config=package_dir / "config" / "extra" / "swebench.yaml",
+            environment=EnvironmentType.docker,
         )
 
     # Should have new result from deterministic model
@@ -406,6 +409,7 @@ def test_exception_handling_in_agent_run(tmp_path, workers):
                 workers=workers,
                 filter_spec="swe-agent__test-repo-1",
                 config=package_dir / "config" / "extra" / "swebench.yaml",
+                environment=EnvironmentType.docker,
             )
 
     # Check that prediction file contains exception information
@@ -447,6 +451,7 @@ def test_different_exception_types(tmp_path, workers):
                 workers=workers,
                 filter_spec="swe-agent__test-repo-1",
                 config=package_dir / "config" / "extra" / "swebench.yaml",
+                environment=EnvironmentType.docker,
             )
 
     # Check trajectory file for correct exception type
@@ -476,6 +481,7 @@ def test_exception_handling_with_progress_manager(tmp_path):
                 workers=2,  # Use multithreaded to test progress manager
                 filter_spec="swe-agent__test-repo-1",
                 config=package_dir / "config" / "extra" / "swebench.yaml",
+                environment=EnvironmentType.docker,
             )
 
             # Verify progress manager methods were called
