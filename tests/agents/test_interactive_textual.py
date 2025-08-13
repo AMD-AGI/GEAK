@@ -570,7 +570,7 @@ async def test_smart_input_container_request_input():
         thread.start()
 
         # Give thread time to start and set up
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
 
         # Check that prompt was set
         assert container.pending_prompt == test_prompt

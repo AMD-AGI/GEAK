@@ -19,7 +19,7 @@ def test_successful_completion_with_confirmation():
 
         exit_status, result = agent.run("Test completion with confirmation")
         assert exit_status == "Submitted"
-        assert result == "completed"
+        assert result == "completed\n"
         assert agent.model.n_calls == 1
 
 
@@ -45,7 +45,7 @@ def test_action_rejection_and_recovery():
 
         exit_status, result = agent.run("Test action rejection")
         assert exit_status == "Submitted"
-        assert result == "recovered"
+        assert result == "recovered\n"
         assert agent.model.n_calls == 2
         # Should have rejection message in conversation
         rejection_messages = [msg for msg in agent.messages if "User rejected this action" in msg.get("content", "")]
@@ -71,7 +71,7 @@ def test_yolo_mode_activation():
 
         exit_status, result = agent.run("Test yolo mode")
         assert exit_status == "Submitted"
-        assert result == "yolo works"
+        assert result == "yolo works\n"
         assert agent.config.mode == "yolo"
 
 
@@ -95,7 +95,7 @@ def test_help_command():
 
             exit_status, result = agent.run("Test help command")
             assert exit_status == "Submitted"
-            assert result == "help shown"
+            assert result == "help shown\n"
             # Check that help was printed
             help_calls = [call for call in mock_print.call_args_list if "/y" in str(call)]
             assert len(help_calls) > 0
@@ -119,7 +119,7 @@ def test_whitelisted_actions_skip_confirmation():
 
         exit_status, result = agent.run("Test whitelisted actions")
         assert exit_status == "Submitted"
-        assert result == "no confirmation needed"
+        assert result == "no confirmation needed\n"
 
 
 def _test_interruption_helper(interruption_input, expected_message_fragment, problem_statement="Test interruption"):
@@ -160,7 +160,7 @@ def _test_interruption_helper(interruption_input, expected_message_fragment, pro
             exit_status, result = agent.run(problem_statement)
 
     assert exit_status == "Submitted"
-    assert result == "recovered from interrupt"
+    assert result == "recovered from interrupt\n"
     # Check that the expected interruption message was added
     interrupt_messages = [msg for msg in agent.messages if expected_message_fragment in msg.get("content", "")]
     assert len(interrupt_messages) == 1
@@ -205,7 +205,7 @@ def test_multiple_confirmations_and_commands():
 
         exit_status, result = agent.run("Test complex interaction flow")
         assert exit_status == "Submitted"
-        assert result == "complex flow completed"
+        assert result == "complex flow completed\n"
         assert agent.config.mode == "yolo"  # Should be in yolo mode
         assert agent.model.n_calls == 2
 
@@ -228,7 +228,7 @@ def test_non_whitelisted_action_requires_confirmation():
 
         exit_status, result = agent.run("Test non-whitelisted action")
         assert exit_status == "Submitted"
-        assert result == "confirmed"
+        assert result == "confirmed\n"
 
 
 # New comprehensive mode switching tests
@@ -252,7 +252,7 @@ def test_human_mode_basic_functionality():
 
         exit_status, result = agent.run("Test human mode")
         assert exit_status == "Submitted"
-        assert result == "human mode works"
+        assert result == "human mode works\n"
         assert agent.config.mode == "human"
         assert agent.model.n_calls == 0  # LM should not be called
 
@@ -279,7 +279,7 @@ def test_human_mode_switch_to_yolo():
 
         exit_status, result = agent.run("Test human to yolo switch")
         assert exit_status == "Submitted"
-        assert result == "switched to yolo"
+        assert result == "switched to yolo\n"
         assert agent.config.mode == "yolo"
         assert agent.model.n_calls == 1
 
@@ -306,7 +306,7 @@ def test_human_mode_switch_to_confirm():
 
         exit_status, result = agent.run("Test human to confirm switch")
         assert exit_status == "Submitted"
-        assert result == "switched to confirm"
+        assert result == "switched to confirm\n"
         assert agent.config.mode == "confirm"
         assert agent.model.n_calls == 1
 
@@ -334,7 +334,7 @@ def test_confirmation_mode_switch_to_human_with_rejection():
 
         exit_status, result = agent.run("Test confirm to human switch")
         assert exit_status == "Submitted"
-        assert result == "human command after rejection"
+        assert result == "human command after rejection\n"
         assert agent.config.mode == "human"
         # Should have rejection message
         rejection_messages = [msg for msg in agent.messages if "Switching to human mode" in msg.get("content", "")]
@@ -362,7 +362,7 @@ def test_confirmation_mode_switch_to_yolo_and_continue():
 
         exit_status, result = agent.run("Test confirm to yolo switch")
         assert exit_status == "Submitted"
-        assert result == "switched and continued"
+        assert result == "switched and continued\n"
         assert agent.config.mode == "yolo"
 
 
@@ -401,7 +401,7 @@ def test_mode_switch_during_keyboard_interrupt():
             exit_status, result = agent.run("Test interrupt mode switch")
 
     assert exit_status == "Submitted"
-    assert result == "recovered after mode switch"
+    assert result == "recovered after mode switch\n"
     assert agent.config.mode == "yolo"
     # Should have interruption message
     interrupt_messages = [msg for msg in agent.messages if "Temporary interruption caught" in msg.get("content", "")]
@@ -430,7 +430,7 @@ def test_already_in_mode_behavior():
 
         exit_status, result = agent.run("Test already in mode")
         assert exit_status == "Submitted"
-        assert result == "already in mode"
+        assert result == "already in mode\n"
         assert agent.config.mode == "confirm"
 
 
@@ -471,7 +471,7 @@ def test_all_mode_transitions_yolo_to_others():
             exit_status, result = agent.run("Test yolo to confirm transition")
 
         assert exit_status == "Submitted"
-        assert result == "confirm action"
+        assert result == "confirm action\n"
         assert agent.config.mode == "confirm"
 
 
@@ -493,7 +493,7 @@ def test_all_mode_transitions_confirm_to_human():
 
         exit_status, result = agent.run("Test confirm to human transition")
         assert exit_status == "Submitted"
-        assert result == "human command"
+        assert result == "human command\n"
         assert agent.config.mode == "human"
 
 
@@ -521,7 +521,7 @@ def test_help_command_from_different_contexts():
 
             exit_status, result = agent.run("Test help from confirmation")
             assert exit_status == "Submitted"
-            assert result == "help works"
+            assert result == "help works\n"
             # Verify help was shown
             help_calls = [call for call in mock_print.call_args_list if "Current mode: " in str(call)]
             assert len(help_calls) > 0
@@ -546,7 +546,7 @@ def test_help_command_from_human_mode():
 
             exit_status, result = agent.run("Test help from human mode")
             assert exit_status == "Submitted"
-            assert result == "help in human mode"
+            assert result == "help in human mode\n"
             # Verify help was shown
             help_calls = [call for call in mock_print.call_args_list if "Current mode: " in str(call)]
             assert len(help_calls) > 0
@@ -593,7 +593,7 @@ def test_complex_mode_switching_sequence():
             exit_status, result = agent.run("Test complex mode switching")
 
     assert exit_status == "Submitted"
-    assert result == "final action"
+    assert result == "final action\n"
     assert agent.config.mode == "confirm"  # Should end in confirm mode
 
 
@@ -622,7 +622,7 @@ def test_limits_exceeded_with_user_continuation():
                 exit_status, result = agent.run("Test limits exceeded with continuation")
 
     assert exit_status == "Submitted"
-    assert result == "completed after limit increase"
+    assert result == "completed after limit increase\n"
     assert agent.model.n_calls == 3  # Should complete all 3 steps
     assert agent.config.step_limit == 10  # Should have updated step limit
     assert agent.config.cost_limit == 5.0  # Should have updated cost limit
@@ -655,7 +655,7 @@ def test_limits_exceeded_multiple_times_with_continuation():
                 exit_status, result = agent.run("Test multiple limit increases")
 
     assert exit_status == "Submitted"
-    assert result == "completed after multiple increases"
+    assert result == "completed after multiple increases\n"
     assert agent.model.n_calls == 5  # Should complete all 5 steps
     assert agent.config.step_limit == 10  # Should have final updated step limit
 
@@ -683,7 +683,7 @@ def test_continue_after_completion_with_new_task():
 
         exit_status, result = agent.run("Complete the initial task")
         assert exit_status == "Submitted"
-        assert result == "new task completed"
+        assert result == "new task completed\n"
         assert agent.model.n_calls == 2
         # Should have the new task message in conversation
         new_task_messages = [
@@ -712,7 +712,7 @@ def test_continue_after_completion_without_new_task():
 
         exit_status, result = agent.run("Complete the task")
         assert exit_status == "Submitted"
-        assert result == "original task completed"
+        assert result == "original task completed\n"
         assert agent.model.n_calls == 1
         # Should not have any new task messages
         new_task_messages = [msg for msg in agent.messages if "The user added a new task" in msg.get("content", "")]
@@ -745,7 +745,7 @@ def test_continue_after_completion_multiple_cycles():
 
         exit_status, result = agent.run("Initial task")
         assert exit_status == "Submitted"
-        assert result == "third completed"
+        assert result == "third completed\n"
         assert agent.model.n_calls == 3
         # Should have both new task messages
         new_task_messages = [msg for msg in agent.messages if "The user added a new task" in msg.get("content", "")]
@@ -776,7 +776,7 @@ def test_continue_after_completion_in_yolo_mode():
 
         exit_status, result = agent.run("Initial task")
         assert exit_status == "Submitted"
-        assert result == "second task completed"
+        assert result == "second task completed\n"
         assert agent.config.mode == "yolo"
         assert agent.model.n_calls == 2
         # Should have the new task message
@@ -800,7 +800,7 @@ def test_confirm_exit_enabled_asks_for_confirmation():
 
         exit_status, result = agent.run("Test confirm exit enabled")
         assert exit_status == "Submitted"
-        assert result == "completed"
+        assert result == "completed\n"
         assert agent.model.n_calls == 1
 
 
@@ -820,7 +820,7 @@ def test_confirm_exit_disabled_exits_immediately():
 
         exit_status, result = agent.run("Test confirm exit disabled")
         assert exit_status == "Submitted"
-        assert result == "completed"
+        assert result == "completed\n"
         assert agent.model.n_calls == 1
 
 
@@ -848,7 +848,7 @@ def test_confirm_exit_with_new_task_continues_execution():
 
         exit_status, result = agent.run("Test exit with new task")
         assert exit_status == "Submitted"
-        assert result == "additional done"
+        assert result == "additional done\n"
         assert agent.model.n_calls == 2
         # Check that the new task was added to the conversation
         new_task_messages = [msg for msg in agent.messages if "Please do one more thing" in msg.get("content", "")]
