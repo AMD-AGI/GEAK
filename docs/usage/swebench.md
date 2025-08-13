@@ -43,19 +43,23 @@
 
         Basic flags:
 
+        - `-o`, `--output` - Output directory
         - `-m`, `--model` - Model to use
         - `-c`, `--config` - Path to a config file (default: `swebench.yaml` in the `config` directory)
-        - `-i`, `--instance` - SWE-Bench instance ID (default: `0`)
+        - `-w`, `--workers` - Number of worker threads for parallel processing (default: `1`)
 
         Data selection flags:
 
         - `--subset` - SWEBench subset to use or path to a dataset (default: `lite`)
         - `--split` - Dataset split (default: `dev`)
+        - `--slice` - Slice specification (e.g., '0:5' for first 5 instances)
+        - `--filter` - Filter instance IDs by regex
+        - `--shuffle` - Shuffle instances (default: `False`)
+        - `--redo-existing` - Redo existing instances (default: `False`)
 
         Advanced flags:
 
         - `--environment-class` - Environment type to use (recommended: `docker` or `singularity`)
-        - `--exit-immediately` - Exit immediately when the agent wants to finish instead of prompting (default: `False`)
 
     === "Single instance (for debugging)"
 
@@ -84,24 +88,19 @@
 
         Basic flags:
 
-        - `-o`, `--output` - Output directory
         - `-m`, `--model` - Model to use
         - `-c`, `--config` - Path to a config file (default: `swebench.yaml` in the `config` directory)
-        - `-w`, `--workers` - Number of worker threads for parallel processing (default: `1`)
 
         Data selection flags:
 
         - `--subset` - SWEBench subset to use or path to a dataset (default: `lite`)
         - `--split` - Dataset split (default: `dev`)
-        - `--slice` - Slice specification (e.g., '0:5' for first 5 instances)
-        - `--filter` - Filter instance IDs by regex
-        - `--shuffle` - Shuffle instances (default: `False`)
-        - `--redo-existing` - Redo existing instances (default: `False`)
+        - `-i`, `--instance` - SWE-Bench instance ID (default: `0`)
 
         Advanced flags:
 
         - `--environment-class` - Environment type to use (recommended: `docker` or `singularity`)
-
+        - `--exit-immediately` - Exit immediately when the agent wants to finish instead of prompting (default: `False`)
 
 !!! tip "Evaluating on SWE-bench"
 
