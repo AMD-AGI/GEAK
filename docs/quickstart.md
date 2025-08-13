@@ -207,6 +207,11 @@ There are several ways to set your API keys:
 
 ### GPT-5 and friends <a name="gpt-5"></a>
 
+!!! tip "litellm versions"
+
+    If you upgrade `litellm` (`pip install -U litellm`), you probably don't need to register the models
+    and don't need to follow the instructions below.
+
 `gpt-5` and friends are not included in `litellm` yet, so we need to register them manually.
 For this, first create the following file:
 
