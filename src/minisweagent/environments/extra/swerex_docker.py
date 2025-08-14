@@ -1,9 +1,11 @@
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from swerex.deployment.docker import DockerDeployment
 from swerex.runtime.abstract import Command as RexCommand
+
+from minisweagent.environments.utils.template_vars import get_remote_template_vars
 
 
 @dataclass
@@ -42,3 +44,6 @@ class SwerexDockerEnvironment:
             "output": output.stdout,
             "returncode": output.exit_code,
         }
+
+    def get_template_vars(self) -> dict[str, Any]:
+        return asdict(self.config) | get_remote_template_vars(self)
