@@ -103,85 +103,49 @@ class TestGetModel:
     def test_env_var_overrides_config_api_key(self):
         """Test that MSWEA_MODEL_API_KEY overrides config api_key."""
         with patch.dict(os.environ, {"MSWEA_MODEL_API_KEY": "env-key"}):
-            # Capture the arguments passed to the model constructor
-            captured_kwargs = {}
+            config = {"model_kwargs": {"api_key": "config-key"}, "model_class": "litellm"}
+            model = get_model("test-model", config)
 
-            def mock_model_constructor(**kwargs):
-                captured_kwargs.update(kwargs)
-                return DeterministicModel(
-                    outputs=kwargs.get("outputs", ["test"]),
-                    model_name=kwargs.get("model_name", "test"),
-                )
-
-            with patch("minisweagent.models.get_model_class") as mock_get_class:
-                mock_get_class.return_value = mock_model_constructor
-
-                config = {"model_kwargs": {"api_key": "config-key"}, "outputs": ["test"]}
-                get_model("test-model", config)
-
-                assert captured_kwargs["model_kwargs"]["api_key"] == "env-key"
+            # LitellmModel stores the api_key in model_kwargs
+            assert model.config.model_kwargs["api_key"] == "env-key"
 
     def test_config_api_key_used_when_no_env_var(self):
         """Test that config api_key is used when env var is not set."""
         with patch.dict(os.environ, {}, clear=True):
-            # Capture the arguments passed to the model constructor
-            captured_kwargs = {}
+            config = {"model_kwargs": {"api_key": "config-key"}, "model_class": "litellm"}
+            model = get_model("test-model", config)
 
-            def mock_model_constructor(**kwargs):
-                captured_kwargs.update(kwargs)
-                return DeterministicModel(
-                    outputs=kwargs.get("outputs", ["test"]),
-                    model_name=kwargs.get("model_name", "test"),
-                )
-
-            with patch("minisweagent.models.get_model_class") as mock_get_class:
-                mock_get_class.return_value = mock_model_constructor
-
-                config = {"model_kwargs": {"api_key": "config-key"}, "outputs": ["test"]}
-                get_model("test-model", config)
-
-                assert captured_kwargs["model_kwargs"]["api_key"] == "config-key"
+            # LitellmModel stores the api_key in model_kwargs
+            assert model.config.model_kwargs["api_key"] == "config-key"
 
     def test_env_var_sets_api_key_when_no_config_key(self):
         """Test that MSWEA_MODEL_API_KEY is used when config has no api_key."""
         with patch.dict(os.environ, {"MSWEA_MODEL_API_KEY": "env-key"}):
-            # Capture the arguments passed to the model constructor
-            captured_kwargs = {}
+            config = {"model_class": "litellm"}
+            model = get_model("test-model", config)
 
-            def mock_model_constructor(**kwargs):
-                captured_kwargs.update(kwargs)
-                return DeterministicModel(
-                    outputs=kwargs.get("outputs", ["test"]),
-                    model_name=kwargs.get("model_name", "test"),
-                )
-
-            with patch("minisweagent.models.get_model_class") as mock_get_class:
-                mock_get_class.return_value = mock_model_constructor
-
-                config = {"outputs": ["test"]}
-                get_model("test-model", config)
-                assert captured_kwargs["model_kwargs"]["api_key"] == "env-key"
+            # LitellmModel stores the api_key in model_kwargs
+            assert model.config.model_kwargs["api_key"] == "env-key"
 
     def test_no_api_key_when_none_provided(self):
         """Test that no api_key is set when neither env var nor config provide one."""
         with patch.dict(os.environ, {}, clear=True):
-            # Capture the arguments passed to the model constructor
-            captured_kwargs = {}
+            config = {"model_class": "litellm"}
+            model = get_model("test-model", config)
 
-            def mock_model_constructor(**kwargs):
-                captured_kwargs.update(kwargs)
-                return DeterministicModel(
-                    outputs=kwargs.get("outputs", ["test"]),
-                    model_name=kwargs.get("model_name", "test"),
-                )
+            # LitellmModel should not have api_key when none provided
+            model_kwargs = getattr(model.config, "model_kwargs", {})
+            assert "api_key" not in model_kwargs
 
-            with patch("minisweagent.models.get_model_class") as mock_get_class:
-                mock_get_class.return_value = mock_model_constructor
+    def test_get_deterministic_model(self):
+        """Test that get_model can instantiate DeterministicModel via model_class parameter."""
+        config = {"outputs": ["hello", "world"], "cost_per_call": 2.0}
+        model = get_model("test-model", config | {"model_class": "deterministic"})
 
-                config = {"outputs": ["test"]}
-                get_model("test-model", config)
-                model_kwargs = captured_kwargs.get("model_kwargs", {})
-                assert "api_key" not in model_kwargs
+        assert isinstance(model, DeterministicModel)
+        assert model.config.outputs == ["hello", "world"]
+        assert model.config.cost_per_call == 2.0
+        assert model.config.model_name == "test-model"
 
 
 class TestGlobalModelStats:
