@@ -73,7 +73,7 @@ def get_swebench_docker_image_name(instance: dict) -> str:
         # Docker doesn't allow double underscore, so we replace them with a magic token
         iid = instance["instance_id"]
         id_docker_compatible = iid.replace("__", "_1776_")
-        image_name = f"swebench/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
+        image_name = f"docker.io/swebench/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
     return image_name
 
 
