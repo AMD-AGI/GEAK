@@ -66,8 +66,8 @@ class LitellmModel:
         except Exception as e:
             logger.critical(
                 f"Error calculating cost for model {self.config.model_name}: {e}. "
-                "Please check the 'Updating the model registry' section in the documentation. "
-                "http://bit.ly/4p31bi4 Still stuck? Please open a github issue for help!"
+                "Please check the 'Updating the model registry' section in the documentation at "
+                "https://klieret.short.gy/litellm-model-registry Still stuck? Please open a github issue for help!"
             )
             raise
         self.n_calls += 1
