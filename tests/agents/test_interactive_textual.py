@@ -862,7 +862,7 @@ async def test_system_commands_are_callable():
         mode="yolo",
     )
 
-    async with app.run_test() as pilot:
+    async with app.run_test():
         screen = app.screen
         commands = list(app.get_system_commands(screen))
 
