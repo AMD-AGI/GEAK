@@ -15,6 +15,7 @@ from tenacity import (
 )
 
 from minisweagent.models import GLOBAL_MODEL_STATS
+from minisweagent.models.utils.cache_control import set_cache_control
 
 logger = logging.getLogger("litellm_model")
 
@@ -29,8 +30,8 @@ class LitellmModelConfig:
 
 
 class LitellmModel:
-    def __init__(self, **kwargs):
-        self.config = LitellmModelConfig(**kwargs)
+    def __init__(self, *, config_class: type = LitellmModelConfig, **kwargs):
+        self.config = config_class(**kwargs)
         self.cost = 0.0
         self.n_calls = 0
         if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
@@ -62,6 +63,8 @@ class LitellmModel:
             raise e
 
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
+        if self.config.set_cache_control:
+            messages = set_cache_control(messages, mode=self.config.set_cache_control)
         response = self._query(messages, **kwargs)
         try:
             cost = litellm.cost_calculator.completion_cost(response)
