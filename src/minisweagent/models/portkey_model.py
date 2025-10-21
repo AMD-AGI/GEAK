@@ -114,7 +114,7 @@ class PortkeyModel:
                 f"WARNING: Total tokens - prompt tokens - completion tokens != 0: {response_for_cost_calc.model_dump()}."
                 " This is probably a portkey bug or incompatibility with litellm cost tracking. "
                 "Setting prompt tokens based on total tokens and completion tokens. You might want to double check your costs. "
-                "Full response: {response_for_cost_calc.model_dump()}"
+                f"Full response: {response_for_cost_calc.model_dump()}"
             )
             response_for_cost_calc.usage.prompt_tokens = total_tokens - completion_tokens
         try:
