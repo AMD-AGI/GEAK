@@ -1,0 +1,1 @@
+hipcc -o point_to_voxelidx point_to_voxelidx_hip.hip -O3

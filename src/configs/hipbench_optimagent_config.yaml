@@ -1,0 +1,21 @@
+# LLM model
+api_key: ""
+model_id: "dvue-aoai-001-gpt-5"
+temperature: 1.0
+
+# TritonBench
+statis_path: ""
+py_folder: ""
+# relative path/filename to the example_hip
+instruction_path: "FromRe_instructions.json"
+corpus_path: ""
+golden_metrics: ""
+perf_ref_folder: ""
+perf_G_path: ""
+py_interpreter: ""
+result_path: null
+
+# absolute path for result optimized kernels and llm output
+output_path: "/home/username/iteration_logs/iter"
+max_iteration: 20
+multi_thread: false

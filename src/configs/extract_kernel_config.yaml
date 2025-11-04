@@ -1,0 +1,19 @@
+statis_path: "~/TB-eval/TritonBench/data/TritonBench_G_v1.json"
+py_folder: "~/TB-eval/TritonBench/data/TritonBench_G_v1"
+instruction_path: "~/TB-eval/TritonBench/data/TritonBench_G_comp_alpac_v1_fixed_with_difficulty.json"
+corpus_path: "~/TB-eval/TritonBench/data/train_crawl.json"
+golden_metrics: "~/TB-eval/TritonBench/performance_metrics/perf_G/golden_metrics"
+perf_ref_folder: "~/TB-eval/TritonBench/performance_metrics/perf_G/golden_results"
+perf_G_path: "~/TB-eval/TritonBench/performance_metrics/perf_G"
+py_interpreter: "python"
+data_len: 184
+target_kernel: "matmul_kernel"
+
+output_file: ../outputs/parallel_scaling.jsonl
+file_list: [
+  "../outputs/20250602_gaagent_gpt41_noprocess_11.jsonl",
+  "../outputs/20250602_gaagent_gpt41_noprocess_12.jsonl",
+  "../outputs/20250602_gaagent_gpt41_noprocess_13.jsonl",
+  "../outputs/20250602_gaagent_gpt41_noprocess_14.jsonl",
+  "../outputs/20250602_gaagent_gpt41_noprocess_15.jsonl",
+]

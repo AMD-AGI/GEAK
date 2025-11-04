@@ -1,0 +1,23 @@
+# LLM model
+api_key: ""
+model_id: "gemini-2.5-pro-preview-05-06"
+temperature: 1.0
+
+# TritonBench
+statis_path: "~/TB-eval/TritonBench/data/TritonBench_G_comp_alpac_v1_fixed_with_difficulty.json"
+py_folder: "~/TB-eval/TritonBench/data/TritonBench_G_v1"
+instruction_path: "~/TB-eval/TritonBench/data/TritonBench_G_comp_alpac_v1_fixed_with_difficulty.json"
+corpus_path: "~/TB-eval/TritonBench/data/train_crawl.json"
+golden_metrics: "~/TB-eval/TritonBench/performance_metrics/perf_G/golden_metrics"
+perf_ref_folder: null
+perf_G_path: "~/TB-eval/TritonBench/performance_metrics/perf_G"
+py_interpreter: "python"
+result_path: null
+mem_file: null
+start_iter: 0
+
+# agent
+output_path: "../outputs/gaagent_gpt41.jsonl"
+max_iteration: 20
+multi_thread: true
+ancestor_num: 5

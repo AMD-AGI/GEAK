@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <ProjectGuid>{dbb8dfe9-cb1b-473c-937c-2a8120e0d819}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>llvm_ir_to_executable_vs2019</RootNamespace>
+    <WindowsTargetPlatformVersion>$(LatestTargetPlatformVersion)</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ClCompile Include="main.hip">
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">--cuda-host-only</AdditionalOptions>
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">--cuda-host-only</AdditionalOptions>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\Common\example_utils.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="hip_obj_gen_win.mcin">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">copy %(Identity) "$(IntDir)%(Identity)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Copying %(Identity)</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(IntDir)%(Identity)</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">copy %(Identity) "$(IntDir)%(Identity)"</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Copying %(Identity)</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(IntDir)%(Identity)</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>HIP clang 6.2</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>HIP clang 6.2</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(PlatformToolset.Contains(`HIP clang `))'">
+    <HIPVersion>$(PlatformToolset.Replace(`HIP clang `, ``))</HIPVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(PlatformToolset.Contains(`HIP nvcc `))'">
+    <HIPVersion>$(PlatformToolset.Replace(`HIP nvcc `, ``))</HIPVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+    <Import Condition="'$(PlatformToolset)'=='HIP clang $(HIPVersion)'" Project="$(VCTargetsPath)\Platforms\$(Platform)\PlatformToolsets\HIP clang $(HIPVersion)\AMD.HIP.Clang.Common.props" />
+    <Import Condition="'$(PlatformToolset)'=='HIP nvcc $(HIPVersion)'" Project="$(VCTargetsPath)\Platforms\$(Platform)\PlatformToolsets\HIP nvcc $(HIPVersion)\AMD.HIP.Nvcc.Common.props" />
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="HIP nvcc $(HIPVersion)" Condition="'$(PlatformToolset)'=='HIP nvcc $(HIPVersion)'">
+    <ProjectExcludedFromBuild>true</ProjectExcludedFromBuild>
+  </PropertyGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <LinkIncremental>true</LinkIncremental>
+    <CustomBuildBeforeTargets>ClCompile</CustomBuildBeforeTargets>
+    <TargetName>hip_$(ProjectName)</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <LinkIncremental>false</LinkIncremental>
+    <CustomBuildBeforeTargets>ClCompile</CustomBuildBeforeTargets>
+    <TargetName>hip_$(ProjectName)</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64' and '$(PlatformToolset)'=='HIP clang $(HIPVersion)'">
+    <ClCompile>
+      <WarningLevel>Level2</WarningLevel>
+      <PreprocessorDefinitions>__clang__;__HIP__;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\..\..\Common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>$(IntDir)main_device.obj;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <CustomBuildStep>
+      <Message>Generating Device Offload Object</Message>
+      <Command>
+        FOR %%a in ($(OffloadArch)) DO "$(ClangToolPath)clang++" --cuda-device-only -c -emit-llvm main.hip --offload-arch=%%a -o "$(IntDir)main_%%a.bc" -I ../../Common -std=c++17
+        FOR %%a in ($(OffloadArch)) DO "$(ClangToolPath)llvm-dis" "$(IntDir)main_%%a.bc" -o "$(IntDir)main_%%a.ll"
+        FOR %%a in ($(OffloadArch)) DO "$(ClangToolPath)clang++" -target amdgcn-amd-amdhsa -mcpu=%%a "$(IntDir)main_%%a.ll" -o "$(IntDir)main_%%a.o"
+        SET TARGETS=host-x86_64-unknown-linux
+        SET INPUTS=-input=nul
+        SETLOCAL ENABLEDELAYEDEXPANSION
+        FOR %%a in ($(OffloadArch)) DO SET TARGETS=!TARGETS!,hipv4-amdgcn-amd-amdhsa--%%a&amp; SET INPUTS=!INPUTS! -input="$(IntDir)main_%%a.o"
+        "$(ClangToolPath)clang-offload-bundler" -type=o -bundle-align=4096 -targets=%TARGETS%  %INPUTS% -output="$(IntDir)offload_bundle.hipfb"
+        cd "$(IntDir)" &amp; "$(ClangToolPath)llvm-mc" -triple host-x86_64-pc-windows-msvc hip_obj_gen_win.mcin -o main_device.obj --filetype=obj
+      </Command>
+      <Inputs>main.hip;$(IntDir)hip_obj_gen_win.mcin</Inputs>
+      <Outputs>$(IntDir)main_device.obj</Outputs>
+    </CustomBuildStep>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64' and '$(PlatformToolset)'=='HIP clang $(HIPVersion)'">
+    <ClCompile>
+      <WarningLevel>Level2</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <PreprocessorDefinitions>__clang__;__HIP__;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\..\..\Common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalDependencies>$(IntDir)main_device.obj;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <CustomBuildStep>
+      <Message>Generating Device Offload Object</Message>
+      <Command>
+        FOR %%a in ($(OffloadArch)) DO "$(ClangToolPath)clang++" --cuda-device-only -c -emit-llvm main.hip --offload-arch=%%a -o "$(IntDir)main_%%a.bc" -I ../../Common -std=c++17
+        FOR %%a in ($(OffloadArch)) DO "$(ClangToolPath)llvm-dis" "$(IntDir)main_%%a.bc" -o "$(IntDir)main_%%a.ll"
+        FOR %%a in ($(OffloadArch)) DO "$(ClangToolPath)clang++" -target amdgcn-amd-amdhsa -mcpu=%%a "$(IntDir)main_%%a.ll" -o "$(IntDir)main_%%a.o"
+        SET TARGETS=host-x86_64-unknown-linux
+        SET INPUTS=-input=nul
+        SETLOCAL ENABLEDELAYEDEXPANSION
+        FOR %%a in ($(OffloadArch)) DO SET TARGETS=!TARGETS!,hipv4-amdgcn-amd-amdhsa--%%a&amp; SET INPUTS=!INPUTS! -input="$(IntDir)main_%%a.o"
+        "$(ClangToolPath)clang-offload-bundler" -type=o -bundle-align=4096 -targets=%TARGETS%  %INPUTS% -output="$(IntDir)offload_bundle.hipfb"
+        cd "$(IntDir)" &amp; "$(ClangToolPath)llvm-mc" -triple host-x86_64-pc-windows-msvc hip_obj_gen_win.mcin -o main_device.obj --filetype=obj
+      </Command>
+      <Inputs>main.hip;$(IntDir)hip_obj_gen_win.mcin</Inputs>
+      <Outputs>$(IntDir)main_device.obj</Outputs>
+    </CustomBuildStep>
+  </ItemDefinitionGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Condition="'$(PlatformToolset)'=='HIP clang $(HIPVersion)'" Project="$(VCTargetsPath)\Platforms\$(Platform)\PlatformToolsets\HIP clang $(HIPVersion)\AMD.HIP.Clang.Common.targets" />
+    <Import Condition="'$(PlatformToolset)'=='HIP nvcc $(HIPVersion)'" Project="$(VCTargetsPath)\Platforms\$(Platform)\PlatformToolsets\HIP nvcc $(HIPVersion)\AMD.HIP.Nvcc.Common.targets" />
+  </ImportGroup>
+</Project>

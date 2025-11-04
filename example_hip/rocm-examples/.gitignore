@@ -1,0 +1,7 @@
+.vs
+.vscode
+[Dd]ebug
+[Rr]elease
+*.vcxproj.user
+[Bb]uild
+*.pdb

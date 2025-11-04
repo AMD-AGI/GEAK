@@ -1,0 +1,64 @@
+name: Linting
+
+on:
+  push:
+    branches:
+      - amd-staging
+      - amd-mainline
+      - 'release/rocm-rel*'
+  pull_request:
+    branches:
+      - amd-staging
+      - amd-mainline
+      - 'release/rocm-rel*'
+
+env:
+  CLANG_FORMAT: /usr/lib/llvm-18/bin/clang-format
+
+jobs:
+  call-workflow-passing-data:
+    name: Documentation
+    uses: ROCm/rocm-docs-core/.github/workflows/linting.yml@develop
+
+  cmake-formatting:
+    name: CMake File Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip
+          python3 -m pip install gersemi
+      - name: Run gersemi
+        run: |
+          gersemi --check .
+          if [ $? -ne 0 ]; then
+            echo "CMake files are not formatted correctly. Please run gersemi ..."
+            echo "For example: \`gersemi -i .\`"
+            exit 1
+          fi
+
+  source-formatting:
+    name: Source Code Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y git wget
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          sudo echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee -a /etc/apt/sources.list.d/llvm-18.list
+          sudo echo "deb-src http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee -a /etc/apt/sources.list.d/llvm-18.list
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-format-18
+          sudo apt-get install -y clang-tools-18  # Install git-clang-format
+      - name: Fetch all branches
+        run: git fetch --all
+      - name: Run clang-format
+        env:
+          GIT_CLANG_FORMAT: /usr/lib/llvm-18/bin/git-clang-format
+        run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE
+          Scripts/CodeFormat/check_format.sh --all-files origin/`if [[ "${{ github.event_name }}" == "push" ]]; then echo "develop"; else echo "${{ github.base_ref }}"; fi` --binary ${{env.CLANG_FORMAT}}
