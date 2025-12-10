@@ -18,6 +18,7 @@ from rich.console import Console
 from minisweagent import global_config_dir
 from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.agents.interactive_textual import TextualAgent
+from minisweagent.agents.patch_agent import PatchAgent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
@@ -55,6 +56,10 @@ def main(
     config_spec: Path = typer.Option(DEFAULT_CONFIG, "-c", "--config", help="Path to config file"),
     output: Path | None = typer.Option(DEFAULT_OUTPUT, "-o", "--output", help="Output trajectory file"),
     exit_immediately: bool = typer.Option( False, "--exit-immediately", help="Exit immediately when the agent wants to finish instead of prompting.", rich_help_panel="Advanced"),
+    save_patch: bool = typer.Option(False, "--save-patch", help="Save git patches and test results"),
+    test_command: str | None = typer.Option(None, "--test-command", help="Test command to run for patch validation"),
+    patch_output: Path | None = typer.Option(None, "--patch-output", help="Output directory for patch files and test results"),
+    metric: str | None = typer.Option(None, "--metric", help="Metric extraction task description for LLM"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
@@ -90,8 +95,16 @@ def main(
     agent_class = InteractiveAgent
     if visual == (os.getenv("MSWEA_VISUAL_MODE_DEFAULT", "false") == "false"):
         agent_class = TextualAgent
+    agent_config = config.get("agent", {})
+    if save_patch:
+        agent_class = PatchAgent
+        agent_config["save_patch"] = True
+        agent_config["test_command"] = test_command
+        patch_dir = patch_output or (global_config_dir / "patches")
+        agent_config["patch_output_dir"] = str(patch_dir)
+        agent_config["metric"] = metric
 
-    agent = agent_class(model, env, **config.get("agent", {}))
+    agent = agent_class(model, env, **agent_config)
     exit_status, result, extra_info = None, None, None
     try:
         exit_status, result = agent.run(task)  # type: ignore[arg-type]
