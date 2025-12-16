@@ -1,4 +1,4 @@
-// Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright(C)[2025] Advanced Micro Devices, Inc. All rights reserved.
 
 // Modified from https://github.com/CVMI-Lab/PAConv/tree/main/scene_seg/lib/paconv_lib/src/gpu
 

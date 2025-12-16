@@ -1,4 +1,4 @@
-// Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright(C)[2025] Advanced Micro Devices, Inc. All rights reserved.
 
 // Modified from
 // https://github.com/sshaoshuai/Pointnet2.PyTorch/tree/master/pointnet2/src/ball_query.cpp

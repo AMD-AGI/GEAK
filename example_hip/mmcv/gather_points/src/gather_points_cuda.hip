@@ -1,4 +1,4 @@
-// Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+// Modifications Copyright(C)[2025] Advanced Micro Devices, Inc. All rights reserved.
 
 #include "hip/hip_runtime.h"
 #include <stdio.h>
