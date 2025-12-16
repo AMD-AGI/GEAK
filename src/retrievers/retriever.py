@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 import json
 import numpy as np
 from typing import Any, Dict, List

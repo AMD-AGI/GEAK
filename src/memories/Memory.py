@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 from typing import Optional, List, Any
 from dataclasses import dataclass, asdict
 from dataloaders.ProblemState import ProblemState

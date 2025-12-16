@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 from agents.Base import SequentialBaseAgent, BaseAgent
 from utils.utils import clear_code
 from prompts import prompt_for_reflection

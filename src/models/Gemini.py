@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 from typing import List
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 import requests

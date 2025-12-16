@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 # LLM model
 api_key: ""
 model_id: "dvue-aoai-001-gpt-4.1"

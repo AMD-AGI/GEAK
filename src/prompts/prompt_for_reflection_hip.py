@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 prompt_hip = """
 Analyze the failed test cases and provide insights 
 on why the solution failed and how it could be improved. Be specific about the issues found.

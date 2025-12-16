@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 from torch.utils.cpp_extension import load
 
 assign_score_withk_ext = load(name="assign_score_withk",

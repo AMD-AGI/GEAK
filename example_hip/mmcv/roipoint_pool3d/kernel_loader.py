@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 from torch.utils.cpp_extension import load
 
 roipoint_pool3d_ext = load(name="roipoint_pool3d",

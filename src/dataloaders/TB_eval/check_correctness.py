@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 import os
 from utils import get_time, code_call_exec_success_allclose, extract_code_from_llm_output, get_fname_difficulty_from_label, passk
 import json

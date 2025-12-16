@@ -1,3 +1,5 @@
+// Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 /*
 Modified for
 https://github.com/open-mmlab/OpenPCDet/blob/master/pcdet/ops/roipoint_pool3d/src/roipoint_pool3d_kernel.cu

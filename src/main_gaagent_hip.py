@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 from agents.GaAgent_HIP import GaAgent_HIP
 from models.OpenAI import OpenAIModel
 from models.Claude import ClaudeModel

@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 from torch.utils.cpp_extension import load
 
 points_in_boxes_ext = load(name="points_in_boxes",

@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 import json
 from tqdm import tqdm
 from args_config import load_config

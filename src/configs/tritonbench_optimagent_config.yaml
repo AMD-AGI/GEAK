@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 # LLM model
 api_key: ""
 model_id: "gemini-2.5-pro-preview-05-06"

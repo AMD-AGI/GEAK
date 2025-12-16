@@ -1,3 +1,5 @@
+# Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
+
 statis_path: "~/TB-eval/TritonBench/data/TritonBench_G_v1.json"
 py_folder: "~/TB-eval/TritonBench/data/TritonBench_G_v1"
 instruction_path: "~/TB-eval/TritonBench/data/TritonBench_G_comp_alpac_v1_fixed_with_difficulty.json"
