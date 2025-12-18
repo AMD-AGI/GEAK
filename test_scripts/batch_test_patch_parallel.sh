@@ -17,11 +17,11 @@ fi
 KERNEL_NAME=$1
 
 # Number of parallel optimization agents (default: 4)
-NUM_AGENTS=${2:-4}
+NUM_AGENTS=4
 
 # Get the number of available GPUs
 NUM_GPUS=8
-GPU_START_IDX=4
+GPU_START_IDX=${2:-0}
 
 # Generate GPU IDs list for parallel agents
 GPU_IDS=()
@@ -40,18 +40,17 @@ echo "GPU IDs: ${GPU_IDS_STR}"
 echo "======================================"
 
 # Setup paths
-TEST_DIR="/mnt/data/yueliu14/ready_mini_swe/rocprim"
+TEST_DIR="/mnt/raid0/users/yueliu14/rocprim"
 ROCPRIM_DIR="${TEST_DIR}/rocPRIM_${KERNEL_NAME}"
 OUTPUT_REPO="20251218_${KERNEL_NAME}"
 PATCH_OUTPUT_DIR="${TEST_DIR}/${OUTPUT_REPO}"
 TRAJ_PATH="${PATCH_OUTPUT_DIR}/last_mini_run.traj.json"
-PROMPT_FILE="${TEST_DIR}/prompts/rocprim_prompt_${KERNEL_NAME}.md"
-BASE_CONFIG="/mnt/data/yueliu14/ready_mini_swe/mini-swe-agent/src/minisweagent/config/mini_patch_agent.yaml"
+PROMPT_FILE="/mnt/raid0/users/yueliu14/mini-swe-agent/rocprim_prompts/rocprim_prompt_${KERNEL_NAME}.md"
+BASE_CONFIG="/mnt/raid0/users/yueliu14/mini-swe-agent/src/minisweagent/config/mini_patch_agent.yaml"
 
 # Create directories
 mkdir -p "${TEST_DIR}"
 mkdir -p "${PATCH_OUTPUT_DIR}"
-mkdir -p "${TEST_DIR}/prompts"
 
 # Check if prompt file exists
 if [ ! -f "${PROMPT_FILE}" ]; then
@@ -82,7 +81,7 @@ mini -c "${BASE_CONFIG}" \
     --num-parallel "${NUM_AGENTS}" \
     --repo "${ROCPRIM_DIR}" \
     --patch-output "${PATCH_OUTPUT_DIR}" \
-    --test-command "cd /mnt/data/yueliu14/ready_mini_swe/rocprim/test_scripts && python test_correctness_benchmark.py benchmark_${KERNEL_NAME} WORK_REPO" \
+    --test-command "cd /mnt/raid0/users/yueliu14/mini-swe-agent/test_scripts && python test_correctness_benchmark.py benchmark_${KERNEL_NAME} WORK_REPO" \
     --metric "extract bytes_per_second G/s from test output, note you should change T/s or other units to G/s. To select the best patch, you should calculate the speedup on all datatypes first and get the average speedup. Not the average of bandwidths on all datatypes." \
     --parallel-gpu-ids "${GPU_IDS_STR}" \
     > "${PATCH_OUTPUT_DIR}/mini_output.log" 2>&1

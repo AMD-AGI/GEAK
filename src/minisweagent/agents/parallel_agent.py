@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
 from contextlib import contextmanager
@@ -195,28 +196,79 @@ class ParallelAgent(DefaultAgent):
             else:
                 self._log_message(f"[ParallelAgent] Patch {patch_name} captured, running test...")
             
-            test_env = os.environ.copy()
-            test_env["PYTHONUNBUFFERED"] = "1"
-            # Replace WORK_REPO placeholder with actual working directory
-            test_command = self.config.test_command.replace("WORK_REPO", str(cwd))
-            test_result = subprocess.run(
-                test_command,
-                shell=True,
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=self.env.config.timeout,
-                env=test_env,
-            )
-            test_output = test_result.stdout
-            test_passed = test_result.returncode == 0
+            if not self.config.test_command:
+                error_msg = "[ParallelAgent] ERROR: test_command is not configured. Cannot run test."
+                self._log_message(error_msg)
+                test_output = error_msg
+                test_passed = False
+                test_returncode = -1
+            else:
+                test_env = os.environ.copy()
+                test_env["PYTHONUNBUFFERED"] = "1"
+                # Replace WORK_REPO placeholder with actual working directory
+                test_command = self.config.test_command.replace("WORK_REPO", str(cwd))
+                self._log_message(f"[ParallelAgent] Running test command: {test_command}")
+                
+                # Create temporary file to capture ALL output
+                # Direct redirection is more reliable than tee when scripts use subprocess.PIPE internally
+                with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt') as tmp_file:
+                    tmp_output_file = tmp_file.name
+                
+                try:
+                    # Direct redirection to file: this captures ALL output that goes to stdout/stderr
+                    # even if the script uses subprocess.PIPE internally, as long as it eventually prints
+                    # This is more reliable than tee because it doesn't depend on the script's internal handling
+                    wrapped_command = f"({test_command}) > {tmp_output_file} 2>&1; echo $? > {tmp_output_file}.exitcode"
+                    test_result = subprocess.run(
+                        wrapped_command,
+                        shell=True,
+                        cwd=cwd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        timeout=self.env.config.timeout,
+                        env=test_env,
+                    )
+                    
+                    # Read output from file (captures everything that was printed)
+                    if Path(tmp_output_file).exists():
+                        test_output = Path(tmp_output_file).read_text()
+                    else:
+                        # Fallback to stdout if file doesn't exist
+                        test_output = test_result.stdout or ""
+                    
+                    # Read exit code from file if available, otherwise use subprocess returncode
+                    exitcode_file = Path(f"{tmp_output_file}.exitcode")
+                    if exitcode_file.exists():
+                        try:
+                            test_returncode = int(exitcode_file.read_text().strip())
+                        except (ValueError, OSError):
+                            test_returncode = test_result.returncode
+                    else:
+                        test_returncode = test_result.returncode
+                    
+                    test_passed = test_returncode == 0
+                    
+                    if not test_output.strip():
+                        self._log_message(
+                            f"[ParallelAgent] Warning: Test command produced no output (returncode: {test_returncode}). "
+                            f"This may indicate the script captured output with subprocess.PIPE but didn't print it. "
+                            f"Output file: {tmp_output_file}"
+                        )
+                finally:
+                    # Clean up temporary files
+                    for tmp_file_path in [tmp_output_file, f"{tmp_output_file}.exitcode"]:
+                        try:
+                            if Path(tmp_file_path).exists():
+                                Path(tmp_file_path).unlink()
+                        except Exception:
+                            pass
             
             self.patch_results[patch_name] = {
                 "patch_file": f"{patch_name}.patch",
                 "test_output_file": f"{patch_name}_test.txt",
                 "test_passed": test_passed,
-                "returncode": test_result.returncode,
+                "returncode": test_returncode,
             }
             status = "✓ PASSED" if test_passed else "✗ FAILED"
             self._log_message(f"[ParallelAgent] Test result for {patch_name}: {status}")
@@ -230,7 +282,7 @@ class ParallelAgent(DefaultAgent):
                 self._save_test_output(patch_name, test_output)
                 self._update_results_file()
             
-            return self._format_patch_info(patch_name, patch_content, test_output, test_passed, test_result.returncode)
+            return self._format_patch_info(patch_name, patch_content, test_output, test_passed, test_returncode)
                 
         except subprocess.TimeoutExpired:
             test_output = "Test command timed out"
