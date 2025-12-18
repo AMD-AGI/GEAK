@@ -123,6 +123,7 @@ class ParallelAgent(DefaultAgent):
         self.patch_results: dict[str, dict] = {}
         self.patch_counter = 0
         self.log_file: Path | None = None
+        self._last_action_hash: str | None = None
 
     def add_message(self, role: str, content: str, **kwargs):
         super().add_message(role, content, **kwargs)
@@ -142,20 +143,39 @@ class ParallelAgent(DefaultAgent):
                     f.flush()
             except Exception:
                 pass  # Ignore errors writing to log file
+    
+    def _log_message(self, message: str):
+        """Log a message directly to the log file without going through stdout."""
+        if self.log_file:
+            try:
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    f.write(message + "\n")
+                    f.flush()
+            except Exception:
+                pass
+        # Also print to console if stdout is not redirected (not a Tee instance)
+        if not isinstance(sys.stdout, Tee):
+            print(message, flush=True)
 
     def execute_action(self, action: dict) -> dict:
         output = super().execute_action(action)
         lines = output.get("output", "").lstrip().splitlines(keepends=True)
         if lines and lines[0].strip() in ("TEST_BASELINE_PERFORMANCE", "SAVE_PATCH_AND_TEST"):
-            patch_info = self._save_patch_and_test()
-            if patch_info:
-                output["output"] = output.get("output", "") + "\n" + patch_info
+            # Prevent duplicate calls for the same action
+            action_hash = f"{action.get('action', '')}:{lines[0].strip()}"
+            if action_hash != self._last_action_hash:
+                self._last_action_hash = action_hash
+                patch_info = self._save_patch_and_test()
+                if patch_info:
+                    output["output"] = output.get("output", "") + "\n" + patch_info
+            else:
+                self._log_message(f"[ParallelAgent] Skipping duplicate patch save for action: {action.get('action', '')}")
         return output
 
     def _save_patch_and_test(self) -> str | None:
         patch_name = f"patch_{self.patch_counter}"
         self.patch_counter += 1
-        print(f"\n[ParallelAgent] Saving patch and running test...", flush=True)
+        self._log_message(f"\n[ParallelAgent] Saving patch and running test...")
         
         cwd = getattr(self.env, 'working_dir', None)
         if cwd is None:
@@ -171,9 +191,9 @@ class ParallelAgent(DefaultAgent):
             )
             patch_content = git_diff_result.stdout
             if not patch_content.strip():
-                print(f"[ParallelAgent] No changes detected, baseline running.", flush=True)
+                self._log_message(f"[ParallelAgent] No changes detected, baseline running.")
             else:
-                print(f"[ParallelAgent] Patch {patch_name} captured, running test...", flush=True)
+                self._log_message(f"[ParallelAgent] Patch {patch_name} captured, running test...")
             
             test_env = os.environ.copy()
             test_env["PYTHONUNBUFFERED"] = "1"
@@ -199,7 +219,7 @@ class ParallelAgent(DefaultAgent):
                 "returncode": test_result.returncode,
             }
             status = "✓ PASSED" if test_passed else "✗ FAILED"
-            print(f"[ParallelAgent] Test result for {patch_name}: {status}", flush=True)
+            self._log_message(f"[ParallelAgent] Test result for {patch_name}: {status}")
             
             if self.config.metric:
                 metric_result = self._extract_metric(patch_name, test_output)
@@ -220,7 +240,7 @@ class ParallelAgent(DefaultAgent):
                 "test_passed": False,
                 "returncode": -1,
             }
-            print(f"[ParallelAgent] Test for {patch_name}: ✗ TIMEOUT", flush=True)
+            self._log_message(f"[ParallelAgent] Test for {patch_name}: ✗ TIMEOUT")
             if self.config.metric:
                 self.patch_results[patch_name]["metric_result"] = None
             if self.config.patch_output_dir:
@@ -236,7 +256,7 @@ class ParallelAgent(DefaultAgent):
                 "test_passed": False,
                 "returncode": -1,
             }
-            print(f"[ParallelAgent] Test for {patch_name}: ✗ ERROR - {e}", flush=True)
+            self._log_message(f"[ParallelAgent] Test for {patch_name}: ✗ ERROR - {e}")
             if self.config.metric:
                 self.patch_results[patch_name]["metric_result"] = None
             if self.config.patch_output_dir:
@@ -262,7 +282,7 @@ class ParallelAgent(DefaultAgent):
         return "\n".join(info_parts)
     
     def _extract_metric(self, patch_name: str, test_output: str):
-        print(f"[ParallelAgent] Extracting metric for {patch_name}...", flush=True)
+        self._log_message(f"[ParallelAgent] Extracting metric for {patch_name}...")
         prompt = (
             f"Task: {self.config.metric}\n\n"
             f"Test output:\n{test_output}\n\n"
@@ -278,10 +298,10 @@ class ParallelAgent(DefaultAgent):
         content = response.get("content", "")
         try:
             result = json.loads(content.strip())
-            print(f"[ParallelAgent] Metric extracted: {result}", flush=True)
+            self._log_message(f"[ParallelAgent] Metric extracted: {result}")
             return result
         except json.JSONDecodeError:
-            print(f"[ParallelAgent] Failed to parse metric response: {content}", flush=True)
+            self._log_message(f"[ParallelAgent] Failed to parse metric response: {content}")
             return None
 
     def _save_patch_file(self, patch_name: str, patch_content: str):
@@ -289,14 +309,14 @@ class ParallelAgent(DefaultAgent):
         output_dir.mkdir(parents=True, exist_ok=True)
         patch_file = output_dir / f"{patch_name}.patch"
         patch_file.write_text(patch_content)
-        print(f"[ParallelAgent] Patch saved to: {patch_file}", flush=True)
+        self._log_message(f"[ParallelAgent] Patch saved to: {patch_file}")
     
     def _save_test_output(self, patch_name: str, test_output: str):
         output_dir = Path(self.config.patch_output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         test_file = output_dir / f"{patch_name}_test.txt"
         test_file.write_text(test_output)
-        print(f"[ParallelAgent] Test output saved to: {test_file}", flush=True)
+        self._log_message(f"[ParallelAgent] Test output saved to: {test_file}")
     
     def _update_results_file(self):
         output_dir = Path(self.config.patch_output_dir)
@@ -314,7 +334,7 @@ class ParallelAgent(DefaultAgent):
                 result_entry["metric_result"] = data["metric_result"]
             simplified_results[name] = result_entry
         results_file.write_text(json.dumps(simplified_results, indent=2, ensure_ascii=False))
-        print(f"[ParallelAgent] Results updated: {results_file}", flush=True)
+        self._log_message(f"[ParallelAgent] Results updated: {results_file}")
 
     def run(self, task: str, **kwargs) -> tuple[str, str] | Any:
         # Handle parallel execution if num_parallel > 1
@@ -935,19 +955,37 @@ class ParallelAgent(DefaultAgent):
                     console.print(best_result.llm_conclusion)
             
             base_patch_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Read results from the best patch's parallel directory to get best patch data
             best_results_file = best_result.patch_dir / "results.json"
             if best_results_file.exists():
                 results_data = json.loads(best_results_file.read_text())
-                for patch_name, patch_data in results_data.items():
-                    if patch_name != "_best_patch":
-                        patch_data["agent_id"] = best_result.agent_id
-                        patch_data["parallel_dir"] = f"parallel_{best_result.agent_id}"
-                results_data["_selected_from_agent"] = best_result.agent_id
-                results_data["_selected_from_parallel_dir"] = f"parallel_{best_result.agent_id}"
-                results_data["_selected_patch_id"] = best_result.patch_id
-                results_data["_selected_patch_content"] = best_result.patch_content
-                results_data["_selected_test_output"] = best_result.test_output
-                (base_patch_dir / "best_results.json").write_text(json.dumps(results_data, indent=2))
+                best_patch_data = results_data.get(best_result.patch_id, {}).copy()
+                
+                # Add agent_id and parallel_dir to the best patch
+                best_patch_data["agent_id"] = best_result.agent_id
+                best_patch_data["parallel_dir"] = f"parallel_{best_result.agent_id}"
+                
+                # Create output with only the best patch
+                output_data = {
+                    best_result.patch_id: best_patch_data,
+                    "_selected_from_agent": best_result.agent_id,
+                    "_selected_from_parallel_dir": f"parallel_{best_result.agent_id}",
+                    "_selected_patch_id": best_result.patch_id,
+                }
+                
+                # Add file paths for the best patch
+                best_patch_file = best_result.patch_dir / best_patch_data.get("patch_file", f"{best_result.patch_id}.patch")
+                output_data["_selected_patch_file"] = str(best_patch_file.resolve()) if best_patch_file.exists() else None
+                
+                best_test_file = best_result.patch_dir / best_patch_data.get("test_output_file", f"{best_result.patch_id}_test.txt")
+                output_data["_selected_test_output_file"] = str(best_test_file.resolve()) if best_test_file.exists() else None
+                
+                # Add LLM analysis
+                if best_result.llm_conclusion:
+                    output_data["_llm_selection_analysis"] = best_result.llm_conclusion
+                
+                (base_patch_dir / "best_results.json").write_text(json.dumps(output_data, indent=2))
         
         if results:
             # Return (exit_status, result) tuple from the first successful result

@@ -64,6 +64,7 @@ def main(
     metric: str | None = typer.Option(None, "--metric", help="Metric extraction task description for LLM"),
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents to run (only effective with --save-patch). If not specified, reads from config file."),
     repo: Path | None = typer.Option(None, "--repo", help="Repository path for parallel execution. Required when num_parallel > 1. Each agent will get an isolated workdir using git worktree."),
+    parallel_gpu_ids: str | None = typer.Option(None, "--parallel-gpu-ids", help="Comma-separated GPU IDs for parallel agents (e.g., '0,1,2,3'). If not specified, reads from config file."),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
@@ -142,7 +143,17 @@ def main(
         agent_config["num_parallel"] = effective_num_parallel
         if repo_path:
             agent_config["repo"] = str(repo_path)
-        agent_config["parallel_gpu_ids"] = config.get("patch", {}).get("parallel_gpu_ids", [])
+        # Get parallel_gpu_ids from command line or config (command line takes precedence)
+        if parallel_gpu_ids:
+            # Parse comma-separated GPU IDs string into list of integers
+            try:
+                gpu_ids_list = [int(gpu_id.strip()) for gpu_id in parallel_gpu_ids.split(",") if gpu_id.strip()]
+                agent_config["parallel_gpu_ids"] = gpu_ids_list
+            except ValueError:
+                console.print(f"[bold red]Warning: Invalid GPU IDs format '{parallel_gpu_ids}'. Expected comma-separated integers (e.g., '0,1,2,3'). Using config file value.[/bold red]")
+                agent_config["parallel_gpu_ids"] = config.get("patch", {}).get("parallel_gpu_ids", [])
+        else:
+            agent_config["parallel_gpu_ids"] = config.get("patch", {}).get("parallel_gpu_ids", [])
     
     # Create and run agent
     agent = agent_class(model, env, **agent_config)

@@ -151,19 +151,6 @@ agent:
   step_limit: 0.
   cost_limit: 0.
   mode: confirm
-patch:
-  # Test command to run for patch validation
-  test_command: "cd /mnt/data/yueliu14/ready_mini_swe/mini-swe-agent/test_scripts && python test_benchmark.py benchmark_device_merge_sort WORK_REPO" # e.g., "cd /path/to/test && ./test_script.sh"
-  # Metric extraction task description for LLM
-  metric: "extract bytes_per_second G/s from test output, note you should change T/s or other units to G/s. To select the best patch, you should calculate the speedup on all datatypes first and get the average speedup. Not the average of bandwidths on all datatypes."  # e.g., "Extract bandwidth and latency metrics from the test output"
-  # Number of parallel patch agents to run
-  num_parallel: 4  # Set to > 1 to enable parallel execution
-  # Repository path for parallel execution (required when num_parallel > 1)
-  # Each agent will get an isolated workdir using git worktree
-  repo: "/mnt/data/yueliu14/ready_mini_swe/rocPRIM_device_merge_sort"  # Path to git repository
-  # GPU IDs for parallel agents (HIP_VISIBLE_DEVICES will be set for each agent)
-  parallel_gpu_ids: [2, 3, 4, 5]  # e.g., [0, 1, 2, 3] for 4 parallel agents using GPUs 0-3
-  patch_output_dir: "/mnt/data/yueliu14/ready_mini_swe/1217_v3_test_patches_merge_sort"
 env:
   env:
     PAGER: cat
