@@ -14,8 +14,12 @@ from tenacity import (
 )
 
 from minisweagent.models import GLOBAL_MODEL_STATS
-from google import genai
-from google.genai.types import HttpOptions
+try:
+    from google import genai
+    from google.genai.types import HttpOptions
+except ImportError:
+    raise ImportError("You should install google-genai to use Gemini models. pip install google-genai")
+
 logger = logging.getLogger("amd_llm")
 
 
