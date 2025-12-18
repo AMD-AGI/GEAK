@@ -658,34 +658,93 @@ class ParallelAgent(DefaultAgent):
             prompt_parts.append(f"The metric is {metric}\n")
             prompt_parts.append(
                 "Based on the metric results, calculate the average improvement of each patch compared to the unified baseline (agent_0/patch_0). "
-                "Analyze all patches and provide your conclusion about which patch is the best and why. "
-                "At the end of your response, indicate the best patch in the format 'agent_id/patch_name' (e.g., '0/patch_1', '1/patch_2', etc.)."
+                "Analyze all patches and provide your conclusion about which patch is the best and why.\n\n"
             )
         else:
             prompt_parts.append(
-                "Based on the test results and patch quality, analyze all patches and provide your conclusion about which patch is the best compared to the unified baseline (agent_0/patch_0) and why. "
-                "At the end of your response, indicate the best patch in the format 'agent_id/patch_name' (e.g., '0/patch_1', '1/patch_2', etc.)."
+                "Based on the test results and patch quality, analyze all patches and provide your conclusion about which patch is the best compared to the unified baseline (agent_0/patch_0) and why.\n\n"
             )
+        
+        prompt_parts.append(
+            "IMPORTANT: You must respond with a valid JSON object in the following format:\n"
+            "{\n"
+            '  "best_patch": {\n'
+            '    "agent_id": <integer>,  // e.g., 0, 1, 2, 3\n'
+            '    "patch_id": "<string>"  // e.g., "patch_0", "patch_1", "patch_2"\n'
+            "  },\n"
+            '  "analysis": "<string>"    // Your detailed analysis explaining why this patch is the best\n'
+            "}\n\n"
+            "The analysis should be comprehensive and explain your reasoning. "
+            "In the analysis, you must:\n"
+            "1. Summarize the key optimization points/techniques used in the best patch.\n"
+            "2. List the other top 3 optimization patches (excluding the best one) with their corresponding speedup/improvement effects compared to the baseline.\n"
+            "The JSON must be valid and parseable."
+        )
         
         print(f"[ParallelAgent] Calling LLM to select best patch from all parallel runs...", flush=True)
         response = model.query([{"role": "user", "content": "".join(prompt_parts)}])
-        llm_conclusion = response.get("content", "").strip()
+        llm_response = response.get("content", "").strip()
         
-        print(f"\n[ParallelAgent] LLM Conclusion:\n{llm_conclusion}\n", flush=True)
+        print(f"\n[ParallelAgent] LLM Response:\n{llm_response}\n", flush=True)
         
-        # Try to extract agent_id/patch_name from conclusion, but don't require strict format
+        # Try to parse JSON from the response
         best_agent_id = None
         best_patch_name = None
+        llm_analysis = llm_response  # Default to full response if JSON parsing fails
         
-        # Try to extract the pattern using regex
-        match = re.search(r'(\d+)\s*/\s*(patch_\d+)', llm_conclusion)
-        if match:
-            try:
-                best_agent_id = int(match.group(1))
-                best_patch_name = match.group(2)
-                print(f"[ParallelAgent] Extracted patch from conclusion: agent_{best_agent_id}/{best_patch_name}", flush=True)
-            except (ValueError, IndexError):
-                pass
+        # Try to extract JSON from the response (might be wrapped in markdown code blocks)
+        json_text = llm_response
+        # First try: extract from markdown code blocks
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', llm_response, re.DOTALL)
+        if json_match:
+            json_text = json_match.group(1)
+        else:
+            # Second try: find JSON object that contains both "best_patch" and "analysis"
+            json_match = re.search(r'\{[^{}]*"best_patch"[^{}]*"analysis"[^{}]*\}', llm_response, re.DOTALL)
+            if json_match:
+                json_text = json_match.group(0)
+            else:
+                # Third try: find any JSON object starting with { and containing "best_patch"
+                # Use a more robust approach: find the first { and try to parse until matching }
+                brace_start = llm_response.find('{')
+                if brace_start != -1:
+                    brace_count = 0
+                    brace_end = brace_start
+                    for i in range(brace_start, len(llm_response)):
+                        if llm_response[i] == '{':
+                            brace_count += 1
+                        elif llm_response[i] == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                brace_end = i + 1
+                                break
+                    if brace_end > brace_start:
+                        potential_json = llm_response[brace_start:brace_end]
+                        if '"best_patch"' in potential_json:
+                            json_text = potential_json
+        
+        try:
+            llm_data = json.loads(json_text)
+            if "best_patch" in llm_data and isinstance(llm_data["best_patch"], dict):
+                best_patch_info = llm_data["best_patch"]
+                best_agent_id = best_patch_info.get("agent_id")
+                best_patch_name = best_patch_info.get("patch_id")
+                llm_analysis = llm_data.get("analysis", llm_response)
+                print(f"[ParallelAgent] Successfully parsed JSON: agent_id={best_agent_id}, patch_id={best_patch_name}", flush=True)
+            else:
+                print(f"[ParallelAgent] JSON parsed but missing 'best_patch' field", flush=True)
+        except json.JSONDecodeError as e:
+            print(f"[ParallelAgent] Failed to parse JSON from LLM response: {e}", flush=True)
+            print(f"[ParallelAgent] Attempting fallback extraction...", flush=True)
+            # Fallback: try regex extraction as before
+            match = re.search(r'(\d+)\s*/\s*(patch_\d+)', llm_response)
+            if match:
+                try:
+                    best_agent_id = int(match.group(1))
+                    best_patch_name = match.group(2)
+                    print(f"[ParallelAgent] Fallback extraction successful: agent_{best_agent_id}/{best_patch_name}", flush=True)
+                except (ValueError, IndexError):
+                    pass
         
         # Collect all patches file locations
         all_patches_info = {}
@@ -751,7 +810,7 @@ class ParallelAgent(DefaultAgent):
             returncode=best_patch_data.get("returncode", -1),
             metric_result=best_patch_data.get("metric_result"),
             patch_dir=best_patch_dir,
-            llm_conclusion=llm_conclusion,
+            llm_conclusion=llm_analysis,
             all_patches_info=all_patches_info,
         )
 
