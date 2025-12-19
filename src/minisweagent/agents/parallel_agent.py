@@ -908,6 +908,7 @@ class ParallelAgent(DefaultAgent):
                 )
             elif "dubious ownership" in error_msg.lower():
                 ParallelAgent._ensure_safe_directory(repo_path)
+                ParallelAgent._ensure_safe_directory(worktree_path)
                 subprocess.run(
                     ["git", "worktree", "add", "--detach", str(worktree_path)],
                     cwd=repo_path,
@@ -935,6 +936,9 @@ class ParallelAgent(DefaultAgent):
                 )
             else:
                 raise RuntimeError(f"Failed to create worktree: {error_msg}") from e
+        
+        # Ensure worktree path is also marked as safe
+        ParallelAgent._ensure_safe_directory(worktree_path)
         
         return worktree_path
 
