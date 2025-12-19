@@ -670,7 +670,8 @@ class ParallelAgent(DefaultAgent):
             "{\n"
             '  "best_patch": {\n'
             '    "agent_id": <integer>,  // e.g., 0, 1, 2, 3\n'
-            '    "patch_id": "<string>"  // e.g., "patch_0", "patch_1", "patch_2"\n'
+            '    "patch_id": "<string>",  // e.g., "patch_0", "patch_1", "patch_2"\n'
+            '    "speedup": <number>  // e.g., 1.5, 2.0, 0.8 (speedup compared to baseline)\n'
             "  },\n"
             '  "analysis": "<string>"    // Your detailed analysis explaining why this patch is the best\n'
             "}\n\n"
