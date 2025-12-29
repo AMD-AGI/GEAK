@@ -1,0 +1,142 @@
+{
+  "name": "mini-swe-agent-vscode",
+  "displayName": "mini-swe-agent",
+  "description": "AI coding agent that solves GitHub issues and programming tasks",
+  "version": "0.1.0",
+  "publisher": "mini-swe-agent",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SWE-agent/mini-swe-agent"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "coding assistant",
+    "swe-bench",
+    "automation"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mini-swe-agent.start",
+        "title": "mini: Start Agent",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "mini-swe-agent.stop",
+        "title": "mini: Stop Agent",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "mini-swe-agent.yolo",
+        "title": "mini: Toggle YOLO Mode",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "mini-swe-agent.confirm",
+        "title": "mini: Switch to Confirm Mode",
+        "icon": "$(question)"
+      },
+      {
+        "command": "mini-swe-agent.human",
+        "title": "mini: Switch to Human Mode",
+        "icon": "$(person)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mini-swe-agent",
+          "title": "mini-swe-agent",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "mini-swe-agent": [
+        {
+          "id": "mini-swe-agent-chat",
+          "name": "Agent Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "mini-swe-agent",
+      "properties": {
+        "mini-swe-agent.modelName": {
+          "type": "string",
+          "default": "gpt-4",
+          "description": "Model to use (e.g., gpt-4, claude-3-5-sonnet-20241022)"
+        },
+        "mini-swe-agent.costLimit": {
+          "type": "number",
+          "default": 3.0,
+          "description": "Maximum cost limit in dollars"
+        },
+        "mini-swe-agent.stepLimit": {
+          "type": "number",
+          "default": 50,
+          "description": "Maximum number of steps (0 = unlimited)"
+        },
+        "mini-swe-agent.defaultMode": {
+          "type": "string",
+          "enum": [
+            "confirm",
+            "yolo",
+            "human"
+          ],
+          "default": "confirm",
+          "description": "Default interaction mode"
+        },
+        "mini-swe-agent.configPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to YAML config file (e.g., mini.yaml). Can include API keys, model settings, and agent configuration. Supports absolute paths or names (will search in workspace, ~/.config/mini-swe-agent, and builtin configs)"
+        },
+        "mini-swe-agent.whitelistActions": {
+          "type": "array",
+          "default": [
+            "^ls",
+            "^cat",
+            "^pwd",
+            "^echo"
+          ],
+          "description": "Regex patterns for auto-approved commands"
+        },
+        "mini-swe-agent.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Python executable (leave empty to auto-detect)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.3.3"
+  }
+}
+
