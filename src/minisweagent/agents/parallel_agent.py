@@ -162,15 +162,10 @@ class ParallelAgent(DefaultAgent):
         output = super().execute_action(action)
         lines = output.get("output", "").lstrip().splitlines(keepends=True)
         if lines and lines[0].strip() in ("TEST_BASELINE_PERFORMANCE", "SAVE_PATCH_AND_TEST"):
-            # Prevent duplicate calls for the same action
-            action_hash = f"{action.get('action', '')}:{lines[0].strip()}"
-            if action_hash != self._last_action_hash:
-                self._last_action_hash = action_hash
-                patch_info = self._save_patch_and_test()
-                if patch_info:
-                    output["output"] = output.get("output", "") + "\n" + patch_info
-            else:
-                self._log_message(f"[ParallelAgent] Skipping duplicate patch save for action: {action.get('action', '')}")
+            patch_info = self._save_patch_and_test()
+            if patch_info:
+                output["output"] = output.get("output", "") + "\n" + patch_info
+            
         return output
 
     def _save_patch_and_test(self) -> str | None:
