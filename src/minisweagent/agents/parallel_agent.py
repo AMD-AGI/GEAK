@@ -320,8 +320,6 @@ class ParallelAgent(DefaultAgent):
             f"Test status: {status}",
             f"Return code: {returncode}",
             f"{'='*60}",
-            "\n## Patch Content:",
-            f"```diff\n{patch_content}\n```",
             "\n## Test Output:",
             f"```\n{test_output}\n```",
             f"{'='*60}\n",
