@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { PythonBridge } from './pythonBridge';
-import { AgentState, AgentMessage, InitializeParams, ConfirmationResponse } from './types';
+import { AgentState, AgentMessage, InitializeParams, ConfirmationResponse, Task } from './types';
 
 export class AgentManager {
     private bridge: PythonBridge;
@@ -9,10 +9,14 @@ export class AgentManager {
         currentStep: 0,
         totalCost: 0,
         mode: 'confirm',
-        messages: []
+        messages: [],
+        taskHistory: []
     };
     private stateChangeEmitter = new vscode.EventEmitter<AgentState>();
     public onStateChange = this.stateChangeEmitter.event;
+    
+    private pendingActionResolvers: Map<string, (response: ConfirmationResponse) => void> = new Map();
+    private nextActionId: number = 1;
     
     constructor(private context: vscode.ExtensionContext) {
         this.bridge = new PythonBridge(context);
@@ -22,62 +26,77 @@ export class AgentManager {
     private setupBridgeHandlers() {
         // Handle agent messages
         this.bridge.onNotification('agent/message', (params) => {
-            this.state.messages.push({
+            const message: AgentMessage = {
                 role: params.role,
                 content: params.content,
                 step: params.step,
-                cost: params.cost
-            });
+                cost: params.cost,
+                timestamp: new Date()
+            };
+            
+            this.state.messages.push(message);
             this.state.currentStep = params.step;
             this.state.totalCost = params.cost;
+            
+            // Update current task
+            if (this.state.currentTask) {
+                this.state.currentTask.totalSteps = params.step;
+                this.state.currentTask.totalCost = params.cost;
+            }
+            
             this.emitStateChange();
         });
         
         // Handle confirmation requests (blocking on Python side)
         this.bridge.onRequest('agent/requestConfirmation', async (params) => {
+            // Generate action ID
+            const actionId = `action_${this.nextActionId++}_${Date.now()}`;
+            
+            // Check mode
+            if (this.state.mode === 'yolo') {
+                // Auto-approve in YOLO mode
+                const actionMessage: AgentMessage = {
+                    role: 'assistant',
+                    content: params.action,
+                    step: this.state.currentStep,
+                    timestamp: new Date(),
+                    isAction: true,
+                    actionId: actionId,
+                    actionStatus: 'auto-approved',
+                    actionCommand: params.action,
+                    actionTimestamp: new Date()
+                };
+                this.state.messages.push(actionMessage);
+                this.emitStateChange();
+                
+                return { approved: true };
+            }
+            
+            // Create pending action message
+            const actionMessage: AgentMessage = {
+                role: 'assistant',
+                content: params.action,
+                step: this.state.currentStep,
+                timestamp: new Date(),
+                isAction: true,
+                actionId: actionId,
+                actionStatus: 'pending',
+                actionCommand: params.action
+            };
+            
+            this.state.messages.push(actionMessage);
             this.state.status = 'waiting_approval';
             this.state.pendingAction = {
                 action: params.action,
+                actionId: actionId,
                 step: this.state.currentStep
             };
             this.emitStateChange();
             
-            // Show quick pick for approval
-            const choice = await vscode.window.showQuickPick([
-                { label: '$(check) Approve', value: 'approve', description: 'Execute this command' },
-                { label: '$(close) Reject', value: 'reject', description: 'Don\'t execute this command' },
-                { label: '$(zap) Switch to YOLO', value: 'yolo', description: 'Auto-execute all future commands' },
-                { label: '$(person) Switch to Human', value: 'human', description: 'Enter commands manually' }
-            ], {
-                placeHolder: `Execute command?`,
-                title: 'Agent wants to execute a command'
+            // Wait for user action
+            return new Promise<ConfirmationResponse>((resolve) => {
+                this.pendingActionResolvers.set(actionId, resolve);
             });
-            
-            this.state.status = 'running';
-            this.state.pendingAction = undefined;
-            this.emitStateChange();
-            
-            const response: ConfirmationResponse = {};
-            
-            if (!choice || choice.value === 'reject') {
-                response.approved = false;
-                response.reason = 'User rejected';
-            } else if (choice.value === 'approve') {
-                response.approved = true;
-            } else if (choice.value === 'yolo') {
-                this.state.mode = 'yolo';
-                response.approved = true;
-                response.switchMode = true;
-                response.newMode = 'yolo';
-                vscode.window.showInformationMessage('Switched to YOLO mode - all commands will execute automatically');
-            } else if (choice.value === 'human') {
-                this.state.mode = 'human';
-                response.switchMode = true;
-                response.newMode = 'human';
-                vscode.window.showInformationMessage('Switched to Human mode - you can now enter commands manually');
-            }
-            
-            return response;
         });
         
         // Handle human command requests
@@ -156,7 +175,6 @@ export class AgentManager {
         this.bridge.onNotification('agent/started', () => {
             this.state.status = 'running';
             this.emitStateChange();
-            vscode.window.showInformationMessage('Agent started');
         });
         
         // Handle info notifications
@@ -172,6 +190,18 @@ export class AgentManager {
         // Handle agent finished
         this.bridge.onNotification('agent/finished', (params) => {
             this.state.status = 'finished';
+            
+            // Mark current task as completed
+            if (this.state.currentTask) {
+                this.state.currentTask.status = params.exitStatus === 'success' ? 'completed' : 'failed';
+                this.state.currentTask.endTime = new Date();
+                this.state.currentTask.exitStatus = params.exitStatus;
+                
+                // Move to history
+                this.state.taskHistory.unshift(this.state.currentTask);
+                this.state.currentTask = undefined;
+            }
+            
             this.emitStateChange();
             
             vscode.window.showInformationMessage(
@@ -187,6 +217,18 @@ export class AgentManager {
         // Handle errors
         this.bridge.onNotification('agent/error', (params) => {
             this.state.status = 'error';
+            
+            // Mark current task as failed
+            if (this.state.currentTask) {
+                this.state.currentTask.status = 'failed';
+                this.state.currentTask.endTime = new Date();
+                this.state.currentTask.exitStatus = 'error: ' + params.error;
+                
+                // Move to history
+                this.state.taskHistory.unshift(this.state.currentTask);
+                this.state.currentTask = undefined;
+            }
+            
             this.emitStateChange();
             
             vscode.window.showErrorMessage(`Agent error: ${params.error}`, 'Show Details').then(choice => {
@@ -232,22 +274,53 @@ export class AgentManager {
             }
         };
         
-        // Send initialization - this will block on Python side until agent completes
-        this.bridge.sendRequest('agent/waitInitialize', initParams).catch((err) => {
-            vscode.window.showErrorMessage(`Failed to initialize agent: ${err}`);
-        });
+        // Create new task
+        const newTask: Task = {
+            id: `task_${Date.now()}`,
+            query: task,
+            status: 'running',
+            startTime: new Date(),
+            totalSteps: 0,
+            totalCost: 0
+        };
         
         this.state = {
             status: 'running',
             currentStep: 0,
             totalCost: 0,
             mode: config.get('defaultMode', 'confirm'),
-            messages: []
+            messages: [],
+            currentTask: newTask,
+            taskHistory: this.state.taskHistory
         };
         this.emitStateChange();
+        
+        // Send initialization - this will block on Python side until agent completes
+        this.bridge.sendRequest('agent/waitInitialize', initParams).catch((err) => {
+            vscode.window.showErrorMessage(`Failed to initialize agent: ${err}`);
+            
+            // Mark task as failed
+            if (this.state.currentTask) {
+                this.state.currentTask.status = 'failed';
+                this.state.currentTask.endTime = new Date();
+                this.state.taskHistory.unshift(this.state.currentTask);
+                this.state.currentTask = undefined;
+            }
+            
+            this.state.status = 'error';
+            this.emitStateChange();
+        });
     }
     
     stopAgent(): void {
+        // Mark current task as cancelled
+        if (this.state.currentTask) {
+            this.state.currentTask.status = 'cancelled';
+            this.state.currentTask.endTime = new Date();
+            this.state.taskHistory.unshift(this.state.currentTask);
+            this.state.currentTask = undefined;
+        }
+        
         this.bridge.stop();
         this.state.status = 'idle';
         this.emitStateChange();
@@ -261,6 +334,46 @@ export class AgentManager {
         vscode.window.showInformationMessage(`Switched to ${mode} mode`);
     }
     
+    /**
+     * Handle action approval/rejection from the UI
+     */
+    handleAction(actionId: string, decision: 'approve' | 'reject', reason?: string, editedCommand?: string): void {
+        // Find the action message
+        const messageIndex = this.state.messages.findIndex(m => m.actionId === actionId);
+        if (messageIndex === -1) {
+            vscode.window.showErrorMessage('Action not found');
+            return;
+        }
+        
+        const message = this.state.messages[messageIndex];
+        
+        // Update message status
+        message.actionStatus = decision === 'approve' ? 'approved' : 'rejected';
+        message.actionTimestamp = new Date();
+        if (reason) {
+            message.actionReason = reason;
+        }
+        
+        // Clear pending action
+        this.state.status = 'running';
+        this.state.pendingAction = undefined;
+        this.emitStateChange();
+        
+        // Resolve the promise
+        const resolver = this.pendingActionResolvers.get(actionId);
+        if (resolver) {
+            this.pendingActionResolvers.delete(actionId);
+            
+            const response: ConfirmationResponse = {
+                approved: decision === 'approve',
+                reason: reason,
+                editedCommand: editedCommand
+            };
+            
+            resolver(response);
+        }
+    }
+    
     getState(): AgentState {
         return { ...this.state };
     }
@@ -269,4 +382,3 @@ export class AgentManager {
         this.stateChangeEmitter.fire({ ...this.state });
     }
 }
-

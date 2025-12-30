@@ -53,6 +53,11 @@
         "command": "mini-swe-agent.human",
         "title": "mini: Switch to Human Mode",
         "icon": "$(person)"
+      },
+      {
+        "command": "mini-swe-agent.showPanel",
+        "title": "mini: Show Full Chat",
+        "icon": "$(comment-discussion)"
       }
     ],
     "viewsContainers": {
@@ -67,8 +72,8 @@
     "views": {
       "mini-swe-agent": [
         {
-          "id": "mini-swe-agent-chat",
-          "name": "Agent Chat",
+          "id": "mini-swe-agent-sidebar",
+          "name": "Agent Status",
           "type": "webview"
         }
       ]

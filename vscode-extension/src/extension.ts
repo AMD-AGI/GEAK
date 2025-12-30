@@ -1,18 +1,20 @@
 import * as vscode from 'vscode';
 import { AgentManager } from './agentManager';
-import { WebviewProvider } from './webviewProvider';
+import { SidebarProvider } from './sidebarProvider';
+import { PanelProvider } from './panelProvider';
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('mini-swe-agent extension is now active');
     
     const agentManager = new AgentManager(context);
-    const webviewProvider = new WebviewProvider(context, agentManager);
+    const sidebarProvider = new SidebarProvider(context, agentManager);
+    const panelProvider = new PanelProvider(context, agentManager);
     
-    // Register webview provider
+    // Register sidebar provider
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
-            'mini-swe-agent-chat',
-            webviewProvider,
+            'mini-swe-agent-sidebar',
+            sidebarProvider,
             {
                 webviewOptions: {
                     retainContextWhenHidden: true
@@ -32,6 +34,8 @@ export function activate(context: vscode.ExtensionContext) {
             
             if (task) {
                 await agentManager.startAgent(task);
+                // Auto-show panel when starting a task
+                panelProvider.show();
             }
         }),
         
@@ -49,6 +53,10 @@ export function activate(context: vscode.ExtensionContext) {
         
         vscode.commands.registerCommand('mini-swe-agent.human', () => {
             agentManager.setMode('human');
+        }),
+        
+        vscode.commands.registerCommand('mini-swe-agent.showPanel', (taskId?: string) => {
+            panelProvider.show(taskId);
         })
     );
     

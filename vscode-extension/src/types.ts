@@ -2,14 +2,28 @@
  * Type definitions for mini-swe-agent VS Code extension
  */
 
+export interface Task {
+    id: string;
+    query: string;
+    status: 'running' | 'completed' | 'failed' | 'cancelled';
+    startTime: Date;
+    endTime?: Date;
+    totalSteps?: number;
+    totalCost?: number;
+    exitStatus?: string;
+}
+
 export interface AgentState {
     status: 'idle' | 'running' | 'waiting_approval' | 'waiting_input' | 'finished' | 'error';
     currentStep: number;
     totalCost: number;
     mode: 'confirm' | 'yolo' | 'human';
     messages: AgentMessage[];
+    currentTask?: Task;
+    taskHistory: Task[];
     pendingAction?: {
         action: string;
+        actionId: string;
         step: number;
     };
 }
@@ -19,6 +33,15 @@ export interface AgentMessage {
     content: string;
     step?: number;
     cost?: number;
+    timestamp?: Date;
+    
+    // Action related
+    isAction?: boolean;
+    actionId?: string;
+    actionStatus?: 'pending' | 'approved' | 'rejected' | 'auto-approved';
+    actionCommand?: string;
+    actionReason?: string;
+    actionTimestamp?: Date;
 }
 
 export interface JSONRPCMessage {
@@ -60,5 +83,6 @@ export interface ConfirmationResponse {
     switchMode?: boolean;
     newMode?: string;
     reason?: string;
+    editedCommand?: string;
 }
 
