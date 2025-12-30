@@ -32,7 +32,7 @@ def main():
     parser.add_argument(
         "--base-patch-dir",
         type=str,
-        default="/mnt/raid0/users/yueliu14/rocprim/20251218_device_binary_search",
+        default="/mnt/raid0/yueliu14/rocprim/20251218_device_binary_search",
         help="Base directory containing parallel_* subdirectories"
     )
     parser.add_argument(

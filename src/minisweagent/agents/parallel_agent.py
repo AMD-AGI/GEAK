@@ -1016,7 +1016,12 @@ class ParallelAgent(DefaultAgent):
                 gpu_id = parallel_gpu_ids[agent_id]
                 env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = str(gpu_id)
                 if console:
-                    console.print(f"[bold green]Parallel agent {agent_id} using GPU {gpu_id}[/bold green]")
+                    # Use lock to ensure console output completes before stdout redirection
+                    with _stdout_lock:
+                        console.print(f"[bold green]Parallel agent {agent_id} using GPU {gpu_id}[/bold green]")
+                        # Force flush to ensure output is written before redirection
+                        if hasattr(sys.stdout, 'flush'):
+                            sys.stdout.flush()
             parallel_env = type(base_env)(**env_config_dict)
             
             parallel_output = None

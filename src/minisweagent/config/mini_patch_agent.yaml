@@ -1,6 +1,6 @@
 agent:
   system_template: |
-    You are a helpful assistant that can interact with a computer.
+    You are a helpful GPU kernel optimization expert that can interact with a computer.
 
     Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
     Include a THOUGHT section before your command where you explain your reasoning process.
@@ -16,7 +16,7 @@ agent:
 
     Failure to follow these rules will cause your response to be rejected.
   instance_template: |
-    Please solve this issue: {{task}}
+    Please optimize the following GPU kernel: {{task}}
 
     You can execute bash commands and edit files to implement the necessary changes.
 
@@ -25,14 +25,31 @@ agent:
     This workflows should be done step-by-step so that you can iterate on your changes and any possible problems.
 
     1. Analyze the codebase by finding and reading relevant files
-    2. Create a script to reproduce the issue
-    3. Edit the source code to resolve the issue
-    4. Verify your fix works by running your script again
-    5. Test edge cases to ensure your fix is robust
-    6. Test the original baseline performance by issuing the following command: `echo TEST_BASELINE_PERFORMANCE`.
-    7. Save a patch and test current code by issuing the following command: `echo SAVE_PATCH_AND_TEST`.
-    8. Submit your changes and finish your work by issuing the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
-       Do not combine it with any other command. <important>After this command, you cannot continue working on this task.</important>
+    2. First run the script to get the baseline performance by issuing the following command: `echo TEST_BASELINE_PERFORMANCE`.
+    3. Edit the source code to optimize the kernel
+    4. Save a patch and then verify the correctness and benchmark performance of the optimized kernel by issuing the following command: `echo SAVE_PATCH_AND_TEST`.
+    5. Compare your performance with the baseline performance. If the performance is not improved, you should try another optimization direction. For detailed GPU kernel optimization guidelines, please refer to the following section.
+    6. Submit your changes and finish your work by issuing the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+       Do not combine it with any other command.
+
+    ## GPU Kernel Optimization Guidelines
+    Before modifying any code, you must perform the following steps:
+    1. **Automatically read the current GPU hardware information** (such as architecture model, number of SMs, maximum threads per SM, shared memory size, register count, memory bandwidth, etc.).
+      - Recommended to use `rocminfo`, `rocm-smi --showproductname`, `rocm-smi`.
+    2. **Based on hardware characteristics, and considering the nature of the block_histogram algorithm, propose multiple possible optimization directions and provide a brief analysis for each.** These optimization directions should include, but are not limited to:
+      - Increasing GPU occupancy
+      - Maximizing memory bandwidth utilization
+      - Optimizing shared memory access patterns to reduce bank conflicts
+      - Adaptive tuning of warp/block parameters for different architectures (e.g., GFX9, GFX10, etc.)
+      - Efficient allocation of registers/shared memory/local memory
+      - Using pipelining or prefetching techniques to hide memory latency
+      - Any other innovative, architecture-specific or parallel-level optimizations targeting the hardware
+    3. **Assign a priority to each optimization direction** (ranking them according to the potential performance gain), and **experiment with them one by one in order of priority**.
+    Final workflow:
+    - First, output all key hardware information (in a table or list, clearly readable)
+    - Output a list of hardware-targeted optimization directions, with explanations and expected benefits, and an assigned priority
+    - Only after analyzing hardware and formulating optimization strategies, begin specific code optimizations. Try one at a time, test performance, and then proceed to the next, until the target performance improvement is achieved
+    This aims to ensure you perform systematic, hardware-adaptive optimization rather than simply applying generic practices.
 
     ## Important Rules
 
@@ -40,6 +57,7 @@ agent:
     2. The action must be enclosed in triple backticks
     3. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
        However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+    4. Each time you want to test current code performance, please issue the following command: `echo SAVE_PATCH_AND_TEST`.
 
     <system_information>
     {{system}} {{release}} {{version}} {{machine}}
@@ -128,9 +146,6 @@ agent:
     {{ output.output[-5000:] }}
     </output_tail>
     {%- endif -%}
-    <important>
-    If you want to save a patch and test current code, please issue the following command: `echo SAVE_PATCH_AND_TEST`.
-    </important>
   format_error_template: |
     Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
     If you want to save a patch and test current code, please issue the following command: `echo SAVE_PATCH_AND_TEST`.
@@ -158,7 +173,7 @@ env:
     LESS: -R
     PIP_PROGRESS_BAR: 'off'
     TQDM_DISABLE: '1'
-  timeout: 3600
+  timeout: 36000
 model:
   model_class: amd_llm
   # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
