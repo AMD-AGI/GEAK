@@ -49,6 +49,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'showTask':
                     vscode.commands.executeCommand('mini-swe-agent.showPanel', message.taskId);
                     break;
+                case 'selectStrategy':
+                    this.agentManager.handleStrategySelection(message.strategyId, 'select');
+                    break;
+                case 'skipStrategy':
+                    this.agentManager.handleStrategySelection(null, 'skip');
+                    break;
             }
         });
         
@@ -74,7 +80,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             mode: state.mode,
             currentTask: state.currentTask,
             recentTasks: state.taskHistory.slice(0, 5),
-            hasPendingAction: !!state.pendingAction
+            hasPendingAction: !!state.pendingAction,
+            currentStrategies: state.currentStrategies,
+            waitingForStrategySelection: state.waitingForStrategySelection
         };
     }
     
@@ -230,6 +238,72 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             gap: 8px;
         }
         
+        .strategy-section {
+            margin: 16px 0;
+            padding: 12px;
+            background: var(--vscode-textBlockQuote-background);
+            border-radius: 4px;
+            border: 1px solid var(--vscode-charts-yellow);
+        }
+        
+        .strategy-list {
+            margin: 12px 0;
+        }
+        
+        .strategy-item {
+            padding: 10px;
+            margin-bottom: 8px;
+            border-radius: 4px;
+            border: 1px solid var(--vscode-input-border);
+            background: var(--vscode-editor-background);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .strategy-item:hover {
+            background: var(--vscode-list-hoverBackground);
+            border-color: var(--vscode-focusBorder);
+        }
+        
+        .strategy-item.selected {
+            background: var(--vscode-list-activeSelectionBackground);
+            border-color: var(--vscode-focusBorder);
+        }
+        
+        .strategy-item.recommended {
+            border-color: var(--vscode-charts-green);
+        }
+        
+        .strategy-title {
+            font-weight: bold;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .strategy-description {
+            font-size: 0.9em;
+            opacity: 0.8;
+            margin-bottom: 4px;
+        }
+        
+        .strategy-reasoning {
+            font-size: 0.85em;
+            opacity: 0.6;
+            font-style: italic;
+        }
+        
+        .strategy-buttons {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+        }
+        
+        .strategy-buttons button {
+            flex: 1;
+        }
+        
         .task-card {
             padding: 10px;
             border-radius: 4px;
@@ -325,14 +399,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     <div class="status-indicator">
         <div class="status-dot" id="status-dot"></div>
         <div class="status-text" id="status-text">Idle</div>
-    </div>
+            </div>
     
     <!-- Metrics -->
     <div class="metrics">
         <div class="metric-card">
             <span class="metric-label">Step</span>
             <span class="metric-value" id="metric-step">0</span>
-        </div>
+            </div>
         <div class="metric-card">
             <span class="metric-label">Cost</span>
             <span class="metric-value" id="metric-cost">$0.00</span>
@@ -354,9 +428,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <button onclick="stopAgent()">⏸ Stop</button>
     </div>
     
-    <div class="mode-buttons">
+        <div class="mode-buttons">
         <button id="btn-yolo" onclick="setMode('yolo')" class="secondary">⚡ YOLO</button>
         <button id="btn-human" onclick="setMode('human')" class="secondary">👤 Human</button>
+    </div>
+    
+    <!-- Strategy Selection (shown when waiting) -->
+    <div id="strategy-section" class="strategy-section" style="display: none;">
+        <div class="section-title">
+            <span>⚡ Choose a Strategy</span>
+        </div>
+        <div id="strategy-list" class="strategy-list"></div>
+        <div class="strategy-buttons">
+            <button onclick="confirmStrategy()" class="primary">✓ Confirm</button>
+            <button onclick="skipStrategy()" class="secondary">→ Let LLM Choose</button>
+        </div>
     </div>
     
     <!-- Recent Tasks -->
@@ -428,8 +514,82 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 actionNotice.style.display = 'none';
             }
             
+            // Update strategy section
+            updateStrategies(state.waitingForStrategySelection, state.currentStrategies || []);
+            
             // Update tasks
             updateTasks(state.currentTask, state.recentTasks || []);
+        }
+        
+        let selectedStrategyId = null;
+        
+        function updateStrategies(waiting, strategies) {
+            const strategySection = document.getElementById('strategy-section');
+            const strategyList = document.getElementById('strategy-list');
+            
+            if (!waiting || !strategies || strategies.length === 0) {
+                strategySection.style.display = 'none';
+                return;
+            }
+            
+            strategySection.style.display = 'block';
+            selectedStrategyId = null;
+            
+            strategyList.innerHTML = strategies.map(strategy => {
+                const recommendedBadge = strategy.isRecommended ? '<span style="color: var(--vscode-charts-green);">⭐</span>' : '';
+                const recommendedClass = strategy.isRecommended ? 'recommended' : '';
+                
+                return \`
+                    <div class="strategy-item \${recommendedClass}" 
+                         data-strategy-id="\${strategy.id}"
+                         onclick="selectStrategyItem('\${strategy.id}')">
+                        <div class="strategy-title">
+                            \${recommendedBadge}
+                            \${escapeHtml(strategy.title)}
+                        </div>
+                        <div class="strategy-description">\${escapeHtml(strategy.description)}</div>
+                        \${strategy.reasoning ? '<div class="strategy-reasoning">' + escapeHtml(strategy.reasoning) + '</div>' : ''}
+                    </div>
+                \`;
+            }).join('');
+        }
+        
+        function selectStrategyItem(strategyId) {
+            selectedStrategyId = strategyId;
+            document.querySelectorAll('.strategy-item').forEach(item => {
+                if (item.dataset.strategyId === strategyId) {
+                    item.classList.add('selected');
+            } else {
+                    item.classList.remove('selected');
+                }
+            });
+        }
+        
+        function confirmStrategy() {
+            if (!selectedStrategyId) {
+                // If no strategy selected, auto-select recommended one
+                const recommendedItem = document.querySelector('.strategy-item.recommended');
+                if (recommendedItem) {
+                    selectedStrategyId = recommendedItem.dataset.strategyId;
+                } else {
+                    // Select first one
+                    const firstItem = document.querySelector('.strategy-item');
+                    if (firstItem) {
+                        selectedStrategyId = firstItem.dataset.strategyId;
+                    }
+                }
+            }
+            
+            vscode.postMessage({
+                command: 'selectStrategy',
+                strategyId: selectedStrategyId
+            });
+        }
+        
+        function skipStrategy() {
+            vscode.postMessage({
+                command: 'skipStrategy'
+            });
         }
         
         function updateTasks(currentTask, recentTasks) {
@@ -447,7 +607,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (allTasks.length === 0) {
                 taskList.innerHTML = '<div class="empty-state">No tasks yet</div>';
                 return;
-            }
+                        }
             
             taskList.innerHTML = allTasks.map(task => {
                 const isCurrent = currentTask && task.id === currentTask.id;

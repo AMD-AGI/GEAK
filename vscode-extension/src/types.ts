@@ -14,7 +14,7 @@ export interface Task {
 }
 
 export interface AgentState {
-    status: 'idle' | 'running' | 'waiting_approval' | 'waiting_input' | 'finished' | 'error';
+    status: 'idle' | 'running' | 'waiting_approval' | 'waiting_input' | 'waiting_strategy' | 'finished' | 'error';
     currentStep: number;
     totalCost: number;
     mode: 'confirm' | 'yolo' | 'human';
@@ -26,6 +26,8 @@ export interface AgentState {
         actionId: string;
         step: number;
     };
+    currentStrategies: Strategy[];
+    waitingForStrategySelection: boolean;
 }
 
 export interface AgentMessage {
@@ -84,5 +86,32 @@ export interface ConfirmationResponse {
     newMode?: string;
     reason?: string;
     editedCommand?: string;
+}
+
+export interface Strategy {
+    id: string;
+    title: string;
+    description: string;
+    reasoning?: string;
+    isRecommended?: boolean;
+}
+
+export interface StrategySelectionRequest {
+    strategies: Strategy[];
+    step: number;
+    cost: number;
+}
+
+export interface StrategySelectionResponse {
+    selectedStrategyId: string | null;
+    action: 'select' | 'skip';
+}
+
+export interface StrategyGeneratedNotification {
+    strategies: Strategy[];
+    autoSelected: string;
+    mode: 'auto';
+    step: number;
+    cost: number;
 }
 

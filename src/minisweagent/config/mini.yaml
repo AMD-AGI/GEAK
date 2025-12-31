@@ -55,6 +55,30 @@ agent:
     ```
     </example_response>
 
+    ## Special Commands
+
+    ### Strategy Planning:
+    
+    When you need to plan your approach before implementing, use the `generate_strategies` command:
+    
+    ```bash
+    generate_strategies "Brief description of the problem to solve"
+    ```
+    
+    This command will generate multiple strategies for solving the problem. In confirm mode, the user will be shown these strategies and can choose which one to follow. In YOLO mode, the system will automatically select the recommended strategy.
+    
+    Use this when:
+    - You're facing a complex problem with multiple possible approaches
+    - You want to explore different solutions before committing to one
+    - The task requires careful planning and the user should be involved in the decision
+    
+    Example:
+    ```bash
+    generate_strategies "Fix the authentication bug in user_auth.py"
+    ```
+    
+    The command will return a description of the selected strategy, which you should then follow in your subsequent actions.
+
     ## Useful command examples
 
     ### Create a new file:

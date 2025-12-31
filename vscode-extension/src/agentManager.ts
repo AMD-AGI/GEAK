@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { PythonBridge } from './pythonBridge';
-import { AgentState, AgentMessage, InitializeParams, ConfirmationResponse, Task } from './types';
+import { AgentState, AgentMessage, InitializeParams, ConfirmationResponse, Task, StrategySelectionResponse } from './types';
 
 export class AgentManager {
     private bridge: PythonBridge;
@@ -10,13 +10,16 @@ export class AgentManager {
         totalCost: 0,
         mode: 'confirm',
         messages: [],
-        taskHistory: []
+        taskHistory: [],
+        currentStrategies: [],
+        waitingForStrategySelection: false
     };
     private stateChangeEmitter = new vscode.EventEmitter<AgentState>();
     public onStateChange = this.stateChangeEmitter.event;
     
     private pendingActionResolvers: Map<string, (response: ConfirmationResponse) => void> = new Map();
     private nextActionId: number = 1;
+    private pendingStrategyResolver?: (response: StrategySelectionResponse) => void;
     
     constructor(private context: vscode.ExtensionContext) {
         this.bridge = new PythonBridge(context);
@@ -171,6 +174,37 @@ export class AgentManager {
             return { continue: false };
         });
         
+        // Handle strategy selection request (confirm mode - blocking)
+        this.bridge.onRequest('agent/requestStrategySelection', async (params) => {
+            console.log('[AgentManager] Received requestStrategySelection:', params);
+            
+            // Update state
+            this.state.currentStrategies = params.strategies;
+            this.state.waitingForStrategySelection = true;
+            this.state.status = 'waiting_strategy';
+            this.emitStateChange();
+            
+            // Wait for user selection
+            return new Promise((resolve) => {
+                this.pendingStrategyResolver = resolve;
+            });
+        });
+        
+        // Handle strategy generated notification (yolo mode - non-blocking)
+        this.bridge.onNotification('agent/strategiesGenerated', (params) => {
+            console.log('[AgentManager] Received strategiesGenerated:', params);
+            
+            // Update state to show auto-selected strategy
+            this.state.currentStrategies = params.strategies;
+            this.emitStateChange();
+            
+            // Clear after a few seconds
+            setTimeout(() => {
+                this.state.currentStrategies = [];
+                this.emitStateChange();
+            }, 5000);
+        });
+        
         // Handle agent started
         this.bridge.onNotification('agent/started', () => {
             this.state.status = 'running';
@@ -291,7 +325,9 @@ export class AgentManager {
             mode: config.get('defaultMode', 'confirm'),
             messages: [],
             currentTask: newTask,
-            taskHistory: this.state.taskHistory
+            taskHistory: this.state.taskHistory,
+            currentStrategies: [],
+            waitingForStrategySelection: false
         };
         this.emitStateChange();
         
@@ -371,6 +407,30 @@ export class AgentManager {
             };
             
             resolver(response);
+        }
+    }
+    
+    /**
+     * Handle strategy selection from the UI
+     */
+    handleStrategySelection(strategyId: string | null, action: 'select' | 'skip'): void {
+        console.log('[AgentManager] handleStrategySelection:', strategyId, action);
+        
+        // Clear strategy state
+        this.state.currentStrategies = [];
+        this.state.waitingForStrategySelection = false;
+        this.state.status = 'running';
+        this.emitStateChange();
+        
+        // Resolve the promise
+        if (this.pendingStrategyResolver) {
+            const response: StrategySelectionResponse = {
+                selectedStrategyId: strategyId,
+                action: action
+            };
+            
+            this.pendingStrategyResolver(response);
+            this.pendingStrategyResolver = undefined;
         }
     }
     
