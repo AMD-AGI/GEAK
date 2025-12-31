@@ -11,13 +11,6 @@ I use `WORK_REPO/benchmark/benchmark_device_partial_sort.cpp` to test `WORK_REPO
 9. When the performance does not reach 1.2 times the baseline, further optimization must be carried out and Do not take Action `submit`. Use the average over bytes_per_second of all datatypes as the metric.
 10. Your edit should not effect the compile of other kernels
  
+ ## Test Perf
 1. Baseline: Before changing any code, you should run baseline numbers.
 2. Optimized test: After changing, you should test the code. If fail to pass the correctness test, MUST debug the kernel carefully. If run correctness and performance test successfully, you can get the bandwidth (bytes_per_second) of the kernel under different input key type.
- 
- 
-**Innovative Optimization Design**
-First you MUST review all related files，and edit them.
-Before give Optimization methods, you MUST review all related files.
-After review the related files, You MUST summary the provided Optimization methods. Then provide your optimization method. Not exactly the same as any other optimization methods.
-   - Propose a **new optimization** that:
-     - Aims to further improve performance (bandwidth under different data type) and explain the reasoning. 

@@ -18,41 +18,74 @@ agent:
 
     You can execute bash commands and edit files to implement the necessary changes.
 
-    ## Recommended Workflow
+    ## Optimization Workflow
 
-    This workflows should be done step-by-step so that you can iterate on your changes and any possible problems.
+    Follow this systematic workflow to optimize GPU kernels. Each phase should be completed step-by-step.
 
-    1. Analyze the codebase by finding and reading relevant files
-    2. First run the script to get the baseline performance by issuing the following command: `echo TEST_BASELINE_PERFORMANCE`.
-    3. Edit the source code to optimize the kernel
-    4. Save a patch and then verify the correctness and benchmark performance of the optimized kernel by issuing the following command: `echo SAVE_PATCH_AND_TEST`.
-    5. Compare your performance with the baseline performance. If the performance is not improved, you should try another optimization direction. For detailed GPU kernel optimization guidelines, please refer to the following section.
-    6. Submit your changes and finish your work by issuing the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
-       Do not combine it with any other command.
+    ### Phase 1: Hardware Analysis
 
-    ## GPU Kernel Optimization Guidelines
-    Before modifying any code, you must perform the following steps:
-    1. **Automatically read the current GPU hardware information** (such as architecture model, number of SMs, maximum threads per SM, shared memory size, register count, memory bandwidth, etc.).
-      - Recommended to use `rocminfo`, `rocm-smi --showproductname`, `rocm-smi`.
-    2. **Based on hardware characteristics, propose multiple possible optimization directions and provide a brief analysis for each.** 
-    <important>
-    You should NOT ONLY consider simple code-level optimizations, like loop unrolling, vectorization, config setting search, etc. 
-    You MUST consider architecture-level optimizations, like parallel, GPU occupancy, key points in benchmark test, etc.
-    These optimization directions should include, but are not limited to:
-      - Increasing GPU occupancy
-      - Maximizing memory bandwidth utilization
-      - Optimizing shared memory access patterns to reduce bank conflicts
-      - Adaptive tuning of warp/block parameters for different architectures (e.g., GFX9, GFX10, etc.)
-      - Efficient allocation of registers/shared memory/local memory
-      - Using pipelining or prefetching techniques to hide memory latency
-      - Any other innovative, architecture-specific or parallel-level optimizations targeting the hardware
-    </important>
-    3. **Assign a priority to each optimization direction** (ranking them according to the potential performance gain), and **experiment with them one by one in order of priority**.
-    Final workflow:
-    - First, output all key hardware information (in a table or list, clearly readable)
-    - Output a list of hardware-targeted optimization directions, with explanations and expected benefits, and an assigned priority
-    - Only after analyzing hardware and formulating optimization strategies, begin specific code optimizations. Try one at a time, test performance, and then proceed to the next, until the target performance improvement is achieved
-    This aims to ensure you perform systematic, hardware-adaptive optimization rather than simply applying generic practices.
+    1. **Gather hardware information** using `rocminfo`, `rocm-smi --showproductname`, `rocm-smi`
+       - Architecture model (e.g., GFX9, GFX10)
+       - Number of compute units (CUs/SMs)
+       - Maximum threads per CU/SM
+       - Shared memory size per CU/SM
+       - Register count
+       - Memory bandwidth
+       - Output this information in a clear table or list format
+
+    ### Phase 2: Codebase Analysis
+
+    2. **Analyze the target kernel** by finding and reading relevant files
+       - Understand the current implementation
+       - Identify the kernel's computational pattern
+       - Note resource usage (registers, shared memory, threads)
+
+    ### Phase 3: Baseline Measurement
+
+    3. **Establish baseline performance** by issuing: `echo TEST_BASELINE_PERFORMANCE`
+       - Identify performance bottlenecks from profiling data
+
+    ### Phase 4: Strategy Formulation
+
+    4. **Propose multiple optimization directions** based on hardware characteristics, code analysis, and baseline results
+       <important>
+       You MUST consider architecture-level optimizations, NOT just simple code-level changes, like loop unrolling, vectorization, config setting search, etc.
+       Prioritize optimization directions according to potential performance gain.
+       
+       Consider optimizations including but not limited to:
+       - **GPU occupancy**: Increase active warps/wavefronts per CU
+       - **Memory bandwidth**: Maximize global/shared memory throughput
+       - **Bank conflicts**: Optimize shared memory access patterns
+       - **Warp/block tuning**: Adapt parameters for specific architectures
+       - **Resource allocation**: Efficient use of registers/shared memory/local memory
+       - **Latency hiding**: Use pipelining or prefetching techniques
+       - **Parallelism**: Exploit hardware parallelism at different levels
+       - **Architecture-specific**: Leverage unique hardware features
+       
+       For each direction, provide:
+       - Brief analysis of why it applies to this kernel
+       - Expected performance benefit
+       - Priority ranking
+       </important>
+
+    ### Phase 5: Iterative Optimization
+
+    5. **Implement optimizations one at a time** in priority order
+       - Edit the source code for the current optimization
+       - Save and test by issuing: `echo SAVE_PATCH_AND_TEST`
+       - If test fails, you should fix the failure and try again
+       - Compare results with baseline
+       - If no improvement: no need to revert because I have already saved the patch. You can try other optimization directions.
+       - In the progress of optimization, you can adaptively adjust the priority ofoptimization directions based on the results. 
+       - If you are not sure about the next optimization direction, you can review the priority history in Phase 4.
+
+    6. **Repeat Phase 5** until target performance is achieved or all high-priority optimizations are exhausted
+
+    ### Phase 6: Submission
+
+    7. **Submit final changes** by issuing: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+       - Do NOT combine this command with any other command
+       - Only submit after achieving satisfactory performance improvement
 
     ## Important Rules
 
