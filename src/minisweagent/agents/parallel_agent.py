@@ -502,69 +502,55 @@ class ParallelAgent(DefaultAgent):
             print(f"[ParallelAgent] SelectPatchAgent failed: {e}", flush=True)
             traceback.print_exc()
         
-        # Extract the final result from agent's analysis
-        final_result = select_agent.extract_final_result()
+        # Extract the final result string (agent_id/patch_id)
+        result_str = select_agent.extract_final_result()
         
-        if not final_result or "best_patch" not in final_result:
-            print("[ParallelAgent] SelectPatchAgent did not produce valid result, using fallback", flush=True)
-            # Fallback to highest speedup
-            valid_results = [r for r in select_agent.final_results if r["test_passed"]]
-            if valid_results:
-                best = max(valid_results, key=lambda x: x["speedup"])
-                final_result = {
-                    "best_patch": {
-                        "agent_id": best["agent_id"],
-                        "patch_id": best["patch_id"],
-                        "speedup": best["speedup"],
-                    },
-                    "analysis": f"Fallback: highest speedup among passing tests ({best['speedup']:.4f})"
-                }
-            elif select_agent.final_results:
-                first = select_agent.final_results[0]
-                final_result = {
-                    "best_patch": {
-                        "agent_id": first["agent_id"],
-                        "patch_id": first["patch_id"],
-                        "speedup": first["speedup"],
-                    },
-                    "analysis": "Fallback: selected first patch as no tests passed"
-                }
-            else:
-                return None
+        if not result_str:
+            print("[ParallelAgent] SelectPatchAgent did not produce valid result", flush=True)
+            return None
         
-        # Save final selection result
-        (base_patch_dir / "selection_final_result.json").write_text(
-            json.dumps(final_result, indent=2)
-        )
+        print(f"[ParallelAgent] SelectPatchAgent returned: {result_str}", flush=True)
         
-        # Extract best patch info
-        best_patch_info = final_result["best_patch"]
-        best_agent_id = best_patch_info["agent_id"]
-        best_patch_name = best_patch_info["patch_id"]
-        llm_analysis = final_result.get("analysis", "")
+        # Read best_results.json saved by select agent
+        best_results_file = base_patch_dir / "best_results.json"
+        if not best_results_file.exists():
+            print(f"[ParallelAgent] best_results.json not found at {best_results_file}", flush=True)
+            return None
+        
+        try:
+            best_results = json.loads(best_results_file.read_text())
+        except json.JSONDecodeError as e:
+            print(f"[ParallelAgent] Failed to parse best_results.json: {e}", flush=True)
+            return None
+        
+        # Extract metadata from best_results.json
+        best_agent_id = best_results.get("_selected_from_agent")
+        best_patch_name = best_results.get("_selected_patch_id")
+        best_patch_file = best_results.get("_selected_patch_file")
+        best_test_output_file = best_results.get("_selected_test_output_file")
+        llm_analysis = best_results.get("_llm_selection_analysis", "")
+        parallel_dir_name = best_results.get("_selected_from_parallel_dir", f"parallel_{best_agent_id}")
+        
+        if best_agent_id is None or not best_patch_name:
+            print("[ParallelAgent] Invalid best_results.json format", flush=True)
+            return None
         
         print(f"[ParallelAgent] Selected best patch: agent_{best_agent_id}/{best_patch_name}", flush=True)
         
-        # Load results from the selected agent
-        if best_agent_id not in select_agent.all_results:
-            print(f"[ParallelAgent] Agent {best_agent_id} not found in results", flush=True)
+        # Get patch data
+        best_patch_data = best_results.get(best_patch_name)
+        if not best_patch_data:
+            print(f"[ParallelAgent] Patch data for {best_patch_name} not found in best_results.json", flush=True)
             return None
         
-        best_agent_data = select_agent.all_results[best_agent_id]
-        best_patch_dir = best_agent_data["dir"]
-        best_agent_results = best_agent_data["results"]
-        
-        if best_patch_name not in best_agent_results:
-            print(f"[ParallelAgent] Patch {best_patch_name} not found in agent {best_agent_id} results", flush=True)
-            return None
-        
-        best_patch_data = best_agent_results[best_patch_name]
+        best_patch_dir = base_patch_dir / parallel_dir_name
         
         # Read test output
-        test_output_file = best_patch_dir / best_patch_data.get("test_output_file", f"{best_patch_name}_test.txt")
         test_output = ""
-        if test_output_file.exists():
-            test_output = test_output_file.read_text()
+        if best_test_output_file:
+            test_output_path = Path(best_test_output_file)
+            if test_output_path.exists():
+                test_output = test_output_path.read_text()
         
         return BestPatchResult(
             agent_id=best_agent_id,

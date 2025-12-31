@@ -18,13 +18,19 @@ class SelectPatchAgentConfig(AgentConfig):
     instance_template: str = (
         "{{task}}\n\n"
         "Please analyze the patches and respond with a bash command that outputs your analysis.\n"
-        "When you have made your final decision, output a command that starts with:\n"
-        "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\n"
-        "followed by your JSON result in the format:\n"
+        "When you have made your final decision, save your results to best_results.json and output:\n"
+        "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:agent_<id>/patch_<name>'\n"
+        "For example: echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:agent_0/patch_12'\n\n"
+        "The best_results.json file should contain the selected patch data with the following structure:\n"
         "{\n"
-        '  "best_patch": {"agent_id": <int>, "patch_id": "<string>", "speedup": <float>},\n'
-        '  "analysis": "<string>"\n'
-        "}"
+        '  "patch_<name>": { /* full patch data from results.json */ },\n'
+        '  "_selected_from_agent": <int>,\n'
+        '  "_selected_from_parallel_dir": "parallel_<id>",\n'
+        '  "_selected_patch_id": "patch_<name>",\n'
+        '  "_selected_patch_file": "<absolute_path_to_patch_file>",\n'
+        '  "_selected_test_output_file": "<absolute_path_to_test_output_file>",\n'
+        '  "_llm_selection_analysis": "<your analysis>"\n'
+        "}\n"
     )
     step_limit: int = 10
     cost_limit: float = 1.0
@@ -168,7 +174,25 @@ class SelectPatchAgent(DefaultAgent):
             "2. Read test outputs: cat {patch_dir}/parallel_*/patch_*_test.txt\n"
             "3. Analyze and compare patches\n\n"
             f"All files are in: {base_patch_dir}\n\n"
-            "When ready, output your final decision as specified in the instructions."
+            "When ready, copy the selected patch data from the corresponding parallel_*/results.json "
+            "to best_results.json with the required metadata fields, then output:\n"
+            "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:agent_<id>/patch_<name>'\n\n"
+            "Example bash commands to save best_results.json:\n"
+            "```bash\n"
+            "# Extract patch data and build best_results.json\n"
+            "cat > best_results.json << 'EOF'\n"
+            "{\n"
+            '  "patch_12": { /* copy full data from parallel_0/results.json */ },\n'
+            '  "_selected_from_agent": 0,\n'
+            '  "_selected_from_parallel_dir": "parallel_0",\n'
+            '  "_selected_patch_id": "patch_12",\n'
+            f'  "_selected_patch_file": "{base_patch_dir}/parallel_0/patch_12.patch",\n'
+            f'  "_selected_test_output_file": "{base_patch_dir}/parallel_0/patch_12_test.txt",\n'
+            '  "_llm_selection_analysis": "Your analysis here"\n'
+            "}\n"
+            "EOF\n"
+            "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:agent_0/patch_12'\n"
+            "```"
         )
         
         return "".join(task_parts)
@@ -211,42 +235,65 @@ class SelectPatchAgent(DefaultAgent):
         from minisweagent.agents.default import FormatError
         raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
     
-    def extract_final_result(self) -> dict | None:
-        """Extract the final result from messages."""
+    def extract_final_result(self) -> str | None:
+        """Extract the final result string (agent_id/patch_id) from messages."""
         # Look through messages for the final output
         for msg in reversed(self.messages):
             if msg["role"] == "user" and "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in msg.get("content", ""):
                 content = msg["content"]
-                # Extract JSON from the output
-                try:
-                    json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                    if json_match:
-                        return json.loads(json_match.group(0))
-                except json.JSONDecodeError:
-                    pass
+                # Extract agent_id/patch_id pattern
+                match = re.search(r'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:agent_(\d+)/patch_(\w+)', content)
+                if match:
+                    agent_id = int(match.group(1))
+                    patch_id = f"patch_{match.group(2)}"
+                    return f"agent_{agent_id}/{patch_id}"
         
-        # Fallback: use highest speedup from final_results
+        # Fallback: use highest speedup from final_results and save best_results.json
         valid_results = [r for r in self.final_results if r["test_passed"]]
         if valid_results:
             best = max(valid_results, key=lambda x: x["speedup"])
-            return {
-                "best_patch": {
-                    "agent_id": best["agent_id"],
-                    "patch_id": best["patch_id"],
-                    "speedup": best["speedup"],
-                },
-                "analysis": f"Fallback selection: highest speedup among passing tests. {best['reasoning']}"
-            }
+            self._save_fallback_best_results(best, "Fallback selection: highest speedup among passing tests. This is the baseline patch.")
+            return f"agent_{best['agent_id']}/{best['patch_id']}"
         elif self.final_results:
             first = self.final_results[0]
-            return {
-                "best_patch": {
-                    "agent_id": first["agent_id"],
-                    "patch_id": first["patch_id"],
-                    "speedup": first["speedup"],
-                },
-                "analysis": "Fallback: selected first patch as no tests passed."
-            }
+            self._save_fallback_best_results(first, "Fallback: selected first patch as no tests passed.")
+            return f"agent_{first['agent_id']}/{first['patch_id']}"
         
         return None
+    
+    def _save_fallback_best_results(self, best: dict, analysis: str):
+        """Save best_results.json in fallback mode."""
+        if not self.patch_dir:
+            return
+        
+        agent_id = best["agent_id"]
+        patch_id = best["patch_id"]
+        
+        # Load the full patch data
+        if agent_id not in self.all_results:
+            return
+        
+        agent_data = self.all_results[agent_id]
+        parallel_dir = agent_data["dir"]
+        results = agent_data["results"]
+        
+        if patch_id not in results:
+            return
+        
+        patch_data = results[patch_id]
+        
+        # Build best_results.json
+        best_results = {
+            patch_id: patch_data,
+            "_selected_from_agent": agent_id,
+            "_selected_from_parallel_dir": f"parallel_{agent_id}",
+            "_selected_patch_id": patch_id,
+            "_selected_patch_file": str(parallel_dir / patch_data.get("patch_file", f"{patch_id}.patch")),
+            "_selected_test_output_file": str(parallel_dir / patch_data.get("test_output_file", f"{patch_id}_test.txt")),
+            "_llm_selection_analysis": analysis,
+        }
+        
+        (self.patch_dir / "best_results.json").write_text(
+            json.dumps(best_results, indent=2)
+        )
 
