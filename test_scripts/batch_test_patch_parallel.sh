@@ -40,13 +40,13 @@ echo "GPU IDs: ${GPU_IDS_STR}"
 echo "======================================"
 
 # Setup paths
-TEST_DIR="/mnt/raid0/yueliu14/mini-swe-agent/"
+TEST_DIR="/data/users/yueliu14/mini-swe-agent/"
 ROCPRIM_DIR="${TEST_DIR}/rocPRIM_${KERNEL_NAME}"
-OUTPUT_REPO="20251230_${KERNEL_NAME}"
+OUTPUT_REPO="20251231_${KERNEL_NAME}"
 PATCH_OUTPUT_DIR="${TEST_DIR}/${OUTPUT_REPO}"
 TRAJ_PATH="${PATCH_OUTPUT_DIR}/last_mini_run.traj.json"
-PROMPT_FILE="/mnt/raid0/yueliu14/mini-swe-agent/rocprim_prompts/rocprim_prompt_${KERNEL_NAME}.md"
-BASE_CONFIG="/mnt/raid0/yueliu14/mini-swe-agent/src/minisweagent/config/mini_patch_agent.yaml"
+PROMPT_FILE="/data/users/yueliu14/mini-swe-agent/rocprim_prompts/rocprim_prompt_${KERNEL_NAME}.md"
+BASE_CONFIG="/data/users/yueliu14/mini-swe-agent/src/minisweagent/config/mini_patch_agent.yaml"
 
 # Create directories
 mkdir -p "${TEST_DIR}"
@@ -81,7 +81,7 @@ mini -c "${BASE_CONFIG}" \
     --num-parallel "${NUM_AGENTS}" \
     --repo "${ROCPRIM_DIR}" \
     --patch-output "${PATCH_OUTPUT_DIR}" \
-    --test-command "cd /mnt/raid0/yueliu14/mini-swe-agent/test_scripts && python test_correctness_benchmark.py benchmark_${KERNEL_NAME} WORK_REPO" \
+    --test-command "cd /data/users/yueliu14/mini-swe-agent/test_scripts && python test_correctness_benchmark.py benchmark_${KERNEL_NAME} WORK_REPO" \
     --metric "extract bytes_per_second G/s from test output, note you should change T/s or other units to G/s. To select the best patch, you should calculate the speedup ratio on all datatypes first and get the average speedup ratio." \
     --parallel-gpu-ids "${GPU_IDS_STR}" \
     > "${PATCH_OUTPUT_DIR}/mini_output.log" 2>&1

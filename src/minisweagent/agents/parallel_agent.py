@@ -17,6 +17,8 @@ from typing import Any
 
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent
+from minisweagent.models import get_model
+from minisweagent.agents.select_patch_agent import SelectPatchAgent
 
 
 @dataclass
@@ -24,14 +26,10 @@ class BestPatchResult:
     """Result of selecting the best patch from parallel runs."""
     agent_id: int
     patch_id: str
-    patch_content: str
     test_output: str
-    test_passed: bool
-    returncode: int
     metric_result: dict | None = None
     patch_dir: Path | None = None
     llm_conclusion: str | None = None
-    all_patches_info: dict[str, dict[str, str]] | None = None
 
 
 class Tee:
@@ -412,6 +410,7 @@ class ParallelAgent(DefaultAgent):
                 env_factory=env_factory,
                 base_patch_dir=base_patch_dir,
                 output=output,
+                metric_model_config=kwargs.get("metric_model_config"),
                 parallel_gpu_ids=self.config.parallel_gpu_ids,
                 save_traj_fn=save_traj_fn,
                 console=console,
@@ -440,12 +439,6 @@ class ParallelAgent(DefaultAgent):
         completion_msg = f"\n[ParallelAgent] Agent execution completed\n"
         completion_msg += f"[ParallelAgent] Exit status: {exit_status}\n"
         
-        # Only select best patch for single agent mode, not for parallel mode
-        # In parallel mode, all patches will be collected and sorted together
-        is_parallel_mode = kwargs.get("_is_parallel_mode", False)
-        if not is_parallel_mode and self.config.patch_output_dir and len(self.patch_results) > 1:
-            self._select_best_patch()
-        
         self._print_summary()
         completion_msg += f"[ParallelAgent] Trajectory will be saved by the runner\n"
         
@@ -472,308 +465,92 @@ class ParallelAgent(DefaultAgent):
             print(f"  Results saved to: {Path(self.config.patch_output_dir) / 'results.json'}", flush=True)
         print(f"{'='*60}\n", flush=True)
 
-    def _select_best_patch(self) -> str | None:
-        if not self.patch_results or len(self.patch_results) <= 1:
-            return None
-        
-        print(f"\n[ParallelAgent] Calling LLM to select best patch...", flush=True)
-        
-        output_dir = Path(self.config.patch_output_dir)
-        prompt_parts = ["Analyze the following patches and their test results to select the best patch.\n"]
-        
-        if self.config.metric:
-            prompt_parts.append(f"Metric extraction task: {self.config.metric}\n")
-            prompt_parts.append("IMPORTANT: patch_0 is the baseline (no modifications). ")
-            prompt_parts.append("Select the patch with the best average improvement compared to the baseline.\n\n")
-        else:
-            prompt_parts.append("\n")
-        
-        prompt_parts.append(f"Total patches: {len(self.patch_results)}\n\n")
-        
-        for patch_name, data in self.patch_results.items():
-            is_baseline = patch_name == "patch_0"
-            prompt_parts.append(f"## {patch_name}")
-            if is_baseline:
-                prompt_parts.append(" (BASELINE)\n")
-            else:
-                prompt_parts.append("\n")
-            
-            prompt_parts.append(f"Test passed: {data['test_passed']}\n")
-            prompt_parts.append(f"Return code: {data['returncode']}\n")
-            
-            if "metric_result" in data and data["metric_result"] is not None:
-                prompt_parts.append(f"Metric result: {json.dumps(data['metric_result'], indent=2)}\n\n")
-            else:
-                prompt_parts.append("\n")
-            
-            patch_file = output_dir / data["patch_file"]
-            if patch_file.exists():
-                patch_content = patch_file.read_text()
-                if not is_baseline:
-                    prompt_parts.append(f"Patch content:\n```\n{patch_content}\n```\n\n")
-        
-        if self.config.metric:
-            prompt_parts.append(f"The metric is {self.config.metric}\n")
-            prompt_parts.append(
-                "Based on the metric results, calculate the average improvement of each patch compared to patch_0 (baseline). "
-                "Select the patch with the highest average improvement. "
-                "If patch_0 has the best metrics, you can select it. "
-                "Respond with ONLY the patch name (e.g., 'patch_0', 'patch_1', etc.)."
-            )
-        else:
-            prompt_parts.append(
-                "Based on the test results and patch quality, which patch is the best? "
-                "Respond with ONLY the patch name (e.g., 'patch_0', 'patch_1', etc.)."
-            )
-        
-        response = self.model.query([{"role": "user", "content": "".join(prompt_parts)}])
-        best_patch = response.get("content", "").strip()
-        
-        if best_patch in self.patch_results:
-            print(f"[ParallelAgent] LLM selected best patch: {best_patch}", flush=True)
-            self.patch_results["_best_patch"] = best_patch
-            self._update_results_file()
-            return best_patch
-        else:
-            print(f"[ParallelAgent] LLM response invalid: {best_patch}", flush=True)
-            return None
 
     @staticmethod
-    def _select_best_from_parallel_runs(base_patch_dir: Path, num_parallel: int, metric: str | None, model: Model) -> BestPatchResult | None:
-        """Select the best patch from multiple parallel runs. Returns agent_id, patch_id, patch_content, and test results."""
-        all_results = {}
-        for i in range(num_parallel):
-            parallel_dir = base_patch_dir / f"parallel_{i}"
-            results_file = parallel_dir / "results.json"
-            if results_file.exists():
-                try:
-                    results_data = json.loads(results_file.read_text())
-                    all_results[i] = {
-                        "dir": parallel_dir,
-                        "results": results_data,
-                    }
-                except Exception as e:
-                    print(f"[ParallelAgent] Error reading results from parallel_{i}: {e}", flush=True)
+    def _select_best_from_parallel_runs(base_patch_dir: Path, num_parallel: int, metric: str | None, metric_model_config: dict) -> BestPatchResult | None:
+        """Select the best patch from multiple parallel runs using SelectPatchAgent."""
+        from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
         
-        if not all_results:
-            print("[ParallelAgent] No parallel results found", flush=True)
+        print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
+        
+        # Create model and environment for the SelectPatchAgent
+        model = get_model(config=metric_model_config)
+        env_config = LocalEnvironmentConfig(cwd=str(base_patch_dir))
+        env = LocalEnvironment(**env_config.__dict__)
+        
+        # Create SelectPatchAgent
+        select_agent = SelectPatchAgent(model, env)
+        
+        # Setup the selection task
+        task = select_agent.setup_selection_task(base_patch_dir, num_parallel, metric)
+        
+        if task is None:
+            print("[ParallelAgent] Failed to setup selection task", flush=True)
             return None
         
-        # Collect all patches from all parallel runs
-        prompt_parts = ["Analyze all patches from multiple parallel runs and select the best one.\n\n"]
+        # Save agent conversation log
+        log_file = base_patch_dir / "select_agent.log"
+        select_agent.log_file = log_file
         
-        # Get unified baseline from agent 0
-        unified_baseline = None
-        if 0 in all_results:
-            unified_baseline = all_results[0]["results"].get("patch_0")
+        print(f"[ParallelAgent] Running SelectPatchAgent (log: {log_file})...", flush=True)
         
-        if metric:
-            prompt_parts.append(f"Metric extraction task: {metric}\n")
-            if unified_baseline:
-                prompt_parts.append("IMPORTANT: Use agent_0/patch_0 as the unified baseline for ALL patches. ")
-                prompt_parts.append("All patches (from all parallel runs) should be compared against this unified baseline. ")
-                prompt_parts.append("Select the patch with the best average improvement compared to agent_0/patch_0.\n\n")
-            else:
-                prompt_parts.append("IMPORTANT: Compare all patches against agent_0/patch_0 as the unified baseline.\n\n")
-        else:
-            prompt_parts.append("\n")
-        
-        # Collect all patches with their agent_id
-        all_patches = []
-        
-        for agent_id, data in all_results.items():
-            results = data["results"]
-            parallel_dir = data["dir"]
-            
-            # Collect all patches from this agent (excluding metadata keys)
-            for patch_name, patch_data in results.items():
-                if patch_name.startswith("_"):
-                    continue  # Skip metadata keys like "_best_patch"
-                all_patches.append({
-                    "agent_id": agent_id,
-                    "patch_name": patch_name,
-                    "patch_data": patch_data,
-                    "parallel_dir": parallel_dir,
-                })
-        
-        # Sort patches by agent_id and patch_name for consistent ordering
-        all_patches.sort(key=lambda x: (x["agent_id"], x["patch_name"]))
-        
-        prompt_parts.append(f"Total patches across all parallel runs: {len(all_patches)}\n")
-        prompt_parts.append(f"Total parallel runs: {len(all_results)}\n\n")
-        
-        # Show unified baseline first
-        if unified_baseline:
-            prompt_parts.append("## Unified Baseline (agent_0/patch_0)\n")
-            prompt_parts.append(f"Test passed: {unified_baseline.get('test_passed', False)}\n")
-            prompt_parts.append(f"Return code: {unified_baseline.get('returncode', -1)}\n")
-            if "metric_result" in unified_baseline and unified_baseline["metric_result"]:
-                prompt_parts.append(f"Metric result: {json.dumps(unified_baseline['metric_result'], indent=2)}\n")
-            prompt_parts.append("\n")
-            prompt_parts.append("All patches below should be compared against this unified baseline.\n\n")
-        
-        # Group patches by agent for better presentation
-        for agent_id in sorted(all_results.keys()):
-            agent_patches = [p for p in all_patches if p["agent_id"] == agent_id]
-            if not agent_patches:
-                continue
-            
-            prompt_parts.append(f"## Parallel Run {agent_id}\n")
-            
-            # Show all patches from this agent
-            for patch_info in agent_patches:
-                patch_name = patch_info["patch_name"]
-                patch_data = patch_info["patch_data"]
-                is_unified_baseline = agent_id == 0 and patch_name == "patch_0"
-                
-                prompt_parts.append(f"### {patch_name}")
-                if is_unified_baseline:
-                    prompt_parts.append(" (UNIFIED BASELINE)\n")
-                else:
-                    prompt_parts.append("\n")
-                
-                prompt_parts.append(f"Test passed: {patch_data.get('test_passed', False)}\n")
-                prompt_parts.append(f"Return code: {patch_data.get('returncode', -1)}\n")
-                
-                if "metric_result" in patch_data and patch_data["metric_result"]:
-                    prompt_parts.append(f"Metric result: {json.dumps(patch_data['metric_result'], indent=2)}\n")
-                
-                # Include patch content for non-baseline patches
-                if not is_unified_baseline:
-                    patch_file = patch_info["parallel_dir"] / patch_data.get("patch_file", f"{patch_name}.patch")
-                    if patch_file.exists():
-                        patch_content = patch_file.read_text()
-                        prompt_parts.append(f"Patch content:\n```\n{patch_content}\n```\n")
-                
-                prompt_parts.append("\n")
-        
-        if metric:
-            prompt_parts.append(f"The metric is {metric}\n")
-            prompt_parts.append(
-                "Based on the metric results, calculate the average improvement of each patch compared to the unified baseline (agent_0/patch_0). "
-                "Analyze all patches and provide your conclusion about which patch is the best and why.\n\n"
-            )
-        else:
-            prompt_parts.append(
-                "Based on the test results and patch quality, analyze all patches and provide your conclusion about which patch is the best compared to the unified baseline (agent_0/patch_0) and why.\n\n"
-            )
-        
-        prompt_parts.append(
-            "IMPORTANT: You must respond with a valid JSON object in the following format:\n"
-            "{\n"
-            '  "best_patch": {\n'
-            '    "agent_id": <integer>,  // e.g., 0, 1, 2, 3\n'
-            '    "patch_id": "<string>",  // e.g., "patch_0", "patch_1", "patch_2"\n'
-            '    "speedup": <number>  // e.g., 1.5, 2.0, 0.8 (speedup compared to baseline)\n'
-            "  },\n"
-            '  "analysis": "<string>"    // Your detailed analysis explaining why this patch is the best\n'
-            "}\n\n"
-            "The analysis should be comprehensive and explain your reasoning. "
-            "In the analysis, you must:\n"
-            "1. Summarize the key optimization points/techniques used in the best patch.\n"
-            "2. List the other top 3 optimization patches (excluding the best one) with their corresponding speedup/improvement effects compared to the baseline.\n"
-            "The JSON must be valid and parseable."
-        )
-        
-        print(f"[ParallelAgent] Calling LLM to select best patch from all parallel runs...", flush=True)
-        response = model.query([{"role": "user", "content": "".join(prompt_parts)}])
-        llm_response = response.get("content", "").strip()
-        
-        print(f"\n[ParallelAgent] LLM Response:\n{llm_response}\n", flush=True)
-        
-        # Try to parse JSON from the response
-        best_agent_id = None
-        best_patch_name = None
-        llm_analysis = llm_response  # Default to full response if JSON parsing fails
-        
-        # Try to extract JSON from the response (might be wrapped in markdown code blocks)
-        json_text = llm_response
-        # First try: extract from markdown code blocks
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', llm_response, re.DOTALL)
-        if json_match:
-            json_text = json_match.group(1)
-        else:
-            # Second try: find JSON object that contains both "best_patch" and "analysis"
-            json_match = re.search(r'\{[^{}]*"best_patch"[^{}]*"analysis"[^{}]*\}', llm_response, re.DOTALL)
-            if json_match:
-                json_text = json_match.group(0)
-            else:
-                # Third try: find any JSON object starting with { and containing "best_patch"
-                # Use a more robust approach: find the first { and try to parse until matching }
-                brace_start = llm_response.find('{')
-                if brace_start != -1:
-                    brace_count = 0
-                    brace_end = brace_start
-                    for i in range(brace_start, len(llm_response)):
-                        if llm_response[i] == '{':
-                            brace_count += 1
-                        elif llm_response[i] == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                brace_end = i + 1
-                                break
-                    if brace_end > brace_start:
-                        potential_json = llm_response[brace_start:brace_end]
-                        if '"best_patch"' in potential_json:
-                            json_text = potential_json
-        
+        # Run the agent
         try:
-            llm_data = json.loads(json_text)
-            if "best_patch" in llm_data and isinstance(llm_data["best_patch"], dict):
-                best_patch_info = llm_data["best_patch"]
-                best_agent_id = best_patch_info.get("agent_id")
-                best_patch_name = best_patch_info.get("patch_id")
-                llm_analysis = llm_data.get("analysis", llm_response)
-                print(f"[ParallelAgent] Successfully parsed JSON: agent_id={best_agent_id}, patch_id={best_patch_name}", flush=True)
-            else:
-                print(f"[ParallelAgent] JSON parsed but missing 'best_patch' field", flush=True)
-        except json.JSONDecodeError as e:
-            print(f"[ParallelAgent] Failed to parse JSON from LLM response: {e}", flush=True)
-            print(f"[ParallelAgent] Attempting fallback extraction...", flush=True)
-            # Fallback: try regex extraction as before
-            match = re.search(r'(\d+)\s*/\s*(patch_\d+)', llm_response)
-            if match:
-                try:
-                    best_agent_id = int(match.group(1))
-                    best_patch_name = match.group(2)
-                    print(f"[ParallelAgent] Fallback extraction successful: agent_{best_agent_id}/{best_patch_name}", flush=True)
-                except (ValueError, IndexError):
-                    pass
+            exit_status, result = select_agent.run(task)
+            print(f"[ParallelAgent] SelectPatchAgent finished with status: {exit_status}", flush=True)
+        except Exception as e:
+            print(f"[ParallelAgent] SelectPatchAgent failed: {e}", flush=True)
+            traceback.print_exc()
         
-        # Collect all patches file locations
-        all_patches_info = {}
-        for patch_info in all_patches:
-            agent_id = patch_info["agent_id"]
-            patch_name = patch_info["patch_name"]
-            patch_data = patch_info["patch_data"]
-            parallel_dir = patch_info["parallel_dir"]
-            
-            patch_file_path = parallel_dir / patch_data.get("patch_file", f"{patch_name}.patch")
-            test_file_path = parallel_dir / patch_data.get("test_output_file", f"{patch_name}_test.txt")
-            
-            key = f"agent_{agent_id}/{patch_name}"
-            all_patches_info[key] = {
-                "patch_file": str(patch_file_path) if patch_file_path.exists() else None,
-                "test_output_file": str(test_file_path) if test_file_path.exists() else None,
-                "test_passed": patch_data.get("test_passed", False),
-                "returncode": patch_data.get("returncode", -1),
-            }
+        # Extract the final result from agent's analysis
+        final_result = select_agent.extract_final_result()
         
-        
-        # If we couldn't extract a specific patch, use the first one as fallback
-        if best_agent_id is None or best_patch_name is None:
-            if all_patches:
-                fallback_patch = all_patches[0]
-                best_agent_id = fallback_patch["agent_id"]
-                best_patch_name = fallback_patch["patch_name"]
-                print(f"[ParallelAgent] Could not extract specific patch from conclusion, using first patch as reference: agent_{best_agent_id}/{best_patch_name}", flush=True)
+        if not final_result or "best_patch" not in final_result:
+            print("[ParallelAgent] SelectPatchAgent did not produce valid result, using fallback", flush=True)
+            # Fallback to highest speedup
+            valid_results = [r for r in select_agent.final_results if r["test_passed"]]
+            if valid_results:
+                best = max(valid_results, key=lambda x: x["speedup"])
+                final_result = {
+                    "best_patch": {
+                        "agent_id": best["agent_id"],
+                        "patch_id": best["patch_id"],
+                        "speedup": best["speedup"],
+                    },
+                    "analysis": f"Fallback: highest speedup among passing tests ({best['speedup']:.4f})"
+                }
+            elif select_agent.final_results:
+                first = select_agent.final_results[0]
+                final_result = {
+                    "best_patch": {
+                        "agent_id": first["agent_id"],
+                        "patch_id": first["patch_id"],
+                        "speedup": first["speedup"],
+                    },
+                    "analysis": "Fallback: selected first patch as no tests passed"
+                }
             else:
                 return None
         
-        if best_agent_id not in all_results:
+        # Save final selection result
+        (base_patch_dir / "selection_final_result.json").write_text(
+            json.dumps(final_result, indent=2)
+        )
+        
+        # Extract best patch info
+        best_patch_info = final_result["best_patch"]
+        best_agent_id = best_patch_info["agent_id"]
+        best_patch_name = best_patch_info["patch_id"]
+        llm_analysis = final_result.get("analysis", "")
+        
+        print(f"[ParallelAgent] Selected best patch: agent_{best_agent_id}/{best_patch_name}", flush=True)
+        
+        # Load results from the selected agent
+        if best_agent_id not in select_agent.all_results:
+            print(f"[ParallelAgent] Agent {best_agent_id} not found in results", flush=True)
             return None
         
-        best_agent_data = all_results[best_agent_id]
+        best_agent_data = select_agent.all_results[best_agent_id]
         best_patch_dir = best_agent_data["dir"]
         best_agent_results = best_agent_data["results"]
         
@@ -782,12 +559,6 @@ class ParallelAgent(DefaultAgent):
             return None
         
         best_patch_data = best_agent_results[best_patch_name]
-        
-        # Read patch content
-        patch_file = best_patch_dir / best_patch_data.get("patch_file", f"{best_patch_name}.patch")
-        patch_content = ""
-        if patch_file.exists():
-            patch_content = patch_file.read_text()
         
         # Read test output
         test_output_file = best_patch_dir / best_patch_data.get("test_output_file", f"{best_patch_name}_test.txt")
@@ -798,14 +569,10 @@ class ParallelAgent(DefaultAgent):
         return BestPatchResult(
             agent_id=best_agent_id,
             patch_id=best_patch_name,
-            patch_content=patch_content,
             test_output=test_output,
-            test_passed=best_patch_data.get("test_passed", False),
-            returncode=best_patch_data.get("returncode", -1),
             metric_result=best_patch_data.get("metric_result"),
             patch_dir=best_patch_dir,
             llm_conclusion=llm_analysis,
-            all_patches_info=all_patches_info,
         )
 
     @staticmethod
@@ -958,6 +725,7 @@ class ParallelAgent(DefaultAgent):
         env_factory,
         base_patch_dir: Path,
         output: Path | None,
+        metric_model_config: dict | None = None,
         parallel_gpu_ids: list[int] | None = None,
         redirect_output_fn=redirect_output_to_file,
         save_traj_fn=None,
@@ -1058,8 +826,11 @@ class ParallelAgent(DefaultAgent):
         # Select best patch from all parallel runs
         if console:
             console.print(f"\n[bold green]Selecting best patch from {num_parallel} parallel runs...[/bold green]")
+        # Use metric_model_config if provided, otherwise fall back to main model config
+        if metric_model_config is None:
+            metric_model_config = {}
         best_result = cls._select_best_from_parallel_runs(
-            base_patch_dir, num_parallel, agent_config.get("metric"), model_factory()
+            base_patch_dir, num_parallel, agent_config.get("metric"), metric_model_config
         )
         
         if best_result is not None:

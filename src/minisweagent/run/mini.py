@@ -166,6 +166,7 @@ def main(
             console=console,
             model_factory=lambda: get_model(model_name, config.get("model", {})),
             env_factory=lambda: LocalEnvironment(**config.get("env", {})),
+            metric_model_config=config.get("metric_model", {}),
         )
     except Exception as e:
         logger.error(f"Error running agent: {e}", exc_info=True)

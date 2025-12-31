@@ -2,8 +2,8 @@
 """Quick test script for _select_best_from_parallel_runs method.
 
 This script can be run directly without pytest to test the functionality.
-It uses a real model to select the best patch from parallel runs.
-The model configuration is read from mini_patch_agent.yaml.
+It uses the metric_model configuration to select the best patch from parallel runs.
+The metric_model configuration is read from mini_patch_agent.yaml.
 """
 
 import sys
@@ -15,14 +15,13 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from minisweagent.agents.parallel_agent import ParallelAgent
 from minisweagent.config import get_config_path
-from minisweagent.models import get_model
 
 
 def main():
-    """Run test with actual data and real model."""
+    """Run test with actual data and metric_model config."""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Test _select_best_from_parallel_runs with real model")
+    parser = argparse.ArgumentParser(description="Test _select_best_from_parallel_runs with metric_model config")
     parser.add_argument(
         "--config", "-c",
         type=str,
@@ -32,7 +31,7 @@ def main():
     parser.add_argument(
         "--base-patch-dir",
         type=str,
-        default="/mnt/raid0/yueliu14/rocprim/20251218_device_binary_search",
+        default="/data/users/yueliu14/mini-swe-agent/20251230_v3_device_segmented_reduce/",
         help="Base directory containing parallel_* subdirectories"
     )
     parser.add_argument(
@@ -44,7 +43,8 @@ def main():
     parser.add_argument(
         "--metric",
         type=str,
-        default="bytes_per_second",
+        default="To select the best patch, you should Calculate speedup point-by-point between PATCH and BASELINE, \
+          then take the mean of those speedup. Do not average the bandwidth values before computing speedup.",
         help="Metric name for evaluation"
     )
     
@@ -74,47 +74,34 @@ def main():
         print(f"✗ Failed to load config file: {e}")
         return 1
     
-    # Initialize real model from config
+    # Get metric model config
     print("=" * 80)
-    print("Initializing model from config...")
+    print("Loading metric_model config...")
     print("=" * 80)
     
-    try:
-        model = get_model(config=config.get("model", {}))
-        print(f"✓ Model initialized: {model.config.model_name}")
-        print(f"  Model class: {type(model).__name__}\n")
-    except Exception as e:
-        print(f"✗ Failed to initialize model: {e}")
-        print(f"\nPlease check the model configuration in: {config_path}")
-        return 1
+    metric_model_config = config.get("metric_model", {})
+    if not metric_model_config:
+        print("✗ Warning: No metric_model config found, using default")
+        metric_model_config = {}
+    else:
+        print(f"✓ Metric model config loaded")
+        print(f"  Model name: {metric_model_config.get('model_name', 'not specified')}")
+        print(f"  Model class: {metric_model_config.get('model_class', 'not specified')}\n")
     
-    # Test with real model
+    # Test with metric model config
     print("=" * 80)
-    print("Calling _select_best_from_parallel_runs with real model...")
+    print("Calling _select_best_from_parallel_runs with metric_model config...")
     print("=" * 80)
     
     result = ParallelAgent._select_best_from_parallel_runs(
         base_patch_dir=base_patch_dir,
         num_parallel=args.num_parallel,
         metric=args.metric,
-        model=model
+        metric_model_config=metric_model_config
     )
     
     if result:
-        print(f"\n✓ Success!")
-        print(f"  Selected: agent_{result.agent_id}/{result.patch_id}")
-        print(f"  Test passed: {result.test_passed}")
-        print(f"  Return code: {result.returncode}")
-        if result.llm_conclusion:
-            print(f"  Analysis preview: {result.llm_conclusion[:200]}...")
-        print(f"  Model calls: {model.n_calls}")
-        print(f"  Model cost: ${model.cost:.4f}")
-        
-        # Show patch file path if available
-        patch_file = base_patch_dir / f"parallel_{result.agent_id}" / f"{result.patch_id}.patch"
-        if patch_file.exists():
-            print(f"  Patch file: {patch_file}")
-            print(f"  Patch size: {patch_file.stat().st_size} bytes")
+        print(f"result: {result}")
     else:
         print("\n✗ Failed: Result is None")
         return 1

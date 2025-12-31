@@ -51,8 +51,8 @@ for cmd in commands:
     # Print output to stdout/stderr so ParallelAgent can capture it via tee
     if stdout_text:
         print(stdout_text, flush=True)
-    if stderr_text:
-        print(stderr_text, file=sys.stderr, flush=True)
+    # if stderr_text:
+    #     print(stderr_text, file=sys.stderr, flush=True)
     if result.returncode != 0 or "FAIL" in stdout_text:
         print(f"fail: {cmd}", flush=True)
         sys.exit(result.returncode if result.returncode != 0 else 1)

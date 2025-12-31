@@ -15,8 +15,6 @@ agent:
     </format_example>
 
     Failure to follow these rules will cause your response to be rejected.
-  instance_template: |
-    Please optimize the following GPU kernel: {{task}}
 
     You can execute bash commands and edit files to implement the necessary changes.
 
@@ -36,7 +34,11 @@ agent:
     Before modifying any code, you must perform the following steps:
     1. **Automatically read the current GPU hardware information** (such as architecture model, number of SMs, maximum threads per SM, shared memory size, register count, memory bandwidth, etc.).
       - Recommended to use `rocminfo`, `rocm-smi --showproductname`, `rocm-smi`.
-    2. **Based on hardware characteristics, and considering the nature of the block_histogram algorithm, propose multiple possible optimization directions and provide a brief analysis for each.** These optimization directions should include, but are not limited to:
+    2. **Based on hardware characteristics, propose multiple possible optimization directions and provide a brief analysis for each.** 
+    <important>
+    You should NOT ONLY consider simple code-level optimizations, like loop unrolling, vectorization, config setting search, etc. 
+    You MUST consider architecture-level optimizations, like parallel, GPU occupancy, key points in benchmark test, etc.
+    These optimization directions should include, but are not limited to:
       - Increasing GPU occupancy
       - Maximizing memory bandwidth utilization
       - Optimizing shared memory access patterns to reduce bank conflicts
@@ -44,6 +46,7 @@ agent:
       - Efficient allocation of registers/shared memory/local memory
       - Using pipelining or prefetching techniques to hide memory latency
       - Any other innovative, architecture-specific or parallel-level optimizations targeting the hardware
+    </important>
     3. **Assign a priority to each optimization direction** (ranking them according to the potential performance gain), and **experiment with them one by one in order of priority**.
     Final workflow:
     - First, output all key hardware information (in a table or list, clearly readable)
@@ -121,6 +124,8 @@ agent:
     ```bash
     anything
     ```
+  instance_template: |
+    Please optimize the following GPU kernel: {{task}}
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
     {% if output.output | length < 10000 -%}
@@ -188,3 +193,7 @@ model:
     # # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
     # text:
     #   verbosity: low
+metric_model:
+  model_class: amd_llm
+  model_name: gpt-5.2
+  api_key: ""
