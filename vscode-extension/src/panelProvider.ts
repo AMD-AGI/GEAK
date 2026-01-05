@@ -16,6 +16,10 @@ export class PanelProvider {
         });
     }
     
+    public isVisible(): boolean {
+        return this.panel !== undefined;
+    }
+    
     public show(taskId?: string) {
         if (this.panel) {
             this.panel.reveal(vscode.ViewColumn.One);
@@ -69,6 +73,11 @@ export class PanelProvider {
     
     private handleMessage(message: any) {
         switch (message.command) {
+            case 'startTask':
+                // Start agent from panel
+                this.agentManager.startAgent(message.task);
+                break;
+                
             case 'approveAction':
                 this.agentManager.handleAction(message.actionId, 'approve');
                 break;
@@ -471,6 +480,85 @@ export class PanelProvider {
             margin-bottom: 16px;
         }
         
+        /* Task input area styles */
+        .task-input-area {
+            padding: 40px 20px;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        
+        .task-input-card {
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 12px;
+            padding: 32px;
+        }
+        
+        .task-input-card h2 {
+            margin: 0 0 10px 0;
+            font-size: 24px;
+            color: var(--vscode-foreground);
+        }
+        
+        .task-input-card .hint {
+            margin: 0 0 20px 0;
+            color: var(--vscode-descriptionForeground);
+            font-size: 14px;
+        }
+        
+        #task-input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid var(--vscode-input-border);
+            background: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            font-family: var(--vscode-font-family);
+            font-size: 14px;
+            line-height: 1.5;
+            resize: vertical;
+            margin-bottom: 16px;
+            border-radius: 4px;
+        }
+        
+        #task-input:focus {
+            outline: 1px solid var(--vscode-focusBorder);
+        }
+        
+        #start-task-btn {
+            width: 100%;
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: 600;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            cursor: pointer;
+            border-radius: 6px;
+        }
+        
+        #start-task-btn:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+        
+        #start-task-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .task-examples {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid var(--vscode-panel-border);
+            color: var(--vscode-descriptionForeground);
+            font-size: 13px;
+            line-height: 1.8;
+        }
+        
+        .task-examples strong {
+            display: block;
+            margin-bottom: 8px;
+        }
+        
         /* Message collapse styles */
         .message-preview {
             white-space: pre-wrap;
@@ -527,12 +615,35 @@ export class PanelProvider {
         </div>
     </div>
     
-    <div class="messages-container" id="messages-container">
-        <div class="empty-state">
-            <div class="empty-state-icon">🤖</div>
-            <p><strong>mini-swe-agent</strong></p>
-            <p>Start a new task to begin</p>
+    <!-- Task input area (shown when idle with no messages) -->
+    <div class="task-input-area" id="task-input-area" style="display: none;">
+        <div class="task-input-card">
+            <h2>🚀 Start New Task</h2>
+            <p class="hint">Describe what you want the agent to help you with</p>
+            <textarea 
+                id="task-input" 
+                placeholder="e.g., Fix the bug in user_auth.py that causes login failures..."
+                rows="6"
+            ></textarea>
+            <button id="start-task-btn">▶ Start Agent</button>
+            <div class="task-examples">
+                <strong>Examples:</strong>
+                • Optimize the device_binary_search function in the kernel<br>
+                • Add error handling to the API endpoints<br>
+                • Write unit tests for the authentication module
+            </div>
         </div>
+    </div>
+    
+    <!-- Messages container (shown when agent is running or has history) -->
+    <div class="messages-container" id="messages-container" style="display: none;">
+    </div>
+    
+    <!-- Empty state (fallback) -->
+    <div class="empty-state" id="empty-state">
+        <div class="empty-state-icon">🤖</div>
+        <p><strong>mini-swe-agent</strong></p>
+        <p>Click "Show Full Chat" to start a new task</p>
     </div>
     
     <script>
@@ -549,6 +660,32 @@ export class PanelProvider {
             }
         });
         
+        // Task input button handler
+        document.getElementById('start-task-btn').addEventListener('click', () => {
+            const taskInput = document.getElementById('task-input');
+            const task = taskInput.value.trim();
+            if (!task) {
+                return;
+            }
+            
+            // Send task to extension
+            vscode.postMessage({
+                command: 'startTask',
+                task: task
+            });
+            
+            // Disable button to prevent double-click
+            document.getElementById('start-task-btn').disabled = true;
+            document.getElementById('start-task-btn').textContent = '⏳ Starting...';
+        });
+        
+        // Support Ctrl+Enter to submit
+        document.getElementById('task-input').addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                document.getElementById('start-task-btn').click();
+            }
+        });
+        
         function updateUI(state) {
             // Update toolbar
             const statusBadge = document.getElementById('status-badge');
@@ -560,21 +697,50 @@ export class PanelProvider {
             document.getElementById('total-cost').textContent = '$' + (state.totalCost || 0).toFixed(2);
             document.getElementById('mode-badge').textContent = state.mode;
             
-            // Update messages
+            // Update messages and UI areas
+            updateUIAreas(state);
             updateMessages(state);
+        }
+        
+        function updateUIAreas(state) {
+            const taskInputArea = document.getElementById('task-input-area');
+            const messagesContainer = document.getElementById('messages-container');
+            const emptyState = document.getElementById('empty-state');
+            const taskInput = document.getElementById('task-input');
+            const startBtn = document.getElementById('start-task-btn');
+            
+            // Determine which area to show
+            if (state.status === 'idle' && (!state.messages || state.messages.length === 0)) {
+                // Show task input area
+                taskInputArea.style.display = 'block';
+                messagesContainer.style.display = 'none';
+                emptyState.style.display = 'none';
+                
+                // Reset input if idle
+                taskInput.value = '';
+                startBtn.disabled = false;
+                startBtn.textContent = '▶ Start Agent';
+                
+                // Auto-focus on input
+                setTimeout(() => taskInput.focus(), 100);
+            } else if (state.messages && state.messages.length > 0) {
+                // Show messages
+                taskInputArea.style.display = 'none';
+                messagesContainer.style.display = 'block';
+                emptyState.style.display = 'none';
+            } else {
+                // Show empty state (fallback)
+                taskInputArea.style.display = 'none';
+                messagesContainer.style.display = 'none';
+                emptyState.style.display = 'flex';
+            }
         }
         
         function updateMessages(state) {
             const container = document.getElementById('messages-container');
             
             if (!state.messages || state.messages.length === 0) {
-                container.innerHTML = \`
-                    <div class="empty-state">
-                        <div class="empty-state-icon">🤖</div>
-                        <p><strong>mini-swe-agent</strong></p>
-                        <p>Start a new task to begin</p>
-                    </div>
-                \`;
+                container.innerHTML = '';
                 return;
             }
             

@@ -26,6 +26,18 @@ export function activate(context: vscode.ExtensionContext) {
     // Register commands
     context.subscriptions.push(
         vscode.commands.registerCommand('mini-swe-agent.start', async () => {
+            const state = agentManager.getState();
+            
+            // If panel is visible and agent is idle with no messages, let user input in panel
+            if (panelProvider.isVisible() && state.status === 'idle' && 
+                (!state.messages || state.messages.length === 0)) {
+                // Panel is showing the task input area, just focus it
+                panelProvider.show(); // This will trigger focus
+                vscode.window.showInformationMessage('Please enter your task in the panel');
+                return;
+            }
+            
+            // Otherwise, use the input box
             const task = await vscode.window.showInputBox({
                 prompt: 'What do you want the agent to do?',
                 placeHolder: 'e.g., Fix the bug in app.py, Add unit tests for the Utils class',
