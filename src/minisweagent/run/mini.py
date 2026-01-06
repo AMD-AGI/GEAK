@@ -3,6 +3,7 @@
 """Run mini-SWE-agent in your local environment. This is the default executable `mini`."""
 # Read this first: https://mini-swe-agent.com/latest/usage/mini/  (usage)
 
+import copy
 import os
 import traceback
 from pathlib import Path
@@ -165,7 +166,7 @@ def main(
             save_traj_fn=save_traj,
             console=console,
             model_factory=lambda: get_model(model_name, config.get("model", {})),
-            env_factory=lambda: LocalEnvironment(**config.get("env", {})),
+            env_factory=lambda: LocalEnvironment(**copy.deepcopy(config.get("env", {}))),
             metric_model_config=config.get("metric_model", {}),
         )
     except Exception as e:

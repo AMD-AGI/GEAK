@@ -197,6 +197,11 @@ class ParallelAgent(DefaultAgent):
                 test_returncode = -1
             else:
                 test_env = os.environ.copy()
+                # Include environment variables from env config (e.g., HIP_VISIBLE_DEVICES for GPU isolation)
+                if hasattr(self.env.config, 'env'):
+                    test_env.update(self.env.config.env)
+                    if 'HIP_VISIBLE_DEVICES' in self.env.config.env:
+                        self._log_message(f"[ParallelAgent] Using GPU isolation: HIP_VISIBLE_DEVICES={self.env.config.env['HIP_VISIBLE_DEVICES']}")
                 test_env["PYTHONUNBUFFERED"] = "1"
                 # Replace WORK_REPO placeholder with actual working directory
                 test_command = self.config.test_command.replace("WORK_REPO", str(cwd))
