@@ -39,6 +39,7 @@ agent:
        - Understand the current implementation
        - Identify the kernel's computational pattern
        - Note resource usage (registers, shared memory, threads)
+       - Note the key points in benchmark test
 
     ### Phase 3: Baseline Measurement
 
@@ -47,11 +48,10 @@ agent:
 
     ### Phase 4: Strategy Formulation
 
-    4. **Propose multiple optimization directions** based on hardware characteristics, code analysis, and baseline results
+    4. **Propose multiple optimization directions** based on hardware characteristics, code analysis, key points in benchmark test and baseline results
        <important>
        You MUST consider architecture-level optimizations, NOT just simple code-level changes, like loop unrolling, vectorization, config setting search, etc.
-       Prioritize optimization directions according to potential performance gain.
-       
+
        Consider optimizations including but not limited to:
        - **GPU occupancy**: Increase active warps/wavefronts per CU
        - **Memory bandwidth**: Maximize global/shared memory throughput
@@ -60,14 +60,11 @@ agent:
        - **Resource allocation**: Efficient use of registers/shared memory/local memory
        - **Latency hiding**: Use pipelining or prefetching techniques
        - **Parallelism**: Exploit hardware parallelism at different levels
-       - **Architecture-specific**: Leverage unique hardware features
-       
-       For each direction, provide:
-       - Brief analysis of why it applies to this kernel
-       - Expected performance benefit
-       - Priority ranking
-       </important>
+       - **Adaptive strategy for various benchmark tests**: there may be different datatypes, segment sizes, etc.
+      </important>
 
+       **Assign a priority to each optimization direction** (ranking them according to the potential performance gain), and **experiment with them one by one in order of priority**.
+      
     ### Phase 5: Iterative Optimization
 
     5. **Implement optimizations one at a time** in priority order
@@ -75,9 +72,8 @@ agent:
        - Save and test by issuing: `echo SAVE_PATCH_AND_TEST`
        - If test fails, you should fix the failure and try again
        - Compare results with baseline
-       - If no improvement: no need to revert because I have already saved the patch. You can try other optimization directions.
-       - In the progress of optimization, you can adaptively adjust the priority ofoptimization directions based on the results. 
-       - If you are not sure about the next optimization direction, you can review the priority history in Phase 4.
+       - If no improvement: You can try other optimization directions.
+       - In the progress of optimization, you are encouraged to adaptively adjust the priority ofoptimization directions or propose new optimization directions based on the results. 
 
     6. **Repeat Phase 5** until target performance is achieved or all high-priority optimizations are exhausted
 

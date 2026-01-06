@@ -42,7 +42,7 @@ echo "======================================"
 # Setup paths
 TEST_DIR="/data/users/yueliu14/mini-swe-agent/"
 ROCPRIM_DIR="${TEST_DIR}/rocPRIM_${KERNEL_NAME}"
-OUTPUT_REPO="20251231_${KERNEL_NAME}"
+OUTPUT_REPO="20251231_v1_${KERNEL_NAME}"
 PATCH_OUTPUT_DIR="${TEST_DIR}/${OUTPUT_REPO}"
 TRAJ_PATH="${PATCH_OUTPUT_DIR}/last_mini_run.traj.json"
 PROMPT_FILE="/data/users/yueliu14/mini-swe-agent/rocprim_prompts/rocprim_prompt_${KERNEL_NAME}.md"
