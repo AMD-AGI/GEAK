@@ -37,17 +37,19 @@ export class AgentManager {
                 timestamp: new Date()
             };
             
-            this.state.messages.push(message);
-            this.state.currentStep = params.step;
-            this.state.totalCost = params.cost;
-            
-            // Update current task
-            if (this.state.currentTask) {
-                this.state.currentTask.totalSteps = params.step;
-                this.state.currentTask.totalCost = params.cost;
+            if (params.action == "" || !params.need_confirm) {
+                this.state.messages.push(message);
+                this.state.currentStep = params.step;
+                this.state.totalCost = params.cost;
+                
+                // Update current task
+                if (this.state.currentTask) {
+                    this.state.currentTask.totalSteps = params.step;
+                    this.state.currentTask.totalCost = params.cost;
+                }
+                
+                this.emitStateChange();
             }
-            
-            this.emitStateChange();
         });
         
         // Handle confirmation requests (blocking on Python side)

@@ -146,9 +146,18 @@ class VSCodeAgent(InteractiveAgent):
         """Override to send messages to VS Code instead of console."""
         super().add_message(role, content, **kwargs)
 
+        action = ""
+        need_confirm = False
+        if role == "assistant":
+            content_dict = {
+                "content": content,
+            }
+            action = self.parse_action(content_dict).get("action", "")
+            need_confirm = self.should_ask_confirmation(action)
+
         # Send to VS Code webview
         self.bridge.send_notification(
-            "agent/message", {"role": role, "content": content, "step": self.model.n_calls, "cost": self.model.cost}
+            "agent/message", {"role": role, "content": content, "step": self.model.n_calls, "cost": self.model.cost, "action": action, "need_confirm": need_confirm}
         )
 
     def execute_action(self, action: dict) -> str:
