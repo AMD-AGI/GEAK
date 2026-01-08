@@ -76,7 +76,7 @@ export function activate(context: vscode.ExtensionContext) {
     const hasShownWelcome = context.globalState.get('mini-swe-agent.hasShownWelcome');
     if (!hasShownWelcome) {
         vscode.window.showInformationMessage(
-            'Welcome to mini-swe-agent! Use the Command Palette (Ctrl+Shift+P) and run "mini: Start Agent" to begin.',
+            'Welcome to GEAK Agent! Use the Command Palette (Ctrl+Shift+P) and run "GEAK: Start Agent" to begin.',
             'Got it'
         ).then(() => {
             context.globalState.update('mini-swe-agent.hasShownWelcome', true);

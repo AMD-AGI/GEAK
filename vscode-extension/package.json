@@ -1,7 +1,7 @@
 {
-  "name": "mini-swe-agent-vscode",
-  "displayName": "mini-swe-agent",
-  "description": "AI coding agent that solves GitHub issues and programming tasks",
+  "name": "geak-agent-vscode",
+  "displayName": "GEAK",
+  "description": "AI-coding Agent for Generating Efficient AI Kernels",
   "version": "0.1.0",
   "publisher": "mini-swe-agent",
   "repository": {
@@ -64,7 +64,7 @@
       "activitybar": [
         {
           "id": "mini-swe-agent",
-          "title": "mini-swe-agent",
+          "title": "geak-agent",
           "icon": "media/icon.svg"
         }
       ]
@@ -79,17 +79,22 @@
       ]
     },
     "configuration": {
-      "title": "mini-swe-agent",
+      "title": "geak-agent",
       "properties": {
         "mini-swe-agent.modelName": {
           "type": "string",
-          "default": "gpt-4",
-          "description": "Model to use (e.g., gpt-4, claude-3-5-sonnet-20241022)"
+          "default": "claude-opus-4.5",
+          "description": "Model to use (e.g., gpt-5, claude-opus-4.5)"
+        },
+        "mini-swe-agent.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for the model"
         },
         "mini-swe-agent.costLimit": {
           "type": "number",
           "default": 3.0,
-          "description": "Maximum cost limit in dollars"
+          "description": "Maximum cost limit in dollars (0 = unlimited)"
         },
         "mini-swe-agent.stepLimit": {
           "type": "number",
@@ -105,11 +110,6 @@
           ],
           "default": "confirm",
           "description": "Default interaction mode"
-        },
-        "mini-swe-agent.configPath": {
-          "type": "string",
-          "default": "",
-          "description": "Path to YAML config file (e.g., mini.yaml). Can include API keys, model settings, and agent configuration. Supports absolute paths or names (will search in workspace, ~/.config/mini-swe-agent, and builtin configs)"
         },
         "mini-swe-agent.whitelistActions": {
           "type": "array",

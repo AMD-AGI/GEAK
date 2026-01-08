@@ -290,14 +290,14 @@ export class AgentManager {
         await this.bridge.start();
         
         // Get config file path if specified
-        const configFilePath = config.get<string>('configPath');
+        const defaultConfigPath = "mini_kernel.yaml";
         
         // Prepare initialization parameters
         const initParams: InitializeParams = {
             workspacePath: workspaceFolder.uri.fsPath,
             modelName: config.get('modelName'), // Can be undefined if set in YAML
             task: task,
-            configFilePath: configFilePath || undefined,
+            configFilePath: defaultConfigPath,
             config: {
                 agent: {
                     mode: config.get('defaultMode', 'confirm'),
@@ -305,7 +305,9 @@ export class AgentManager {
                     step_limit: config.get('stepLimit', 50),
                     whitelist_actions: config.get('whitelistActions', ['^ls', '^cat', '^pwd'])
                 },
-                model: {},
+                model: {
+                    api_key: config.get('apiKey', ''),
+                },
                 env: {}
             }
         };

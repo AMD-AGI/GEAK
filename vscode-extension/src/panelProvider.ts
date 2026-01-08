@@ -31,7 +31,7 @@ export class PanelProvider {
         
         this.panel = vscode.window.createWebviewPanel(
             'miniSweAgentChat',
-            'mini-swe-agent Chat',
+            'GEAK Agent Chat',
             vscode.ViewColumn.One,
             {
                 enableScripts: true,
@@ -146,7 +146,7 @@ export class PanelProvider {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>mini-swe-agent Chat</title>
+    <title>GEAK Agent Chat</title>
     <style>
         * {
             box-sizing: border-box;
@@ -642,7 +642,7 @@ export class PanelProvider {
     <!-- Empty state (fallback) -->
     <div class="empty-state" id="empty-state">
         <div class="empty-state-icon">🤖</div>
-        <p><strong>mini-swe-agent</strong></p>
+        <p><strong>GEAK Agent</strong></p>
         <p>Click "Show Full Chat" to start a new task</p>
     </div>
     
