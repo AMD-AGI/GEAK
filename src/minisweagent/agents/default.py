@@ -4,10 +4,11 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-
+import json
 from jinja2 import StrictUndefined, Template
 
 from minisweagent import Environment, Model
+from minisweagent.tools.tools_runtime import ToolRuntime
 
 
 @dataclass
@@ -27,6 +28,10 @@ class AgentConfig:
     action_observation_template: str = "Observation: {{output}}"
     step_limit: int = 0
     cost_limit: float = 3.0
+    profiling_type: str = ""
+    profiling_repo: str = ""
+    profiling_cmd: str = ""
+    profiling_path: str = ""
 
 
 class NonTerminatingException(Exception):
@@ -60,6 +65,8 @@ class DefaultAgent:
         self.model = model
         self.env = env
         self.extra_template_vars = {}
+        self.toolruntime = ToolRuntime(profiling_workdir=self.config.profiling_repo, profiling_cmd=self.config.profiling_cmd, 
+                                       profiling_path=self.config.profiling_path, profiling_type=self.config.profiling_type)
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
@@ -94,21 +101,27 @@ class DefaultAgent:
         if 0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost:
             raise LimitsExceeded()
         response = self.model.query(self.messages)
-        self.add_message("assistant", **response)
+        output = "<action>\n"+ response["content"] + f"\ntool call:\n   {json.dumps(response["tools"], indent=4)}" + "\n</action>"
+        self.add_message("assistant", output)
         return response
 
     def get_observation(self, response: dict) -> dict:
         """Execute the action and return the observation."""
-        output = self.execute_action(self.parse_action(response))
+        output = self.parse_action(response)
         observation = self.render_template(self.config.action_observation_template, output=output)
         self.add_message("user", observation)
         return output
 
     def parse_action(self, response: dict) -> dict:
         """Parse the action from the message. Returns the action."""
-        actions = re.findall(r"```bash\s*\n(.*?)\n```", response["content"], re.DOTALL)
-        if len(actions) == 1:
-            return {"action": actions[0].strip(), **response}
+        if response["content"]:
+            actions = re.findall(r"```bash\s*\n(.*?)\n```", response["content"], re.DOTALL)
+            if len(actions) == 1:
+                actions = {"action": actions[0].strip(), **response}
+                return self.execute_action(actions)
+        if response["tools"]:
+            result = self.toolruntime.dispatch(tool_call=response["tools"]["function"])
+            return result
         raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
 
     def execute_action(self, action: dict) -> dict:

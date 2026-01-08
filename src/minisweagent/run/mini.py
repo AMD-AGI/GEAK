@@ -79,6 +79,9 @@ def main(
             ),
         )
         console.print("[bold green]Got that, thanks![/bold green]")
+    elif task and '.md' in task:
+        with open(task, "r", encoding="utf-8") as f:
+            task = f.read()
 
     if yolo:
         config.setdefault("agent", {})["mode"] = "yolo"
