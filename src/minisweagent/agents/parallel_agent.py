@@ -177,11 +177,12 @@ class ParallelAgent(DefaultAgent):
         
         try:
             git_diff_result = subprocess.run(
-                ["git", "diff"],
+                "git add -N . && git diff",
                 cwd=cwd,
                 capture_output=True,
                 text=True,
                 timeout=10,
+                shell=True,
             )
             patch_content = git_diff_result.stdout
             if not patch_content.strip():
