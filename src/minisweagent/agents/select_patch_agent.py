@@ -24,9 +24,7 @@ class SelectPatchAgentConfig(AgentConfig):
         "The best_results.json file should contain the selected patch data with the following structure:\n"
         "{\n"
         '  "patch_<name>": { /* full patch data from results.json */ },\n'
-        '  "_selected_from_agent": <int>,\n'
-        '  "_selected_from_parallel_dir": "parallel_<id>",\n'
-        '  "_selected_patch_id": "patch_<name>",\n'
+        '  "speedup": <float>,\n'
         '  "_selected_patch_file": "<absolute_path_to_patch_file>",\n'
         '  "_selected_test_output_file": "<absolute_path_to_test_output_file>",\n'
         '  "_llm_selection_analysis": "<your analysis>"\n'
@@ -43,7 +41,6 @@ class SelectPatchAgent(DefaultAgent):
         super().__init__(model, env, config_class=SelectPatchAgentConfig, **kwargs)
         self.patch_dir: Path | None = None
         self.all_results: dict = {}
-        self.final_results: list = []
         self.log_file: Path | None = None
     
     def add_message(self, role: str, content: str, **kwargs):
@@ -107,44 +104,11 @@ class SelectPatchAgent(DefaultAgent):
         
         all_patches.sort(key=lambda x: (x["agent_id"], x["patch_name"]))
         
-        # Phase 1: Compute speedup for each patch
-        print(f"[SelectPatchAgent] Computing speedup for {len(all_patches)} patches...")
-        self.final_results = []
-        
-        for idx, patch_info in enumerate(all_patches):
-            agent_id = patch_info["agent_id"]
-            patch_name = patch_info["patch_name"]
-            patch_data = patch_info["patch_data"]
-            is_baseline = agent_id == 0 and patch_name == "patch_0"
-            
-            if is_baseline:
-                speedup = 1.0
-                reasoning = "This is the baseline patch."
-            else:
-                # For now, use simple heuristic or extract from metric
-                # The agent will refine this through multi-turn reasoning
-                speedup = self._extract_speedup_heuristic(patch_data, unified_baseline, metric)
-                reasoning = "Initial heuristic computation"
-            
-            self.final_results.append({
-                "agent_id": agent_id,
-                "patch_id": patch_name,
-                "speedup": speedup,
-                "reasoning": reasoning,
-                "test_passed": patch_data.get("test_passed", False),
-                "returncode": patch_data.get("returncode", -1),
-                "metric_result": patch_data.get("metric_result"),
-            })
-        
-        # Save initial results
-        if self.patch_dir:
-            (self.patch_dir / "selection_initial_results.json").write_text(
-                json.dumps(self.final_results, indent=2)
-            )
+        print(f"[SelectPatchAgent] Processing {len(all_patches)} patches...")
         
         # Build task description for the agent
         task_parts = [
-            f"You need to select the best patch from {len(self.final_results)} patches.\n\n"
+            f"You need to select the best patch from {len(all_patches)} patches.\n\n"
         ]
         
         if metric:
@@ -158,13 +122,17 @@ class SelectPatchAgent(DefaultAgent):
         task_parts.append("\n")
         
         task_parts.append("## All Patches Summary:\n\n")
-        for result in self.final_results:
+        for patch_info in all_patches:
+            agent_id = patch_info["agent_id"]
+            patch_name = patch_info["patch_name"]
+            patch_data = patch_info["patch_data"]
             task_parts.append(
-                f"- agent_{result['agent_id']}/{result['patch_id']}: "
-                f"speedup={result['speedup']:.4f}, test_passed={result['test_passed']}"
+                f"- agent_{agent_id}/{patch_name}: "
+                f"test_passed={patch_data.get('test_passed', False)}, "
+                f"returncode={patch_data.get('returncode', -1)}"
             )
-            if result.get("metric_result"):
-                task_parts.append(f", metric={json.dumps(result['metric_result'])}")
+            if patch_data.get("metric_result"):
+                task_parts.append(f", metric={json.dumps(patch_data['metric_result'])}")
             task_parts.append("\n")
         
         task_parts.append("\n")
@@ -172,7 +140,8 @@ class SelectPatchAgent(DefaultAgent):
             "You can use bash commands to:\n"
             "1. Read patch files: cat {patch_dir}/parallel_*/patch_*.patch\n"
             "2. Read test outputs: cat {patch_dir}/parallel_*/patch_*_test.txt\n"
-            "3. Analyze and compare patches\n\n"
+            "3. Read results: cat {patch_dir}/parallel_*/results.json\n"
+            "4. Analyze and compare patches\n\n"
             f"All files are in: {base_patch_dir}\n\n"
             "When ready, copy the selected patch data from the corresponding parallel_*/results.json "
             "to best_results.json with the required metadata fields, then output:\n"
@@ -183,9 +152,7 @@ class SelectPatchAgent(DefaultAgent):
             "cat > best_results.json << 'EOF'\n"
             "{\n"
             '  "patch_12": { /* copy full data from parallel_0/results.json */ },\n'
-            '  "_selected_from_agent": 0,\n'
-            '  "_selected_from_parallel_dir": "parallel_0",\n'
-            '  "_selected_patch_id": "patch_12",\n'
+            '  "speedup": <float>,\n'
             f'  "_selected_patch_file": "{base_patch_dir}/parallel_0/patch_12.patch",\n'
             f'  "_selected_test_output_file": "{base_patch_dir}/parallel_0/patch_12_test.txt",\n'
             '  "_llm_selection_analysis": "Your analysis here"\n'
@@ -196,31 +163,6 @@ class SelectPatchAgent(DefaultAgent):
         )
         
         return "".join(task_parts)
-    
-    def _extract_speedup_heuristic(self, patch_data: dict, baseline_data: dict, metric: str | None) -> float:
-        """Extract speedup using simple heuristics."""
-        # If test didn't pass, speedup is 0
-        if not patch_data.get("test_passed", False):
-            return 0.0
-        
-        # Try to extract from metric_result if available
-        metric_result = patch_data.get("metric_result")
-        baseline_metric = baseline_data.get("metric_result")
-        
-        if metric_result and baseline_metric:
-            # Try common metric keys
-            for key in ["value", "bandwidth", "throughput", "ops_per_sec"]:
-                if key in metric_result and key in baseline_metric:
-                    try:
-                        patch_val = float(metric_result[key])
-                        baseline_val = float(baseline_metric[key])
-                        if baseline_val > 0:
-                            return patch_val / baseline_val
-                    except (ValueError, TypeError):
-                        pass
-        
-        # Default: if test passed, assume neutral speedup
-        return 1.0
     
     def parse_action(self, response: dict) -> dict:
         """Parse bash command from response."""
@@ -248,16 +190,13 @@ class SelectPatchAgent(DefaultAgent):
                     patch_id = f"patch_{match.group(2)}"
                     return f"agent_{agent_id}/{patch_id}"
         
-        # Fallback: use highest speedup from final_results and save best_results.json
-        valid_results = [r for r in self.final_results if r["test_passed"]]
-        if valid_results:
-            best = max(valid_results, key=lambda x: x["speedup"])
-            self._save_fallback_best_results(best, "Fallback selection: highest speedup among passing tests. This is the baseline patch.")
-            return f"agent_{best['agent_id']}/{best['patch_id']}"
-        elif self.final_results:
-            first = self.final_results[0]
-            self._save_fallback_best_results(first, "Fallback: selected first patch as no tests passed.")
-            return f"agent_{first['agent_id']}/{first['patch_id']}"
+        # Fallback: select baseline (agent_0/patch_0) and save best_results.json
+        if 0 in self.all_results and "patch_0" in self.all_results[0]["results"]:
+            self._save_fallback_best_results(
+                {"agent_id": 0, "patch_id": "patch_0"},
+                "Fallback: selected baseline patch_0 as no explicit selection was made."
+            )
+            return "agent_0/patch_0"
         
         return None
     
@@ -285,9 +224,7 @@ class SelectPatchAgent(DefaultAgent):
         # Build best_results.json
         best_results = {
             patch_id: patch_data,
-            "_selected_from_agent": agent_id,
-            "_selected_from_parallel_dir": f"parallel_{agent_id}",
-            "_selected_patch_id": patch_id,
+            "speedup": 1.0,
             "_selected_patch_file": str(parallel_dir / patch_data.get("patch_file", f"{patch_id}.patch")),
             "_selected_test_output_file": str(parallel_dir / patch_data.get("test_output_file", f"{patch_id}_test.txt")),
             "_llm_selection_analysis": analysis,
