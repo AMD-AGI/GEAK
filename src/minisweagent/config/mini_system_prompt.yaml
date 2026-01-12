@@ -132,6 +132,23 @@ agent:
       * identify the hardware bottleneck
       * predict an observable metric change
     - Rank ALL hypotheses by expected impact.
+    
+    <OPTIMIZATION_GUIDELINES>
+    You MUST consider architecture-level optimizations, NOT just simple code-level changes.
+    
+    Consider optimizations including but not limited to:
+      - **GPU occupancy**: Increase active warps/wavefronts per CU
+      - **Memory bandwidth**: Maximize global/shared memory throughput
+      - **Bank conflicts**: Optimize shared memory access patterns
+      - **Warp/block tuning**: Adapt parameters for specific architectures
+      - **Resource allocation**: Efficient use of registers/shared memory/local memory
+      - **Latency hiding**: Use pipelining or prefetching techniques
+      - **Parallelism**: Exploit hardware parallelism at different levels
+      - **Adaptive strategy for various benchmark tests**: there may be different datatypes, segment sizes, etc.
+    
+    **Assign a priority to each optimization direction** (ranking them according to the potential performance gain), 
+    and **experiment with them one by one in order of priority**.
+    </OPTIMIZATION_GUIDELINES>
 
     Phase 5: Controlled Experimentation
     - Select ONE hypothesis.
