@@ -14,20 +14,21 @@ class SelectPatchAgentConfig(AgentConfig):
     system_template: str = (
         "You are an expert at analyzing kernel patches and their performance results. "
         "Your task is to select the best patch from multiple parallel runs based on speedup metrics and test results."
+        "If you meet any issue, please try to fix it and select the best patch again."
     )
     instance_template: str = (
         "{{task}}\n\n"
         "Please analyze the patches and respond with a bash command that outputs your analysis.\n"
         "When you have made your final decision, save your results to best_results.json and output:\n"
-        "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:agent_<id>/patch_<name>'\n"
-        "For example: echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:agent_0/patch_12'\n\n"
+        "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:parallel_<id>/patch_<name>'\n"
+        "For example: echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:parallel_0/patch_12'\n\n"
         "The best_results.json file should contain the selected patch data with the following structure:\n"
         "{\n"
-        '  "patch_<name>": { /* full patch data from results.json */ },\n'
-        '  "speedup": <float>,\n'
-        '  "_selected_patch_file": "<absolute_path_to_patch_file>",\n'
-        '  "_selected_test_output_file": "<absolute_path_to_test_output_file>",\n'
-        '  "_llm_selection_analysis": "<your analysis>"\n'
+        '  "best_patch_id": "parallel_<id>/patch_<name>",\n'
+        '  "best_patch_speedup": <float>,\n'
+        '  "best_patch_file": "<absolute_path_to_patch_file>",\n'
+        '  "best_patch_test_output": "<absolute_path_to_test_output_file>",\n'
+        '  "llm_selection_analysis": "<your analysis>"\n'
         "}\n"
     )
     step_limit: int = 10
@@ -78,7 +79,7 @@ class SelectPatchAgent(DefaultAgent):
         if not self.all_results:
             return None
         
-        # Get unified baseline from agent 0
+        # Get unified baseline from parallel 0
         unified_baseline = None
         if 0 in self.all_results:
             unified_baseline = self.all_results[0]["results"].get("patch_0")
@@ -86,9 +87,9 @@ class SelectPatchAgent(DefaultAgent):
         if not unified_baseline:
             return None
         
-        # Collect all patches with their agent_id
+        # Collect all patches with their parallel_id
         all_patches = []
-        for agent_id, data in self.all_results.items():
+        for parallel_id, data in self.all_results.items():
             results = data["results"]
             parallel_dir = data["dir"]
             
@@ -96,13 +97,13 @@ class SelectPatchAgent(DefaultAgent):
                 if patch_name.startswith("_"):
                     continue
                 all_patches.append({
-                    "agent_id": agent_id,
+                    "parallel_id": parallel_id,
                     "patch_name": patch_name,
                     "patch_data": patch_data,
                     "parallel_dir": parallel_dir,
                 })
         
-        all_patches.sort(key=lambda x: (x["agent_id"], x["patch_name"]))
+        all_patches.sort(key=lambda x: (x["parallel_id"], x["patch_name"]))
         
         print(f"[SelectPatchAgent] Processing {len(all_patches)} patches...")
         
@@ -114,7 +115,7 @@ class SelectPatchAgent(DefaultAgent):
         if metric:
             task_parts.append(f"Optimization metric: {metric}\n\n")
         
-        task_parts.append("## Baseline (agent_0/patch_0)\n")
+        task_parts.append("## Baseline (parallel_0/patch_0)\n")
         task_parts.append(f"Test passed: {unified_baseline.get('test_passed', False)}\n")
         task_parts.append(f"Return code: {unified_baseline.get('returncode', -1)}\n")
         if "metric_result" in unified_baseline and unified_baseline["metric_result"]:
@@ -123,11 +124,11 @@ class SelectPatchAgent(DefaultAgent):
         
         task_parts.append("## All Patches Summary:\n\n")
         for patch_info in all_patches:
-            agent_id = patch_info["agent_id"]
+            parallel_id = patch_info["parallel_id"]
             patch_name = patch_info["patch_name"]
             patch_data = patch_info["patch_data"]
             task_parts.append(
-                f"- agent_{agent_id}/{patch_name}: "
+                f"- parallel_{parallel_id}/{patch_name}: "
                 f"test_passed={patch_data.get('test_passed', False)}, "
                 f"returncode={patch_data.get('returncode', -1)}"
             )
@@ -143,22 +144,60 @@ class SelectPatchAgent(DefaultAgent):
             "3. Read results: cat {patch_dir}/parallel_*/results.json\n"
             "4. Analyze and compare patches\n\n"
             f"All files are in: {base_patch_dir}\n\n"
+            "IMPORTANT: In results.json, each patch object has this structure:\n"
+            '{\n'
+            '  "patch_X": {\n'
+            '    "patch_file": "patch_X.patch",\n'
+            '    "test_output_file": "patch_X_test.txt",\n'
+            '    "test_passed": true/false,\n'
+            '    "returncode": <int>,\n'
+            '    "metric_result": {     // NOTE: field name is "metric_result" not "metric"\n'
+            '      "values": [...]      // metric values array\n'
+            '    }\n'
+            '  }\n'
+            '}\n\n'
+            "When writing Python scripts:\n"
+            "1. ALWAYS check if patch value is a dict before accessing: if not isinstance(v, dict): skip\n"
+            "2. Use patch_obj['metric_result']['values'] to access metric values\n"
+            "3. Use .get() with defaults to handle missing keys safely\n\n"
+            "Example of safe iteration:\n"
+            "```python\n"
+            "for par, k, v, rpath in all_patches:\n"
+            "    # Check if v is a valid dict first\n"
+            "    if not isinstance(v, dict):\n"
+            "        skipped.append((par, k, 'invalid_type'))\n"
+            "        continue\n"
+            "    # Now safe to use .get()\n"
+            "    if not v.get('test_passed', False):\n"
+            "        skipped.append((par, k, 'test_failed'))\n"
+            "        continue\n"
+            "    # Access metric_result safely\n"
+            "    metric_result = v.get('metric_result', {})\n"
+            "    if not isinstance(metric_result, dict):\n"
+            "        skipped.append((par, k, 'no_metric_result'))\n"
+            "        continue\n"
+            "    values = metric_result.get('values', None)\n"
+            "    if not isinstance(values, list):\n"
+            "        skipped.append((par, k, 'no_values'))\n"
+            "        continue\n"
+            "    # Now can safely process values\n"
+            "```\n\n"
             "When ready, copy the selected patch data from the corresponding parallel_*/results.json "
             "to best_results.json with the required metadata fields, then output:\n"
-            "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:agent_<id>/patch_<name>'\n\n"
+            "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:parallel_<id>/patch_<name>'\n\n"
             "Example bash commands to save best_results.json:\n"
             "```bash\n"
             "# Extract patch data and build best_results.json\n"
             "cat > best_results.json << 'EOF'\n"
             "{\n"
-            '  "patch_12": { /* copy full data from parallel_0/results.json */ },\n'
-            '  "speedup": <float>,\n'
-            f'  "_selected_patch_file": "{base_patch_dir}/parallel_0/patch_12.patch",\n'
-            f'  "_selected_test_output_file": "{base_patch_dir}/parallel_0/patch_12_test.txt",\n'
-            '  "_llm_selection_analysis": "Your analysis here"\n'
+            '  "best_patch_id": "parallel_0/patch_12",\n'
+            '  "best_patch_speedup": <float>,\n'
+            f'  "best_patch_file": "{base_patch_dir}/parallel_0/patch_12.patch",\n'
+            f'  "best_patch_test_output": "{base_patch_dir}/parallel_0/patch_12_test.txt",\n'
+            '  "llm_selection_analysis": "Your analysis here"\n'
             "}\n"
             "EOF\n"
-            "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:agent_0/patch_12'\n"
+            "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:parallel_0/patch_12'\n"
             "```"
         )
         
@@ -178,25 +217,25 @@ class SelectPatchAgent(DefaultAgent):
         raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
     
     def extract_final_result(self) -> str | None:
-        """Extract the final result string (agent_id/patch_id) from messages."""
+        """Extract the final result string (parallel_id/patch_id) from messages."""
         # Look through messages for the final output
         for msg in reversed(self.messages):
             if msg["role"] == "user" and "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in msg.get("content", ""):
                 content = msg["content"]
-                # Extract agent_id/patch_id pattern
-                match = re.search(r'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:agent_(\d+)/patch_(\w+)', content)
+                # Extract parallel_id/patch_id pattern
+                match = re.search(r'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT:parallel_(\d+)/patch_(\w+)', content)
                 if match:
-                    agent_id = int(match.group(1))
+                    parallel_id = int(match.group(1))
                     patch_id = f"patch_{match.group(2)}"
-                    return f"agent_{agent_id}/{patch_id}"
+                    return f"parallel_{parallel_id}/{patch_id}"
         
-        # Fallback: select baseline (agent_0/patch_0) and save best_results.json
+        # Fallback: select baseline (parallel_0/patch_0) and save best_results.json
         if 0 in self.all_results and "patch_0" in self.all_results[0]["results"]:
             self._save_fallback_best_results(
-                {"agent_id": 0, "patch_id": "patch_0"},
+                {"parallel_id": 0, "patch_id": "patch_0"},
                 "Fallback: selected baseline patch_0 as no explicit selection was made."
             )
-            return "agent_0/patch_0"
+            return "parallel_0/patch_0"
         
         return None
     
@@ -205,16 +244,16 @@ class SelectPatchAgent(DefaultAgent):
         if not self.patch_dir:
             return
         
-        agent_id = best["agent_id"]
+        parallel_id = best["parallel_id"]
         patch_id = best["patch_id"]
         
         # Load the full patch data
-        if agent_id not in self.all_results:
+        if parallel_id not in self.all_results:
             return
         
-        agent_data = self.all_results[agent_id]
-        parallel_dir = agent_data["dir"]
-        results = agent_data["results"]
+        parallel_data = self.all_results[parallel_id]
+        parallel_dir = parallel_data["dir"]
+        results = parallel_data["results"]
         
         if patch_id not in results:
             return
@@ -223,11 +262,11 @@ class SelectPatchAgent(DefaultAgent):
         
         # Build best_results.json
         best_results = {
-            patch_id: patch_data,
-            "speedup": 1.0,
-            "_selected_patch_file": str(parallel_dir / patch_data.get("patch_file", f"{patch_id}.patch")),
-            "_selected_test_output_file": str(parallel_dir / patch_data.get("test_output_file", f"{patch_id}_test.txt")),
-            "_llm_selection_analysis": analysis,
+            "best_patch_id": f"parallel_{parallel_id}/{patch_id}",
+            "best_patch_speedup": 1.0,
+            "best_patch_file": str(parallel_dir / patch_data.get("patch_file", f"{patch_id}.patch")),
+            "best_patch_test_output": str(parallel_dir / patch_data.get("test_output_file", f"{patch_id}_test.txt")),
+            "llm_selection_analysis": analysis,
         }
         
         (self.patch_dir / "best_results.json").write_text(
