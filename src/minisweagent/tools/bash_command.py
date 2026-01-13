@@ -41,6 +41,11 @@ class BashCommand:
         command: str,
         **kwargs,
     ):
+        if not command:
+            return {
+                "output": "bash tool call need a command argument, it must not be empty.",
+                "returncode": 1,
+            }
         if any(f.startswith(command) for f in self.blocklist) or command in self.blocklist_standalone:
             return {
                 "output": f"Blocked dangerous command: {command}",
