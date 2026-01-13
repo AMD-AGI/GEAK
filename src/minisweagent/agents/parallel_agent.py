@@ -152,8 +152,8 @@ class ParallelAgent(DefaultAgent):
                     f.flush()
             except Exception:
                 pass
-        # Also print to console if stdout is not redirected (not a Tee instance)
-        if not isinstance(sys.stdout, Tee):
+        else:
+            # Only print to console if not in parallel mode (no log file)
             print(message, flush=True)
 
     def execute_action(self, action: dict) -> dict:
@@ -272,9 +272,8 @@ class ParallelAgent(DefaultAgent):
             status = "✓ PASSED" if test_passed else "✗ FAILED"
             self._log_message(f"[ParallelAgent] Test result for {patch_name}: {status}")
             
-            if self.config.metric:
-                metric_result = self._extract_metric(patch_name, test_output)
-                self.patch_results[patch_name]["metric_result"] = metric_result
+            metric_result = self._extract_metric(patch_name, test_output)
+            self.patch_results[patch_name]["metric_result"] = metric_result
             
             if self.config.patch_output_dir:
                 self._save_patch_file(patch_name, patch_content)
@@ -292,8 +291,7 @@ class ParallelAgent(DefaultAgent):
                 "returncode": -1,
             }
             self._log_message(f"[ParallelAgent] Test for {patch_name}: ✗ TIMEOUT")
-            if self.config.metric:
-                self.patch_results[patch_name]["metric_result"] = None
+            self.patch_results[patch_name]["metric_result"] = None
             if self.config.patch_output_dir:
                 self._save_patch_file(patch_name, patch_content)
                 self._save_test_output(patch_name, test_output)
@@ -308,8 +306,7 @@ class ParallelAgent(DefaultAgent):
                 "returncode": -1,
             }
             self._log_message(f"[ParallelAgent] Test for {patch_name}: ✗ ERROR - {e}")
-            if self.config.metric:
-                self.patch_results[patch_name]["metric_result"] = None
+            self.patch_results[patch_name]["metric_result"] = None
             if self.config.patch_output_dir:
                 self._save_patch_file(patch_name, patch_content)
                 self._save_test_output(patch_name, test_output)
@@ -332,8 +329,15 @@ class ParallelAgent(DefaultAgent):
     
     def _extract_metric(self, patch_name: str, test_output: str):
         self._log_message(f"[ParallelAgent] Extracting metric for {patch_name}...")
+        
+        if self.config.metric:
+            metric_prompt = self.config.metric
+        else:
+            metric_prompt = """
+            Extract the performance metrics from the test output.
+            """
         prompt = (
-            f"Task: {self.config.metric}\n\n"
+            f"Task: {metric_prompt}\n\n"
             f"Test output:\n{test_output}\n\n"
             "Extract the requested metric from the test output above. "
             "Return ONLY a valid JSON object with the extracted data. "
@@ -416,7 +420,6 @@ class ParallelAgent(DefaultAgent):
                 env_factory=env_factory,
                 base_patch_dir=base_patch_dir,
                 output=output,
-                metric_model_config=kwargs.get("metric_model_config"),
                 parallel_gpu_ids=self.config.parallel_gpu_ids,
                 save_traj_fn=save_traj_fn,
                 console=console,
@@ -429,6 +432,8 @@ class ParallelAgent(DefaultAgent):
         init_msg += f"[ParallelAgent] Patch output directory: {self.config.patch_output_dir}\n"
         if self.config.metric:
             init_msg += f"[ParallelAgent] Metric extraction: {self.config.metric}\n"
+        else:
+            init_msg += f"[ParallelAgent] Metric extraction: Automatic (LLM will extract performance metrics and calculate speedup)\n"
         init_msg += f"[ParallelAgent] Triggers: Use 'TEST_BASELINE_PERFORMANCE' or 'SAVE_PATCH_AND_TEST' in command output\n"
         init_msg += f"{'='*60}\n\n"
         
@@ -460,32 +465,58 @@ class ParallelAgent(DefaultAgent):
     def _print_summary(self):
         if not self.patch_results:
             return
-        print(f"\n{'='*60}", flush=True)
-        print(f"[ParallelAgent] Summary:", flush=True)
-        print(f"  Total patches: {len(self.patch_results)}", flush=True)
+        
+        summary_lines = [
+            f"\n{'='*60}",
+            f"[ParallelAgent] Summary:",
+            f"  Total patches: {len(self.patch_results)}",
+        ]
+        
         passed = sum(1 for data in self.patch_results.values() if data["test_passed"])
         failed = len(self.patch_results) - passed
-        print(f"  Passed: {passed}", flush=True)
-        print(f"  Failed: {failed}", flush=True)
+        summary_lines.append(f"  Passed: {passed}")
+        summary_lines.append(f"  Failed: {failed}")
+        
         if self.config.patch_output_dir:
-            print(f"  Results saved to: {Path(self.config.patch_output_dir) / 'results.json'}", flush=True)
-        print(f"{'='*60}\n", flush=True)
+            summary_lines.append(f"  Results saved to: {Path(self.config.patch_output_dir) / 'results.json'}")
+        summary_lines.append(f"{'='*60}\n")
+        
+        summary_text = "\n".join(summary_lines)
+        
+        # Write directly to log file if available (thread-safe)
+        if self.log_file:
+            try:
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    f.write(summary_text + "\n")
+                    f.flush()
+            except Exception:
+                pass
+        else:
+            # Only print to console if not in parallel mode (no log file)
+            print(summary_text, flush=True)
 
 
     @staticmethod
-    def _select_best_from_parallel_runs(base_patch_dir: Path, num_parallel: int, metric: str | None, metric_model_config: dict) -> BestPatchResult | None:
+    def _select_best_from_parallel_runs(base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory) -> BestPatchResult | None:
         """Select the best patch from multiple parallel runs using SelectPatchAgent."""
         from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
+        from minisweagent.config import get_config_path
+        import yaml
         
         print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
         
+        # Load SelectPatchAgent config
+        config_path = get_config_path("mini_select_patch")
+        config = yaml.safe_load(config_path.read_text())
+        agent_config = config.get("agent", {})
+        
         # Create model and environment for the SelectPatchAgent
-        model = get_model(config=metric_model_config)
+        model = model_factory()
         env_config = LocalEnvironmentConfig(cwd=str(base_patch_dir))
         env = LocalEnvironment(**env_config.__dict__)
         
-        # Create SelectPatchAgent
-        select_agent = SelectPatchAgent(model, env)
+        # Create SelectPatchAgent with config
+        select_agent = SelectPatchAgent(model, env, **agent_config)
         
         # Setup the selection task
         task = select_agent.setup_selection_task(base_patch_dir, num_parallel, metric)
@@ -508,64 +539,47 @@ class ParallelAgent(DefaultAgent):
             print(f"[ParallelAgent] SelectPatchAgent failed: {e}", flush=True)
             traceback.print_exc()
         
-        # Extract the final result string (agent_id/patch_id)
-        result_str = select_agent.extract_final_result()
-        
-        if not result_str:
-            print("[ParallelAgent] SelectPatchAgent did not produce valid result", flush=True)
+        # Read best_results.json saved by SelectPatchAgent
+        best_patch_id = select_agent.extract_final_result()
+        if not best_patch_id:
+            print("[ParallelAgent] SelectPatchAgent did not save best_results.json", flush=True)
             return None
         
-        print(f"[ParallelAgent] SelectPatchAgent returned: {result_str}", flush=True)
-        
-        # Read best_results.json saved by select agent
-        best_results_file = base_patch_dir / "best_results.json"
-        if not best_results_file.exists():
-            print(f"[ParallelAgent] best_results.json not found at {best_results_file}", flush=True)
-            return None
+        print(f"[ParallelAgent] Selected best patch: {best_patch_id}", flush=True)
         
         try:
-            best_results = json.loads(best_results_file.read_text())
-        except json.JSONDecodeError as e:
-            print(f"[ParallelAgent] Failed to parse best_results.json: {e}", flush=True)
+            # Read the best_results.json for additional details
+            best_results = json.loads((base_patch_dir / "best_results.json").read_text())
+            
+            # Parse "parallel_X/patch_Y" to get agent_id, patch_name, and directory
+            parallel_dir_name, patch_name = best_patch_id.split("/")
+            agent_id = int(parallel_dir_name.replace("parallel_", ""))
+            patch_dir = base_patch_dir / parallel_dir_name
+            
+            # Read metric_result from parallel_X/results.json
+            metric_result = None
+            results_file = patch_dir / "results.json"
+            if results_file.exists():
+                results = json.loads(results_file.read_text())
+                metric_result = results.get(patch_name, {}).get("metric_result")
+            
+            # Read test output if path provided
+            test_output = ""
+            test_output_path = best_results.get("best_patch_test_output")
+            if test_output_path and Path(test_output_path).exists():
+                test_output = Path(test_output_path).read_text()
+            
+            return BestPatchResult(
+                agent_id=agent_id,
+                patch_id=patch_name,
+                test_output=test_output,
+                metric_result=metric_result,
+                patch_dir=patch_dir,
+                llm_conclusion=best_results.get("llm_selection_analysis", ""),
+            )
+        except Exception as e:
+            print(f"[ParallelAgent] Failed to process best_results.json: {e}", flush=True)
             return None
-        
-        # Extract metadata from best_results.json
-        best_agent_id = best_results.get("_selected_from_agent")
-        best_patch_name = best_results.get("_selected_patch_id")
-        best_patch_file = best_results.get("_selected_patch_file")
-        best_test_output_file = best_results.get("_selected_test_output_file")
-        llm_analysis = best_results.get("_llm_selection_analysis", "")
-        parallel_dir_name = best_results.get("_selected_from_parallel_dir", f"parallel_{best_agent_id}")
-        
-        if best_agent_id is None or not best_patch_name:
-            print("[ParallelAgent] Invalid best_results.json format", flush=True)
-            return None
-        
-        print(f"[ParallelAgent] Selected best patch: agent_{best_agent_id}/{best_patch_name}", flush=True)
-        
-        # Get patch data
-        best_patch_data = best_results.get(best_patch_name)
-        if not best_patch_data:
-            print(f"[ParallelAgent] Patch data for {best_patch_name} not found in best_results.json", flush=True)
-            return None
-        
-        best_patch_dir = base_patch_dir / parallel_dir_name
-        
-        # Read test output
-        test_output = ""
-        if best_test_output_file:
-            test_output_path = Path(best_test_output_file)
-            if test_output_path.exists():
-                test_output = test_output_path.read_text()
-        
-        return BestPatchResult(
-            agent_id=best_agent_id,
-            patch_id=best_patch_name,
-            test_output=test_output,
-            metric_result=best_patch_data.get("metric_result"),
-            patch_dir=best_patch_dir,
-            llm_conclusion=llm_analysis,
-        )
 
     @staticmethod
     def _ensure_safe_directory(repo_path: Path):
@@ -717,7 +731,6 @@ class ParallelAgent(DefaultAgent):
         env_factory,
         base_patch_dir: Path,
         output: Path | None,
-        metric_model_config: dict | None = None,
         parallel_gpu_ids: list[int] | None = None,
         redirect_output_fn=redirect_output_to_file,
         save_traj_fn=None,
@@ -818,11 +831,9 @@ class ParallelAgent(DefaultAgent):
         # Select best patch from all parallel runs
         if console:
             console.print(f"\n[bold green]Selecting best patch from {num_parallel} parallel runs...[/bold green]")
-        # Use metric_model_config if provided, otherwise fall back to main model config
-        if metric_model_config is None:
-            metric_model_config = {}
+        metric = agent_config.get("metric") or "Extract the performance metrics from the test output and calculate the best speedup."
         best_result = cls._select_best_from_parallel_runs(
-            base_patch_dir, num_parallel, agent_config.get("metric"), metric_model_config
+            base_patch_dir, num_parallel, metric, model_factory
         )
         
         if best_result is not None:
@@ -831,38 +842,7 @@ class ParallelAgent(DefaultAgent):
                     console.print(f"\n[bold cyan]LLM Conclusion:[/bold cyan]")
                     console.print(best_result.llm_conclusion)
             
-            base_patch_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Read results from the best patch's parallel directory to get best patch data
-            best_results_file = best_result.patch_dir / "results.json"
-            if best_results_file.exists():
-                results_data = json.loads(best_results_file.read_text())
-                best_patch_data = results_data.get(best_result.patch_id, {}).copy()
-                
-                # Add agent_id and parallel_dir to the best patch
-                best_patch_data["agent_id"] = best_result.agent_id
-                best_patch_data["parallel_dir"] = f"parallel_{best_result.agent_id}"
-                
-                # Create output with only the best patch
-                output_data = {
-                    best_result.patch_id: best_patch_data,
-                    "_selected_from_agent": best_result.agent_id,
-                    "_selected_from_parallel_dir": f"parallel_{best_result.agent_id}",
-                    "_selected_patch_id": best_result.patch_id,
-                }
-                
-                # Add file paths for the best patch
-                best_patch_file = best_result.patch_dir / best_patch_data.get("patch_file", f"{best_result.patch_id}.patch")
-                output_data["_selected_patch_file"] = str(best_patch_file.resolve()) if best_patch_file.exists() else None
-                
-                best_test_file = best_result.patch_dir / best_patch_data.get("test_output_file", f"{best_result.patch_id}_test.txt")
-                output_data["_selected_test_output_file"] = str(best_test_file.resolve()) if best_test_file.exists() else None
-                
-                # Add LLM analysis
-                if best_result.llm_conclusion:
-                    output_data["_llm_selection_analysis"] = best_result.llm_conclusion
-                
-                (base_patch_dir / "best_results.json").write_text(json.dumps(output_data, indent=2))
+            # best_results.json is already written by SelectPatchAgent, no need to overwrite it
         
         if results:
             # Return (exit_status, result) tuple from the first successful result
