@@ -113,7 +113,9 @@ agent:
 
     For kernel optimization tasks, use a systematic exploration approach. Track different optimization strategies in `.optimization_strategies.md`.
 
-    See the **"Optimization Strategy Tracking"** section in "Useful command examples" below for detailed commands on how to create and manage the strategy exploration file.
+    Use the **strategy-manager tool** to create and manage your strategy list. This tool provides a consistent interface and ensures proper formatting.
+
+    See the **"Strategy List Management"** section in "Useful command examples" below for detailed commands.
 
     ### Strategy Status Labels:
     - `[baseline]` - Original performance (measure this first!)
@@ -149,105 +151,75 @@ agent:
 
     ## Useful command examples
 
-    ### Optimization Strategy Tracking (for kernel optimization):
+    ### Strategy List Management (using strategy-manager tool):
 
     ```bash
-    # Create strategy exploration file
-    cat > .optimization_strategies.md << 'EOF'
-    # Kernel Optimization Strategies
-
-    ## Baseline Performance
-    [baseline] (Run benchmarks first and record detailed metrics)
-    - Example format: "Bandwidth avg: 152.3 GB/s, Throughput: 2.3 TFLOPS"
-    - Detailed results: baseline_benchmark.log
-
-    ## Strategy 1: Memory Coalescing
-    [pending] Optimize memory access patterns
-    - Expected: +20-30%
-    - Result: (pending - will record relative change)
-
-    ## Strategy 2: SIMD Vectorization
-    [pending] Add vector intrinsics
-    - Expected: +15-25%
-    - Result: (pending - will record relative change)
-
-    ## Strategy 3: Shared Memory Tiling
-    [pending] Use shared memory for caching
-    - Expected: +30-40%
-    - Result: (pending - will record relative change)
-    EOF
+    # Create initial strategy list
+    python -m minisweagent.tools.strategy_manager create \
+      --baseline-metrics "Bandwidth:152.3 GB/s" \
+      --baseline-metrics "Throughput:2.3 TFLOPS" \
+      --baseline-log "baseline_benchmark.log" \
+      --strategies "Memory Coalescing|Optimize memory access patterns|+20-30%|Memory-bound" \
+      --strategies "SIMD Vectorization|Use vector intrinsics|+15-25%|Compute-bound" \
+      --strategies "Shared Memory|Cache data in shared memory|+30-40%|Memory traffic"
     
-    # Run baseline benchmark and save to log
-    ./run_benchmark original.cu | tee baseline_benchmark.log
+    # View all strategies
+    python -m minisweagent.tools.strategy_manager show
     
-    # View strategies
-    cat .optimization_strategies.md
+    # View summary statistics
+    python -m minisweagent.tools.strategy_manager show --summary
     
-    # Start exploring Strategy 1 (use range to target specific strategy)
-    sed -i '/## Strategy 1:/,/## Strategy 2:/ s/\[pending\]/\[exploring\]/' .optimization_strategies.md
+    # Mark strategy as exploring
+    python -m minisweagent.tools.strategy_manager mark 1 exploring
     
-    # After implementing and benchmarking Strategy 1, record result
     # Record successful strategy
-    sed -i '/## Strategy 1:/,/## Strategy 2:/ s/\[exploring\]/\[successful\]/' .optimization_strategies.md
-    sed -i '/## Strategy 1:/,/## Strategy 2:/ s/Result: (pending.*)/Result: +21.1% improvement (KEEP)/' .optimization_strategies.md
+    python -m minisweagent.tools.strategy_manager mark 1 successful \
+      --result "+21.1% improvement (KEEP)" \
+      --details "strategy1_benchmark.log"
     
-    # OR record failed strategy
-    sed -i '/## Strategy 1:/,/## Strategy 2:/ s/\[exploring\]/\[failed\]/' .optimization_strategies.md
-    sed -i '/## Strategy 1:/,/## Strategy 2:/ s/Result: (pending.*)/Result: -4.7% regression (REVERTED)/' .optimization_strategies.md
+    # Record failed strategy
+    python -m minisweagent.tools.strategy_manager mark 2 failed \
+      --result "-3.2% regression (REVERTED)" \
+      --details "Register pressure increased, reduced occupancy"
     
-    # For Strategy 2, use range from Strategy 2 to Strategy 3
-    sed -i '/## Strategy 2:/,/## Strategy 3:/ s/\[pending\]/\[exploring\]/' .optimization_strategies.md
-    sed -i '/## Strategy 2:/,/## Strategy 3:/ s/Result: (pending.*)/Result: +15.3% improvement (KEEP)/' .optimization_strategies.md
+    # Record partial success
+    python -m minisweagent.tools.strategy_manager mark 3 partial \
+      --result "+7.2% improvement (below expected 20-30%)"
     
-    # For last strategy, use range to end of file
-    sed -i '/## Strategy 3:/,$ s/\[pending\]/\[exploring\]/' .optimization_strategies.md
-    sed -i '/## Strategy 3:/,$ s/Result: (pending.*)/Result: +8.5% improvement (KEEP)/' .optimization_strategies.md
+    # Add new strategy
+    python -m minisweagent.tools.strategy_manager add \
+      "Loop Unrolling" \
+      "Unroll inner loops to reduce overhead" \
+      "+10-15%" \
+      --target "Reduce loop overhead"
     
-    # Note: Range syntax '/pattern1/,/pattern2/' ensures changes only affect specific strategy
-    ```
+    # Add strategy at specific position
+    python -m minisweagent.tools.strategy_manager add \
+      "Advanced Memory Coalescing" \
+      "Build on Strategy 1 with aligned access" \
+      "+5-10%" \
+      --position 2
     
-    ### Modifying Strategy List (add/remove/reorder strategies):
+    # Skip strategy (mark as not applicable)
+    python -m minisweagent.tools.strategy_manager remove 3 --method skip
     
-    ```bash
-    # Add a new strategy to the list
-    cat >> .optimization_strategies.md << 'EOF'
-
-    ## Strategy 4: Loop Unrolling
-    [pending] Unroll inner loops to reduce overhead
-    - Expected: +10-15%
-    - Result: (pending - will record relative change)
-    EOF
+    # Delete strategy (remove and renumber)
+    python -m minisweagent.tools.strategy_manager remove 3 --method delete
     
-    # Recreate file to reorganize strategies (recommended for major changes)
-    # Manually preserve all tested/in-progress strategies, reorganize/add/remove pending ones
-    cat > .optimization_strategies.md << 'EOF'
-    # Kernel Optimization Strategies
+    # Update strategy fields
+    python -m minisweagent.tools.strategy_manager update 1 \
+      --status exploring \
+      --details "Currently testing different tile sizes"
     
-    ## Baseline Performance
-    [baseline] Bandwidth: 152.3 GB/s, Throughput: 2.3 TFLOPS
-    - Detailed results: baseline_benchmark.log
+    # Add note to document decisions
+    python -m minisweagent.tools.strategy_manager note \
+      "Prioritized memory optimizations based on profiling results"
     
-    ## Strategy 1: Memory Coalescing
-    [successful] Result: +21.1% improvement (KEEP)
-    - Detailed results: strategy1_benchmark.log
+    # View only successful strategies
+    python -m minisweagent.tools.strategy_manager show --status successful
     
-    ## Strategy 2: SIMD Vectorization
-    [failed] Result: -3.2% regression (REVERTED)
-    - Reason: Register pressure increased, reduced occupancy
-    
-    ## Strategy 3: Shared Memory
-    [pending] Cache frequently accessed data in shared memory
-    - Expected: +30-40%
-    - Result: (pending - will record relative change)
-    
-    ## Strategy 4: Loop Unrolling
-    [pending] Unroll inner loops to reduce overhead
-    - Expected: +10-15%
-    - Result: (pending - will record relative change)
-    
-    # Note: Removed original "Strategy 3: Thread Block Optimization" as not applicable
-    # Note: Prioritized Shared Memory based on profiling showing memory-bound bottleneck
-    EOF
+    # View only pending strategies
+    python -m minisweagent.tools.strategy_manager show --status pending
     ```
 
     ### Create a new file:
