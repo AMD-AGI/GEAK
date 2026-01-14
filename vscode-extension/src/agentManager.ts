@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { PythonBridge } from './pythonBridge';
 import { AgentState, AgentMessage, InitializeParams, ConfirmationResponse, Task, StrategySelectionResponse } from './types';
+import { StrategyManagerClient, StrategyListData } from './strategyManager';
 
 export class AgentManager {
     private bridge: PythonBridge;
@@ -12,7 +13,9 @@ export class AgentManager {
         messages: [],
         taskHistory: [],
         currentStrategies: [],
-        waitingForStrategySelection: false
+        waitingForStrategySelection: false,
+        strategyData: null,
+        hasPendingUserMessage: false
     };
     private stateChangeEmitter = new vscode.EventEmitter<AgentState>();
     public onStateChange = this.stateChangeEmitter.event;
@@ -20,6 +23,7 @@ export class AgentManager {
     private pendingActionResolvers: Map<string, (response: ConfirmationResponse) => void> = new Map();
     private nextActionId: number = 1;
     private pendingStrategyResolver?: (response: StrategySelectionResponse) => void;
+    private strategyManager?: StrategyManagerClient;
     
     constructor(private context: vscode.ExtensionContext) {
         this.bridge = new PythonBridge(context);
@@ -223,6 +227,18 @@ export class AgentManager {
             vscode.window.showWarningMessage(params.message);
         });
         
+        // Handle strategy data updates from Python agent
+        this.bridge.onNotification('agent/strategyData', (params) => {
+            console.log('[AgentManager] Received strategy data from Python agent:', params);
+            this.state.strategyData = params;
+            this.emitStateChange();
+        });
+        
+        // Handle step completed - trigger strategy list refresh
+        this.bridge.onNotification('step/completed', () => {
+            this.refreshStrategyList();
+        });
+        
         // Handle agent finished
         this.bridge.onNotification('agent/finished', (params) => {
             this.state.status = 'finished';
@@ -290,7 +306,7 @@ export class AgentManager {
         await this.bridge.start();
         
         // Get config file path if specified
-        const defaultConfigPath = "mini_kernel.yaml";
+        const defaultConfigPath = "mini_kernel_strategy_list.yaml";
         
         // Prepare initialization parameters
         const initParams: InitializeParams = {
@@ -303,7 +319,11 @@ export class AgentManager {
                     mode: config.get('defaultMode', 'confirm'),
                     cost_limit: config.get('costLimit', 3.0),
                     step_limit: config.get('stepLimit', 50),
-                    whitelist_actions: config.get('whitelistActions', ['^ls', '^cat', '^pwd'])
+                    whitelist_actions: config.get('whitelistActions', [
+                        '^ls', '^cat', '^pwd',
+                        '^cd .+ && ls($| .*)',
+                        '^cd .+ && cat($| .*)'
+                    ])
                 },
                 model: {
                     api_key: config.get('apiKey', ''),
@@ -331,7 +351,9 @@ export class AgentManager {
             currentTask: newTask,
             taskHistory: this.state.taskHistory,
             currentStrategies: [],
-            waitingForStrategySelection: false
+            waitingForStrategySelection: false,
+            strategyData: this.state.strategyData,
+            hasPendingUserMessage: this.state.hasPendingUserMessage
         };
         this.emitStateChange();
         
@@ -444,5 +466,109 @@ export class AgentManager {
     
     private emitStateChange() {
         this.stateChangeEmitter.fire({ ...this.state });
+    }
+    
+    /**
+     * Initialize strategy manager
+     */
+    initStrategyManager(workspacePath: string): void {
+        console.log('[AgentManager] Initializing strategy manager for workspace:', workspacePath);
+        this.strategyManager = new StrategyManagerClient(
+            workspacePath,
+            this.context.extensionPath
+        );
+        
+        // Listen to strategy data changes
+        this.strategyManager.onChange((data) => {
+            console.log('[AgentManager] Strategy data changed:', JSON.stringify(data, null, 2));
+            this.state.strategyData = data;
+            console.log('[AgentManager] Emitting state change...');
+            this.emitStateChange();
+        });
+        
+        // Start event-driven mode
+        console.log('[AgentManager] Starting event-driven mode...');
+        this.strategyManager.startEventDriven();
+    }
+    
+    /**
+     * Refresh strategy list (for event-driven updates)
+     */
+    async refreshStrategyList(): Promise<void> {
+        if (this.strategyManager) {
+            await this.strategyManager.triggerRefresh();
+        }
+    }
+    
+    /**
+     * Explore selected strategies - send message to agent
+     */
+    async exploreStrategies(selectedIndices: number[]): Promise<void> {
+        if (selectedIndices.length === 0) {
+            vscode.window.showWarningMessage('No strategies selected');
+            return;
+        }
+        
+        const strategyData = this.strategyManager?.getCurrentData();
+        if (!strategyData || !strategyData.exists) {
+            vscode.window.showWarningMessage('No strategy file found');
+            return;
+        }
+        
+        const strategies = selectedIndices.map(idx => 
+            strategyData.strategies.find(s => s.index === idx)
+        ).filter(s => s !== undefined);
+        
+        if (strategies.length === 0) {
+            vscode.window.showWarningMessage('Invalid strategy indices selected');
+            return;
+        }
+        
+        // Generate message
+        const strategyNames = strategies.map(s => `Strategy ${s!.index}: ${s!.name}`).join(', ');
+        const messageContent = `Please implement ${strategyNames} from the .optimization_strategies.md file.`;
+        
+        const userMessage: AgentMessage = {
+            role: 'user',
+            content: messageContent,
+            timestamp: new Date(),
+            messageType: 'strategy_explore',
+            relatedStrategyIndices: selectedIndices
+        };
+        
+        // Add message to history
+        this.state.messages.push(userMessage);
+        this.state.hasPendingUserMessage = true;
+        this.emitStateChange();
+        
+        // If agent is waiting for input, send message immediately
+        if (this.state.status === 'waiting_input') {
+            try {
+                await this.bridge.sendNotification('user/sendMessage', {
+                    message: messageContent
+                });
+                this.state.hasPendingUserMessage = false;
+                this.state.status = 'running';
+                this.emitStateChange();
+                
+                vscode.window.showInformationMessage(`Exploring ${strategies.length} strateg${strategies.length === 1 ? 'y' : 'ies'}`);
+            } catch (error) {
+                vscode.window.showErrorMessage(`Failed to send message: ${error}`);
+            }
+        } else {
+            // Otherwise, message remains in chat history for agent to process later
+            vscode.window.showInformationMessage(
+                `Message added to chat history. Agent will process it when ready.`
+            );
+        }
+    }
+    
+    /**
+     * Cleanup
+     */
+    dispose(): void {
+        if (this.strategyManager) {
+            this.strategyManager.stop();
+        }
     }
 }

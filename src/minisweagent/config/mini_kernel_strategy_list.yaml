@@ -151,75 +151,63 @@ agent:
 
     ## Useful command examples
 
-    ### Strategy List Management (using strategy-manager tool):
+    ### Strategy List Management (using optool command):
+
+    **optool** is a built-in command for managing optimization strategies. It provides a simple interface for tracking your exploration process.
 
     ```bash
-    # Create initial strategy list
-    python -m minisweagent.tools.strategy_manager create \
+    # Create initial strategy list with baseline metrics and initial strategies
+    optool create \
       --baseline-metrics "Bandwidth:152.3 GB/s" \
-      --baseline-metrics "Throughput:2.3 TFLOPS" \
+      --baseline-metrics "Latency:23.4 ms" \
       --baseline-log "baseline_benchmark.log" \
       --strategies "Memory Coalescing|Optimize memory access patterns|+20-30%|Memory-bound" \
-      --strategies "SIMD Vectorization|Use vector intrinsics|+15-25%|Compute-bound" \
-      --strategies "Shared Memory|Cache data in shared memory|+30-40%|Memory traffic"
+      --strategies "Shared Memory|Use shared memory for reduction|+15-25%|Reduce global memory"
     
     # View all strategies
-    python -m minisweagent.tools.strategy_manager show
+    optool show
     
-    # View summary statistics
-    python -m minisweagent.tools.strategy_manager show --summary
+    # View specific strategy details
+    optool show 1
     
-    # Mark strategy as exploring
-    python -m minisweagent.tools.strategy_manager mark 1 exploring
+    # Get help on available commands
+    optool help
+    
+    # Mark strategy as exploring (start working on it)
+    optool mark 1 exploring
     
     # Record successful strategy
-    python -m minisweagent.tools.strategy_manager mark 1 successful \
-      --result "+21.1% improvement (KEEP)" \
-      --details "strategy1_benchmark.log"
+    optool mark 1 successful --result "+21.1% improvement (KEEP)" --details "strategy1_benchmark.log"
     
     # Record failed strategy
-    python -m minisweagent.tools.strategy_manager mark 2 failed \
-      --result "-3.2% regression (REVERTED)" \
-      --details "Register pressure increased, reduced occupancy"
+    optool mark 2 failed --result "-3.2% regression (REVERTED)" --details "Register pressure increased, reduced occupancy"
     
     # Record partial success
-    python -m minisweagent.tools.strategy_manager mark 3 partial \
-      --result "+7.2% improvement (below expected 20-30%)"
+    optool mark 3 partial --result "+7.2% improvement (below expected 20-30%)"
     
-    # Add new strategy
-    python -m minisweagent.tools.strategy_manager add \
-      "Loop Unrolling" \
-      "Unroll inner loops to reduce overhead" \
-      "+10-15%" \
-      --target "Reduce loop overhead"
-    
-    # Add strategy at specific position
-    python -m minisweagent.tools.strategy_manager add \
-      "Advanced Memory Coalescing" \
-      "Build on Strategy 1 with aligned access" \
-      "+5-10%" \
-      --position 2
+    # Add new strategy during exploration
+    optool add "Loop Unrolling" "Unroll inner loops to reduce overhead" "+10-15%" --target "Reduce loop overhead"
     
     # Skip strategy (mark as not applicable)
-    python -m minisweagent.tools.strategy_manager remove 3 --method skip
+    optool remove 3 --method skip
     
-    # Delete strategy (remove and renumber)
-    python -m minisweagent.tools.strategy_manager remove 3 --method delete
+    # Delete strategy completely (use sparingly - prefer skip to preserve history)
+    optool remove 3 --method delete
     
     # Update strategy fields
-    python -m minisweagent.tools.strategy_manager update 1 \
-      --status exploring \
-      --details "Currently testing different tile sizes"
+    optool update 1 --status exploring --details "Currently testing different tile sizes"
     
-    # Add note to document decisions
-    python -m minisweagent.tools.strategy_manager note \
-      "Prioritized memory optimizations based on profiling results"
-    
-    # View only successful strategies
-    python -m minisweagent.tools.strategy_manager show --status successful
-    
-    # View only pending strategies
-    python -m minisweagent.tools.strategy_manager show --status pending
+    # Add note to document insights or decisions
+    optool note "Prioritized memory optimizations based on profiling results showing memory-bound bottleneck"
+    ```
+
+    **Note**: The strategy file (.optimization_strategies.md) can be created manually or using the CLI tool:
+    ```bash
+    # Alternative: Use CLI tool to create initial file (if needed)
+    python -m minisweagent.tools.strategy_manager create \
+      --baseline-metrics "Bandwidth:152.3 GB/s" \
+      --baseline-log "baseline_benchmark.log" \
+      --strategies "Memory Coalescing|Optimize memory access patterns|+20-30%|Memory-bound"
     ```
 
     ### Create a new file:

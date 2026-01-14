@@ -7,6 +7,14 @@ export function activate(context: vscode.ExtensionContext) {
     console.log('mini-swe-agent extension is now active');
     
     const agentManager = new AgentManager(context);
+    
+    // Initialize strategy manager with workspace path
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (workspaceFolders && workspaceFolders.length > 0) {
+        const workspacePath = workspaceFolders[0].uri.fsPath;
+        agentManager.initStrategyManager(workspacePath);
+    }
+    
     const sidebarProvider = new SidebarProvider(context, agentManager);
     const panelProvider = new PanelProvider(context, agentManager);
     
@@ -82,6 +90,13 @@ export function activate(context: vscode.ExtensionContext) {
             context.globalState.update('mini-swe-agent.hasShownWelcome', true);
         });
     }
+    
+    // Register cleanup
+    context.subscriptions.push({
+        dispose: () => {
+            agentManager.dispose();
+        }
+    });
 }
 
 export function deactivate() {

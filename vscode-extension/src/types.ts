@@ -28,6 +28,8 @@ export interface AgentState {
     };
     currentStrategies: Strategy[];
     waitingForStrategySelection: boolean;
+    strategyData?: StrategyListData | null;
+    hasPendingUserMessage?: boolean;
 }
 
 export interface AgentMessage {
@@ -44,6 +46,10 @@ export interface AgentMessage {
     actionCommand?: string;
     actionReason?: string;
     actionTimestamp?: Date;
+    
+    // Message type
+    messageType?: 'chat' | 'strategy_explore' | 'action' | 'system';
+    relatedStrategyIndices?: number[];
 }
 
 export interface JSONRPCMessage {
@@ -115,3 +121,24 @@ export interface StrategyGeneratedNotification {
     cost: number;
 }
 
+// Optimization strategy types (from .optimization_strategies.md file)
+export interface OptimizationStrategy {
+    index: number;
+    name: string;
+    status: 'baseline' | 'pending' | 'exploring' | 'successful' | 'failed' | 'partial' | 'skipped' | 'combined';
+    description: string;
+    expected?: string;
+    target?: string;
+    result?: string;
+    details?: string;
+}
+
+export interface StrategyListData {
+    exists: boolean;
+    baseline?: {
+        metrics: Record<string, string>;
+        logFile?: string;
+    };
+    strategies: OptimizationStrategy[];
+    notes: string[];
+}

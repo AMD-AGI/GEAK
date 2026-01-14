@@ -55,6 +55,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'skipStrategy':
                     this.agentManager.handleStrategySelection(null, 'skip');
                     break;
+                case 'refreshStrategies':
+                    this.agentManager.refreshStrategyList();
+                    break;
+                case 'exploreStrategies':
+                    this.agentManager.exploreStrategies(message.indices || []);
+                    break;
             }
         });
         
@@ -65,6 +71,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private updateWebview(state: AgentState) {
         if (this.view) {
             const sidebarData = this.extractSidebarData(state);
+            console.log('[SidebarProvider] Updating webview with state:', JSON.stringify(sidebarData, null, 2));
             this.view.webview.postMessage({
                 type: 'stateUpdate',
                 state: sidebarData
@@ -82,7 +89,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             recentTasks: state.taskHistory.slice(0, 5),
             hasPendingAction: !!state.pendingAction,
             currentStrategies: state.currentStrategies,
-            waitingForStrategySelection: state.waitingForStrategySelection
+            waitingForStrategySelection: state.waitingForStrategySelection,
+            strategyData: state.strategyData
         };
     }
     
@@ -304,6 +312,149 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             flex: 1;
         }
         
+        /* Optimization strategies section */
+        .optimization-section {
+            margin: 12px 0;
+            padding: 12px;
+            background: var(--vscode-editor-background);
+            border-radius: 6px;
+            border: 1px solid var(--vscode-input-border);
+        }
+        
+        .optimization-section .section-title {
+            margin: 0 0 12px 0;
+            position: relative;
+        }
+        
+        .refresh-btn {
+            padding: 4px 8px;
+            font-size: 14px;
+            min-width: 28px;
+            margin-left: auto;
+        }
+        
+        .optimization-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .optimization-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 8px;
+            margin-bottom: 6px;
+            background: var(--vscode-textBlockQuote-background);
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+        
+        .optimization-item:hover {
+            background: var(--vscode-list-hoverBackground);
+        }
+        
+        .optimization-item.disabled {
+            opacity: 0.6;
+        }
+        
+        .optimization-item.disabled:hover {
+            background: transparent;
+        }
+        
+        .optimization-checkbox {
+            margin-top: 2px;
+            cursor: pointer;
+        }
+        
+        .optimization-checkbox:disabled {
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+        
+        .optimization-content {
+            flex: 1;
+            min-width: 0;
+        }
+        
+        .optimization-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 2px;
+        }
+        
+        .optimization-name {
+            font-weight: 500;
+            font-size: 0.9em;
+        }
+        
+        .optimization-status {
+            font-size: 0.75em;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: 500;
+        }
+        
+        .status-pending {
+            background: var(--vscode-charts-yellow);
+            color: var(--vscode-editor-background);
+        }
+        
+        .status-exploring {
+            background: var(--vscode-charts-blue);
+            color: var(--vscode-editor-background);
+        }
+        
+        .status-successful {
+            background: var(--vscode-charts-green);
+            color: var(--vscode-editor-background);
+        }
+        
+        .status-failed {
+            background: var(--vscode-charts-red);
+            color: var(--vscode-editor-background);
+        }
+        
+        .status-partial {
+            background: var(--vscode-charts-orange);
+            color: var(--vscode-editor-background);
+        }
+        
+        .status-combined {
+            background: var(--vscode-charts-purple);
+            color: var(--vscode-editor-background);
+        }
+        
+        .status-skipped {
+            background: var(--vscode-descriptionForeground);
+            color: var(--vscode-editor-background);
+        }
+        
+        .optimization-description {
+            font-size: 0.85em;
+            opacity: 0.7;
+            line-height: 1.3;
+            word-break: break-word;
+        }
+        
+        .optimization-result {
+            margin-top: 4px;
+            font-size: 0.8em;
+            padding: 4px 6px;
+            background: var(--vscode-textBlockQuote-background);
+            border-left: 2px solid var(--vscode-textBlockQuote-border);
+            color: var(--vscode-descriptionForeground);
+            font-style: italic;
+            line-height: 1.3;
+        }
+        
+        .empty-strategies {
+            text-align: center;
+            padding: 20px;
+            opacity: 0.6;
+            font-size: 0.9em;
+        }
+        
         .task-card {
             padding: 10px;
             border-radius: 4px;
@@ -445,6 +596,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         </div>
     </div>
     
+    <!-- Optimization Strategies -->
+    <div id="optimization-section" class="optimization-section" style="display: none;">
+        <div class="section-title">
+            <span>🎯 Optimization Strategies</span>
+            <button onclick="refreshStrategies()" class="refresh-btn" title="Refresh">↻</button>
+        </div>
+        <div id="optimization-list" class="optimization-list"></div>
+        <div class="strategy-buttons">
+            <button onclick="exploreSelected()" class="primary">🚀 Explore Selected</button>
+        </div>
+    </div>
+    
     <!-- Recent Tasks -->
     <div class="section-title">
         <span>Recent Tasks</span>
@@ -467,7 +630,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         
         window.addEventListener('message', event => {
             const message = event.data;
+            console.log('[Webview] Received message:', message);
             if (message.type === 'stateUpdate') {
+                console.log('[Webview] State update:', message.state);
                 updateUI(message.state);
             }
         });
@@ -516,6 +681,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             
             // Update strategy section
             updateStrategies(state.waitingForStrategySelection, state.currentStrategies || []);
+            
+            // Update optimization strategies section
+            updateOptimizationStrategies(state.strategyData);
             
             // Update tasks
             updateTasks(state.currentTask, state.recentTasks || []);
@@ -639,6 +807,84 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         
         function stopAgent() {
             vscode.postMessage({ command: 'stop' });
+        }
+        
+        let selectedOptimizationIndices = new Set();
+        
+        function updateOptimizationStrategies(strategyData) {
+            console.log('[Webview] updateOptimizationStrategies called with:', strategyData);
+            const optimizationSection = document.getElementById('optimization-section');
+            const optimizationList = document.getElementById('optimization-list');
+            
+            if (!strategyData || !strategyData.exists) {
+                console.log('[Webview] Strategy data not exists, hiding section');
+                optimizationSection.style.display = 'none';
+                return;
+            }
+            
+            console.log('[Webview] Strategy data exists, showing section');
+            
+            optimizationSection.style.display = 'block';
+            
+            // Show all strategies, not just pending ones
+            const strategies = strategyData.strategies;
+            
+            if (strategies.length === 0) {
+                optimizationList.innerHTML = '<div class="empty-strategies">No strategies found</div>';
+                return;
+            }
+            
+            optimizationList.innerHTML = strategies.map(strategy => {
+                const isPending = strategy.status === 'pending';
+                const isDisabled = !isPending;
+                
+                return \`
+                <div class="optimization-item \${isDisabled ? 'disabled' : ''}">
+                    <input 
+                        type="checkbox" 
+                        class="optimization-checkbox" 
+                        id="opt-\${strategy.index}"
+                        onchange="toggleOptimizationStrategy(\${strategy.index})"
+                        \${selectedOptimizationIndices.has(strategy.index) ? 'checked' : ''}
+                        \${isDisabled ? 'disabled' : ''}
+                    />
+                    <label for="opt-\${strategy.index}" class="optimization-content">
+                        <div class="optimization-header">
+                            <span class="optimization-name">#\${strategy.index} \${escapeHtml(strategy.name)}</span>
+                            <span class="optimization-status status-\${strategy.status}">\${strategy.status}</span>
+                        </div>
+                        <div class="optimization-description">\${escapeHtml(strategy.description)}</div>
+                        \${strategy.result ? \`<div class="optimization-result">\${escapeHtml(strategy.result)}</div>\` : ''}
+                    </label>
+                </div>
+                \`;
+            }).join('');
+        }
+        
+        function toggleOptimizationStrategy(index) {
+            if (selectedOptimizationIndices.has(index)) {
+                selectedOptimizationIndices.delete(index);
+            } else {
+                selectedOptimizationIndices.add(index);
+            }
+        }
+        
+        function refreshStrategies() {
+            vscode.postMessage({ command: 'refreshStrategies' });
+        }
+        
+        function exploreSelected() {
+            if (selectedOptimizationIndices.size === 0) {
+                return;
+            }
+            
+            vscode.postMessage({ 
+                command: 'exploreStrategies', 
+                indices: Array.from(selectedOptimizationIndices)
+            });
+            
+            // Clear selection
+            selectedOptimizationIndices.clear();
         }
         
         function setMode(mode) {
