@@ -29,12 +29,16 @@ export class StrategyManagerClient {
     private currentData?: StrategyListData;
     private changeHandlers: ((data: StrategyListData) => void)[] = [];
     private pythonBridgePath: string;
+    private strategyFilePath: string;
     
     constructor(
         private workspacePath: string,
-        extensionPath: string
+        extensionPath: string,
+        strategyFilePath: string
     ) {
         this.pythonBridgePath = path.join(extensionPath, 'python', 'strategy_bridge.py');
+        this.strategyFilePath = strategyFilePath;
+        console.log('[StrategyManagerClient] Initialized with strategy file path:', strategyFilePath);
     }
     
     /**
@@ -148,11 +152,16 @@ export class StrategyManagerClient {
      * Call Python bridge to load strategy list
      */
     private async loadStrategyList(): Promise<StrategyListData> {
-        const strategyFilePath = path.join(this.workspacePath, '.optimization_strategies.md');
-        const command = `python ${this.pythonBridgePath} get ${strategyFilePath}`;
+        // Resolve file path: if absolute, use as-is; if relative, join with workspace path
+        const resolvedPath = path.isAbsolute(this.strategyFilePath)
+            ? this.strategyFilePath
+            : path.join(this.workspacePath, this.strategyFilePath);
+        
+        const command = `python ${this.pythonBridgePath} get ${resolvedPath}`;
         
         console.log('[StrategyManager] Executing command:', command);
-        console.log('[StrategyManager] Strategy file path:', strategyFilePath);
+        console.log('[StrategyManager] Configured path:', this.strategyFilePath);
+        console.log('[StrategyManager] Resolved path:', resolvedPath);
         
         try {
             const { stdout, stderr } = await execAsync(command);

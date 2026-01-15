@@ -30,6 +30,13 @@ export interface AgentState {
     waitingForStrategySelection: boolean;
     strategyData?: StrategyListData | null;
     hasPendingUserMessage?: boolean;
+    strategyFilePath?: StrategyFilePathInfo;
+}
+
+export interface StrategyFilePathInfo {
+    relative: string;
+    absolute: string;
+    isModifiable: boolean;
 }
 
 export interface AgentMessage {
@@ -75,6 +82,7 @@ export interface InitializeParams {
             cost_limit?: number;
             step_limit?: number;
             whitelist_actions?: string[];
+            strategy_file_path?: string;
         };
         model?: Record<string, any>;
         env?: Record<string, any>;
@@ -141,4 +149,5 @@ export interface StrategyListData {
     };
     strategies: OptimizationStrategy[];
     notes: string[];
+    filePath?: string;  // Actual file path from Python agent
 }

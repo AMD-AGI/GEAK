@@ -32,7 +32,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
         
         // Handle messages from webview
-        webviewView.webview.onDidReceiveMessage(message => {
+        webviewView.webview.onDidReceiveMessage(async message => {
             switch (message.command) {
                 case 'start':
                     vscode.commands.executeCommand('mini-swe-agent.start');
@@ -60,6 +60,62 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'exploreStrategies':
                     this.agentManager.exploreStrategies(message.indices || []);
+                    break;
+                case 'editStrategyPath':
+                    {
+                        const pathInfo = this.agentManager.getStrategyFilePath();
+                        if (!pathInfo.isModifiable) {
+                            vscode.window.showWarningMessage('Cannot change path while agent is running.');
+                            return;
+                        }
+                        
+                        const newPath = await vscode.window.showInputBox({
+                            prompt: 'Enter strategy file path (relative to workspace or absolute path)',
+                            value: pathInfo.relative,
+                            placeHolder: '.optimization_strategies.md or /absolute/path/to/file.md',
+                            validateInput: (value) => {
+                                if (!value) { return 'Path cannot be empty'; }
+                                return null;
+                            }
+                        });
+                        
+                        if (newPath && newPath !== pathInfo.relative) {
+                            await this.agentManager.updateStrategyFilePath(newPath);
+                        }
+                    }
+                    break;
+                case 'openStrategyFile':
+                    {
+                        const fs = require('fs');
+                        let filePath: string;
+                        
+                        // Try to get path from strategy data (from Python agent) first
+                        const state = this.agentManager.getState();
+                        if (state.strategyData?.filePath) {
+                            filePath = state.strategyData.filePath;
+                            console.log('[SidebarProvider] Using file path from Python agent:', filePath);
+                        } else {
+                            // Fallback to calculated path
+                            const pathInfo = this.agentManager.getStrategyFilePath();
+                            filePath = pathInfo.absolute;
+                            console.log('[SidebarProvider] Using calculated file path:', filePath);
+                        }
+                        
+                        const uri = vscode.Uri.file(filePath);
+                        
+                        if (fs.existsSync(filePath)) {
+                            await vscode.window.showTextDocument(uri);
+                        } else {
+                            const choice = await vscode.window.showWarningMessage(
+                                `Strategy file does not exist: ${filePath}\nCreate it?`,
+                                'Create',
+                                'Cancel'
+                            );
+                            if (choice === 'Create') {
+                                vscode.window.showInformationMessage('Use agent command: optool create ...');
+                            }
+                        }
+                    }
                     break;
             }
         });
@@ -90,7 +146,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             hasPendingAction: !!state.pendingAction,
             currentStrategies: state.currentStrategies,
             waitingForStrategySelection: state.waitingForStrategySelection,
-            strategyData: state.strategyData
+            strategyData: state.strategyData,
+            strategyFilePath: state.strategyFilePath
         };
     }
     
@@ -543,6 +600,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             color: var(--vscode-charts-yellow);
             text-align: center;
         }
+        
+        .strategy-file-path {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 8px;
+            margin-bottom: 8px;
+            background: var(--vscode-editor-inactiveSelectionBackground);
+            border-radius: 4px;
+            font-size: 11px;
+        }
+        
+        .path-text {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--vscode-descriptionForeground);
+        }
+        
+        .path-button {
+            padding: 2px 6px;
+            font-size: 10px;
+            min-width: auto;
+        }
+        
+        .lock-icon {
+            opacity: 0.7;
+            font-size: 10px;
+        }
+        
+        button:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 <body>
@@ -600,7 +692,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     <div id="optimization-section" class="optimization-section" style="display: none;">
         <div class="section-title">
             <span>🎯 Optimization Strategies</span>
-            <button onclick="refreshStrategies()" class="refresh-btn" title="Refresh">↻</button>
+            <div style="display: flex; gap: 4px;">
+                <button onclick="refreshStrategies()" class="path-button" title="Refresh strategy list">↻</button>
+                <button id="edit-path-btn" onclick="editStrategyPath()" class="path-button" title="Change file path">⚙️</button>
+            </div>
+        </div>
+        <div id="strategy-file-path" class="strategy-file-path">
+            <span>📄</span>
+            <span class="path-text" id="path-text" title=""></span>
+            <button onclick="openStrategyFile()" class="path-button">Open</button>
+            <span class="lock-icon" id="path-lock-icon"></span>
         </div>
         <div id="optimization-list" class="optimization-list"></div>
         <div class="strategy-buttons">
@@ -681,6 +782,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             
             // Update strategy section
             updateStrategies(state.waitingForStrategySelection, state.currentStrategies || []);
+            
+            // Update strategy file path (pass strategy data to get actual file path)
+            updateStrategyFilePath(state.strategyFilePath, state.strategyData);
             
             // Update optimization strategies section
             updateOptimizationStrategies(state.strategyData);
@@ -885,6 +989,50 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             
             // Clear selection
             selectedOptimizationIndices.clear();
+        }
+        
+        function updateStrategyFilePath(pathInfo, strategyData) {
+            const pathText = document.getElementById('path-text');
+            const editBtn = document.getElementById('edit-path-btn');
+            const lockIcon = document.getElementById('path-lock-icon');
+            
+            // If strategy data has actual file path from Python agent, use that
+            if (strategyData && strategyData.filePath) {
+                const actualPath = strategyData.filePath;
+                const parts = actualPath.split('/');
+                const fileName = parts[parts.length - 1];
+                
+                pathText.textContent = fileName;
+                pathText.title = actualPath;
+                
+                // When agent is running with actual file, lock is always on
+                lockIcon.textContent = '🔒';
+                lockIcon.title = 'Locked (agent running)';
+                editBtn.disabled = true;
+            } else if (pathInfo) {
+                // Fallback to calculated path info
+                pathText.textContent = pathInfo.relative;
+                pathText.title = pathInfo.absolute;
+                
+                // Update lock icon and button state
+                if (pathInfo.isModifiable) {
+                    lockIcon.textContent = '✏️';
+                    lockIcon.title = 'Editable';
+                    editBtn.disabled = false;
+                } else {
+                    lockIcon.textContent = '🔒';
+                    lockIcon.title = 'Locked (agent running)';
+                    editBtn.disabled = true;
+                }
+            }
+        }
+        
+        function editStrategyPath() {
+            vscode.postMessage({ command: 'editStrategyPath' });
+        }
+        
+        function openStrategyFile() {
+            vscode.postMessage({ command: 'openStrategyFile' });
         }
         
         function setMode(mode) {

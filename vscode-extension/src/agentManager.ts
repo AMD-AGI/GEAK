@@ -1,10 +1,13 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { PythonBridge } from './pythonBridge';
-import { AgentState, AgentMessage, InitializeParams, ConfirmationResponse, Task, StrategySelectionResponse } from './types';
+import { AgentState, AgentMessage, InitializeParams, ConfirmationResponse, Task, StrategySelectionResponse, StrategyFilePathInfo } from './types';
 import { StrategyManagerClient, StrategyListData } from './strategyManager';
 
 export class AgentManager {
     private bridge: PythonBridge;
+    private strategyFilePath: string = '.optimization_strategies.md';
+    private workspacePath: string = '';
     private state: AgentState = {
         status: 'idle',
         currentStep: 0,
@@ -28,6 +31,7 @@ export class AgentManager {
     constructor(private context: vscode.ExtensionContext) {
         this.bridge = new PythonBridge(context);
         this.setupBridgeHandlers();
+        this.setupConfigWatcher();
     }
     
     private setupBridgeHandlers() {
@@ -302,6 +306,13 @@ export class AgentManager {
             return;
         }
         
+        // Update workspace path and strategy file path (may have changed since initialization)
+        this.workspacePath = workspaceFolder.uri.fsPath;
+        this.strategyFilePath = config.get('strategyFilePath', '.optimization_strategies.md');
+        
+        console.log('[AgentManager] Starting agent with strategy file path:', this.strategyFilePath);
+        console.log('[AgentManager] Workspace path:', this.workspacePath);
+        
         // Start Python bridge
         await this.bridge.start();
         
@@ -323,7 +334,8 @@ export class AgentManager {
                         '^ls', '^cat', '^pwd',
                         '^cd .+ && ls($| .*)',
                         '^cd .+ && cat($| .*)'
-                    ])
+                    ]),
+                    strategy_file_path: this.strategyFilePath
                 },
                 model: {
                     api_key: config.get('apiKey', ''),
@@ -353,7 +365,8 @@ export class AgentManager {
             currentStrategies: [],
             waitingForStrategySelection: false,
             strategyData: this.state.strategyData,
-            hasPendingUserMessage: this.state.hasPendingUserMessage
+            hasPendingUserMessage: this.state.hasPendingUserMessage,
+            strategyFilePath: this.getStrategyFilePath()
         };
         this.emitStateChange();
         
@@ -473,9 +486,19 @@ export class AgentManager {
      */
     initStrategyManager(workspacePath: string): void {
         console.log('[AgentManager] Initializing strategy manager for workspace:', workspacePath);
+        
+        // Store workspace path for later use
+        this.workspacePath = workspacePath;
+        
+        // Read strategy file path from config
+        const config = vscode.workspace.getConfiguration('mini-swe-agent');
+        this.strategyFilePath = config.get('strategyFilePath', '.optimization_strategies.md');
+        
+        console.log('[AgentManager] Creating StrategyManagerClient with path:', this.strategyFilePath);
         this.strategyManager = new StrategyManagerClient(
             workspacePath,
-            this.context.extensionPath
+            this.context.extensionPath,
+            this.strategyFilePath
         );
         
         // Listen to strategy data changes
@@ -489,6 +512,10 @@ export class AgentManager {
         // Start event-driven mode
         console.log('[AgentManager] Starting event-driven mode...');
         this.strategyManager.startEventDriven();
+        
+        // Update initial state with path info
+        this.state.strategyFilePath = this.getStrategyFilePath();
+        this.emitStateChange();
     }
     
     /**
@@ -561,6 +588,103 @@ export class AgentManager {
                 `Message added to chat history. Agent will process it when ready.`
             );
         }
+    }
+    
+    /**
+     * Get strategy file path info
+     */
+    getStrategyFilePath(): StrategyFilePathInfo {
+        const isRunning = this.state.status === 'running' || this.state.status.includes('waiting');
+        
+        // If path is absolute, use it directly; otherwise join with workspace path
+        const absolutePath = path.isAbsolute(this.strategyFilePath) 
+            ? this.strategyFilePath
+            : (this.workspacePath ? path.join(this.workspacePath, this.strategyFilePath) : this.strategyFilePath);
+        
+        return {
+            relative: this.strategyFilePath,
+            absolute: absolutePath,
+            isModifiable: !isRunning
+        };
+    }
+    
+    /**
+     * Update strategy file path (only when agent is not running)
+     */
+    async updateStrategyFilePath(newPath: string): Promise<boolean> {
+        const isRunning = this.state.status === 'running' || this.state.status.includes('waiting');
+        
+        if (isRunning) {
+            // Agent is running, prompt user to stop
+            const choice = await vscode.window.showWarningMessage(
+                `Cannot change path while agent is running. Restart agent to use: ${newPath}`,
+                'Stop & Change',
+                'Cancel'
+            );
+            
+            if (choice === 'Stop & Change') {
+                this.stopAgent();
+                // Continue with the change
+            } else {
+                return false;
+            }
+        }
+        
+        // Update configuration
+        const config = vscode.workspace.getConfiguration('mini-swe-agent');
+        await config.update('strategyFilePath', newPath, vscode.ConfigurationTarget.Workspace);
+        
+        // Update local variable
+        this.strategyFilePath = newPath;
+        
+        // Update strategy manager
+        if (this.strategyManager && this.workspacePath) {
+            this.strategyManager.stop();
+            console.log('[AgentManager] Recreating StrategyManagerClient with new path:', this.strategyFilePath);
+            this.strategyManager = new StrategyManagerClient(
+                this.workspacePath,
+                this.context.extensionPath,
+                this.strategyFilePath
+            );
+            this.strategyManager.onChange((data) => {
+                console.log('[AgentManager] Strategy data changed:', JSON.stringify(data, null, 2));
+                this.state.strategyData = data;
+                this.emitStateChange();
+            });
+            this.strategyManager.startEventDriven();
+        }
+        
+        // Update state
+        this.state.strategyFilePath = this.getStrategyFilePath();
+        this.emitStateChange();
+        
+        vscode.window.showInformationMessage(`Strategy file path updated to: ${newPath}`);
+        return true;
+    }
+    
+    /**
+     * Setup config watcher
+     */
+    private setupConfigWatcher(): void {
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('mini-swe-agent.strategyFilePath')) {
+                const newPath = vscode.workspace.getConfiguration('mini-swe-agent').get('strategyFilePath', '.optimization_strategies.md');
+                const isRunning = this.state.status === 'running' || this.state.status.includes('waiting');
+                
+                if (isRunning && newPath !== this.strategyFilePath) {
+                    vscode.window.showWarningMessage(
+                        `Strategy path changed in settings, but agent is still using: ${this.strategyFilePath}. Restart to apply.`,
+                        'Restart Now'
+                    ).then(choice => {
+                        if (choice === 'Restart Now') {
+                            this.stopAgent();
+                            // User needs to manually restart
+                            vscode.window.showInformationMessage('Agent stopped. Please start it again to use the new path.');
+                        }
+                    });
+                }
+            }
+        });
     }
     
     /**

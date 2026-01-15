@@ -97,8 +97,20 @@ class StrategyList:
 class StrategyManager:
     """Strategy list manager."""
     
-    def __init__(self, filepath: Path | str = ".optimization_strategies.md"):
+    def __init__(
+        self, 
+        filepath: Path | str = ".optimization_strategies.md",
+        on_change_callback = None
+    ):
+        """Initialize strategy manager.
+        
+        Args:
+            filepath: Path to strategy markdown file
+            on_change_callback: Optional callback function called when strategies change.
+                                Receives StrategyList as argument.
+        """
         self.filepath = Path(filepath)
+        self.on_change_callback = on_change_callback
     
     def create(self, baseline: Baseline, strategies: list[Strategy]) -> None:
         """Create new strategy list file."""
@@ -117,6 +129,15 @@ class StrategyManager:
         """Save strategy list to markdown file."""
         content = strategy_list.to_markdown()
         self.filepath.write_text(content)
+        
+        # Trigger callback if provided
+        if self.on_change_callback:
+            try:
+                self.on_change_callback(strategy_list)
+            except Exception as e:
+                # Don't let callback errors break the save operation
+                import sys
+                print(f"Warning: on_change_callback failed: {e}", file=sys.stderr)
     
     def exists(self) -> bool:
         """Check if strategy file exists."""

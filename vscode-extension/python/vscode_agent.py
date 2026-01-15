@@ -138,10 +138,14 @@ class VSCodeBridge:
 class VSCodeAgent(InteractiveAgent):
     """Agent adapted for VS Code - replaces terminal I/O with JSON-RPC."""
 
-    def __init__(self, bridge: VSCodeBridge, *args, **kwargs):
+    def __init__(self, bridge: VSCodeBridge, *args, strategy_file_path: str = ".optimization_strategies.md", **kwargs):
         self.bridge = bridge
+        self.strategy_file_path = strategy_file_path
         super().__init__(*args, **kwargs)
         self._strategy_manager = None  # Lazy initialization
+        
+        import sys
+        print(f"[DEBUG] VSCodeAgent initialized with strategy_file_path: {strategy_file_path}", file=sys.stderr)
 
     def add_message(self, role: str, content: str, **kwargs):
         """Override to send messages to VS Code instead of console."""
@@ -226,7 +230,10 @@ class VSCodeAgent(InteractiveAgent):
             
             # Get working directory from env config or use current directory
             cwd = self.env.config.cwd or os.getcwd()
-            strategy_file = Path(cwd) / '.optimization_strategies.md'
+            strategy_file = Path(cwd) / self.strategy_file_path
+            
+            print(f"[DEBUG] Creating StrategyManager with file: {strategy_file}", file=sys.stderr)
+            
             self._strategy_manager = StrategyManager(
                 filepath=strategy_file,
                 on_change_callback=self._on_strategy_changed
@@ -245,11 +252,14 @@ class VSCodeAgent(InteractiveAgent):
     def _on_strategy_changed(self, strategy_list):
         """Callback when strategy list changes - push to VSCode."""
         try:
+            manager = self._get_strategy_manager()
+            
             result = {
                 "exists": True,
                 "strategies": [],
                 "baseline": None,
-                "notes": strategy_list.notes
+                "notes": strategy_list.notes,
+                "filePath": str(manager.filepath)  # Add actual file path (use correct attribute)
             }
             
             if strategy_list.baseline:
@@ -271,7 +281,7 @@ class VSCodeAgent(InteractiveAgent):
                 })
             
             self.bridge.send_notification("agent/strategyData", result)
-            print(f"[DEBUG] Sent strategy data to VSCode: {len(result['strategies'])} strategies", file=sys.stderr)
+            print(f"[DEBUG] Sent strategy data to VSCode: {len(result['strategies'])} strategies, file: {result['filePath']}", file=sys.stderr)
             
         except Exception as e:
             print(f"[ERROR] Failed to send strategy data: {e}", file=sys.stderr)
@@ -302,6 +312,8 @@ class VSCodeAgent(InteractiveAgent):
             return self._optool_show(manager, parts[2:])
         elif subcommand == "note":
             return self._optool_note(manager, parts[2:])
+        elif subcommand == "path":
+            return self._optool_path(manager)
         elif subcommand == "help" or subcommand == "--help":
             return self._optool_help()
         else:
@@ -341,6 +353,10 @@ Subcommands:
   note <text>
       Add a note to the strategy list
       Example: optool note "Combined strategies 1 and 3 work well together"
+  
+  path
+      Show current strategy file path (read-only)
+      Note: Path is fixed for this agent session. Restart agent to change.
   
   help
       Show this help message
@@ -532,7 +548,12 @@ Subcommands:
         manager.add_note(note_text)
         return f"✓ Added note: {note_text}"
     
-    
+    def _optool_path(self, manager) -> str:
+        """Show current strategy file path (read-only)."""
+        return f"""Strategy file path: {str(manager.filepath)}
+Configured path: {self.strategy_file_path}
+
+Note: Path is fixed for this agent session. Restart agent to change."""
     
     def _generate_strategies_dummy(self, context: str) -> list[dict]:
         """Generate strategy list (dummy implementation)."""

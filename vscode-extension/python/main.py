@@ -100,14 +100,22 @@ def main():
         if "api_key" in model_config and "api_key" not in model_config.get("model_kwargs", {}):
             model_config.setdefault("model_kwargs", {})["api_key"] = model_config.pop("api_key")
 
+        # Get agent configuration (includes strategy_file_path)
+        agent_config = config.get("agent", {})
+        
         # Create model and environment
         print(f"[DEBUG] Creating model and environment", file=sys.stderr)
         model = get_model(model_name, model_config)
         env = LocalEnvironment(cwd=workspace_path, **config.get("env", {}))
 
-        # Create agent
+        # Create agent (strategy_file_path is passed via **agent_config)
         print(f"[DEBUG] Creating agent", file=sys.stderr)
-        agent = VSCodeAgent(bridge=bridge, model=model, env=env, **config.get("agent", {}))
+        agent = VSCodeAgent(
+            bridge=bridge, 
+            model=model, 
+            env=env,
+            **agent_config
+        )
         agent_ref["agent"] = agent  # Store reference for mode switching
 
         # Run agent

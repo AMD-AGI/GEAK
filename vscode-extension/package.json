@@ -125,6 +125,12 @@
           "type": "string",
           "default": "",
           "description": "Path to Python executable (leave empty to auto-detect)"
+        },
+        "mini-swe-agent.strategyFilePath": {
+          "type": "string",
+          "default": ".optimization_strategies.md",
+          "description": "Path to the optimization strategies file (relative to workspace or absolute path). Restart agent to apply changes.",
+          "scope": "resource"
         }
       }
     }
