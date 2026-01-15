@@ -402,6 +402,21 @@ export class AgentManager {
         vscode.window.showInformationMessage('Agent stopped');
     }
     
+    /**
+     * Clear message history (for starting a fresh task)
+     */
+    clearMessages(): void {
+        this.state.messages = [];
+        this.emitStateChange();
+    }
+    
+    /**
+     * Check if there are any messages in history
+     */
+    hasMessages(): boolean {
+        return this.state.messages.length > 0;
+    }
+    
     setMode(mode: 'confirm' | 'yolo' | 'human'): void {
         this.state.mode = mode;
         this.bridge.sendNotification('agent/setMode', { mode });

@@ -20,6 +20,22 @@ export class PanelProvider {
         return this.panel !== undefined;
     }
     
+    /**
+     * Check if panel has messages displayed
+     */
+    public hasMessages(): boolean {
+        const state = this.agentManager.getState();
+        return state.messages.length > 0;
+    }
+    
+    /**
+     * Clear messages and reset to task input view
+     */
+    public clearAndReset(): void {
+        this.agentManager.clearMessages();
+        // Panel will auto-update via state change listener
+    }
+    
     public show(taskId?: string) {
         if (this.panel) {
             this.panel.reveal(vscode.ViewColumn.One);
@@ -709,27 +725,36 @@ export class PanelProvider {
             const taskInput = document.getElementById('task-input');
             const startBtn = document.getElementById('start-task-btn');
             
-            // Determine which area to show
-            if (state.status === 'idle' && (!state.messages || state.messages.length === 0)) {
+            // Determine if agent can start new task
+            const canStartNewTask = state.status === 'idle' || 
+                                   state.status === 'finished' || 
+                                   state.status === 'error';
+            
+            // Show task input if can start new task AND no messages
+            if (canStartNewTask && (!state.messages || state.messages.length === 0)) {
                 // Show task input area
                 taskInputArea.style.display = 'block';
                 messagesContainer.style.display = 'none';
                 emptyState.style.display = 'none';
                 
-                // Reset input if idle
+                // Reset input
                 taskInput.value = '';
                 startBtn.disabled = false;
                 startBtn.textContent = '▶ Start Agent';
                 
                 // Auto-focus on input
                 setTimeout(() => taskInput.focus(), 100);
-            } else if (state.messages && state.messages.length > 0) {
+            } 
+            // Show messages if there are any
+            else if (state.messages && state.messages.length > 0) {
                 // Show messages
                 taskInputArea.style.display = 'none';
                 messagesContainer.style.display = 'block';
                 emptyState.style.display = 'none';
-            } else {
-                // Show empty state (fallback)
+            } 
+            // Fallback - show empty state
+            else {
+                // Show empty state
                 taskInputArea.style.display = 'none';
                 messagesContainer.style.display = 'none';
                 emptyState.style.display = 'flex';

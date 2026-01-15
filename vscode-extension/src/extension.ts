@@ -75,8 +75,53 @@ export function activate(context: vscode.ExtensionContext) {
             agentManager.setMode('human');
         }),
         
-        vscode.commands.registerCommand('mini-swe-agent.showPanel', (taskId?: string) => {
-            panelProvider.show(taskId);
+        vscode.commands.registerCommand('mini-swe-agent.showPanel', async (taskId?: string) => {
+            const state = agentManager.getState();
+            
+            // Check if agent is in a state where we can start a new task
+            const canStartNewTask = state.status === 'idle' || 
+                                   state.status === 'finished' || 
+                                   state.status === 'error';
+            
+            if (!canStartNewTask) {
+                // Agent is running, just show the panel normally
+                panelProvider.show(taskId);
+                return;
+            }
+            
+            // Agent can start new task - check if panel is already open
+            const isPanelOpen = panelProvider.isVisible();
+            
+            if (!isPanelOpen) {
+                // Panel not open - clear messages and show fresh panel
+                agentManager.clearMessages();
+                panelProvider.show(taskId);
+                return;
+            }
+            
+            // Panel is already open - check if there are history messages
+            const hasHistory = agentManager.hasMessages();
+            
+            if (!hasHistory) {
+                // No history - just focus the panel
+                panelProvider.show(taskId);
+                return;
+            }
+            
+            // Panel open + has history - ask user for confirmation
+            const choice = await vscode.window.showWarningMessage(
+                'Starting a new task will clear the current chat history. Do you want to continue?',
+                { modal: true },
+                'Start New Task',
+                'Cancel'
+            );
+            
+            if (choice === 'Start New Task') {
+                // User confirmed - clear history and show task input
+                agentManager.clearMessages();
+                panelProvider.show(taskId);
+            }
+            // If cancelled, do nothing (keep panel as-is)
         })
     );
     
