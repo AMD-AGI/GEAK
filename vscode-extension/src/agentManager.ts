@@ -235,6 +235,7 @@ export class AgentManager {
         this.bridge.onNotification('agent/strategyData', (params) => {
             console.log('[AgentManager] Received strategy data from Python agent:', params);
             this.state.strategyData = params;
+            console.log('[AgentManager] Updated state with Agent strategy data');
             this.emitStateChange();
         });
         
@@ -518,9 +519,9 @@ export class AgentManager {
         
         // Listen to strategy data changes
         this.strategyManager.onChange((data) => {
-            console.log('[AgentManager] Strategy data changed:', JSON.stringify(data, null, 2));
+            console.log('[AgentManager] StrategyManagerClient data loaded:', JSON.stringify(data, null, 2));
             this.state.strategyData = data;
-            console.log('[AgentManager] Emitting state change...');
+            console.log('[AgentManager] Updated state with StrategyManagerClient data');
             this.emitStateChange();
         });
         
@@ -551,9 +552,9 @@ export class AgentManager {
             return;
         }
         
-        const strategyData = this.strategyManager?.getCurrentData();
+        const strategyData = this.state.strategyData;
         if (!strategyData || !strategyData.exists) {
-            vscode.window.showWarningMessage('No strategy file found');
+            vscode.window.showWarningMessage('Strategy data not available. Please ensure the agent is running.');
             return;
         }
         
