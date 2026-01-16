@@ -79,6 +79,7 @@ export interface InitializeParams {
     config: {
         agent?: {
             mode?: string;
+            confirm_exit?: boolean;
             cost_limit?: number;
             step_limit?: number;
             whitelist_actions?: string[];

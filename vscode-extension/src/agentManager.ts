@@ -329,6 +329,7 @@ export class AgentManager {
             config: {
                 agent: {
                     mode: config.get('defaultMode', 'confirm'),
+                    confirm_exit: false,  // Disable exit confirmation dialog
                     cost_limit: config.get('costLimit', 3.0),
                     step_limit: config.get('stepLimit', 50),
                     whitelist_actions: config.get('whitelistActions', [

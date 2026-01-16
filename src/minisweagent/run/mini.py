@@ -18,6 +18,7 @@ from rich.console import Console
 from minisweagent import global_config_dir
 from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.agents.interactive_textual import TextualAgent
+from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
@@ -55,6 +56,8 @@ def main(
     config_spec: Path = typer.Option(DEFAULT_CONFIG, "-c", "--config", help="Path to config file"),
     output: Path | None = typer.Option(DEFAULT_OUTPUT, "-o", "--output", help="Output trajectory file"),
     exit_immediately: bool = typer.Option( False, "--exit-immediately", help="Exit immediately when the agent wants to finish instead of prompting.", rich_help_panel="Advanced"),
+    enable_strategies: bool = typer.Option(False, "--enable-strategies", help="Enable optimization strategy management (optool command)", rich_help_panel="Advanced"),
+    strategy_file: str = typer.Option(".optimization_strategies.md", "--strategy-file", help="Path to strategy file (relative to workspace)", rich_help_panel="Advanced"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
@@ -87,9 +90,15 @@ def main(
     env = LocalEnvironment(**config.get("env", {}))
 
     # Both visual flag and the MSWEA_VISUAL_MODE_DEFAULT flip the mode, so it's essentially a XOR
-    agent_class = InteractiveAgent
-    if visual == (os.getenv("MSWEA_VISUAL_MODE_DEFAULT", "false") == "false"):
+    # Choose agent class based on features needed
+    if enable_strategies:
+        agent_class = StrategyInteractiveAgent
+        # Add strategy_file_path to config
+        config.setdefault("agent", {})["strategy_file_path"] = strategy_file
+    elif visual == (os.getenv("MSWEA_VISUAL_MODE_DEFAULT", "false") == "false"):
         agent_class = TextualAgent
+    else:
+        agent_class = InteractiveAgent
 
     agent = agent_class(model, env, **config.get("agent", {}))
     exit_status, result, extra_info = None, None, None
