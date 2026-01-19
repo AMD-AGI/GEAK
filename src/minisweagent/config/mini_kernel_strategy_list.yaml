@@ -312,28 +312,3 @@ agent:
 
     Note: In rare cases, if you need to reference a similar format in your command, you might have
     to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
-  step_limit: 0.
-  cost_limit: 0.
-  mode: confirm
-env:
-  env:
-    PAGER: cat
-    MANPAGER: cat
-    LESS: -R
-    PIP_PROGRESS_BAR: 'off'
-    TQDM_DISABLE: '1'
-  timeout: 3600
-model:
-  model_class: amd_llm
-  # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
-  model_name: claude-opus-4.5
-  api_key: "65481c6913004dafb08eee42587844c0"
-  model_kwargs:
-    temperature: 0.0
-    max_tokens: 16000
-    # reasoning is only valid for gpt models, can be set to none, low, medium, high
-    reasoning:
-      effort: high
-    # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
-    text:
-      verbosity: low

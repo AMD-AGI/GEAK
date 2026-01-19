@@ -43,6 +43,15 @@ class AmdLlmModel:
         self.n_calls = 0
 
         api_key = self.config.api_key or os.getenv("AMD_LLM_API_KEY") or os.getenv("LLM_GATEWAY_KEY")
+        
+        # Validate API key
+        if not api_key:
+            raise ValueError(
+                "API key not provided. Please set it via:\n"
+                "  1. VSCode settings (mini-swe-agent.apiKey), or\n"
+                "  2. Environment variable AMD_LLM_API_KEY, or\n"
+                "  3. Environment variable LLM_GATEWAY_KEY"
+            )
 
         # Get user name safely
         try:

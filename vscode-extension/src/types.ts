@@ -31,6 +31,7 @@ export interface AgentState {
     strategyData?: StrategyListData | null;
     hasPendingUserMessage?: boolean;
     strategyFilePath?: StrategyFilePathInfo;
+    strategyModeEnabled: boolean;  // Whether strategy mode is enabled
 }
 
 export interface StrategyFilePathInfo {
@@ -75,7 +76,7 @@ export interface InitializeParams {
     workspacePath: string;
     modelName?: string;
     task: string;
-    configFilePath?: string;
+    templateName: string;  // Auto-selected template based on strategy mode
     config: {
         agent?: {
             mode?: string;
@@ -83,10 +84,13 @@ export interface InitializeParams {
             cost_limit?: number;
             step_limit?: number;
             whitelist_actions?: string[];
-            strategy_file_path?: string;
         };
         model?: Record<string, any>;
         env?: Record<string, any>;
+    };
+    strategyMode: {
+        enabled: boolean;
+        filePath: string;
     };
 }
 

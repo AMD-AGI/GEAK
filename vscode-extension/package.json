@@ -93,12 +93,12 @@
         },
         "mini-swe-agent.costLimit": {
           "type": "number",
-          "default": 3.0,
+          "default": 0.0,
           "description": "Maximum cost limit in dollars (0 = unlimited)"
         },
         "mini-swe-agent.stepLimit": {
           "type": "number",
-          "default": 50,
+          "default": 0,
           "description": "Maximum number of steps (0 = unlimited)"
         },
         "mini-swe-agent.defaultMode": {
@@ -126,10 +126,16 @@
           "default": "",
           "description": "Path to Python executable (leave empty to auto-detect)"
         },
-        "mini-swe-agent.strategyFilePath": {
+        "mini-swe-agent.strategyMode.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable strategy list management mode with optool support. Auto-selects appropriate template (mini_kernel_strategy_list.yaml or mini_kernel.yaml). Requires agent restart to take effect.",
+          "scope": "resource"
+        },
+        "mini-swe-agent.strategyMode.filePath": {
           "type": "string",
           "default": ".optimization_strategies.md",
-          "description": "Path to the optimization strategies file (relative to workspace or absolute path). Restart agent to apply changes.",
+          "description": "Path to the optimization strategies file (relative to workspace or absolute path). Only used when strategy mode is enabled.",
           "scope": "resource"
         }
       }

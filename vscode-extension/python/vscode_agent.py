@@ -7,7 +7,7 @@ import traceback
 from typing import Any
 
 from minisweagent.agents.strategy_agent import StrategyAgent
-from minisweagent.agents.interactive import InteractiveAgentConfig, NonTerminatingException
+from minisweagent.agents.interactive import InteractiveAgent, InteractiveAgentConfig, NonTerminatingException, Submitted
 
 
 class VSCodeBridge:
@@ -135,19 +135,137 @@ class VSCodeBridge:
         return response
 
 
-class VSCodeAgent(StrategyAgent):
-    """Agent adapted for VS Code - implements strategy agent with JSON-RPC communication.
+class VSCodeInteractiveAgent(InteractiveAgent):
+    """VSCode Agent without strategy management (基础模式).
     
-    This class is a thin adapter that connects the strategy agent core logic
-    to VS Code's JSON-RPC interface. It only handles communication, delegating
-    all business logic to the parent StrategyAgent class.
+    This agent provides basic interactive functionality without optool commands
+    or strategy management features.
+    """
+
+    def __init__(self, bridge: VSCodeBridge, *args, **kwargs):
+        self.bridge = bridge
+        super().__init__(*args, **kwargs)
+        print("[INFO] VSCode Agent: Interactive Mode (no strategy support)", file=sys.stderr)
+
+    def add_message(self, role: str, content: str, **kwargs):
+        """Override to send messages to VS Code instead of console."""
+        super().add_message(role, content, **kwargs)
+
+        action = ""
+        need_confirm = False
+        if role == "assistant":
+            content_dict = {
+                "content": content,
+            }
+            action = self.parse_action(content_dict).get("action", "")
+            need_confirm = self.should_ask_confirmation(action)
+
+        # Send to VS Code webview
+        self.bridge.send_notification(
+            "agent/message", {
+                "role": role,
+                "content": content,
+                "step": self.model.n_calls,
+                "cost": self.model.cost,
+                "action": action,
+                "need_confirm": need_confirm
+            }
+        )
+
+    def ask_confirmation(self) -> None:
+        """Ask user for confirmation via VS Code."""
+        last_message = self.messages[-1]["content"] if self.messages else ""
+        
+        # Send confirmation request to VS Code
+        response = self.bridge.send_request(
+            "agent/requestConfirmation",
+            {"action": last_message, "mode": self.config.mode}
+        )
+
+        # Handle response same way as InteractiveAgent
+        if response.get("approved") is False:
+            # User rejected or modified the command
+            # Handle mode switching (/y, /c, /u)
+            new_mode = response.get("newMode")
+            if new_mode in ["human", "confirm", "yolo"]:
+                self.config.mode = new_mode
+                if new_mode == "human":
+                    raise NonTerminatingException("Command not executed. Switching to human mode")
+        else:
+            # Approved, continue
+            pass
+
+    def query(self) -> dict:
+        """Override to handle human mode via VS Code."""
+        if self.config.mode == "human":
+            # Request command from user via VS Code
+            response = self.bridge.send_request("agent/requestHumanCommand", {})
+            
+            human_command = response.get("command", "")
+            if not human_command:
+                raise NonTerminatingException("No command provided in human mode")
+            
+            # Return as observation
+            result = self.env.execute({"action": human_command})
+            return {"role": "user", "content": result.get("observation", "")}
+        
+        # Check if we need to increase limits
+        if (
+            self.config.cost_limit
+            and self.model.cost >= self.config.cost_limit
+            or self.config.step_limit
+            and self.model.n_calls >= self.config.step_limit
+        ):
+            response = self.bridge.send_request(
+                "agent/limitReached",
+                {
+                    "current_steps": self.model.n_calls,
+                    "current_cost": self.model.cost,
+                    "step_limit": self.config.step_limit,
+                    "cost_limit": self.config.cost_limit,
+                },
+            )
+
+            if not response.get("continue", False):
+                raise NonTerminatingException(
+                    "Cost limit reached"
+                )
+
+            self.config.step_limit = response.get("step_limit", self.config.step_limit)
+            self.config.cost_limit = response.get("cost_limit", self.config.cost_limit)
+
+            return super().query()
+
+        return super().query()
+
+    def has_finished(self, output: dict) -> bool:
+        """Override to handle exit confirmation via VS Code."""
+        try:
+            return super().has_finished(output)
+        except Submitted as e:
+            if self.config.confirm_exit:
+                # Ask user if they want to continue or finish
+                response = self.bridge.send_request("agent/confirmExit", {"output": str(e)})
+                
+                if not response.get("confirmed", True):
+                    # User wants to continue
+                    return False
+            # User confirmed exit or confirm_exit is False
+            raise
+
+
+class VSCodeStrategyAgent(StrategyAgent):
+    """VSCode Agent with strategy management (策略模式).
+    
+    This agent provides full strategy management functionality including optool
+    commands and .optimization_strategies.md file management.
     """
 
     def __init__(self, bridge: VSCodeBridge, *args, **kwargs):
         self.bridge = bridge
         super().__init__(*args, **kwargs)
         
-        print(f"[DEBUG] VSCodeAgent initialized", file=sys.stderr)
+        print(f"[INFO] VSCode Agent: Strategy Mode (file: {self.strategy_file_path})", file=sys.stderr)
 
     # ============ Communication Implementation ============
     

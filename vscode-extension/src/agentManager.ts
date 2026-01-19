@@ -18,7 +18,8 @@ export class AgentManager {
         currentStrategies: [],
         waitingForStrategySelection: false,
         strategyData: null,
-        hasPendingUserMessage: false
+        hasPendingUserMessage: false,
+        strategyModeEnabled: true  // Default to true, will be updated on agent start
     };
     private stateChangeEmitter = new vscode.EventEmitter<AgentState>();
     public onStateChange = this.stateChangeEmitter.event;
@@ -314,44 +315,73 @@ export class AgentManager {
             return;
         }
         
-        // Update workspace path and strategy file path (may have changed since initialization)
+        // Update workspace path
         this.workspacePath = workspaceFolder.uri.fsPath;
-        this.strategyFilePath = config.get('strategyFilePath', '.optimization_strategies.md');
-        
-        console.log('[AgentManager] Starting agent with strategy file path:', this.strategyFilePath);
-        console.log('[AgentManager] Workspace path:', this.workspacePath);
         
         // Start Python bridge
         await this.bridge.start();
         
-        // Get config file path if specified
-        const defaultConfigPath = "mini_kernel_strategy_list.yaml";
+        // 1. Read strategy mode configuration
+        const strategyEnabled = config.get<boolean>('strategyMode.enabled', true);
+        const strategyFilePath = config.get<string>('strategyMode.filePath', '.optimization_strategies.md');
         
-        // Prepare initialization parameters
+        // 2. Auto-select template based on strategy mode
+        const templateName = strategyEnabled 
+            ? 'mini_kernel_strategy_list.yaml'
+            : 'mini_kernel.yaml';
+        
+        console.log('[AgentManager] Strategy mode:', strategyEnabled ? 'enabled' : 'disabled');
+        console.log('[AgentManager] Auto-selected template:', templateName);
+        console.log('[AgentManager] Using default user config: geak.yaml (VSCode mode)');
+        console.log('[AgentManager] Workspace path:', this.workspacePath);
+        if (strategyEnabled) {
+            console.log('[AgentManager] Strategy file path:', strategyFilePath);
+        }
+        
+        // 3. Prepare initialization parameters
+        const apiKey = config.get<string>('apiKey', '');
+        console.log('[AgentManager] API Key read from config:', apiKey ? `${apiKey.substring(0, 8)}...` : '(empty)');
+        
+        // Build VSCode settings config (only include non-empty values)
+        const vscodeConfig: any = {
+            agent: {
+                mode: config.get('defaultMode', 'confirm'),
+                confirm_exit: false,
+                cost_limit: config.get('costLimit', 3.0),
+                step_limit: config.get('stepLimit', 50),
+                whitelist_actions: config.get('whitelistActions', [
+                    '^ls', '^cat', '^pwd',
+                    '^cd .+ && ls($| .*)',
+                    '^cd .+ && cat($| .*)'
+                ]),
+            },
+            env: {}
+        };
+        
+        // Only add model config if API key is provided
+        if (apiKey && apiKey.trim()) {
+            vscodeConfig.model = { api_key: apiKey.trim() };
+            console.log('[AgentManager] Adding API key to VSCode config');
+        } else {
+            console.log('[AgentManager] No API key in VSCode settings, will use template/file default');
+        }
+        
         const initParams: InitializeParams = {
             workspacePath: workspaceFolder.uri.fsPath,
-            modelName: config.get('modelName'), // Can be undefined if set in YAML
+            modelName: config.get<string>('modelName', 'claude-opus-4.5'),
             task: task,
-            configFilePath: defaultConfigPath,
-            config: {
-                agent: {
-                    mode: config.get('defaultMode', 'confirm'),
-                    confirm_exit: false,  // Disable exit confirmation dialog
-                    cost_limit: config.get('costLimit', 3.0),
-                    step_limit: config.get('stepLimit', 50),
-                    whitelist_actions: config.get('whitelistActions', [
-                        '^ls', '^cat', '^pwd',
-                        '^cd .+ && ls($| .*)',
-                        '^cd .+ && cat($| .*)'
-                    ]),
-                    strategy_file_path: this.strategyFilePath
-                },
-                model: {
-                    api_key: config.get('apiKey', ''),
-                },
-                env: {}
+            templateName: templateName,
+            config: vscodeConfig,
+            strategyMode: {
+                enabled: strategyEnabled,
+                filePath: strategyFilePath
             }
         };
+        
+        console.log('[AgentManager] VSCode config being sent:', JSON.stringify(vscodeConfig, null, 2));
+        
+        // Update local state
+        this.strategyFilePath = strategyFilePath;
         
         // Create new task
         const newTask: Task = {
@@ -375,7 +405,8 @@ export class AgentManager {
             waitingForStrategySelection: false,
             strategyData: this.state.strategyData,
             hasPendingUserMessage: this.state.hasPendingUserMessage,
-            strategyFilePath: this.getStrategyFilePath()
+            strategyFilePath: this.getStrategyFilePath(),
+            strategyModeEnabled: strategyEnabled
         };
         this.emitStateChange();
         

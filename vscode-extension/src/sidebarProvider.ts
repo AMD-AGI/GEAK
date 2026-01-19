@@ -117,6 +117,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         }
                     }
                     break;
+                case 'openSettings':
+                    {
+                        // Open VSCode settings with focus on the specified setting
+                        const settingId = message.settingId || 'mini-swe-agent';
+                        await vscode.commands.executeCommand('workbench.action.openSettings', settingId);
+                    }
+                    break;
             }
         });
         
@@ -147,7 +154,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             currentStrategies: state.currentStrategies,
             waitingForStrategySelection: state.waitingForStrategySelection,
             strategyData: state.strategyData,
-            strategyFilePath: state.strategyFilePath
+            strategyFilePath: state.strategyFilePath,
+            strategyModeEnabled: state.strategyModeEnabled
         };
     }
     
@@ -728,7 +736,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         </div>
         <div id="optimization-list" class="optimization-list"></div>
         <div class="strategy-buttons">
-            <button id="explore-selected-btn" onclick="exploreSelected()" class="primary" disabled>🚀 Explore Selected (0)</button>
+            <button id="explore-selected-btn" onclick="exploreSelected()" class="primary" disabled>🔴 Set High Priority (0)</button>
         </div>
     </div>
     
@@ -809,8 +817,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             // Update strategy file path (pass strategy data to get actual file path)
             updateStrategyFilePath(state.strategyFilePath, state.strategyData);
             
-            // Update optimization strategies section
-            updateOptimizationStrategies(state.strategyData);
+            // Update optimization strategies section based on strategy mode
+            updateOptimizationStrategies(state.strategyData, state.strategyModeEnabled);
             
             // Update tasks
             updateTasks(state.currentTask, state.recentTasks || []);
@@ -938,11 +946,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         
         let selectedOptimizationIndices = new Set();
         
-        function updateOptimizationStrategies(strategyData) {
-            console.log('[Webview] updateOptimizationStrategies called with:', strategyData);
+        function updateOptimizationStrategies(strategyData, strategyModeEnabled) {
+            console.log('[Webview] updateOptimizationStrategies called with:', strategyData, 'mode enabled:', strategyModeEnabled);
             const optimizationSection = document.getElementById('optimization-section');
             const optimizationList = document.getElementById('optimization-list');
             
+            // If strategy mode is disabled, show info message
+            if (!strategyModeEnabled) {
+                console.log('[Webview] Strategy mode disabled, showing info message');
+                optimizationSection.style.display = 'block';
+                optimizationList.innerHTML = \`
+                    <div class="info-box" style="padding: 16px; background: var(--vscode-editor-inactiveSelectionBackground); border-radius: 4px; margin: 8px 0;">
+                        <div style="font-weight: bold; margin-bottom: 8px;">○ Strategy Mode Disabled</div>
+                        <p style="margin: 8px 0; font-size: 12px; opacity: 0.8;">Strategy list management is currently disabled.</p>
+                        <p style="margin: 8px 0; font-size: 12px;">To enable:</p>
+                        <ol style="margin: 4px 0 8px 16px; font-size: 12px;">
+                            <li>Open Settings (Ctrl+,)</li>
+                            <li>Search for "mini-swe-agent"</li>
+                            <li>Enable "Strategy Mode: Enabled"</li>
+                            <li>Restart the agent</li>
+                        </ol>
+                        <button onclick="openSettings()" style="margin-top: 8px; padding: 4px 12px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 2px; cursor: pointer;">Open Settings</button>
+                    </div>
+                \`;
+                return;
+            }
+            
+            // Strategy mode is enabled
             if (!strategyData || !strategyData.exists) {
                 console.log('[Webview] Strategy data not exists, hiding section');
                 optimizationSection.style.display = 'none';
@@ -1009,7 +1039,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         function updateExploreButton() {
             const btn = document.getElementById('explore-selected-btn');
             const count = selectedOptimizationIndices.size;
-            btn.textContent = \`🚀 Explore Selected (\${count})\`;
+            btn.textContent = \`🔴 Set High Priority (\${count})\`;
             btn.disabled = count === 0;
         }
         
@@ -1081,6 +1111,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         
         function openStrategyFile() {
             vscode.postMessage({ command: 'openStrategyFile' });
+        }
+        
+        function openSettings() {
+            vscode.postMessage({ command: 'openSettings', settingId: 'mini-swe-agent.strategyMode.enabled' });
         }
         
         function setMode(mode) {

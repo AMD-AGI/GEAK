@@ -14,13 +14,24 @@ sys.stdout = sys.stderr  # Temporarily redirect stdout to stderr during imports
 
 try:
     import yaml
-    from minisweagent.config import get_config_path
+    from minisweagent.config import get_config_path, builtin_config_dir
     from minisweagent.environments.local import LocalEnvironment
     from minisweagent.models import get_model
-    from vscode_agent import VSCodeAgent, VSCodeBridge
+    from vscode_agent import VSCodeInteractiveAgent, VSCodeStrategyAgent, VSCodeBridge
 finally:
     # Restore original stdout for JSON-RPC communication
     sys.stdout = _original_stdout
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge two dictionaries, override takes precedence."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 def main():
@@ -62,60 +73,91 @@ def main():
     print("[DEBUG] Initialization received, starting agent", file=sys.stderr)
 
     workspace_path = init_message.get("workspacePath")
-    config = init_message.get("config", {})
+    template_name = init_message.get("templateName")
+    vscode_config = init_message.get("config", {})
+    strategy_mode = init_message.get("strategyMode", {})
     task = init_message.get("task")
-    config_file_path = init_message.get("configFilePath")
+    
+    # VSCode mode always uses geak.yaml as default user config
+    user_config_file = "geak.yaml"
 
     try:
-        # Load config from YAML file if provided
-        if config_file_path:
-            try:
-                print(f"[DEBUG] Loading config from: {config_file_path}", file=sys.stderr)
-                config_path = get_config_path(config_file_path)
-                yaml_config = yaml.safe_load(config_path.read_text())
-                bridge.send_notification("agent/info", {"message": f"Loaded config from {config_path}"})
-                
-                # Merge YAML config with VS Code config (VS Code config takes precedence)
-                # Deep merge for nested dicts
-                for section in ["agent", "model", "env"]:
-                    if section in yaml_config:
-                        if section not in config:
-                            config[section] = {}
-                        # YAML config as base, VS Code config overrides
-                        config[section] = {**yaml_config[section], **config[section]}
-            except FileNotFoundError as e:
-                print(f"[WARNING] Config file not found: {e}", file=sys.stderr)
-                bridge.send_notification("agent/warning", {"message": f"Config file not found: {e}"})
-            except Exception as e:
-                print(f"[WARNING] Failed to load config file: {e}", file=sys.stderr)
-                print(traceback.format_exc(), file=sys.stderr)
-                bridge.send_notification("agent/warning", {"message": f"Failed to load config file: {e}"})
+        # 1. Load template configuration
+        if not template_name:
+            # Fallback for backward compatibility
+            template_name = "mini_kernel_strategy_list.yaml"
+        
+        template_path = builtin_config_dir / template_name
+        print(f"[INFO] Loading template: {template_name}", file=sys.stderr)
+        template_config = yaml.safe_load(template_path.read_text())
+        bridge.send_notification("agent/info", {"message": f"Using template: {template_name}"})
+        
+        # 2. Load geak.yaml as default user config
+        file_config = {}
+        try:
+            print(f"[INFO] Loading default user config: {user_config_file}", file=sys.stderr)
+            user_config_path = get_config_path(user_config_file)
+            file_config = yaml.safe_load(user_config_path.read_text())
+            bridge.send_notification("agent/info", {"message": f"Loaded user config from {user_config_path}"})
+        except FileNotFoundError as e:
+            print(f"[WARNING] Default user config not found: {e}", file=sys.stderr)
+            bridge.send_notification("agent/warning", {"message": f"Default user config not found: {e}"})
+        except Exception as e:
+            print(f"[WARNING] Failed to load default user config: {e}", file=sys.stderr)
+            print(traceback.format_exc(), file=sys.stderr)
+            bridge.send_notification("agent/warning", {"message": f"Failed to load user config: {e}"})
+        
+        # 3. Merge configs with priority: template → geak.yaml → vscode settings
+        config = _deep_merge(template_config, file_config)
+        config = _deep_merge(config, vscode_config)
+        print(f"[INFO] Config priority: template → geak.yaml → vscode settings", file=sys.stderr)
+        
+        # Debug: Print model config before processing
+        print(f"[DEBUG] VSCode config model section: {vscode_config.get('model', {})}", file=sys.stderr)
+        print(f"[DEBUG] After merge, model config: {config.get('model', {})}", file=sys.stderr)
 
-        # Get model name from config or init message
+        # 4. Get model name from config
         model_config = config.get("model", {})
         model_name = init_message.get("modelName") or model_config.get("model_name", "gpt-4")
-        print(f"[DEBUG] Using model: {model_name}", file=sys.stderr)
+        print(f"[INFO] Using model: {model_name}", file=sys.stderr)
 
         # Handle API key - if it's at top level, move it to model_kwargs for compatibility
         if "api_key" in model_config and "api_key" not in model_config.get("model_kwargs", {}):
             model_config.setdefault("model_kwargs", {})["api_key"] = model_config.pop("api_key")
+            print(f"[DEBUG] Moved API key from model_config to model_kwargs", file=sys.stderr)
+        
+        print(f"[DEBUG] Final model_config before get_model: {model_config}", file=sys.stderr)
 
-        # Get agent configuration (includes strategy_file_path)
+        # Get agent configuration
         agent_config = config.get("agent", {})
         
-        # Create model and environment
-        print(f"[DEBUG] Creating model and environment", file=sys.stderr)
+        # 5. Create model and environment
+        print(f"[INFO] Creating model and environment", file=sys.stderr)
         model = get_model(model_name, model_config)
         env = LocalEnvironment(cwd=workspace_path, **config.get("env", {}))
 
-        # Create agent (strategy_file_path is passed via **agent_config)
-        print(f"[DEBUG] Creating agent", file=sys.stderr)
-        agent = VSCodeAgent(
-            bridge=bridge, 
-            model=model, 
-            env=env,
-            **agent_config
-        )
+        # 6. Create agent based on strategy mode
+        strategy_enabled = strategy_mode.get("enabled", True)
+        strategy_file_path = strategy_mode.get("filePath", ".optimization_strategies.md")
+        
+        if strategy_enabled:
+            print(f"[INFO] Creating VSCodeStrategyAgent (file: {strategy_file_path})", file=sys.stderr)
+            agent = VSCodeStrategyAgent(
+                bridge=bridge,
+                model=model,
+                env=env,
+                strategy_file_path=strategy_file_path,
+                **agent_config
+            )
+        else:
+            print(f"[INFO] Creating VSCodeInteractiveAgent (no strategy support)", file=sys.stderr)
+            agent = VSCodeInteractiveAgent(
+                bridge=bridge,
+                model=model,
+                env=env,
+                **agent_config
+            )
+        
         agent_ref["agent"] = agent  # Store reference for mode switching
 
         # Run agent

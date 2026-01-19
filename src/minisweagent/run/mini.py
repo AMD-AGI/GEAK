@@ -31,6 +31,17 @@ DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
 console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich")
 prompt_session = PromptSession(history=FileHistory(global_config_dir / "mini_task_history.txt"))
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge two dictionaries, override takes precedence."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 _HELP_TEXT = """Run mini-SWE-agent in your local environment.
 
 [not dim]
@@ -56,14 +67,27 @@ def main(
     config_spec: Path = typer.Option(DEFAULT_CONFIG, "-c", "--config", help="Path to config file"),
     output: Path | None = typer.Option(DEFAULT_OUTPUT, "-o", "--output", help="Output trajectory file"),
     exit_immediately: bool = typer.Option( False, "--exit-immediately", help="Exit immediately when the agent wants to finish instead of prompting.", rich_help_panel="Advanced"),
-    enable_strategies: bool = typer.Option(False, "--enable-strategies", help="Enable optimization strategy management (optool command)", rich_help_panel="Advanced"),
+    enable_strategies: bool = typer.Option(True, "--enable-strategies/--no-enable-strategies", help="Enable optimization strategy management (optool command). Auto-selects appropriate template.", rich_help_panel="Advanced"),
     strategy_file: str = typer.Option(".optimization_strategies.md", "--strategy-file", help="Path to strategy file (relative to workspace)", rich_help_panel="Advanced"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
-    config_path = get_config_path(config_spec)
-    console.print(f"Loading agent config from [bold green]'{config_path}'[/bold green]")
-    config = yaml.safe_load(config_path.read_text())
+    
+    # 1. Auto-select template based on strategy mode
+    template_name = "mini_kernel_strategy_list.yaml" if enable_strategies else "mini_kernel.yaml"
+    template_path = builtin_config_dir / template_name
+    console.print(f"Using template: [bold green]'{template_name}'[/bold green]")
+    template_config = yaml.safe_load(template_path.read_text())
+    
+    # 2. Load user config if provided
+    user_config = {}
+    if config_spec and config_spec != DEFAULT_CONFIG:
+        config_path = get_config_path(config_spec)
+        console.print(f"Loading user config from [bold green]'{config_path}'[/bold green]")
+        user_config = yaml.safe_load(config_path.read_text())
+    
+    # 3. Merge configs: template as base, user config overrides
+    config = _deep_merge(template_config, user_config)
 
     if not task:
         console.print("[bold yellow]What do you want to do?")
