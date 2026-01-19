@@ -28,9 +28,10 @@ agent:
     RECOMMENDED for complex optimizations:
     1. Establish baseline performance first (measure before optimizing)
     2. Identify 3-5 potential optimization strategies (e.g., memory coalescing, vectorization, shared memory, loop unrolling)
-    3. Try strategies one at a time, measure impact
-    4. Keep successful optimizations, revert failures
-    5. Combine successful strategies for maximum performance
+    3. Use `optool next` to get the next recommended strategy (automatically prioritizes HIGH PRIORITY ones)
+    4. Try strategies one at a time, measure impact. 
+    5. Keep successful optimizations, revert failures
+    6. Combine successful strategies for maximum performance
     
     Track your exploration in `.optimization_strategies.md` to:
     - Document potential optimization directions
@@ -73,8 +74,20 @@ agent:
        - Prioritize strategies based on bottleneck analysis (e.g., focus on memory optimizations if memory-bound)
        - Update strategy file with expected improvements for each strategy
 
-    4. **Explore Strategy 1**
-       - Mark first strategy as `[exploring]` in your strategy file
+    4. **Select Next Strategy to Explore**
+       - **RECOMMENDED**: Use `optool next` to get the next recommended strategy:
+         ```bash
+         optool next
+         ```
+       - This command automatically prioritizes user-marked high-priority strategies (🔴 HIGH)
+       - The recommendation is based on priority and strategic value
+       - Alternatively, you can view the full list with `optool show` and select manually based on:
+         * Expected performance improvement
+         * Implementation complexity vs. expected gain
+         * Relevance to identified bottlenecks
+
+    5. **Explore Selected Strategy**
+       - Mark selected strategy as `[exploring]` in your strategy file
        - Implement the optimization (e.g., memory coalescing, vectorization, shared memory)
        - Verify correctness with tests after implementation
        - Run benchmarks and save detailed output to log file (e.g., `strategy1_benchmark.log`)
@@ -83,28 +96,29 @@ agent:
        - Include reference to detailed log file for full metrics
        - **Decision**: If successful (performance improved), keep it. If failed (regression), revert the changes.
 
-    5. **Explore Additional Strategies**
-       - Repeat step 4 for each remaining strategy in your list
+    6. **Explore Additional Strategies**
+       - Repeat steps 4-5 for each remaining strategy in your list
+       - **Use `optool next` to get the next recommended strategy** (automatically prioritizes high-priority ones)
        - Try strategies individually first to isolate their impact
        - **Dynamically adjust strategy list based on results**: If a strategy reveals new optimization opportunities, add them; if multiple strategies fail in similar ways, skip related ones
        - After testing individually, consider combining successful strategies
        - Track cumulative performance gains as you combine strategies
        - Update strategy file after each experiment
 
-    6. **Combine and Refine**
+    7. **Combine and Refine**
        - Combine multiple successful strategies for maximum performance
        - Test for synergistic effects (combined effect may be better than sum of parts)
        - Re-balance parameters to optimize strategy interactions (parameters optimal for individual strategies may need adjustment when combined)
        - Verify correctness is maintained after combining strategies
 
-    7. **Final Verification and Benchmarking**
+    8. **Final Verification and Benchmarking**
        - Verify correctness is maintained after combining strategies
        - Run comprehensive benchmarks on final optimized version
        - Compare against baseline to calculate total improvement
        - View your `.optimization_strategies.md` file to review the complete optimization journey
        - Document all successful strategies and their individual/combined contributions
        
-    8. **Submit Final Output**
+    9. **Submit Final Output**
        - Review your strategy exploration file for a summary of what worked and what didn't
        - When satisfied with your implementation, issue: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
        - Do not combine it with any other command. <important>After this command, you cannot continue working on this task.</important>
@@ -172,6 +186,9 @@ agent:
     
     # Get help on available commands
     optool help
+    
+    # Get next recommended strategy to explore (automatically prioritizes high-priority ones)
+    optool next
     
     # Mark strategy as exploring (start working on it)
     optool mark 1 exploring

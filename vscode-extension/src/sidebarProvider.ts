@@ -418,6 +418,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             background: transparent;
         }
         
+        .optimization-item.high-priority {
+            border-left: 4px solid #ffa500;
+        }
+        
+        .optimization-item.high-priority:hover {
+            background: var(--vscode-list-hoverBackground);
+        }
+        
         .optimization-checkbox {
             margin-top: 2px;
             cursor: pointer;
@@ -443,6 +451,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         .optimization-name {
             font-weight: 500;
             font-size: 0.9em;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .priority-label {
+            display: inline-block;
+            padding: 2px 6px;
+            font-size: 0.75em;
+            font-weight: 700;
+            color: #ffa500;
+            background: transparent !important;
+            border: 1px solid #ffa500;
+            border-radius: 3px;
+            text-transform: uppercase;
         }
         
         .optimization-status {
@@ -705,7 +728,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         </div>
         <div id="optimization-list" class="optimization-list"></div>
         <div class="strategy-buttons">
-            <button onclick="exploreSelected()" class="primary">🚀 Explore Selected</button>
+            <button id="explore-selected-btn" onclick="exploreSelected()" class="primary" disabled>🚀 Explore Selected (0)</button>
         </div>
     </div>
     
@@ -938,12 +961,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 return;
             }
             
-            optimizationList.innerHTML = strategies.map(strategy => {
+            // Keep original order, don't sort by priority
+            const sortedStrategies = [...strategies].sort((a, b) => a.index - b.index);
+            
+            optimizationList.innerHTML = sortedStrategies.map(strategy => {
                 const isPending = strategy.status === 'pending';
                 const isDisabled = !isPending;
+                const isHighPriority = strategy.priority >= 100;
+                const priorityLabel = isHighPriority ? '<span class="priority-label">[high]</span>' : '';
+                
+                // Debug: log priority value
+                console.log(\`[Webview] Strategy \${strategy.index}: priority=\${strategy.priority}, isHighPriority=\${isHighPriority}\`);
                 
                 return \`
-                <div class="optimization-item \${isDisabled ? 'disabled' : ''}">
+                <div class="optimization-item \${isDisabled ? 'disabled' : ''} \${isHighPriority ? 'high-priority' : ''}">
                     <input 
                         type="checkbox" 
                         class="optimization-checkbox" 
@@ -954,11 +985,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     />
                     <label for="opt-\${strategy.index}" class="optimization-content">
                         <div class="optimization-header">
-                            <span class="optimization-name">#\${strategy.index} \${escapeHtml(strategy.name)}</span>
+                            <span class="optimization-name">#\${strategy.index} \${escapeHtml(strategy.name)} \${priorityLabel}</span>
                             <span class="optimization-status status-\${strategy.status}">\${strategy.status}</span>
                         </div>
                         <div class="optimization-description">\${escapeHtml(strategy.description)}</div>
-                        \${strategy.result ? \`<div class="optimization-result">\${escapeHtml(strategy.result)}</div>\` : ''}
+                        \${strategy.expected ? \`<div class="optimization-expected">Expected: \${escapeHtml(strategy.expected)}</div>\` : ''}
+                        \${strategy.result ? \`<div class="optimization-result">Result: \${escapeHtml(strategy.result)}</div>\` : ''}
                     </label>
                 </div>
                 \`;
@@ -971,6 +1003,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             } else {
                 selectedOptimizationIndices.add(index);
             }
+            updateExploreButton();
+        }
+        
+        function updateExploreButton() {
+            const btn = document.getElementById('explore-selected-btn');
+            const count = selectedOptimizationIndices.size;
+            btn.textContent = \`🚀 Explore Selected (\${count})\`;
+            btn.disabled = count === 0;
         }
         
         function refreshStrategies() {
@@ -989,6 +1029,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             
             // Clear selection
             selectedOptimizationIndices.clear();
+            
+            // Clear all checkboxes
+            document.querySelectorAll('.optimization-checkbox').forEach(cb => {
+                cb.checked = false;
+            });
+            
+            // Update button
+            updateExploreButton();
         }
         
         function updateStrategyFilePath(pathInfo, strategyData) {

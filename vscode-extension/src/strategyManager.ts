@@ -9,6 +9,7 @@ export interface OptimizationStrategy {
     name: string;
     status: 'baseline' | 'pending' | 'exploring' | 'successful' | 'failed' | 'partial' | 'skipped' | 'combined';
     description: string;
+    priority: number;  // High=100, Normal=50 (stored as numbers, displayed as "high"/"normal")
     expected?: string;
     target?: string;
     result?: string;
@@ -23,6 +24,7 @@ export interface StrategyListData {
     };
     strategies: OptimizationStrategy[];
     notes: string[];
+    filePath?: string;  // Actual file path from Python agent
 }
 
 export class StrategyManagerClient {

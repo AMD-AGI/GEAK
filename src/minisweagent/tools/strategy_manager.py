@@ -33,15 +33,33 @@ class Strategy:
     name: str
     status: StrategyStatus
     description: str
+    priority: int = 50  # Default: Normal priority (High=100, Normal=50)
     expected: str | None = None
     result: str | None = None
     details: str | None = None
     target: str | None = None
     
+    @property
+    def priority_label(self) -> str:
+        """Get human-readable priority label."""
+        if self.priority >= 100:
+            return "high"
+        else:
+            return "normal"
+    
+    @staticmethod
+    def priority_from_label(label: str) -> int:
+        """Convert priority label to numeric value."""
+        label_lower = label.lower()
+        if label_lower == "high":
+            return 100
+        else:  # "normal" or any other value
+            return 50
+    
     def to_markdown(self, index: int) -> str:
         """Convert to markdown format."""
         lines = [f"## Strategy {index}: {self.name}"]
-        lines.append(f"[{self.status.value}] {self.description}")
+        lines.append(f"[priority:{self.priority_label}][{self.status.value}] {self.description}")
         
         if self.expected:
             lines.append(f"- Expected: {self.expected}")
@@ -254,10 +272,62 @@ class StrategyManager:
         
         return summary
     
+    def get_full_content(self) -> str:
+        """Get full content of the strategy file as formatted text."""
+        if not self.exists():
+            return "Strategy file does not exist"
+        
+        strategy_list = self.load()
+        lines = []
+        
+        # Baseline section
+        if strategy_list.baseline:
+            lines.append("## Baseline Performance")
+            for key, value in strategy_list.baseline.metrics.items():
+                lines.append(f"- {key}: {value}")
+            if strategy_list.baseline.log_file:
+                lines.append(f"- Detailed results: {strategy_list.baseline.log_file}")
+            lines.append("")
+        
+        # Strategies
+        for idx, strategy in enumerate(strategy_list.strategies, start=1):
+            priority_label = "🔴 HIGH" if strategy.priority >= 100 else ""
+            lines.append(f"## Strategy {idx}: {strategy.name} {priority_label}")
+            lines.append(f"[{strategy.status.value}] {strategy.description}")
+            if strategy.expected:
+                lines.append(f"- Expected: {strategy.expected}")
+            if strategy.target:
+                lines.append(f"- Target: {strategy.target}")
+            if strategy.result:
+                lines.append(f"- Result: {strategy.result}")
+            if strategy.details:
+                lines.append(f"- Details: {strategy.details}")
+            lines.append("")
+        
+        # Notes
+        if strategy_list.notes:
+            lines.append("## Notes")
+            for note in strategy_list.notes:
+                lines.append(f"- {note}")
+            lines.append("")
+        
+        return "\n".join(lines)
+    
     def add_note(self, note: str) -> None:
         """Add note to strategy list."""
         strategy_list = self.load()
         strategy_list.notes.append(note)
+        self.save(strategy_list)
+    
+    def update_priority(self, index: int, priority: int) -> None:
+        """Update strategy priority."""
+        strategy_list = self.load()
+        idx = index - 1
+        
+        if idx < 0 or idx >= len(strategy_list.strategies):
+            raise IndexError(f"Strategy index {index} out of range")
+        
+        strategy_list.strategies[idx].priority = priority
         self.save(strategy_list)
     
     def _parse_markdown(self, content: str) -> StrategyList:
@@ -323,6 +393,7 @@ class StrategyManager:
     def _parse_strategy(self, lines: list[str], start_idx: int, name: str) -> tuple[Strategy, int]:
         """Parse strategy section."""
         status = StrategyStatus.PENDING
+        priority = 50  # Default: Normal priority
         description = ""
         expected = None
         result = None
@@ -338,12 +409,29 @@ class StrategyManager:
                 break
             
             if line.startswith("[") and "]" in line:
-                status_str = line[line.index("[") + 1:line.index("]")]
-                try:
-                    status = StrategyStatus(status_str)
-                except ValueError:
-                    status = StrategyStatus.PENDING
-                description = line[line.index("]") + 1:].strip()
+                # Parse priority if present: [priority:high][status] description
+                remaining = line
+                
+                # Try to parse priority (supports both numeric and text labels)
+                priority_match = re.match(r'\[priority:(high|normal|\d+)\]', remaining, re.IGNORECASE)
+                if priority_match:
+                    priority_value = priority_match.group(1)
+                    if priority_value.isdigit():
+                        # Numeric value (backward compatibility)
+                        priority = int(priority_value)
+                    else:
+                        # Text label (high/normal)
+                        priority = Strategy.priority_from_label(priority_value)
+                    remaining = remaining[priority_match.end():]
+                
+                # Parse status
+                if remaining.startswith("[") and "]" in remaining:
+                    status_str = remaining[remaining.index("[") + 1:remaining.index("]")]
+                    try:
+                        status = StrategyStatus(status_str)
+                    except ValueError:
+                        status = StrategyStatus.PENDING
+                    description = remaining[remaining.index("]") + 1:].strip()
             elif line.startswith("- Expected:"):
                 expected = line.replace("- Expected:", "").strip()
             elif line.startswith("- Target:"):
@@ -358,6 +446,7 @@ class StrategyManager:
         return Strategy(
             name=name,
             status=status,
+            priority=priority,
             description=description,
             expected=expected,
             result=result,

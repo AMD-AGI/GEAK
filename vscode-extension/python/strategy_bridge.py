@@ -42,6 +42,7 @@ def get_strategy_list(file_path: str = ".optimization_strategies.md") -> dict:
                 "name": strategy.name,
                 "status": strategy.status.value,
                 "description": strategy.description,
+                "priority": strategy.priority,  # Add priority field
                 "expected": strategy.expected,
                 "target": strategy.target,
                 "result": strategy.result,

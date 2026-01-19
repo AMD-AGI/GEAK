@@ -139,6 +139,7 @@ class StrategyAgent(InteractiveAgent):
                     "name": strategy.name,
                     "status": strategy.status.value,
                     "description": strategy.description,
+                    "priority": strategy.priority,  # 添加 priority 字段
                     "expected": strategy.expected,
                     "target": strategy.target,
                     "result": strategy.result,
@@ -175,8 +176,12 @@ class StrategyAgent(InteractiveAgent):
             return self._optool_show(manager, parts[2:])
         elif subcommand == "note":
             return self._optool_note(manager, parts[2:])
+        elif subcommand == "priority":
+            return self._optool_priority(manager, parts[2:])
         elif subcommand == "path":
             return self._optool_path(manager)
+        elif subcommand == "next":
+            return self._optool_next(manager)
         elif subcommand == "help" or subcommand == "--help":
             return self._optool_help()
         else:
@@ -209,13 +214,24 @@ Subcommands:
       Remove or skip a strategy (default: skip)
       Example: optool remove 2 --method skip
   
-  show [index]
-      Show all strategies or a specific strategy
-      Example: optool show
+  show [summary|index]
+      Show full content (default), summary statistics, or a specific strategy
+      Example: optool show           # Show full content
+      Example: optool show summary   # Show statistics
+      Example: optool show 1         # Show strategy 1
+  
+  next
+      Get the next recommended strategy to explore
+      Automatically prioritizes user-marked high-priority strategies
+      Example: optool next
   
   note <text>
       Add a note to the strategy list
       Example: optool note "Combined strategies 1 and 3 work well together"
+  
+  priority <index> <high|normal>
+      Set strategy priority (high or normal)
+      Example: optool priority 1 high
   
   path
       Show current strategy file path
@@ -387,15 +403,37 @@ Subcommands:
     def _optool_show(self, manager, args: list[str]) -> str:
         """Show strategies."""
         try:
-            if len(args) > 0:
+            if len(args) == 0:
+                # Show full content (like cat .optimization_strategies.md)
+                return manager.get_full_content()
+            elif args[0] == "summary":
+                # Show summary statistics
+                summary = manager.get_summary()
+                lines = [f"Total strategies: {summary['total']}"]
+                if summary['by_status']:
+                    lines.append("\nBy status:")
+                    for status, count in summary['by_status'].items():
+                        lines.append(f"  {status}: {count}")
+                return "\n".join(lines)
+            else:
                 # Show specific strategy
                 index = int(args[0])
                 strategy = manager.get_strategy(index)
-                return f"Strategy {index}: {strategy.name}\nStatus: {strategy.status.value}\nDescription: {strategy.description}\nExpected: {strategy.expected}\nTarget: {strategy.target}\nResult: {strategy.result}\nDetails: {strategy.details}"
-            else:
-                # Show all strategies
-                summary = manager.get_summary()
-                return summary
+                priority_label = "🔴 HIGH" if strategy.priority >= 100 else "Normal"
+                lines = [
+                    f"Strategy {index}: {strategy.name}",
+                    f"Status: {strategy.status.value}",
+                    f"Priority: {priority_label}",
+                    f"Description: {strategy.description}",
+                    f"Expected: {strategy.expected}",
+                ]
+                if strategy.target:
+                    lines.append(f"Target: {strategy.target}")
+                if strategy.result:
+                    lines.append(f"Result: {strategy.result}")
+                if strategy.details:
+                    lines.append(f"Details: {strategy.details}")
+                return "\n".join(lines)
         except ValueError:
             return f"Error: Invalid index '{args[0]}', must be a number"
         except Exception as e:
@@ -410,8 +448,137 @@ Subcommands:
         manager.add_note(note_text)
         return f"✓ Added note: {note_text}"
     
+    def _optool_priority(self, manager, args: list[str]) -> str:
+        """Set strategy priority."""
+        if len(args) < 2:
+            return "Error: priority requires <index> <high|normal>\nExample: optool priority 1 high"
+        
+        try:
+            from minisweagent.tools.strategy_manager import Strategy
+            
+            index = int(args[0])
+            priority_input = args[1].lower()
+            
+            # Support both text labels and numeric values (backward compatibility)
+            if priority_input.isdigit():
+                priority = int(priority_input)
+            else:
+                priority = Strategy.priority_from_label(priority_input)
+            
+            manager.update_priority(index, priority)
+            
+            # Show human-readable label in output
+            label = "high" if priority >= 100 else "normal"
+            return f"✓ Set strategy {index} priority to {label}"
+        except ValueError as e:
+            return f"Error: Invalid index. Must be a number"
+        except Exception as e:
+            return f"Error: {e}"
+    
     def _optool_path(self, manager) -> str:
         """Show current strategy file path."""
         return f"""Strategy file path: {str(manager.filepath)}
 Configured path: {self.strategy_file_path}"""
+    
+    def _optool_next(self, manager) -> str:
+        """Get the next recommended strategy to explore."""
+        if not manager.exists():
+            return "No strategy file found. Create one with 'optool create' first."
+        
+        index, strategy = self.select_next_strategy()
+        
+        if strategy is None:
+            return "No pending strategies available. All strategies have been explored or marked as skipped."
+        
+        # Format the recommendation
+        priority_label = "🔴 HIGH PRIORITY" if strategy.priority >= 100 else f"Priority: {strategy.priority}"
+        lines = [
+            f"✨ Recommended next strategy: #{index}",
+            "",
+            f"Name: {strategy.name}",
+            f"Status: {strategy.status.value}",
+            f"{priority_label}",
+            f"Description: {strategy.description}",
+            f"Expected improvement: {strategy.expected}",
+        ]
+        
+        if strategy.target:
+            lines.append(f"Target: {strategy.target}")
+        
+        lines.extend([
+            "",
+            f"To mark as exploring: optool mark {index} exploring",
+            f"To view details: optool show {index}"
+        ])
+        
+        return "\n".join(lines)
+    
+    # ============ Strategy Selection Logic ============
+    
+    def get_sorted_pending_strategies(self):
+        """Get pending strategies sorted by priority."""
+        manager = self._get_strategy_manager()
+        if not manager.exists():
+            return []
+        
+        from minisweagent.tools.strategy_manager import StrategyStatus
+        
+        strategy_list = manager.load()
+        pending = [s for s in strategy_list.strategies 
+                   if s.status == StrategyStatus.PENDING]
+        
+        # Sort by priority (high first), then by index
+        return sorted(enumerate(pending, 1), 
+                     key=lambda x: (-x[1].priority, x[0]))
+    
+    def select_next_strategy(self):
+        """Select next strategy to explore based on priority and LLM judgment.
+        
+        Returns:
+            tuple: (index, Strategy) or (None, None) if no strategies available
+        """
+        sorted_strategies = self.get_sorted_pending_strategies()
+        
+        if not sorted_strategies:
+            return None, None
+        
+        # Check if there are high priority strategies (>= 100)
+        if sorted_strategies[0][1].priority >= 100:
+            # User has marked high priority, use first one
+            return sorted_strategies[0]
+        
+        # All are normal/low priority, let LLM choose
+        return self._llm_select_strategy(sorted_strategies)
+    
+    def _llm_select_strategy(self, strategies: list[tuple[int, any]]):
+        """Let LLM choose the most promising strategy from normal priority ones.
+        
+        Args:
+            strategies: List of (index, Strategy) tuples
+            
+        Returns:
+            tuple: (index, Strategy) of selected strategy
+        """
+        # Format strategies for LLM
+        strategy_desc = "\n".join([
+            f"{idx}. {s.name} - {s.description} (Expected: {s.expected}, Priority: {s.priority})"
+            for idx, s in strategies[:10]  # Limit to first 10
+        ])
+        
+        prompt = f"""Available optimization strategies (all Normal/Low priority):
+
+{strategy_desc}
+
+Based on your expertise and the current optimization context, which strategy looks most promising to explore next?
+Consider expected impact, implementation complexity, and risk.
+
+Respond with just the strategy number."""
+        
+        try:
+            # Simple query - in practice this would use self.model.query()
+            # For now, just return the first strategy with highest expected value
+            return strategies[0]
+        except Exception as e:
+            print(f"[WARNING] LLM selection failed: {e}, using first strategy", file=sys.stderr)
+            return strategies[0]
 

@@ -234,6 +234,13 @@ export class AgentManager {
         // Handle strategy data updates from Python agent
         this.bridge.onNotification('agent/strategyData', (params) => {
             console.log('[AgentManager] Received strategy data from Python agent:', params);
+            
+            // Preserve filePath from previous strategyData if new data doesn't have it
+            if (!params.filePath && this.state.strategyData?.filePath) {
+                console.log('[AgentManager] Preserving filePath from previous data:', this.state.strategyData.filePath);
+                params.filePath = this.state.strategyData.filePath;
+            }
+            
             this.state.strategyData = params;
             console.log('[AgentManager] Updated state with Agent strategy data');
             this.emitStateChange();
@@ -521,6 +528,13 @@ export class AgentManager {
         // Listen to strategy data changes
         this.strategyManager.onChange((data) => {
             console.log('[AgentManager] StrategyManagerClient data loaded:', JSON.stringify(data, null, 2));
+            
+            // Preserve filePath from previous strategyData if new data doesn't have it
+            if (!data.filePath && this.state.strategyData?.filePath) {
+                console.log('[AgentManager] Preserving filePath from previous data:', this.state.strategyData.filePath);
+                (data as any).filePath = this.state.strategyData.filePath;
+            }
+            
             this.state.strategyData = data;
             console.log('[AgentManager] Updated state with StrategyManagerClient data');
             this.emitStateChange();
@@ -559,51 +573,124 @@ export class AgentManager {
             return;
         }
         
-        const strategies = selectedIndices.map(idx => 
-            strategyData.strategies.find(s => s.index === idx)
-        ).filter(s => s !== undefined);
+        // Get all strategy indices
+        const allIndices = strategyData.strategies.map(s => s.index);
         
-        if (strategies.length === 0) {
-            vscode.window.showWarningMessage('Invalid strategy indices selected');
-            return;
+        try {
+            // Set selected strategies to High Priority
+            for (const idx of selectedIndices) {
+                await this.sendOptoolCommand(`optool priority ${idx} high`);
+            }
+            
+            // Set unselected strategies to Normal Priority
+            const unselectedIndices = allIndices.filter(idx => !selectedIndices.includes(idx));
+            for (const idx of unselectedIndices) {
+                await this.sendOptoolCommand(`optool priority ${idx} normal`);
+            }
+            
+            vscode.window.showInformationMessage(
+                `Set ${selectedIndices.length} ${selectedIndices.length === 1 ? 'strategy' : 'strategies'} to high priority`
+            );
+            
+            // Refresh strategy list to show updated priorities
+            await this.refreshStrategyList();
+            
+        } catch (error) {
+            vscode.window.showErrorMessage(`Failed to update priorities: ${error}`);
+        }
+    }
+    
+    /**
+     * Send optool command by directly modifying the strategy file
+     * The Python agent will read the updated priorities when selecting strategies
+     */
+    private async sendOptoolCommand(command: string): Promise<void> {
+        console.log(`[AgentManager] Sending optool command: ${command}`);
+        
+        // Parse the command to extract index and priority
+        const match = command.match(/optool priority (\d+) (high|normal|\d+)/i);
+        if (!match) {
+            throw new Error(`Invalid optool command format: ${command}`);
         }
         
-        // Generate message
-        const strategyNames = strategies.map(s => `Strategy ${s!.index}: ${s!.name}`).join(', ');
-        const messageContent = `Please implement ${strategyNames} from the .optimization_strategies.md file.`;
+        const index = parseInt(match[1]);
+        const priorityInput = match[2].toLowerCase();
         
-        const userMessage: AgentMessage = {
-            role: 'user',
-            content: messageContent,
-            timestamp: new Date(),
-            messageType: 'strategy_explore',
-            relatedStrategyIndices: selectedIndices
-        };
-        
-        // Add message to history
-        this.state.messages.push(userMessage);
-        this.state.hasPendingUserMessage = true;
-        this.emitStateChange();
-        
-        // If agent is waiting for input, send message immediately
-        if (this.state.status === 'waiting_input') {
-            try {
-                await this.bridge.sendNotification('user/sendMessage', {
-                    message: messageContent
-                });
-                this.state.hasPendingUserMessage = false;
-                this.state.status = 'running';
-                this.emitStateChange();
-                
-                vscode.window.showInformationMessage(`Exploring ${strategies.length} strateg${strategies.length === 1 ? 'y' : 'ies'}`);
-            } catch (error) {
-                vscode.window.showErrorMessage(`Failed to send message: ${error}`);
-            }
+        // Convert to numeric value (for file update)
+        let priority: number;
+        if (priorityInput === 'high') {
+            priority = 100;
+        } else if (priorityInput === 'normal') {
+            priority = 50;
         } else {
-            // Otherwise, message remains in chat history for agent to process later
-            vscode.window.showInformationMessage(
-                `Message added to chat history. Agent will process it when ready.`
-            );
+            priority = parseInt(priorityInput);  // Backward compatibility
+        }
+        
+        // Update in-memory strategy data
+        if (this.state.strategyData && this.state.strategyData.strategies) {
+            const strategy = this.state.strategyData.strategies.find(s => s.index === index);
+            if (strategy) {
+                strategy.priority = priority;
+            }
+        }
+        
+        // Write to file using Node.js fs module
+        const fs = require('fs');
+        const path = require('path');
+        
+        // Get file path - try strategyData.filePath first, then fallback to calculated path
+        let filePath: string;
+        
+        if (this.state.strategyData?.filePath) {
+            filePath = this.state.strategyData.filePath;
+            console.log(`[AgentManager] Using filePath from strategyData: ${filePath}`);
+        } else {
+            // Fallback: calculate the path
+            const pathInfo = this.getStrategyFilePath();
+            filePath = pathInfo.absolute;
+            console.log(`[AgentManager] Using calculated filePath: ${filePath}`);
+        }
+        
+        if (!filePath) {
+            throw new Error('Strategy file path not available');
+        }
+        
+        try {
+            // Read current file
+            const content = fs.readFileSync(filePath, 'utf8');
+            
+            // Update the priority in the file
+            const lines = content.split('\n');
+            let inStrategy = false;
+            let strategyIndex = 0;
+            
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                
+                // Check if this is a strategy header
+                const headerMatch = line.match(/^## Strategy (\d+):/);
+                if (headerMatch) {
+                    strategyIndex = parseInt(headerMatch[1]);
+                    inStrategy = (strategyIndex === index);
+                    continue;
+                }
+                
+                // If we're in the target strategy, update the priority line
+                if (inStrategy && line.match(/^\[priority:(high|normal|\d+)\]/i)) {
+                    // Convert priority to label
+                    const priorityLabel = priority >= 100 ? 'high' : 'normal';
+                    lines[i] = line.replace(/\[priority:(high|normal|\d+)\]/i, `[priority:${priorityLabel}]`);
+                    break;
+                }
+            }
+            
+            // Write back to file
+            fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+            console.log(`[AgentManager] Updated priority for strategy ${index} to ${priority}`);
+            
+        } catch (error) {
+            console.error(`[AgentManager] Failed to update strategy file: ${error}`);
+            throw error;
         }
     }
     
@@ -665,6 +752,13 @@ export class AgentManager {
             );
             this.strategyManager.onChange((data) => {
                 console.log('[AgentManager] Strategy data changed:', JSON.stringify(data, null, 2));
+                
+                // Preserve filePath from previous strategyData if new data doesn't have it
+                if (!data.filePath && this.state.strategyData?.filePath) {
+                    console.log('[AgentManager] Preserving filePath from previous data:', this.state.strategyData.filePath);
+                    (data as any).filePath = this.state.strategyData.filePath;
+                }
+                
                 this.state.strategyData = data;
                 this.emitStateChange();
             });
