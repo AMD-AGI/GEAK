@@ -5,13 +5,16 @@ from typing import Dict, Tuple
 from collections import defaultdict
 import pandas as pd
 
+from minisweagent.tools.prompt_for_profiling_analyzer import profiler_prompt
+
 class ProfilingAnalyzer:
     
-    def __init__(self, workdir: str, profiling_cmd: str, output_path: str, profiling_type: str):
+    def __init__(self, workdir: str, profiling_cmd: str, output_path: str, profiling_type: str, llm_model=None):
         self.workdir = workdir
         self.profiling_cmd = profiling_cmd
         self.output_path = output_path
         self.profiling_type = profiling_type
+        self.model = llm_model
     
     def _extract_kernel_name(self) -> str:
         match = re.search(r'Kernel\s+\d+:\s*(.+?)\s*\.\.\.', self.content)
@@ -57,7 +60,7 @@ class ProfilingAnalyzer:
             df = pd.read_csv(csv_path)
             kernels = df['Kernel_Name'].tolist()
             pct = df['Pct'].tolist()
-            kernel_names = [k for k, p in zip(kernels, pct) if p > 4.0]
+            kernel_names = [k for k, p in zip(kernels, pct) if p > 1.0]
         except (ValueError, IndexError):
             print("Warning: Could not find top kernels")
         return kernel_names
@@ -568,17 +571,17 @@ class ProfilingAnalyzer:
     def more_profiling(self):
         sys_info = self.parse_profiling_sys_info()
         more_profiler = "\nBelow are some more profiling information of this kernel, you can reference these info to analyze and generate better kernel."
-        more_profiler += f"\nThe following are GPU system information:\n"
+        more_profiler += f"\nSection 1.0: The following are GPU system information:\n"
         for k,v in sys_info.items():
             more_profiler += f"- {k}: {v}\n"
         
         top_kernels = self.parse_profiling_top_kernel()
-        more_profiler += f"\nThe following are the top-performing kernels that need optimization:\n"
+        more_profiler += f"\nSection 2.0: The following are the top-performing kernels that need optimization:\n"
         for k in top_kernels[:3]:
             more_profiler += f"- {k}\n"
         
         sys_speedup = self.parse_profiling_sys_speed()
-        more_profiler += "\nThe following are Performance Utilization & Bottlenecks:"
+        more_profiler += "\nSection 3.0: The following are Performance Utilization & Bottlenecks:"
         more_profiler += f"\n- compute_util_pct: percentage of peak compute throughput achieved. value: {sys_speedup["compute_util_pct"]}"
         more_profiler += f"\n- ipc: instructions per cycle. value: {sys_speedup["ipc"]}"
         more_profiler += f"\n- valu_active_threads: effective SIMD utilization. value: {sys_speedup["valu_active_threads"]}"
@@ -589,7 +592,7 @@ class ProfilingAnalyzer:
         more_profiler += f"\n- max_latency_cycles: observed memory or fabric latency. value: {sys_speedup["max_latency_cycles"]}"
 
         compute_units = self.parse_profiling_compute_units()
-        more_profiler += "\nThe following are Compute Units - Instruction Mix:"
+        more_profiler += "\nSection 4.0: The following are Compute Units - Instruction Mix:"
         more_profiler += f"\n- Integer operations account for {compute_units["int_ratio"]*100:.1f}% of all arithmetic instructions"
         more_profiler += f"\n- Floating-point operations account for {compute_units["fp_ratio"]*100:.1f}% of all arithmetic instructions"
         more_profiler += f"\n- Global memory reads account for {compute_units["global_read_ratio"]*100:.1f}% of memory operations"
@@ -598,7 +601,7 @@ class ProfilingAnalyzer:
         more_profiler += f"\n- MFMA instructions used: {compute_units["uses_mfma"]}"
 
         l1_data = self.parse_profiling_l1_data()
-        more_profiler += "\nThe following are informantion in Vector L1 Data Cache:"
+        more_profiler += "\nSection 5.0: The following are informantion in Vector L1 Data Cache:"
         more_profiler += f"\n- L1 cache hit rate: Indicates how much kernel data reuse is captured by L1 cache. value: {l1_data["l1_cache"]["hit_rate_pct"]}"
         more_profiler += f"\n- L1 bandwidth utilization: Measures utilization of L1 bandwidth. value: {l1_data["l1_cache"]["bandwidth_util_pct"]}"
         more_profiler += f"\n- L1 stalled on L2 data: Reflects how often L1 waits on L2 responses. value: {l1_data["l1_stall"]["l2_data_stall_median_pct"]}"
@@ -610,7 +613,7 @@ class ProfilingAnalyzer:
         more_profiler += f"\n- TLB miss rate: Fraction of requests that missed the TLB. value: {l1_data["tlb"]["miss_rate_pct"] }"
 
         l2_data = self.parse_profiling_l2_data()
-        more_profiler += "\nThe following are informantion in L2 Cache:"
+        more_profiler += "\nSection 6.0: The following are informantion in L2 Cache:"
         more_profiler += f"\n- L2 cache hit rate: {l2_data["l2_locality"]["hit_rate"]}"
         more_profiler += f"\n- l2_bw_util: {l2_data["l2_bandwidth"]["utilization"]}"
         more_profiler += f"\n- read_latency_cycles: {l2_data["latency"]["write_cycles"]}"
@@ -620,7 +623,7 @@ class ProfilingAnalyzer:
 
         wavefront = self.parse_profiling_wavefront()
         total_cycles = wavefront["Dependency Wait Cycles"][0] + wavefront["Issue Wait Cycles"][0] + wavefront["Active Cycles"][0]
-        more_profiler += "\nThe following are Threading & Allocation:"
+        more_profiler += "\nSection 7.0: The following are Threading & Allocation:"
         more_profiler += f"\n- VGPR pressure: {wavefront["VGPRs"][0]} {wavefront["VGPRs"][1]}"
         more_profiler += f"\n- SGPR pressure: {wavefront["SGPRs"][0]} {wavefront["SGPRs"][1]}"
         more_profiler += f"\n- AGPR pressure: {wavefront["AGPRs"][0]} {wavefront["AGPRs"][1]}"
@@ -661,7 +664,7 @@ class ProfilingAnalyzer:
         ai_metrics = self.parse_roofline_ai()
         categorized = self.categorize_metrics(rates)
         roofline = self.roofline_summary(categorized, ai_metrics)
-        more_profiler = self.more_profiling()
+        more_profiler = self.more_profiling() if self.profiling_type == 'profiling' else None
         
         return {
             'roofline': roofline,
@@ -671,20 +674,47 @@ class ProfilingAnalyzer:
     def __call__(self, *args, **kwds):
         kernel_name = Path(self.workdir).name
         results = {}
-        make_cmd = [f"HIP_VISIBLE_DEVICES=5 rocprof-compute profile -n {kernel_name} --path {self.output_path} -b 0 1 2 4 7 10 16 17 -- {self.profiling_cmd}"]
-        result = subprocess.run(make_cmd, shell=True, cwd=self.workdir, capture_output=True, text=True, timeout=3600)
+        if self.profiling_type == 'profiling':
+            make_cmd = [f"rocprof-compute profile -n {kernel_name} --path {self.output_path} -b 0 1 2 4 7 10 16 17 -- {self.profiling_cmd}"]
+        elif self.profiling_type == 'roofline':
+            make_cmd = [f"rocprof-compute profile -n {kernel_name} --path {self.output_path} --roof-only -- {self.profiling_cmd}"]
+        elif self.profiling_type == 'profiler_analyzer':
+            make_cmd = [f"rocprof-compute profile -n {kernel_name} --path {self.output_path} -b 0 1 2 4 7 10 11 16 17 -- {self.profiling_cmd}"] 
+        else: 
+            return {
+                "output": "No profiling information",
+                "returncode": 1,
+            }
+        result = subprocess.run(make_cmd, shell=True, cwd=self.workdir, capture_output=True, text=True, timeout=3600*6)
         if result.returncode == 0:
-            analysis_cmd =[f"HIP_VISIBLE_DEVICES=5 rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
-            result = subprocess.run(analysis_cmd, shell=True, cwd=self.workdir, capture_output=True, text=True, timeout=3600)
+            analysis_cmd =[f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
+            if self.profiling_type == 'profiling':
+                analysis_cmd =[f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
+            elif self.profiling_type == 'roofline':
+                analysis_cmd =[f"rocprof-compute analyze -p {self.output_path} -b 4"]
+            elif self.profiling_type == 'profiler_analyzer':
+                analysis_cmd =[f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 11 16 17"]
+            result = subprocess.run(analysis_cmd, shell=True, cwd=self.workdir, capture_output=True, text=True, timeout=3600*6)
             if result.returncode == 0:
-                self.content = result.stdout
-                analyzer = self.analyze()
-                if self.profiling_type=='roofline':
+                
+                if self.profiling_type == 'profiler_analyzer' and self.model is not None:
+                    msg = profiler_prompt.format(profiler_output = result.stdout)
+                    prompt = [{"role": "user", "content": msg}]
+                    response = self.model.query(prompt)
+                    results ={
+                        "output": response["content"] if response["content"] else result.stdout,
+                        "returncode": 0,
+                    }
+                elif self.profiling_type=='roofline':
+                    self.content = result.stdout
+                    analyzer = self.analyze()
                     results ={
                         "output": analyzer["roofline"],
                         "returncode": result.returncode,
                     }
                 elif self.profiling_type=='profiling':
+                    self.content = result.stdout
+                    analyzer = self.analyze()
                     results ={
                         "output": analyzer["roofline"] + analyzer["profiling"],
                         "returncode": result.returncode,
@@ -694,7 +724,6 @@ class ProfilingAnalyzer:
             "output": result.stdout.strip() or result.stderr.strip(),
             "returncode": result.returncode,
         }
-
 
 if __name__ == "__main__":
     repo= "/mcp/fused_bucketized"

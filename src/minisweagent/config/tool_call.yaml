@@ -137,7 +137,7 @@ agent:
   step_limit: 0.
   cost_limit: 0.
   mode: confirm
-  profiling_type: roofline # profiling roofline
+  profiling_type: roofline # profiling roofline profiler_analyzer
   profiling_repo: /mcp/tasks/AIG-Eval-Internal-Tasks/fused_bucketized
   profiling_cmd: ./applications_fused_bucketized
   profiling_path: /mcp/outputs/l1/fused_bucketized/profiling
