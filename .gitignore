@@ -181,4 +181,7 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
-
+rocPRIM_*/
+2025*/
+*patch
+*txt

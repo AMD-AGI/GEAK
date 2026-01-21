@@ -14,6 +14,11 @@ from tenacity import (
 )
 
 from minisweagent.models import GLOBAL_MODEL_STATS
+try:
+    from google import genai
+    from google.genai.types import HttpOptions
+except ImportError:
+    raise ImportError("You should install google-genai to use Gemini models. pip install google-genai")
 
 logger = logging.getLogger("amd_llm")
 
@@ -81,6 +86,23 @@ class AmdLlmModel:
                     "user": user,
                     "anthropic-version": self.config.api_version,
                 },
+            )
+        elif "gemini" in self.config.model_name:
+            # Initialize Google genai client with AMD endpoint
+            # Ensure base_url and api_version are set correctly for Gemini
+            base_url = self.config.base_url or "https://llm-api.amd.com/VertexGen"
+            api_version = "v1"  # Gemini always uses "v1"
+            self.client = genai.Client(
+                vertexai=True,
+                api_key="dummy",
+                http_options=HttpOptions(
+                    base_url=base_url,
+                    api_version=api_version,
+                    headers={
+                        "Ocp-Apim-Subscription-Key": api_key,
+                        "user": user,
+                    }
+                )
             )
 
 
@@ -156,27 +178,79 @@ class AmdLlmModel:
             if k in supported_params
         }
 
-        # 拼 prompt
-        prompt = "\n".join([msg["content"] for msg in messages])
+        cleaned_messages = []
+        for msg in messages:
+            cleaned_messages.append({"role": msg['role'], "content": msg['content']})
 
-        # 调用 AMD Responses API
         response = self.client.responses.create(
             model=self.config.model_name,
-            input=prompt,
-            **filtered_kwargs,
+            input=cleaned_messages,
+            **filtered_kwargs
         )
 
         return response
     
+    @retry(
+        stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "10"))),
+        wait=wait_exponential(multiplier=4, min=4, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        retry=retry_if_not_exception_type(KeyboardInterrupt),
+    )
+    def _query_gemini(self, messages: list[dict[str, str]], **kwargs):
+        # Google genai API supported parameters
+        supported_params = {
+            "temperature", "max_output_tokens", "top_p", "top_k",
+            "stop_sequences", "candidate_count", "safety_settings"
+        }
+
+        # Filter parameters
+        all_kwargs = self.config.model_kwargs | kwargs
+        filtered_kwargs = {
+            k: v for k, v in all_kwargs.items()
+            if k in supported_params
+        }
+
+        # Convert messages format for Google genai API
+        # Google genai expects contents as a list of Content objects with role and parts
+        contents = []
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            text = msg.get("content", "")
+            
+            if role == "system":
+                # Include system messages in contents with role "system"
+                genai_role = "system"
+            elif role == "assistant":
+                genai_role = "model" 
+            else:
+                genai_role = "user"
+
+            contents.append({
+                "role": genai_role,
+                "parts": [
+                    {"text": text}
+                ]
+            })
+
+        response = self.client.models.generate_content(
+            model=self.config.model_name,
+            contents=contents,
+            **filtered_kwargs
+        )
+
+
+        return response
+
     def _parse_response_openai(self, response):
         content = ""
         try:
             out = response.output
-            if out and hasattr(out[0], "content"):
+            if out and hasattr(out[0], "content") and out[0].content is not None:
                 if out[0].content and out[0].content[0].type == "output_text":
                     content = out[0].content[0].text
             # resp from gpt-5-codex
-            elif out and hasattr(out[-1], "content"):
+            elif out and hasattr(out[-1], "content") and out[-1].content is not None:
                 if out[-1].content and out[-1].content[0].type == "output_text":
                     content = out[-1].content[0].text
         except Exception:
@@ -197,9 +271,29 @@ class AmdLlmModel:
         except Exception:
             logger.warning("Failed to parse response content")
 
-
+    
         return content
     
+    def _parse_response_gemini(self, response):
+        content = ""
+        try:
+            # Google genai returns response.text for text content
+            if hasattr(response, "text") and response.text:
+                content = response.text
+            elif hasattr(response, "candidates") and response.candidates:
+                # Fallback: try to extract from candidates
+                candidate = response.candidates[0]
+                if hasattr(candidate, "content") and hasattr(candidate.content, "parts"):
+                    text_parts = [
+                        part.text for part in candidate.content.parts
+                        if hasattr(part, "text")
+                    ]
+                    content = "".join(text_parts)
+        except Exception as e:
+            logger.warning(f"Failed to parse response content: {e}")
+
+        return content
+
     def query(self, messages: list[dict[str, str]], **kwargs):
         if "gpt" in self.config.model_name:
             response = self._query_openai(messages, **kwargs)
@@ -207,11 +301,19 @@ class AmdLlmModel:
         elif "claude" in self.config.model_name:
             response = self._query_anthropic(messages, **kwargs)
             content = self._parse_response_anthropic(response)
+        elif "gemini" in self.config.model_name:
+            response = self._query_gemini(messages, **kwargs)
+            content = self._parse_response_gemini(response)
         else:
             raise ValueError(f"Unsupported model: {self.config.model_name}")
+    
+        try:
+            usage = response.usage
+        except Exception:
+            logger.warning("Failed to get usage information")
+            usage = None
 
-        usage = response.usage
-        if usage:
+        if usage:   
             cost = (
                 (usage.input_tokens / 1000) * self.config.cost_per_1k_input_tokens +
                 (usage.output_tokens / 1000) * self.config.cost_per_1k_output_tokens
@@ -233,10 +335,24 @@ class AmdLlmModel:
 
 
 if __name__ == "__main__":
-    # gpt-5, gpt-5-codex, gpt-5.1, claude-opus-4.5, claude-sonnet-4.5
-    model = AmdLlmModel(
-        model_name="gpt-5",
-        api_key="",
-    )
-    response = model.query([{"role": "user", "content": "Explain briefly what 'neural text degeneration' means in LLMs."}])
-    print(response["content"])
+    # gpt-5, gpt-5-codex, gpt-5.1, claude-opus-4.5, claude-sonnet-4.5，gemini-3-pro-preview
+    model_list = [
+        "gpt-5",
+        "claude-opus-4.5",
+        "claude-sonnet-4.5",
+        "gemini-3-pro-preview",
+    ]
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is the capital of France?"},
+        {"role": "assistant", "content": "Paris"},
+        {"role": "user", "content": "Explain the attention sink in LLM"},
+    ]
+    for model_name in model_list:
+        print(f"Testing {model_name}...")
+        model = AmdLlmModel(
+            model_name=model_name,
+            api_key="",
+        )
+        response = model.query(messages)
+        print(response["content"])
