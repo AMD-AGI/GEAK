@@ -1,0 +1,126 @@
+"""Parse optimization task information from user input."""
+
+import json
+import re
+from datetime import datetime
+from pathlib import Path
+
+
+def parse_task_info(task_content: str, model) -> dict:
+    """Parse task content to extract optimization configuration.
+    
+    Extracts:
+    - kernel_name: Name of the kernel being optimized
+    - repo: Repository path
+    - test_command: Command to test the optimization
+    - metric: Performance metric to extract
+    - num_parallel: Number of parallel agents
+    - gpu_ids: GPU IDs for parallel execution
+    
+    Returns dict with extracted values (None if not found).
+    """
+    prompt = f"""Analyze the following optimization task and extract configuration information.
+
+Task:
+{task_content}
+
+Extract the following information (return null if not found):
+1. kernel_name: The name of the kernel/function being optimized (e.g., "gemm", "matmul", "conv2d")
+2. repo: The repository path mentioned in the task (absolute path or relative path)
+3. test_command: The command to run tests or benchmarks
+4. metric: The performance metric to measure (e.g., "bandwidth in GB/s", "latency in ms", "throughput")
+5. num_parallel: Number of parallel optimization agents to run (integer)
+6. gpu_ids: Comma-separated GPU IDs for parallel execution (e.g., "0,1,2,3")
+
+Return ONLY a valid JSON object with these keys. Example:
+{{
+  "kernel_name": "matmul",
+  "repo": "/path/to/repo",
+  "test_command": "python test.py",
+  "metric": "Extract throughput in GFLOPS",
+  "num_parallel": 4,
+  "gpu_ids": "0,1,2,3"
+}}
+
+If any field cannot be determined from the task, set it to null.
+"""
+    
+    try:
+        response = model.query([
+            {"role": "system", "content": "You are a helpful assistant that extracts structured configuration from optimization tasks. Always respond with valid JSON."},
+            {"role": "user", "content": prompt}
+        ])
+        content = response.get("content", "").strip()
+        
+        # Extract JSON from markdown code blocks if present
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+        
+        parsed = json.loads(content)
+        
+        # Validate and normalize the parsed data
+        result = {
+            "kernel_name": parsed.get("kernel_name"),
+            "repo": parsed.get("repo"),
+            "test_command": parsed.get("test_command"),
+            "metric": parsed.get("metric"),
+            "num_parallel": parsed.get("num_parallel"),
+            "gpu_ids": parsed.get("gpu_ids"),
+        }
+        
+        # Normalize repo path if it exists
+        if result["repo"]:
+            repo_path = Path(result["repo"])
+            if repo_path.exists():
+                result["repo"] = str(repo_path.resolve())
+        
+        return result
+        
+    except (json.JSONDecodeError, Exception) as e:
+        # If parsing fails, return all None
+        return {
+            "kernel_name": None,
+            "repo": None,
+            "test_command": None,
+            "metric": None,
+            "num_parallel": None,
+            "gpu_ids": None,
+        }
+
+
+def generate_patch_output_dir(kernel_name: str | None, base_dir: str = "optimization_logs") -> str:
+    """Generate patch output directory based on kernel name and timestamp.
+    
+    Format: optimization_logs/kernelname_timestamp
+    If kernel_name is None, use "optimization_timestamp"
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if kernel_name:
+        # Clean kernel name (replace special characters with underscores)
+        clean_name = re.sub(r'[^\w\-]', '_', kernel_name)
+        dir_name = f"{clean_name}_{timestamp}"
+    else:
+        dir_name = f"optimization_{timestamp}"
+    
+    return str(Path(base_dir) / dir_name)
+
+
+def display_parsed_config(parsed_info: dict, patch_output_dir: str) -> str:
+    """Display parsed configuration in a formatted way for user confirmation."""
+    lines = [
+        "\n" + "=" * 70,
+        "Auto-detected Configuration:",
+        "=" * 70,
+    ]
+    
+    lines.append(f"  Kernel Name:       {parsed_info['kernel_name'] or 'Not detected'}")
+    lines.append(f"  Repository:        {parsed_info['repo'] or 'Not detected'}")
+    lines.append(f"  Test Command:      {parsed_info['test_command'] or 'Not detected'}")
+    lines.append(f"  Metric:            {parsed_info['metric'] or 'Not detected'}")
+    lines.append(f"  Num Parallel:      {parsed_info['num_parallel'] or 'Not detected'}")
+    lines.append(f"  GPU IDs:           {parsed_info['gpu_ids'] or 'Not detected'}")
+    lines.append(f"  Patch Output Dir:  {patch_output_dir}")
+    lines.append("=" * 70)
+    
+    return "\n".join(lines)

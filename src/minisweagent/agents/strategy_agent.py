@@ -24,6 +24,8 @@ class StrategyAgent(InteractiveAgent):
         super().__init__(*args, **kwargs)
         self.strategy_file_path = strategy_file_path
         self._strategy_manager = None  # Lazy initialization
+        # patch-related attributes (patch_counter, patch_results, log_file, test_command, etc.) 
+        # are now inherited from DefaultAgent
         
         print(f"[DEBUG] StrategyAgent initialized with strategy_file_path: {strategy_file_path}", file=sys.stderr)
 
@@ -84,7 +86,7 @@ class StrategyAgent(InteractiveAgent):
                 print(traceback.format_exc(), file=sys.stderr)
                 return {"output": error_msg, "returncode": 1}
         
-        # Other commands execute normally
+        # Execute the action normally (save_patch functionality is handled by DefaultAgent)
         return super().execute_action(action)
     
     def _get_strategy_manager(self):

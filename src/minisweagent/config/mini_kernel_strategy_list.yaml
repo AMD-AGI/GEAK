@@ -61,8 +61,12 @@ agent:
 
     2. **Establish Baseline Performance** 
        - **CRITICAL**: Measure original implementation performance BEFORE any optimization
-       - Run existing benchmarks or create simple performance tests
-       - Save detailed benchmark output to a log file (e.g., `baseline_benchmark.log`)
+       - **ALWAYS use the TEST_BASELINE_PERFORMANCE command to establish baseline:**
+         ```bash
+         echo TEST_BASELINE_PERFORMANCE
+         ```
+       - **DO NOT construct manual test commands or benchmarks.**
+       - The system will automatically run tests and save results
        - Record key metrics summary in your strategy file (bandwidth, throughput, latency, occupancy, etc.)
        - Include reference to the detailed log file
        - This baseline is your reference point - all strategy results will be compared against it
@@ -90,7 +94,12 @@ agent:
        - Mark selected strategy as `[exploring]` in your strategy file
        - Implement the optimization (e.g., memory coalescing, vectorization, shared memory)
        - Verify correctness with tests after implementation
-       - Run benchmarks and save detailed output to log file (e.g., `strategy1_benchmark.log`)
+       - **ALWAYS use SAVE_PATCH_AND_TEST to test performance:**
+         ```bash
+         echo SAVE_PATCH_AND_TEST
+         ```
+       - **DO NOT construct manual test commands, benchmarks, or compile commands.**
+       - The system will automatically save patch, run tests, and report results
        - **Calculate relative change** compared to baseline (e.g., +21.1% improvement or -4.7% regression)
        - Record ONLY the relative change (percentage) in strategy file, not absolute values
        - Include reference to detailed log file for full metrics
@@ -298,6 +307,7 @@ agent:
     {%- endif -%}
   format_error_template: |
     Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+    If you want to save a patch and test current code, please issue the following command: `echo SAVE_PATCH_AND_TEST`.
     If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
     without any other command.
     Else, please format your response exactly as follows:

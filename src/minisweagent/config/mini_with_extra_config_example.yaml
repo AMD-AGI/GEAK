@@ -1,6 +1,9 @@
+# Example mini.yaml with extra_config section
+# This shows how to configure default optimization settings
+
 agent:
   system_template: |
-    You are a helpful GPU kernel optimization expert that can interact with a computer.
+    You are a helpful assistant that can interact with a computer.
 
     Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
     Include a THOUGHT section before your command where you explain your reasoning process.
@@ -15,73 +18,22 @@ agent:
     </format_example>
 
     Failure to follow these rules will cause your response to be rejected.
+  instance_template: |
+    Please solve this issue: {{task}}
 
     You can execute bash commands and edit files to implement the necessary changes.
 
-    ## Optimization Workflow
+    ## Recommended Workflow
 
-    Follow this systematic workflow to optimize GPU kernels. Each phase should be completed step-by-step.
+    This workflows should be done step-by-step so that you can iterate on your changes and any possible problems.
 
-    ### Phase 1: Hardware Analysis
-
-    1. **Gather hardware information** using `rocminfo`, `rocm-smi --showproductname`, `rocm-smi`
-       - Architecture model (e.g., GFX9, GFX10)
-       - Number of compute units (CUs/SMs)
-       - Maximum threads per CU/SM
-       - Shared memory size per CU/SM
-       - Register count
-       - Memory bandwidth
-       - Output this information in a clear table or list format
-
-    ### Phase 2: Codebase Analysis
-
-    2. **Analyze the target kernel** by finding and reading relevant files
-       - Understand the current implementation
-       - Identify the kernel's computational pattern
-       - Note resource usage (registers, shared memory, threads)
-       - Note the key points in benchmark test
-
-    ### Phase 3: Baseline Measurement
-
-    3. **Establish baseline performance** by issuing: `echo TEST_BASELINE_PERFORMANCE`
-       - Identify performance bottlenecks from profiling data
-
-    ### Phase 4: Strategy Formulation
-
-    4. **Propose multiple optimization directions** based on hardware characteristics, code analysis, key points in benchmark test and baseline results
-       <important>
-       You MUST consider architecture-level optimizations, NOT just simple code-level changes, like loop unrolling, vectorization, config setting search, etc.
-
-       Consider optimizations including but not limited to:
-       - **GPU occupancy**: Increase active warps/wavefronts per CU
-       - **Memory bandwidth**: Maximize global/shared memory throughput
-       - **Bank conflicts**: Optimize shared memory access patterns
-       - **Warp/block tuning**: Adapt parameters for specific architectures
-       - **Resource allocation**: Efficient use of registers/shared memory/local memory
-       - **Latency hiding**: Use pipelining or prefetching techniques
-       - **Parallelism**: Exploit hardware parallelism at different levels
-       - **Adaptive strategy for various benchmark tests**: there may be different datatypes, segment sizes, etc.
-      </important>
-
-       **Assign a priority to each optimization direction** (ranking them according to the potential performance gain), and **experiment with them one by one in order of priority**.
-      
-    ### Phase 5: Iterative Optimization
-
-    5. **Implement optimizations one at a time** in priority order
-       - Edit the source code for the current optimization
-       - Save and test by issuing: `echo SAVE_PATCH_AND_TEST`
-       - If test fails, you should fix the failure and try again
-       - Compare results with baseline
-       - If no improvement: You can try other optimization directions.
-       - In the progress of optimization, you are encouraged to adaptively adjust the priority ofoptimization directions or propose new optimization directions based on the results. 
-
-    6. **Repeat Phase 5** until target performance is achieved or all high-priority optimizations are exhausted
-
-    ### Phase 6: Submission
-
-    7. **Submit final changes** by issuing: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
-       - Do NOT combine this command with any other command
-       - Only submit after achieving satisfactory performance improvement
+    1. Analyze the codebase by finding and reading relevant files
+    2. Create a script to reproduce the issue
+    3. Edit the source code to resolve the issue
+    4. Verify your fix works by running your script again
+    5. Test edge cases to ensure your fix is robust
+    6. Submit your changes and finish your work by issuing the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+       Do not combine it with any other command. <important>After this command, you cannot continue working on this task.</important>
 
     ## Important Rules
 
@@ -89,7 +41,6 @@ agent:
     2. The action must be enclosed in triple backticks
     3. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
        However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
-    4. Each time you want to test current code performance, please issue the following command: `echo SAVE_PATCH_AND_TEST`.
 
     <system_information>
     {{system}} {{release}} {{version}} {{machine}}
@@ -153,8 +104,6 @@ agent:
     ```bash
     anything
     ```
-  instance_template: |
-    Please optimize the following GPU kernel: {{task}}
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
     {% if output.output | length < 10000 -%}
@@ -182,7 +131,6 @@ agent:
     {%- endif -%}
   format_error_template: |
     Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
-    If you want to save a patch and test current code, please issue the following command: `echo SAVE_PATCH_AND_TEST`.
     If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
     without any other command.
     Else, please format your response exactly as follows:
@@ -200,6 +148,7 @@ agent:
   step_limit: 0.
   cost_limit: 0.
   mode: confirm
+
 env:
   env:
     PAGER: cat
@@ -207,18 +156,41 @@ env:
     LESS: -R
     PIP_PROGRESS_BAR: 'off'
     TQDM_DISABLE: '1'
-  timeout: 36000
+  timeout: 3600
+
 model:
   model_class: amd_llm
-  # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
   model_name: claude-opus-4.5
   api_key: ""
-  # model_kwargs:
-    # temperature: 0.0
-    # max_tokens: 16000
-    # reasoning is only valid for gpt models, can be set to none, low, medium, high
-    # reasoning:
-    #   effort: high
-    # # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
-    # text:
-    #   verbosity: low
+  model_kwargs:
+    temperature: 0.0
+    max_tokens: 16000
+    reasoning:
+      effort: high
+    text:
+      verbosity: low
+
+# Extra configuration for optimization tasks
+# These values are used as defaults when not provided via command-line
+# Priority: Command-line > extra_config > auto-detect
+extra_config:
+  # Repository path for optimization
+  repo: /data/yueliu14/rocm-examples
+  
+  # Default test command (can include WORK_REPO placeholder)
+  test_command: cd WORK_REPO && python benchmark.py --size 4096
+  
+  # Default metric extraction description
+  metric: Extract throughput in GFLOPS and latency in milliseconds
+  
+  # Default number of parallel agents
+  num_parallel: 4
+  
+  # Default GPU IDs for parallel execution
+  # Can be a list or comma-separated string
+  gpu_ids: [0, 1, 2, 3]
+  # Or: gpu_ids: "0,1,2,3"
+  
+  # Default patch output directory (optional)
+  # If not set, will be auto-generated as optimization_logs/kernelname_timestamp
+  # patch_output_dir: /path/to/custom/output

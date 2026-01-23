@@ -106,23 +106,21 @@ def redirect_output_to_file(log_file: Path):
 
 @dataclass
 class ParallelAgentConfig(AgentConfig):
-    save_patch: bool = True
-    test_command: str | None = None
-    patch_output_dir: str | None = None
-    metric: str | None = None
+    # save_patch, test_command, patch_output_dir, metric are now inherited from AgentConfig
     mode: str | None = None
     num_parallel: int = 1
     repo: Path | None = None
-    parallel_gpu_ids: list[int] | None = None
+    gpu_ids: list[int] | None = None
+    agent_class: type | None = None
 
 
 class ParallelAgent(DefaultAgent):
     def __init__(self, model: Model, env: Environment, **kwargs):
         super().__init__(model, env, config_class=ParallelAgentConfig, **kwargs)
-        self.patch_results: dict[str, dict] = {}
-        self.patch_counter = 0
-        self.log_file: Path | None = None
+        # patch_results, patch_counter, log_file, base_repo_path are now inherited from DefaultAgent
         self._last_action_hash: str | None = None
+
+    # _is_git_repo() and _diff_excludes() are now inherited from DefaultAgent
 
     def add_message(self, role: str, content: str, **kwargs):
         super().add_message(role, content, **kwargs)
@@ -143,30 +141,12 @@ class ParallelAgent(DefaultAgent):
             except Exception:
                 pass  # Ignore errors writing to log file
     
-    def _log_message(self, message: str):
-        """Log a message directly to the log file without going through stdout."""
-        if self.log_file:
-            try:
-                with open(self.log_file, "a", encoding="utf-8") as f:
-                    f.write(message + "\n")
-                    f.flush()
-            except Exception:
-                pass
-        else:
-            # Only print to console if not in parallel mode (no log file)
-            print(message, flush=True)
+    # _log_message() is now inherited from DefaultAgent (same implementation)
 
-    def execute_action(self, action: dict) -> dict:
-        output = super().execute_action(action)
-        lines = output.get("output", "").lstrip().splitlines(keepends=True)
-        if lines and lines[0].strip() in ("TEST_BASELINE_PERFORMANCE", "SAVE_PATCH_AND_TEST"):
-            patch_info = self._save_patch_and_test()
-            if patch_info:
-                output["output"] = output.get("output", "") + "\n" + patch_info
-            
-        return output
+    # execute_action(), _save_patch_and_test(), and all related helper methods
+    # are now inherited from DefaultAgent
 
-    def _save_patch_and_test(self) -> str | None:
+    def run(self, task: str, **kwargs) -> tuple[str, str] | Any:
         patch_name = f"patch_{self.patch_counter}"
         self.patch_counter += 1
         self._log_message(f"\n[ParallelAgent] Saving patch and running test...")
@@ -176,15 +156,34 @@ class ParallelAgent(DefaultAgent):
             cwd = getattr(self.env.config, 'cwd', None) or os.getcwd()
         
         try:
-            git_diff_result = subprocess.run(
-                "git add -N . && git diff",
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                shell=True,
-            )
-            patch_content = git_diff_result.stdout
+            patch_content = ""
+            if self._is_git_repo(Path(cwd)):
+                git_diff_result = subprocess.run(
+                    "git add -N . && git diff",
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    shell=True,
+                )
+                patch_content = git_diff_result.stdout
+            elif self.base_repo_path and self.base_repo_path.exists():
+                excludes = self._diff_excludes()
+                diff_result = subprocess.run(
+                    [
+                        "diff",
+                        "-ruN",
+                        "--exclude=.git",
+                        "--exclude=__pycache__",
+                        *[f"--exclude={p}" for p in excludes if p not in (".git", "__pycache__")],
+                        str(self.base_repo_path),
+                        str(cwd),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                patch_content = diff_result.stdout
             if not patch_content.strip():
                 self._log_message(f"[ParallelAgent] No changes detected, baseline running.")
             else:
@@ -398,8 +397,10 @@ class ParallelAgent(DefaultAgent):
             repo_path = repo_path.resolve()
             if not repo_path.exists():
                 raise ValueError(f"Repository path does not exist: {repo_path}")
-            if not (repo_path / ".git").exists():
-                raise ValueError(f"Repository path is not a git repository: {repo_path}")
+            # Use git worktrees only when repo_path itself is a git repo root (has .git).
+            # If user passes a subdirectory (even if it's inside a git repo), prefer copy-mode so the workdir
+            # contains only that subtree, which also enables non-git repo optimization workflows.
+            is_git_repo = (repo_path / ".git").exists()
             
             base_patch_dir = Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")
             output = kwargs.get("output")
@@ -411,16 +412,21 @@ class ParallelAgent(DefaultAgent):
             if not model_factory or not env_factory:
                 raise ValueError("model_factory and env_factory must be provided in kwargs when num_parallel > 1")
             
+            # Use specified agent_class or default to DefaultAgent
+            agent_class = self.config.agent_class or DefaultAgent
+            
             return self.run_parallel(
                 num_parallel=self.config.num_parallel,
                 repo_path=repo_path,
+                is_git_repo=is_git_repo,
                 task_content=task,
-                agent_config={k: v for k, v in self.config.__dict__.items() if k not in ('num_parallel', 'repo', 'parallel_gpu_ids')},
+                agent_class=agent_class,
+                agent_config={k: v for k, v in self.config.__dict__.items() if k not in ('num_parallel', 'repo', 'gpu_ids', 'agent_class')},
                 model_factory=model_factory,
                 env_factory=env_factory,
                 base_patch_dir=base_patch_dir,
                 output=output,
-                parallel_gpu_ids=self.config.parallel_gpu_ids,
+                gpu_ids=self.config.gpu_ids,
                 save_traj_fn=save_traj_fn,
                 console=console,
             )
@@ -445,13 +451,24 @@ class ParallelAgent(DefaultAgent):
             except Exception:
                 pass
         
-        exit_status, result = super().run(task, **kwargs)
+        exit_status, result, extra_info = None, None, None
+        try:
+            exit_status, result = super().run(task, **kwargs)
+        except Exception as e:
+            exit_status, result = type(e).__name__, str(e)
+            extra_info = {"traceback": traceback.format_exc()}
         
         completion_msg = f"\n[ParallelAgent] Agent execution completed\n"
         completion_msg += f"[ParallelAgent] Exit status: {exit_status}\n"
         
         self._print_summary()
-        completion_msg += f"[ParallelAgent] Trajectory will be saved by the runner\n"
+        
+        # Save trajectory for single agent mode
+        output = kwargs.get("output")
+        save_traj_fn = kwargs.get("save_traj_fn")
+        if output and save_traj_fn:
+            completion_msg += f"[ParallelAgent] Saving trajectory to {output}\n"
+            save_traj_fn(self, output, exit_status=exit_status, result=result, extra_info=extra_info)
         
         if self.log_file:
             try:
@@ -709,6 +726,22 @@ class ParallelAgent(DefaultAgent):
         return worktree_path
 
     @staticmethod
+    def _create_copy_workdir(repo_path: Path, workdir_path: Path) -> Path:
+        """Create an isolated work directory by copying `repo_path` (for non-git repos)."""
+        if workdir_path.exists():
+            try:
+                shutil.rmtree(workdir_path)
+            except Exception:
+                pass
+        workdir_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            repo_path,
+            workdir_path,
+            ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
+        )
+        return workdir_path
+
+    @staticmethod
     def _replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
         """Replace repository paths with worktree path in text."""
         repo_path_str = str(repo_path.resolve())
@@ -725,13 +758,15 @@ class ParallelAgent(DefaultAgent):
         cls,
         num_parallel: int,
         repo_path: Path,
+        is_git_repo: bool,
         task_content: str,
+        agent_class: type,
         agent_config: dict,
         model_factory,
         env_factory,
         base_patch_dir: Path,
         output: Path | None,
-        parallel_gpu_ids: list[int] | None = None,
+        gpu_ids: list[int] | None = None,
         redirect_output_fn=redirect_output_to_file,
         save_traj_fn=None,
         console=None,
@@ -745,13 +780,16 @@ class ParallelAgent(DefaultAgent):
         repo_path_resolved = repo_path.resolve()
         repo_path_str = str(repo_path_resolved)
         
-        if parallel_gpu_ids and len(parallel_gpu_ids) < num_parallel:
+        if gpu_ids and len(gpu_ids) < num_parallel:
             if console:
-                console.print(f"[bold yellow]Warning: Only {len(parallel_gpu_ids)} GPU IDs provided for {num_parallel} parallel agents. Some agents will not have GPU isolation.[/bold yellow]")
+                console.print(f"[bold yellow]Warning: Only {len(gpu_ids)} GPU IDs provided for {num_parallel} parallel agents. Some agents will not have GPU isolation.[/bold yellow]")
         
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
-            worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
+            if is_git_repo:
+                worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
+            else:
+                worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
             worktree_path_str = str(worktree_path.resolve())
             
             if console:
@@ -778,8 +816,8 @@ class ParallelAgent(DefaultAgent):
             env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, 'config') else {}
             env_config_dict["cwd"] = str(worktree_path)
             env_config_dict.setdefault("env", {})["WORK_REPO"] = worktree_path_str
-            if parallel_gpu_ids and agent_id < len(parallel_gpu_ids):
-                gpu_id = parallel_gpu_ids[agent_id]
+            if gpu_ids and agent_id < len(gpu_ids):
+                gpu_id = gpu_ids[agent_id]
                 env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = str(gpu_id)
                 if console:
                     # Use lock to ensure console output completes before stdout redirection
@@ -794,9 +832,14 @@ class ParallelAgent(DefaultAgent):
             if output:
                 parallel_output = output.parent / f"{output.stem}_parallel_{agent_id}{output.suffix}"
             
-            agent = cls(parallel_model, parallel_env, **parallel_agent_config)
-            agent.extra_template_vars["WORK_REPO"] = worktree_path_str
-            agent.log_file = log_file
+            agent = agent_class(parallel_model, parallel_env, **parallel_agent_config)
+            # Set agent attributes if they exist (for ParallelAgent compatibility)
+            if hasattr(agent, 'extra_template_vars'):
+                agent.extra_template_vars["WORK_REPO"] = worktree_path_str
+            if hasattr(agent, 'base_repo_path'):
+                agent.base_repo_path = repo_path_resolved
+            if hasattr(agent, 'log_file'):
+                agent.log_file = log_file
             
             with open(log_file, "w", encoding="utf-8") as f:
                 f.write(f"Agent {agent_id} Conversation Log\n")

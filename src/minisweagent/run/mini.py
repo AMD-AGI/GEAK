@@ -20,13 +20,13 @@ from minisweagent import global_config_dir
 from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.agents.interactive_textual import TextualAgent
 from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
-from minisweagent.agents.patch_agent import PatchAgent
 from minisweagent.agents.parallel_agent import ParallelAgent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.utils.save import save_traj
+from minisweagent.run.utils.config_editor import load_and_merge_configs
 from minisweagent.utils.log import logger
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
@@ -74,32 +74,30 @@ def main(
     # Strategy mode configuration
     enable_strategies: bool = typer.Option(True, "--enable-strategies/--no-enable-strategies", help="Enable optimization strategy management (optool command). Auto-selects appropriate template.", rich_help_panel="Advanced"),
     strategy_file: str = typer.Option(".optimization_strategies.md", "--strategy-file", help="Path to strategy file (relative to workspace)", rich_help_panel="Advanced"),
-    # Patch mode configuration
-    save_patch: bool = typer.Option(False, "--save-patch", help="Save git patches and test results"),
+    # Patch mode configuration (always enabled)
     test_command: str | None = typer.Option(None, "--test-command", help="Test command to run for patch validation"),
     patch_output: Path | None = typer.Option(None, "--patch-output", help="Output directory for patch files and test results"),
     metric: str | None = typer.Option(None, "--metric", help="Metric extraction task description for LLM"),
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents to run (only effective with --save-patch). If not specified, reads from config file."),
     repo: Path | None = typer.Option(None, "--repo", help="Repository path for parallel execution. Required when num_parallel > 1. Each agent will get an isolated workdir using git worktree."),
-    parallel_gpu_ids: str | None = typer.Option(None, "--parallel-gpu-ids", help="Comma-separated GPU IDs for parallel agents (e.g., '0,1,2,3'). If not specified, reads from config file."),
+    gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs for agents (e.g., '0,1,2,3'). For single agent, uses first GPU. Defaults to '0'."),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
     
-    # 1. Auto-select template based on strategy mode
-    # Get num_parallel from config or command line (command line takes precedence)
-    effective_num_parallel = num_parallel if num_parallel is not None else 1
-    # Auto-enable save_patch if num_parallel > 1, or use explicit save_patch flag
-    save_patch = save_patch or effective_num_parallel > 1
-
-    template_name = "mini_system_prompt.yaml" if save_patch else ("mini_kernel_strategy_list.yaml" if enable_strategies else "mini_kernel.yaml")
+    # Select template based on enable_strategies flag
+    if enable_strategies:
+        template_name = "mini_kernel_strategy_list.yaml"
+    else:
+        template_name = "mini_system_prompt.yaml"
+    
     template_path = builtin_config_dir / template_name
-    console.print(f"Using template: [bold green]'{template_name}'[/bold green]")
+    console.print(f"Using template: [bold green]'{template_name}'[/bold green] (save_patch always enabled)")
     template_config = yaml.safe_load(template_path.read_text())
     
     # 2. Load user config if provided
     user_config = {}
-    if config_spec and config_spec != DEFAULT_CONFIG:
+    if config_spec:
         config_path = get_config_path(config_spec)
         console.print(f"Loading user config from [bold green]'{config_path}'[/bold green]")
         user_config = yaml.safe_load(config_path.read_text())
@@ -143,57 +141,75 @@ def main(
     model = get_model(model_name, config.get("model", {}))
     env = LocalEnvironment(**config.get("env", {}))
 
-    # Both visual flag and the MSWEA_VISUAL_MODE_DEFAULT flip the mode, so it's essentially a XOR
-    # Choose agent class based on features needed
-    if enable_strategies:
-        agent_class = StrategyInteractiveAgent
-        # Add strategy_file_path to config
-        config.setdefault("agent", {})["strategy_file_path"] = strategy_file
-    elif visual == (os.getenv("MSWEA_VISUAL_MODE_DEFAULT", "false") == "false"):
-        agent_class = TextualAgent
+    # Load and merge configurations: Command-line > extra_config from yaml > auto-detect
+    result = load_and_merge_configs(
+        config, repo, test_command, metric, num_parallel, gpu_ids, patch_output,
+        task_content, yolo, model, console
+    )
+    if result == (None, None, None, None, None, None):
+        console.print("[bold yellow]Continuing without automatic patch saving. You can still interact with the agent.[/bold yellow]")
+        # Keep original None values since user aborted
+        repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output = None, None, None, None, [0], None
     else:
-        agent_class = InteractiveAgent
+        repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output = result
+    
+    # ============ Step 1: Choose base agent class ============
+    # Based on enable_strategies flag, select appropriate agent and template
+    if enable_strategies:
+        # Use strategy agent with mini_kernel_strategy_list.yaml template
+        base_agent_class = StrategyInteractiveAgent
+        console.print(f"[bold cyan]Using Strategy Agent with strategy file: {strategy_file}[/bold cyan]")
+    else:
+        # Use interactive agent with mini_system_prompt.yaml template
+        # Choose between visual (Textual) and non-visual (Interactive) mode
+        if visual == (os.getenv("MSWEA_VISUAL_MODE_DEFAULT", "false") == "false"):
+            base_agent_class = TextualAgent
+        else:
+            base_agent_class = InteractiveAgent
+        console.print(f"[bold cyan]Using Interactive Agent (visual={'on' if base_agent_class == TextualAgent else 'off'})[/bold cyan]")
+    
+    # Mode (yolo/confirm/human) is set via config and applies to all InteractiveAgent subclasses
+    
+    # ============ Step 2: Configure agent settings ============
     agent_config = config.get("agent", {})
     
+    # Add strategy file path for strategy agent
+    if enable_strategies:
+        agent_config["strategy_file_path"] = strategy_file
     
-    # Configure patch agent if save_patch is enabled
-    if save_patch:
-        # Use PatchAgent when num_parallel=1, ParallelAgent when num_parallel>1
-        if effective_num_parallel > 1:
-            agent_class = ParallelAgent
-        else:
-            agent_class = PatchAgent
-        agent_config["save_patch"] = True
-        agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
-        patch_dir = patch_output or config.get("patch", {}).get("patch_output_dir") or (global_config_dir / "patches")
-        agent_config["patch_output_dir"] = str(patch_dir)
-        agent_config["metric"] = metric or config.get("patch", {}).get("metric")
+    # Configure save_patch settings (always enabled)
+    agent_config["save_patch"] = True
+    agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
+    patch_dir = patch_output or config.get("patch", {}).get("patch_output_dir") or (global_config_dir / "patches")
+    agent_config["patch_output_dir"] = str(patch_dir)
+    agent_config["metric"] = metric or config.get("patch", {}).get("metric")
     
-    # Get repo path from config or command line (command line takes precedence)
-    repo_path = repo or config.get("patch", {}).get("repo")
-    if repo_path:
-        repo_path = Path(repo_path).resolve()
-
-    # Configure agent with parallel settings if needed
-    if save_patch and effective_num_parallel > 1:
-        agent_config["num_parallel"] = effective_num_parallel
+    # ============ Step 3: Use ParallelAgent (supports both single and parallel execution) ============
+    agent_class = ParallelAgent
+    agent_config["agent_class"] = base_agent_class
+    agent_config["num_parallel"] = num_parallel or 1
+    agent_config["gpu_ids"] = parsed_gpu_ids
+    
+    if num_parallel and num_parallel > 1:
+        console.print(f"[bold cyan]Using Parallel Mode: {num_parallel} agents[/bold cyan]")
+        console.print(f"[dim]GPU IDs: {parsed_gpu_ids}[/dim]")
+        
+        # Configure repo path for parallel execution
+        repo_path = repo or config.get("patch", {}).get("repo")
         if repo_path:
-            agent_config["repo"] = str(repo_path)
-        # Get parallel_gpu_ids from command line or config (command line takes precedence)
-        if parallel_gpu_ids:
-            # Parse comma-separated GPU IDs string into list of integers
-            try:
-                gpu_ids_list = [int(gpu_id.strip()) for gpu_id in parallel_gpu_ids.split(",") if gpu_id.strip()]
-                agent_config["parallel_gpu_ids"] = gpu_ids_list
-            except ValueError:
-                console.print(f"[bold red]Warning: Invalid GPU IDs format '{parallel_gpu_ids}'. Expected comma-separated integers (e.g., '0,1,2,3'). Using config file value.[/bold red]")
-                agent_config["parallel_gpu_ids"] = config.get("patch", {}).get("parallel_gpu_ids", [])
+            agent_config["repo"] = str(Path(repo_path).resolve())
+            console.print(f"[dim]Repository: {agent_config['repo']}[/dim]")
         else:
-            agent_config["parallel_gpu_ids"] = config.get("patch", {}).get("parallel_gpu_ids", [])
+            console.print("[bold yellow]Warning: No repo path specified for parallel execution[/bold yellow]")
+    else:
+        console.print(f"[bold cyan]Using Single Agent Mode[/bold cyan]")
+        console.print(f"[dim]Using GPU: {parsed_gpu_ids[0]}[/dim]")
+        # Set HIP_VISIBLE_DEVICES for single agent GPU isolation
+        env.config.env = env.config.env or {}
+        env.config.env["HIP_VISIBLE_DEVICES"] = str(parsed_gpu_ids[0])
     
     # Create and run agent
     agent = agent_class(model, env, **agent_config)
-    exit_status, result, extra_info = None, None, None
     try:
         exit_status, result = agent.run(
             task_content,
@@ -206,13 +222,8 @@ def main(
     except Exception as e:
         logger.error(f"Error running agent: {e}", exc_info=True)
         exit_status, result = type(e).__name__, str(e)
-        extra_info = {"traceback": traceback.format_exc()}
-    finally:
-        if output and not (save_patch and effective_num_parallel > 1):
-            save_traj(agent, output, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
     
-    # Return agent for single execution, result for parallel execution
-    return result if (save_patch and effective_num_parallel > 1) else agent
+    return agent
 
 
 if __name__ == "__main__":
