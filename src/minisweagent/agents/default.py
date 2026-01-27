@@ -29,9 +29,6 @@ class AgentConfig:
     step_limit: int = 0
     cost_limit: float = 3.0
     profiling_type: str = ""
-    profiling_repo: str = ""
-    profiling_cmd: str = ""
-    profiling_path: str = ""
 
 
 class NonTerminatingException(Exception):
@@ -65,8 +62,7 @@ class DefaultAgent:
         self.model = model
         self.env = env
         self.extra_template_vars = {}
-        self.toolruntime = ToolRuntime(profiling_workdir=self.config.profiling_repo, profiling_cmd=self.config.profiling_cmd, 
-                                       profiling_path=self.config.profiling_path, profiling_type=self.config.profiling_type)
+        self.toolruntime = ToolRuntime(profiling_type=self.config.profiling_type)
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()

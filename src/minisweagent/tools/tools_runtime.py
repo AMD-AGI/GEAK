@@ -14,13 +14,13 @@ with open(json_path,"r",encoding="utf-8") as f:
 # =========================
 
 class ToolRuntime:
-    def __init__(self, profiling_workdir: str=None, profiling_cmd: str=None, profiling_path: str=None, profiling_type: str=None, llm_model=None):
+    def __init__(self, profiling_type: str=None, llm_model=None):
         self._tool_table = {
             "bash": BashCommand(),
             "str_replace_editor": str_replace_editor(),
         }
         if profiling_type in ['roofline', 'profiling', 'profiler_analyzer']:
-            self._tool_table["profiling"] = ProfilingAnalyzer(workdir=profiling_workdir, profiling_cmd=profiling_cmd, output_path=profiling_path, profiling_type=profiling_type, llm_model=llm_model)
+            self._tool_table["profiling"] = ProfilingAnalyzer(profiling_type=profiling_type, llm_model=llm_model)
 
     def dispatch(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
         """

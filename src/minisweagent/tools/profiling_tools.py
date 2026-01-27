@@ -4,18 +4,39 @@ from pathlib import Path
 from typing import Dict, Tuple
 from collections import defaultdict
 import pandas as pd
+from packaging.version import Version
+import tempfile
 
 from minisweagent.tools.prompt_for_profiling_analyzer import profiler_prompt
 
 class ProfilingAnalyzer:
     
-    def __init__(self, workdir: str, profiling_cmd: str, output_path: str, profiling_type: str, llm_model=None):
-        self.workdir = workdir
-        self.profiling_cmd = profiling_cmd
-        self.output_path = output_path
+    def __init__(self, profiling_type: str, llm_model=None):
         self.profiling_type = profiling_type
         self.model = llm_model
+        with tempfile.TemporaryDirectory(prefix="rocprof_") as tmpdir:
+            self.output_path = Path(tmpdir).resolve()
     
+    def _check_rocprof_compute(self):
+        result_rocprof = subprocess.run([f'rocprof-compute --version'], capture_output=True, text=True, shell=True)
+        if result_rocprof.returncode !=0:
+            print("ROCProf is not installed. Starting installing.....")
+            result = subprocess.run([f'sudo apt install rocprofiler-compute'], capture_output=True, text=True, shell=True)
+            result = subprocess.run([f'sudo update-alternatives --install /usr/bin/rocprofiler-compute rocprof-compute /opt/rocm/bin/rocprofiler-compute 0'], capture_output=True, text=True, shell=True)
+            result = subprocess.run([f'python3 -m pip install -r /opt/rocm/libexec/rocprofiler-compute/requirements.txt'], capture_output=True, text=True, shell=True)
+            if result.returncode != 0:
+                return None
+            else:
+                result_rocprof = subprocess.run([f'rocprof-compute --version'], capture_output=True, text=True, shell=True)
+                pattern = r"rocprofiler-compute\s+version:\s*([0-9]+\.[0-9]+\.[0-9]+)"
+                match = re.search(pattern, result_rocprof.stdout)
+                return match.group(1) if match else None
+        else:
+            pattern = r"rocprofiler-compute\s+version:\s*([0-9]+\.[0-9]+\.[0-9]+)"
+            match = re.search(pattern, result_rocprof.stdout)
+            return match.group(1) if match else None
+        
+
     def _extract_kernel_name(self) -> str:
         match = re.search(r'Kernel\s+\d+:\s*(.+?)\s*\.\.\.', self.content)
         return match.group(1) if match else "Unknown"
@@ -56,11 +77,11 @@ class ProfilingAnalyzer:
     def parse_profiling_top_kernel(self) -> Dict[str, Tuple[float, float, str]]:
         kernel_names = []
         try:
-            csv_path = self.output_path + "/pmc_kernel_top.csv"
+            csv_path = self.output_path / "pmc_kernel_top.csv"
             df = pd.read_csv(csv_path)
             kernels = df['Kernel_Name'].tolist()
             pct = df['Pct'].tolist()
-            kernel_names = [k for k, p in zip(kernels, pct) if p > 1.0]
+            kernel_names = [k for k, p in zip(kernels, pct) if p > 1.0 and "amd_rocclr" not in k]
         except (ValueError, IndexError):
             print("Warning: Could not find top kernels")
         return kernel_names
@@ -299,7 +320,7 @@ class ProfilingAnalyzer:
 
         # ---------- MFMA presence ----------
         mfma = tables.get("10.4", {})
-        features["uses_mfma"] = any(v > 0 for v in mfma.values())
+        features["uses_mfma"] = any(v > 0 for v in mfma.values() if v is not None)
         
         if not features:
             print("Warning: Could not find compute units")
@@ -333,7 +354,7 @@ class ProfilingAnalyzer:
                         lk = parts[2].lower()
                         if "hit rate" in lk:
                             feat["l1_cache"]["hit_rate_pct"] = safe_float(parts[3])
-                        elif "bandwidth utilization" in lk:
+                        elif "bandwidth" in lk:
                             feat["l1_cache"]["bandwidth_util_pct"] = safe_float(parts[3])
                         elif lk == "utilization":
                             feat["l1_cache"]["utilization_pct"] = safe_float(parts[3])
@@ -397,7 +418,7 @@ class ProfilingAnalyzer:
                         continue
         
         if not feat:
-            print("Warning: Could not find l2 data")
+            print("Warning: Could not find l1 data")
         
         return feat
     
@@ -413,11 +434,11 @@ class ProfilingAnalyzer:
         in_section = False
         feat = defaultdict(dict)
         for i, line in enumerate(lines):
-            if '17.1 L2 Speed-of-Light' in line:
+            if '17. L2' in line:
                 in_section = True
                 continue
             
-            if in_section and '7. Wavefront' in line:
+            if in_section and '18. L2' in line:
                 break
             # ---------- L1 Cache Effectiveness ----------
             if in_section and '│' in line and '17.' in line:
@@ -426,7 +447,7 @@ class ProfilingAnalyzer:
                     try:
                         lk = parts[2].lower()
                         # ---- bandwidth ----
-                        if "peak bandwidth" in lk:
+                        if "bandwidth" in lk and "17.1" in parts[1]:
                             feat["l2_bandwidth"]["utilization"] = safe_float(parts[3])
                         elif "read bw" in lk:
                             feat["l2_bandwidth"]["read_bw_gbps"] = safe_float(parts[3])
@@ -664,37 +685,46 @@ class ProfilingAnalyzer:
         ai_metrics = self.parse_roofline_ai()
         categorized = self.categorize_metrics(rates)
         roofline = self.roofline_summary(categorized, ai_metrics)
-        more_profiler = self.more_profiling() if self.profiling_type == 'profiling' else None
+        more_profiler = self.more_profiling()
         
         return {
             'roofline': roofline,
             'profiling': more_profiler
         }
     
-    def __call__(self, *args, **kwds):
-        kernel_name = Path(self.workdir).name
+    def __call__(self, profiling_workdir: str, profiling_cmd: str, *args, **kwds):
+        kernel_name = Path(profiling_workdir).name
         results = {}
-        if self.profiling_type == 'profiling':
-            make_cmd = [f"rocprof-compute profile -n {kernel_name} --path {self.output_path} -b 0 1 2 4 7 10 16 17 -- {self.profiling_cmd}"]
+        rocprof_version = self._check_rocprof_compute()
+        if not profiling_workdir or not profiling_cmd:
+            return {
+                "output": "No profiling_workdir and profiling_cmd arguments are provided.",
+                "returncode": 1,
+            }
+        if rocprof_version is None:
+            return {
+                "output": "No ROCProf is installed. CAN NOT get profiling information.",
+                "returncode": 1,
+            }        
+        use_profiling = Version(rocprof_version) < Version("3.3.1") and (self.profiling_type == 'roofline' or self.profiling_type == 'profiling')
+        if self.profiling_type == 'profiling' or use_profiling or self.profiling_type == 'profiler_analyzer':
+            make_cmd = [f"rocprof-compute profile -n {kernel_name} --path {self.output_path} -- {profiling_cmd}"]
         elif self.profiling_type == 'roofline':
-            make_cmd = [f"rocprof-compute profile -n {kernel_name} --path {self.output_path} --roof-only -- {self.profiling_cmd}"]
-        elif self.profiling_type == 'profiler_analyzer':
-            make_cmd = [f"rocprof-compute profile -n {kernel_name} --path {self.output_path} -b 0 1 2 4 7 10 11 16 17 -- {self.profiling_cmd}"] 
+            make_cmd = [f"rocprof-compute profile -n {kernel_name} --path {self.output_path} --roof-only -- {profiling_cmd}"]
         else: 
             return {
                 "output": "No profiling information",
                 "returncode": 1,
             }
-        result = subprocess.run(make_cmd, shell=True, cwd=self.workdir, capture_output=True, text=True, timeout=3600*6)
+        result = subprocess.run(make_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600*6)
         if result.returncode == 0:
-            analysis_cmd =[f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
-            if self.profiling_type == 'profiling':
+            if self.profiling_type == 'profiling'  or use_profiling:
                 analysis_cmd =[f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
             elif self.profiling_type == 'roofline':
                 analysis_cmd =[f"rocprof-compute analyze -p {self.output_path} -b 4"]
             elif self.profiling_type == 'profiler_analyzer':
                 analysis_cmd =[f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 11 16 17"]
-            result = subprocess.run(analysis_cmd, shell=True, cwd=self.workdir, capture_output=True, text=True, timeout=3600*6)
+            result = subprocess.run(analysis_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600*6)
             if result.returncode == 0:
                 
                 if self.profiling_type == 'profiler_analyzer' and self.model is not None:
@@ -705,30 +735,34 @@ class ProfilingAnalyzer:
                         "output": response["content"] if response["content"] else result.stdout,
                         "returncode": 0,
                     }
-                elif self.profiling_type=='roofline':
+                else:
                     self.content = result.stdout
                     analyzer = self.analyze()
-                    results ={
-                        "output": analyzer["roofline"],
-                        "returncode": result.returncode,
-                    }
-                elif self.profiling_type=='profiling':
-                    self.content = result.stdout
-                    analyzer = self.analyze()
-                    results ={
-                        "output": analyzer["roofline"] + analyzer["profiling"],
-                        "returncode": result.returncode,
+                    if use_profiling:
+                        results ={
+                            "output": analyzer["profiling"],
+                            "returncode": result.returncode,
+                            }
+                    elif self.profiling_type=='profiling':
+                        results ={
+                            "output": analyzer["roofline"] + analyzer["profiling"],
+                            "returncode": result.returncode,
+                            }
+                    elif self.profiling_type=='roofline':
+                        results ={
+                            "output": analyzer["roofline"],
+                            "returncode": result.returncode,
                         }
-                return results
+                    return results
         return {
-            "output": result.stdout.strip() or result.stderr.strip(),
-            "returncode": result.returncode,
+            "output":  result.stdout.strip() or result.stderr.strip(),
+            "returncode": 1,
         }
 
 if __name__ == "__main__":
-    repo= "/mcp/fused_bucketized"
+    repo= "/mcp/task/AIG-Eval-Internal-Tasks/fused_bucketized"
     profiling_cmd= "./applications_fused_bucketized"
     output_path= "/mcp/outputs/l1/fused_bucketized/profiling"
-    kernel_profiling = ProfilingAnalyzer(repo, profiling_cmd, output_path, profiling_type='profiling')
-    response = kernel_profiling()
+    kernel_profiling = ProfilingAnalyzer(profiling_type='roofline')
+    response = kernel_profiling(profiling_workdir=repo, profiling_cmd=profiling_cmd)
     print(response["output"])

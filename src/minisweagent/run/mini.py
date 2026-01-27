@@ -60,6 +60,7 @@ def main(
     test_command: str | None = typer.Option(None, "--test-command", help="Test command to run for patch validation"),
     patch_output: Path | None = typer.Option(None, "--patch-output", help="Output directory for patch files and test results"),
     metric: str | None = typer.Option(None, "--metric", help="Metric extraction task description for LLM"),
+    profiling: bool = typer.Option(False, "--profiling", help="Run without profiling"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
@@ -91,6 +92,8 @@ def main(
         config.setdefault("agent", {})["confirm_exit"] = False
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
+    if profiling:
+        config.setdefault("model", {})["profiling"] = True
     model = get_model(model_name, config.get("model", {}))
     env = LocalEnvironment(**config.get("env", {}))
 

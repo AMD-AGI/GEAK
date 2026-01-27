@@ -137,10 +137,7 @@ agent:
   step_limit: 0.
   cost_limit: 0.
   mode: confirm
-  profiling_type: roofline # profiling roofline profiler_analyzer
-  profiling_repo: /mcp/tasks/AIG-Eval-Internal-Tasks/fused_bucketized
-  profiling_cmd: ./applications_fused_bucketized
-  profiling_path: /mcp/outputs/l1/fused_bucketized/profiling
+  profiling_type: profiling # profiling roofline profiler_analyzer
 env:
   env:
     PAGER: cat
@@ -154,7 +151,8 @@ model:
   # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
   model_name: claude-opus-4.5
   api_key: ""
-  use_tools: true
+  bash_tool: false
+  profiling: false
   model_kwargs:
     temperature: 1.0
     max_tokens: 16000

@@ -31,7 +31,8 @@ class AmdLlmModelConfig:
     cost_per_1k_output_tokens: float = 0.01
     set_cache_control: Literal["default_end"] | None = "default_end"
     reasoning: dict[str, Any] = field(default_factory=dict)
-    use_tools: bool = True
+    bash_tool: bool = True
+    profiling: bool = False
 
 def convert_openai_tools_to_claude(tools: list[dict]) -> list[dict]:
     """
@@ -87,6 +88,11 @@ class AmdLlmModel:
         self.config = AmdLlmModelConfig(**kwargs)
         self.cost = 0.0
         self.n_calls = 0
+        self.tools = tools_list
+        if not self.config.profiling:
+            self.tools = [tool for tool in self.tools if tool["name"] != "profiling"]
+        if not self.config.bash_tool:
+            self.tools = [tool for tool in self.tools if tool["name"] != "bash"]
 
         api_key = self.config.api_key or os.getenv("AMD_LLM_API_KEY") or os.getenv("LLM_GATEWAY_KEY")
 
@@ -158,8 +164,7 @@ class AmdLlmModel:
             if k in supported_params
         }
 
-        if self.config.use_tools:
-            filtered_kwargs["tools"] = convert_openai_tools_to_claude(tools_list)
+        filtered_kwargs["tools"] = convert_openai_tools_to_claude(self.tools)
 
         # Convert messages format for Anthropic API
         # Anthropic expects messages with role and content
@@ -213,9 +218,8 @@ class AmdLlmModel:
             if k in supported_params
         }
 
-        if self.config.use_tools:
-            filtered_kwargs["tools"] = tools_list
-            filtered_kwargs["tool_choice"] = "auto"
+        filtered_kwargs["tools"] = self.tools
+        filtered_kwargs["tool_choice"] = "auto"
 
         cleaned_messages = []
         prompt = "\n".join([msg["content"] for msg in messages])
@@ -249,10 +253,9 @@ class AmdLlmModel:
             if k in supported_params
         }
         
-        if self.config.use_tools:
-            test_tools = convert_openai_tools_to_gemini(tools_list)
-            tools = [types.Tool(function_declarations=test_tools)]
-            all_kwargs["config"]= types.GenerateContentConfig(tools=tools)
+        test_tools = convert_openai_tools_to_gemini(self.tools)
+        tools = [types.Tool(function_declarations=test_tools)]
+        all_kwargs["config"]= types.GenerateContentConfig(tools=tools)
 
         # Convert messages format for Google genai API
         # Google genai expects contents as a list of Content objects with role and parts
