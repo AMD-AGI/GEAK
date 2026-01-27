@@ -107,7 +107,7 @@ class ProfilingAnalyzer:
         in_section = False
         
         for i, line in enumerate(lines):
-            if '1.1 System Info' in line:
+            if '1. System Info' in line:
                 in_section = True
                 continue
             
@@ -183,7 +183,7 @@ class ProfilingAnalyzer:
         in_section = False
         rows=[]
         for i, line in enumerate(lines):
-            if '2.1 System Speed-of-Light' in line:
+            if '2. System Speed-of-Light' in line:
                 in_section = True
                 continue
             
