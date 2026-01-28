@@ -1,0 +1,35 @@
+[
+  {
+    "name": "profiling",
+    "type": "function",
+    "description": "Profile code with rocprof to identify kernel bottlenecks. After test, run profiling to get bottlenecks for further optimization.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+          "profiling_workdir": {
+            "type": "string",
+            "description": "Absolute path to directory, used to as working directory to running profiling command."
+          },
+          "profiling_cmd": {
+            "type": "string",
+            "description": "The command to execute the kernel during profiling, e.g. execution command using in performance test."
+          }
+        },
+        "required": ["profiling_workdir", "profiling_cmd"]
+    }
+  },
+  {
+    "name": "bash", 
+    "type": "function",
+    "description": "runs the given command directly in bash", 
+    "parameters": {
+        "type": "object", 
+        "properties": {
+            "command": {
+            "type": "string", "description": "The bash command to execute."
+            }
+            }, 
+        "required": ["command"]
+    }
+  }
+]

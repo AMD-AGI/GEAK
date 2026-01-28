@@ -7,10 +7,11 @@ import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-
+import json
 from jinja2 import StrictUndefined, Template
 from pathlib import Path
 from minisweagent import Environment, Model
+from minisweagent.tools.tools_runtime import ToolRuntime
 
 
 @dataclass
@@ -106,21 +107,27 @@ class DefaultAgent:
         if 0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost:
             raise LimitsExceeded()
         response = self.model.query(self.messages)
-        self.add_message("assistant", **response)
+        output = "<action>\n"+ response["content"] + f"\ntool call:\n   {json.dumps(response["tools"], indent=4)}" + "\n</action>"
+        self.add_message("assistant", output)
         return response
 
     def get_observation(self, response: dict) -> dict:
         """Execute the action and return the observation."""
-        output = self.execute_action(self.parse_action(response))
+        output = self.parse_action(response)
         observation = self.render_template(self.config.action_observation_template, output=output)
         self.add_message("user", observation)
         return output
 
     def parse_action(self, response: dict) -> dict:
         """Parse the action from the message. Returns the action."""
-        actions = re.findall(r"```bash\s*\n(.*?)\n```", response["content"], re.DOTALL)
-        if len(actions) == 1:
-            return {"action": actions[0].strip(), **response}
+        if response["content"]:
+            actions = re.findall(r"```bash\s*\n(.*?)\n```", response["content"], re.DOTALL)
+            if len(actions) == 1:
+                actions = {"action": actions[0].strip(), **response}
+                return self.execute_action(actions)
+        if response["tools"]:
+            result = self.toolruntime.dispatch(tool_call=response["tools"]["function"])
+            return result
         raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
 
     def execute_action(self, action: dict) -> dict:

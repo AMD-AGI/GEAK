@@ -2,7 +2,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
-
+import json
 import openai
 import anthropic
 from tenacity import (
@@ -22,7 +22,6 @@ except ImportError:
 
 logger = logging.getLogger("amd_llm")
 
-
 @dataclass
 class AmdLlmModelConfig:
     model_name: str
@@ -34,6 +33,51 @@ class AmdLlmModelConfig:
     cost_per_1k_output_tokens: float = 0.01
     set_cache_control: Literal["default_end"] | None = "default_end"
     reasoning: dict[str, Any] = field(default_factory=dict)
+    bash_tool: bool = True
+    profiling: bool = False
+
+def convert_openai_tools_to_claude(tools: list[dict]) -> list[dict]:
+    """
+    Convert OpenAI-style tool (function calling) definitions into
+    Claude tool-use compatible format.
+    """
+    claude_tools = []
+    for tool in tools:
+        func = tool.get("function", tool)
+        claude_tool = {
+            "name": func["name"],
+            "description": func.get("description", ""),
+            "input_schema": func.get("parameters", {
+                "type": "object",
+                "properties": {},
+                "required": []
+            })
+        }
+        claude_tools.append(claude_tool)
+    return claude_tools
+
+def convert_openai_tools_to_gemini(tools: list[dict]) -> list[dict]:
+    """
+    Convert OpenAI-style tool (function calling) definitions
+    into Gemini-compatible function_declarations format.
+    """
+    gemini_tools = []
+    for tool in tools:
+        func = tool.get("function", tool)
+        gemini_func = {
+            "name": func["name"],
+            "description": func.get("description", ""),
+            "parameters": func.get(
+                "parameters",
+                {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            )
+        }
+        gemini_tools.append(gemini_func)
+    return gemini_tools
 
 
 class AmdLlmModel:
@@ -46,6 +90,11 @@ class AmdLlmModel:
         self.config = AmdLlmModelConfig(**kwargs)
         self.cost = 0.0
         self.n_calls = 0
+        self.tools = tools_list
+        if not self.config.profiling:
+            self.tools = [tool for tool in self.tools if tool["name"] != "profiling"]
+        if not self.config.bash_tool:
+            self.tools = [tool for tool in self.tools if tool["name"] != "bash"]
 
         api_key = self.config.api_key or os.getenv("AMD_LLM_API_KEY") or os.getenv("LLM_GATEWAY_KEY")
         
@@ -116,7 +165,7 @@ class AmdLlmModel:
         # Anthropic API supported parameters
         supported_params = {
             "temperature", "max_tokens", "top_p", "top_k",
-            "stop_sequences", "stream", "metadata", "system"
+            "stop_sequences", "stream", "metadata", "system", "tools"
         }
 
         # Filter parameters
@@ -125,6 +174,8 @@ class AmdLlmModel:
             k: v for k, v in all_kwargs.items()
             if k in supported_params
         }
+
+        filtered_kwargs["tools"] = convert_openai_tools_to_claude(self.tools)
 
         # Convert messages format for Anthropic API
         # Anthropic expects messages with role and content
@@ -139,11 +190,11 @@ class AmdLlmModel:
                 system_message = content
             else:
                 # Map OpenAI roles to Anthropic roles
-                anthropic_role = "assistant" if role == "assistant" else "user"
-                anthropic_messages.append({
-                    "role": anthropic_role,
-                    "content": content
-                })
+                prompt = "\n".join([msg["content"] for msg in messages])
+        anthropic_messages.append({
+            "role": "user",
+            "content": prompt
+        })
 
         # Anthropic API requires max_tokens
         if "max_tokens" not in filtered_kwargs:
@@ -178,9 +229,12 @@ class AmdLlmModel:
             if k in supported_params
         }
 
+        filtered_kwargs["tools"] = self.tools
+        filtered_kwargs["tool_choice"] = "auto"
+
         cleaned_messages = []
-        for msg in messages:
-            cleaned_messages.append({"role": msg['role'], "content": msg['content']})
+        prompt = "\n".join([msg["content"] for msg in messages])
+        cleaned_messages.append({"role": "user", "content":prompt})
 
         response = self.client.responses.create(
             model=self.config.model_name,
@@ -200,7 +254,7 @@ class AmdLlmModel:
         # Google genai API supported parameters
         supported_params = {
             "temperature", "max_output_tokens", "top_p", "top_k",
-            "stop_sequences", "candidate_count", "safety_settings"
+            "stop_sequences", "candidate_count", "safety_settings", "config"
         }
 
         # Filter parameters
@@ -209,56 +263,58 @@ class AmdLlmModel:
             k: v for k, v in all_kwargs.items()
             if k in supported_params
         }
+        
+        test_tools = convert_openai_tools_to_gemini(self.tools)
+        tools = [types.Tool(function_declarations=test_tools)]
+        all_kwargs["config"]= types.GenerateContentConfig(tools=tools)
 
         # Convert messages format for Google genai API
         # Google genai expects contents as a list of Content objects with role and parts
         contents = []
-
-        for msg in messages:
-            role = msg.get("role", "user")
-            text = msg.get("content", "")
-            
-            if role == "system":
-                # Include system messages in contents with role "system"
-                genai_role = "system"
-            elif role == "assistant":
-                genai_role = "model" 
-            else:
-                genai_role = "user"
-
-            contents.append({
-                "role": genai_role,
-                "parts": [
-                    {"text": text}
-                ]
-            })
-
+        prompt = "\n".join([msg["content"] for msg in messages])
+        contents.append({"role": "user", "content":prompt})
         response = self.client.models.generate_content(
             model=self.config.model_name,
             contents=contents,
             **filtered_kwargs
         )
 
-
         return response
 
     def _parse_response_openai(self, response):
+        output_dict ={
+            "content": "",
+            "tools": ""
+        }
         content = ""
         try:
-            out = response.output
-            if out and hasattr(out[0], "content") and out[0].content is not None:
-                if out[0].content and out[0].content[0].type == "output_text":
-                    content = out[0].content[0].text
-            # resp from gpt-5-codex
-            elif out and hasattr(out[-1], "content") and out[-1].content is not None:
-                if out[-1].content and out[-1].content[0].type == "output_text":
-                    content = out[-1].content[0].text
-        except Exception:
-            logger.warning("Failed to parse response content")
+            outs = response.output
+            for out in outs:
+                if out and hasattr(out, "content") and out.content is not None and out.content[0].type == "output_text":
+                    content = out.content[0].text
+                    output_dict["content"] = content
+                    break
+            for out in outs:
+                if out and hasattr(out, "type") and out.type == "function_call":
+                    tool_call = {
+                        "id": out.call_id,
+                        "function": {
+                            "arguments": json.loads(out.arguments),
+                            "name": out.name,
+                        },
+                    }
+                    output_dict["tools"] = tool_call
+                    break
+        except Exception as e:
+            logger.warning(f"Failed to parse openai response content {e}")
 
-        return content
+        return output_dict
     
     def _parse_response_anthropic(self, response):
+        output_dict ={
+            "content": "",
+            "tools": ""
+        }
         content = ""
         try:
             if response.content:
@@ -268,13 +324,30 @@ class AmdLlmModel:
                     if block.type == "text":
                         content_parts.append(block.text)
                 content = "".join(content_parts)
+                output_dict["content"] = content
+                
+                for block in response.content:
+                    if block.type == "tool_use":
+                        tool_call = {
+                            "id": block.id,
+                            "function": {
+                                "arguments": block.input,
+                                "name": block.name,
+                            },
+                        }
+                        output_dict["tools"] = tool_call
+                        break
         except Exception:
             logger.warning("Failed to parse response content")
 
     
-        return content
+        return output_dict
     
     def _parse_response_gemini(self, response):
+        output_dict ={
+            "content": "",
+            "tools": ""
+        }
         content = ""
         try:
             # Google genai returns response.text for text content
@@ -283,16 +356,42 @@ class AmdLlmModel:
             elif hasattr(response, "candidates") and response.candidates:
                 # Fallback: try to extract from candidates
                 candidate = response.candidates[0]
-                if hasattr(candidate, "content") and hasattr(candidate.content, "parts"):
+                if hasattr(candidate, "content") and hasattr(candidate.content, "parts") and candidate.content.parts:
                     text_parts = [
                         part.text for part in candidate.content.parts
                         if hasattr(part, "text")
                     ]
                     content = "".join(text_parts)
+                    output_dict["content"] = content
+            
+            if hasattr(response, "candidates") and response.candidates:
+                candidate = response.candidates[0]
+                if hasattr(candidate, "finish_message"):
+                    tools_call = candidate.finish_message
+                    m = re.search(r"call:(\w+)\s*\{([\s\S]*?)\}\s*$", tools_call.strip())
+                    if m:
+                        name = m.group(1)
+                        raw_args = m.group(2)
+                        json_like = re.sub(
+                            r'(\w+)\s*:',
+                            r'"\1":',
+                            raw_args
+                        )
+                        # import pdb; pdb.set_trace()
+                        json_text = "{" + json_like + "}"
+                        arguments = json.loads(json_text)
+                        tool_call = {
+                            "id": None,
+                            "function": {
+                                "arguments": arguments,
+                                "name": name,
+                            },
+                        }
+                        output_dict["tools"] = tool_call            
         except Exception as e:
             logger.warning(f"Failed to parse response content: {e}")
 
-        return content
+        return output_dict
 
     def query(self, messages: list[dict[str, str]], **kwargs):
         if "gpt" in self.config.model_name:
@@ -325,10 +424,7 @@ class AmdLlmModel:
         self.cost += cost
         GLOBAL_MODEL_STATS.add(cost)
 
-        return {
-            "content": content,
-            "extra": {"response": response.model_dump()},
-        }
+        return content
 
     def get_template_vars(self):
         return asdict(self.config) | {"n_model_calls": self.n_calls, "model_cost": self.cost}
@@ -346,7 +442,7 @@ if __name__ == "__main__":
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What is the capital of France?"},
         {"role": "assistant", "content": "Paris"},
-        {"role": "user", "content": "Explain the attention sink in LLM"},
+        {"role": "user", "content": "Use tool named as str_replace_editor to veiw file '/home/chaox/kernel_agent/read_mini.py' and output your thinking"},
     ]
     for model_name in model_list:
         print(f"Testing {model_name}...")
@@ -355,4 +451,4 @@ if __name__ == "__main__":
             api_key="",
         )
         response = model.query(messages)
-        print(response["content"])
+        print(response)

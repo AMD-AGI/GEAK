@@ -129,6 +129,9 @@ def main(
             ),
         )
         console.print("[bold green]Got that, thanks![/bold green]")
+    elif task and '.md' in task:
+        with open(task, "r", encoding="utf-8") as f:
+            task = f.read()
 
     if yolo:
         config.setdefault("agent", {})["mode"] = "yolo"
@@ -138,6 +141,8 @@ def main(
         config.setdefault("agent", {})["confirm_exit"] = False
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
+    if profiling:
+        config.setdefault("model", {})["profiling"] = True
     model = get_model(model_name, config.get("model", {}))
     env = LocalEnvironment(**config.get("env", {}))
 
