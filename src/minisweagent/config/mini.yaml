@@ -158,12 +158,12 @@ model:
   # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
   model_name: claude-opus-4.5
   api_key: ""
-  model_kwargs:
-    temperature: 0.0
-    max_tokens: 16000
-    # reasoning is only valid for gpt models, can be set to none, low, medium, high
-    reasoning:
-      effort: high
-    # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
-    text:
-      verbosity: low
+  # model_kwargs:
+  #   temperature: 0.0
+  #   max_tokens: 16000
+  #   # reasoning is only valid for gpt models, can be set to none, low, medium, high
+  #   reasoning:
+  #     effort: high
+  #   # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
+  #   text:
+  #     verbosity: low

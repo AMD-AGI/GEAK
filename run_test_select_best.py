@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from minisweagent.agents.parallel_agent import ParallelAgent
 from minisweagent.config import get_config_path
+from minisweagent.models import get_model
 
 
 def main():
@@ -25,8 +26,8 @@ def main():
     parser.add_argument(
         "--config", "-c",
         type=str,
-        default="mini_patch_agent",
-        help="Config file name (without .yaml extension). Default: mini_patch_agent"
+        default="mini_select_patch",
+        help="Config file name/path (with or without .yaml). Default: mini_select_patch"
     )
     parser.add_argument(
         "--base-patch-dir",
@@ -72,32 +73,49 @@ def main():
         print(f"✓ Config loaded\n")
     except Exception as e:
         print(f"✗ Failed to load config file: {e}")
-        return 1
+        print("  Tip: available builtin configs include:")
+        print("   - mini")
+        print("   - mini_kernel")
+        print("   - mini_select_patch")
+        print("   - mini_system_prompt")
+        print("  You can also pass a direct path to a .yaml file via --config.\n")
+        config = {}
     
-    # Get metric model config
+    # Resolve model config for SelectPatchAgent
     print("=" * 80)
-    print("Loading metric_model config...")
+    print("Resolving model config...")
     print("=" * 80)
-    
-    metric_model_config = config.get("metric_model", {})
-    if not metric_model_config:
-        print("✗ Warning: No metric_model config found, using default")
-        metric_model_config = {}
+
+    # Optional override: some configs may provide a dedicated metric_model section
+    metric_model_config = config.get("metric_model", {}) or {}
+
+    # Default: use the config's model/model_name (same as normal runner)
+    model_config = dict(config.get("model", {}) or {})
+    model_name = config.get("model_name")
+    if model_name and "model_name" not in model_config:
+        model_config["model_name"] = model_name
+
+    if metric_model_config:
+        print("✓ Using metric_model config override\n")
+        model_config = metric_model_config
     else:
-        print(f"✓ Metric model config loaded")
-        print(f"  Model name: {metric_model_config.get('model_name', 'not specified')}")
-        print(f"  Model class: {metric_model_config.get('model_class', 'not specified')}\n")
+        print("✓ Using config.model / model_name\n")
+
+    print(f"  Model name: {model_config.get('model_name', 'not specified')}")
+    print(f"  Model class: {model_config.get('model_class', model_config.get('model_class', 'not specified'))}\n")
     
     # Test with metric model config
     print("=" * 80)
     print("Calling _select_best_from_parallel_runs with metric_model config...")
     print("=" * 80)
     
+    model_factory = lambda: get_model(config=model_config)
+
     result = ParallelAgent._select_best_from_parallel_runs(
         base_patch_dir=base_patch_dir,
         num_parallel=args.num_parallel,
         metric=args.metric,
-        metric_model_config=metric_model_config
+        model_factory=model_factory,
     )
     
     if result:

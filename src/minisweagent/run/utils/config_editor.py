@@ -6,18 +6,18 @@ from typing import Any
 
 
 def parse_edit_command(command: str) -> tuple[str | None, Any]:
-    """Parse user edit command like '/test_command=python test.py'.
+    """Parse user edit command like '--test_command=python test.py'.
     
     Returns (field_name, value) or (None, None) if invalid.
     """
     command = command.strip()
     
-    # Check if it's an edit command (starts with /)
-    if not command.startswith('/'):
+    # Check if it's an edit command (starts with --)
+    if not command.startswith('--'):
         return None, None
     
-    # Remove leading /
-    command = command[1:]
+    # Remove leading --
+    command = command[2:]
     
     # Split by = sign
     if '=' not in command:
@@ -50,19 +50,19 @@ def parse_edit_command(command: str) -> tuple[str | None, Any]:
 
 def display_edit_help() -> str:
     """Display help message for editing configuration."""
-    return """
-[bold yellow]Edit Commands:[/bold yellow]
-  /kernel_name=<name>      - Set kernel name
-  /repo=<path>             - Set repository path
-  /test_command=<cmd>      - Set test command
-  /metric=<description>    - Set metric description
-  /num_parallel=<number>   - Set number of parallel agents
-  /gpu_ids=<ids>           - Set GPU IDs (e.g., "0,1,2,3")
+    # Use markup=False or escape angle brackets for Rich console
+    return """[bold yellow]Edit Commands:[/bold yellow]
+  --kernel_name=VALUE      - Set kernel name
+  --repo=PATH              - Set repository path
+  --test_command=CMD       - Set test command
+  --metric=DESCRIPTION     - Set metric description
+  --num_parallel=NUMBER    - Set number of parallel agents
+  --gpu_ids=IDS            - Set GPU IDs (e.g., "0,1,2,3")
   
 [bold green]Other Commands:[/bold green]
-  y, yes, [Enter]          - Proceed with current configuration
-  n, no                    - Abort
-  h, help                  - Show this help message
+  y or Enter               - Proceed with current configuration
+  q                        - Abort
+  h                        - Show this help message
 """
 
 
@@ -84,30 +84,30 @@ def interactive_config_edit(parsed_config: dict, patch_output_dir: str, console)
         console.print(display_parsed_config(current_config, current_patch_dir))
         
         # Prompt for input
-        console.print("\n[bold cyan]Options:[/bold cyan] [y]es to proceed, [n]o to abort, [h]elp for edit commands, or /field=value to edit")
+        console.print("\n[bold cyan]Options:[/bold cyan] (y) to proceed, (q) to abort, (h) for help, or --field=value to edit")
         user_input = input("Your choice: ").strip().lower()
         
         # Handle different inputs
-        if not user_input or user_input in ('y', 'yes'):
+        if not user_input or user_input == 'y':
             # Proceed with current config
             return current_config, current_patch_dir, True
         
-        elif user_input in ('n', 'no'):
+        elif user_input == 'q':
             # Abort
             return current_config, current_patch_dir, False
         
-        elif user_input in ('h', 'help'):
+        elif user_input == 'h':
             # Show help
             console.print(display_edit_help())
             continue
         
-        elif user_input.startswith('/'):
+        elif user_input.startswith('--'):
             # Edit command
             field_name, value = parse_edit_command(user_input)
             
             if field_name is None:
-                console.print("[bold red]Invalid command format. Use /field=value (e.g., /test_command=python test.py)[/bold red]")
-                console.print("[dim]Type 'help' to see all available commands[/dim]")
+                console.print("[bold red]Invalid command format. Use --field=value (e.g., --test_command=python test.py)[/bold red]")
+                console.print("[dim]Type 'h' to see all available commands[/dim]")
                 continue
             
             # Update configuration
@@ -123,7 +123,7 @@ def interactive_config_edit(parsed_config: dict, patch_output_dir: str, console)
             continue
         
         else:
-            console.print(f"[bold red]Unknown command: '{user_input}'. Type 'help' for available commands.[/bold red]")
+            console.print(f"[bold red]Unknown command: '{user_input}'. Type 'h' for available commands.[/bold red]")
             continue
 
 
@@ -175,7 +175,7 @@ def load_and_merge_configs(
     yolo: bool,
     model,
     console,
-) -> tuple[Path | None, str | None, str | None, int | None, list[int], Path | None]:
+) -> tuple[Path | None, str | None, str | None, int | None, list[int], Path | None, str | None]:
     """Load and merge configurations from multiple sources.
     
     Configuration priority: Command-line > extra_config from yaml > auto-detect
@@ -189,10 +189,13 @@ def load_and_merge_configs(
         console: Rich console for output
     
     Returns:
-        Updated tuple of (repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output)
+        Updated tuple of (repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name)
         Note: gpu_ids is returned as a list[int], not str
     """
     from minisweagent.run.utils.task_parser import parse_task_info, generate_patch_output_dir, display_parsed_config
+    
+    # Track kernel_name for returning
+    kernel_name = None
     
     # Step 1: Get extra_config from yaml (if exists)
     extra_config = config.get("extra_config", {})
@@ -266,6 +269,7 @@ def load_and_merge_configs(
             repo, test_command, metric, num_parallel, gpu_ids, patch_output = apply_config_changes(
                 parsed_config, repo, test_command, metric, num_parallel, gpu_ids, patch_output
             )
+            kernel_name = parsed_config.get("kernel_name")
         else:
             console.print("[bold green]All configuration provided via command-line or config file. Skipping auto-detection.[/bold green]")
     
@@ -275,7 +279,7 @@ def load_and_merge_configs(
         try:
             parsed_gpu_ids = [int(gpu_id.strip()) for gpu_id in gpu_ids.split(",") if gpu_id.strip()]
         except ValueError:
-            console.print(f"[bold red]Warning: Invalid GPU IDs format '{gpu_ids}'. Expected comma-separated integers (e.g., '0,1,2,3'). Using default [0].[/bold red]")
+            console.print(f"[bold red]Warning: Invalid GPU IDs format '{gpu_ids}'. Expected comma-separated integers (e.g., '0,1,2,3'). Using default \\[0].[/bold red]")
             parsed_gpu_ids = [0]
     else:
         # Try to get from config file
@@ -292,4 +296,4 @@ def load_and_merge_configs(
             # Default to GPU 0
             parsed_gpu_ids = [0]
     
-    return repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output
+    return repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name

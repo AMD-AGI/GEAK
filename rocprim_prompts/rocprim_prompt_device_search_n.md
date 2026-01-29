@@ -1,7 +1,7 @@
-I use `WORK_REPO/benchmark/benchmark_device_binary_search.cpp` to test `WORK_REPO/rocprim/include/rocprim/device/device_binary_search.hpp` performance. But the performance is too bad (low bandwidth).
+I use `/data/yueliu14/mini-swe-agent/rocPRIM_device_binary_search/benchmark/benchmark_device_binary_search.cpp` to test `/data/yueliu14/mini-swe-agent/rocPRIM_device_binary_search/rocprim/include/rocprim/device/device_binary_search.hpp` performance. But the performance is too bad (low bandwidth).
 
-1. You must find the all files related to `WORK_REPO/rocprim/include/rocprim/device/device_binary_search.hpp`. And review and edit it.
-2. You MUST edit all files related to `WORK_REPO/rocprim/include/rocprim/device/device_binary_search.hpp`.
+1. You must find the all files related to `/data/yueliu14/mini-swe-agent/rocPRIM_device_binary_search/rocprim/include/rocprim/device/device_binary_search.hpp`. And review and edit it.
+2. You MUST edit all files related to `/data/yueliu14/mini-swe-agent/rocPRIM_device_binary_search/rocprim/include/rocprim/device/device_binary_search.hpp`.
 3. The files in `benchmark` is NOT allowed to be edited.
 4. The files in `test` is NOT allowed to be edited.
 5. The file `test_correctness_benchmark.py` is forbidden to be edited.
@@ -10,8 +10,9 @@ I use `WORK_REPO/benchmark/benchmark_device_binary_search.cpp` to test `WORK_REP
 8. Before Action `submit`, You MUST run the Performance test.
 9. When the performance does not reach 1.2 times the baseline, further optimization must be carried out and Do not take Action `submit`. Use the average over bytes_per_second of all datatypes as the metric.
 10. Your edit should not effect the compile of other kernels
- 
+
 ## Test Perf
 1. Baseline: Before changing any code, you should run baseline numbers.
-2. Optimized test: After changing, you should test the code. If fail to pass the correctness test, MUST debug the kernel carefully. If run correctness and performance test successfully, you can get the bandwidth (bytes_per_second) of the kernel under different input key type.
- 
+2. Optimized test: After changing, you should test the code through running `python /data/yueliu14/mini-swe-agent/test_scripts/test_correctness_benchmark.py benchmark_device_binary_search /data/yueliu14/mini-swe-agent/rocPRIM_device_binary_search`. You should extract bytes_per_second G/s from test output, note you should change T/s or other units to G/s. To select the best patch, you should calculate the speedup ratio on all datatypes first and get the average speedup ratio. If fail to pass the correctness test, MUST debug the kernel carefully. If run correctness and performance test successfully, you can get the bandwidth (bytes_per_second) of the kernel under different input key type.
+
+parallel 4 runs. from gpu idx 0

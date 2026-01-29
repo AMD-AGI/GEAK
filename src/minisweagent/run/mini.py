@@ -28,6 +28,7 @@ from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.utils.save import save_traj
 from minisweagent.run.utils.config_editor import load_and_merge_configs
 from minisweagent.utils.log import logger
+from minisweagent.agents.unit_test_agent import run_unit_test_agent
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
 DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
@@ -68,14 +69,21 @@ def main(
     task: str | None = typer.Option(None, "-t", "--task", help="Task/problem statement", show_default=False),
     yolo: bool = typer.Option(False, "-y", "--yolo", help="Run without confirmation"),
     cost_limit: float | None = typer.Option(None, "-l", "--cost-limit", help="Cost limit. Set to 0 to disable."),
-    config_spec: Path = typer.Option(DEFAULT_CONFIG, "-c", "--config", help="Path to config file"),
+    config_spec: Path | None = typer.Option(None, "-c", "--config", help="Path to config file (overrides template selection)"),
     output: Path | None = typer.Option(DEFAULT_OUTPUT, "-o", "--output", help="Output trajectory file"),
     exit_immediately: bool = typer.Option( False, "--exit-immediately", help="Exit immediately when the agent wants to finish instead of prompting.", rich_help_panel="Advanced"),
     # Strategy mode configuration
     enable_strategies: bool = typer.Option(True, "--enable-strategies/--no-enable-strategies", help="Enable optimization strategy management (optool command). Auto-selects appropriate template.", rich_help_panel="Advanced"),
     strategy_file: str = typer.Option(".optimization_strategies.md", "--strategy-file", help="Path to strategy file (relative to workspace)", rich_help_panel="Advanced"),
     # Patch mode configuration (always enabled)
-    test_command: str | None = typer.Option(None, "--test-command", help="Test command to run for patch validation"),
+    test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command to run for patch validation"),
+    create_test: bool = typer.Option(
+        False,
+        "--create-test",
+        "--create_test",
+        help="Auto-create/search unit tests and infer test_command when missing (or to override it).",
+        rich_help_panel="Advanced",
+    ),
     patch_output: Path | None = typer.Option(None, "--patch-output", help="Output directory for patch files and test results"),
     metric: str | None = typer.Option(None, "--metric", help="Metric extraction task description for LLM"),
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents to run (only effective with --save-patch). If not specified, reads from config file."),
@@ -85,25 +93,28 @@ def main(
     # fmt: on
     configure_if_first_time()
     
-    # Select template based on enable_strategies flag
+    # 1. Load base config (mini.yaml - always loaded as foundation)
+    base_config_path = builtin_config_dir / "mini.yaml"
+    console.print(f"Loading base config: [bold green]'{base_config_path.name}'[/bold green]")
+    config = yaml.safe_load(base_config_path.read_text())
+    
+    # 2. Select and merge template based on enable_strategies flag
     if enable_strategies:
         template_name = "mini_kernel_strategy_list.yaml"
     else:
         template_name = "mini_system_prompt.yaml"
     
     template_path = builtin_config_dir / template_name
-    console.print(f"Using template: [bold green]'{template_name}'[/bold green] (save_patch always enabled)")
+    console.print(f"Applying template: [bold green]'{template_name}'[/bold green] (save_patch always enabled)")
     template_config = yaml.safe_load(template_path.read_text())
+    config = _deep_merge(config, template_config)
     
-    # 2. Load user config if provided
-    user_config = {}
+    # 3. Load user config if explicitly specified (final override)
     if config_spec:
         config_path = get_config_path(config_spec)
-        console.print(f"Loading user config from [bold green]'{config_path}'[/bold green]")
+        console.print(f"[dim]Applying user config from '{config_path}' (final override)[/dim]")
         user_config = yaml.safe_load(config_path.read_text())
-    
-    # 3. Merge configs: template as base, user config overrides
-    config = _deep_merge(template_config, user_config)
+        config = _deep_merge(config, user_config)
 
     # Read task content - if task is a file path, read its content; otherwise use task as-is
     task_content = task
@@ -141,8 +152,8 @@ def main(
         config.setdefault("agent", {})["confirm_exit"] = False
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
-    if profiling:
-        config.setdefault("model", {})["profiling"] = True
+    # Set use_strategy_manager in model config based on enable_strategies flag
+    config.setdefault("model", {})["use_strategy_manager"] = enable_strategies
     model = get_model(model_name, config.get("model", {}))
     env = LocalEnvironment(**config.get("env", {}))
 
@@ -151,12 +162,27 @@ def main(
         config, repo, test_command, metric, num_parallel, gpu_ids, patch_output,
         task_content, yolo, model, console
     )
-    if result == (None, None, None, None, None, None):
+    if result == (None, None, None, None, None, None, None):
         console.print("[bold yellow]Continuing without automatic patch saving. You can still interact with the agent.[/bold yellow]")
         # Keep original None values since user aborted
-        repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output = None, None, None, None, [0], None
+        repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name = None, None, None, None, [0], None, None
     else:
-        repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output = result
+        repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name = result
+
+    if create_test or not test_command:
+        if not repo:
+            raise ValueError("repo is required for --create-test or when test_command is missing. Please pass --repo.")
+        console.print(
+            "[bold yellow]No test_command provided (or --create-test enabled). "
+            "Will auto-create/search unit tests and infer a test command via UnitTestAgent...[/bold yellow]"
+        )
+        test_command = run_unit_test_agent(
+            model=get_model(model_name, config.get("model", {})),
+            repo=repo,
+            kernel_name=kernel_name or "unknown",
+            log_dir=patch_output,
+        )
+        console.print(f"[bold green]Using UnitTestAgent test_command:[/bold green] {test_command}")
     
     # ============ Step 1: Choose base agent class ============
     # Based on enable_strategies flag, select appropriate agent and template
@@ -178,7 +204,8 @@ def main(
     # ============ Step 2: Configure agent settings ============
     agent_config = config.get("agent", {})
     
-    # Add strategy file path for strategy agent
+    # Add strategy manager settings
+    agent_config["use_strategy_manager"] = enable_strategies
     if enable_strategies:
         agent_config["strategy_file_path"] = strategy_file
     

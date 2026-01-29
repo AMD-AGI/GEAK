@@ -755,14 +755,8 @@ def test_continue_after_completion_multiple_cycles():
 
 
 def test_continue_after_completion_in_yolo_mode():
-    """Test continuation when starting in yolo mode (no confirmations needed)."""
-    with patch(
-        "minisweagent.agents.interactive.prompt_session.prompt",
-        side_effect=[
-            "Create a second task",  # Provide new task when agent wants to finish
-            "",  # Don't provide another task after second completion (finish)
-        ],
-    ):
+    """Test that yolo mode exits immediately (no exit confirmation prompt)."""
+    with patch("minisweagent.agents.interactive.prompt_session.prompt") as mock_prompt:
         agent = InteractiveAgent(
             model=DeterministicModel(
                 outputs=[
@@ -776,12 +770,11 @@ def test_continue_after_completion_in_yolo_mode():
 
         exit_status, result = agent.run("Initial task")
         assert exit_status == "Submitted"
-        assert result == "second task completed\n"
+        assert result == "first completed\n"
         assert agent.config.mode == "yolo"
-        assert agent.model.n_calls == 2
-        # Should have the new task message
-        new_task_messages = [msg for msg in agent.messages if "Create a second task" in msg.get("content", "")]
-        assert len(new_task_messages) == 1
+        assert agent.config.confirm_exit is False
+        assert agent.model.n_calls == 1
+        mock_prompt.assert_not_called()
 
 
 def test_confirm_exit_enabled_asks_for_confirmation():

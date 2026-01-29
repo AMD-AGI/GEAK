@@ -606,3 +606,125 @@ def note(
 if __name__ == "__main__":
     app()
 
+
+# =============================================================================
+# Tool wrapper for LLM tool calling
+# =============================================================================
+
+class StrategyManagerTool:
+    """Tool wrapper for managing optimization strategies via tool calls."""
+    
+    def __init__(self, filepath: str = ".optimization_strategies.md", on_change_callback=None):
+        self.filepath = filepath
+        self.on_change_callback = on_change_callback
+    
+    def __call__(
+        self,
+        *,
+        command: str,
+        index: int | None = None,
+        status: str | None = None,
+        result: str | None = None,
+        details: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
+        expected: str | None = None,
+        target: str | None = None,
+        baseline_metrics: list[str] | None = None,
+        baseline_log: str | None = None,
+        strategies: list[str] | None = None,
+        method: str = "skip",
+        note: str | None = None,
+        **kwargs,
+    ):
+        manager = StrategyManager(self.filepath, on_change_callback=self.on_change_callback)
+        
+        try:
+            if command == "create":
+                if not baseline_metrics:
+                    return {"output": "baseline_metrics is required for create command", "returncode": 1}
+                
+                metrics = {k.strip(): v.strip() for m in baseline_metrics if ":" in m for k, v in [m.split(":", 1)]}
+                baseline = Baseline(metrics=metrics, log_file=baseline_log)
+                strategy_list = []
+                if strategies:
+                    for s in strategies:
+                        parts = s.split("|")
+                        if len(parts) >= 2:
+                            strategy_list.append(Strategy(
+                                name=parts[0].strip(), status=StrategyStatus.PENDING,
+                                description=parts[1].strip(),
+                                expected=parts[2].strip() if len(parts) > 2 else None,
+                                target=parts[3].strip() if len(parts) > 3 else None
+                            ))
+                manager.create(baseline, strategy_list)
+                return {"output": f"Created strategy list: {self.filepath}", "returncode": 0}
+            
+            elif command == "show":
+                if not manager.exists():
+                    return {"output": "Strategy file does not exist", "returncode": 1}
+                if index is not None:
+                    strategy = manager.get_strategy(index)
+                    lines = [f"Strategy {index}: {strategy.name}", f"Status: [{strategy.status.value}]", f"Description: {strategy.description}"]
+                    if strategy.expected: lines.append(f"Expected: {strategy.expected}")
+                    if strategy.target: lines.append(f"Target: {strategy.target}")
+                    if strategy.result: lines.append(f"Result: {strategy.result}")
+                    if strategy.details: lines.append(f"Details: {strategy.details}")
+                    return {"output": "\n".join(lines), "returncode": 0}
+                return {"output": manager.get_full_content(), "returncode": 0}
+            
+            elif command == "next":
+                if not manager.exists():
+                    return {"output": "Strategy file does not exist", "returncode": 1}
+                pending = [(i, s) for i, s in manager.list_strategies() if s.status.value == "pending"]
+                pending.sort(key=lambda x: -x[1].priority)
+                if not pending:
+                    return {"output": "No pending strategies remaining", "returncode": 0}
+                idx, strategy = pending[0]
+                priority_label = "🔴 HIGH PRIORITY" if strategy.priority >= 100 else ""
+                return {"output": f"Next strategy:\n\nStrategy {idx}: {strategy.name} {priority_label}\n[{strategy.status.value}] {strategy.description}\nExpected: {strategy.expected or 'N/A'}\nTarget: {strategy.target or 'N/A'}", "returncode": 0}
+            
+            elif command == "mark":
+                if index is None or status is None:
+                    return {"output": "index and status are required for mark command", "returncode": 1}
+                manager.mark_status(index, status, result, details)
+                return {"output": f"Marked Strategy {index} as [{status}]", "returncode": 0}
+            
+            elif command == "add":
+                if not name or not description or not expected:
+                    return {"output": "name, description, and expected are required for add command", "returncode": 1}
+                manager.add_strategy(name, description, expected, target=target)
+                return {"output": f"Added strategy: {name}", "returncode": 0}
+            
+            elif command == "remove":
+                if index is None:
+                    return {"output": "index is required for remove command", "returncode": 1}
+                manager.remove_strategy(index, method)
+                return {"output": f"{'Skipped' if method == 'skip' else 'Deleted'} Strategy {index}", "returncode": 0}
+            
+            elif command == "update":
+                if index is None:
+                    return {"output": "index is required for update command", "returncode": 1}
+                manager.update_strategy(index, status, result, details, **({"expected": expected} if expected else {}))
+                return {"output": f"Updated Strategy {index}", "returncode": 0}
+            
+            elif command == "note":
+                if not note:
+                    return {"output": "note is required for note command", "returncode": 1}
+                manager.add_note(note)
+                return {"output": "Added note", "returncode": 0}
+            
+            elif command == "summary":
+                if not manager.exists():
+                    return {"output": "Strategy file does not exist", "returncode": 1}
+                summary = manager.get_summary()
+                lines = [f"Total strategies: {summary['total']}", "By status:"]
+                lines.extend(f"  [{s}]: {c}" for s, c in summary['by_status'].items())
+                return {"output": "\n".join(lines), "returncode": 0}
+            
+            else:
+                return {"output": f"Unknown command: {command}. Available: create, show, next, mark, add, remove, update, note, summary", "returncode": 1}
+        
+        except Exception as e:
+            return {"output": f"Error: {str(e)}", "returncode": 1}
+

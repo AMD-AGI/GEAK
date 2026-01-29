@@ -2,25 +2,57 @@ import os
 import json
 from typing import Dict, Any
 from minisweagent.tools.bash_command import BashCommand
-from minisweagent.tools.profiling_tools import ProfilingAnalyzer
+from minisweagent.tools.strategy_manager import StrategyManagerTool
 from minisweagent.tools.str_replace_editor import str_replace_editor
+from minisweagent.tools.test_perf import TestPerfTool
+from minisweagent.tools.submit import SubmitTool
 
 current_dir = os.path.dirname(__file__)
 json_path = os.path.join(current_dir, "tools.json")
 with open(json_path,"r",encoding="utf-8") as f:
-    tools_list = json.load(f)
-# =========================
-# Unified Tool Runtime
-# =========================
+    _all_tools = json.load(f)
+
+def get_tools_list(use_strategy_manager: bool = False) -> list:
+    """Get filtered tools list based on settings.
+    
+    Args:
+        use_strategy_manager: If True, include strategy_manager tool. If False, exclude it.
+    Returns:
+        List of tool definitions for the API.
+    """
+    excluded = set()
+    if not use_strategy_manager:
+        excluded.add("strategy_manager")
+    return [t for t in _all_tools if t["name"] not in excluded]
+
+# Backward compatibility
+tools_list = _all_tools
+
 
 class ToolRuntime:
-    def __init__(self, profiling_type: str=None, llm_model=None):
+    def __init__(self, profiling_type: str=None, llm_model=None, use_strategy_manager: bool=False, 
+                 strategy_file: str=".optimization_strategies.md", on_strategy_change=None):
         self._tool_table = {
             "bash": BashCommand(),
             "str_replace_editor": str_replace_editor(),
+            "test_perf": TestPerfTool(),
+            "submit": SubmitTool(),
         }
         if profiling_type in ['roofline', 'profiling', 'profiler_analyzer']:
+            from minisweagent.tools.profiling_tools import ProfilingAnalyzer
             self._tool_table["profiling"] = ProfilingAnalyzer(profiling_type=profiling_type, llm_model=llm_model)
+        if use_strategy_manager:
+            self._tool_table["strategy_manager"] = StrategyManagerTool(
+                filepath=strategy_file, 
+                on_change_callback=on_strategy_change
+            )
+        
+        # Store settings for tools list generation
+        self.use_strategy_manager = use_strategy_manager
+    
+    def get_tools_list(self) -> list:
+        """Get the tools list for API based on current settings."""
+        return get_tools_list(self.use_strategy_manager)
 
     def dispatch(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
         """

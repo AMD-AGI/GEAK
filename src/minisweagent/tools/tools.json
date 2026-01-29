@@ -1,35 +1,179 @@
 [
   {
+    "name": "bash",
+    "type": "function",
+    "description": "Execute shell commands directly in bash.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "The bash command to execute."
+        }
+      },
+      "required": ["command"]
+    }
+  },
+  {
+    "name": "test_perf",
+    "type": "function",
+    "description": "Save current changes as patch and run performance test. Use this after implementing optimizations to measure performance impact. The system will automatically save your changes, run the configured test command, and report results.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Brief description of what optimization is being tested (e.g., 'baseline', 'memory coalescing', 'vectorization')"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "submit",
+    "type": "function",
+    "description": "Submit the final optimized implementation and complete the task. Use this when you are satisfied with your optimization results. After calling this, you cannot continue working on the task.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string",
+          "description": "Summary of the optimizations made and their performance impact."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "str_replace_editor",
+    "type": "function",
+    "description": "File editor for viewing, creating, and editing files. Commands: view (view file content), create (create new file), str_replace (replace text), insert (insert text at line).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "enum": ["view", "create", "str_replace", "insert"],
+          "description": "The editor command to execute."
+        },
+        "path": {
+          "type": "string",
+          "description": "Absolute path to the file."
+        },
+        "file_text": {
+          "type": "string",
+          "description": "File content. Required for: create."
+        },
+        "view_range": {
+          "type": "array",
+          "items": {"type": "integer"},
+          "description": "Line range [start, end] to view. Optional for: view."
+        },
+        "old_str": {
+          "type": "string",
+          "description": "Text to be replaced. Required for: str_replace."
+        },
+        "new_str": {
+          "type": "string",
+          "description": "Replacement text. Required for: str_replace, insert."
+        },
+        "insert_line": {
+          "type": "integer",
+          "description": "Line number to insert at. Required for: insert."
+        }
+      },
+      "required": ["command", "path"]
+    }
+  },
+  {
     "name": "profiling",
     "type": "function",
     "description": "Profile code with rocprof to identify kernel bottlenecks. After test, run profiling to get bottlenecks for further optimization.",
     "parameters": {
-        "type": "object",
-        "properties": {
-          "profiling_workdir": {
-            "type": "string",
-            "description": "Absolute path to directory, used to as working directory to running profiling command."
-          },
-          "profiling_cmd": {
-            "type": "string",
-            "description": "The command to execute the kernel during profiling, e.g. execution command using in performance test."
-          }
+      "type": "object",
+      "properties": {
+        "profiling_workdir": {
+          "type": "string",
+          "description": "Absolute path to directory, used to as working directory to running profiling command."
         },
-        "required": ["profiling_workdir", "profiling_cmd"]
+        "profiling_cmd": {
+          "type": "string",
+          "description": "The command to execute the kernel during profiling, e.g. execution command using in performance test."
+        }
+      },
+      "required": ["profiling_workdir", "profiling_cmd"]
     }
   },
   {
-    "name": "bash", 
+    "name": "strategy_manager",
     "type": "function",
-    "description": "runs the given command directly in bash", 
+    "description": "Manage optimization strategies. Commands: create (initialize strategy list), show (view strategies), next (get next pending strategy), mark (update status), add (add new strategy), remove (skip/delete strategy), update (modify strategy), note (add note), summary (show statistics).",
     "parameters": {
-        "type": "object", 
-        "properties": {
-            "command": {
-            "type": "string", "description": "The bash command to execute."
-            }
-            }, 
-        "required": ["command"]
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "enum": ["create", "show", "next", "mark", "add", "remove", "update", "note", "summary"],
+          "description": "The operation to perform."
+        },
+        "index": {
+          "type": "integer",
+          "description": "Strategy index (1-based). Required for: mark, remove, update. Optional for: show."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "exploring", "successful", "failed", "partial", "skipped", "combined"],
+          "description": "Strategy status. Required for: mark. Optional for: update."
+        },
+        "result": {
+          "type": "string",
+          "description": "Result description (e.g., '+21.1% improvement'). Optional for: mark, update."
+        },
+        "details": {
+          "type": "string",
+          "description": "Additional details or log file path. Optional for: mark, update."
+        },
+        "name": {
+          "type": "string",
+          "description": "Strategy name. Required for: add."
+        },
+        "description": {
+          "type": "string",
+          "description": "Strategy description. Required for: add."
+        },
+        "expected": {
+          "type": "string",
+          "description": "Expected improvement (e.g., '+20-30%'). Required for: add."
+        },
+        "target": {
+          "type": "string",
+          "description": "Optimization target. Optional for: add."
+        },
+        "baseline_metrics": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Baseline metrics in 'Key:Value' format. Required for: create."
+        },
+        "baseline_log": {
+          "type": "string",
+          "description": "Path to baseline benchmark log. Optional for: create."
+        },
+        "strategies": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Initial strategies in 'Name|Description|Expected|Target' format. Optional for: create."
+        },
+        "method": {
+          "type": "string",
+          "enum": ["skip", "delete"],
+          "description": "Remove method. Default: skip. For: remove."
+        },
+        "note": {
+          "type": "string",
+          "description": "Note message. Required for: note."
+        }
+      },
+      "required": ["command"]
     }
   }
 ]

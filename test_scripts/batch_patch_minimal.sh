@@ -6,15 +6,13 @@
 
 set -e
 
-if [ $# -eq 0 ]; then
-    echo "Usage: $0 <kernel_name> [num_agents] [gpu_start_idx]"
-    echo "Example: $0 device_merge_sort 4 0"
-    exit 1
-fi
+# if [ $# -eq 0 ]; then
+#     echo "Usage: $0 <kernel_name> [num_agents] [gpu_start_idx]"
+#     echo "Example: $0 device_merge_sort 4 0"
+#     exit 1
+# fi
 
 KERNEL_NAME=$1
-NUM_AGENTS=${2:-4}
-GPU_START_IDX=${3:-0}
 
 echo "======================================"
 echo "Minimal Auto-Detect Optimization"
@@ -51,13 +49,11 @@ echo ""
 echo "Running mini with full auto-detect..."
 echo ""
 
-cd "${ROCPRIM_DIR}"
-
 # This is the SIMPLEST possible command!
 # Everything else is auto-detected from the task file
 mini -t "${TASK_FILE}" \
-     --yolo \
-     -c "${CONFIG_FILE}"
+    # --yolo
+# Optional: add --yolo for auto-confirmation mode
 
 echo ""
 echo "Done! Check optimization_logs/ for results"

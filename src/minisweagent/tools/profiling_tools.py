@@ -12,7 +12,7 @@ from minisweagent.tools.prompt_for_profiling_analyzer import profiler_prompt
 class ProfilingAnalyzer:
     
     def __init__(self, profiling_type: str, llm_model=None):
-        self.profiling_type = profiling_type
+        self.profiling_type = profiling_type or "profiling"
         self.model = llm_model
         with tempfile.TemporaryDirectory(prefix="rocprof_") as tmpdir:
             self.output_path = Path(tmpdir).resolve()

@@ -253,7 +253,6 @@ class VSCodeInteractiveAgent(InteractiveAgent):
             # User confirmed exit or confirm_exit is False
             raise
 
-
 class VSCodeStrategyAgent(StrategyAgent):
     """VSCode Agent with strategy management (策略模式).
     
@@ -265,7 +264,7 @@ class VSCodeStrategyAgent(StrategyAgent):
         self.bridge = bridge
         super().__init__(*args, **kwargs)
         
-        print(f"[INFO] VSCode Agent: Strategy Mode (file: {self.strategy_file_path})", file=sys.stderr)
+        print(f"[INFO] VSCode Agent: Strategy Mode (file: {self.config.strategy_file_path})", file=sys.stderr)
 
     # ============ Communication Implementation ============
     
@@ -387,3 +386,4 @@ class VSCodeStrategyAgent(StrategyAgent):
                     new_task = response.get("newTask", "Continue working")
                     raise NonTerminatingException(f"The user added a new task: {new_task}")
             raise e
+

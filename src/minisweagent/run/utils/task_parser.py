@@ -114,12 +114,12 @@ def display_parsed_config(parsed_info: dict, patch_output_dir: str) -> str:
         "=" * 70,
     ]
     
-    lines.append(f"  Kernel Name:       {parsed_info['kernel_name'] or 'Not detected'}")
-    lines.append(f"  Repository:        {parsed_info['repo'] or 'Not detected'}")
-    lines.append(f"  Test Command:      {parsed_info['test_command'] or 'Not detected'}")
-    lines.append(f"  Metric:            {parsed_info['metric'] or 'Not detected'}")
-    lines.append(f"  Num Parallel:      {parsed_info['num_parallel'] or 'Not detected'}")
-    lines.append(f"  GPU IDs:           {parsed_info['gpu_ids'] or 'Not detected'}")
+    lines.append(f"  Kernel Name:       {parsed_info['kernel_name'] or 'Not detected. Please use --kernel-name to specify the kernel name'}")
+    lines.append(f"  Repository:        {parsed_info['repo'] or 'Not detected. Please use --repo to specify the repository path'}")
+    lines.append(f"  Test Command:      {parsed_info['test_command'] or 'Not detected. Automatically search or create the test command via UnitTestAgent'}")
+    lines.append(f"  Metric:            {parsed_info['metric'] or 'Not detected. Automatically extract the metric from the test output'}")
+    lines.append(f"  Num Parallel:      {parsed_info['num_parallel'] or 'Not detected. Default to 1.'}")
+    lines.append(f"  GPU IDs:           {parsed_info['gpu_ids'] or 'Not detected. Default to 0.'}")
     lines.append(f"  Patch Output Dir:  {patch_output_dir}")
     lines.append("=" * 70)
     

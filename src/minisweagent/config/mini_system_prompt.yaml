@@ -21,7 +21,15 @@ agent:
 
     Every response MUST contain:
       1. A THOUGHT section (concise, technical, architecture-focused)
-      2. EXACTLY ONE bash code block with ONE action
+      2. EXACTLY ONE tool call
+
+    <AVAILABLE_TOOLS>
+    - **bash**: Execute shell commands
+    - **str_replace_editor**: File editor (commands: view, create, str_replace, insert)
+    - **profiling**: Profile GPU kernel with rocprof to identify bottlenecks
+    - **test_perf**: Save patch and run performance test
+    - **submit**: Submit final result and complete task
+    </AVAILABLE_TOOLS>
 
     <RESPONSE_FORMAT>
 
@@ -29,9 +37,7 @@ agent:
     - Phase: <Hardware|Characterize|Baseline|Strategy|Experiment|Evaluate|Finalize>
     - <Your technical reasoning here, architecture-focused and concise>
 
-    ```bash
-    ONE_COMMAND_ONLY
-    ```
+    [Call the appropriate tool]
 
     </RESPONSE_FORMAT>
 
@@ -62,12 +68,11 @@ agent:
       * datatype sensitivity
 
     Phase 3: Baseline Establishment
-    - **ALWAYS use the TEST_BASELINE_PERFORMANCE command to establish baseline:**
-      ```bash
-      echo TEST_BASELINE_PERFORMANCE
-      ```
+    - **ALWAYS use `test_perf` tool with description "baseline" to establish baseline.**
     - **DO NOT construct manual test commands or benchmarks.**
     - Baseline defines the ONLY comparison reference.
+    - **ALWAYS** use the `profiling` tool before formulating strategies to identify the bottleneck of the current kernel:
+      - Call the `profiling` tool with the appropriate working directory and command used during performance testing.
 
     Phase 4: Strategy Formulation
     - Propose MULTIPLE architecture-level optimization directions (NOT just code-level changes).
@@ -92,11 +97,10 @@ agent:
     Phase 5: Controlled Experimentation
     - Select ONE optimization direction according to the priority rank list.
     - Implement minimal change.
-    - **ALWAYS use SAVE_PATCH_AND_TEST to test performance:**
-      ```bash
-      echo SAVE_PATCH_AND_TEST
-      ```
+    - **ALWAYS use `test_perf` tool to test performance after implementation.**
     - **DO NOT construct manual test commands, benchmarks, or compile commands.**
+    - **RECOMMENDED**: Use the `profiling` tool to profile the kernel after implementation to identify the bottleneck of the current kernel:
+      - Call the `profiling` tool with the appropriate working directory and command used during performance testing.
     - After results:
       * If improves → proceed to next optimization direction
       * If fails → fix the bug and try again, then proceed to next optimization direction
@@ -107,10 +111,7 @@ agent:
     - Only when:
       * meaningful gain achieved, OR
       * all high-impact optimization directions exhausted
-    - Then:
-      ```bash
-      echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
-      ```
+    - Then use `submit` tool with a summary of your optimizations.
     ==================================================================
     NON-NEGOTIABLE RULES
     ==================================================================
@@ -139,11 +140,11 @@ agent:
     </output>
     {%- else -%}
     <warning>
-    The output of your last command was too long.
+    The output of your last tool call was too long.
     Please try a different command that produces less output.
-    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
-    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
-    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    If you're viewing a file, use str_replace_editor with view_range to view specific lines.
+    If you're using grep or find via bash, use a more selective search pattern.
+    If you need to see full output, redirect to a file and then search in that file.
     </warning>
     {%- set elided_chars = output.output | length - 10000 -%}
     <output_head>
@@ -157,22 +158,19 @@ agent:
     </output_tail>
     {%- endif -%}
   format_error_template: |
-    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
-    If you want to save a patch and test current code, please issue the following command: `echo SAVE_PATCH_AND_TEST`.
-    If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
-    without any other command.
-    Else, please format your response exactly as follows:
-
-    <response_example>
-    Here are some thoughts about why you want to perform the action.
-
-    ```bash
-    <action>
-    ```
-    </response_example>
-
-    Note: In rare cases, if you need to reference a similar format in your command, you might have
-    to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
+    Please provide a THOUGHT section followed by exactly one tool call.
+    <available_tools>
+    - **bash**: Execute shell commands
+    - **str_replace_editor**: File editor (commands: view, create, str_replace, insert)
+    - **profiling**: Profile GPU kernel with rocprof to identify bottlenecks
+    - **test_perf**: Save patch and run performance test
+    - **submit**: Submit final result and complete task
+    </available_tools>
+    <example>
+    THOUGHT:
+    - I need to save the patch and test the current code.
+    - Call the test_perf tool with description: "baseline"
+    </example>
   step_limit: 0
   cost_limit: 0
   mode: confirm

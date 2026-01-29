@@ -14,6 +14,7 @@ from tenacity import (
 )
 
 from minisweagent.models import GLOBAL_MODEL_STATS
+from minisweagent.tools.tools_runtime import get_tools_list
 try:
     from google import genai
     from google.genai.types import HttpOptions
@@ -35,6 +36,7 @@ class AmdLlmModelConfig:
     reasoning: dict[str, Any] = field(default_factory=dict)
     bash_tool: bool = True
     profiling: bool = False
+    use_strategy_manager: bool = False
 
 def convert_openai_tools_to_claude(tools: list[dict]) -> list[dict]:
     """
@@ -90,7 +92,8 @@ class AmdLlmModel:
         self.config = AmdLlmModelConfig(**kwargs)
         self.cost = 0.0
         self.n_calls = 0
-        self.tools = tools_list
+        # Get tools list based on strategy manager setting
+        self.tools = get_tools_list(use_strategy_manager=self.config.use_strategy_manager)
         if not self.config.profiling:
             self.tools = [tool for tool in self.tools if tool["name"] != "profiling"]
         if not self.config.bash_tool:

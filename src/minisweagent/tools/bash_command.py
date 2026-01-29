@@ -1,5 +1,5 @@
-import re
 import subprocess
+
 
 class BashCommand:
     def __init__(self):

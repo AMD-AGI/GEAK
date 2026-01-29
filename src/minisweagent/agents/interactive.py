@@ -30,6 +30,12 @@ class InteractiveAgentConfig(AgentConfig):
     """Never confirm actions that match these regular expressions."""
     confirm_exit: bool = True
     """If the agent wants to finish, do we ask for confirmation from user?"""
+    # Strategy agent compatibility (ignored by InteractiveAgent but allows config sharing)
+    strategy_file_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode == "yolo":
+            self.confirm_exit = False
 
 
 class InteractiveAgent(DefaultAgent):
@@ -133,6 +139,8 @@ class InteractiveAgent(DefaultAgent):
                     f"[bold red]Already in {self.config.mode} mode.[/bold red]\n{prompt}"
                 )
             self.config.mode = self._MODE_COMMANDS_MAPPING[user_input]
+            if self.config.mode == "yolo":
+                self.config.confirm_exit = False
             console.print(f"Switched to [bold green]{self.config.mode}[/bold green] mode.")
             return user_input
         return user_input

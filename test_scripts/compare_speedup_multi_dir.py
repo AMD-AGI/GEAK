@@ -191,7 +191,7 @@ if __name__ == "__main__":
         # For patch_*_test.txt files, use parent directory's parent (the base directory)
         parent_dir_for_extraction = log_file.parent.parent if log_file.name.startswith("patch_") else None
         bench_name = extract_benchmark_name(log_file.name, parent_dir_for_extraction)
-        
+        bench_name = bench_name.strip('_')
         if bench_name is None:
             print(f"  ❌ Could not extract benchmark name from: {log_file.name}\n")
             continue
