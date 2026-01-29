@@ -179,7 +179,7 @@ def main(
     model = get_model(model_name, config.get("model", {}))
     env = LocalEnvironment(**config.get("env", {}))
 
-    # Load and merge configurations: Command-line > extra_config from yaml > auto-detect
+    # Load and merge configurations: Command-line > parallel_config from yaml > auto-detect
     result = load_and_merge_configs(
         config, repo, test_command, metric, num_parallel, gpu_ids, patch_output,
         task_content, yolo, model, console

@@ -1,8 +1,19 @@
 """Interactive configuration editor for auto-detected settings."""
 
 import re
+import sys
+from select import select
 from pathlib import Path
 from typing import Any
+
+
+def input_with_timeout(prompt: str, timeout_s: float, default: str) -> tuple[str, bool]:
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    ready, _, _ = select([sys.stdin], [], [], timeout_s)
+    if ready:
+        return sys.stdin.readline().rstrip("\n"), False
+    return default, True
 
 
 def parse_edit_command(command: str) -> tuple[str | None, Any]:
@@ -85,7 +96,10 @@ def interactive_config_edit(parsed_config: dict, patch_output_dir: str, console)
         
         # Prompt for input
         console.print("\n[bold cyan]Options:[/bold cyan] (y) to proceed, (q) to abort, (h) for help, or --field=value to edit")
-        user_input = input("Your choice: ").strip().lower()
+        user_input, timed_out = input_with_timeout("Your choice: ", timeout_s=60, default="y")
+        user_input = user_input.strip().lower()
+        if timed_out:
+            console.print("[dim]No input for 60s, defaulting to 'y'.[/dim]")
         
         # Handle different inputs
         if not user_input or user_input == 'y':
@@ -178,7 +192,7 @@ def load_and_merge_configs(
 ) -> tuple[Path | None, str | None, str | None, int | None, list[int], Path | None, str | None]:
     """Load and merge configurations from multiple sources.
     
-    Configuration priority: Command-line > extra_config from yaml > auto-detect
+    Configuration priority: Command-line > parallel_config from yaml > auto-detect
     
     Args:
         config: Loaded configuration dict from yaml
@@ -197,31 +211,32 @@ def load_and_merge_configs(
     # Track kernel_name for returning
     kernel_name = None
     
-    # Step 1: Get extra_config from yaml (if exists)
-    extra_config = config.get("extra_config", {})
+    # Step 1: Get parallel_config from yaml (if exists)
+    # Backward compatible: fall back to legacy extra_config.
+    parallel_config = config.get("parallel_config") or config.get("extra_config", {})
     
-    # Step 2: Apply extra_config values for missing command-line arguments
-    if not repo and extra_config.get("repo"):
-        repo = Path(extra_config["repo"])
+    # Step 2: Apply parallel_config values for missing command-line arguments
+    if not repo and parallel_config.get("repo"):
+        repo = Path(parallel_config["repo"])
         console.print(f"[dim]Using repo from config: {repo}[/dim]")
-    if not test_command and extra_config.get("test_command"):
-        test_command = extra_config["test_command"]
+    if not test_command and parallel_config.get("test_command"):
+        test_command = parallel_config["test_command"]
         console.print(f"[dim]Using test_command from config[/dim]")
-    if not metric and extra_config.get("metric"):
-        metric = extra_config["metric"]
+    if not metric and parallel_config.get("metric"):
+        metric = parallel_config["metric"]
         console.print(f"[dim]Using metric from config[/dim]")
-    if num_parallel is None and extra_config.get("num_parallel"):
-        num_parallel = extra_config["num_parallel"]
+    if num_parallel is None and parallel_config.get("num_parallel"):
+        num_parallel = parallel_config["num_parallel"]
         console.print(f"[dim]Using num_parallel from config: {num_parallel}[/dim]")
-    if not gpu_ids and extra_config.get("gpu_ids"):
-        gpu_ids_value = extra_config.get("gpu_ids")
+    if not gpu_ids and parallel_config.get("gpu_ids"):
+        gpu_ids_value = parallel_config.get("gpu_ids")
         if isinstance(gpu_ids_value, list):
             gpu_ids = ",".join(map(str, gpu_ids_value))
         else:
             gpu_ids = gpu_ids_value
         console.print(f"[dim]Using gpu_ids from config: {gpu_ids}[/dim]")
-    if not patch_output and extra_config.get("patch_output_dir"):
-        patch_output = Path(extra_config["patch_output_dir"])
+    if not patch_output and parallel_config.get("patch_output_dir"):
+        patch_output = Path(parallel_config["patch_output_dir"])
         console.print(f"[dim]Using patch_output_dir from config: {patch_output}[/dim]")
     
     # Step 3: Auto-detect remaining missing configurations
