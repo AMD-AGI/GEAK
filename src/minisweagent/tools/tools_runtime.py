@@ -68,6 +68,11 @@ class ToolRuntime:
         if name not in self._tool_table:
             raise ValueError(f"Unknown tool: {name}")
 
+        # Be robust to malformed tool calls from the LLM.
+        # `bash` requires keyword-only `command`; missing it would crash the agent loop.
+        if name == "bash" and "command" not in args:
+            args = {**args, "command": ""}
+
         return self._tool_table[name](**args)
 
 
