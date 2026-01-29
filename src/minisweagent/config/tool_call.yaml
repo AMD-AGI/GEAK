@@ -137,7 +137,6 @@ agent:
   step_limit: 0.
   cost_limit: 0.
   mode: confirm
-  profiling_type: profiling # profiling roofline profiler_analyzer
 env:
   env:
     PAGER: cat
@@ -146,13 +145,15 @@ env:
     PIP_PROGRESS_BAR: 'off'
     TQDM_DISABLE: '1'
   timeout: 3600
+tools:
+  bash: false
+  profiling: false
+  profiling_type: profiling # profiling roofline profiler_analyzer
 model:
   model_class: amd_llm
   # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
   model_name: claude-opus-4.5
   api_key: ""
-  bash_tool: false
-  profiling: false
   model_kwargs:
     temperature: 1.0
     max_tokens: 16000

@@ -37,6 +37,7 @@ class AgentConfig:
     # Strategy manager configuration
     use_strategy_manager: bool = False
     strategy_file_path: str = ".optimization_strategies.md"
+    profiling_type: str | None = None
 
 
 class NonTerminatingException(Exception):
@@ -78,8 +79,12 @@ class DefaultAgent:
         # Initialize tool runtime with strategy manager settings
         # Subclasses (like StrategyAgent) can override _get_strategy_callback() for UI notifications
         self.toolruntime = ToolRuntime(
+            profiling_type=self.config.profiling_type,
+            llm_model=self.model,
             use_strategy_manager=self.config.use_strategy_manager,
-            strategy_file=self._get_strategy_file(),
+            strategy_file=self._get_strategy_file()
+            if self.config.use_strategy_manager
+            else ".optimization_strategies.md",
             on_strategy_change=self._get_strategy_callback(),
         )
         # Setup test_perf tool context
@@ -87,9 +92,10 @@ class DefaultAgent:
     
     def _get_strategy_file(self) -> str:
         """Get the strategy file path. Override in subclasses to customize."""
-        import os
-        cwd = getattr(self.env.config, 'cwd', None) or os.getcwd()
-        return str(Path(cwd) / self.config.strategy_file_path)
+        cwd = Path(getattr(self.env.config, "cwd", None) or Path.cwd())
+        strategy_file_path = self.config.strategy_file_path or ".optimization_strategies.md"
+        strategy_path = Path(strategy_file_path)
+        return str(strategy_path if strategy_path.is_absolute() else cwd / strategy_path)
     
     def _get_strategy_callback(self):
         """Get the callback for strategy changes. Override in subclasses for UI notifications."""

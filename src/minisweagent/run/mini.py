@@ -116,6 +116,28 @@ def main(
         user_config = yaml.safe_load(config_path.read_text())
         config = _deep_merge(config, user_config)
 
+    tools_cfg = config.get("tools") or {}
+    if tools_cfg:
+        if "bash" in tools_cfg:
+            config.setdefault("model", {}).setdefault("bash_tool", tools_cfg["bash"])
+        if "profiling" in tools_cfg:
+            config.setdefault("model", {}).setdefault("profiling", tools_cfg["profiling"])
+        if "profiling_type" in tools_cfg:
+            config.setdefault("agent", {}).setdefault("profiling_type", tools_cfg["profiling_type"])
+        if tools_cfg.get("profiling") and "profiling_type" not in tools_cfg:
+            config.setdefault("agent", {}).setdefault("profiling_type", "profiling")
+        if "strategy_manager" in tools_cfg:
+            config.setdefault("agent", {}).setdefault("use_strategy_manager", tools_cfg["strategy_manager"])
+            config.setdefault("model", {}).setdefault("use_strategy_manager", tools_cfg["strategy_manager"])
+
+    # Backward compatibility: legacy top-level tool flags
+    if "profiling" in config:
+        config.setdefault("model", {}).setdefault("profiling", config["profiling"])
+    if "profiling_type" in config:
+        config.setdefault("agent", {}).setdefault("profiling_type", config["profiling_type"])
+    if config.get("model", {}).get("profiling") and not config.get("agent", {}).get("profiling_type"):
+        config.setdefault("agent", {})["profiling_type"] = "profiling"
+
     # Read task content - if task is a file path, read its content; otherwise use task as-is
     task_content = task
     if task:

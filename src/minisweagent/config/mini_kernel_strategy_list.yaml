@@ -166,6 +166,10 @@ agent:
     - **create**: Create new file with file_text content
     - **str_replace**: Replace old_str with new_str in file
     - **insert**: Insert new_str at insert_line
+    
+    Important:
+    - Do NOT use interactive shell commands to view files (`view`, `less`, `vi`, `vim`, etc.). They will hang.
+    - To view files, call `str_replace_editor` with command `view` (optionally with `view_range`).
 
     ### test_perf
     Save patch and run performance test. Use after implementing optimizations to measure impact.
@@ -224,3 +228,8 @@ agent:
     - **strategy_manager**: Track optimization strategies
     - **profiling**: Profile GPU kernel with rocprof
     </available_tools>
+
+tools:
+  profiling: true
+  profiling_type: profiling
+  strategy_manager: true

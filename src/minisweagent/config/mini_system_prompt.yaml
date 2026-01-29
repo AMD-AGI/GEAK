@@ -71,10 +71,10 @@ agent:
     - **ALWAYS use `test_perf` tool with description "baseline" to establish baseline.**
     - **DO NOT construct manual test commands or benchmarks.**
     - Baseline defines the ONLY comparison reference.
-    - **ALWAYS** use the `profiling` tool before formulating strategies to identify the bottleneck of the current kernel:
-      - Call the `profiling` tool with the appropriate working directory and command used during performance testing.
 
     Phase 4: Strategy Formulation
+    - **ALWAYS** use the `profiling` tool before formulating strategies to identify the bottleneck of the current kernel:
+      - Call the `profiling` tool with the appropriate working directory and command used during performance testing.
     - Propose MULTIPLE architecture-level optimization directions (NOT just code-level changes).
     - Each direction MUST state:
       * bottleneck hypothesis (e.g., occupancy-limited, latency-limited, bandwidth-limited, divergence-limited)
@@ -121,6 +121,9 @@ agent:
     - Architecture reasoning precedes code
     - Benchmark diversity must be considered
     - Bounded sweep only if architecture-justified
+    - Do NOT run interactive terminal programs (they will hang):
+      `view`, `less`, `more`, `vi`, `vim`, `nano`, `man`, `top`, etc.
+      To view files, use the `str_replace_editor` tool with command `view` and a `view_range`.
 
     ==================================================================
     ENVIRONMENT NOTES
@@ -182,6 +185,9 @@ env:
     PIP_PROGRESS_BAR: 'off'
     TQDM_DISABLE: '1'
   timeout: 36000
+tools:
+  profiling: true
+  profiling_type: profiling
 model:
   model_class: amd_llm
   # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex

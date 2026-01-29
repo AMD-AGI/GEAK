@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 import json
@@ -17,11 +18,15 @@ from minisweagent.models import GLOBAL_MODEL_STATS
 from minisweagent.tools.tools_runtime import get_tools_list
 try:
     from google import genai
+    from google.genai import types
     from google.genai.types import HttpOptions
 except ImportError:
     raise ImportError("You should install google-genai to use Gemini models. pip install google-genai")
 
 logger = logging.getLogger("amd_llm")
+
+def _maybe_log_llm_tools(provider: str, tools: Any) -> None:
+    logger.warning("LLM tools (%s): %s", provider, json.dumps(tools, ensure_ascii=False, default=str))
 
 @dataclass
 class AmdLlmModelConfig:
@@ -179,6 +184,7 @@ class AmdLlmModel:
         }
 
         filtered_kwargs["tools"] = convert_openai_tools_to_claude(self.tools)
+        _maybe_log_llm_tools("claude", filtered_kwargs["tools"])
 
         # Convert messages format for Anthropic API
         # Anthropic expects messages with role and content
@@ -234,6 +240,7 @@ class AmdLlmModel:
 
         filtered_kwargs["tools"] = self.tools
         filtered_kwargs["tool_choice"] = "auto"
+        _maybe_log_llm_tools("openai", filtered_kwargs["tools"])
 
         cleaned_messages = []
         prompt = "\n".join([msg["content"] for msg in messages])
@@ -269,7 +276,8 @@ class AmdLlmModel:
         
         test_tools = convert_openai_tools_to_gemini(self.tools)
         tools = [types.Tool(function_declarations=test_tools)]
-        all_kwargs["config"]= types.GenerateContentConfig(tools=tools)
+        filtered_kwargs["config"] = types.GenerateContentConfig(tools=tools)
+        _maybe_log_llm_tools("gemini", test_tools)
 
         # Convert messages format for Google genai API
         # Google genai expects contents as a list of Content objects with role and parts

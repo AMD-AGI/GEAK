@@ -25,6 +25,7 @@ agent:
     1) Explore the repository for existing tests/benchmarks:
        - From repo root, read `README.md` (and any referenced docs/scripts) to learn intended build/run commands.
        - Enumerate existing runnable assets: source benchmarks under `benchmark/` and tests under `test/`.
+       - Do NOT use interactive terminal programs to view files (`view`, `less`, `vi`, `vim`, etc.). Use non-interactive output.
     2) Prefer and reuse existing tests/benchmarks:
        - If an existing benchmark executable for this kernel exists, run it with `--trials 20` (or equivalent).
        - If benchmark sources exist but the current `build/` was configured with benchmarks OFF,
