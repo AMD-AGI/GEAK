@@ -25,9 +25,6 @@ except ImportError:
 
 logger = logging.getLogger("amd_llm")
 
-def _maybe_log_llm_tools(provider: str, tools: Any) -> None:
-    logger.warning("LLM tools (%s): %s", provider, json.dumps(tools, ensure_ascii=False, default=str))
-
 @dataclass
 class AmdLlmModelConfig:
     model_name: str
@@ -184,7 +181,6 @@ class AmdLlmModel:
         }
 
         filtered_kwargs["tools"] = convert_openai_tools_to_claude(self.tools)
-        _maybe_log_llm_tools("claude", filtered_kwargs["tools"])
 
         # Convert messages format for Anthropic API
         # Anthropic expects messages with role and content
@@ -240,7 +236,6 @@ class AmdLlmModel:
 
         filtered_kwargs["tools"] = self.tools
         filtered_kwargs["tool_choice"] = "auto"
-        _maybe_log_llm_tools("openai", filtered_kwargs["tools"])
 
         cleaned_messages = []
         prompt = "\n".join([msg["content"] for msg in messages])
@@ -277,7 +272,6 @@ class AmdLlmModel:
         test_tools = convert_openai_tools_to_gemini(self.tools)
         tools = [types.Tool(function_declarations=test_tools)]
         filtered_kwargs["config"] = types.GenerateContentConfig(tools=tools)
-        _maybe_log_llm_tools("gemini", test_tools)
 
         # Convert messages format for Google genai API
         # Google genai expects contents as a list of Content objects with role and parts
