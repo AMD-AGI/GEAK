@@ -15,4 +15,4 @@ I use `/data/yueliu14/mini-swe-agent/rocPRIM_device_binary_search/benchmark/benc
 1. Baseline: Before changing any code, you should run baseline numbers.
 
 
-parallel 4 runs. from gpu idx 0
+parallel 4 runs. from gpu idx 4

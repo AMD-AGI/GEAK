@@ -4,7 +4,7 @@ I use `/data/yueliu14/mini-swe-agent/rocPRIM_block_radix_rank/benchmark/benchmar
 2. You MUST edit all files related to `/data/yueliu14/mini-swe-agent/rocPRIM_block_radix_rank/rocprim/include/rocprim/block/block_radix_rank.hpp`.
 3. The files in `benchmark` is NOT allowed to be edited.
 4. The files in `test` is NOT allowed to be edited.
-5. The file `/mnt/data/yueliu14/ready_mini_swe/mini-swe-agent/test_scripts/test_correctness_benchmark.py` is forbidden to be edited.
+5. The file `test_correctness_benchmark.py` is forbidden to be edited.
 6. All CMAKEList and CMAKE files are forbidden to be edited.
 7. You can modify multiple files at once.
 8. Before Action `submit`, You MUST run the Performance test.

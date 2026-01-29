@@ -16,4 +16,4 @@ I use `/data/yueliu14/mini-swe-agent/rocPRIM_device_segmented_reduce/benchmark/b
 2. Optimized test: After changing, you should test the code through running `python /data/yueliu14/mini-swe-agent/test_scripts/test_correctness_benchmark.py benchmark_device_segmented_reduce /data/yueliu14/mini-swe-agent/rocPRIM_device_segmented_reduce`. You should extract bytes_per_second G/s from test output, note you should change T/s or other units to G/s. To select the best patch, you should calculate the speedup ratio on all datatypes first and get the average speedup ratio. If fail to pass the correctness test, MUST debug the kernel carefully. If run correctness and performance test successfully, you can get the bandwidth (bytes_per_second) of the kernel under different input key type.
 
 
-parallel 4 runs. from gpu idx 0
+parallel 4 runs. from gpu idx 0~3
