@@ -6,6 +6,8 @@ from select import select
 from pathlib import Path
 from typing import Any
 
+from minisweagent.run.utils.task_parser import generate_patch_output_dir
+
 
 def input_with_timeout(prompt: str, timeout_s: float, default: str) -> tuple[str, bool]:
     sys.stdout.write(prompt)
@@ -75,6 +77,102 @@ def display_edit_help() -> str:
   q                        - Abort
   h                        - Show this help message
 """
+
+
+def display_config_with_sources(merged_config: dict, console):
+    """Display configuration with sources and conflicts."""
+    lines = [
+        "\n" + "=" * 80,
+        "Configuration (Priority: Prompt > CLI > YAML):",
+        "=" * 80,
+    ]
+    
+    # Show conflicts if any
+    conflicts = merged_config.get("_conflicts", {})
+    if conflicts:
+        lines.append("\n[bold yellow]⚠ Conflicts detected:[/bold yellow]")
+        for field, sources in conflicts.items():
+            lines.append(f"  {field}:")
+            for source, value in sources.items():
+                marker = "→" if source == "prompt" else "✗"
+                lines.append(f"    {marker} {source}: {value}")
+        lines.append("")
+    
+    # Show final configuration
+    sources = merged_config.get("_sources", {})
+    fields = [
+        ("kernel_name", merged_config.get("kernel_name") or "Not detected"),
+        ("repo", merged_config.get("repo") or "Not detected"),
+        ("test_command", merged_config.get("test_command") or "Auto-create via UnitTestAgent"),
+        ("metric", merged_config.get("metric") or "Auto-extract from test output"),
+        ("num_parallel", str(merged_config.get("num_parallel") or "1 (default)")),
+        ("gpu_ids", merged_config.get("gpu_ids") or "0 (default)"),
+        ("patch_output_dir", merged_config.get("_patch_output_dir", "optimization_logs")),
+    ]
+    
+    for key, value in fields:
+        source = sources.get(key)
+        source_label = f" [{source}]" if source else ""
+        lines.append(f"  {key + ':':<20} {value}{source_label}")
+    
+    lines.append("=" * 80)
+    console.print("\n".join(lines))
+
+
+def interactive_config_edit_with_sources(merged_config: dict, console) -> tuple[dict, str, bool]:
+    """Interactive configuration editor with source tracking and conflict warnings."""
+    display_config_with_sources(merged_config, console)
+    
+    # Show conflicts warning if any
+    conflicts = merged_config.get("_conflicts", {})
+    if conflicts:
+        console.print("\n[bold yellow]⚠ Configuration conflicts detected (see above).[/bold yellow]")
+        console.print("[dim]Prompt-detected values will be used by default (highest priority).[/dim]")
+    
+    current_config = {k: v for k, v in merged_config.items() if not k.startswith("_")}
+    current_patch_dir = merged_config["_patch_output_dir"]
+    
+    while True:
+        console.print("\n[bold cyan]Options:[/bold cyan] (y) to proceed, (q) to abort, (h) for help, or --field=value to edit")
+        user_input, timed_out = input_with_timeout("Your choice: ", timeout_s=60, default="y")
+        user_input = user_input.strip().lower()
+        if timed_out:
+            console.print("[dim]No input for 60s, defaulting to 'y'.[/dim]")
+        
+        if not user_input or user_input == 'y':
+            return current_config, current_patch_dir, True
+        
+        elif user_input == 'q':
+            return current_config, current_patch_dir, False
+        
+        elif user_input == 'h':
+            console.print(display_edit_help())
+            continue
+        
+        elif user_input.startswith('--'):
+            field_name, value = parse_edit_command(user_input)
+            
+            if field_name is None:
+                console.print("[bold red]Invalid command format. Use --field=value (e.g., --test_command=python test.py)[/bold red]")
+                console.print("[dim]Type 'h' to see all available commands[/dim]")
+                continue
+            
+            current_config[field_name] = value
+            console.print(f"[bold green]✓ Updated {field_name} = {value}[/bold green]")
+            
+            if field_name == 'kernel_name':
+                current_patch_dir = generate_patch_output_dir(value)
+                console.print(f"[bold green]✓ Updated patch_output_dir = {current_patch_dir}[/bold green]")
+            
+            # Update merged_config for next display
+            merged_config[field_name] = value
+            merged_config["_patch_output_dir"] = current_patch_dir
+            display_config_with_sources(merged_config, console)
+            continue
+        
+        else:
+            console.print(f"[bold red]Unknown command: '{user_input}'. Type 'h' for available commands.[/bold red]")
+            continue
 
 
 def interactive_config_edit(parsed_config: dict, patch_output_dir: str, console) -> tuple[dict, str, bool]:
@@ -192,7 +290,12 @@ def load_and_merge_configs(
 ) -> tuple[Path | None, str | None, str | None, int | None, list[int], Path | None, str | None]:
     """Load and merge configurations from multiple sources.
     
-    Configuration priority: Command-line > parallel_config from yaml > auto-detect
+    Configuration priority (highest to lowest):
+    1. Prompt auto-detect (from task description)
+    2. CLI arguments (--repo, --test-command, etc.)
+    3. YAML parallel_config
+    
+    When conflicts exist, user is prompted for confirmation.
     
     Args:
         config: Loaded configuration dict from yaml
@@ -206,87 +309,181 @@ def load_and_merge_configs(
         Updated tuple of (repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name)
         Note: gpu_ids is returned as a list[int], not str
     """
-    from minisweagent.run.utils.task_parser import parse_task_info, generate_patch_output_dir, display_parsed_config
+    from minisweagent.run.utils.task_parser import parse_task_info, generate_patch_output_dir
     
     # Track kernel_name for returning
     kernel_name = None
+
+    # Track config sources for each field
+    config_sources: dict[str, dict[str, Any]] = {
+        "repo": {},
+        "test_command": {},
+        "metric": {},
+        "num_parallel": {},
+        "gpu_ids": {},
+        "patch_output": {},
+    }
     
-    # Step 1: Get parallel_config from yaml (if exists)
-    # Backward compatible: fall back to legacy extra_config.
-    parallel_config = config.get("parallel_config") or config.get("extra_config", {})
+    # Step 1: Collect values from all sources
+    parallel_config = config.get("parallel_config") or {}
     
-    # Step 2: Apply parallel_config values for missing command-line arguments
-    if not repo and parallel_config.get("repo"):
-        repo = Path(parallel_config["repo"])
-        console.print(f"[dim]Using repo from config: {repo}[/dim]")
-    if not test_command and parallel_config.get("test_command"):
-        test_command = parallel_config["test_command"]
-        console.print(f"[dim]Using test_command from config[/dim]")
-    if not metric and parallel_config.get("metric"):
-        metric = parallel_config["metric"]
-        console.print(f"[dim]Using metric from config[/dim]")
-    if num_parallel is None and parallel_config.get("num_parallel"):
-        num_parallel = parallel_config["num_parallel"]
-        console.print(f"[dim]Using num_parallel from config: {num_parallel}[/dim]")
-    if not gpu_ids and parallel_config.get("gpu_ids"):
-        gpu_ids_value = parallel_config.get("gpu_ids")
+    # Source 1: CLI arguments (if provided)
+    if repo:
+        config_sources["repo"]["cli"] = repo
+    if test_command:
+        config_sources["test_command"]["cli"] = test_command
+    if metric:
+        config_sources["metric"]["cli"] = metric
+    if num_parallel is not None:
+        config_sources["num_parallel"]["cli"] = num_parallel
+    if gpu_ids:
+        config_sources["gpu_ids"]["cli"] = gpu_ids
+    if patch_output:
+        config_sources["patch_output"]["cli"] = patch_output
+    
+    # Source 2: YAML parallel_config
+    if parallel_config.get("repo"):
+        config_sources["repo"]["yaml"] = Path(parallel_config["repo"])
+    if parallel_config.get("test_command"):
+        config_sources["test_command"]["yaml"] = parallel_config["test_command"]
+    if parallel_config.get("metric"):
+        config_sources["metric"]["yaml"] = parallel_config["metric"]
+    if parallel_config.get("num_parallel") is not None:
+        config_sources["num_parallel"]["yaml"] = parallel_config["num_parallel"]
+    if parallel_config.get("gpu_ids"):
+        gpu_ids_value = parallel_config["gpu_ids"]
         if isinstance(gpu_ids_value, list):
-            gpu_ids = ",".join(map(str, gpu_ids_value))
+            config_sources["gpu_ids"]["yaml"] = ",".join(map(str, gpu_ids_value))
         else:
-            gpu_ids = gpu_ids_value
-        console.print(f"[dim]Using gpu_ids from config: {gpu_ids}[/dim]")
-    if not patch_output and parallel_config.get("patch_output_dir"):
-        patch_output = Path(parallel_config["patch_output_dir"])
-        console.print(f"[dim]Using patch_output_dir from config: {patch_output}[/dim]")
+            config_sources["gpu_ids"]["yaml"] = str(gpu_ids_value)
+    if parallel_config.get("patch_output_dir"):
+        config_sources["patch_output"]["yaml"] = Path(parallel_config["patch_output_dir"])
     
-    # Step 3: Auto-detect remaining missing configurations
+    # Step 2: Auto-detect from task content (highest priority if present)
+    parsed_config = None
+    missing_in_cli_yaml = []
     if task_content:
-        missing_fields = []
-        if not repo:
-            missing_fields.append("repo")
-        if not test_command:
-            missing_fields.append("test_command")
-        if not metric:
-            missing_fields.append("metric")
-        if num_parallel is None:
-            missing_fields.append("num_parallel")
-        if not gpu_ids:
-            missing_fields.append("gpu_ids")
+        # Check what's missing from CLI+YAML
+        if not config_sources["repo"]:
+            missing_in_cli_yaml.append("repo")
+        if not config_sources["test_command"]:
+            missing_in_cli_yaml.append("test_command")
+        if not config_sources["metric"]:
+            missing_in_cli_yaml.append("metric")
+        if not config_sources["num_parallel"]:
+            missing_in_cli_yaml.append("num_parallel")
+        if not config_sources["gpu_ids"]:
+            missing_in_cli_yaml.append("gpu_ids")
         
-        if missing_fields:
-            console.print(f"[bold cyan]Auto-detecting missing configuration from task: {', '.join(missing_fields)}...[/bold cyan]")
+        # Always run auto-detect if there's task content (to show user what was detected)
+        if missing_in_cli_yaml:
+            console.print(f"[bold cyan]Auto-detecting configuration from task: {', '.join(missing_in_cli_yaml)}...[/bold cyan]")
             parsed_config = parse_task_info(task_content, model)
             
-            # Generate patch output directory based on kernel name (only if not set)
-            if not patch_output:
-                auto_patch_output = generate_patch_output_dir(parsed_config.get("kernel_name"))
-                parsed_config["_patch_output_dir"] = auto_patch_output
-            else:
-                parsed_config["_patch_output_dir"] = str(patch_output)
-            
-            # Interactive configuration editor (unless in yolo mode)
-            if not yolo:
-                updated_config, updated_patch_dir, proceed = interactive_config_edit(
-                    parsed_config, parsed_config["_patch_output_dir"], console
-                )
-                
-                if not proceed:
-                    console.print("[bold red]Aborted by user.[/bold red]")
-                    return None, None, None, None, None, None
-                
-                parsed_config = updated_config
-                parsed_config["_patch_output_dir"] = updated_patch_dir
-            else:
-                # In yolo mode, just display the config
-                console.print(display_parsed_config(parsed_config, parsed_config["_patch_output_dir"]))
-            
-            # Apply parsed configuration to command-line arguments (only for missing values)
-            repo, test_command, metric, num_parallel, gpu_ids, patch_output = apply_config_changes(
-                parsed_config, repo, test_command, metric, num_parallel, gpu_ids, patch_output
-            )
-            kernel_name = parsed_config.get("kernel_name")
-        else:
-            console.print("[bold green]All configuration provided via command-line or config file. Skipping auto-detection.[/bold green]")
+            # Source 3: Prompt auto-detect (highest priority)
+            if parsed_config.get("repo"):
+                config_sources["repo"]["prompt"] = Path(parsed_config["repo"])
+            if parsed_config.get("test_command"):
+                config_sources["test_command"]["prompt"] = parsed_config["test_command"]
+            if parsed_config.get("metric"):
+                config_sources["metric"]["prompt"] = parsed_config["metric"]
+            if parsed_config.get("num_parallel") is not None:
+                config_sources["num_parallel"]["prompt"] = parsed_config["num_parallel"]
+            if parsed_config.get("gpu_ids"):
+                config_sources["gpu_ids"]["prompt"] = parsed_config["gpu_ids"]
+            if parsed_config.get("kernel_name"):
+                kernel_name = parsed_config["kernel_name"]
+    
+    # Step 3: Merge configurations with priority: prompt > cli > yaml
+    # Apply highest priority source for each field
+    def get_highest_priority(field_sources: dict[str, Any]) -> tuple[Any, str | None]:
+        """Get value from highest priority source. Returns (value, source)"""
+        if "prompt" in field_sources:
+            return field_sources["prompt"], "prompt"
+        elif "cli" in field_sources:
+            return field_sources["cli"], "cli"
+        elif "yaml" in field_sources:
+            return field_sources["yaml"], "yaml"
+        return None, None
+    
+    # Detect conflicts (when multiple sources have different values for the same field)
+    conflicts: dict[str, dict[str, Any]] = {}
+    for field, sources in config_sources.items():
+        if len(sources) > 1:
+            # Check if values are actually different
+            values = list(sources.values())
+            if len(set(str(v) for v in values)) > 1:
+                conflicts[field] = sources
+    
+    # Apply merged configuration
+    repo_value, repo_source = get_highest_priority(config_sources["repo"])
+    test_command_value, test_command_source = get_highest_priority(config_sources["test_command"])
+    metric_value, metric_source = get_highest_priority(config_sources["metric"])
+    num_parallel_value, num_parallel_source = get_highest_priority(config_sources["num_parallel"])
+    gpu_ids_value, gpu_ids_source = get_highest_priority(config_sources["gpu_ids"])
+    patch_output_value, patch_output_source = get_highest_priority(config_sources["patch_output"])
+    
+    # Generate patch output directory if not provided
+    if not patch_output_value:
+        patch_output_value = Path(generate_patch_output_dir(kernel_name))
+        patch_output_source = "auto-generated"
+    
+    # Prepare display config with sources
+    merged_config = {
+        "kernel_name": kernel_name,
+        "repo": repo_value,
+        "test_command": test_command_value,
+        "metric": metric_value,
+        "num_parallel": num_parallel_value,
+        "gpu_ids": gpu_ids_value,
+        "_patch_output_dir": str(patch_output_value),
+        "_sources": {
+            "repo": repo_source,
+            "test_command": test_command_source,
+            "metric": metric_source,
+            "num_parallel": num_parallel_source,
+            "gpu_ids": gpu_ids_source,
+            "patch_output": patch_output_source,
+        },
+        "_conflicts": conflicts,
+    }
+    
+    # Step 4: Interactive confirmation (unless in yolo mode)
+    if not yolo and (parsed_config or conflicts):
+        updated_config, updated_patch_dir, proceed = interactive_config_edit_with_sources(
+            merged_config, console
+        )
+        
+        if not proceed:
+            console.print("[bold red]Aborted by user.[/bold red]")
+            return None, None, None, None, None, None, None
+        
+        # Apply user-confirmed values
+        repo = Path(updated_config["repo"]) if updated_config.get("repo") else None
+        test_command = updated_config.get("test_command")
+        metric = updated_config.get("metric")
+        num_parallel = updated_config.get("num_parallel")
+        gpu_ids = updated_config.get("gpu_ids")
+        patch_output = Path(updated_patch_dir) if updated_patch_dir else None
+        kernel_name = updated_config.get("kernel_name")
+    elif yolo and (parsed_config or missing_in_cli_yaml):
+        # In yolo mode, just display and auto-apply
+        display_config_with_sources(merged_config, console)
+        repo = repo_value
+        test_command = test_command_value
+        metric = metric_value
+        num_parallel = num_parallel_value
+        gpu_ids = gpu_ids_value
+        patch_output = patch_output_value
+    else:
+        # No auto-detect needed and no conflicts
+        console.print("[bold green]Using configuration from command-line and/or config file.[/bold green]")
+        repo = repo_value
+        test_command = test_command_value
+        metric = metric_value
+        num_parallel = num_parallel_value
+        gpu_ids = gpu_ids_value
+        patch_output = patch_output_value
     
     # Parse GPU IDs into list[int]
     parsed_gpu_ids = []

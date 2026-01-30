@@ -179,7 +179,7 @@ def main(
     model = get_model(model_name, config.get("model", {}))
     env = LocalEnvironment(**config.get("env", {}))
 
-    # Load and merge configurations: Command-line > parallel_config from yaml > auto-detect
+    # Load and merge configurations: Command-line > extra_config from yaml > auto-detect
     result = load_and_merge_configs(
         config, repo, test_command, metric, num_parallel, gpu_ids, patch_output,
         task_content, yolo, model, console
@@ -238,6 +238,11 @@ def main(
     agent_config["patch_output_dir"] = str(patch_dir)
     agent_config["metric"] = metric or config.get("patch", {}).get("metric")
     
+    # Create log directory and prepare log file path
+    log_dir = Path(patch_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    agent_log_file = log_dir / "mini_agent.log"
+    
     # ============ Step 3: Use ParallelAgent (supports both single and parallel execution) ============
     agent_class = ParallelAgent
     agent_config["agent_class"] = base_agent_class
@@ -264,6 +269,9 @@ def main(
     
     # Create and run agent
     agent = agent_class(model, env, **agent_config)
+    agent.log_file = agent_log_file
+    console.print(f"[dim]Agent log: {agent_log_file}[/dim]")
+    
     try:
         exit_status, result = agent.run(
             task_content,

@@ -8,8 +8,21 @@ agent:
     - Output **exactly ONE** shell command that, in order:
       - Runs a correctness test (required, first)
       - Runs a benchmark test (required)
-      - Enables before-vs-after comparison
+      - Enables **before-vs-after comparison**
     - If correctness fails, the command must fail (non-zero exit).
+
+    Definitions (must follow)
+    - There are two kinds of tasks:
+      - (A) Normal kernel optimization: you are optimizing ONE kernel implementation; before/after comparison means **git before vs git after**.
+        In this case, the test command should be **the same** before and after, and it is "suitable" if it provides correctness + benchmark.
+      - (B) Fused-kernel optimization: there are TWO implementations (unfused baseline path vs fused optimized kernel) that must be compared
+        **within the same code version**; here comparison means **unfused vs fused** on identical inputs.
+    - Decide task type:
+      - If the kernel name/task mentions "fused" OR the codebase contains both fused and unfused variants for the kernel, treat it as (B).
+      - Otherwise treat it as (A).
+    - Suitability criteria:
+      - For (A): suitable if it runs correctness + benchmark for the kernel, and can be rerun unchanged after optimization.
+      - For (B): suitable only if it runs BOTH unfused and fused, validates both for correctness, and prints both benchmark performance metrics.
 
     TEST_COMMAND rules (strict)
     - One command:
@@ -37,9 +50,10 @@ agent:
     Part 2: Creating a new test/benchmark script
     (Only if no suitable existing test/benchmark can be found.)
        - Create a minimal correctness test that exercises real kernel code and validates against a trusted reference
-         (CPU, non-optimized kernel, or non-fused path) using random inputs across multiple dtypes and shapes.
-       - Create a benchmark using identical workloads for baseline and optimized versions; report at least one metric
-         (time, bandwidth, or TFLOPS); and run at least 20 iterations per input to report average performance.
+         (torch reference, or non-fused path when applicable) using random inputs across multiple dtypes and shapes.
+       - Create a benchmark:
+         - For (A): benchmark the kernel with at least 20 iterations per input; print a stable timing metric.
+         - For (B): write correctness and benchmark test for original unfused kernels and optimized fused kerenl.
        - Cover all supported dtypes, representative sizes, and edge cases.
 
     Output constraints

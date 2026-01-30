@@ -98,16 +98,3 @@ model:
   model_class: amd_llm
   model_name: claude-opus-4.5
   api_key: ""
-
-# Parallel-related defaults used by `mini.py` (priority: CLI > parallel_config > auto-detect)
-parallel_config:
-  # Repository path (required when num_parallel > 1)
-  repo: null
-  # Default test command
-  test_command: null
-  # Default metric extraction description
-  metric: null
-  # Number of parallel agents
-  num_parallel: 1
-  # GPU IDs for parallel execution (list or "0,1,2,3")
-  gpu_ids: [0]
