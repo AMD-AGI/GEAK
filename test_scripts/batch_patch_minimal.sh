@@ -21,7 +21,7 @@ echo "Agents: ${NUM_AGENTS}"
 echo "======================================"
 
 # Paths
-TEST_DIR="/data/yueliu14/mini-swe-agent"
+TEST_DIR="/mnt/raid0/yueliu14/mini-swe-agent"
 ROCPRIM_DIR="${TEST_DIR}/rocPRIM_${KERNEL_NAME}"
 TASK_FILE="${TEST_DIR}/rocprim_prompts/rocprim_prompt_${KERNEL_NAME}.md"
 CONFIG_FILE="${TEST_DIR}/src/minisweagent/config/mini_system_prompt.yaml"
