@@ -297,81 +297,69 @@ class ParallelAgent(DefaultAgent):
         self._log_message(f"[ParallelAgent] Test output saved to: {test_file}")
 
     def run(self, task: str, **kwargs) -> tuple[str, str] | Any:
-        # Handle parallel execution if num_parallel > 1
-        if self.config.num_parallel > 1:
-            if not self.config.repo:
-                raise ValueError("repo is required when num_parallel > 1. Please specify the repository path.")
-            repo_path = Path(self.config.repo) if isinstance(self.config.repo, (str, Path)) else self.config.repo
-            repo_path = repo_path.resolve()
-            if not repo_path.exists():
-                raise ValueError(f"Repository path does not exist: {repo_path}")
-            # Use git worktrees only when repo_path itself is a git repo root (has .git).
-            # If user passes a subdirectory (even if it's inside a git repo), prefer copy-mode so the workdir
-            # contains only that subtree, which also enables non-git repo optimization workflows.
-            is_git_repo = (repo_path / ".git").exists()
-            
-            base_patch_dir = Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")
-            output = kwargs.get("output")
-            save_traj_fn = kwargs.get("save_traj_fn")
-            console = kwargs.get("console")
-            model_factory = kwargs.get("model_factory")
-            env_factory = kwargs.get("env_factory")
-            
-            if not model_factory or not env_factory:
-                raise ValueError("model_factory and env_factory must be provided in kwargs when num_parallel > 1")
-            
-            return self.run_parallel(
-                num_parallel=self.config.num_parallel,
-                repo_path=repo_path,
-                is_git_repo=is_git_repo,
-                task_content=task,
-                agent_class=self.config.agent_class if self.config.agent_class else type(self),
-                agent_config={k: v for k, v in self.config.__dict__.items() if k not in ('num_parallel', 'repo', 'gpu_ids', 'agent_class')},
-                model_factory=model_factory,
-                env_factory=env_factory,
-                base_patch_dir=base_patch_dir,
-                output=output,
-                gpu_ids=self.config.gpu_ids,
-                save_traj_fn=save_traj_fn,
-                console=console,
-            )
-        
-        # Single agent execution
-        init_msg = f"\n{'='*60}\n"
-        init_msg += f"[ParallelAgent] Starting with patch saving enabled\n"
-        init_msg += f"[ParallelAgent] Test command: {self.config.test_command}\n"
-        init_msg += f"[ParallelAgent] Patch output directory: {self.config.patch_output_dir}\n"
-        if self.config.metric:
-            init_msg += f"[ParallelAgent] Metric extraction: {self.config.metric}\n"
-        else:
-            init_msg += f"[ParallelAgent] Metric extraction: Automatic (LLM will extract performance metrics and calculate speedup)\n"
-        init_msg += f"[ParallelAgent] Triggers: Use 'TEST_BASELINE_PERFORMANCE' or 'SAVE_PATCH_AND_TEST' in command output\n"
-        init_msg += f"{'='*60}\n\n"
-        
-        if self.log_file:
+        num_parallel = self.config.num_parallel or 1
+        console = kwargs.get("console")
+
+        base_patch_dir = (Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")).resolve()
+        model_factory = kwargs.get("model_factory") or (lambda: self.model)
+        env_factory = kwargs.get("env_factory") or (lambda: self.env)
+
+        if num_parallel == 1:
+            parallel_patch_dir = (base_patch_dir / "parallel_0").resolve()
+            parallel_patch_dir.mkdir(parents=True, exist_ok=True)
+            prev_patch_output_dir = self.config.patch_output_dir
+            self.config.patch_output_dir = str(parallel_patch_dir)
             try:
-                with open(self.log_file, "a", encoding="utf-8") as f:
-                    f.write(init_msg)
-                    f.flush()
-            except Exception:
-                pass
-        
-        exit_status, result = super().run(task, **kwargs)
-        
-        completion_msg = f"\n[ParallelAgent] Agent execution completed\n"
-        completion_msg += f"[ParallelAgent] Exit status: {exit_status}\n"
-        
-        self._print_summary()
-        completion_msg += f"[ParallelAgent] Trajectory will be saved by the runner\n"
-        
-        if self.log_file:
-            try:
-                with open(self.log_file, "a", encoding="utf-8") as f:
-                    f.write(completion_msg)
-                    f.flush()
-            except Exception:
-                pass
-        return exit_status, result
+                exit_status, result = super().run(task, **kwargs)
+            finally:
+                self.config.patch_output_dir = prev_patch_output_dir
+
+            metric = self.config.metric or "Extract the performance metrics from the test output and calculate the best speedup."
+            if console:
+                console.print("\n[bold green]Selecting best patch from 1 run...[/bold green]")
+            best_result = self._select_best_from_parallel_runs(base_patch_dir, 1, metric, model_factory)
+            if best_result and console and best_result.llm_conclusion:
+                console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
+                console.print(best_result.llm_conclusion)
+            return exit_status, result
+
+        if not self.config.repo:
+            raise ValueError("Please specify the repository path.")
+        repo_path = (Path(self.config.repo) if isinstance(self.config.repo, (str, Path)) else self.config.repo).resolve()
+        if not repo_path.exists():
+            raise ValueError(f"Repository path does not exist: {repo_path}")
+
+        is_git_repo = (repo_path / ".git").exists()
+        output = kwargs.get("output")
+        save_traj_fn = kwargs.get("save_traj_fn")
+
+        results = self.run_parallel(
+            num_parallel=num_parallel,
+            repo_path=repo_path,
+            is_git_repo=is_git_repo,
+            task_content=task,
+            agent_class=self.config.agent_class if self.config.agent_class else type(self),
+            agent_config={k: v for k, v in self.config.__dict__.items() if k not in ("num_parallel", "repo", "gpu_ids", "agent_class")},
+            model_factory=model_factory,
+            env_factory=env_factory,
+            base_patch_dir=base_patch_dir,
+            output=output,
+            gpu_ids=self.config.gpu_ids,
+            save_traj_fn=save_traj_fn,
+            console=console,
+        )
+
+        metric = self.config.metric or "Extract the performance metrics from the test output and calculate the best speedup."
+        if console:
+            console.print(f"\n[bold green]Selecting best patch from {num_parallel} parallel runs...[/bold green]")
+        best_result = self._select_best_from_parallel_runs(base_patch_dir, num_parallel, metric, model_factory)
+        if best_result and console and best_result.llm_conclusion:
+            console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
+            console.print(best_result.llm_conclusion)
+
+        if results:
+            return results[0][2], results[0][3]
+        return "Error", "All parallel agents failed"
 
     def _print_summary(self):
         if not self.patch_results:
@@ -688,8 +676,8 @@ class ParallelAgent(DefaultAgent):
         redirect_output_fn=redirect_output_to_file,
         save_traj_fn=None,
         console=None,
-    ) -> Any:
-        """Run multiple parallel agents and select the best result."""
+    ) -> list[tuple[int, Any, Any, Any]]:
+        """Run multiple parallel agents and return their results."""
         if console:
             console.print(f"[bold green]Running {num_parallel} parallel patch agents...[/bold green]")
         
@@ -767,7 +755,20 @@ class ParallelAgent(DefaultAgent):
             with open(log_file, "w", encoding="utf-8") as f:
                 f.write(f"Agent {agent_id} Conversation Log\n")
                 f.write("=" * 60 + "\n\n")
-            
+
+            init_msg = (
+                f"\n{'='*60}\n"
+                "[ParallelAgent] Starting with patch saving enabled\n"
+                f"[ParallelAgent] Test command: {parallel_agent_config.get('test_command')}\n"
+                f"[ParallelAgent] Patch output directory: {parallel_agent_config.get('patch_output_dir')}\n"
+                f"[ParallelAgent] Metric extraction: {parallel_agent_config.get('metric') or 'Automatic (LLM will extract performance metrics and calculate speedup)'}\n"
+                "[ParallelAgent] Triggers: Use 'TEST_BASELINE_PERFORMANCE' or 'SAVE_PATCH_AND_TEST' in command output\n"
+                f"{'='*60}\n\n"
+            )
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(init_msg)
+                f.flush()
+
             exit_status, result, extra_info = None, None, None
             with redirect_output_fn(log_file):
                 try:
@@ -797,26 +798,4 @@ class ParallelAgent(DefaultAgent):
                     agent_id = futures[future]
                     from minisweagent.utils.log import logger
                     logger.error(f"Error in parallel agent {agent_id}: {e}", exc_info=True)
-        
-        # Select best patch from all parallel runs
-        if console:
-            console.print(f"\n[bold green]Selecting best patch from {num_parallel} parallel runs...[/bold green]")
-        metric = agent_config.get("metric") or "Extract the performance metrics from the test output and calculate the best speedup."
-        best_result = cls._select_best_from_parallel_runs(
-            base_patch_dir, num_parallel, metric, model_factory
-        )
-        
-        if best_result is not None:
-            if console:
-                if best_result.llm_conclusion:
-                    console.print(f"\n[bold cyan]LLM Conclusion:[/bold cyan]")
-                    console.print(best_result.llm_conclusion)
-            
-            # best_results.json is already written by SelectPatchAgent, no need to overwrite it
-        
-        if results:
-            # Return (exit_status, result) tuple from the first successful result
-            return results[0][2], results[0][3]
-        else:
-            # All agents failed - return error status
-            return "Error", "All parallel agents failed"
+        return results

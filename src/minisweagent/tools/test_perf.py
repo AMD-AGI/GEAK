@@ -80,7 +80,6 @@ class TestPerfTool:
             if ctx.patch_output_dir:
                 self._save_patch_file(patch_name, patch_content)
                 self._save_test_output(patch_name, test_output)
-                self._update_results_file()
             
             output = self._format_output(patch_name, patch_content, test_output, test_passed, test_returncode)
             return {"output": output, "returncode": 0 if test_passed else 1}
@@ -224,7 +223,6 @@ class TestPerfTool:
         if ctx.patch_output_dir:
             self._save_patch_file(patch_name, patch_content)
             self._save_test_output(patch_name, error_msg)
-            self._update_results_file()
         
         output = self._format_output(patch_name, patch_content, error_msg, False, -1)
         return {"output": output, "returncode": 1}
@@ -238,11 +236,6 @@ class TestPerfTool:
         output_dir = Path(self.context.patch_output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / f"{patch_name}_test.txt").write_text(test_output)
-    
-    def _update_results_file(self):
-        if self.context.patch_results and self.context.patch_output_dir:
-            output_dir = Path(self.context.patch_output_dir)
-            (output_dir / "results.json").write_text(json.dumps(self.context.patch_results, indent=2))
     
     @staticmethod
     def _is_git_repo(path: Path) -> bool:
