@@ -16,10 +16,11 @@ Options:
 import argparse
 import sys
 from pathlib import Path
-from .discovery import DiscoveryPipeline, discover
 
 # Add parent src to path to import geakagent modules
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from .mcp_tools.discovery import DiscoveryPipeline, discover
 
 from geakagent.runtime_env import (
     prompt_runtime_environment,

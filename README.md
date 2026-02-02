@@ -4,28 +4,6 @@ GPU Evolutionary Agent for Kernels - A simple AI agent for GPU kernel optimizati
 
 Based on [mini-swe-agent](https://github.com/SWE-agent/mini-SWE-agent) architecture: the LLM generates bash commands and MCP tool calls to optimize GPU kernels.
 
-## 🚀 Quick Start
-
-```bash
-# Auto-detect environment and run agent (recommended)
-python3 -m geakagent.run.mini -m claude-sonnet-4.5 \
-  -t "Optimize kernel at /path/to/kernel.py" \
-  --yolo
-
-# Force Docker with default image
-python3 -m geakagent.run.mini -m claude-sonnet-4.5 \
-  -t "Optimize kernel" \
-  --runtime docker \
-  --workspace /path/to/kernels \
-  --yolo
-```
-
-**💡 New:** Auto-detects GPU environment, defaults to Docker `lmsysorg/sglang:v0.5.6.post1-rocm700-mi35x` if needed.
-
-📖 See [RUNTIME_QUICKSTART.md](RUNTIME_QUICKSTART.md) | [RUNTIME_ENV.md](RUNTIME_ENV.md) for details.
-
----
-
 ## Architecture
 
 ```
@@ -101,12 +79,19 @@ GEAK-agent/
 ├── kernel-profiler/            # MCP: GPU profiling
 ├── kernel-evolve/              # MCP: optimization strategies
 ├── kernel-ercs/                # MCP: evaluation/reflection
-├── geak_agent/                 # Discovery pipeline
+├── mini_kernel/                # Core tools (discovery, metrix, cli)
 ├── reference/                  # Reference files from old agent
 │   ├── optimization_strategies.py
 │   └── state.py
 └── docs/
 ```
+
+## Documentation
+
+Detailed documentation for core components:
+
+- **[Discovery Pipeline](docs/DISCOVERY_PIPELINE.md)** - Automated test and benchmark discovery
+- **[MetrixTool](docs/METRIX_TOOL.md)** - GPU kernel profiler with hardware metrics
 
 ## Reference
 

@@ -88,19 +88,19 @@ When given a single kernel file, automatically expands search to project root:
 
 ```bash
 # Discover tests for a kernel
-python -m geak_agent.discovery /path/to/kernel.py
+python -m mini_kernel.mcp_tools.discovery /path/to/kernel.py
 
 # Non-interactive mode
-python -m geak_agent.discovery /path/to/kernel.py --no-confirm
+python -m mini_kernel.mcp_tools.discovery /path/to/kernel.py --no-confirm
 
 # Discovery only (don't start agent)
-python -m geak_agent.discovery /path/to/kernel.py --discover-only
+python -m mini_kernel.mcp_tools.discovery /path/to/kernel.py --discover-only
 ```
 
 ### Programmatic
 
 ```python
-from geak_agent.discovery import discover
+from mini_kernel.mcp_tools.discovery import discover
 
 result = discover(
     kernel_path=Path("/path/to/kernel.py"),
@@ -117,7 +117,7 @@ for test in result.tests:
 Skip discovery by providing explicit commands:
 
 ```bash
-python -m geak_agent.cli /path/to/kernel.py \
+python -m mini_kernel.cli /path/to/kernel.py \
     --test "pytest tests/test_kernel.py -v" \
     --bench "python benchmarks/bench_kernel.py"
 ```
