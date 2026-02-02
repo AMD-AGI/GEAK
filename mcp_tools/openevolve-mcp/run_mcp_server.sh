@@ -1,4 +1,4 @@
 #!/bin/bash
 # Start OpenEvolve MCP Server
-cd /home/sapmajum/GEAK-v3/msa/mcp_tools/openevolve-mcp
+cd "$(dirname "$0")"
 python3 -m openevolve_mcp.server

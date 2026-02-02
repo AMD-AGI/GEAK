@@ -418,7 +418,7 @@ docker rm -f $(docker ps -a -q --filter "name=geakagent")
 ### Test Runtime Detection
 
 ```bash
-cd /home/sapmajum/GEAK-v3/msa
+cd .
 python3 -m geakagent.runtime_env
 ```
 
@@ -435,7 +435,7 @@ python3 -m geakagent.run.mini \
   -m claude-sonnet-4.5 \
   -t "Check if torch and triton are available" \
   --runtime docker \
-  --workspace /home/sapmajum/test_geak_workflow \
+  --workspace /path/to/workspace \
   --yolo
 ```
 

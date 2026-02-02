@@ -83,7 +83,7 @@ Complete local (GPU + torch + triton)?
 ### Check What Runtime Will Be Used
 
 ```bash
-cd /home/sapmajum/GEAK-v3/msa
+cd .
 python3 -m geakagent.runtime_env
 ```
 

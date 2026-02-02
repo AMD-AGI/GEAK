@@ -51,7 +51,9 @@ python3 -m geakagent.run.mini -m claude-sonnet-4.5 \
 ## Installation
 
 ```bash
-cd /home/sapmajum/GEAK-v3/msa
+# Clone the repository
+git clone -b msa2 https://github.com/AMD-AGI/GEAK-agent.git
+cd GEAK-agent
 
 # 1. Install main package
 pip install -e .
@@ -70,8 +72,7 @@ python3 -m pip install -e mcp_tools/mcp-client/ --no-build-isolation
 ### Full Pipeline Command
 
 ```bash
-cd /home/sapmajum/GEAK-v3/msa && \
-export ANTHROPIC_API_KEY="your-api-key" && \
+export ANTHROPIC_API_KEY="your-api-key"
 python3 -m geakagent.run.mini \
   -m claude-sonnet-4.5 \
   -t "Complete GEAK Agent Pipeline for examples/add_kernel/kernel.py
