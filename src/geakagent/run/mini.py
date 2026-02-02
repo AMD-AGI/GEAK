@@ -21,9 +21,16 @@ from geakagent.agents.interactive_textual import TextualAgent
 from geakagent.agents.patch_agent import PatchAgent
 from geakagent.config import builtin_config_dir, get_config_path
 from geakagent.environments.local import LocalEnvironment
+from geakagent.environments.docker import DockerEnvironment
 from geakagent.models import get_model
 from geakagent.run.extra.config import configure_if_first_time
 from geakagent.run.utils.save import save_traj
+from geakagent.runtime_env import (
+    prompt_runtime_environment,
+    get_runtime_config_for_agent,
+    display_runtime_info,
+    RuntimeType,
+)
 from geakagent.utils.log import logger
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
@@ -60,6 +67,10 @@ def main(
     test_command: str | None = typer.Option(None, "--test-command", help="Test command to run for patch validation"),
     patch_output: Path | None = typer.Option(None, "--patch-output", help="Output directory for patch files and test results"),
     metric: str | None = typer.Option(None, "--metric", help="Metric extraction task description for LLM"),
+    runtime: str | None = typer.Option(None, "--runtime", help="Runtime environment: 'local', 'docker', or 'auto' (default: auto)", rich_help_panel="Runtime"),
+    docker_image: str | None = typer.Option(None, "--docker-image", help="Docker image to use (default: lmsysorg/sglang:v0.5.6.post1-rocm700-mi35x)", rich_help_panel="Runtime"),
+    workspace: str | None = typer.Option(None, "--workspace", help="Workspace directory to mount in Docker", rich_help_panel="Runtime"),
+    no_runtime_check: bool = typer.Option(False, "--no-runtime-check", help="Skip runtime environment detection", rich_help_panel="Runtime"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
@@ -80,6 +91,37 @@ def main(
         )
         console.print("[bold green]Got that, thanks![/bold green]")
 
+    # Runtime environment detection and configuration
+    runtime_env = None
+    if not no_runtime_check:
+        if runtime == "local":
+            # Force local environment
+            from geakagent.runtime_env import RuntimeEnvironment, RuntimeType
+            runtime_env = RuntimeEnvironment(runtime_type=RuntimeType.LOCAL)
+            display_runtime_info(runtime_env)
+        elif runtime == "docker":
+            # Force Docker environment
+            from geakagent.runtime_env import RuntimeEnvironment, RuntimeType, DEFAULT_DOCKER_IMAGE
+            image = docker_image or DEFAULT_DOCKER_IMAGE
+            runtime_env = RuntimeEnvironment(
+                runtime_type=RuntimeType.DOCKER,
+                docker_image=image,
+                docker_devices=["/dev/kfd", "/dev/dri"],
+                has_gpu=True,
+                has_triton=True,
+                has_torch=True
+            )
+            display_runtime_info(runtime_env)
+        else:
+            # Auto-detect (default)
+            runtime_env = prompt_runtime_environment(auto_confirm=yolo)
+        
+        # Update config based on runtime environment
+        if runtime_env and runtime_env.runtime_type == RuntimeType.DOCKER:
+            workspace_path = workspace or os.getcwd()
+            runtime_config = get_runtime_config_for_agent(runtime_env, workspace_path)
+            config["env"] = runtime_config
+
     if yolo:
         config.setdefault("agent", {})["mode"] = "yolo"
     if cost_limit is not None:
@@ -89,7 +131,13 @@ def main(
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
     model = get_model(model_name, config.get("model", {}))
-    env = LocalEnvironment(**config.get("env", {}))
+    
+    # Create environment based on runtime configuration
+    env_config = config.get("env", {})
+    if runtime_env and runtime_env.runtime_type == RuntimeType.DOCKER:
+        env = DockerEnvironment(**env_config)
+    else:
+        env = LocalEnvironment(**env_config)
 
     # Both visual flag and the MSWEA_VISUAL_MODE_DEFAULT flip the mode, so it's essentially a XOR
     agent_class = InteractiveAgent
