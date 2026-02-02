@@ -1,0 +1,12 @@
+[project]
+name = "mcp-client"
+version = "0.1.0"
+description = "MCP Protocol Client for GEAK Agent"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

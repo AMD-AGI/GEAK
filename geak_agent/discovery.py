@@ -102,9 +102,12 @@ class TestInfo:
 class BenchmarkInfo:
     """Information about a discovered benchmark."""
     file_path: Path
-    bench_type: str  # pytest, script, custom
+    bench_type: str  # pytest, script, custom, standardized
     command: str
     confidence: float
+    
+    # Note: Agent should use geakagent.benchmark.StandardBenchmark internally
+    # to ensure all kernels get consistent metrics in benchmark/baseline/metrics.json
 
 
 @dataclass
@@ -1045,6 +1048,7 @@ Respond with JSON only:
             "bench_command": self.get_bench_command(),
             "has_tests": len(self.result.tests) > 0,
             "has_benchmarks": len(self.result.benchmarks) > 0,
+            "_benchmark_note": "Use geakagent.benchmark.StandardBenchmark to ensure standardized metrics",
         }
 
 

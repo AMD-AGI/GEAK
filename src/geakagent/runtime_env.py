@@ -266,7 +266,6 @@ def get_runtime_config_for_agent(runtime_env: RuntimeEnvironment, workspace_path
             run_args.extend(["-v", volume])
         
         return {
-            "type": "docker",
             "image": runtime_env.docker_image,
             "cwd": "/workspace" if workspace_path else "/",
             "run_args": run_args,
@@ -277,7 +276,6 @@ def get_runtime_config_for_agent(runtime_env: RuntimeEnvironment, workspace_path
     
     else:  # LOCAL or UNKNOWN
         return {
-            "type": "local",
             "cwd": workspace_path or os.getcwd(),
         }
 

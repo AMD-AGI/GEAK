@@ -96,12 +96,12 @@ def main(
     if not no_runtime_check:
         if runtime == "local":
             # Force local environment
-            from geakagent.runtime_env import RuntimeEnvironment, RuntimeType
+            from geakagent.runtime_env import RuntimeEnvironment
             runtime_env = RuntimeEnvironment(runtime_type=RuntimeType.LOCAL)
             display_runtime_info(runtime_env)
         elif runtime == "docker":
             # Force Docker environment
-            from geakagent.runtime_env import RuntimeEnvironment, RuntimeType, DEFAULT_DOCKER_IMAGE
+            from geakagent.runtime_env import RuntimeEnvironment, DEFAULT_DOCKER_IMAGE
             image = docker_image or DEFAULT_DOCKER_IMAGE
             runtime_env = RuntimeEnvironment(
                 runtime_type=RuntimeType.DOCKER,
