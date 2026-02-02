@@ -9,11 +9,25 @@ Options:
     --bench "command"    Explicit benchmark command (skip discovery)
     --gpu N              GPU device to use (default: 0)
     --no-confirm         Skip confirmation prompts
+    --runtime TYPE       Runtime environment: local, docker, or auto (default: auto)
+    --docker-image IMG   Docker image to use
 """
 
 import argparse
+import sys
 from pathlib import Path
 from .discovery import DiscoveryPipeline, discover
+
+# Add parent src to path to import geakagent modules
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from geakagent.runtime_env import (
+    prompt_runtime_environment,
+    display_runtime_info,
+    RuntimeType,
+    RuntimeEnvironment,
+    DEFAULT_DOCKER_IMAGE,
+)
 
 
 def main():
@@ -74,6 +88,30 @@ Examples:
         help="Only run discovery, don't start agent loop"
     )
     
+    parser.add_argument(
+        "--runtime", "-r",
+        choices=["local", "docker", "auto"],
+        default="auto",
+        help="Runtime environment (default: auto)"
+    )
+    
+    parser.add_argument(
+        "--docker-image",
+        help=f"Docker image to use (default: {DEFAULT_DOCKER_IMAGE})"
+    )
+    
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        help="Workspace directory to mount in Docker (default: auto-detected)"
+    )
+    
+    parser.add_argument(
+        "--no-runtime-check",
+        action="store_true",
+        help="Skip runtime environment detection"
+    )
+    
     args = parser.parse_args()
     
     # Run discovery pipeline
@@ -82,6 +120,33 @@ Examples:
     print("=" * 60)
     print(f"\n  Kernel path: {args.kernel_path}")
     print(f"  GPU device: {args.gpu}")
+    
+    # Runtime environment detection
+    runtime_env = None
+    if not args.no_runtime_check:
+        print("\n" + "=" * 60)
+        print("  RUNTIME ENVIRONMENT")
+        print("=" * 60)
+        
+        if args.runtime == "local":
+            # Force local environment
+            runtime_env = RuntimeEnvironment(runtime_type=RuntimeType.LOCAL)
+            display_runtime_info(runtime_env)
+        elif args.runtime == "docker":
+            # Force Docker environment
+            image = args.docker_image or DEFAULT_DOCKER_IMAGE
+            runtime_env = RuntimeEnvironment(
+                runtime_type=RuntimeType.DOCKER,
+                docker_image=image,
+                docker_devices=["/dev/kfd", "/dev/dri"],
+                has_gpu=True,
+                has_triton=True,
+                has_torch=True
+            )
+            display_runtime_info(runtime_env)
+        else:
+            # Auto-detect (default)
+            runtime_env = prompt_runtime_environment(auto_confirm=args.no_confirm)
     
     # Determine workspace
     if args.kernel_path.is_file():
@@ -114,12 +179,18 @@ Examples:
         return
     
     # Build context for agent
+    workspace_path = args.workspace or workspace
     context = {
-        "workspace": str(workspace),
+        "workspace": str(workspace_path),
         "kernel_path": str(kernel_path) if kernel_path else None,
         "test_command": test_cmd,
         "bench_command": bench_cmd,
         "gpu_device": args.gpu,
+        "runtime_env": {
+            "type": runtime_env.runtime_type.value if runtime_env else "local",
+            "docker_image": runtime_env.docker_image if runtime_env else None,
+            "has_gpu": runtime_env.has_gpu if runtime_env else False,
+        } if runtime_env else None,
         "kernels": [
             {
                 "name": k.kernel_name,
@@ -138,6 +209,9 @@ Examples:
     print(f"  Test command: {context['test_command']}")
     print(f"  Bench command: {context['bench_command']}")
     print(f"  GPU: {context['gpu_device']}")
+    print(f"  Runtime: {context['runtime_env']['type'] if context['runtime_env'] else 'local'}")
+    if context['runtime_env'] and context['runtime_env'].get('docker_image'):
+        print(f"  Docker Image: {context['runtime_env']['docker_image']}")
     print(f"  Kernels: {len(context['kernels'])}")
     
     # TODO: Start agent loop
