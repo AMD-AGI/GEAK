@@ -69,7 +69,7 @@ python3 -m pip install -e mcp_tools/mcp-client/ --no-build-isolation
 
 ## Usage
 
-### Full Pipeline Command
+### Example: Full Pipeline Command
 
 ```bash
 export ANTHROPIC_API_KEY="your-api-key"
