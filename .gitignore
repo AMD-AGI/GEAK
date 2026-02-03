@@ -6,3 +6,6 @@ __pycache__/
 dist/
 build/
 geak-oe/
+
+# AITER repo (cloned at runtime for test suite)
+aiter/
