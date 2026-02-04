@@ -10,25 +10,25 @@ Profile a GPU kernel and get optimization suggestions.
 
 ```bash
 # Profile a kernel
-python mini_kernel/examples/profile_kernel.py 'python3 /path/to/kernel.py --profile'
+python geak_agent/examples/profile_kernel.py 'python3 /path/to/kernel.py --profile'
 
 # Specify GPU device
-python mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile' --gpu-devices 3
+python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --gpu-devices 3
 
 # Filter specific kernel
-python mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile' --filter '*topk*'
+python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --filter '*topk*'
 
 # More replays for better statistics
-python mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile' --replays 5
+python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --replays 5
 
 # Auto-select main kernel only (default shows all kernels)
-python mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile' --auto-select
+python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --auto-select
 
 # Quick profile for speed (3 metrics, 1 pass vs 12 metrics, 2 passes)
-python mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile' --quick
+python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --quick
 
 # Profile on multiple GPUs (compare performance across devices)
-python mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile' --gpu-devices 0,1,2
+python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --gpu-devices 0,1,2
 ```
 
 ### Example with GEAK-Eval Kernels
@@ -36,13 +36,13 @@ python mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile' --gp
 ```bash
 # Profile TopK kernel
 cd /home/sdubagun/work/repos/GEAK-agent
-python mini_kernel/examples/profile_kernel.py \
+python geak_agent/examples/profile_kernel.py \
     'python3 /home/sdubagun/work/repos/AIG-Eval/tasks/geak_eval/topk/kernel.py --profile' \
     --gpu-devices 3 \
     --filter '*topk*'
 
 # Profile GEMM kernel
-python mini_kernel/examples/profile_kernel.py \
+python geak_agent/examples/profile_kernel.py \
     'python3 /home/sdubagun/work/repos/AIG-Eval/tasks/geak_eval/gemm/kernel.py --profile' \
     --gpu-devices 3
 ```
@@ -73,7 +73,7 @@ For integration into your own scripts:
 
 ### Single or Multiple GPUs
 ```python
-from mini_kernel.mcp_tools.metrix import MetrixTool
+from geak_agent.mcp_tools.metrix import MetrixTool
 
 # Single GPU
 tool = MetrixTool(gpu_devices="3")

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from mini_kernel.mcp_tools.metrix import MetrixTool
+from geak_agent.mcp_tools.metrix import MetrixTool
 
 
 class TestMetrixTool:

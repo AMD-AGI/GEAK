@@ -5,3 +5,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+geak-oe/
+
+# AITER repo (cloned at runtime for test suite)
+aiter/

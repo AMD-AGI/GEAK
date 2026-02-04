@@ -6,16 +6,16 @@ Minimal unit tests for the MetrixTool MCP.
 
 ```bash
 # Run all tests
-pytest mini_kernel/tests/
+pytest geak_agent/tests/
 
 # Run with verbose output
-pytest mini_kernel/tests/ -v
+pytest geak_agent/tests/ -v
 
 # Run specific test
-pytest mini_kernel/tests/test_metrix.py::TestMetrixTool::test_classify_bottleneck
+pytest geak_agent/tests/test_metrix.py::TestMetrixTool::test_classify_bottleneck
 
 # Run with coverage
-pytest mini_kernel/tests/ --cov=mini_kernel.mcp_tools.metrix
+pytest geak_agent/tests/ --cov=geak_agent.mcp_tools.metrix
 ```
 
 ## Test Structure

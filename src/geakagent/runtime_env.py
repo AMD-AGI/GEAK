@@ -266,7 +266,6 @@ def get_runtime_config_for_agent(runtime_env: RuntimeEnvironment, workspace_path
             run_args.extend(["-v", volume])
         
         return {
-            "type": "docker",
             "image": runtime_env.docker_image,
             "cwd": "/workspace" if workspace_path else "/",
             "run_args": run_args,
@@ -277,7 +276,6 @@ def get_runtime_config_for_agent(runtime_env: RuntimeEnvironment, workspace_path
     
     else:  # LOCAL or UNKNOWN
         return {
-            "type": "local",
             "cwd": workspace_path or os.getcwd(),
         }
 
@@ -314,5 +312,5 @@ if __name__ == "__main__":
     display_runtime_info(selected_env)
     
     console.print("\n[bold]Agent Config:[/bold]")
-    config = get_runtime_config_for_agent(selected_env, "/home/sapmajum/test_geak_workflow")
+    config = get_runtime_config_for_agent(selected_env, "/tmp/test_geak_workflow")
     console.print(config)

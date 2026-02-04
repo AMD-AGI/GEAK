@@ -15,7 +15,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from mini_kernel.mcp_tools.metrix import MetrixTool
+from geak_agent.mcp_tools.metrix import MetrixTool
 
 EXAMPLES = """
 Examples:
