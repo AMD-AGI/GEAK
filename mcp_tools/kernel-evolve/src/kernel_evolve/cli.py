@@ -24,6 +24,14 @@ from .server import (
 )
 
 
+def _call_tool(tool, *args, **kwargs):
+    """Call MCP tool, unwrapping FunctionTool if needed."""
+    if hasattr(tool, 'fn'):
+        return tool.fn(*args, **kwargs)
+    else:
+        return tool(*args, **kwargs)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="kernel-evolve",
@@ -38,7 +46,7 @@ def main():
                             choices=["latency", "memory", "compute", "lds", "balanced"],
                             help="Bottleneck type")
     gen_parser.add_argument("--strategy", "-s", help="Specific strategy to apply")
-    gen_parser.add_argument("--model", "-m", default="amd/claude-sonnet-4-20250514", help="LLM model")
+    gen_parser.add_argument("--model", "-m", default="claude-sonnet-4.5", help="LLM model")
 
     # mutate command
     mut_parser = subparsers.add_parser("mutate", help="Mutate existing kernel")
@@ -48,7 +56,7 @@ def main():
                             help="Mutation type")
     mut_parser.add_argument("--latency", "-l", type=float, default=0.0, help="Current latency (us)")
     mut_parser.add_argument("--speedup", "-s", type=float, default=1.0, help="Current speedup")
-    mut_parser.add_argument("--model", "-m", default="amd/claude-sonnet-4-20250514", help="LLM model")
+    mut_parser.add_argument("--model", "-m", default="claude-sonnet-4.5", help="LLM model")
 
     # crossover command
     cross_parser = subparsers.add_parser("crossover", help="Combine two kernels")
@@ -56,7 +64,7 @@ def main():
     cross_parser.add_argument("kernel2", help="Path to second kernel")
     cross_parser.add_argument("--speedup1", type=float, default=1.0, help="Speedup of kernel1")
     cross_parser.add_argument("--speedup2", type=float, default=1.0, help="Speedup of kernel2")
-    cross_parser.add_argument("--model", "-m", default="amd/claude-sonnet-4-20250514", help="LLM model")
+    cross_parser.add_argument("--model", "-m", default="claude-sonnet-4.5", help="LLM model")
 
     # strategies command
     strat_parser = subparsers.add_parser("strategies", help="Get strategies for bottleneck")
@@ -73,7 +81,7 @@ def main():
 
     if args.command == "generate":
         kernel_code = Path(args.kernel_file).read_text()
-        result = generate_optimization(
+        result = _call_tool(generate_optimization,
             kernel_code=kernel_code,
             bottleneck=args.bottleneck,
             strategy=args.strategy,
@@ -81,7 +89,7 @@ def main():
         )
     elif args.command == "mutate":
         kernel_code = Path(args.kernel_file).read_text()
-        result = mutate_kernel(
+        result = _call_tool(mutate_kernel,
             kernel_code=kernel_code,
             mutation_type=args.type,
             latency_us=args.latency,
@@ -91,7 +99,7 @@ def main():
     elif args.command == "crossover":
         kernel1 = Path(args.kernel1).read_text()
         kernel2 = Path(args.kernel2).read_text()
-        result = crossover_kernels(
+        result = _call_tool(crossover_kernels,
             kernel1=kernel1,
             kernel2=kernel2,
             speedup1=args.speedup1,
@@ -99,9 +107,9 @@ def main():
             model=args.model
         )
     elif args.command == "strategies":
-        result = get_optimization_strategies(bottleneck=args.bottleneck)
+        result = _call_tool(get_optimization_strategies, bottleneck=args.bottleneck)
     elif args.command == "params":
-        result = suggest_kernel_params(kernel_type=args.kernel_type, problem_size=args.size)
+        result = _call_tool(suggest_kernel_params, kernel_type=args.kernel_type, problem_size=args.size)
     else:
         parser.print_help()
         sys.exit(1)

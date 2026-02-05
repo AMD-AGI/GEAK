@@ -38,7 +38,7 @@ mcp = FastMCP(
 )
 
 
-def call_llm(messages: list, model: str = "amd/claude-sonnet-4-20250514", temperature: float = 0.7) -> str:
+def call_llm(messages: list, model: str = "claude-sonnet-4.5", temperature: float = 0.7) -> str:
     """Call LLM using AMD gateway or litellm."""
     api_key = os.environ.get("AMD_LLM_API_KEY") or os.environ.get("LLM_GATEWAY_KEY")
     
@@ -237,7 +237,7 @@ def generate_optimization(
     kernel_code: str,
     bottleneck: str = "balanced",
     strategy: str = None,
-    model: str = "amd/claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4.5"
 ) -> dict[str, Any]:
     """
     Generate an optimized kernel variant using LLM.
@@ -293,7 +293,7 @@ def mutate_kernel(
     mutation_type: str = "parameter",
     latency_us: float = 0.0,
     speedup: float = 1.0,
-    model: str = "amd/claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4.5"
 ) -> dict[str, Any]:
     """
     Mutate an existing kernel optimization to explore variations.
@@ -354,7 +354,7 @@ def crossover_kernels(
     kernel2: str,
     speedup1: float = 1.0,
     speedup2: float = 1.0,
-    model: str = "amd/claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4.5"
 ) -> dict[str, Any]:
     """
     Combine two kernel optimizations to create a hybrid.

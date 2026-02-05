@@ -24,6 +24,7 @@ dependencies = [
     "prompt_toolkit",
     "openai",
     "anthropic",
+    "google-genai",
     "mcp[cli]>=1.2.0",
 ]
 

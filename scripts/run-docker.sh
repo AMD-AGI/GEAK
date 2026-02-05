@@ -10,6 +10,43 @@ CONTAINER_NAME="geak-agent-${USER}"
 PARENT_DIR="${HOME}"
 HOST_CODE_DIR="${HOME}"
 
+#######################################
+# Pre-flight checks for environment variables
+#######################################
+echo "Checking environment configuration..."
+
+# Check for required AMD_LLM_API_KEY
+if [ -z "$AMD_LLM_API_KEY" ]; then
+    echo ""
+    echo "❌ ERROR: AMD_LLM_API_KEY environment variable is not set!"
+    echo ""
+    echo "The GEAK-agent requires an API key to function."
+    echo ""
+    echo "To fix this:"
+    echo "  export AMD_LLM_API_KEY=your-api-key-here"
+    echo ""
+    echo "Optionally, you can also set:"
+    echo "  export AMD_LLM_BASE_URL=https://your-llm-gateway-url"
+    echo "  (default: https://llm-gateway-dev.apps.amdcloud.com/api/gateway/v1)"
+    echo ""
+    exit 1
+fi
+
+# Show what we're using (first 20 chars only for security)
+echo "✅ AMD_LLM_API_KEY: ${AMD_LLM_API_KEY:0:20}..."
+if [ -n "$AMD_LLM_BASE_URL" ]; then
+    echo "✅ AMD_LLM_BASE_URL: $AMD_LLM_BASE_URL"
+else
+    echo "ℹ️  AMD_LLM_BASE_URL: (using default)"
+fi
+if [ -n "$GEAK_MODEL" ]; then
+    echo "✅ GEAK_MODEL: $GEAK_MODEL"
+else
+    GEAK_MODEL="claude-sonnet-4.5"
+    echo "ℹ️  GEAK_MODEL: (using default: $GEAK_MODEL)"
+fi
+echo ""
+
 # Check if image exists, build if not
 if [[ "$(docker images -q ${IMAGE_NAME} 2> /dev/null)" == "" ]]; then
     echo "Image ${IMAGE_NAME} not found. Building..."
@@ -45,6 +82,9 @@ docker run -d \
     --cap-add=SYS_PTRACE \
     --security-opt seccomp=unconfined \
     --privileged \
+    -e AMD_LLM_API_KEY="${AMD_LLM_API_KEY}" \
+    -e AMD_LLM_BASE_URL="${AMD_LLM_BASE_URL}" \
+    -e GEAK_MODEL="${GEAK_MODEL}" \
     -v /cephfs:/cephfs \
     --shm-size 8G \
     -v ${PARENT_DIR}:${PARENT_DIR} \
@@ -52,8 +92,7 @@ docker run -d \
     -v /shared-nfs:/shared-nfs \
     -v /shared-aig:/shared-aig \
     -w ${HOST_CODE_DIR} \
-    ${IMAGE_NAME} \
-    tail -f /dev/null
+    ${IMAGE_NAME}
 
 # Now exec into the running container
 echo "Entering container ${CONTAINER_NAME}..."

@@ -22,6 +22,14 @@ from .server import (
 )
 
 
+def _call_tool(tool, *args, **kwargs):
+    """Call MCP tool, unwrapping FunctionTool if needed."""
+    if hasattr(tool, 'fn'):
+        return tool.fn(*args, **kwargs)
+    else:
+        return tool(*args, **kwargs)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="kernel-ercs",
@@ -32,7 +40,7 @@ def main():
     # evaluate command
     eval_parser = subparsers.add_parser("evaluate", help="Evaluate kernel quality")
     eval_parser.add_argument("kernel_file", help="Path to kernel file")
-    eval_parser.add_argument("--model", "-m", default="amd/claude-sonnet-4-20250514", help="LLM model")
+    eval_parser.add_argument("--model", "-m", default="claude-sonnet-4.5", help="LLM model")
 
     # reflect command
     ref_parser = subparsers.add_parser("reflect", help="Reflect on kernel test results")
@@ -43,7 +51,7 @@ def main():
                             help="Correctness status")
     ref_parser.add_argument("--history", help="Optimization history summary")
     ref_parser.add_argument("--tried", help="Comma-separated list of tried strategies")
-    ref_parser.add_argument("--model", "-m", default="amd/claude-sonnet-4-20250514", help="LLM model")
+    ref_parser.add_argument("--model", "-m", default="claude-sonnet-4.5", help="LLM model")
 
     # specs command
     subparsers.add_parser("specs", help="Get AMD MI350X GPU specifications")
@@ -56,7 +64,7 @@ def main():
 
     if args.command == "evaluate":
         kernel_code = Path(args.kernel_file).read_text()
-        result = evaluate_kernel_quality(kernel_code=kernel_code, model=args.model)
+        result = _call_tool(evaluate_kernel_quality, kernel_code=kernel_code, model=args.model)
     elif args.command == "reflect":
         kernel_code = Path(args.kernel_file).read_text()
         # Handle @file syntax for output
@@ -64,7 +72,7 @@ def main():
             test_output = Path(args.output[1:]).read_text()
         else:
             test_output = args.output
-        result = reflect_on_kernel_result(
+        result = _call_tool(reflect_on_kernel_result,
             kernel_code=kernel_code,
             test_output=test_output,
             speedup=args.speedup,
@@ -74,10 +82,10 @@ def main():
             model=args.model
         )
     elif args.command == "specs":
-        result = get_amd_gpu_specs()
+        result = _call_tool(get_amd_gpu_specs)
     elif args.command == "compat":
         kernel_code = Path(args.kernel_file).read_text()
-        result = check_kernel_compatibility(kernel_code=kernel_code)
+        result = _call_tool(check_kernel_compatibility, kernel_code=kernel_code)
     else:
         parser.print_help()
         sys.exit(1)

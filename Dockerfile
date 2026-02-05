@@ -32,5 +32,10 @@ RUN python3 -c "from geak_agent.cli import main; from geakagent.optimizer import
 # Verify metrix is available
 RUN python3 -c "from metrix import Metrix; print('✅ Metrix installed')" || echo "⚠️  Metrix not available (will be needed for profiling)"
 
+# Add entrypoint script for runtime configuration and health checks
+COPY entrypoint.sh /workspace/entrypoint.sh
+RUN chmod +x /workspace/entrypoint.sh
+
 ENV HIP_VISIBLE_DEVICES=0
-CMD ["python3", "-m", "geak_agent.cli", "--help"]
+ENTRYPOINT ["/workspace/entrypoint.sh"]
+CMD ["tail", "-f", "/dev/null"]

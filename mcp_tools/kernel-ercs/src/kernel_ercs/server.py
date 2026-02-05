@@ -218,7 +218,7 @@ Only output valid JSON.
 @mcp.tool()
 def evaluate_kernel_quality(
     kernel_code: str,
-    model: str = "amd/claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4.5"
 ) -> dict[str, Any]:
     """
     Evaluate Triton kernel quality using LLM analysis.
@@ -228,7 +228,7 @@ def evaluate_kernel_quality(
     
     Args:
         kernel_code: The Triton kernel code to evaluate
-        model: LLM model to use (default: amd/claude-sonnet-4-20250514)
+        model: LLM model to use (default: claude-sonnet-4.5)
     
     Returns:
         dict with scores (0.0-1.0 each), total_score, reasoning, and suggestions
@@ -286,7 +286,7 @@ def reflect_on_kernel_result(
     correctness_status: str = "unknown",
     history: str = "",
     tried_strategies: str = "",
-    model: str = "amd/claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4.5"
 ) -> dict[str, Any]:
     """
     Analyze kernel test results and get targeted improvement suggestions.

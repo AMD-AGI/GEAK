@@ -28,8 +28,8 @@ from geakagent.run.utils.save import save_traj
 from geakagent.runtime_env import (
     prompt_runtime_environment,
     get_runtime_config_for_agent,
-    display_runtime_info,
     RuntimeType,
+    display_runtime_info,
 )
 from geakagent.utils.log import logger
 
@@ -96,12 +96,12 @@ def main(
     if not no_runtime_check:
         if runtime == "local":
             # Force local environment
-            from geakagent.runtime_env import RuntimeEnvironment, RuntimeType
+            from geakagent.runtime_env import RuntimeEnvironment
             runtime_env = RuntimeEnvironment(runtime_type=RuntimeType.LOCAL)
             display_runtime_info(runtime_env)
         elif runtime == "docker":
             # Force Docker environment
-            from geakagent.runtime_env import RuntimeEnvironment, RuntimeType, DEFAULT_DOCKER_IMAGE
+            from geakagent.runtime_env import RuntimeEnvironment, DEFAULT_DOCKER_IMAGE
             image = docker_image or DEFAULT_DOCKER_IMAGE
             runtime_env = RuntimeEnvironment(
                 runtime_type=RuntimeType.DOCKER,
@@ -117,7 +117,7 @@ def main(
             runtime_env = prompt_runtime_environment(auto_confirm=yolo)
         
         # Update config based on runtime environment
-        if runtime_env and runtime_env.runtime_type == RuntimeType.DOCKER:
+        if runtime_env and hasattr(runtime_env, 'runtime_type') and runtime_env.runtime_type == RuntimeType.DOCKER:
             workspace_path = workspace or os.getcwd()
             runtime_config = get_runtime_config_for_agent(runtime_env, workspace_path)
             config["env"] = runtime_config
