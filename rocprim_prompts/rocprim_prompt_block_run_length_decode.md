@@ -1,0 +1,17 @@
+I use `/your-mini-swe-folder-here/rocPRIM_block_run_length_decode/benchmark/benchmark_block_run_length_decode.cpp` to test `/your-mini-swe-folder-here/rocPRIM_block_run_length_decode/rocprim/include/rocprim/block/block_run_length_decode.hpp` performance. But the performance is too bad (low bandwidth).
+
+1. You must find the all files related to `/your-mini-swe-folder-here/rocPRIM_block_run_length_decode/rocprim/include/rocprim/block/block_run_length_decode.hpp`. And review and edit it.
+2. You MUST edit all files related to `/your-mini-swe-folder-here/rocPRIM_block_run_length_decode/rocprim/include/rocprim/block/block_run_length_decode.hpp`.
+3. The files in `benchmark` is NOT allowed to be edited.
+4. The files in `test` is NOT allowed to be edited.
+5. The file `test_correctness_benchmark.py` is forbidden to be edited.
+6. All CMAKEList and CMAKE files are forbidden to be edited.
+7. You can modify multiple files at once.
+8. Before Action `submit`, You MUST run the Performance test.
+9. When the performance does not reach 1.2 times the baseline, further optimization must be carried out and Do not take Action `submit`. Use the average over bytes_per_second of all datatypes as the metric.
+10. Your edit should not effect the compile of other kernels
+ 
+## Test Perf
+1. Baseline: Before changing any code, you should run baseline numbers.
+2. Optimized test: After changing, you should test the code through running `python /your-mini-swe-folder-here/test_scripts/test_correctness_benchmark.py benchmark_block_run_length_decode /your-mini-swe-folder-here/rocPRIM_block_run_length_decode`. You should extract bytes_per_second G/s from test output, note you should change T/s or other units to G/s. To select the best patch, you should calculate the speedup ratio on all datatypes first and get the average speedup ratio. . If fail to pass the correctness test, MUST debug the kernel carefully. If run correctness and performance test successfully, you can get the bandwidth (bytes_per_second) of the the kernel under different input key type.
+parallel 1 runs. from gpu idx 0
