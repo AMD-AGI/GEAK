@@ -1,0 +1,542 @@
+"""Agent with git patch saving and test execution capability."""
+
+import concurrent.futures
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import traceback
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from minisweagent import Environment, Model
+from minisweagent.agents.default import AgentConfig, DefaultAgent
+from minisweagent.models import get_model
+from minisweagent.agents.select_patch_agent import SelectPatchAgent
+
+
+@dataclass
+class BestPatchResult:
+    """Result of selecting the best patch from parallel runs."""
+    agent_id: int
+    patch_id: str
+    test_output: str
+    metric_result: dict | None = None
+    patch_dir: Path | None = None
+    llm_conclusion: str | None = None
+
+
+_stdout_lock = threading.Lock()
+
+
+@contextmanager
+def redirect_output_to_file(log_file: Path):
+    """No-op context manager. Agent writes to log file directly via add_message/log_message.
+    
+    Stdout/stderr redirection doesn't work for parallel threads since sys.stdout is global.
+    """
+    yield
+
+
+@dataclass
+class ParallelAgentConfig(AgentConfig):
+    # save_patch, test_command, patch_output_dir, metric are now inherited from AgentConfig
+    mode: str | None = None
+    num_parallel: int = 1
+    repo: Path | None = None
+    gpu_ids: list[int] | None = None
+    agent_class: type | None = None
+    # Strategy agent compatibility
+    strategy_file_path: str | None = None
+
+
+class ParallelAgent(DefaultAgent):
+    def __init__(self, model: Model, env: Environment, **kwargs):
+        super().__init__(model, env, config_class=ParallelAgentConfig, **kwargs)
+        # patch_results, patch_counter, log_file, base_repo_path are now inherited from DefaultAgent
+        self._last_action_hash: str | None = None
+
+    # _is_git_repo(), _diff_excludes(), add_message, _log_message are inherited from DefaultAgent
+
+    def run(self, task: str, **kwargs) -> tuple[str, str] | Any:
+        num_parallel = self.config.num_parallel or 1
+        console = kwargs.get("console")
+
+        base_patch_dir = (Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")).resolve()
+        model_factory = kwargs.get("model_factory") or (lambda: self.model)
+        env_factory = kwargs.get("env_factory") or (lambda: self.env)
+
+        if num_parallel == 1:
+            # For single run, save patches directly to base_patch_dir (no parallel_0 subdirectory)
+            base_patch_dir.mkdir(parents=True, exist_ok=True)
+            prev_patch_output_dir = self.config.patch_output_dir
+            self.config.patch_output_dir = str(base_patch_dir)
+            try:
+                exit_status, result = super().run(task, **(kwargs | {"_skip_select_patch": True}))
+            finally:
+                self.config.patch_output_dir = prev_patch_output_dir
+
+            metric = self.config.metric or "Extract the performance metrics from the test output and calculate the best speedup."
+            if console:
+                console.print("\n[bold green]Selecting best patch from 1 run...[/bold green]")
+            best_result = self._select_best_from_parallel_runs(base_patch_dir, 1, metric, model_factory)
+            if best_result and console and best_result.llm_conclusion:
+                console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
+                console.print(best_result.llm_conclusion)
+            return exit_status, result
+
+        if not self.config.repo:
+            raise ValueError("Please specify the repository path.")
+        repo_path = (Path(self.config.repo) if isinstance(self.config.repo, (str, Path)) else self.config.repo).resolve()
+        if not repo_path.exists():
+            raise ValueError(f"Repository path does not exist: {repo_path}")
+
+        is_git_repo = (repo_path / ".git").exists()
+        output = kwargs.get("output")
+        save_traj_fn = kwargs.get("save_traj_fn")
+
+        results = self.run_parallel(
+            num_parallel=num_parallel,
+            repo_path=repo_path,
+            is_git_repo=is_git_repo,
+            task_content=task,
+            agent_class=self.config.agent_class if self.config.agent_class else type(self),
+            agent_config={k: v for k, v in self.config.__dict__.items() if k not in ("num_parallel", "repo", "gpu_ids", "agent_class")},
+            model_factory=model_factory,
+            env_factory=env_factory,
+            base_patch_dir=base_patch_dir,
+            output=output,
+            gpu_ids=self.config.gpu_ids,
+            save_traj_fn=save_traj_fn,
+            console=console,
+        )
+
+        metric = self.config.metric or "Extract the performance metrics from the test output and calculate the best speedup."
+        if console:
+            console.print(f"\n[bold green]Selecting best patch from {num_parallel} parallel runs...[/bold green]")
+        best_result = self._select_best_from_parallel_runs(base_patch_dir, num_parallel, metric, model_factory)
+        if best_result and console and best_result.llm_conclusion:
+            console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
+            console.print(best_result.llm_conclusion)
+
+        if results:
+            return results[0][2], results[0][3]
+        return "Error", "All parallel agents failed"
+
+
+    @staticmethod
+    def _select_best_from_parallel_runs(base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory) -> BestPatchResult | None:
+        """Select the best patch from multiple parallel runs using SelectPatchAgent."""
+        from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
+        from minisweagent.config import get_config_path
+        import yaml
+        
+        print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
+        
+        # Load SelectPatchAgent config
+        config_path = get_config_path("mini_select_patch")
+        config = yaml.safe_load(config_path.read_text())
+        agent_config = config.get("agent", {})
+        
+        # Create model and environment for the SelectPatchAgent
+        model = model_factory()
+        env_config = LocalEnvironmentConfig(cwd=str(base_patch_dir))
+        env = LocalEnvironment(**env_config.__dict__)
+        
+        # Create SelectPatchAgent with config
+        select_agent = SelectPatchAgent(model, env, **agent_config)
+        
+        # Setup the selection task
+        task = select_agent.setup_selection_task(base_patch_dir, num_parallel, metric)
+        
+        if task is None:
+            print("[ParallelAgent] Failed to setup selection task", flush=True)
+            return None
+        
+        # Save agent conversation log
+        log_file = base_patch_dir / "select_agent.log"
+        select_agent.log_file = log_file
+        
+        print(f"[ParallelAgent] Running SelectPatchAgent (log: {log_file})...", flush=True)
+        
+        # Run the agent
+        try:
+            exit_status, result = select_agent.run(task)
+            print(f"[ParallelAgent] SelectPatchAgent finished with status: {exit_status}", flush=True)
+        except Exception as e:
+            print(f"[ParallelAgent] SelectPatchAgent failed: {e}", flush=True)
+            traceback.print_exc()
+        
+        # Read best_results.json saved by SelectPatchAgent
+        best_patch_id = select_agent.extract_final_result()
+        if not best_patch_id:
+            print("[ParallelAgent] SelectPatchAgent did not save best_results.json", flush=True)
+            return None
+        
+        print(f"[ParallelAgent] Selected best patch: {best_patch_id}", flush=True)
+        
+        try:
+            # Read the best_results.json for additional details
+            best_results = json.loads((base_patch_dir / "best_results.json").read_text())
+            
+            # Parse best_patch_id: either "parallel_X/patch_Y" (multi-run) or "patch_Y" (single run)
+            if "/" in best_patch_id:
+                # Multi-run format: "parallel_X/patch_Y"
+                parallel_dir_name, patch_name = best_patch_id.split("/")
+                agent_id = int(parallel_dir_name.replace("parallel_", ""))
+                patch_dir = base_patch_dir / parallel_dir_name
+            else:
+                # Single run format: "patch_Y" (directly in base_patch_dir)
+                patch_name = best_patch_id
+                agent_id = 0
+                patch_dir = base_patch_dir
+            
+            # metric_result is no longer persisted (results.json removed); rely on test logs if needed
+            metric_result = None
+            
+            # Read test output if path provided
+            test_output = ""
+            test_output_path = best_results.get("best_patch_test_output")
+            if test_output_path and Path(test_output_path).exists():
+                test_output = Path(test_output_path).read_text()
+            
+            return BestPatchResult(
+                agent_id=agent_id,
+                patch_id=patch_name,
+                test_output=test_output,
+                metric_result=metric_result,
+                patch_dir=patch_dir,
+                llm_conclusion=best_results.get("llm_selection_analysis", ""),
+            )
+        except Exception as e:
+            print(f"[ParallelAgent] Failed to process best_results.json: {e}", flush=True)
+            return None
+
+    @staticmethod
+    def _ensure_safe_directory(repo_path: Path):
+        """Ensure repository is in git's safe.directory list."""
+        repo_path_str = str(repo_path.resolve())
+        try:
+            result = subprocess.run(
+                ["git", "config", "--global", "--get-all", "safe.directory"],
+                capture_output=True,
+                text=True,
+            )
+            safe_dirs = result.stdout.strip().split("\n") if result.stdout.strip() else []
+            if repo_path_str not in safe_dirs:
+                subprocess.run(
+                    ["git", "config", "--global", "--add", "safe.directory", repo_path_str],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+        except subprocess.CalledProcessError:
+            try:
+                subprocess.run(
+                    ["git", "config", "--global", "--add", "safe.directory", repo_path_str],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError:
+                pass
+
+    @staticmethod
+    def _create_worktree(repo_path: Path, worktree_path: Path) -> Path:
+        """Create a git worktree, cleaning up any existing one first."""
+        worktree_str = str(worktree_path.resolve())
+        
+        # Clean up any existing worktree
+        try:
+            result = subprocess.run(
+                ["git", "worktree", "list"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            worktree_exists = any(worktree_str in line or str(worktree_path) in line for line in result.stdout.splitlines())
+            
+            if worktree_exists:
+                try:
+                    subprocess.run(
+                        ["git", "worktree", "remove", str(worktree_path), "--force"],
+                        cwd=repo_path,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                except subprocess.CalledProcessError:
+                    subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
+        except subprocess.CalledProcessError:
+            subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
+        except Exception:
+            pass
+        
+        # Remove directory if it still exists
+        if worktree_path.exists():
+            try:
+                shutil.rmtree(worktree_path)
+            except Exception:
+                pass
+        
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        ParallelAgent._ensure_safe_directory(repo_path)
+        
+        # Create new worktree with detached HEAD to avoid branch name conflicts
+        try:
+            subprocess.run(
+                ["git", "worktree", "add", "--detach", str(worktree_path)],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr if e.stderr else (e.stdout if e.stdout else str(e))
+            if "missing but already registered worktree" in error_msg.lower():
+                subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
+                subprocess.run(
+                    ["git", "worktree", "add", "--detach", "-f", str(worktree_path)],
+                    cwd=repo_path,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            elif "dubious ownership" in error_msg.lower():
+                ParallelAgent._ensure_safe_directory(repo_path)
+                ParallelAgent._ensure_safe_directory(worktree_path)
+                subprocess.run(
+                    ["git", "worktree", "add", "--detach", str(worktree_path)],
+                    cwd=repo_path,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            elif "already used by worktree" in error_msg.lower():
+                # Branch name conflict - remove old worktree and retry
+                subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
+                # Extract branch name from error message if possible, otherwise use worktree path
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(worktree_path)],
+                    cwd=repo_path,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                subprocess.run(
+                    ["git", "worktree", "add", "--detach", str(worktree_path)],
+                    cwd=repo_path,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                raise RuntimeError(f"Failed to create worktree: {error_msg}") from e
+        
+        # Ensure worktree path is also marked as safe
+        ParallelAgent._ensure_safe_directory(worktree_path)
+        
+        # Copy untracked files from repo to worktree (e.g., newly created test files)
+        ParallelAgent._copy_untracked_files(repo_path, worktree_path)
+        
+        return worktree_path
+    
+    @staticmethod
+    def _copy_untracked_files(repo_path: Path, worktree_path: Path) -> None:
+        """Copy untracked files from repo to worktree."""
+        try:
+            result = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            untracked_files = [f.strip() for f in result.stdout.splitlines() if f.strip()]
+            for rel_path in untracked_files:
+                src = repo_path / rel_path
+                dst = worktree_path / rel_path
+                if src.is_file():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+        except subprocess.CalledProcessError:
+            pass  # If git command fails, skip copying untracked files
+
+    @staticmethod
+    def _create_copy_workdir(repo_path: Path, workdir_path: Path) -> Path:
+        """Create an isolated work directory by copying `repo_path` (for non-git repos)."""
+        if workdir_path.exists():
+            try:
+                shutil.rmtree(workdir_path)
+            except Exception:
+                pass
+        workdir_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            repo_path,
+            workdir_path,
+            ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
+        )
+        return workdir_path
+
+    @staticmethod
+    def _replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
+        """Replace repository paths with worktree path in text.
+        
+        For backward compatibility: replaces absolute paths and WORK_REPO placeholder.
+        New design uses relative paths that don't need replacement.
+        """
+        repo_path_str = str(repo_path.resolve())
+        worktree_path_str = str(worktree_path.resolve())
+        text = text.replace("WORK_REPO", worktree_path_str)
+        text = text.replace(repo_path_str, worktree_path_str)
+        if str(repo_path) != repo_path_str:
+            text = text.replace(str(repo_path), worktree_path_str)
+        text = re.sub(r'/worktrees/agent_\d+', f'/worktrees/agent_{worktree_path.name.split("_")[-1]}', text)
+        return text
+
+    @classmethod
+    def run_parallel(
+        cls,
+        num_parallel: int,
+        repo_path: Path,
+        is_git_repo: bool,
+        task_content: str,
+        agent_class: type,
+        agent_config: dict,
+        model_factory,
+        env_factory,
+        base_patch_dir: Path,
+        output: Path | None,
+        gpu_ids: list[int] | None = None,
+        redirect_output_fn=redirect_output_to_file,
+        save_traj_fn=None,
+        console=None,
+    ) -> list[tuple[int, Any, Any, Any]]:
+        """Run multiple parallel agents and return their results."""
+        if console:
+            console.print(f"[bold green]Running {num_parallel} parallel patch agents...[/bold green]")
+        
+        base_patch_dir = base_patch_dir.resolve()
+        worktree_base = base_patch_dir / "worktrees"
+        worktree_base.mkdir(parents=True, exist_ok=True)
+        repo_path_resolved = repo_path.resolve()
+        repo_path_str = str(repo_path_resolved)
+        
+        if gpu_ids and len(gpu_ids) < num_parallel:
+            if console:
+                console.print(f"[bold yellow]Warning: Only {len(gpu_ids)} GPU IDs provided for {num_parallel} parallel agents. Some agents will not have GPU isolation.[/bold yellow]")
+        
+        def run_single_agent(agent_id: int):
+            """Run a single parallel agent instance."""
+            if is_git_repo:
+                worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
+            else:
+                worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
+            worktree_path_str = str(worktree_path.resolve())
+            
+            if console:
+                console.print(f"[bold green]Created worktree for agent {agent_id}: {worktree_path}[/bold green]")
+            
+            parallel_patch_dir = (base_patch_dir / f"parallel_{agent_id}").resolve()
+            parallel_patch_dir.mkdir(parents=True, exist_ok=True)
+            parallel_agent_config = agent_config.copy()
+            parallel_agent_config["patch_output_dir"] = str(parallel_patch_dir)
+            # Force yolo mode for parallel agents (no interactive confirmation prompts)
+            parallel_agent_config["mode"] = "yolo"
+            parallel_agent_config["confirm_exit"] = False
+            
+            log_file = parallel_patch_dir / f"agent_{agent_id}.log"
+            
+            # test_command should use relative paths, executed from worktree cwd
+            # Path replacement kept for backward compatibility with absolute paths
+            if parallel_agent_config.get("test_command"):
+                parallel_agent_config["test_command"] = cls._replace_paths(
+                    parallel_agent_config["test_command"], repo_path, worktree_path
+                )
+            
+            task_with_repo = cls._replace_paths(task_content, repo_path, worktree_path)
+            
+            # Create model and environment
+            parallel_model = model_factory()
+            base_env = env_factory()
+            env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, 'config') else {}
+            env_config_dict["cwd"] = worktree_path_str
+            env_config_dict.setdefault("env", {})["WORK_REPO"] = worktree_path_str
+            if gpu_ids and agent_id < len(gpu_ids):
+                gpu_id = gpu_ids[agent_id]
+                env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+                if console:
+                    # Use lock to ensure console output completes before stdout redirection
+                    with _stdout_lock:
+                        console.print(f"[bold green]Parallel agent {agent_id} using GPU {gpu_id}[/bold green]")
+                        # Force flush to ensure output is written before redirection
+                        if hasattr(sys.stdout, 'flush'):
+                            sys.stdout.flush()
+            parallel_env = type(base_env)(**env_config_dict)
+            
+            parallel_output = None
+            if output:
+                parallel_output = output.parent / f"{output.stem}_parallel_{agent_id}{output.suffix}"
+            
+            agent = agent_class(parallel_model, parallel_env, **parallel_agent_config)
+            # Set agent attributes if they exist (for ParallelAgent compatibility)
+            if hasattr(agent, 'extra_template_vars'):
+                agent.extra_template_vars["WORK_REPO"] = worktree_path_str
+            if hasattr(agent, 'base_repo_path'):
+                agent.base_repo_path = repo_path_resolved
+            if hasattr(agent, 'log_file'):
+                agent.log_file = log_file
+            
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write(f"Agent {agent_id} Conversation Log\n")
+                f.write("=" * 60 + "\n\n")
+
+            init_msg = (
+                f"\n{'='*60}\n"
+                "[ParallelAgent] Starting with patch saving enabled\n"
+                f"[ParallelAgent] Test command: {parallel_agent_config.get('test_command')}\n"
+                f"[ParallelAgent] Patch output directory: {parallel_agent_config.get('patch_output_dir')}\n"
+                f"[ParallelAgent] Metric extraction: {parallel_agent_config.get('metric') or 'Automatic (LLM will extract performance metrics and calculate speedup)'}\n"
+                f"{'='*60}\n\n"
+            )
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(init_msg)
+                f.flush()
+
+            exit_status, result, extra_info = None, None, None
+            with redirect_output_fn(log_file):
+                try:
+                    exit_status, result = agent.run(task_with_repo, _is_parallel_mode=True)
+                except Exception as e:
+                    exit_status, result = type(e).__name__, str(e)
+                    extra_info = {"traceback": traceback.format_exc()}
+                    # Write error to log file
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        f.write(f"\n\nERROR: {exit_status}: {result}\n")
+                        f.write(f"Traceback:\n{extra_info['traceback']}\n")
+                finally:
+                    if parallel_output and save_traj_fn:
+                        save_traj_fn(agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info)
+            
+            return agent_id, agent, exit_status, result
+        
+        # Run parallel agents
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel) as executor:
+            futures = {executor.submit(run_single_agent, i): i for i in range(num_parallel)}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    agent_id = futures[future]
+                    from minisweagent.utils.log import logger
+                    logger.error(f"Error in parallel agent {agent_id}: {e}", exc_info=True)
+        return results
