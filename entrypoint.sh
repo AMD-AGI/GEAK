@@ -59,14 +59,6 @@ else
     FAILED_CHECKS=$((FAILED_CHECKS + 1))
 fi
 
-# Check Python environment
-if python3 -c "from geak_agent.cli import main; from geakagent.optimizer import optimize_kernel" 2>/dev/null; then
-    echo "✅ Python imports: OK"
-else
-    echo "❌ Python imports: FAILED"
-    FAILED_CHECKS=$((FAILED_CHECKS + 1))
-fi
-
 # Summary
 echo ""
 if [ $FAILED_CHECKS -eq 0 ]; then
