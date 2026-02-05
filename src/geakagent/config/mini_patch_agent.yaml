@@ -149,7 +149,7 @@ agent:
     to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
   step_limit: 0.
   cost_limit: 0.
-  mode: confirm
+  mode: yolo
 env:
   env:
     PAGER: cat
