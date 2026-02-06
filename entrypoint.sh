@@ -43,11 +43,11 @@ else
     FAILED_CHECKS=$((FAILED_CHECKS + 1))
 fi
 
-# Check profile_kernel.py
-if [ -f "/workspace/geak_agent/examples/profile_kernel.py" ]; then
-    echo "✅ profile_kernel.py: Found"
+# Check kernel-profile (MetrixTool profiler)
+if kernel-profile --help > /dev/null 2>&1; then
+    echo "✅ kernel-profile: OK"
 else
-    echo "❌ profile_kernel.py: Not found"
+    echo "❌ kernel-profile: Not found"
     FAILED_CHECKS=$((FAILED_CHECKS + 1))
 fi
 

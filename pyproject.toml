@@ -41,6 +41,7 @@ Repository = "https://github.com/AMD-AGI/GEAK-agent"
 [project.scripts]
 geak = "geakagent.run.mini:app"
 geak-agent = "geakagent.run.mini:app"
+kernel-profile = "geakagent.kernel_profile:main"
 
 [tool.setuptools]
 include-package-data = true

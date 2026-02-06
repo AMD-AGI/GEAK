@@ -10,8 +10,64 @@ CONTAINER_NAME="geak-agent-${USER}"
 PARENT_DIR="${HOME}"
 HOST_CODE_DIR="${HOME}"
 
+REBUILD=false
+
 #######################################
-# Pre-flight checks for environment variables
+# Parse options
+#######################################
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --rebuild)
+            REBUILD=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --rebuild     Stop/remove container if present, then rebuild image (no cache)"
+            echo "  -h, --help    Show this help"
+            echo ""
+            echo "Requires: AMD_LLM_API_KEY environment variable"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+#######################################
+# Rebuild: stop and remove container, then rebuild image (fresh, no cache)
+#######################################
+if [ "$REBUILD" = true ]; then
+    if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+        echo "Stopping container ${CONTAINER_NAME}..."
+        docker stop ${CONTAINER_NAME}
+    fi
+    if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+        echo "Removing container ${CONTAINER_NAME}..."
+        docker rm ${CONTAINER_NAME}
+    fi
+    echo "Rebuilding image ${IMAGE_NAME} (--no-cache)..."
+    docker build --no-cache -t ${IMAGE_NAME} .
+    echo ""
+fi
+
+# If container already exists (running or stopped), just use it — no pre-flight needed
+if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    echo "Container ${CONTAINER_NAME} is already running. Executing bash..."
+    exec docker exec -it ${CONTAINER_NAME} bash
+fi
+if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    echo "Container ${CONTAINER_NAME} exists but is stopped. Restarting..."
+    docker start ${CONTAINER_NAME}
+    exec docker exec -it ${CONTAINER_NAME} bash
+fi
+
+#######################################
+# Pre-flight checks (only when creating a new container)
 #######################################
 echo "Checking environment configuration..."
 
@@ -47,26 +103,13 @@ else
 fi
 echo ""
 
-# Check if image exists, build if not
+# Check if image exists, build if not (unless we already rebuilt)
 if [[ "$(docker images -q ${IMAGE_NAME} 2> /dev/null)" == "" ]]; then
     echo "Image ${IMAGE_NAME} not found. Building..."
     docker build -t ${IMAGE_NAME} .
 else
     echo "Using existing image ${IMAGE_NAME}"
-    echo "To rebuild, run: docker build -t ${IMAGE_NAME} ."
-fi
-
-# Check if container is already running
-if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    echo "Container ${CONTAINER_NAME} is already running. Executing bash..."
-    exec docker exec -it ${CONTAINER_NAME} bash
-fi
-
-# Check if stopped container exists
-if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    echo "Container ${CONTAINER_NAME} exists but is stopped. Restarting..."
-    docker start ${CONTAINER_NAME}
-    exec docker exec -it ${CONTAINER_NAME} bash
+    echo "To rebuild from scratch, run: $0 --rebuild"
 fi
 
 # Run new container in detached mode with persistent process
