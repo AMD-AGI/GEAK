@@ -6,8 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
-# Repo root so geak_agent (MetrixTool) is importable
-_repo_root = Path(__file__).resolve().parent.parent
+# Repo root so geak_agent (MetrixTool) is importable (src/geakagent -> src -> repo root)
+_repo_root = Path(__file__).resolve().parent.parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 

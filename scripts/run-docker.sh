@@ -107,7 +107,7 @@ echo ""
 if [[ "$(docker images -q ${IMAGE_NAME} 2> /dev/null)" == "" ]]; then
     echo "Image ${IMAGE_NAME} not found. Building..."
     docker build -t ${IMAGE_NAME} .
-else
+elif [ "$REBUILD" != true ]; then
     echo "Using existing image ${IMAGE_NAME}"
     echo "To rebuild from scratch, run: $0 --rebuild"
 fi
