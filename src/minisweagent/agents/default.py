@@ -133,15 +133,49 @@ class DefaultAgent:
         self.messages.append({"role": role, "content": content, **kwargs})
         if self.log_file:
             try:
-                if role == "assistant":
-                    log_content = f"\nmini-swe-agent (step {self.model.n_calls}, ${self.model.cost:.2f}):\n"
-                else:
-                    log_content = f"\n{role.capitalize()}:\n"
-                log_content += content + "\n"
+                log_content = self._format_log_entry(role, content, **kwargs)
                 with open(self.log_file, "a", encoding="utf-8") as f:
                     f.write(log_content)
             except Exception:
                 pass
+
+    def _format_log_entry(self, role: str, content: str, **kwargs) -> str:
+        """Build a human-readable log entry."""
+        if role == "assistant":
+            header = f"mini-swe-agent step {self.model.n_calls} (${self.model.cost:.2f})"
+            log = f"\n{'=' * len(header)}\n{header}\n{'=' * len(header)}\n"
+            # Text content first
+            if content:
+                log += content.rstrip() + "\n"
+            # Then tool call details (raw JSON)
+            if kwargs.get("tool_calls"):
+                tc = kwargs["tool_calls"]
+                func = tc["function"]
+                log += f"\n> Tool Call: {func['name']}\n"
+                args = func.get("arguments", {})
+                log += json.dumps(args, indent=2, ensure_ascii=False) + "\n"
+            return log
+
+        if role == "tool":
+            name = kwargs.get("name", "unknown")
+            log = f"\nUser (tool_result: {name}):\n"
+            # Pretty-print JSON output when possible
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        val = str(v)
+                        log += f"  {k}: {val}\n"
+                    return log
+            except (json.JSONDecodeError, TypeError):
+                pass
+            log += content + "\n"
+            return log
+
+        # system / user / other
+        log = f"\n{role.capitalize()}:\n"
+        log += content + "\n"
+        return log
 
     def run(self, task: str, **kwargs) -> tuple[str, str]:
         """Run step() until agent is finished. Return exit status & message"""
@@ -168,17 +202,42 @@ class DefaultAgent:
         if 0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost:
             raise LimitsExceeded()
         response = self.model.query(self.messages)
-        tools_str = json.dumps(response["tools"], indent=4)
-        output = "<action>\n" + response["content"] + f"\ntool call:\n   {tools_str}" + "\n</action>"
-        self.add_message("assistant", output)
+        output = response["content"]
+        # Include tool_calls in assistant message when the model requests a tool call
+        # and there is no bash block (bash takes priority in parse_action).
+        msg_kwargs = {}
+        if response.get("tools") and not self._will_use_bash(response):
+            msg_kwargs["tool_calls"] = response["tools"]
+        self.add_message("assistant", output, **msg_kwargs)
         return response
 
     def get_observation(self, response: dict) -> dict:
         """Execute the action and return the observation."""
         output = self.parse_action(response)
-        observation = self.render_template(self.config.action_observation_template, output=output)
-        self.add_message("user", observation)
+
+        # If the last assistant message has tool_calls, the tool was dispatched
+        # → add a structured tool result message instead of a plain observation.
+        last_msg = self.messages[-1] if self.messages else {}
+        if last_msg.get("role") == "assistant" and last_msg.get("tool_calls") and response.get("tools"):
+            tool_info = response["tools"]
+            result_content = json.dumps(output) if isinstance(output, dict) else str(output)
+            self.add_message(
+                "tool", result_content,
+                tool_call_id=tool_info.get("id", ""),
+                name=tool_info["function"]["name"],
+            )
+        else:
+            observation = self.render_template(self.config.action_observation_template, output=output)
+            self.add_message("user", observation)
         return output
+
+    @staticmethod
+    def _will_use_bash(response: dict) -> bool:
+        """Return True when parse_action would execute a bash block for this response."""
+        content = response.get("content", "")
+        if not content:
+            return False
+        return len(re.findall(r"```bash\s*\n(.*?)\n```", content, re.DOTALL)) == 1
 
     def parse_action(self, response: dict) -> dict:
         """Parse the action from the message. Returns the action."""
