@@ -70,6 +70,8 @@ class InteractiveAgent(DefaultAgent):
                 f"Limits exceeded. Limits: {self.config.step_limit} steps, ${self.config.cost_limit}.\n"
                 f"Current spend: {self.model.n_calls} steps, ${self.model.cost:.2f}."
             )
+            if self.config.mode == "yolo":
+                raise  # Exit gracefully; run() catches TerminatingException and returns
             self.config.step_limit = int(input("New step limit: "))
             self.config.cost_limit = float(input("New cost limit: "))
             return super().query()
