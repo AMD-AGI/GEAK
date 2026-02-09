@@ -137,6 +137,23 @@ class AmdLlmModelBase:
         self.cost += cost
         GLOBAL_MODEL_STATS.add(cost)
 
+        # Attach raw response for trajectory logging.
+        try:
+            response_dump = None
+            if hasattr(response, "model_dump"):
+                response_dump = response.model_dump()
+            elif hasattr(response, "to_dict"):
+                response_dump = response.to_dict()
+            elif hasattr(response, "dict"):
+                response_dump = response.dict()
+            else:
+                response_dump = str(response)
+        except Exception:
+            response_dump = str(response)
+
+        if isinstance(content, dict):
+            content["extra"] = {"response": response_dump}
+
         return content
 
     def get_template_vars(self):
