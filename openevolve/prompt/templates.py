@@ -165,6 +165,60 @@ Return your evaluation as a JSON object with the following format:
 }}
 """
 
+# Multi-file diff user template with baseline profiling support
+DIFF_USER_MULTIFILE_TEMPLATE = """# Current Program Information
+- Current performance metrics: {metrics}
+- Areas identified for improvement: {improvement_areas}
+
+{artifacts}
+
+# Program Evolution History
+{evolution_history}
+
+# Program Files
+{file_listing}
+
+# File Contents
+{file_contents}
+
+# Baseline Hardware Profiling
+{baseline_profiling}
+
+# Task
+Suggest improvements to the program that will lead to better performance on the specified metrics.
+Use the baseline profiling data above to identify bottlenecks and guide your optimization strategy.
+
+## Optimization Strategy Guidance (based on profiling data)
+- **Memory-bound kernels**: Focus on coalesced memory access, reducing global loads/stores, using shared memory (LDS), improving cache hit rates, and data prefetching.
+- **Compute-bound kernels**: Focus on increasing instruction-level parallelism, using fused multiply-add, reducing register pressure, and optimizing warp/wavefront occupancy.
+- **Latency-bound kernels**: Focus on overlapping computation with memory access, reducing synchronization barriers, and improving pipeline utilization.
+- **General**: Consider autotuning (BLOCK_SIZE, num_warps, num_stages), data types (fp16/bf16/fp8), and kernel fusion.
+
+You MUST use the exact SEARCH/REPLACE diff format shown below to indicate changes.
+For multi-file programs, you MUST include the `file:` prefix to specify which file each change applies to:
+
+<<<<<<< SEARCH file:kernel.py
+# Original code to find and replace (must match exactly)
+=======
+# New replacement code
+>>>>>>> REPLACE
+
+Example of valid multi-file diff format:
+<<<<<<< SEARCH file:kernel.py
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+=======
+    x = tl.load(x_ptr + offsets, mask=mask, eviction_policy="evict_last")
+    y = tl.load(y_ptr + offsets, mask=mask, eviction_policy="evict_last")
+>>>>>>> REPLACE
+
+You can suggest multiple changes across different files.
+Each SEARCH section must exactly match code in the specified file.
+Be thoughtful about your changes and explain your reasoning thoroughly.
+
+IMPORTANT: Do not rewrite entire files - focus on targeted improvements.
+"""
+
 HINTS = ""
 
 # Default templates dictionary
@@ -179,6 +233,7 @@ DEFAULT_TEMPLATES = {
     "inspirations_section": INSPIRATIONS_SECTION_TEMPLATE,
     "inspiration_program": INSPIRATION_PROGRAM_TEMPLATE,
     "evaluation": EVALUATION_TEMPLATE,
+    "diff_user_multifile": DIFF_USER_MULTIFILE_TEMPLATE,
     "hints": HINTS,
 }
 

@@ -49,6 +49,10 @@ class Program:
     code: str
     language: str = "python"
 
+    # Multi-file support
+    files: Dict[str, str] = field(default_factory=dict)  # relative_path -> content
+    main_file: Optional[str] = None  # entry point file within files dict
+
     # Evolution information
     parent_id: Optional[str] = None
     generation: int = 0
@@ -78,6 +82,42 @@ class Program:
 
     llm_response: str = ""  # LLM response that generated this program
 
+    # --- Multi-file helpers ---
+
+    def is_multifile(self) -> bool:
+        """Return True if this program contains multiple files."""
+        return bool(self.files)
+
+    def get_file(self, path: str) -> str:
+        """Get the content of a specific file by its relative path."""
+        if path not in self.files:
+            raise KeyError(f"File '{path}' not found in program. Available: {list(self.files.keys())}")
+        return self.files[path]
+
+    def set_file(self, path: str, content: str) -> None:
+        """Set (or create) the content of a specific file by its relative path."""
+        self.files[path] = content
+
+    def get_all_code(self) -> str:
+        """
+        Return a concatenated view of all files (for diversity/distance calculations).
+        For single-file programs, returns self.code directly.
+        For multi-file programs, concatenates all file contents with headers.
+        """
+        if not self.files:
+            return self.code
+
+        parts = []
+        # Sort files for deterministic ordering; main_file goes first
+        sorted_paths = sorted(self.files.keys())
+        if self.main_file and self.main_file in self.files:
+            sorted_paths.remove(self.main_file)
+            sorted_paths.insert(0, self.main_file)
+
+        for path in sorted_paths:
+            parts.append(f"# === FILE: {path} ===\n{self.files[path]}")
+        return "\n\n".join(parts)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation"""
         return asdict(self)
@@ -97,6 +137,69 @@ class Program:
             logger.debug(f"Filtered out unsupported fields when loading Program: {filtered_out}")
 
         return cls(**filtered_data)
+
+
+# File extensions to include when loading a program from a directory
+_PROGRAM_FILE_EXTENSIONS = {".py", ".hip", ".cu", ".cuh", ".h", ".hpp", ".cpp", ".c"}
+
+
+def load_program_from_directory(dir_path: str) -> Tuple[Dict[str, str], str]:
+    """
+    Walk a directory and load all source files into a files dict.
+
+    Args:
+        dir_path: Path to the directory containing program files.
+
+    Returns:
+        Tuple of (files_dict, main_file) where:
+        - files_dict maps relative paths to file contents
+        - main_file is the auto-detected entry point (e.g. kernel.py)
+    """
+    dir_path = os.path.abspath(dir_path)
+    if not os.path.isdir(dir_path):
+        raise ValueError(f"Not a directory: {dir_path}")
+
+    files: Dict[str, str] = {}
+    main_file: Optional[str] = None
+
+    for root, _dirs, filenames in os.walk(dir_path):
+        # Skip hidden directories and __pycache__
+        _dirs[:] = [d for d in _dirs if not d.startswith(".") and d != "__pycache__"]
+
+        for filename in sorted(filenames):
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in _PROGRAM_FILE_EXTENSIONS:
+                continue
+
+            full_path = os.path.join(root, filename)
+            rel_path = os.path.relpath(full_path, dir_path)
+
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                files[rel_path] = f.read()
+
+    if not files:
+        raise ValueError(f"No source files found in {dir_path} (extensions: {_PROGRAM_FILE_EXTENSIONS})")
+
+    # Auto-detect main_file: prefer kernel.py, then any *kernel*.py at top level
+    top_level_files = [p for p in files if os.sep not in p and "/" not in p]
+    for candidate in ["kernel.py", "main.py"]:
+        if candidate in top_level_files:
+            main_file = candidate
+            break
+
+    if main_file is None:
+        # Look for files with 'kernel' in the name at top level
+        kernel_files = [f for f in top_level_files if "kernel" in f.lower() and f.endswith(".py")]
+        if kernel_files:
+            main_file = sorted(kernel_files)[0]
+
+    if main_file is None:
+        # Fall back to first top-level .py file, or first file overall
+        py_top = [f for f in top_level_files if f.endswith(".py")]
+        main_file = py_top[0] if py_top else sorted(files.keys())[0]
+
+    logger.info(f"Loaded {len(files)} files from {dir_path}, main_file={main_file}")
+    return files, main_file
 
 
 class ProgramDatabase:
@@ -566,9 +669,21 @@ class ProgramDatabase:
         with open(program_path, "w") as f:
             json.dump(program_dict, f)
 
-        code = program.code
-        with open(os.path.join(programs_dir, f"{program.id}_code.py"), "w") as f:
-            f.write(code)
+        # Save code file(s)
+        if program.is_multifile():
+            # Multi-file: write each file into a sub-directory
+            files_dir = os.path.join(programs_dir, f"{program.id}_files")
+            os.makedirs(files_dir, exist_ok=True)
+            for rel_path, content in program.files.items():
+                file_path = os.path.join(files_dir, rel_path)
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, "w") as f:
+                    f.write(content)
+        else:
+            # Single-file: existing behavior
+            code = program.code
+            with open(os.path.join(programs_dir, f"{program.id}_code.py"), "w") as f:
+                f.write(code)
 
     def _calculate_feature_coords(self, program: Program) -> List[int]:
         """
@@ -585,7 +700,7 @@ class ProgramDatabase:
         for dim in self.config.feature_dimensions:
             if dim == "complexity":
                 # Use code length as complexity measure
-                complexity = len(program.code)
+                complexity = len(program.get_all_code())
                 bin_idx = min(int(complexity / 1000 * self.feature_bins), self.feature_bins - 1)
                 coords.append(bin_idx)
             elif dim == "diversity":
@@ -597,7 +712,7 @@ class ProgramDatabase:
                         list(self.programs.values()), min(5, len(self.programs))
                     )
                     avg_distance = sum(
-                        calculate_edit_distance(program.code, other.code)
+                        calculate_edit_distance(program.get_all_code(), other.get_all_code())
                         for other in sample_programs
                     ) / len(sample_programs)
                     bin_idx = min(
@@ -1104,6 +1219,8 @@ class ProgramDatabase:
                         id=f"{migrant.id}_migrant_{target_island}",
                         code=migrant.code,
                         language=migrant.language,
+                        files=dict(migrant.files) if migrant.files else {},
+                        main_file=migrant.main_file,
                         parent_id=migrant.id,
                         generation=migrant.generation,
                         metrics=migrant.metrics.copy(),

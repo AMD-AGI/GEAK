@@ -16,14 +16,16 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import traceback
 
 from openevolve.config import Config, load_config
-from openevolve.database import Program, ProgramDatabase
+from openevolve.database import Program, ProgramDatabase, load_program_from_directory
 from openevolve.evaluator import Evaluator
 from openevolve.llm.ensemble import LLMEnsemble
 from openevolve.prompt.sampler import PromptSampler
 from openevolve.utils.code_utils import (
     apply_diff,
+    apply_multifile_diff,
     extract_code_language,
     extract_diffs,
+    extract_multifile_diffs,
     format_diff_summary,
     parse_evolve_blocks,
     parse_full_rewrite,
@@ -134,13 +136,39 @@ class OpenEvolve:
             logger.info(f"Set random seed to {self.config.random_seed} for reproducibility")
             logger.debug(f"Generated LLM seed: {llm_seed}")
 
-        # Load initial program
+        # Load initial program (file or directory)
         self.initial_program_path = initial_program_path
-        self.initial_program_code = self._load_initial_program()
+        self.is_multifile = os.path.isdir(initial_program_path)
+        self.initial_files: Dict[str, str] = {}
+        self.initial_main_file: Optional[str] = None
+        self.baseline_profiling: Optional[Dict[str, Any]] = None
+
+        if self.is_multifile:
+            # Directory input: load all source files
+            self.initial_files, self.initial_main_file = load_program_from_directory(
+                initial_program_path
+            )
+            # Use main_file content as initial_program_code for backward compatibility
+            self.initial_program_code = self.initial_files.get(
+                self.initial_main_file, ""
+            )
+            logger.info(
+                f"Loaded multi-file program: {len(self.initial_files)} files, "
+                f"main_file={self.initial_main_file}"
+            )
+        else:
+            self.initial_program_code = self._load_initial_program()
+
         self.language = extract_code_language(self.initial_program_code)
 
+        # Try to load baseline profiling data
+        self.baseline_profiling = self._load_baseline_profiling()
+
         # Extract file extension from initial program
-        self.file_extension = os.path.splitext(initial_program_path)[1]
+        if self.is_multifile:
+            self.file_extension = ".py"  # Default for directories
+        else:
+            self.file_extension = os.path.splitext(initial_program_path)[1]
         if not self.file_extension:
             # Default to .py if no extension found
             self.file_extension = ".py"
@@ -167,6 +195,17 @@ class OpenEvolve:
 
         self.database = ProgramDatabase(self.config.database)
 
+        # Parse GPU IDs from environment (e.g., GEAK_GPU_IDS="0,1,2,3")
+        # If not set, GPUPool will auto-detect available GPUs.
+        gpu_ids_env = os.environ.get("GEAK_GPU_IDS", "")
+        gpu_ids = None
+        if gpu_ids_env:
+            try:
+                gpu_ids = [int(x.strip()) for x in gpu_ids_env.split(",") if x.strip()]
+                logger.info(f"GPU IDs from GEAK_GPU_IDS: {gpu_ids}")
+            except ValueError:
+                logger.warning(f"Invalid GEAK_GPU_IDS={gpu_ids_env!r}, will auto-detect")
+
         self.evaluator = Evaluator(
             self.config.evaluator,
             evaluation_file,
@@ -175,6 +214,7 @@ class OpenEvolve:
             prompt_sampler=self.evaluator_prompt_sampler,
             database=self.database,
             kernel_evaluator_path=self.kernel_evaluator_path,
+            gpu_ids=gpu_ids,
         )
 
         logger.info(f"Initialized OpenEvolve with {initial_program_path} " f"and {evaluation_file}")
@@ -207,6 +247,50 @@ class OpenEvolve:
         """Load the initial program from file"""
         with open(self.initial_program_path, "r") as f:
             return f.read()
+
+    def _load_baseline_profiling(self) -> Optional[Dict[str, Any]]:
+        """
+        Search for baseline profiling metrics (metrics.json) in standard locations.
+
+        Search order:
+        1. GEAK_BASELINE_METRICS env var
+        2. <program_dir>/benchmark/baseline/metrics.json
+        3. <program_dir>/metrics.json
+        4. <output_dir>/baseline_metrics.json
+        """
+        import json as _json
+
+        search_paths = []
+
+        # Env var override
+        env_path = os.environ.get("GEAK_BASELINE_METRICS")
+        if env_path:
+            search_paths.append(env_path)
+
+        # Standard locations relative to program path
+        if self.is_multifile:
+            base_dir = self.initial_program_path
+        else:
+            base_dir = os.path.dirname(self.initial_program_path)
+
+        search_paths.extend([
+            os.path.join(base_dir, "benchmark", "baseline", "metrics.json"),
+            os.path.join(base_dir, "metrics.json"),
+            os.path.join(self.output_dir, "baseline_metrics.json"),
+        ])
+
+        for path in search_paths:
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r") as f:
+                        data = _json.load(f)
+                    logger.info(f"Loaded baseline profiling from {path}")
+                    return data
+                except Exception as e:
+                    logger.warning(f"Failed to load baseline profiling from {path}: {e}")
+
+        logger.info("No baseline profiling data found")
+        return None
 
     async def run(
         self,
@@ -253,6 +337,8 @@ class OpenEvolve:
                 id=initial_program_id,
                 code=self.initial_program_code,
                 language=self.language,
+                files=dict(self.initial_files) if self.initial_files else {},
+                main_file=self.initial_main_file,
                 metrics=initial_metrics,
                 analysis=analysis,
                 iteration_found=start_iteration,
@@ -301,10 +387,10 @@ class OpenEvolve:
             # This ensures the LLM sees only high-performing programs as examples
             actual_top_programs = self.database.get_top_programs(5)
 
-            # Build prompt
+            # Build prompt (with multi-file support)
             prompt = self.prompt_sampler.build_prompt(
-                current_program=parent.code,
-                parent_program=parent.code,  # We don't have the parent's code, use the same
+                current_program=parent.get_all_code() if parent.is_multifile() else parent.code,
+                parent_program=parent.get_all_code() if parent.is_multifile() else parent.code,
                 program_metrics=parent.metrics,
                 previous_programs=[p.to_dict() for p in self.database.get_top_programs(3)],
                 top_programs=[p.to_dict() for p in actual_top_programs],  # Use actual top programs
@@ -313,6 +399,11 @@ class OpenEvolve:
                 evolution_round=i,
                 diff_based_evolution=self.config.diff_based_evolution,
                 program_artifacts=parent_artifacts if parent_artifacts else None,
+                # Multi-file support
+                is_multifile=self.is_multifile,
+                program_files=parent.files if parent.is_multifile() else None,
+                main_file=parent.main_file if parent.is_multifile() else None,
+                baseline_profiling=self.baseline_profiling,
             )
 
             # Generate code modification
@@ -336,15 +427,43 @@ class OpenEvolve:
                         continue
                     # Parse the response
                     if self.config.diff_based_evolution:
-                        diff_blocks = extract_diffs(llm_response)
+                        if self.is_multifile and parent.is_multifile():
+                            # Try multi-file diffs first
+                            multifile_diffs = extract_multifile_diffs(llm_response)
+                            if multifile_diffs:
+                                child_files = apply_multifile_diff(
+                                    parent.files, llm_response, default_file=parent.main_file
+                                )
+                                child_code = child_files.get(
+                                    parent.main_file, list(child_files.values())[0]
+                                )
+                                # Summarize changes
+                                all_diffs = []
+                                for fp, diffs in multifile_diffs.items():
+                                    all_diffs.extend(diffs)
+                                changes_summary = format_diff_summary(all_diffs)
+                            else:
+                                # Fallback: single-file diffs on main_file
+                                diff_blocks = extract_diffs(llm_response)
+                                if not diff_blocks:
+                                    logger.warning(f"Iteration {i+1}: No valid diffs found in response")
+                                    continue
+                                child_files = dict(parent.files)
+                                main = parent.main_file or sorted(parent.files.keys())[0]
+                                child_files[main] = apply_diff(parent.files[main], llm_response)
+                                child_code = child_files[main]
+                                changes_summary = format_diff_summary(diff_blocks)
+                        else:
+                            diff_blocks = extract_diffs(llm_response)
 
-                        if not diff_blocks:
-                            logger.warning(f"Iteration {i+1}: No valid diffs found in response")
-                            continue
+                            if not diff_blocks:
+                                logger.warning(f"Iteration {i+1}: No valid diffs found in response")
+                                continue
 
-                        # Apply the diffs
-                        child_code = apply_diff(parent.code, llm_response)
-                        changes_summary = format_diff_summary(diff_blocks)
+                            # Apply the diffs
+                            child_code = apply_diff(parent.code, llm_response)
+                            child_files = {}
+                            changes_summary = format_diff_summary(diff_blocks)
                     else:
                         # Parse full rewrite
                         new_code = parse_full_rewrite(llm_response, self.language)
@@ -354,6 +473,7 @@ class OpenEvolve:
                             continue
 
                         child_code = new_code
+                        child_files = {}
                         changes_summary = "Full rewrite"
 
                     # Check code length
@@ -395,6 +515,8 @@ class OpenEvolve:
                         id=child_id,
                         code=child_code,
                         language=self.language,
+                        files=dict(child_files) if child_files else {},
+                        main_file=parent.main_file if self.is_multifile else None,
                         parent_id=parent.id,
                         generation=parent.generation + 1,
                         metrics=child_metrics,
@@ -587,9 +709,19 @@ class OpenEvolve:
 
         if best_program:
             # Save the best program at this checkpoint
-            best_program_path = os.path.join(checkpoint_path, f"best_program{self.file_extension}")
-            with open(best_program_path, "w") as f:
-                f.write(best_program.code)
+            if best_program.is_multifile():
+                # Multi-file: save each file
+                for rel_path, content in best_program.files.items():
+                    file_path = os.path.join(checkpoint_path, rel_path)
+                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                    with open(file_path, "w") as f:
+                        f.write(content)
+            else:
+                best_program_path = os.path.join(
+                    checkpoint_path, f"best_program{self.file_extension}"
+                )
+                with open(best_program_path, "w") as f:
+                    f.write(best_program.code)
 
             # Save metrics
             best_program_info_path = os.path.join(checkpoint_path, "best_program_info.json")
@@ -640,12 +772,21 @@ class OpenEvolve:
         best_dir = os.path.join(self.output_dir, "best")
         os.makedirs(best_dir, exist_ok=True)
 
-        # Use the extension from the initial program file
-        filename = f"best_program{self.file_extension}"
-        code_path = os.path.join(best_dir, filename)
-
-        with open(code_path, "w") as f:
-            f.write(program.code)
+        if program.is_multifile():
+            # Multi-file: save each file in a directory tree
+            for rel_path, content in program.files.items():
+                file_path = os.path.join(best_dir, rel_path)
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, "w") as f:
+                    f.write(content)
+            code_path = os.path.join(best_dir, program.main_file or "kernel.py")
+            logger.info(f"Saved {len(program.files)} files to {best_dir}")
+        else:
+            # Use the extension from the initial program file
+            filename = f"best_program{self.file_extension}"
+            code_path = os.path.join(best_dir, filename)
+            with open(code_path, "w") as f:
+                f.write(program.code)
 
         # Save complete program info including metrics
         info_path = os.path.join(best_dir, "best_program_info.json")

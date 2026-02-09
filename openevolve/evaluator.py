@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import uuid
@@ -33,6 +34,112 @@ from openevolve.utils.other_utils import get_time_spent
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# GPU Pool -- ensures no two concurrent evaluations share a GPU
+# ---------------------------------------------------------------------------
+
+class GPUPool:
+    """
+    Thread-safe pool of GPU devices for exclusive access during evaluation.
+
+    When a candidate program needs to be benchmarked, it acquires a GPU from
+    the pool.  No other evaluation can use that GPU until it is released.
+    This prevents GPU contention that would corrupt latency measurements.
+
+    Usage:
+        pool = GPUPool(gpu_ids=[0, 1, 2, 3, 4, 5, 6, 7])
+        gpu_id = pool.acquire()       # blocks until a GPU is free
+        try:
+            ... run evaluation on gpu_id ...
+        finally:
+            pool.release(gpu_id)
+    """
+
+    def __init__(self, gpu_ids: Optional[List[int]] = None):
+        """
+        Args:
+            gpu_ids: List of GPU device IDs to manage.
+                     If None or empty, auto-detects available GPUs.
+        """
+        if gpu_ids:
+            self._gpu_ids = list(gpu_ids)
+        else:
+            self._gpu_ids = self._detect_gpus()
+
+        self._semaphore = threading.Semaphore(len(self._gpu_ids))
+        self._lock = threading.Lock()
+        self._available = list(self._gpu_ids)
+        logger.info(
+            f"GPUPool initialized with {len(self._gpu_ids)} GPUs: {self._gpu_ids}"
+        )
+
+    @staticmethod
+    def _detect_gpus() -> List[int]:
+        """Auto-detect available GPUs via rocm-smi or torch."""
+        # Try rocm-smi first (works even when HIP_VISIBLE_DEVICES is restricted)
+        try:
+            result = subprocess.run(
+                ["rocm-smi", "--showid"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                import re
+                gpu_ids = sorted(set(
+                    int(m.group(1))
+                    for m in re.finditer(r"GPU\[(\d+)\]", result.stdout)
+                ))
+                if gpu_ids:
+                    return gpu_ids
+        except Exception:
+            pass
+
+        # Fallback: try torch
+        try:
+            import torch
+            count = torch.cuda.device_count()
+            if count > 0:
+                return list(range(count))
+        except Exception:
+            pass
+
+        # Last resort: single GPU 0
+        return [0]
+
+    @property
+    def num_gpus(self) -> int:
+        return len(self._gpu_ids)
+
+    @property
+    def gpu_ids(self) -> List[int]:
+        return list(self._gpu_ids)
+
+    def acquire(self, timeout: float = 600) -> int:
+        """
+        Acquire exclusive access to a GPU.  Blocks until one is free.
+
+        Returns:
+            GPU device ID
+        """
+        acquired = self._semaphore.acquire(timeout=timeout)
+        if not acquired:
+            raise TimeoutError(
+                f"Could not acquire a GPU within {timeout}s "
+                f"(all {len(self._gpu_ids)} GPUs are busy)"
+            )
+        with self._lock:
+            gpu_id = self._available.pop(0)
+        logger.debug(f"Acquired GPU {gpu_id} (remaining: {self._available})")
+        return gpu_id
+
+    def release(self, gpu_id: int) -> None:
+        """Release a GPU back to the pool."""
+        with self._lock:
+            if gpu_id not in self._available:
+                self._available.append(gpu_id)
+        self._semaphore.release()
+        logger.debug(f"Released GPU {gpu_id} (available: {self._available})")
+
+
 class Evaluator:
     """
     Evaluates programs and assigns scores
@@ -50,6 +157,7 @@ class Evaluator:
         prompt_sampler: Optional[PromptSampler] = None,
         database: Optional[ProgramDatabase] = None,
         kernel_evaluator_path: Optional[str] = None,
+        gpu_ids: Optional[List[int]] = None,
     ):
         self.config = config
         self.eval_dir = config.eval_dir or tempfile.gettempdir()
@@ -61,8 +169,23 @@ class Evaluator:
         self.initial_program_name = initial_program_name
         if not os.path.exists(kernel_evaluator_path): 
             print(f"⚠️ WARNING: Kernel evaluator path {kernel_evaluator_path} does not exist, using default given path.")
+
+        # GPU pool for exclusive GPU access during benchmarking.
+        # If gpu_ids is provided, use those; otherwise auto-detect.
+        self.gpu_pool = GPUPool(gpu_ids=gpu_ids)
+
+        # Limit parallel evaluations to number of available GPUs so that
+        # no two evaluations ever share a GPU for latency measurement.
+        effective_parallel = min(
+            config.parallel_evaluations, self.gpu_pool.num_gpus
+        )
+        if effective_parallel != config.parallel_evaluations:
+            logger.info(
+                f"Capping parallel_evaluations from {config.parallel_evaluations} "
+                f"to {effective_parallel} (= number of available GPUs)"
+            )
         # Create a task pool for parallel evaluation
-        self.task_pool = TaskPool(max_concurrency=config.parallel_evaluations)
+        self.task_pool = TaskPool(max_concurrency=effective_parallel)
 
         # Set up evaluation function if file exists
         self._load_evaluation_function()
@@ -70,7 +193,10 @@ class Evaluator:
         # Pending artifacts storage for programs
         self._pending_artifacts: Dict[str, Dict[str, Union[str, bytes]]] = {}
 
-        logger.info(f"Initialized evaluator with {evaluation_file}")
+        logger.info(
+            f"Initialized evaluator with {evaluation_file} "
+            f"(parallel={effective_parallel}, gpus={self.gpu_pool.gpu_ids})"
+        )
 
     def _load_evaluation_function(self) -> None:
         """Load the evaluation function from the evaluation file"""
@@ -107,14 +233,21 @@ class Evaluator:
         self,
         program_code: str,
         program_id: str = "",
-        gpu_id: Optional[str] = 0,
+        gpu_id: Optional[int] = None,
     ) -> Dict[str, float]:
         """
-        Evaluate a program and return scores
+        Evaluate a program and return scores.
+
+        GPU isolation: acquires an exclusive GPU from the pool before
+        benchmarking.  No two concurrent evaluations will share a GPU.
+        The assigned GPU ID is written to .gpu_id in the temp dir so
+        that the evaluation function (e.g., geak_eval_evaluator.py)
+        can read it and pass it to the CommandmentEvaluator.
 
         Args:
             program_code: Code to evaluate
             program_id: Optional ID for logging
+            gpu_id: Hint for GPU ID (ignored -- pool assignment is used)
 
         Returns:
             Dictionary of metric name to score
@@ -122,30 +255,66 @@ class Evaluator:
         start_time = time.time()
         program_id_str = f" {program_id}" if program_id else ""
 
+        # Acquire exclusive GPU from the pool (blocks if all GPUs busy)
+        assigned_gpu = self.gpu_pool.acquire()
+        logger.info(
+            f"Program{program_id_str}: acquired GPU {assigned_gpu} for evaluation"
+        )
+
         # Check if artifacts are enabled
         artifacts_enabled = os.environ.get("ENABLE_ARTIFACTS", "true").lower() == "true"
 
         # Retry logic for evaluation
         last_exception = None
-        for attempt in range(self.config.max_retries + 1):
-            # Create a temporary file for the program
-            # with tempfile.NamedTemporaryFile(suffix=".py", delete=False, dir=tempfile.gettempdir()) as temp_file:
-            #     temp_file.write(program_code.encode("utf-8"))
-            #     temp_file.flush()
-            #     os.fsync(temp_file.fileno())
-            #     temp_file_path = temp_file.name
-            #     os.chmod(temp_file_path, 0o777)
-
+        try:
+          for attempt in range(self.config.max_retries + 1):
             # Create temp directory - compatible with Python 3.11
             temp_dir = tempfile.mkdtemp(dir=self.eval_dir)
             try:
+                # Support multi-file programs: if program_code is a JSON-encoded
+                # dict of {filepath: content}, write all files.  Otherwise write
+                # a single file as before (backward compatible).
                 temp_file_path = os.path.join(temp_dir, self.initial_program_name)
-                with open(temp_file_path, "w", encoding="utf-8") as temp_file:
-                    temp_file.write(program_code)
-                    temp_file.flush()
-                    os.fsync(temp_file.fileno())
+                is_multifile = False
+                try:
+                    parsed = json.loads(program_code)
+                    if isinstance(parsed, dict) and all(
+                        isinstance(v, str) for v in parsed.values()
+                    ):
+                        is_multifile = True
+                        for rel_path, content in parsed.items():
+                            fpath = os.path.join(temp_dir, rel_path)
+                            os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                            with open(fpath, "w", encoding="utf-8") as f:
+                                f.write(content)
+                                f.flush()
+                                os.fsync(f.fileno())
+                            os.chmod(fpath, 0o777)
+                        # Set temp_file_path to the main file (initial_program_name)
+                        temp_file_path = os.path.join(temp_dir, self.initial_program_name)
+                        if not os.path.exists(temp_file_path):
+                            # Fall back to first file if main file not in dict
+                            temp_file_path = os.path.join(
+                                temp_dir, list(parsed.keys())[0]
+                            )
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+                if not is_multifile:
+                    with open(temp_file_path, "w", encoding="utf-8") as temp_file:
+                        temp_file.write(program_code)
+                        temp_file.flush()
+                        os.fsync(temp_file.fileno())
+                    os.chmod(temp_file_path, 0o777)
+
                 os.chmod(temp_dir, 0o777)
-                os.chmod(temp_file_path, 0o777)
+
+                # Write .gpu_id file so the evaluation function knows which
+                # GPU to use (thread-safe: each eval has its own temp_dir)
+                gpu_id_path = os.path.join(temp_dir, ".gpu_id")
+                with open(gpu_id_path, "w") as gf:
+                    gf.write(str(assigned_gpu))
+
             except Exception as e:
                 # Clean up on error
                 import shutil
@@ -305,11 +474,15 @@ class Evaluator:
                 #         logger.warning(f"Failed to remove temporary directory {temp_dir}: {str(e)}")
                 pass
 
-        # All retries failed
-        logger.error(
-            f"All evaluation attempts failed for program{program_id_str}. Last error: {str(last_exception)}"
-        )
-        return {"error": 0.0}, None
+          # All retries failed
+          logger.error(
+              f"All evaluation attempts failed for program{program_id_str}. Last error: {str(last_exception)}"
+          )
+          return {"error": 0.0}, None
+        finally:
+            # ALWAYS release the GPU back to the pool, even on failure/timeout
+            self.gpu_pool.release(assigned_gpu)
+            logger.debug(f"Program{program_id_str}: released GPU {assigned_gpu}")
 
     def _process_evaluation_result(self, result: Any) -> EvaluationResult:
         """
@@ -757,7 +930,12 @@ class Evaluator:
         programs: List[Tuple[str, str]],
     ) -> List[Dict[str, float]]:
         """
-        Evaluate multiple programs in parallel
+        Evaluate multiple programs in parallel, each on its own exclusive GPU.
+
+        The GPU assignment is handled by the GPUPool inside evaluate_program(),
+        which acquires an exclusive GPU before benchmarking and releases it
+        after.  The task pool concurrency is capped to the number of available
+        GPUs, so no two evaluations ever share a GPU.
 
         Args:
             programs: List of (program_code, program_id) tuples
@@ -766,8 +944,8 @@ class Evaluator:
             List of metric dictionaries
         """
         tasks = [
-            self.task_pool.create_task(self.evaluate_program, program_code, program_id, gpu_id)
-            for gpu_id, (program_code, program_id) in enumerate(programs)
+            self.task_pool.create_task(self.evaluate_program, program_code, program_id)
+            for program_code, program_id in programs
         ]
 
         return await asyncio.gather(*tasks)

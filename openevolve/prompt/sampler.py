@@ -60,6 +60,11 @@ class PromptSampler:
         diff_based_evolution: bool = True,
         template_key: Optional[str] = None,
         program_artifacts: Optional[Dict[str, Union[str, bytes]]] = None,
+        # Multi-file support
+        is_multifile: bool = False,
+        program_files: Optional[Dict[str, str]] = None,
+        main_file: Optional[str] = None,
+        baseline_profiling: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Dict[str, str]:
         """
@@ -77,6 +82,10 @@ class PromptSampler:
             diff_based_evolution: Whether to use diff-based evolution (True) or full rewrites (False)
             template_key: Optional override for template key
             program_artifacts: Optional artifacts from program evaluation
+            is_multifile: Whether this is a multi-file program
+            program_files: Dict of relative_path -> content (for multi-file)
+            main_file: Entry point file (for multi-file)
+            baseline_profiling: Hardware profiling data from Metrix
             **kwargs: Additional keys to replace in the user prompt
 
         Returns:
@@ -89,6 +98,9 @@ class PromptSampler:
         elif self.user_template_override:
             # Use the override set with set_templates
             user_template_key = self.user_template_override
+        elif is_multifile and diff_based_evolution:
+            # Auto-select multi-file template
+            user_template_key = "diff_user_multifile"
         else:
             # Default behavior: diff-based vs full rewrite
             user_template_key = "diff_user" if diff_based_evolution else "full_rewrite_user"
@@ -131,6 +143,31 @@ class PromptSampler:
         if self.config.use_template_stochasticity:
             user_template = self._apply_template_variations(user_template)
 
+        # Build multi-file specific placeholders
+        extra_format_kwargs = dict(kwargs)
+        if is_multifile and program_files:
+            extra_format_kwargs["file_listing"] = self._format_file_listing(
+                program_files, main_file
+            )
+            extra_format_kwargs["file_contents"] = self._format_file_contents(
+                program_files, main_file, language
+            )
+        elif is_multifile:
+            # Fallback if files not provided
+            extra_format_kwargs.setdefault("file_listing", "(single file)")
+            extra_format_kwargs.setdefault("file_contents", f"```{language}\n{current_program}\n```")
+
+        # Baseline profiling
+        if baseline_profiling:
+            extra_format_kwargs["baseline_profiling"] = self._format_baseline_profiling(
+                baseline_profiling
+            )
+        else:
+            extra_format_kwargs.setdefault(
+                "baseline_profiling",
+                "No baseline profiling data available. Focus on general optimization strategies."
+            )
+
         # Format the final user message
         user_message = user_template.format(
             metrics=metrics_str,
@@ -139,7 +176,7 @@ class PromptSampler:
             current_program=current_program,
             language=language,
             artifacts=artifacts_section,
-            **kwargs,
+            **extra_format_kwargs,
         )
 
         return {
@@ -551,6 +588,178 @@ class PromptSampler:
             features.append(f"{program_type} approach to the problem")
             
         return ", ".join(features[:3])  # Limit to top 3 features
+
+    # --- Multi-file formatting helpers ---
+
+    def _format_file_listing(
+        self, files: Dict[str, str], main_file: Optional[str] = None
+    ) -> str:
+        """Format a listing of all files in the program."""
+        lines = []
+        sorted_paths = sorted(files.keys())
+        for path in sorted_paths:
+            size = len(files[path])
+            marker = " (main)" if path == main_file else ""
+            lines.append(f"- `{path}` ({size} chars){marker}")
+        return "\n".join(lines)
+
+    def _format_file_contents(
+        self,
+        files: Dict[str, str],
+        main_file: Optional[str] = None,
+        language: str = "python",
+    ) -> str:
+        """Format file contents for inclusion in the prompt."""
+        parts = []
+        # Main file first
+        sorted_paths = sorted(files.keys())
+        if main_file and main_file in files:
+            sorted_paths.remove(main_file)
+            sorted_paths.insert(0, main_file)
+
+        for path in sorted_paths:
+            marker = " (main entry point)" if path == main_file else ""
+            parts.append(
+                f"## File: `{path}`{marker}\n```{language}\n{files[path]}\n```"
+            )
+        return "\n\n".join(parts)
+
+    def _format_baseline_profiling(self, profiling: Dict[str, Any]) -> str:
+        """
+        Format baseline hardware profiling data from Metrix into a human-readable
+        string for inclusion in the LLM prompt.
+
+        Args:
+            profiling: Dictionary of profiling metrics from Metrix/rocprofv3.
+
+        Returns:
+            Formatted profiling summary string with bottleneck analysis.
+        """
+        sections = []
+
+        # --- Latency ---
+        latency_keys = ["latency_us", "latency_min_us", "latency_avg_us", "latency_max_us"]
+        latency_parts = []
+        for key in latency_keys:
+            if key in profiling:
+                label = key.replace("_us", "").replace("latency_", "").capitalize() or "Latency"
+                latency_parts.append(f"  - {label}: {profiling[key]:.2f} us")
+        if latency_parts:
+            sections.append("## Latency\n" + "\n".join(latency_parts))
+
+        # --- Memory Performance ---
+        mem_keys = {
+            "bandwidth_gb_s": "Bandwidth",
+            "hbm_utilization": "HBM Utilization",
+            "hbm_read_gb_s": "HBM Read",
+            "hbm_write_gb_s": "HBM Write",
+            "global_load_efficiency": "Global Load Efficiency",
+            "global_store_efficiency": "Global Store Efficiency",
+            "coalescing_efficiency": "Coalescing Efficiency",
+            "lds_bank_conflicts": "LDS Bank Conflicts",
+        }
+        mem_parts = []
+        for key, label in mem_keys.items():
+            if key in profiling:
+                val = profiling[key]
+                if isinstance(val, float):
+                    # Format percentages vs raw numbers
+                    if "efficiency" in key or "utilization" in key:
+                        mem_parts.append(f"  - {label}: {val:.1f}%")
+                    else:
+                        mem_parts.append(f"  - {label}: {val:.2f} GB/s")
+                else:
+                    mem_parts.append(f"  - {label}: {val}")
+        if mem_parts:
+            sections.append("## Memory Performance\n" + "\n".join(mem_parts))
+
+        # --- Compute Performance ---
+        compute_keys = {
+            "tflops": "TFLOPS",
+            "compute_busy": "GPU Compute Busy",
+            "valu_busy": "VALU Busy",
+            "mfma_busy": "MFMA Busy",
+        }
+        compute_parts = []
+        for key, label in compute_keys.items():
+            if key in profiling:
+                val = profiling[key]
+                if "busy" in key:
+                    compute_parts.append(f"  - {label}: {val:.1f}%")
+                else:
+                    compute_parts.append(f"  - {label}: {val:.2f}")
+        if compute_parts:
+            sections.append("## Compute Performance\n" + "\n".join(compute_parts))
+
+        # --- Cache Performance ---
+        cache_keys = {
+            "l1_hit_rate": "L1 Cache Hit Rate",
+            "l2_hit_rate": "L2 Cache Hit Rate",
+            "l2_read_hit_rate": "L2 Read Hit Rate",
+            "l2_write_hit_rate": "L2 Write Hit Rate",
+        }
+        cache_parts = []
+        for key, label in cache_keys.items():
+            if key in profiling:
+                cache_parts.append(f"  - {label}: {profiling[key]:.1f}%")
+        if cache_parts:
+            sections.append("## Cache Performance\n" + "\n".join(cache_parts))
+
+        # --- Bottleneck Analysis ---
+        bottleneck = self._analyze_bottleneck(profiling)
+        if bottleneck:
+            sections.append(f"## Bottleneck Analysis\n{bottleneck}")
+
+        if not sections:
+            return "No detailed profiling data available."
+
+        return "\n\n".join(sections)
+
+    def _analyze_bottleneck(self, profiling: Dict[str, Any]) -> str:
+        """
+        Automatically analyze profiling data to identify the primary bottleneck.
+        """
+        analysis = []
+
+        compute_busy = profiling.get("compute_busy", None)
+        hbm_util = profiling.get("hbm_utilization", None)
+        bandwidth = profiling.get("bandwidth_gb_s", None)
+        coalescing = profiling.get("coalescing_efficiency", None)
+        l2_hit = profiling.get("l2_hit_rate", None)
+
+        if compute_busy is not None and hbm_util is not None:
+            if compute_busy < 30 and hbm_util > 60:
+                analysis.append(
+                    "**Memory-bound**: GPU compute is underutilized while memory bandwidth "
+                    "is high. Focus on reducing memory traffic, improving data reuse, "
+                    "and using shared memory (LDS)."
+                )
+            elif compute_busy > 60 and hbm_util < 30:
+                analysis.append(
+                    "**Compute-bound**: Memory bandwidth is underutilized while compute "
+                    "is saturated. Focus on algorithmic improvements, reducing redundant "
+                    "computation, and increasing parallelism."
+                )
+            elif compute_busy < 30 and hbm_util < 30:
+                analysis.append(
+                    "**Latency-bound**: Both compute and memory are underutilized. "
+                    "The kernel may be limited by synchronization, launch overhead, "
+                    "or low occupancy. Focus on increasing occupancy and reducing barriers."
+                )
+
+        if coalescing is not None and coalescing < 50:
+            analysis.append(
+                f"**Poor memory coalescing** ({coalescing:.0f}%): Memory accesses are "
+                "not well-coalesced. Reorganize data layout or access patterns."
+            )
+
+        if l2_hit is not None and l2_hit < 30:
+            analysis.append(
+                f"**Low L2 cache hit rate** ({l2_hit:.0f}%): Data is not being reused "
+                "effectively. Consider tiling strategies or adjusting block sizes."
+            )
+
+        return "\n".join(analysis) if analysis else ""
 
     def _apply_template_variations(self, template: str) -> str:
         """Apply stochastic variations to the template"""

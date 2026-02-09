@@ -5,8 +5,11 @@
 Utilities for code parsing, diffing, and manipulation
 """
 
+import logging
 import re
 from typing import Dict, List, Optional, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 
 def parse_evolve_blocks(code: str) -> List[Tuple[int, int, str]]:
@@ -181,6 +184,129 @@ def calculate_edit_distance(code1: str, code2: str) -> int:
             )
 
     return dp[m][n]
+
+
+# ---------------------------------------------------------------------------
+# Multi-file diff support
+# ---------------------------------------------------------------------------
+
+def extract_multifile_diffs(diff_text: str) -> Dict[str, List[Tuple[str, str]]]:
+    """
+    Extract diff blocks that carry a ``file:path`` annotation.
+
+    Format expected::
+
+        <<<<<<< SEARCH file:kernel.py
+        old code
+        =======
+        new code
+        >>>>>>> REPLACE
+
+    Args:
+        diff_text: LLM response containing one or more SEARCH/REPLACE blocks.
+
+    Returns:
+        Dictionary mapping file paths to lists of (search_text, replace_text).
+        If no ``file:`` prefix is found on any block, returns an empty dict
+        (caller should fall back to single-file ``extract_diffs``).
+    """
+    # Pattern: <<<<<<< SEARCH file:some/path.py
+    pattern = r"<<<<<<< SEARCH\s+file:(\S+)\n(.*?)=======\n(.*?)>>>>>>> REPLACE"
+    matches = re.findall(pattern, diff_text, re.DOTALL)
+
+    if not matches:
+        return {}
+
+    result: Dict[str, List[Tuple[str, str]]] = {}
+    for file_path, search_text, replace_text in matches:
+        file_path = file_path.strip()
+        result.setdefault(file_path, []).append(
+            (search_text.rstrip(), replace_text.rstrip())
+        )
+    return result
+
+
+def apply_multifile_diff(
+    files: Dict[str, str], diff_text: str, default_file: Optional[str] = None
+) -> Dict[str, str]:
+    """
+    Apply SEARCH/REPLACE diffs to a dictionary of files.
+
+    Supports two modes:
+
+    1. **Multi-file**: Diffs carry ``file:path`` annotations.  Each diff is
+       applied only to the specified file.
+    2. **Single-file fallback**: If no ``file:`` annotations are found, all
+       diffs are applied to *default_file* (or the first file if not given).
+
+    Args:
+        files: Dictionary mapping relative file paths to their contents.
+        diff_text: Raw LLM response with SEARCH/REPLACE blocks.
+        default_file: Fallback file for single-file diffs.
+
+    Returns:
+        Updated files dictionary (new dict; originals are not mutated).
+    """
+    updated = dict(files)  # shallow copy
+
+    multifile_diffs = extract_multifile_diffs(diff_text)
+
+    if multifile_diffs:
+        # Multi-file mode
+        for file_path, diffs in multifile_diffs.items():
+            if file_path not in updated:
+                logger.warning(
+                    f"Diff targets file '{file_path}' which does not exist. "
+                    f"Available files: {list(updated.keys())}"
+                )
+                continue
+            code = updated[file_path]
+            for search_text, replace_text in diffs:
+                search_lines = search_text.split("\n")
+                replace_lines = replace_text.split("\n")
+                code_lines = code.split("\n")
+                applied = False
+                for i in range(len(code_lines) - len(search_lines) + 1):
+                    if code_lines[i : i + len(search_lines)] == search_lines:
+                        code_lines[i : i + len(search_lines)] = replace_lines
+                        applied = True
+                        break
+                if not applied:
+                    logger.warning(
+                        f"Could not apply diff to '{file_path}': search text not found"
+                    )
+                code = "\n".join(code_lines)
+            updated[file_path] = code
+    else:
+        # Single-file fallback: apply all diffs to default_file
+        target = default_file or (sorted(updated.keys())[0] if updated else None)
+        if target and target in updated:
+            updated[target] = apply_diff(updated[target], diff_text)
+        elif target:
+            logger.warning(f"Default file '{target}' not found in files dict")
+
+    return updated
+
+
+def format_multifile_diff(file_path: str, search: str, replace: str) -> str:
+    """
+    Generate a properly formatted multi-file SEARCH/REPLACE block.
+
+    Args:
+        file_path: Relative path of the target file.
+        search: The original code to find.
+        replace: The replacement code.
+
+    Returns:
+        Formatted diff block string.
+    """
+    return (
+        f"<<<<<<< SEARCH file:{file_path}\n"
+        f"{search}\n"
+        f"=======\n"
+        f"{replace}\n"
+        f">>>>>>> REPLACE"
+    )
 
 
 def extract_code_language(code: str) -> str:

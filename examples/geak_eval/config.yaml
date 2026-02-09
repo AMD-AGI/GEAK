@@ -1,0 +1,57 @@
+# OpenEvolve configuration for AIG-Eval GPU kernels
+# Used with: python run_openevolve.py <kernel_path> --config config.yaml
+
+max_iterations: 10
+checkpoint_interval: 5
+log_level: "INFO"
+
+# LLM configuration - uses AMD LLM gateway (OpenAI-compatible endpoint)
+llm:
+  sampling:
+    fn: "random"
+  models:
+    - name: "claude-opus-4-5"
+      weight: 1.0
+      api_base: "https://llm-api.amd.com/claude3/deployments/claude-opus-4-5"
+      api_key: null  # Set via OPENAI_API_KEY env var (= AMD_LLM_API_KEY)
+
+  evaluator_models:
+    - name: "claude-opus-4-5"
+      weight: 1.0
+      api_base: "https://llm-api.amd.com/claude3/deployments/claude-opus-4-5"
+      api_key: null
+
+prompt:
+  template_dir: null  # Use default templates
+
+# Database configuration
+database:
+  db_path: "./openevolve_db"
+  population_size: 20
+  archive_size: 10
+  num_islands: 4
+  elite_selection_ratio: 0.2
+  exploitation_ratio: 0.65
+  exploration_ratio: 0.35
+  migration_interval: 3
+  migration_rate: 0.1
+  log_prompts: false
+
+# Evaluator configuration - delegates to geak_eval_evaluator.py
+evaluator:
+  timeout: 600        # 10 min per evaluation (GPU kernels can be slow)
+  max_retries: 2
+  parallel_evaluations: 8  # Up to 8 GPUs -- capped at runtime to actual count
+  use_llm_feedback: false  # Pure measured benchmarks, no LLM guessing
+  cascade_evaluation: false
+  eval_dir: null      # Will be set relative to output_dir at runtime
+  n_warmup: 100
+  n_iters: 500
+  atol: 0.1
+  rtol: 0.1
+  verbose: false
+
+# Evolution settings
+diff_based_evolution: true
+allow_full_rewrites: false
+max_code_length: 60000
