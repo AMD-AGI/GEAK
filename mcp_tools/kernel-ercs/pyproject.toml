@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kernel-ercs"
+version = "0.1.0"
+description = "MCP server for LLM-based Triton/AMD GPU kernel Evaluation, Reflection, Compatibility, and Specs"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    {name = "AMD GEAK Team"}
+]
+keywords = ["mcp", "triton", "gpu", "kernel", "amd", "rocm", "llm", "evaluation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "fastmcp>=2.0.0",
+    "anthropic>=0.30.0",
+    "litellm>=1.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+kernel-ercs-mcp = "kernel_ercs.server:main"
+kernel-ercs = "kernel_ercs.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/amd/GEAK-agent"
+Documentation = "https://github.com/amd/GEAK-agent#readme"
+Repository = "https://github.com/amd/GEAK-agent"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kernel_ercs"]

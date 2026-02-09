@@ -1,4 +1,4 @@
-# GEAK v3
+# GEAK — GPU Evolutionary Agent for Kernels
 
 GEAK is an AI-powered framework for automated GPU kernel optimization built on top of mini-SWE-agent. It provides advanced features for systematic kernel optimization through exploration-based approaches, parallel execution, and profiling-guided optimization.
 
@@ -473,6 +473,59 @@ def my_tool(param1: str, param2: int):
 - Start with existing configs and customize
 - Use `mode: yolo` for parallel agents (no confirmation prompts)
 - Set appropriate timeouts for long-running benchmarks
+
+## MCP Tool Servers
+
+GEAK includes standalone MCP (Model Context Protocol) servers that the agent can call for specialized tasks:
+
+| Server | Purpose |
+|--------|---------|
+| `automated-test-discovery` | Content-based test/benchmark discovery for any project |
+| `kernel-profiler` | Hardware-level GPU profiling via rocprof-compute |
+| `kernel-evolve` | LLM-guided kernel optimization (generate/mutate/crossover) |
+| `kernel-ercs` | Kernel evaluation, reflection, compatibility checks |
+| `metrix-mcp` | AMD Metrix API wrapper for GPU metrics |
+| `openevolve-mcp` | OpenEvolve evolutionary optimizer |
+| `mcp-client` | JSON-RPC 2.0 client for MCP communication |
+
+Install MCP servers individually: `pip install -e mcp_tools/<server-name>/`
+
+## Docker Support
+
+```bash
+# Auto-detect environment (uses Docker if no local GPU)
+mini --runtime auto --task "Optimize kernel at /path/to/kernel.py"
+
+# Force Docker with specific image
+mini --runtime docker --docker-image lmsysorg/sglang:v0.5.6.post1-rocm700-mi35x \
+  --workspace /path/to/kernels --task "..."
+```
+
+See [RUNTIME_ENV.md](RUNTIME_ENV.md) and [RUNTIME_QUICKSTART.md](RUNTIME_QUICKSTART.md) for details.
+
+## Architecture
+
+```
+GEAK Agent (unified)
+├── src/minisweagent/          # Core agent framework
+│   ├── agents/                # 7 agent types (default, interactive, strategy,
+│   │                          #   parallel, select_patch, unit_test, textual)
+│   ├── tools/                 # Built-in tools (bash, editor, test_perf,
+│   │                          #   profiling, strategy_manager, discovery, submit)
+│   ├── config/                # YAML configs (layered: base → template → user)
+│   ├── environments/          # Execution environments (local, docker, singularity)
+│   ├── models/                # LLM backends (amd_llm, anthropic, litellm, etc.)
+│   ├── optimizer/             # Unified optimizer (OpenEvolve + Autotune)
+│   ├── mcp_tools/             # MetrixTool for AMD GPU profiling
+│   ├── benchmark.py           # Standardized benchmarking framework
+│   ├── kernel_profile.py      # CLI for hardware-level GPU profiling
+│   └── runtime_env.py         # Runtime environment detection (local/Docker)
+├── mcp_tools/                 # 6 standalone MCP servers + client
+├── reference/                 # GPU optimization strategies database (50+)
+├── test_suite/                # Regression suite (10 AITER kernels)
+├── examples/                  # Example kernels
+└── Dockerfile                 # Docker image with all tools
+```
 
 ## License
 

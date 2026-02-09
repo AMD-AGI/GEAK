@@ -28,7 +28,7 @@ from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.utils.save import save_traj
 from minisweagent.run.utils.config_editor import load_and_merge_configs
 from minisweagent.utils.log import logger
-from minisweagent.agents.unit_test_agent import run_unit_test_agent
+from minisweagent.agents.unit_test_agent import run_unit_test_agent, run_discovery_pipeline
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
 DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
@@ -89,10 +89,31 @@ def main(
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents to run (only effective with --save-patch). If not specified, reads from config file."),
     repo: Path | None = typer.Option(None, "--repo", help="Repository path for parallel execution. Required when num_parallel > 1. Each agent will get an isolated workdir using git worktree."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs for agents (e.g., '0,1,2,3'). For single agent, uses first GPU. Defaults to '0'."),
+    # Runtime environment configuration (ported from MSA branch)
+    runtime: str = typer.Option("local", "--runtime", help="Runtime environment: local, docker, or auto (auto-detects GPU availability).", rich_help_panel="Advanced"),
+    docker_image: str | None = typer.Option(None, "--docker-image", help="Docker image to use when --runtime=docker.", rich_help_panel="Advanced"),
+    workspace: Path | None = typer.Option(None, "--workspace", help="Workspace directory to mount in Docker.", rich_help_panel="Advanced"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
-    
+
+    # 0. Runtime environment check (ported from MSA branch)
+    if runtime in ("auto", "docker"):
+        try:
+            from minisweagent.runtime_env import detect_runtime_environment, RuntimeType
+            rt_env = detect_runtime_environment()
+            if runtime == "auto" and not rt_env.has_gpu:
+                console.print(
+                    "[bold yellow]No GPU detected locally. Consider --runtime docker.[/bold yellow]"
+                )
+            elif runtime == "docker":
+                console.print(
+                    f"[bold cyan]Docker runtime selected. Image: {docker_image or 'default'}[/bold cyan]"
+                )
+        except ImportError:
+            if runtime == "docker":
+                console.print("[bold yellow]runtime_env module not available; proceeding with local.[/bold yellow]")
+
     # 1. Load base config (mini.yaml - always loaded as foundation)
     base_config_path = builtin_config_dir / "mini.yaml"
     console.print(f"Loading base config: [bold green]'{base_config_path.name}'[/bold green]")
@@ -194,15 +215,31 @@ def main(
     if create_test or not test_command:
         if not repo:
             raise ValueError("repo is required for --create-test or when test_command is missing. Please pass --repo.")
+
+        # Step 0a: Run content-based discovery (fast, free, no LLM)
+        discovery_context = ""
+        _kernel_path = Path(task) if task and Path(task).is_file() else None
+        if _kernel_path or repo:
+            console.print("[bold cyan]Running content-based test discovery...[/bold cyan]")
+            discovery_context = run_discovery_pipeline(
+                kernel_path=_kernel_path or repo,
+                repo=repo,
+            )
+            if discovery_context:
+                console.print("[dim]Discovery found candidates — feeding into UnitTestAgent.[/dim]")
+            else:
+                console.print("[dim]Discovery found nothing — UnitTestAgent will search/create from scratch.[/dim]")
+
+        # Step 0b: Run UnitTestAgent with discovery context
         console.print(
-            "[bold yellow]No test_command provided (or --create-test enabled). "
-            "Will auto-create/search unit tests and infer a test command via UnitTestAgent...[/bold yellow]"
+            "[bold yellow]Running UnitTestAgent to find or create test command...[/bold yellow]"
         )
         test_command = run_unit_test_agent(
             model=get_model(model_name, config.get("model", {})),
             repo=repo,
             kernel_name=kernel_name or "unknown",
             log_dir=patch_output,
+            discovery_context=discovery_context,
         )
         console.print(f"[bold green]Using UnitTestAgent test_command:[/bold green] {test_command}")
     

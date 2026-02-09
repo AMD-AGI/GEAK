@@ -168,7 +168,8 @@ class DefaultAgent:
         if 0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost:
             raise LimitsExceeded()
         response = self.model.query(self.messages)
-        output = "<action>\n"+ response["content"] + f"\ntool call:\n   {json.dumps(response["tools"], indent=4)}" + "\n</action>"
+        tools_str = json.dumps(response["tools"], indent=4)
+        output = "<action>\n" + response["content"] + f"\ntool call:\n   {tools_str}" + "\n</action>"
         self.add_message("assistant", output)
         return response
 
