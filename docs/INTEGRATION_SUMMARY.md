@@ -15,7 +15,6 @@ We had two parallel branches developing different parts of the GEAK system:
 
 - **`msa`** — The tooling layer. Content-based test discovery pipeline, 6 standalone MCP servers (profiling, evolution, evaluation, etc.), Docker support, runtime environment detection, benchmarking framework, and a database of 50+ GPU optimization strategies.
 
-The two branches were complementary — v3 had the richer agent architecture, msa had the richer tooling. The `yab` branch unifies them.
 
 ---
 
