@@ -4,111 +4,183 @@ GPU Evolutionary Agent for Kernels - A simple AI agent for GPU kernel optimizati
 
 Based on [mini-swe-agent](https://github.com/SWE-agent/mini-SWE-agent) architecture: the LLM generates bash commands and MCP tool calls to optimize GPU kernels.
 
-## 🚀 Quick Start
+## Quick Start
+
+### Docker Setup (Recommended)
 
 ```bash
-# Auto-detect environment and run agent (recommended)
-python3 -m geakagent.run.mini -m claude-sonnet-4.5 \
-  -t "Optimize kernel at /path/to/kernel.py" \
-  --yolo
+# Build and run the Docker container
+cd GEAK    # this repo (branch: msa)
+export AMD_LLM_API_KEY=<your-key>
+bash scripts/run-docker.sh
+```
 
-# Force Docker with default image
-python3 -m geakagent.run.mini -m claude-sonnet-4.5 \
-  -t "Optimize kernel" \
-  --runtime docker \
-  --workspace /path/to/kernels \
+This builds a container with all tools pre-installed (OpenEvolve, Metrix, MCP servers).
+
+### Run the Agent
+
+```bash
+# Inside Docker container:
+python3 -m geakagent.run.mini \
+  -m claude-opus-4-5 \
+  -t "Complete GEAK Agent Pipeline for examples/add_kernel/kernel.py
+1. DISCOVER: Analyze the kernel
+2. TEST GENERATION: Create test cases
+3. BENCHMARKING: Profile baseline with Metrix and create COMMANDMENT.md
+4. OPTIMIZATION: Use OpenEvolve MCP with max_iterations=10
+5. Save optimized kernel and metrics" \
   --yolo
 ```
 
-**💡 New:** Auto-detects GPU environment, defaults to Docker `lmsysorg/sglang:v0.5.6.post1-rocm700-mi35x` if needed.
+### Run on AIG-Eval Kernels
 
-📖 See [RUNTIME_QUICKSTART.md](RUNTIME_QUICKSTART.md) | [RUNTIME_ENV.md](RUNTIME_ENV.md) for details.
+```bash
+# Clone AIG-Eval (inside container or mounted)
+git clone -b geak-eval-kernels git@github.com:AMD-AGI/AIG-Eval.git
+
+# Run optimization on a single kernel
+cd AIG-Eval/tasks/geak_eval
+bash run.sh fused_qkv_rope --optimize --gpu 0 --iterations 5
+
+# Run on all 8 kernels
+bash run.sh --all --optimize --gpu 0 --iterations 10
+```
+
+### Direct OpenEvolve Invocation
+
+```bash
+# Auto-build mode (generates COMMANDMENT.md from kernel)
+python3 $GEAK_OE_ROOT/examples/geak_eval/run_openevolve.py \
+  /path/to/kernel.py \
+  --iterations 10 --gpu 0 --output /path/to/output
+
+# Pre-built COMMANDMENT mode (for custom evaluation pipelines)
+python3 $GEAK_OE_ROOT/examples/geak_eval/run_openevolve.py \
+  /path/to/kernel.py \
+  --iterations 10 --gpu 0 --output /path/to/output \
+  --commandment /path/to/COMMANDMENT.md \
+  --baseline-metrics /path/to/baseline_metrics.json
+```
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      GEAK AGENT                             │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  LLM generates:                                             │
-│    - Bash commands (edit files, run tests, benchmark)       │
-│    - MCP tool calls (profile, evolve, discover)             │
-│                                                             │
-│  Execute → Observe → Repeat                                 │
-│                                                             │
-├─────────────────────────────────────────────────────────────┤
-│  Available MCPs:                                            │
-│    - automated-test-discovery  (find tests/benchmarks)      │
-│    - kernel-profiler          (rocprof-compute profiling)   │
-│    - kernel-evolve            (LLM mutation/crossover)      │
-│    - kernel-ercs              (evaluation/reflection)       │
-└─────────────────────────────────────────────────────────────┘
+GEAK-MSA Pipeline (mini-SWE-agent)
+====================================
+
+1. DISCOVER    --> Find kernel files
+2. TEST GEN    --> Generate test cases / correctness checks
+3. BASELINE    --> Profile with Metrix, validate evaluation commands
+4. FREEZE      --> Write COMMANDMENT.md (immutable during optimization)
+5. OPTIMIZE    --> OpenEvolve evolutionary optimization
+6. REPORT      --> Best kernel + speedup metrics
+
+COMMANDMENT.md = Universal Contract
+=====================================
+  SETUP:        Environment setup, GPU warmup
+  CORRECTNESS:  Deterministic correctness check vs baseline
+  PROFILE:      Metrix hardware profiling (warm-up + measurement)
+
+  - Written ONLY after all commands validated on baseline
+  - Frozen during OpenEvolve evolution (never changes)
+  - Each candidate evaluated with exact same commands
+  - GPU isolation: one GPU per evaluation, no contention
 ```
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `openevolve-mcp` | OpenEvolve optimizer (COMMANDMENT-based, multi-file) |
+| `kernel-profiler` | Metrix hardware profiling (rocprofv3) |
+| `kernel-evolve` | LLM mutation/crossover strategies |
+| `kernel-ercs` | Evaluation/reflection |
+| `automated-test-discovery` | Find tests/benchmarks |
+
+### OpenEvolve Integration
+
+OpenEvolve is auto-installed in the Docker container from the
+[`optimizer-geak-openevolve`](https://github.com/AMD-AGI/GEAK/tree/optimizer-geak-openevolve) branch.
+
+Key features:
+- **Multi-file support**: Kernels can span multiple files (no SEPARATOR format)
+- **COMMANDMENT.md**: Frozen, deterministic evaluation contract
+- **GPU isolation**: GPUPool ensures exclusive GPU per concurrent evaluation
+- **Metrix profiler**: Hardware-level metrics (bandwidth, cache hit rates, compute utilization)
+- **Warm-up passes**: Stable baseline measurements (not cold-start inflated)
+- **Baseline profiling in prompts**: LLM receives hardware metrics to guide optimization
 
 ## Installation
 
-```bash
-# Clone the repository
-git clone -b msa2 https://github.com/AMD-AGI/GEAK-agent.git
-cd GEAK-agent
+### Docker (Recommended)
 
+```bash
+git clone -b msa https://github.com/AMD-AGI/GEAK.git
+cd GEAK
+export AMD_LLM_API_KEY=<your-key>
+bash scripts/run-docker.sh
+```
+
+The Dockerfile handles all dependencies:
+- GEAK-agent (this package)
+- OpenEvolve (optimizer-geak-openevolve branch)
+- Metrix (hardware profiler from AMD intellikit)
+- All MCP servers
+
+### Manual Installation
+
+```bash
 # 1. Install main package
 pip install -e .
 
 # 2. Clone and install OpenEvolve
-git clone -b geak-openevolve https://github.com/AMD-AGI/GEAK-agent.git geak-oe
-cd geak-oe && PIP_USER=1 python3 -m pip install -e . --no-build-isolation && cd ..
+git clone -b optimizer-geak-openevolve https://github.com/AMD-AGI/GEAK.git geak-oe
+cd geak-oe && pip install -e . --no-build-isolation && cd ..
+export GEAK_OE_ROOT=$(pwd)/geak-oe
 
 # 3. Install MCP servers
 pip install -e mcp_tools/openevolve-mcp/
-python3 -m pip install -e mcp_tools/mcp-client/ --no-build-isolation
+pip install -e mcp_tools/mcp-client/
+pip install -e mcp_tools/kernel-profiler/
+pip install -e mcp_tools/kernel-evolve/
+pip install -e mcp_tools/kernel-ercs/
+
+# 4. Install Metrix (requires ROCm)
+git clone https://github.com/AMDResearch/intellikit.git
+cd intellikit/metrix && pip install -e . && cd ../..
 ```
 
-## Usage
+## Environment Variables
 
-### Example: Full Pipeline Command
-
-```bash
-export ANTHROPIC_API_KEY="your-api-key"
-python3 -m geakagent.run.mini \
-  -m claude-sonnet-4.5 \
-  -t "Complete GEAK Agent Pipeline for examples/add_kernel/kernel.py
-
-1. DISCOVER: Analyze the kernel
-2. TEST GENERATION: Create test cases in examples/add_kernel/tests/
-3. BENCHMARKING: Save baseline metrics to benchmark/baseline/metrics.json
-4. OPTIMIZATION: Use OpenEvolve MCP (mcp_tools/openevolve-mcp) with max_iterations=10
-5. Save optimized kernel to kernel_optimized.py and metrics to benchmark/optimized/metrics.json" \
-  --yolo
-```
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `AMD_LLM_API_KEY` | API key for AMD LLM gateway | Yes |
+| `GEAK_OE_ROOT` | Path to OpenEvolve repo (default: `/workspace/geak-oe`) | No |
+| `OPENAI_API_KEY` | Set to `AMD_LLM_API_KEY` value for OpenEvolve | For optimization |
+| `HIP_VISIBLE_DEVICES` | GPU devices to use (default: `0`) | No |
 
 ## Project Structure
 
 ```
-GEAK-agent/
-├── src/geakagent/          # Main agent (minswe-based)
-│   ├── agents/             # Agent implementations
-│   ├── config/             # Configuration files
-│   ├── environments/       # Execution environments
-│   ├── models/             # LLM interfaces
-│   ├── optimizer/          # Optimizer interface
-│   └── run/                # CLI entry points
-├── mcp_tools/              # MCP servers & client (consolidated)
-│   ├── automated-test-discovery/   # MCP: test discovery
-│   ├── kernel-profiler/            # MCP: GPU profiling
-│   ├── kernel-evolve/              # MCP: optimization strategies
-│   ├── kernel-ercs/                # MCP: evaluation/reflection
-│   ├── openevolve-mcp/             # MCP: OpenEvolve optimizer
-│   └── mcp-client/                 # MCP: Protocol client (JSON-RPC)
-├── geak_agent/             # Discovery pipeline
-├── examples/               # Example kernels
-├── reference/              # Reference files from old agent
-│   ├── optimization_strategies.py
-│   └── state.py
-└── docs/
+GEAK/  (branch: msa)
+|-- src/geakagent/          # Main agent (minswe-based)
+|   |-- agents/             # Agent implementations
+|   |-- config/             # Configuration files (mini.yaml)
+|   |-- environments/       # Execution environments (local, docker)
+|   |-- models/             # LLM interfaces (AMD LLM gateway)
+|   |-- optimizer/          # Optimizer interface
+|   +-- run/                # CLI entry points
+|-- mcp_tools/              # MCP servers
+|   |-- openevolve-mcp/     # OpenEvolve optimizer (subprocess-based)
+|   |-- kernel-profiler/    # Metrix hardware profiling
+|   |-- kernel-evolve/      # LLM mutation strategies
+|   |-- kernel-ercs/        # Evaluation/reflection
+|   +-- mcp-client/         # MCP protocol client
+|-- examples/               # Example kernels (add_kernel)
+|-- scripts/                # Docker setup (run-docker.sh)
++-- docs/                   # Documentation
 ```
 
 ## Reference

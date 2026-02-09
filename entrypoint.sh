@@ -59,6 +59,23 @@ else
     FAILED_CHECKS=$((FAILED_CHECKS + 1))
 fi
 
+# Check OpenEvolve installation
+if python3 -c "from openevolve import OpenEvolve; print('OK')" > /dev/null 2>&1; then
+    echo "✅ openevolve: OK"
+else
+    echo "❌ openevolve: Not importable"
+    FAILED_CHECKS=$((FAILED_CHECKS + 1))
+fi
+
+# Check run_openevolve.py exists
+GEAK_OE_ROOT="${GEAK_OE_ROOT:-/workspace/geak-oe}"
+if [ -f "${GEAK_OE_ROOT}/examples/geak_eval/run_openevolve.py" ]; then
+    echo "✅ run_openevolve.py: OK (${GEAK_OE_ROOT})"
+else
+    echo "❌ run_openevolve.py: Not found at ${GEAK_OE_ROOT}/examples/geak_eval/"
+    FAILED_CHECKS=$((FAILED_CHECKS + 1))
+fi
+
 # Summary
 echo ""
 if [ $FAILED_CHECKS -eq 0 ]; then
