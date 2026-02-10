@@ -82,6 +82,31 @@ logging.basicConfig(
 logger = logging.getLogger("run_openevolve")
 
 
+def _setup_file_logging(output_dir: str) -> None:
+    """
+    Add a file handler to the root logger so that ALL log messages
+    (from run_openevolve, openevolve.controller, openevolve.evaluator,
+    openevolve.commandment_evaluator, etc.) are written to
+    ``{output_dir}/openevolve.log``.
+
+    This file can be monitored in real-time with:
+        tail -f <output_dir>/openevolve.log
+
+    This is critical when OpenEvolve is invoked by the mini-SWE-agent,
+    which buffers subprocess stdout/stderr until the command completes.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, "openevolve.log")
+    file_handler = logging.FileHandler(log_path, mode="a")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    )
+    logging.getLogger().addHandler(file_handler)
+    logger.info(f"Logging to file: {log_path}")
+    logger.info(f"Monitor with: tail -f {log_path}")
+
+
 # ===========================================================================
 # GPU detection
 # ===========================================================================
@@ -627,6 +652,10 @@ async def run_openevolve(
     kernel_path = os.path.abspath(kernel_path)
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
+
+    # Set up file logging so all output goes to openevolve.log
+    # (visible via `tail -f` even when subprocess stdout is buffered)
+    _setup_file_logging(output_dir)
 
     evaluator_path = str(Path(__file__).parent / "geak_eval_evaluator.py")
 

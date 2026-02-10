@@ -369,16 +369,17 @@ class OpenEvolve:
         for i in range(start_iteration, total_iterations):
             iteration_start = time.time()
 
-            # Prominent iteration header (flushed to stdout)
+            # Prominent iteration header (logged + flushed to stdout)
             _best = self.database.get_best_program()
             _best_sp = _best.metrics.get("speedup", _best.metrics.get("combined_score", 0)) if _best else 0
-            print(
-                f"\n{'=' * 60}\n"
+            _iter_msg = (
                 f"[OpenEvolve] ITERATION {i + 1}/{total_iterations}  "
-                f"(best so far: {_best_sp:.4f}x)\n"
-                f"{'=' * 60}",
-                flush=True,
+                f"(best so far: {_best_sp:.4f}x)"
             )
+            logger.info("=" * 60)
+            logger.info(_iter_msg)
+            logger.info("=" * 60)
+            print(f"\n{'=' * 60}\n{_iter_msg}\n{'=' * 60}", flush=True)
 
             # Manage island evolution - switch islands periodically
             # if i > start_iteration and current_island_counter >= programs_per_island:
