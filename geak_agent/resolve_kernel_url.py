@@ -17,6 +17,31 @@ def is_weblink(s: str) -> bool:
     return s.startswith("http://") or s.startswith("https://")
 
 
+def _parse_fragment(spec: str) -> tuple[int | None, int | None]:
+    """Parse #L106 or #L106-L108 from spec. Returns (line_start, line_end) or (None, None)."""
+    if "#" not in spec:
+        return (None, None)
+    frag = spec.split("#", 1)[1].strip()
+    if not frag.startswith("L"):
+        return (None, None)
+    part = frag[1:].strip()
+    if "-" in part:
+        a, b = part.split("-", 1)
+        try:
+            return (int(a.strip()), int(b.strip().lstrip("L")))
+        except ValueError:
+            return (None, None)
+    try:
+        return (int(part), int(part))
+    except ValueError:
+        return (None, None)
+
+
+def _strip_fragment(spec: str) -> str:
+    """Return spec without #L123 fragment."""
+    return spec.split("#", 1)[0].rstrip()
+
+
 def _parse_github_blob(url: str) -> tuple[str, str, str, str] | None:
     """
     Parse GitHub blob URL: https://github.com/OWNER/REPO/blob/BRANCH/PATH
@@ -37,31 +62,38 @@ def _parse_github_blob(url: str) -> tuple[str, str, str, str] | None:
     return None
 
 
-def resolve_kernel_url(spec: str) -> dict:
+def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
     """
     If spec is a web link (e.g. GitHub file URL), clone the repo to a temp dir
-    and return local paths. Otherwise return the spec as a local path.
+    (or into clone_into/.geak_resolved/<repo> if clone_into is set) and return local paths.
+    Otherwise return the spec as a local path.
 
     Returns dict with: is_weblink, local_repo_path (or None), local_file_path,
-    original_spec, error (or None).
+    original_spec, line_number (int or None), line_end (int or None), error (or None).
     """
     spec = (spec or "").strip()
+    line_start, line_end = _parse_fragment(spec)
+    spec_no_frag = _strip_fragment(spec)
     out = {
         "is_weblink": False,
         "local_repo_path": None,
-        "local_file_path": spec,
+        "local_file_path": spec_no_frag,
         "original_spec": spec,
+        "line_number": line_start,
+        "line_end": line_end,
         "error": None,
     }
-    if not spec:
+    if not spec_no_frag:
         out["error"] = "Empty spec"
         return out
-    if not is_weblink(spec):
-        out["local_file_path"] = spec
+    if not is_weblink(spec_no_frag):
+        out["local_file_path"] = spec_no_frag
+        out["line_number"] = line_start
+        out["line_end"] = line_end
         return out
 
     out["is_weblink"] = True
-    parsed = _parse_github_blob(spec)
+    parsed = _parse_github_blob(spec_no_frag)
     if not parsed:
         out["error"] = "Only GitHub blob or raw URLs are supported"
         return out
@@ -69,7 +101,20 @@ def resolve_kernel_url(spec: str) -> dict:
     owner, repo, branch, file_path = parsed
     clone_url = f"https://github.com/{owner}/{repo}.git"
     try:
-        tmpdir = tempfile.mkdtemp(prefix=f"geak_kernel_{repo}_")
+        if clone_into is not None:
+            base = Path(clone_into)
+            base.mkdir(parents=True, exist_ok=True)
+            tmpdir_path = base / ".geak_resolved" / f"{owner}_{repo}"
+            tmpdir_path.mkdir(parents=True, exist_ok=True)
+            tmpdir = str(tmpdir_path)
+            if (tmpdir_path / file_path).exists():
+                out["local_repo_path"] = tmpdir
+                out["local_file_path"] = str((tmpdir_path / file_path).resolve())
+                out["line_number"] = line_start
+                out["line_end"] = line_end
+                return out
+        else:
+            tmpdir = tempfile.mkdtemp(prefix=f"geak_kernel_{repo}_")
         result = subprocess.run(
             ["git", "clone", "--depth", "1", "-b", branch, clone_url, tmpdir],
             capture_output=True,
@@ -85,6 +130,8 @@ def resolve_kernel_url(spec: str) -> dict:
             return out
         out["local_repo_path"] = tmpdir
         out["local_file_path"] = str(local_file.resolve())
+        out["line_number"] = line_start
+        out["line_end"] = line_end
         return out
     except subprocess.TimeoutExpired:
         out["error"] = "git clone timed out"
@@ -95,6 +142,38 @@ def resolve_kernel_url(spec: str) -> dict:
     except Exception as e:
         out["error"] = str(e)
         return out
+
+
+def get_kernel_name_at_line(file_path: str | Path, line_number: int) -> str | None:
+    """
+    Return the name of the kernel (e.g. @triton.jit function or def) that contains the given line.
+    Scans the file for def/async def; returns the innermost function name that spans line_number.
+    Returns None if not found.
+    """
+    path = Path(file_path)
+    if not path.exists() or line_number < 1:
+        return None
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return None
+    # Build (name, start_line, end_line) for each top-level def
+    funcs: list[tuple[str, int, int]] = []
+    for i, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if stripped.startswith("def ") or stripped.startswith("async def "):
+            match = re.match(r"(?:async\s+)?def\s+(\w+)\s*\(", stripped)
+            if match:
+                if funcs:
+                    prev_name, prev_start, _ = funcs[-1]
+                    funcs[-1] = (prev_name, prev_start, i)
+                funcs.append((match.group(1), i, len(lines) + 1))
+    if funcs and len(funcs) > 1:
+        funcs[-1] = (funcs[-1][0], funcs[-1][1], len(lines) + 1)
+    for name, start, end in reversed(funcs):
+        if start <= line_number < end:
+            return name
+    return None
 
 
 def cleanup_resolved_path(local_repo_path: str | None) -> None:

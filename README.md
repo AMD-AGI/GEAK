@@ -32,6 +32,27 @@ python3 -m geakagent.run.mini -m claude-opus-4-5 \
   --yolo
 ```
 
+### Run with a kernel URL (weblink)
+
+You can pass the kernel as a GitHub URL instead of a local path. The agent will resolve it to a local path (cloning the repo into the workspace if needed) and inject path, optional line number, and kernel name into the task.
+
+```bash
+# URL only (no line): discovery identifies kernel(s) in the file
+python3 -m geakagent.run.mini -m claude-opus-4-5 \
+  --kernel-url "https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/rope/rope.py" \
+  -t "Complete GEAK Agent Pipeline: 1. DISCOVER 2. TEST GEN 3. BENCHMARK 4. OPTIMIZE 5. Save results" \
+  --yolo
+
+# URL with line (e.g. #L106): resolved kernel name is passed; agent uses kernel-profile --filter '<name>' when profiling
+python3 -m geakagent.run.mini -m claude-opus-4-5 \
+  --kernel-url "https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/rope/rope.py#L106" \
+  -t "Complete GEAK Agent Pipeline: 1. DISCOVER 2. TEST GEN 3. BENCHMARK 4. OPTIMIZE 5. Save results" \
+  --yolo
+```
+
+- **Line number is optional.** Without `#L123`, the injected task tells the agent that discovery should identify the kernel(s). With `#L123`, the resolved kernel function name is included and the agent is instructed to use `kernel-profile --filter '<name>'` when the file has multiple kernels.
+- Resolving uses `geak_agent.resolve_kernel_url`; when using Docker, the clone is placed under the workspace so the container sees the file.
+
 ### Run on AIG-Eval Kernels
 
 ```bash
@@ -167,7 +188,7 @@ pip install -e mcp_tools/openevolve-mcp/ -e mcp_tools/mcp-client/
 | Variable | Description |
 |----------|-------------|
 | `AMD_LLM_API_KEY` | API key for AMD LLM gateway (required) |
-| `GEAK_OE_ROOT` | Path to OpenEvolve repo (default: `/workspace/geak-oe`) |
+| `GEAK_OE_ROOT` | Path to OpenEvolve repo (default: `/opt/geak-oe` in Docker so it is not hidden by the `-v REPO:/workspace` mount) |
 | `HIP_VISIBLE_DEVICES` | GPU devices (default: `0`) |
 
 ---

@@ -8,19 +8,31 @@ _repo_root = Path(__file__).resolve().parent.parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from geak_agent.resolve_kernel_url import cleanup_resolved_path, resolve_kernel_url
+from geak_agent.resolve_kernel_url import (
+    get_kernel_name_at_line,
+    resolve_kernel_url,
+)
 
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: python geak_agent/examples/resolve_kernel_url.py <spec>")
         print("       ./geak_agent/examples/resolve_kernel_url.py <spec>")
-        print("  spec: local path or GitHub URL (e.g. https://github.com/OWNER/REPO/blob/BRANCH/path/to/file.py)")
+        print("  spec: local path or GitHub URL; optional fragment #L106 or #L106-L108")
         sys.exit(1)
     spec = sys.argv[1].strip()
     result = resolve_kernel_url(spec)
     print("is_weblink:", result["is_weblink"])
     print("local_file_path:", result["local_file_path"])
+    if result.get("line_number") is not None:
+        print("line_number:", result["line_number"])
+        if result.get("line_end") != result.get("line_number"):
+            print("line_end:", result["line_end"])
+        path = result["local_file_path"]
+        if path:
+            name = get_kernel_name_at_line(path, result["line_number"])
+            if name is not None:
+                print("kernel_name:", name)
     if result.get("local_repo_path"):
         print("local_repo_path:", result["local_repo_path"])
     if result.get("error"):

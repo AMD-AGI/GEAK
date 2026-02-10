@@ -7,8 +7,11 @@ from unittest.mock import patch
 import pytest
 
 from geak_agent.resolve_kernel_url import (
+    _parse_fragment,
     _parse_github_blob,
+    _strip_fragment,
     cleanup_resolved_path,
+    get_kernel_name_at_line,
     is_weblink,
     resolve_kernel_url,
 )
@@ -53,6 +56,53 @@ class TestParseGithubBlob:
         assert _parse_github_blob("https://raw.githubusercontent.com/owner/repo") is None
 
 
+class TestParseFragment:
+    def test_no_fragment(self):
+        assert _parse_fragment("https://github.com/a/b/blob/main/f.py") == (None, None)
+        assert _parse_fragment("/path/to/f.py") == (None, None)
+
+    def test_single_line(self):
+        assert _parse_fragment("file.py#L106") == (106, 106)
+        assert _parse_fragment("https://github.com/a/b/blob/main/f.py#L106") == (106, 106)
+
+    def test_line_range(self):
+        assert _parse_fragment("f.py#L106-L108") == (106, 108)
+        assert _parse_fragment("f.py#L10-L20") == (10, 20)
+
+
+class TestStripFragment:
+    def test_strip_fragment(self):
+        assert _strip_fragment("file.py#L106") == "file.py"
+        assert _strip_fragment("https://github.com/a/b/blob/main/f.py#L106") == "https://github.com/a/b/blob/main/f.py"
+
+
+class TestGetKernelNameAtLine:
+    def test_returns_function_containing_line(self, tmp_path):
+        f = tmp_path / "k.py"
+        f.write_text(
+            "def foo():\n"
+            "    pass\n"
+            "def bar():\n"
+            "    x = 1\n"
+            "    y = 2\n"
+            "def baz():\n"
+            "    pass\n"
+        )
+        assert get_kernel_name_at_line(f, 1) == "foo"
+        assert get_kernel_name_at_line(f, 2) == "foo"
+        assert get_kernel_name_at_line(f, 3) == "bar"
+        assert get_kernel_name_at_line(f, 5) == "bar"
+        assert get_kernel_name_at_line(f, 6) == "baz"
+
+    def test_none_for_invalid_path(self):
+        assert get_kernel_name_at_line("/nonexistent/k.py", 1) is None
+
+    def test_none_for_invalid_line(self, tmp_path):
+        (tmp_path / "k.py").write_text("def foo(): pass\n")
+        assert get_kernel_name_at_line(tmp_path / "k.py", 0) is None
+        assert get_kernel_name_at_line(tmp_path / "k.py", 99) is None
+
+
 class TestResolveKernelUrl:
     def test_empty_spec_returns_error(self):
         out = resolve_kernel_url("")
@@ -75,6 +125,17 @@ class TestResolveKernelUrl:
         out = resolve_kernel_url("aiter/ops/triton/moe/moe_op_gelu.py")
         assert out["is_weblink"] is False
         assert out["local_file_path"] == "aiter/ops/triton/moe/moe_op_gelu.py"
+
+    def test_local_path_with_fragment_returns_line_number(self):
+        out = resolve_kernel_url("/path/to/kernel.py#L106")
+        assert out["local_file_path"] == "/path/to/kernel.py"
+        assert out["line_number"] == 106
+        assert out["line_end"] == 106
+
+    def test_local_path_with_line_range(self):
+        out = resolve_kernel_url("/path/to/k.py#L10-L20")
+        assert out["line_number"] == 10
+        assert out["line_end"] == 20
 
     def test_unsupported_url_returns_error(self):
         out = resolve_kernel_url("https://gitlab.com/owner/repo/file.py")

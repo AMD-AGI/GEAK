@@ -25,7 +25,7 @@ print(f"Found {len(result.tests)} tests")
 
 ## resolve_kernel_url.py
 
-Resolve a kernel spec to a local path. If the spec is a GitHub URL, the repo is cloned to a temp dir and the file path is returned. Requires `git` and network access for GitHub URLs.
+Resolve a kernel spec to a local path. If the spec is a GitHub URL, the repo is cloned to a temp dir and the file path is returned. Optional fragment `#L106` or `#L106-L108` is parsed; when present, the script also prints `line_number` and `kernel_name` (the function containing that line). Requires `git` and network access for GitHub URLs.
 
 ### Basic Usage
 
@@ -37,6 +37,9 @@ python geak_agent/examples/resolve_kernel_url.py /path/to/kernel.py
 
 # GitHub blob URL (clones repo to temp, returns local path)
 python geak_agent/examples/resolve_kernel_url.py 'https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/moe/moe_op_gelu.py'
+
+# With optional line number (output includes line_number and kernel_name for use with kernel-profile --filter)
+python geak_agent/examples/resolve_kernel_url.py 'https://github.com/.../rope.py#L106'
 ```
 
 ---

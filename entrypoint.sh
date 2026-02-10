@@ -68,7 +68,7 @@ else
 fi
 
 # Check run_openevolve.py exists
-GEAK_OE_ROOT="${GEAK_OE_ROOT:-/workspace/geak-oe}"
+GEAK_OE_ROOT="${GEAK_OE_ROOT:-/opt/geak-oe}"
 if [ -f "${GEAK_OE_ROOT}/examples/geak_eval/run_openevolve.py" ]; then
     echo "✅ run_openevolve.py: OK (${GEAK_OE_ROOT})"
 else

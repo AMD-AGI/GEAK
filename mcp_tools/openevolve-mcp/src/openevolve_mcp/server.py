@@ -41,6 +41,7 @@ mcp = FastMCP(
 GEAK_OE_ROOT = os.environ.get("GEAK_OE_ROOT", "")
 if not GEAK_OE_ROOT:
     for candidate in [
+        "/opt/geak-oe",
         "/workspace/geak-oe",
         str(Path(__file__).parent.parent.parent.parent.parent / "geak-oe"),
         os.path.join(os.path.expanduser("~"), "geak-oe-fresh"),
@@ -70,7 +71,7 @@ def _find_run_openevolve() -> str:
 
     raise FileNotFoundError(
         "run_openevolve.py not found. Set GEAK_OE_ROOT environment variable "
-        "to the OpenEvolve repository root (e.g. /workspace/geak-oe)."
+        "to the OpenEvolve repository root (e.g. /opt/geak-oe)."
     )
 
 
