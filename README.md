@@ -63,6 +63,11 @@ python3 $GEAK_OE_ROOT/examples/geak_eval/run_openevolve.py \
 
 See [docs/RUNTIME_QUICKSTART.md](docs/RUNTIME_QUICKSTART.md) and [docs/RUNTIME_ENV.md](docs/RUNTIME_ENV.md) for runtime options.
 
+**Optional configuration** (e.g. for benchmarks or evals that need stricter behavior):
+
+- **Protected files**: set env `GEAK_PROTECTED_FILES` to a comma-separated list of basenames (e.g. `kernel.py`) to block shell commands from overwriting those files. Alternatively set `env.protected_files` in your config.
+- **Summary on cost limit**: when the cost limit is hit, the agent can get one extra step to write a summary. Enable via env `GEAK_SUMMARY_ON_COST_LIMIT=1` (or set `agent.summary_on_cost_limit: true` in config). Optionally set `GEAK_SUMMARY_ON_LIMIT_PROMPT` (or `agent.summary_on_limit_prompt`) to the exact instruction text for that step.
+
 ---
 
 ## Architecture
@@ -95,9 +100,36 @@ COMMANDMENT.md = Universal Contract
 | `kernel-ercs` | Evaluation/reflection |
 | `automated-test-discovery` | Find tests/benchmarks |
 
-### OpenEvolve Integration
+### OpenEvolve Integration (geak-oe)
 
-OpenEvolve is auto-installed in the Docker container from the [`optimizer-geak-openevolve`](https://github.com/AMD-AGI/GEAK/tree/optimizer-geak-openevolve) branch.
+OpenEvolve is auto-installed in the Docker container from the [`optimizer-geak-openevolve`](https://github.com/AMD-AGI/GEAK/tree/optimizer-geak-openevolve) branch (clone name: **geak-oe**, path: `GEAK_OE_ROOT`).
+
+**What the optimizer can use (from the cherry-pick / newer additions):**
+
+| Component | Purpose |
+|-----------|---------|
+| **geak-oe** | GEAK repo clone; contains `run_openevolve.py` (builds COMMANDMENT.md, runs evolution) |
+| **openevolve-mcp** | MCP server that invokes `run_openevolve.py`; tool `optimize_kernel(kernel_path, max_iterations, gpu, output_dir, commandment_path, baseline_metrics_path)` |
+| **geakagent.optimizer** | Python API: `optimize_kernel(..., optimizer=OptimizerType.OPENEVOLVE)` → calls openevolve-mcp (and thus geak-oe) |
+
+**From code:**
+
+```python
+from geakagent.optimizer import optimize_kernel, OptimizerType
+
+result = optimize_kernel(
+    kernel_code=code,
+    kernel_path="/path/to/kernel.py",
+    optimizer=OptimizerType.OPENEVOLVE,
+    max_iterations=10,
+    gpu=0,
+    output_dir="/path/to/output",
+    commandment_path="/path/to/COMMANDMENT.md",  # optional
+)
+# result.optimized_code, result.metrics["speedup"], result.iterations
+```
+
+**From a run script (e.g. AIG-Eval):** Set `GEAK_OE_ROOT` and either run `run_openevolve.py` directly, or call the optimizer API / openevolve-mcp. COMMANDMENT.md is produced in the output directory when `run_openevolve.py` runs (auto-built if not passed via `--commandment`).
 
 - **Multi-file support**: Kernels can span multiple files (no SEPARATOR format)
 - **COMMANDMENT.md**: Frozen, deterministic evaluation contract

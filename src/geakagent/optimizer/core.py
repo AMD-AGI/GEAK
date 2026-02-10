@@ -89,14 +89,9 @@ def _optimize_with_openevolve(
     strategy: Optional[str],
     **kwargs
 ) -> OptimizeResult:
-    """Use OpenEvolve optimizer via MCP."""
-    import subprocess
-    import json
-    
-    # Get kernel path
+    """Use OpenEvolve optimizer via MCP (openevolve-mcp calls run_openevolve.py from geak-oe)."""
     kernel_path = kwargs.get("kernel_path")
     if not kernel_path:
-        # Create temp file if just code provided
         import tempfile
         with tempfile.NamedTemporaryFile(
             mode='w', suffix='.py', delete=False
@@ -105,72 +100,65 @@ def _optimize_with_openevolve(
             kernel_path = Path(f.name)
     else:
         kernel_path = Path(kernel_path)
-    
-    # Prepare MCP call
-    mcp_request = {
-        "kernel_path": str(kernel_path),
-        "test_path": kwargs.get("test_path"),
-        "max_iterations": kwargs.get("max_iterations", 50),
-        "config": kwargs.get("openevolve_config"),
-        "docker_image": kwargs.get("docker_image", "lmsysorg/sglang:v0.5.6.post1-rocm700-mi35x")
+
+    # openevolve-mcp tool API: kernel_path, max_iterations, gpu, output_dir, commandment_path, baseline_metrics_path
+    mcp_request: Dict[str, Any] = {
+        "kernel_path": str(kernel_path.resolve()),
+        "max_iterations": kwargs.get("max_iterations", 10),
+        "gpu": kwargs.get("gpu", 0),
+        "output_dir": kwargs.get("output_dir"),
+        "commandment_path": kwargs.get("commandment_path"),
+        "baseline_metrics_path": kwargs.get("baseline_metrics_path"),
     }
-    
-    # Call OpenEvolve MCP tool
-    # Try proper MCP protocol first, fallback to direct import
+    # Drop None values so MCP tool uses its defaults
+    mcp_request = {k: v for k, v in mcp_request.items() if v is not None}
+
     try:
-        # Option 1: Use real MCP protocol (recommended)
         from mcp_client import MCPClient
         import asyncio
-        
+
+        mcp_path = Path(__file__).parent.parent.parent.parent / "mcp_tools" / "openevolve-mcp"
+        server_config = {
+            "command": ["python3", "-m", "openevolve_mcp.server"],
+            "cwd": str(mcp_path),
+            "env": {"PYTHONPATH": str(mcp_path / "src")},
+        }
         async def run_mcp():
-            """Run MCP client asynchronously."""
-            # Get server config from registry
-            mcp_path = Path(__file__).parent.parent.parent.parent / "mcp_tools" / "openevolve-mcp"
-            
-            server_config = {
-                "command": ["python3", "-m", "openevolve_mcp.server"],
-                "cwd": str(mcp_path),
-                "env": {
-                    "PYTHONPATH": str(mcp_path / "src")
-                }
-            }
-            
             async with MCPClient("openevolve-mcp", server_config) as client:
-                result = await client.call_tool("optimize_kernel", mcp_request)
-                return result
-        
-        # Run async MCP call
+                return await client.call_tool("optimize_kernel", mcp_request)
         result = asyncio.run(run_mcp())
-        
     except ImportError:
-        # Option 2: Fallback to direct import (backward compatibility)
+        # Fallback: invoke run_openevolve.py via openevolve-mcp server module (same as MCP tool does)
+        import os
         import sys
-        # Path from core.py → optimizer/ → geakagent/ → src/ → msa/ → mcp_tools/openevolve-mcp/src/
-        mcp_path = Path(__file__).parent.parent.parent.parent / "mcp_tools" / "openevolve-mcp" / "src"
-        if str(mcp_path) not in sys.path:
-            sys.path.insert(0, str(mcp_path))
-        
-        from openevolve_mcp.server import _optimize_kernel_impl as mcp_optimize_kernel
-        
-        # Call MCP implementation function directly (no protocol overhead)
-        result = mcp_optimize_kernel(
-            kernel_path=str(kernel_path),
-            test_path=mcp_request.get("test_path"),
-            max_iterations=mcp_request["max_iterations"],
-            config=mcp_request.get("config"),
-            docker_image=mcp_request["docker_image"]
-        )
-    
-    # Process result
-    if result.get("success"):
-        return OptimizeResult(
-            optimized_code=result["optimized_code"],
-            metrics=result["metrics"],
-            optimizer_used="openevolve",
-            iterations=result["iterations"]
-        )
-    else:
-        raise RuntimeError(f"OpenEvolve MCP failed: {result.get('error')}")
+        mcp_src = Path(__file__).parent.parent.parent.parent / "mcp_tools" / "openevolve-mcp" / "src"
+        if str(mcp_src) not in sys.path:
+            sys.path.insert(0, str(mcp_src))
+        os.environ.setdefault("GEAK_OE_ROOT", str(Path(__file__).parent.parent.parent.parent / "geak-oe"))
+        from openevolve_mcp.server import optimize_kernel as _mcp_optimize_kernel
+        # optimize_kernel is the @mcp.tool() function; call it with same args as MCP
+        result = _mcp_optimize_kernel(**mcp_request)
+
+    if not result.get("success"):
+        raise RuntimeError(result.get("error", "OpenEvolve failed"))
+
+    # Map MCP response to OptimizeResult (tool returns best_kernel_path, speedup, commandment_path, etc.)
+    best_path = result.get("best_kernel_path") or ""
+    optimized_code = ""
+    if best_path and Path(best_path).is_file():
+        optimized_code = Path(best_path).read_text()
+    metrics = {
+        "speedup": float(result.get("speedup", 1.0)),
+        "best_score": float(result.get("best_score", 1.0)),
+        "baseline_latency_us": float(result.get("baseline_latency_us", 0)),
+        "best_latency_us": float(result.get("best_latency_us", 0)),
+    }
+    return OptimizeResult(
+        optimized_code=optimized_code,
+        metrics=metrics,
+        optimizer_used="openevolve",
+        iterations=int(result.get("iterations_completed", 0)),
+    )
 
 
 def _optimize_with_autotune(kernel_code: str, **kwargs) -> OptimizeResult:

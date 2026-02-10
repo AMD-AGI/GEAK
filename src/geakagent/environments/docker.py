@@ -7,6 +7,11 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from geakagent.environments.protected_files import (
+    blocked_message,
+    would_write_protected_file,
+)
+
 
 @dataclass
 class DockerEnvironmentConfig:
@@ -32,6 +37,8 @@ class DockerEnvironmentConfig:
     """Max duration to keep container running. Uses the same format as the sleep command."""
     pull_timeout: int = 120
     """Timeout in seconds for pulling images."""
+    protected_files: list[str] = field(default_factory=list)
+    """Basename(s) of files that must not be modified (e.g. ['kernel.py'])."""
 
 
 class DockerEnvironment:
@@ -78,6 +85,11 @@ class DockerEnvironment:
         """Execute a command in the Docker container and return the result as a dict."""
         cwd = cwd or self.config.cwd
         assert self.container_id, "Container not started"
+        protected = getattr(self.config, "protected_files", None) or []
+        if protected:
+            blocked = would_write_protected_file(command, protected)
+            if blocked:
+                return {"output": blocked_message(blocked), "returncode": 1}
 
         cmd = [self.config.executable, "exec", "-w", cwd]
         for key in self.config.forward_env:

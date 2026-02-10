@@ -128,6 +128,14 @@ def main(
         config.setdefault("agent", {})["cost_limit"] = cost_limit
     if exit_immediately:
         config.setdefault("agent", {})["confirm_exit"] = False
+    if os.getenv("GEAK_PROTECTED_FILES"):
+        config.setdefault("env", {})["protected_files"] = [
+            f.strip() for f in os.getenv("GEAK_PROTECTED_FILES", "").split(",") if f.strip()
+        ]
+    if os.getenv("GEAK_SUMMARY_ON_COST_LIMIT", "").lower() in ("1", "true", "yes"):
+        config.setdefault("agent", {})["summary_on_cost_limit"] = True
+    if os.getenv("GEAK_SUMMARY_ON_LIMIT_PROMPT"):
+        config.setdefault("agent", {})["summary_on_limit_prompt"] = os.getenv("GEAK_SUMMARY_ON_LIMIT_PROMPT")
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
     model = get_model(model_name, config.get("model", {}))

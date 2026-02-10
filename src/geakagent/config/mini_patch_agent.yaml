@@ -151,6 +151,9 @@ agent:
   cost_limit: 0.
   mode: yolo
 env:
+  # Optional: protect files from being overwritten (e.g. baseline reference files).
+  # Can also be set via env var GEAK_PROTECTED_FILES (comma-separated basenames).
+  # protected_files: []
   env:
     PAGER: cat
     MANPAGER: cat
