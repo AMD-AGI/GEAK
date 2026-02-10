@@ -227,10 +227,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-     if output:
-            save_traj(agent, output, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
-    return agent
-
-
-if __name__ == "__main__":
-    app()
