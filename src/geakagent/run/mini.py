@@ -54,8 +54,8 @@ def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -
         line_info = f" Line: {line_num}"
         kernel_info = f", kernel name: {kernel_name!r}" if kernel_name else ""
         profile_hint = (
-            " When profiling, the kernel of interest is set automatically; do not use --auto-select."
-            if kernel_name else " When profiling, use --filter for the kernel of interest if the file has multiple kernels."
+            " When profiling, all kernels are reported (--auto-select is not used); the kernel of interest is filtered when set."
+            if kernel_name else " When profiling, all kernels are reported; use --filter if the file has multiple kernels."
         )
     else:
         line_info = ""

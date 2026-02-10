@@ -1,8 +1,9 @@
 """kernel-profile: Profile GPU kernels using MetrixTool (AMD ROCm).
 
 CLI for hardware-level kernel profiling. Naming aligned with kernel-evolve and kernel-ercs.
-When GEAK_PROFILE_KERNEL_FILTER is set (e.g. by mini --kernel-url), that kernel is
-profiled and --auto-select is ignored so the specified kernel is always targeted.
+--auto-select is never used: all kernels are profiled and reported so the agent can
+choose. When GEAK_PROFILE_KERNEL_FILTER is set (e.g. by mini --kernel-url), profiling
+is restricted to that kernel name but results are still shown for all matching kernels.
 """
 import argparse
 import os
@@ -51,7 +52,7 @@ def main():
     parser.add_argument(
         "--auto-select",
         action="store_true",
-        help="Automatically select main kernel (default: show all kernels)",
+        help="(Ignored: all kernels are always profiled and reported for the agent to use)",
     )
     parser.add_argument(
         "--quick",
@@ -61,12 +62,11 @@ def main():
 
     args = parser.parse_args()
 
-    # When pipeline set a specific kernel (e.g. from --kernel-url), use it and do not auto-select
+    # Never use --auto-select: always profile and report all kernels so the agent can decide
+    args.auto_select = False
     env_filter = os.environ.get("GEAK_PROFILE_KERNEL_FILTER", "").strip()
-    if env_filter:
-        if not args.filter:
-            args.filter = env_filter
-        args.auto_select = False  # profile only the specified kernel, not auto-selected "main"
+    if env_filter and not args.filter:
+        args.filter = env_filter
 
     # Parse GPU argument (support comma-separated list)
     gpu_devices = (
