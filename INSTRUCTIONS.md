@@ -77,6 +77,60 @@ Also run the kernel evaluation to verify correctness:
 cd KERNEL_DIR && python3 kernel.py
 ```
 
+### 1b. DISCOVER: Build a Test Harness (for non-standard kernels)
+
+When the kernel file does NOT have a built-in `--profile` flag or standard
+`triton_op`/`torch_op` interface, you must create a **test harness** — a small
+Python script that imports the kernel, creates test inputs, and provides
+`--correctness`, `--profile`, and `--benchmark` modes.
+
+**Common pitfalls to avoid when writing test harnesses:**
+
+1. **Import the kernel via the package path, NOT `importlib.util`.**
+   Triton kernels often have deep import chains (e.g.,
+   `from aiter.ops.triton._triton_kernels.rope.rope import ...`).
+   Using `spec.loader.exec_module` breaks these because the parent package
+   isn't initialised.  Instead, add the repo root to `sys.path` and use a
+   normal `import` or `from ... import`:
+   ```python
+   import sys
+   sys.path.insert(0, '/path/to/repo/root')
+   from aiter.ops.triton.rope.rope import rope_fwd, RotateStyle
+   ```
+
+2. **PYTHONPATH must be set BEFORE the process starts, not inline.**
+   `kernel-profile` passes the command to `rocprofv3` which uses `execvpe`.
+   Inline `PYTHONPATH=... python3 ...` won't work.  Instead, either:
+   - Set `PYTHONPATH` in the COMMANDMENT `## SETUP` section, or
+   - Create a small wrapper shell script:
+   ```bash
+   #!/bin/bash
+   export PYTHONPATH=/path/to/repo:$PYTHONPATH
+   python3 /path/to/test_harness.py "$@"
+   ```
+
+3. **Use a fixed random seed** (`torch.manual_seed(42)`) so that correctness
+   checks compare deterministic outputs.
+
+4. **Use these FIXED tensor sizes for all tests and profiling.**
+   The baseline and every OpenEvolve evaluation MUST use identical input
+   dimensions, otherwise speedup numbers are meaningless.  Use these
+   standard sizes (large enough to saturate the GPU):
+   - **Attention/RoPE kernels:** `S=2048, B=4, H=32, D=128` (fp16)
+   - **GEMM kernels:** `M=4096, N=4096, K=4096` (fp16)
+   - **Elementwise/pointwise:** at least 16M elements
+   Hardcode these in the test harness — do NOT let them vary between runs.
+
+5. **Use `torch.testing.assert_close`** for correctness, NOT manual
+   `torch.allclose` with always-pass fallbacks.
+
+6. **The `--profile` mode should run the kernel once** (with minimal setup)
+   so that `kernel-profile` / `rocprofv3` captures exactly the kernel(s)
+   you care about.  Avoid running benchmarks or loops in profile mode.
+
+7. **Keep the harness file OUTSIDE the kernel directory** or in a fixed
+   location that won't be overwritten by OpenEvolve's candidate files.
+
 ---
 
 ## 2. PROFILING: kernel-profile (Metrix)
@@ -86,7 +140,20 @@ baseline measurement, post-optimisation validation, or ad-hoc investigation.
 OpenEvolve also invokes it during evolution via the COMMANDMENT PROFILE section.
 
 ### Running the profiler
+
+**CRITICAL: Always warm up before profiling.** Triton kernels are JIT-compiled
+on first invocation.  If you profile a cold run, the measured duration will
+include compilation overhead and be much slower than steady-state performance.
+The COMMANDMENT.md template includes two warm-up runs before the actual
+`kernel-profile` call — your baseline profiling MUST do the same, otherwise
+the baseline duration will be inflated and all speedup numbers will be
+meaningless (comparing cold baseline vs warm evaluation).
+
 ```bash
+# Warm up (JIT compile + GPU power ramp) — MUST match COMMANDMENT warm-up
+python3 KERNEL_DIR/kernel.py --profile > /dev/null 2>&1 || true
+python3 KERNEL_DIR/kernel.py --profile > /dev/null 2>&1 || true
+# Now profile (kernel is already compiled and cached)
 kernel-profile "python3 KERNEL_DIR/kernel.py --profile" \
   --gpu-devices 0 --replays 5
 ```
@@ -117,7 +184,11 @@ expects.  You must tell it **exactly** which kernels to include.
 ```bash
 mkdir -p KERNEL_DIR/optimization_output
 
-# Step 1: Profile and save the raw profiler output
+# Step 0: Warm up (JIT compile + GPU power ramp) — MUST do before profiling!
+python3 KERNEL_DIR/kernel.py --profile > /dev/null 2>&1 || true
+python3 KERNEL_DIR/kernel.py --profile > /dev/null 2>&1 || true
+
+# Step 1: Profile and save the raw profiler output (kernel is now warm)
 python3 -c "
 from geak_agent.mcp_tools.metrix import MetrixTool
 from geakagent.baseline_metrics import list_kernels
@@ -230,10 +301,48 @@ PROFILE section must always include the full profiling command.  OpenEvolve
 decides when and how often to profile; the baseline_metrics.json is only the
 starting reference point.
 
+### Monitoring OpenEvolve in Real-Time
+
+OpenEvolve runs as a subprocess and its stdout is buffered until completion.
+To see live progress, **start a background `tail -f` on the progress log
+BEFORE launching OpenEvolve**, then run the optimizer:
+
+```bash
+# Step 1: Start the progress monitor in the background
+OUTPUT_DIR=KERNEL_DIR/optimization_output
+mkdir -p ${OUTPUT_DIR}
+tail -f ${OUTPUT_DIR}/progress.log 2>/dev/null &
+TAIL_PID=$!
+
+# Step 2: Run OpenEvolve (stdout will be buffered, but progress.log updates live)
+python3 /workspace/geak-oe/examples/geak_eval/run_openevolve.py \
+  KERNEL_DIR/kernel.py \
+  --iterations 10 --gpu 0 --output ${OUTPUT_DIR} \
+  --commandment ${OUTPUT_DIR}/COMMANDMENT.md \
+  --baseline-metrics ${OUTPUT_DIR}/baseline_metrics.json
+
+# Step 3: Clean up the tail process
+kill $TAIL_PID 2>/dev/null
+```
+
+This prints live updates like:
+```
+ITERATION 3  (186.2s)
+  Island 0: 5 programs, best=1.2806
+  Island 1: 3 programs, best=1.3072
+  *** OVERALL BEST SPEEDUP: 1.3072x ***
+```
+
+For detailed logs (LLM calls, per-candidate scores, errors):
+```bash
+tail -f ${OUTPUT_DIR}/openevolve.log
+```
+
 ### OpenEvolve Output Files
 - `optimization_output/best_kernel.py` — the best optimized kernel found
 - `optimization_output/openevolve_result.json` — final results with best score
-- `optimization_output/progress.log` — iteration-by-iteration progress
+- `optimization_output/progress.log` — iteration-by-iteration progress (tail -f friendly)
+- `optimization_output/openevolve.log` — detailed log (LLM calls, eval results, errors)
 - `optimization_output/COMMANDMENT.md` — the frozen evaluation contract
 - `optimization_output/evals/` — per-candidate evaluation directories
 
@@ -257,7 +366,7 @@ These are available in every command — do NOT set them yourself:
 3. **NEVER put a `cp` command in SETUP** — OpenEvolve writes kernel.py into `${GEAK_WORK_DIR}` automatically before running any section
 4. Always use `${GEAK_WORK_DIR}/kernel.py` to reference the candidate kernel
 5. Always use `${GEAK_GPU_DEVICE}` instead of hardcoded GPU IDs
-6. Include TWO warm-up runs before actual profiling (Triton JIT compilation + GPU power ramp)
+6. Include TWO warm-up runs before actual profiling (Triton JIT compilation + GPU power ramp). This MUST match the warm-up used during baseline profiling — otherwise speedup numbers will be inflated.
 7. Lines starting with `#` (comments) and empty lines are skipped
 8. Lines starting with ``` are skipped (don't wrap commands in code fences)
 9. Commands run with `cwd=${GEAK_WORK_DIR}`
