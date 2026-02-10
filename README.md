@@ -1,241 +1,201 @@
-<div align="center">
-<a href="https://mini-swe-agent.com/latest/"><img src="https://github.com/SWE-agent/mini-swe-agent/raw/main/docs/assets/mini-swe-agent-banner.svg" alt="mini-swe-agent banner" style="height: 7em"/></a>
-</div>
+# Mini SWE Agent
 
-# The 100 line AI agent that solves GitHub issues & more
+基于 LLM 驱动 Bash 命令的极简 AI 编码智能体，核心代码约 100 行。
 
-📣 [New blogpost: Randomly switching between GPT-5 and Sonnet 4 boosts performance](https://www.swebench.com/SWE-bench/blog/2025/08/19/mini-roulette/)
-
-[![Docs](https://img.shields.io/badge/Docs-green?style=for-the-badge&logo=materialformkdocs&logoColor=white)](https://mini-swe-agent.com/latest/)
-[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/swe-bench/shared_invite/zt-36pj9bu5s-o3_yXPZbaH2wVnxnss1EkQ)
-[![PyPI - Version](https://img.shields.io/pypi/v/mini-swe-agent?style=for-the-badge&logo=python&logoColor=white&labelColor=black&color=deeppink)](https://pypi.org/project/mini-swe-agent/)
-
-In 2024, [SWE-bench](https://github.com/swe-bench/SWE-bench) & [SWE-agent](https://github.com/swe-agent/swe-agent) helped kickstart the coding agent revolution.
-
-We now ask: **What if SWE-agent was 100x smaller, and still worked nearly as well?**
-
-`mini` is for
-
-- **Researchers** who want to **[benchmark](https://swe-bench.com), [fine-tune](https://swesmith.com/) or RL** without assumptions, bloat, or surprises
-- **Developers** who like their tools like their scripts: **short, sharp, and readable**
-- **Engineers** who want something **trivial to sandbox & to deploy anywhere**
-
-Here's some details:
-
-- **Minimal**: Just [100 lines of python](https://github.com/SWE-agent/mini-swe-agent/blob/main/src/minisweagent/agents/default.py) (+100 total for [env](https://github.com/SWE-agent/mini-swe-agent/blob/main/src/minisweagent/environments/local.py),
-[model](https://github.com/SWE-agent/mini-swe-agent/blob/main/src/minisweagent/models/litellm_model.py), [script](https://github.com/SWE-agent/mini-swe-agent/blob/main/src/minisweagent/run/hello_world.py)) — no fancy dependencies!
-- **Powerful:** Resolves >70% of GitHub issues in the [SWE-bench verified benchmark](https://www.swebench.com/) ([leaderboard](https://swe-bench.com/)).
-- **Convenient:** Comes with UIs that turn this into your daily dev swiss army knife!
-- **Deployable:** In addition to local envs, you can use **docker**, **podman**, **singularity**, **apptainer**, and more
-- **Tested:** [![Codecov](https://img.shields.io/codecov/c/github/swe-agent/mini-swe-agent?style=flat-square)](https://codecov.io/gh/SWE-agent/mini-swe-agent)
-- **Cutting edge:** Built by the Princeton & Stanford team behind [SWE-bench](https://swebench.com) and [SWE-agent](https://swe-agent.com).
-
-<details>
-
-<summary>More motivation (for research)</summary>
-
-[SWE-agent](https://swe-agent.com/latest/) jump-started the development of AI agents in 2024. Back then, we placed a lot of emphasis on tools and special interfaces for the agent.
-However, one year later, as LMs have become more capable, a lot of this is not needed at all to build a useful agent!
-In fact, mini-SWE-agent
-
-- **Does not have any tools other than bash** — it doesn't even use the tool-calling interface of the LMs.
-  This means that you can run it with literally any model. When running in sandboxed environments you also don't need to take care
-  of installing a single package — all it needs is bash.
-- **Has a completely linear history** — every step of the agent just appends to the messages and that's it.
-  So there's no difference between the trajectory and the messages that you pass on to the LM.
-  Great for debugging & fine-tuning.
-- **Executes actions with `subprocess.run`** — every action is completely independent (as opposed to keeping a stateful shell session running).
-  This makes it trivial to execute the actions in sandboxes (literally just switch out `subprocess.run` with `docker exec`) and to
-  scale up effortlessly. Seriously, this is [a big deal](https://mini-swe-agent.com/latest/faq/#why-no-shell-session), trust me.
-
-This makes it perfect as a baseline system and for a system that puts the language model (rather than
-the agent scaffold) in the middle of our attention.
-You can see the result on the [SWE-bench (bash only)](https://www.swebench.com/) leaderboard, that evaluates the performance of different LMs with `mini`.
-
-</details>
-
-<details>
-<summary>More motivation (as a tool)</summary>
-
-Some agents are overfitted research artifacts. Others are UI-heavy frontend monsters.
-
-`mini` wants to be a hackable tool, not a black box.
-
-- **Simple** enough to understand at a glance
-- **Convenient** enough to use in daily workflows
-- **Flexible** to extend
-
-Unlike other agents (including our own [swe-agent](https://swe-agent.com/latest/)), it is radically simpler, because it:
-
-- **Does not have any tools other than bash** — it doesn't even use the tool-calling interface of the LMs.
-  Instead of implementing custom tools for every specific thing the agent might want to do, the focus is fully on the LM utilizing the shell to its full potential.
-  Want it to do something specific like opening a PR?
-  Just tell the LM to figure it out rather than spending time to implement it in the agent.
-- **Executes actions with `subprocess.run`** — every action is completely independent (as opposed to keeping a stateful shell session running).
-  This is [a big deal](https://mini-swe-agent.com/latest/faq/#why-no-shell-session) for the stability of the agent, trust me.
-- **Has a completely linear history** — every step of the agent just appends to the messages that are passed to the LM in the next step and that's it.
-  This is great for debugging and understanding what the LM is prompted with.
-
-</details>
-
-<details>
-<summary>Should I use SWE-agent or mini-SWE-agent?</summary>
-
-You should use `mini-swe-agent` if
-
-- You want a quick command line tool that works locally
-- You want an agent with a very simple control flow
-- You want even faster, simpler & more stable sandboxing & benchmark evaluations
-- You are doing FT or RL and don't want to overfit to a specific agent scaffold
-
-You should use `swe-agent` if
-
-- You need specific tools or want to experiment with different tools
-- You want to experiment with different history processors
-- You want very powerful yaml configuration without touching code
-
-What you get with both
-
-- Excellent performance on SWE-Bench
-- A trajectory browser
-
-</details>
-
-<table>
-<tr>
-<td width="50%">
-<a href="https://mini-swe-agent.com/latest/usage/mini/"><strong>Simple UI</strong></a> (<code>mini</code>)
-</td>
-<td>
-<a href="https://mini-swe-agent.com/latest/usage/mini_v/"><strong>Visual UI</strong></a> (<code>mini -v</code>)
-</td>
-</tr>
-<tr>
-<td width="50%">
-
-  ![mini](https://github.com/SWE-agent/swe-agent-media/blob/main/media/mini/gif/mini.gif?raw=true)
-
-</td>
-<td>
-
-  ![miniv](https://github.com/SWE-agent/swe-agent-media/blob/main/media/mini/gif/mini2.gif?raw=true)
-
-</td>
-</tr>
-<tr>
-  <td>
-    <a href="https://mini-swe-agent.com/latest/usage/swebench/"><strong>Batch inference</strong></a>
-  </td>
-  <td>
-    <a href="https://mini-swe-agent.com/latest/usage/inspector/"><strong>Trajectory browser</strong></a>
-  </td>
-<tr>
-<tr>
-
-<td>
-
-![swebench](https://github.com/SWE-agent/swe-agent-media/blob/main/media/mini/gif/swebench.gif?raw=true)
-
-</td>
-
-<td>
-
-![inspector](https://github.com/SWE-agent/swe-agent-media/blob/main/media/mini/gif/inspector.gif?raw=true)
-
-</td>
-
-</tr>
-<td>
-<a href="https://mini-swe-agent.com/latest/advanced/cookbook/"><strong>Python bindings</strong></a>
-</td>
-<td>
-<a href="https://mini-swe-agent.com"><strong>More in the docs</strong></a>
-</td>
-</tr>
-<tr>
-<td>
-
-```python
-agent = DefaultAgent(
-    LitellmModel(model_name=...),
-    LocalEnvironment(),
-)
-agent.run("Write a sudoku game")
-```
-</td>
-<td>
-
-* [Quick start](https://mini-swe-agent.com/latest/quickstart/)
-* [`mini`](https://mini-swe-agent.com/latest/usage/mini/)
-* [FAQ](https://mini-swe-agent.com/latest/faq/)
-* [Global configuration](https://mini-swe-agent.com/latest/advanced/global_configuration/)
-* [Yaml configuration files](https://mini-swe-agent.com/latest/advanced/yaml_configuration/)
-* [Power up](https://mini-swe-agent.com/latest/advanced/cookbook/)
-
-</td>
-</tr>
-</table>
-
-## Let's get started!
-
-Option 1: Install + run in virtual environment
+## 安装
 
 ```bash
-pip install uv && uvx mini-swe-agent [-v]
-# or
-pip install pipx && pipx ensurepath && pipx run mini-swe-agent [-v]
-```
-
-Option 2: Install in current environment
-
-```bash
-pip install mini-swe-agent && mini [-v]
-```
-
-Option 3: Install from source
-
-```bash
-git clone https://github.com/SWE-agent/mini-swe-agent.git
-cd mini-swe-agent
 pip install -e .
-mini [-v]
+
+# 如需使用 MCP RAG 功能，额外安装 langchain 依赖
+pip install -e '.[langchain]'
 ```
 
-Read more in our [documentation](https://mini-swe-agent.com/latest/):
+## 使用
 
-* [Quick start guide](https://mini-swe-agent.com/latest/quickstart/)
-* More on [`mini`](https://mini-swe-agent.com/latest/usage/mini/) and [`mini -v`](https://mini-swe-agent.com/latest/usage/mini_v/)
-* [Global configuration](https://mini-swe-agent.com/latest/advanced/global_configuration/)
-* [Yaml configuration files](https://mini-swe-agent.com/latest/advanced/yaml_configuration/)
-* [Power up with the cookbook](https://mini-swe-agent.com/latest/advanced/cookbook/)
-* [FAQ](https://mini-swe-agent.com/latest/faq/)
-* [Contribute!](https://mini-swe-agent.com/latest/contributing/)
+```bash
+# REPL 交互界面
+mini
 
-## Attribution
+# 直接指定任务
+mini -t "修复 main.py 中的 bug"
 
-If you found this work helpful, please consider citing the [SWE-agent paper](https://arxiv.org/abs/2405.15793) in your work:
+# 自动执行模式（跳过确认）
+mini --yolo
 
-```bibtex
-@inproceedings{yang2024sweagent,
-  title={{SWE}-agent: Agent-Computer Interfaces Enable Automated Software Engineering},
-  author={John Yang and Carlos E Jimenez and Alexander Wettig and Kilian Lieret and Shunyu Yao and Karthik R Narasimhan and Ofir Press},
-  booktitle={The Thirty-eighth Annual Conference on Neural Information Processing Systems},
-  year={2024},
-  url={https://arxiv.org/abs/2405.15793}
-}
+# 启用 MCP
+mini --mcp
 ```
 
-Our other projects:
+## MCP 集成
 
-<div align="center">
-  <a href="https://github.com/SWE-agent/SWE-agent"><img src="https://github.com/SWE-agent/mini-swe-agent/raw/main/docs/assets/sweagent_logo_text_below.svg" alt="SWE-agent" height="120px"></a>
-   &nbsp;&nbsp;
-  <a href="https://github.com/SWE-agent/SWE-ReX"><img src="https://github.com/SWE-agent/mini-swe-agent/raw/main/docs/assets/swerex_logo_text_below.svg" alt="SWE-ReX" height="120px"></a>
-   &nbsp;&nbsp;
-  <a href="https://github.com/SWE-bench/SWE-bench"><img src="https://github.com/SWE-agent/mini-swe-agent/raw/main/docs/assets/swebench_logo_text_below.svg" alt="SWE-bench" height="120px"></a>
-  &nbsp;&nbsp;
-  <a href="https://github.com/SWE-bench/SWE-smith"><img src="https://github.com/SWE-agent/mini-swe-agent/raw/main/docs/assets/swesmith_logo_text_below.svg" alt="SWE-smith" height="120px"></a>
-  &nbsp;&nbsp;
-  <a href="https://github.com/SWE-bench/sb-cli"><img src="https://github.com/SWE-agent/mini-swe-agent/raw/main/docs/assets/sbcli_logo_text_below.svg" alt="sb-cli" height="120px"></a>
-</div>
+集成 AMD AI DevTool，提供基于知识库的混合检索能力（BGE Embedding + BM25 + 重排序）。内置 AMD GPU 和 NVIDIA GPU 知识库。
 
+### 1. 预下载 ROCm 库源码（推荐）
+
+agent 运行时可能需要参考 ROCm 库的源码，建议提前 clone 到本地，避免 agent 运行时下载大仓库导致超时中断：
+
+```bash
+git clone --depth 1 https://github.com/ROCm/rocm-libraries.git ~/.cache/rocm-libraries
+```
+
+### 2. 构建语义索引（首次使用必须）
+
+使用 MCP 前需要先构建知识库索引，否则检索功能无法工作：
+
+```bash
+# 基本用法：对 knowledge-base/ 下所有文档构建索引
+# 强制重建（覆盖已有索引）
+python scripts/build_index.py --force
+
+```
+
+索引默认输出到 `~/.cache/amd-ai-devtool/semantic-index/`，构建产物：
+
+- `index.faiss` + `index.pkl` — FAISS 语义搜索索引
+- `bm25_index.pkl` — BM25 关键词搜索索引
+
+以下情况需要重建索引：
+
+1. 添加/修改知识库文档
+2. 更改分块或索引逻辑
+3. 修复元数据解析 bug
+
+### 3. 测试检索
+
+构建索引后可运行测试脚本验证：
+
+```bash
+python scripts/test_embedding_search.py      # 测试 FAISS 语义搜索
+python scripts/test_hybrid_retrieval.py      # 测试混合检索（Embedding + BM25 + Reranker）
+python scripts/test_rrf_fusion.py            # 测试 RRF 融合算法
+```
+
+### 4. 启用 MCP
+
+```bash
+mini --mcp        # 启用 MCP
+mini --mcp -d     # 启用 MCP + 调试输出
+```
+
+在智能体中通过 `@amd:查询内容` 调用检索。
+
+### 5. RAG 检索架构
+
+```
+Semantic + BM25 → RRF 融合去重 → BGE Reranker 精排 → Top K
+```
+
+- **Embedding**: BAAI/bge-large-en-v1.5（语义召回）
+- **BM25**: 关键词召回
+- **Fusion**: RRF (Reciprocal Rank Fusion) 融合去重
+- **Reranker**: BAAI/bge-reranker-large（精排）
+
+配置文件：`src/minisweagent/config/rag_config.yaml`，可调整检索参数、是否启用 BM25 双路召回、重排序、LLM 总结等。
+
+## 项目结构
+
+```
+src/minisweagent/
+├── __init__.py                # 版本号、协议定义、全局配置
+├── agents/                    # 智能体实现
+│   ├── default.py             #   核心智能体（~100 行）
+│   ├── interactive.py         #   人机交互智能体
+│   └── interactive_textual.py #   Textual TUI 智能体
+├── models/                    # LLM 模型接口
+│   ├── litellm_model.py       #   LiteLLM（支持大多数模型）
+│   ├── anthropic_model.py     #   Anthropic
+│   ├── amd_llm.py             #   AMD LLM 网关
+│   ├── openrouter_model.py    #   OpenRouter
+│   └── portkey_model.py       #   Portkey
+├── environments/              # 执行环境
+│   ├── local.py               #   本地 subprocess
+│   ├── docker.py              #   Docker/Podman
+│   └── singularity.py         #   Singularity/Apptainer
+├── config/                    # YAML 配置文件
+│   ├── mini.yaml              #   mini 命令默认配置
+│   ├── default.yaml           #   DefaultAgent 默认配置
+│   ├── github_issue.yaml      #   GitHub Issue 解决配置
+│   └── rag_config.yaml        #   RAG 检索配置
+├── run/                       # 入口脚本
+│   ├── mini.py                #   主 CLI（mini 命令）
+│   ├── hello_world.py         #   简单示例
+│   ├── github_issue.py        #   GitHub Issue 自动解决
+│   └── inspector.py           #   轨迹浏览器
+├── mcp_integration/           # MCP（AMD AI DevTool）集成
+│   ├── mcp_environment.py     #   MCP 环境封装
+│   ├── langchain_retrieval.py #   混合检索（Embedding + BM25）
+│   └── prompts.py             #   MCP 专用提示词
+└── utils/                     # 工具函数
+    ├── log.py                 #   日志
+    └── subagent.py            #   子智能体
+```
+
+其他顶层目录：
+
+- `scripts/` — 辅助脚本
+- `knowledge-base/` — RAG 知识库（AMD / NVIDIA）
+
+## 配置文件
+
+所有配置文件位于 `src/minisweagent/config/`，通过 `mini -c <配置名>` 指定使用。
+
+### 智能体配置
+
+| 文件 | 用途 | 模型 | 模式 | 说明 |
+|------|------|------|------|------|
+| `mini.yaml` | `mini` 命令默认配置 | AMD LLM 网关 claude-opus-4.5 | yolo | 日常使用的主配置，temperature=0.0，输出截断 20000 字符，timeout 3600s |
+| `default.yaml` | DefaultAgent 基础配置 | 不绑定具体模型 | confirm | 通用基础配置，temperature=0.0，输出截断 10000 字符（头尾各 5000） |
+| `mini_no_temp.yaml` | 无 temperature 版本 | 不绑定具体模型 | confirm | 和 default.yaml 基本一致，但不设 temperature，cost_limit=3 |
+| `mini_reverse_kl.yaml` | GPU kernel 优化分析 | AMD LLM 网关 claude-opus-4.5 | confirm | 专用于分析仓库的 kernel 优化历史并生成报告，prompt 较长 |
+| `github_issue.yaml` | 自动解决 GitHub Issue | 不绑定具体模型 | — | 运行在 Docker 容器中（python:3.11，工作目录 /testbed） |
+
+### RAG 配置
+
+文件：`rag_config.yaml`，控制 RAG 检索管道参数：
+
+| 配置项 | 说明 |
+|--------|------|
+| `retrieval.embed_top_k` / `bm25_top_k` | Embedding / BM25 检索候选数 |
+| `retrieval.enable_bm25` | 是否启用 BM25 双路召回 |
+| `retrieval.mcp_top_k` | 最终返回结果数 |
+| `reranker.enable_reranker` | 是否启用精排 |
+| `fusion.semantic_weight` / `bm25_weight` | Embedding 和 BM25 的融合权重 |
+| `summary.enable_rag_subagent` | 是否启用 LLM 总结 |
+| `debug.verbose` | 是否打印 MCP 工具详细日志 |
+
+## 知识库
+
+### 目录结构
+
+```
+knowledge-base/
+├── amd-knowledge-base/
+│   ├── layer-1-hardware/         # 硬件架构
+│   ├── layer-2-compute-stack/    # 计算栈（HIP、ROCm）
+│   ├── layer-3-libraries/        # 库（rocBLAS、MIOpen 等）
+│   ├── layer-4-frameworks/       # 框架（PyTorch、TensorFlow）
+│   ├── layer-5-llm/              # LLM 相关
+│   ├── layer-6-extended/         # 扩展知识
+│   └── best-practices/           # 最佳实践
+├── nvidia-knowledge-base/        # 同样层级结构
+├── comparisons/                  # 跨平台对比文档
+└── INDEX.md
+```
+
+### 添加新文档
+
+1. **位置**：文件放在对应分类子目录下（如 `layer-6-extended/optimize-guides/*.md`）
+2. **格式**：所有 `.md` 文件必须包含 YAML frontmatter：
+   ```yaml
+   ---
+   tags: ["category1", "category2"]   # 必需
+   priority: "L1-important"           # 必需
+   source_url: "https://..."          # 必需
+   rocm_version: "6.0+"              # 必需
+   last_updated: 2026-01-14           # 必需
+   ---
+   ```
+3. **文件名**：英文，反映内容（如 `bf16-vector-load-store.md`）
+4. **质量**：800-1200 字，每个文档至少 2 个语法正确的代码示例
+5. **添加后必须重建索引**：`python scripts/build_index.py --force`
