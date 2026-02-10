@@ -624,50 +624,225 @@ class PromptSampler:
             )
         return "\n\n".join(parts)
 
+    @staticmethod
+    def _normalize_profiling_keys(profiling: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize Metrix metric keys by stripping the ``memory.`` prefix so
+        that downstream formatters can look up keys consistently.
+
+        Metrix outputs keys like ``memory.coalescing_efficiency``,
+        ``memory.hbm_bandwidth_utilization``, etc.  This method returns a
+        *new* dict where those keys have the prefix stripped, while
+        non-prefixed keys (``duration_us``, ``bottleneck``, ``kernel_name``,
+        GPU hardware fields, etc.) are kept as-is.
+
+        Original keys are also kept (lower priority) so that callers that
+        already handle the prefixed form continue to work.
+        """
+        normalized: Dict[str, Any] = {}
+        for key, val in profiling.items():
+            # Always keep the original key
+            normalized[key] = val
+            # Strip "memory." prefix
+            if key.startswith("memory."):
+                stripped = key[len("memory."):]
+                # Only add if not already present (prefer explicit unprefixed)
+                normalized.setdefault(stripped, val)
+        return normalized
+
+    # Known AMD GPU specs lookup: architecture -> (name, peak_hbm_bw_gb_s, peak_fp32_tflops)
+    _GPU_SPECS = {
+        "gfx942": ("AMD Instinct MI300X", "5300.0", "163.4"),
+        "gfx950": ("AMD Instinct MI325X", "6000.0", "163.4"),
+        "gfx940": ("AMD Instinct MI300A", "5300.0", "122.6"),
+        "gfx90a": ("AMD Instinct MI250X", "3276.8", "95.7"),
+        "gfx908": ("AMD Instinct MI100", "1228.8", "23.1"),
+    }
+
+    @staticmethod
+    def _detect_gpu_hardware() -> Dict[str, str]:
+        """
+        Detect GPU hardware info at runtime via rocm-smi / rocminfo.
+        Returns a dict with keys: gpu, architecture, compute_units,
+        peak_hbm_bw_gb_s, peak_fp32_tflops (any may be missing).
+        """
+        import subprocess, re
+        info: Dict[str, str] = {}
+        arch = ""
+
+        # --- rocm-smi: get GFX version and product name ---
+        try:
+            result = subprocess.run(
+                ["rocm-smi", "--showproductname"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    # GFX Version line (e.g., "GPU[0]\t\t: GFX Version:\t\tgfx950")
+                    gfx_m = re.search(r"GFX\s+Version\s*:\s*(gfx\w+)", line, re.I)
+                    if gfx_m:
+                        arch = gfx_m.group(1)
+                        info["architecture"] = arch
+                    # Card series (may be "N/A")
+                    series_m = re.search(
+                        r"Card\s+Series\s*:\s*(.+)", line, re.I
+                    )
+                    if series_m:
+                        val = series_m.group(1).strip()
+                        if val and val.upper() != "N/A":
+                            info["gpu"] = val
+        except Exception:
+            pass
+
+        # --- rocminfo: get architecture + compute units + marketing name ---
+        try:
+            result = subprocess.run(
+                ["rocminfo"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                in_gpu_agent = False
+                for line in result.stdout.splitlines():
+                    # Detect GPU agent blocks via "Device Type: GPU" or UUID
+                    if "Device Type:" in line and "GPU" in line.upper():
+                        in_gpu_agent = True
+                        continue
+                    elif "Device Type:" in line and "CPU" in line.upper():
+                        in_gpu_agent = False
+                        continue
+                    # Also detect via Vendor Name (CPU vs AMD/GPU)
+                    if "Vendor Name:" in line:
+                        if "CPU" in line:
+                            in_gpu_agent = False
+                        elif "AMD" in line:
+                            in_gpu_agent = True
+
+                    if not in_gpu_agent:
+                        continue
+
+                    # Architecture from "Name: gfx950"
+                    if re.match(r"\s+Name:", line) and "gfx" in line:
+                        m = re.search(r"(gfx\d+)", line)
+                        if m:
+                            arch = m.group(1)
+                            info["architecture"] = arch
+                    # Marketing Name (may be empty)
+                    if "Marketing Name:" in line:
+                        m = re.search(r"Marketing Name:\s*(.+)", line)
+                        if m:
+                            val = m.group(1).strip()
+                            if val:
+                                info["gpu"] = val
+                    # Compute Units
+                    if "Compute Unit:" in line:
+                        m = re.search(r"(\d+)", line)
+                        if m:
+                            info["compute_units"] = m.group(1)
+                    # Stop after first GPU agent is fully parsed
+                    if info.get("compute_units") and info.get("architecture"):
+                        break
+        except Exception:
+            pass
+
+        # --- Fill in known specs from architecture ---
+        if arch in PromptSampler._GPU_SPECS:
+            name, bw, tflops = PromptSampler._GPU_SPECS[arch]
+            info.setdefault("gpu", name)
+            info.setdefault("peak_hbm_bw_gb_s", bw)
+            info.setdefault("peak_fp32_tflops", tflops)
+
+        return info
+
     def _format_baseline_profiling(self, profiling: Dict[str, Any]) -> str:
         """
         Format baseline hardware profiling data from Metrix into a human-readable
         string for inclusion in the LLM prompt.
 
+        Handles Metrix's ``memory.``-prefixed keys (e.g.
+        ``memory.coalescing_efficiency``) by normalizing them, and includes GPU
+        hardware specifications for context.
+
         Args:
             profiling: Dictionary of profiling metrics from Metrix/rocprofv3.
 
         Returns:
-            Formatted profiling summary string with bottleneck analysis.
+            Formatted profiling summary string with bottleneck analysis and
+            GPU hardware context.
         """
+        # Normalize Metrix "memory."-prefixed keys
+        p = self._normalize_profiling_keys(profiling)
         sections = []
 
+        # --- GPU Hardware Context ---
+        hw = self._detect_gpu_hardware()
+        # Also check if profiling dict itself has GPU info (e.g. from kernel-profile)
+        gpu_name = p.get("gpu") or hw.get("gpu", "Unknown")
+        arch = p.get("architecture") or hw.get("architecture", "Unknown")
+        cus = p.get("compute_units") or hw.get("compute_units", "Unknown")
+        peak_bw = p.get("peak_hbm_bw_gb_s") or hw.get("peak_hbm_bw_gb_s", "Unknown")
+        peak_tflops = p.get("peak_fp32_tflops") or hw.get("peak_fp32_tflops", "Unknown")
+
+        hw_section = (
+            "## Target GPU Hardware\n"
+            f"  - GPU: {gpu_name}\n"
+            f"  - Architecture: {arch}\n"
+            f"  - Compute Units: {cus}\n"
+            f"  - Peak HBM Bandwidth: {peak_bw} GB/s\n"
+            f"  - Peak FP32 Throughput: {peak_tflops} TFLOPS"
+        )
+        sections.append(hw_section)
+
+        # --- Kernel info ---
+        kernel_name = p.get("kernel_name", "")
+        if kernel_name:
+            sections.append(f"## Profiled Kernel: `{kernel_name}`")
+
         # --- Latency ---
-        latency_keys = ["latency_us", "latency_min_us", "latency_avg_us", "latency_max_us"]
+        # Metrix uses "duration_us"; also check legacy latency_* keys
+        latency_keys = ["duration_us", "latency_us", "latency_min_us", "latency_avg_us", "latency_max_us"]
         latency_parts = []
         for key in latency_keys:
-            if key in profiling:
-                label = key.replace("_us", "").replace("latency_", "").capitalize() or "Latency"
-                latency_parts.append(f"  - {label}: {profiling[key]:.2f} us")
+            if key in p:
+                val = p[key]
+                if isinstance(val, (int, float)):
+                    label = key.replace("_us", "").replace("_", " ").capitalize()
+                    if label.lower() == "duration":
+                        label = "Kernel Latency"
+                    latency_parts.append(f"  - {label}: {val:.2f} us")
         if latency_parts:
             sections.append("## Latency\n" + "\n".join(latency_parts))
 
         # --- Memory Performance ---
+        # Keys after normalization (memory. prefix stripped)
         mem_keys = {
-            "bandwidth_gb_s": "Bandwidth",
-            "hbm_utilization": "HBM Utilization",
-            "hbm_read_gb_s": "HBM Read",
-            "hbm_write_gb_s": "HBM Write",
-            "global_load_efficiency": "Global Load Efficiency",
-            "global_store_efficiency": "Global Store Efficiency",
-            "coalescing_efficiency": "Coalescing Efficiency",
-            "lds_bank_conflicts": "LDS Bank Conflicts",
+            "hbm_bandwidth_utilization": ("HBM Bandwidth Utilization", "%"),
+            "hbm_read_bandwidth": ("HBM Read Bandwidth", "GB/s"),
+            "hbm_write_bandwidth": ("HBM Write Bandwidth", "GB/s"),
+            "bytes_transferred_hbm": ("HBM Bytes Transferred", "bytes"),
+            "global_load_efficiency": ("Global Load Efficiency", "%"),
+            "global_store_efficiency": ("Global Store Efficiency", "%"),
+            "coalescing_efficiency": ("Coalescing Efficiency", "%"),
+            "lds_bank_conflicts": ("LDS Bank Conflicts", "count"),
+            "atomic_latency": ("Atomic Latency", ""),
+            # Legacy key names (in case someone uses them)
+            "bandwidth_gb_s": ("Bandwidth", "GB/s"),
+            "hbm_utilization": ("HBM Utilization", "%"),
         }
         mem_parts = []
-        for key, label in mem_keys.items():
-            if key in profiling:
-                val = profiling[key]
-                if isinstance(val, float):
-                    # Format percentages vs raw numbers
-                    if "efficiency" in key or "utilization" in key:
+        seen_labels = set()
+        for key, (label, unit) in mem_keys.items():
+            if key in p and label not in seen_labels:
+                seen_labels.add(label)
+                val = p[key]
+                if isinstance(val, (int, float)):
+                    if unit == "%":
                         mem_parts.append(f"  - {label}: {val:.1f}%")
-                    else:
+                    elif unit == "GB/s":
                         mem_parts.append(f"  - {label}: {val:.2f} GB/s")
+                    elif unit == "bytes":
+                        mem_parts.append(f"  - {label}: {val:,.0f} bytes")
+                    else:
+                        mem_parts.append(f"  - {label}: {val:.2f}")
                 else:
                     mem_parts.append(f"  - {label}: {val}")
         if mem_parts:
@@ -675,19 +850,20 @@ class PromptSampler:
 
         # --- Compute Performance ---
         compute_keys = {
-            "tflops": "TFLOPS",
-            "compute_busy": "GPU Compute Busy",
-            "valu_busy": "VALU Busy",
-            "mfma_busy": "MFMA Busy",
+            "tflops": ("TFLOPS", "tflops"),
+            "compute_busy": ("GPU Compute Busy", "%"),
+            "valu_busy": ("VALU Busy", "%"),
+            "mfma_busy": ("MFMA Busy", "%"),
         }
         compute_parts = []
-        for key, label in compute_keys.items():
-            if key in profiling:
-                val = profiling[key]
-                if "busy" in key:
-                    compute_parts.append(f"  - {label}: {val:.1f}%")
-                else:
-                    compute_parts.append(f"  - {label}: {val:.2f}")
+        for key, (label, unit) in compute_keys.items():
+            if key in p:
+                val = p[key]
+                if isinstance(val, (int, float)):
+                    if unit == "%":
+                        compute_parts.append(f"  - {label}: {val:.1f}%")
+                    else:
+                        compute_parts.append(f"  - {label}: {val:.2f}")
         if compute_parts:
             sections.append("## Compute Performance\n" + "\n".join(compute_parts))
 
@@ -695,20 +871,26 @@ class PromptSampler:
         cache_keys = {
             "l1_hit_rate": "L1 Cache Hit Rate",
             "l2_hit_rate": "L2 Cache Hit Rate",
+            "l2_bandwidth": "L2 Bandwidth (GB/s)",
             "l2_read_hit_rate": "L2 Read Hit Rate",
             "l2_write_hit_rate": "L2 Write Hit Rate",
         }
         cache_parts = []
         for key, label in cache_keys.items():
-            if key in profiling:
-                cache_parts.append(f"  - {label}: {profiling[key]:.1f}%")
+            if key in p:
+                val = p[key]
+                if isinstance(val, (int, float)):
+                    if "bandwidth" in key.lower():
+                        cache_parts.append(f"  - {label}: {val:.2f} GB/s")
+                    else:
+                        cache_parts.append(f"  - {label}: {val:.1f}%")
         if cache_parts:
             sections.append("## Cache Performance\n" + "\n".join(cache_parts))
 
         # --- Bottleneck Analysis ---
-        bottleneck = self._analyze_bottleneck(profiling)
+        bottleneck = self._analyze_bottleneck(p)
         if bottleneck:
-            sections.append(f"## Bottleneck Analysis\n{bottleneck}")
+            sections.append(f"## Bottleneck Analysis & Recommended Algorithmic Strategies\n{bottleneck}")
 
         if not sections:
             return "No detailed profiling data available."
@@ -717,49 +899,161 @@ class PromptSampler:
 
     def _analyze_bottleneck(self, profiling: Dict[str, Any]) -> str:
         """
-        Automatically analyze profiling data to identify the primary bottleneck.
+        Analyze profiling data to identify the primary bottleneck and recommend
+        **concrete algorithmic strategies** (NOT autotuning).
+
+        Each recommendation targets a specific profiling signal and maps it to
+        an algorithmic transformation the LLM should attempt.  Autotuning
+        (BLOCK_SIZE, num_warps, etc.) is explicitly discouraged.
+
+        Args:
+            profiling: Normalized profiling dict (``memory.`` prefixes already
+                       stripped by ``_normalize_profiling_keys``).
         """
         analysis = []
 
-        compute_busy = profiling.get("compute_busy", None)
-        hbm_util = profiling.get("hbm_utilization", None)
-        bandwidth = profiling.get("bandwidth_gb_s", None)
-        coalescing = profiling.get("coalescing_efficiency", None)
-        l2_hit = profiling.get("l2_hit_rate", None)
+        # Read metrics (already normalized -- no memory. prefix)
+        compute_busy = profiling.get("compute_busy")
+        hbm_util = profiling.get("hbm_bandwidth_utilization")
+        coalescing = profiling.get("coalescing_efficiency")
+        l1_hit = profiling.get("l1_hit_rate")
+        l2_hit = profiling.get("l2_hit_rate")
+        l2_bw = profiling.get("l2_bandwidth")
+        hbm_read_bw = profiling.get("hbm_read_bandwidth")
+        hbm_write_bw = profiling.get("hbm_write_bandwidth")
+        global_load_eff = profiling.get("global_load_efficiency")
+        global_store_eff = profiling.get("global_store_efficiency")
+        lds_conflicts = profiling.get("lds_bank_conflicts")
+        duration_us = profiling.get("duration_us")
+        # Metrix may also provide a textual bottleneck classification
+        metrix_bottleneck = profiling.get("bottleneck", "")
 
-        if compute_busy is not None and hbm_util is not None:
-            if compute_busy < 30 and hbm_util > 60:
-                analysis.append(
-                    "**Memory-bound**: GPU compute is underutilized while memory bandwidth "
-                    "is high. Focus on reducing memory traffic, improving data reuse, "
-                    "and using shared memory (LDS)."
-                )
-            elif compute_busy > 60 and hbm_util < 30:
-                analysis.append(
-                    "**Compute-bound**: Memory bandwidth is underutilized while compute "
-                    "is saturated. Focus on algorithmic improvements, reducing redundant "
-                    "computation, and increasing parallelism."
-                )
-            elif compute_busy < 30 and hbm_util < 30:
-                analysis.append(
-                    "**Latency-bound**: Both compute and memory are underutilized. "
-                    "The kernel may be limited by synchronization, launch overhead, "
-                    "or low occupancy. Focus on increasing occupancy and reducing barriers."
-                )
+        # ----- Primary bottleneck classification -----
+        if metrix_bottleneck:
+            analysis.append(f"**Metrix classification**: {metrix_bottleneck}-bound")
 
+        _hbm = hbm_util if hbm_util is not None else 0
+        _comp = compute_busy if compute_busy is not None else 0
+
+        if _comp < 30 and _hbm > 60:
+            analysis.append(
+                "**Memory-bound**: GPU compute is idle while HBM bandwidth is saturated.\n"
+                "  Algorithmic strategies:\n"
+                "  - *Kernel fusion*: Merge consecutive kernels to avoid writing intermediate "
+                "results to HBM. For example, fuse an elementwise + reduction kernel pair.\n"
+                "  - *Operator reordering*: Reorder operations so that data produced by one "
+                "computation is consumed immediately in registers/LDS rather than round-tripping "
+                "through HBM.\n"
+                "  - *Data compression*: Compute on fp16/bf16 instead of fp32 to halve memory "
+                "traffic while maintaining accuracy (use Kahan summation for accumulations).\n"
+                "  - *Tiling with LDS staging*: Load a tile of data into LDS (shared memory), "
+                "then perform multiple operations on it before writing back."
+            )
+        elif _comp > 60 and _hbm < 30:
+            analysis.append(
+                "**Compute-bound**: ALU is saturated while memory bandwidth is underutilized.\n"
+                "  Algorithmic strategies:\n"
+                "  - *Strength reduction*: Replace expensive operations (div, sqrt, exp) with "
+                "cheaper approximations or lookup tables. Use `tl.math.fast_expf` or "
+                "polynomial approximations where precision allows.\n"
+                "  - *Redundant computation elimination*: Precompute values outside the inner "
+                "loop. Hoist invariants, factor common sub-expressions.\n"
+                "  - *Algorithmic complexity reduction*: If the kernel is O(N^2), look for "
+                "O(N log N) or O(N) alternatives (e.g., FFT-based convolution, flash attention "
+                "tiling pattern).\n"
+                "  - *FMA utilization*: Ensure multiply-add pairs use fused multiply-add "
+                "(`tl.fma` or `a * b + c`) to get 2 flops per instruction."
+            )
+        elif _comp < 30 and _hbm < 30:
+            analysis.append(
+                "**Latency-bound**: Both compute and memory are severely underutilized.\n"
+                "  Algorithmic strategies:\n"
+                "  - *Work amplification*: The kernel does too little work per launch. Fuse "
+                "multiple operations into a single kernel or increase per-thread work.\n"
+                "  - *Pointer precomputation*: Move address calculations (offsets, strides) "
+                "outside the inner loop to reduce instruction count.\n"
+                "  - *Loop unrolling & software pipelining*: Manually unroll the innermost "
+                "loop to overlap loads with computation (prefetch next iteration's data "
+                "while processing current).\n"
+                "  - *Occupancy-aware redesign*: Use fewer registers per thread to allow more "
+                "concurrent wavefronts, or restructure to avoid barrier synchronizations."
+            )
+
+        # ----- Specific metric-driven recommendations -----
         if coalescing is not None and coalescing < 50:
             analysis.append(
-                f"**Poor memory coalescing** ({coalescing:.0f}%): Memory accesses are "
-                "not well-coalesced. Reorganize data layout or access patterns."
+                f"**Poor memory coalescing** ({coalescing:.0f}%):\n"
+                "  - *Layout transformation*: Transpose from AoS (Array of Structs) to SoA "
+                "(Struct of Arrays) so that consecutive threads access consecutive addresses.\n"
+                "  - *Index remapping*: Reorder the loop iteration space so that the innermost "
+                "dimension maps to thread indices (coalesced access pattern).\n"
+                "  - *Padding*: Add padding to eliminate bank conflicts if the stride is a "
+                "power of 2."
+            )
+
+        if global_load_eff is not None and global_load_eff < 25:
+            analysis.append(
+                f"**Low global load efficiency** ({global_load_eff:.0f}%):\n"
+                "  - Many loaded bytes are wasted. Restructure loads to use full cache lines.\n"
+                "  - Consider vectorized loads (`tl.load` with contiguous offsets) to maximize "
+                "bytes useful per transaction."
+            )
+
+        if global_store_eff is not None and global_store_eff < 25:
+            analysis.append(
+                f"**Low global store efficiency** ({global_store_eff:.0f}%):\n"
+                "  - Writes are scattered / partial cache-line writes. Accumulate results in "
+                "registers and write full tiles at once."
             )
 
         if l2_hit is not None and l2_hit < 30:
             analysis.append(
-                f"**Low L2 cache hit rate** ({l2_hit:.0f}%): Data is not being reused "
-                "effectively. Consider tiling strategies or adjusting block sizes."
+                f"**Low L2 cache hit rate** ({l2_hit:.0f}%):\n"
+                "  - *Temporal tiling*: Restructure the algorithm so the same data block is "
+                "accessed multiple times within a short window (stays in L2).\n"
+                "  - *Producer-consumer fusion*: If this kernel reads output of another, fuse "
+                "them so data goes through L2 once instead of HBM round-trip."
             )
 
-        return "\n".join(analysis) if analysis else ""
+        if l1_hit is not None and l1_hit < 40:
+            analysis.append(
+                f"**Low L1 cache hit rate** ({l1_hit:.0f}%):\n"
+                "  - Data is not being reused within a workgroup. Use LDS (shared memory) to "
+                "stage frequently-accessed data explicitly."
+            )
+
+        if lds_conflicts is not None and lds_conflicts > 5:
+            analysis.append(
+                f"**LDS bank conflicts** ({lds_conflicts:.1f}):\n"
+                "  - Add padding to shared memory arrays (e.g., `tl.make_block_ptr` with +1 "
+                "column) to avoid bank conflicts.\n"
+                "  - Swizzle access patterns within the tile."
+            )
+
+        if hbm_read_bw is not None and hbm_write_bw is not None:
+            if hbm_write_bw > 2 * hbm_read_bw and hbm_write_bw > 50:
+                analysis.append(
+                    f"**Write-heavy kernel** (read={hbm_read_bw:.0f} GB/s, write={hbm_write_bw:.0f} GB/s):\n"
+                    "  - Consider write-combining: accumulate partial results before writing.\n"
+                    "  - If writing intermediate buffers, fuse with the next consumer kernel."
+                )
+
+        if duration_us is not None and duration_us < 10:
+            analysis.append(
+                f"**Very short kernel** ({duration_us:.1f} us):\n"
+                "  - Kernel launch overhead may dominate. Fuse with adjacent kernels "
+                "or batch more work into a single launch."
+            )
+
+        # ----- EXPLICIT: what NOT to focus on -----
+        analysis.append(
+            "**DO NOT** focus on autotuning (BLOCK_SIZE, num_warps, num_stages, grid "
+            "dimensions). These are parameter sweeps, not algorithmic improvements. "
+            "The goal is to find fundamentally better algorithms or data-flow "
+            "transformations that reduce total work or memory traffic."
+        )
+
+        return "\n\n".join(analysis) if analysis else ""
 
     def _apply_template_variations(self, template: str) -> str:
         """Apply stochastic variations to the template"""

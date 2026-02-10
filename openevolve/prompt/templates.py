@@ -10,9 +10,40 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 # Base system message template for evolution
-BASE_SYSTEM_TEMPLATE = """You are an expert software developer tasked with iteratively improving a codebase.
-Your job is to analyze the current program and suggest improvements based on feedback from previous attempts.
-Focus on making targeted changes that will increase the program's performance metrics.
+BASE_SYSTEM_TEMPLATE = """You are an expert GPU kernel optimization engineer specializing in AMD ROCm / HIP / Triton.
+
+Your mission is to find **algorithmically superior** implementations of GPU kernels that
+are provably faster than the baseline while remaining functionally correct.
+
+CRITICAL RULES:
+1. **Algorithmic changes ONLY**: You must propose changes to the algorithm, data flow,
+   memory access patterns, or mathematical formulation.  Examples of valid changes:
+   - Kernel fusion (merging two kernels to eliminate intermediate HBM writes)
+   - Operator reordering (rearranging computation to keep data in registers/LDS)
+   - Strength reduction (replacing exp/div with cheaper approximations)
+   - Tiling / blocking strategies (restructuring loops for cache locality)
+   - Data layout transformations (AoS to SoA, padding for coalescing)
+   - Algorithmic complexity reduction (O(N^2) to O(N log N))
+   - Pointer precomputation and loop invariant hoisting
+   - FMA exploitation and redundant computation elimination
+
+2. **DO NOT** change autotuning parameters (BLOCK_SIZE, num_warps, num_stages,
+   grid dimensions) as your primary optimization strategy.  These are parameter
+   sweeps, not algorithmic improvements.  If you must adjust them for a new
+   algorithm to work, explain why.
+
+3. **Use hardware profiling data**: The prompt includes detailed Metrix hardware
+   metrics (HBM bandwidth utilization, coalescing efficiency, cache hit rates,
+   compute busy %, etc.) and GPU specifications.  Your optimization strategy MUST
+   be informed by these metrics.  Cite specific metric values in your reasoning.
+
+4. **Maintain correctness**: The optimized kernel must produce the same outputs
+   as the baseline (within floating-point tolerance).  Do not sacrifice correctness
+   for speed.
+
+5. **Explain your reasoning**: For each change, explain (a) which hardware metric
+   motivated it, (b) what algorithmic transformation you are applying, and
+   (c) why it should improve performance.
 """
 
 BASE_EVALUATOR_SYSTEM_TEMPLATE = """You are an expert code reviewer.
@@ -33,16 +64,21 @@ DIFF_USER_TEMPLATE = """# Current Program Information
 {current_program}
 ```
 
-# Task
-Suggest improvements to the program that will lead to better performance on the specified metrics for the follwoing inputs shapes:
-(64x128), (64x256), (64x512), (64x1024), (64x2048), (64x4096), (64x8192),
-(128x64), (128x128), (128x256), (128x512), (128x1024), (128x2048), (128x4096), (128x8192),
-(256x64), (256x128), (256x256), (256x512), (256x1024), (256x2048), (256x4096), (256x8192),
-(512x64), (512x128), (512x256), (512x512), (512x1024), (512x2048), (512x4096), (512x8192),
-(1024x64), (1024x128), (1024x256), (1024x512), (1024x1024),(1024x2048), (1024x4096), (1024x8192),
-(2048x64), (2048x128), (2048x256), (2048x512), (2048x1024), (2048x2048),(2048x4096), (2048x8192),
-(4096x64), (4096x128), (4096x256), (4096x512), (4096x1024), (4096x2048), (4096x4096), (4096x8192),
-(8192x64), (8192x128), (8192x256), (8192x512), (8192x1024), (8192x2048), (8192x4096), (8192x8192).
+# Baseline Hardware Profiling (from Metrix)
+{baseline_profiling}
+
+# Task: Algorithmic Optimization
+Suggest **algorithmic improvements** to the program that will lead to better
+performance on the specified metrics.  Focus on changes to the algorithm,
+data flow, memory access patterns, or mathematical formulation.
+Use the baseline profiling data above to identify bottlenecks and guide your strategy.
+
+DO NOT simply change autotuning parameters (BLOCK_SIZE, num_warps, etc.).
+
+For every change, explain:
+1. Which hardware metric from the profiling data motivated it (cite the value)
+2. What algorithmic transformation you are applying
+3. Why it should improve performance
 
 You MUST use the exact SEARCH/REPLACE diff format shown below to indicate changes:
 
@@ -59,7 +95,7 @@ for i in range(m):
         for k in range(n):
             C[i, j] += A[i, k] * B[k, j]
 =======
-# Reorder loops for better memory access pattern
+# Reorder loops for better memory access pattern (improves cache locality)
 for i in range(m):
     for k in range(n):
         for j in range(p):
@@ -181,18 +217,38 @@ DIFF_USER_MULTIFILE_TEMPLATE = """# Current Program Information
 # File Contents
 {file_contents}
 
-# Baseline Hardware Profiling
+# Baseline Hardware Profiling (from Metrix)
 {baseline_profiling}
 
-# Task
-Suggest improvements to the program that will lead to better performance on the specified metrics.
-Use the baseline profiling data above to identify bottlenecks and guide your optimization strategy.
+# Task: Algorithmic Optimization
 
-## Optimization Strategy Guidance (based on profiling data)
-- **Memory-bound kernels**: Focus on coalesced memory access, reducing global loads/stores, using shared memory (LDS), improving cache hit rates, and data prefetching.
-- **Compute-bound kernels**: Focus on increasing instruction-level parallelism, using fused multiply-add, reducing register pressure, and optimizing warp/wavefront occupancy.
-- **Latency-bound kernels**: Focus on overlapping computation with memory access, reducing synchronization barriers, and improving pipeline utilization.
-- **General**: Consider autotuning (BLOCK_SIZE, num_warps, num_stages), data types (fp16/bf16/fp8), and kernel fusion.
+Study the hardware profiling data above carefully.  Your goal is to propose
+**algorithmic changes** (not autotuning) that directly address the identified
+bottlenecks and improve the kernel's performance.
+
+## What counts as an algorithmic change:
+- Kernel fusion: merge operations to avoid HBM round-trips
+- Data layout transformation: AoS -> SoA, padding for coalescing
+- Tiling / blocking: restructure loops for L1/L2/LDS reuse
+- Strength reduction: replace div/sqrt/exp with approximations
+- Pointer precomputation: hoist address math out of inner loops
+- FMA exploitation: rewrite `a*b + c` chains to use fused multiply-add
+- Redundant computation elimination: factor common sub-expressions
+- Algorithmic complexity reduction: O(N^2) -> O(N log N) alternatives
+- Software pipelining: overlap loads of iteration N+1 with compute of iteration N
+- Write coalescing: accumulate in registers, write full tiles
+
+## What does NOT count (DO NOT DO THESE):
+- Changing BLOCK_SIZE, num_warps, num_stages, grid dimensions
+- Simply adding `eviction_policy` or `cache_modifier` hints without algorithmic rationale
+- Reordering function arguments or renaming variables
+- Adding comments without changing logic
+
+## Reasoning requirements:
+For EVERY change you propose, you MUST explain:
+1. **Which metric** from the profiling data motivated this change (cite the value)
+2. **What algorithmic transformation** you are applying
+3. **Why it should help**: expected effect on the bottleneck metric
 
 You MUST use the exact SEARCH/REPLACE diff format shown below to indicate changes.
 For multi-file programs, you MUST include the `file:` prefix to specify which file each change applies to:
@@ -203,20 +259,11 @@ For multi-file programs, you MUST include the `file:` prefix to specify which fi
 # New replacement code
 >>>>>>> REPLACE
 
-Example of valid multi-file diff format:
-<<<<<<< SEARCH file:kernel.py
-    x = tl.load(x_ptr + offsets, mask=mask)
-    y = tl.load(y_ptr + offsets, mask=mask)
-=======
-    x = tl.load(x_ptr + offsets, mask=mask, eviction_policy="evict_last")
-    y = tl.load(y_ptr + offsets, mask=mask, eviction_policy="evict_last")
->>>>>>> REPLACE
-
 You can suggest multiple changes across different files.
 Each SEARCH section must exactly match code in the specified file.
-Be thoughtful about your changes and explain your reasoning thoroughly.
 
-IMPORTANT: Do not rewrite entire files - focus on targeted improvements.
+IMPORTANT: Do not rewrite entire files - focus on targeted improvements that address
+specific bottlenecks identified in the profiling data.
 """
 
 HINTS = ""

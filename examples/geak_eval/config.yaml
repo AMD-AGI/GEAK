@@ -54,4 +54,4 @@ evaluator:
 # Evolution settings
 diff_based_evolution: true
 allow_full_rewrites: false
-max_code_length: 60000
+max_code_length: 100000  # Increased for ASM kernel .s files (typically 50-170KB)

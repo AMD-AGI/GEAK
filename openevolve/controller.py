@@ -406,6 +406,22 @@ class OpenEvolve:
                 baseline_profiling=self.baseline_profiling,
             )
 
+            # Dump prompt to file for debugging/auditing
+            prompt_dump_dir = os.path.join(self.output_dir, "debug_prompts")
+            os.makedirs(prompt_dump_dir, exist_ok=True)
+            prompt_dump_path = os.path.join(prompt_dump_dir, f"prompt_iter_{i+1}.txt")
+            with open(prompt_dump_path, "w") as _pf:
+                _pf.write("=" * 80 + "\n")
+                _pf.write("SYSTEM MESSAGE\n")
+                _pf.write("=" * 80 + "\n")
+                _pf.write(prompt["system"])
+                _pf.write("\n\n")
+                _pf.write("=" * 80 + "\n")
+                _pf.write("USER MESSAGE\n")
+                _pf.write("=" * 80 + "\n")
+                _pf.write(prompt["user"])
+            logger.info(f"Prompt dumped to {prompt_dump_path}")
+
             # Generate code modification
             try:
                 # llm_response = await self.llm_ensemble.generate_with_context(
