@@ -9,3 +9,10 @@ geak-oe/
 
 # AITER repo (cloned at runtime for test suite)
 aiter/
+
+# Profiler data
+.rocprofv3/
+
+# OpenEvolve intermediate outputs
+optimization_output/
+*.log
