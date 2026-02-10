@@ -16,6 +16,7 @@ from tenacity import (
 
 from minisweagent.models import GLOBAL_MODEL_STATS
 from minisweagent.tools.tools_runtime import get_tools_list
+from minisweagent.models.utils.cache_control import set_cache_control
 try:
     from google import genai
     from google.genai import types
@@ -167,6 +168,8 @@ class AmdLlmModel:
         retry=retry_if_not_exception_type((KeyboardInterrupt, openai.AuthenticationError, openai.NotFoundError)),
     )
     def _query_anthropic(self, messages: list[dict[str, str]], **kwargs):
+        if self.config.set_cache_control:
+            messages = set_cache_control(messages, mode=self.config.set_cache_control)
         # Anthropic API supported parameters
         supported_params = {
             "temperature", "max_tokens", "top_p", "top_k",
