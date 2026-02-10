@@ -388,17 +388,34 @@ class ParallelAgent(DefaultAgent):
     @staticmethod
     def _replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
         """Replace repository paths with worktree path in text.
-        
-        For backward compatibility: replaces absolute paths and WORK_REPO placeholder.
-        New design uses relative paths that don't need replacement.
+
+        Uses the provided repo_path (no hardcoded paths) to rewrite any absolute
+        reference so that it points into the current worktree.
         """
         repo_path_str = str(repo_path.resolve())
         worktree_path_str = str(worktree_path.resolve())
-        text = text.replace("WORK_REPO", worktree_path_str)
+
+        # If the text already contains paths pointing into a *previous* worktree
+        # (e.g. "<repo>/optimization_logs/<run>/worktrees/agent_X/..."),
+        # collapse that whole prefix back to the current worktree root first.
+        # This prevents path "nesting" when replacement is applied more than once.
+        prev_worktree_pat = re.compile(
+            re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/agent_\d+"
+        )
+        text = prev_worktree_pat.sub(worktree_path_str, text)
+
+        # Replace repo path (resolved and unresolved forms) with worktree path
         text = text.replace(repo_path_str, worktree_path_str)
         if str(repo_path) != repo_path_str:
             text = text.replace(str(repo_path), worktree_path_str)
-        text = re.sub(r'/worktrees/agent_\d+', f'/worktrees/agent_{worktree_path.name.split("_")[-1]}', text)
+
+        # Keep agent id in any remaining /worktrees/agent_<id> segments aligned
+        # with this worktree.
+        text = re.sub(
+            r"/worktrees/agent_\d+",
+            f"/worktrees/agent_{worktree_path.name.split('_')[-1]}",
+            text,
+        )
         return text
 
     @classmethod
@@ -468,7 +485,7 @@ class ParallelAgent(DefaultAgent):
             base_env = env_factory()
             env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, 'config') else {}
             env_config_dict["cwd"] = worktree_path_str
-            env_config_dict.setdefault("env", {})["WORK_REPO"] = worktree_path_str
+            env_config_dict.setdefault("env", {})[repo_path_str] = worktree_path_str
             if gpu_ids and agent_id < len(gpu_ids):
                 gpu_id = gpu_ids[agent_id]
                 env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = str(gpu_id)
@@ -488,7 +505,7 @@ class ParallelAgent(DefaultAgent):
             agent = agent_class(parallel_model, parallel_env, **parallel_agent_config)
             # Set agent attributes if they exist (for ParallelAgent compatibility)
             if hasattr(agent, 'extra_template_vars'):
-                agent.extra_template_vars["WORK_REPO"] = worktree_path_str
+                agent.extra_template_vars[repo_path_str] = worktree_path_str
             if hasattr(agent, 'base_repo_path'):
                 agent.base_repo_path = repo_path_resolved
             if hasattr(agent, 'log_file'):

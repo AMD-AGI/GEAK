@@ -117,7 +117,14 @@ class TestPerfTool:
             test_env.update(ctx.env_vars)
         test_env["PYTHONUNBUFFERED"] = "1"
         
-        test_command = ctx.test_command.replace("WORK_REPO", ctx.cwd)
+        # If test_command still contains the original repo root path, replace it with the
+        # current working directory (worktree). Uses base_repo_path from context instead of
+        # any hardcoded path. Skip replacement if cwd is already present (already rewritten).
+        test_command = ctx.test_command
+        if ctx.base_repo_path:
+            repo_root = str(ctx.base_repo_path)
+            if repo_root in test_command and ctx.cwd not in test_command:
+                test_command = test_command.replace(repo_root, ctx.cwd)
         self._log(f"[TestPerf] Running: {test_command}")
         
         with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt') as tmp:
