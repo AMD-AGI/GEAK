@@ -965,7 +965,7 @@ class PromptSampler:
                 "(`tl.fma` or `a * b + c`) to get 2 flops per instruction."
             )
         elif _comp < 30 and _hbm < 30:
-            analysis.append(
+            latency_bound_msg = (
                 "**Latency-bound**: Both compute and memory are severely underutilized.\n"
                 "  Algorithmic strategies:\n"
                 "  - *Work amplification*: The kernel does too little work per launch. Fuse "
@@ -978,6 +978,18 @@ class PromptSampler:
                 "  - *Occupancy-aware redesign*: Use fewer registers per thread to allow more "
                 "concurrent wavefronts, or restructure to avoid barrier synchronizations."
             )
+            # For severely latency-bound kernels (<5% HBM utilization), allow
+            # tuning BLOCK_SIZE / num_warps as a SECONDARY strategy alongside
+            # algorithmic changes.  These kernels are so underutilized that
+            # increasing occupancy via parameter changes can genuinely help.
+            if _hbm < 5:
+                latency_bound_msg += (
+                    "\n\n  **Note**: Because HBM utilization is extremely low (<5%), "
+                    "you MAY also adjust `BLOCK_SIZE` and `num_warps` as a SECONDARY "
+                    "strategy to improve occupancy -- but this must be accompanied by "
+                    "at least one algorithmic change from the list above."
+                )
+            analysis.append(latency_bound_msg)
 
         # ----- Specific metric-driven recommendations -----
         if coalescing is not None and coalescing < 50:
@@ -1043,6 +1055,76 @@ class PromptSampler:
                 f"**Very short kernel** ({duration_us:.1f} us):\n"
                 "  - Kernel launch overhead may dominate. Fuse with adjacent kernels "
                 "or batch more work into a single launch."
+            )
+
+        # ----- Kernel-type-specific guidance -----
+
+        # Element-wise kernels: low bytes_transferred + low duration → limited headroom
+        bytes_transferred = profiling.get("bytes_transferred_hbm")
+        if (
+            bytes_transferred is not None
+            and duration_us is not None
+            and duration_us < 50
+            and _hbm < 40
+            and _comp < 40
+        ):
+            analysis.append(
+                "**Element-wise / lightweight kernel** (low data volume, short duration):\n"
+                "  - Limited headroom for single-kernel optimization.\n"
+                "  - *Kernel fusion*: The highest-impact strategy is fusing this kernel with "
+                "adjacent operations (preceding producer or following consumer) to eliminate "
+                "an entire memory round-trip.\n"
+                "  - *Vectorized loads/stores*: Ensure you are using the widest possible "
+                "vector width (e.g., 4-element vectors) to maximize per-thread throughput.\n"
+                "  - If fusion is not possible from this file alone, note this limitation "
+                "and focus on reducing instruction count within the kernel."
+            )
+
+        # Sequential / sorting-like algorithms (topk, argsort, etc.)
+        # Heuristic: very low compute busy, very low HBM, moderate duration
+        if (
+            duration_us is not None
+            and _comp < 15
+            and _hbm < 15
+            and duration_us > 20
+        ):
+            analysis.append(
+                "**Potentially sequential / data-dependent algorithm**:\n"
+                "  - Both compute and memory utilization are extremely low, suggesting "
+                "the algorithm may be inherently sequential (e.g., sorting, top-k selection, "
+                "scan with dependencies).\n"
+                "  - *Consider a fundamentally different algorithm*: Rather than tweaking the "
+                "existing implementation, propose an entirely different approach. For example:\n"
+                "    * Replace iterative top-k with radix select or approximate top-k\n"
+                "    * Replace sequential scan with work-efficient parallel prefix sum\n"
+                "    * Replace comparison-based sort with radix sort\n"
+                "  - *Parallelism extraction*: Identify independent sub-problems that can be "
+                "solved concurrently across workgroups."
+            )
+
+        # LDS-bound kernels: high LDS bank conflicts
+        if lds_conflicts is not None and lds_conflicts > 5:
+            analysis.append(
+                "**LDS-bound kernel** (high bank conflicts detected):\n"
+                "  Concrete Triton patterns to reduce LDS bank conflicts:\n"
+                "  - *Padding*: When allocating shared memory tiles, add +1 to the "
+                "innermost dimension to avoid power-of-2 stride conflicts:\n"
+                "    ```python\n"
+                "    # Instead of:\n"
+                "    tile = tl.zeros([BLOCK_M, BLOCK_K], dtype=tl.float32)\n"
+                "    # Use padded layout (conceptually):\n"
+                "    # Ensure BLOCK_K is not a multiple of 32 (bank count)\n"
+                "    ```\n"
+                "  - *Swizzled access*: XOR the row index with column index bits to "
+                "spread accesses across banks:\n"
+                "    ```python\n"
+                "    # Swizzle pattern for LDS access\n"
+                "    row_idx = tl.arange(0, BLOCK_M)\n"
+                "    col_idx = tl.arange(0, BLOCK_K)\n"
+                "    swizzled_col = col_idx ^ (row_idx[:, None] & 0x1F)\n"
+                "    ```\n"
+                "  - *Bank-conflict-free transpose*: If doing a tile transpose through "
+                "LDS, use the padding + swizzle technique above."
             )
 
         # ----- EXPLICIT: what NOT to focus on -----

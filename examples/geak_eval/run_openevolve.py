@@ -225,6 +225,79 @@ def _parse_metrix_output(output: str) -> Dict[str, Any]:
     return metrics
 
 
+def _check_profiling_target_mismatch(
+    metrics: Dict[str, Any], kernel_path: str
+) -> None:
+    """
+    Warn if the profiled kernel function is NOT defined in the editable
+    kernel.py file.
+
+    This catches cases like nsa_backward where kernel-profile auto-selects
+    a Triton kernel that lives in a *dependency* (e.g. triton_nsa_kernel)
+    rather than in the editable source.  When this happens, OpenEvolve's
+    mutations to kernel.py will have no effect on the profiled bottleneck.
+    """
+    profiled_name = metrics.get("kernel_name", "")
+    if not profiled_name:
+        return
+
+    # Read the kernel source and extract function definitions
+    try:
+        with open(kernel_path, "r") as f:
+            source = f.read()
+    except Exception:
+        return
+
+    import re
+    # Match "def <name>" and "@triton.jit" decorated functions
+    fn_names = set(re.findall(r"(?:^|\n)\s*def\s+(\w+)\s*\(", source))
+    # Also match Triton JIT kernel names (may differ from Python def names)
+    jit_names = set(re.findall(r"@triton\.(?:jit|autotune)[\s\S]*?\ndef\s+(\w+)\s*\(", source))
+    all_names = fn_names | jit_names
+
+    # The profiled kernel name often has a suffix (e.g. "_0d1d2d3d")
+    # Try to match the base name against known function names.
+    base_profiled = profiled_name.split("_0d")[0]  # strip Triton mangled suffix
+
+    matched = False
+    for name in all_names:
+        if name in base_profiled or base_profiled in name:
+            matched = True
+            break
+
+    if not matched:
+        logger.warning("")
+        logger.warning("=" * 60)
+        logger.warning("PROFILING TARGET MISMATCH WARNING")
+        logger.warning("=" * 60)
+        logger.warning(
+            f"  Metrix profiled kernel: '{profiled_name}'"
+        )
+        logger.warning(
+            f"  But this function is NOT found in: {kernel_path}"
+        )
+        logger.warning(
+            f"  Functions in kernel.py: {sorted(all_names)}"
+        )
+        logger.warning(
+            "  The profiled bottleneck may be in a dependency rather than"
+        )
+        logger.warning(
+            "  the editable code. OpenEvolve mutations may not affect it."
+        )
+        logger.warning(
+            "  Consider: (1) profile a specific Triton kernel from the"
+        )
+        logger.warning(
+            "  editable file, or (2) include the dependency in the"
+        )
+        logger.warning(
+            "  multi-file program so OpenEvolve can modify it."
+        )
+        logger.warning("=" * 60)
+        logger.warning("")
+
+
 # ===========================================================================
 # AIG-Eval auto-build helpers (only used when --commandment is NOT provided)
 # ===========================================================================
@@ -403,6 +476,9 @@ def validate_commands_on_baseline(
             )
         else:
             logger.info(f"  [PROFILE] duration_us = {dur:.2f}")
+
+        # Check if the profiled kernel is actually in the editable file
+        _check_profiling_target_mismatch(profile_metrics, kernel_path)
 
         logger.info("All commands validated successfully on baseline.")
         return {

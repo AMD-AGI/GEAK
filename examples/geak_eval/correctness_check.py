@@ -38,8 +38,24 @@ import sys
 import traceback
 from typing import Any, Dict, List, Tuple
 
-# Ensure CUDA is available before importing torch
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# Only set PYTORCH_CUDA_ALLOC_CONF on NVIDIA/CUDA -- on ROCm/HIP the
+# "expandable_segments" allocator option is not supported and triggers a
+# UserWarning that pollutes stderr, causing false correctness failures.
+def _is_rocm() -> bool:
+    """Detect whether we are running on a ROCm/HIP platform."""
+    # Fast env-var check (set by many ROCm containers and scripts)
+    if os.environ.get("HIP_VISIBLE_DEVICES") is not None:
+        return True
+    if os.environ.get("ROCM_HOME") is not None:
+        return True
+    # Check for rocm-smi binary
+    import shutil
+    if shutil.which("rocm-smi") is not None:
+        return True
+    return False
+
+if not _is_rocm():
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 

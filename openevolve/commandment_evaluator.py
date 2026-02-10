@@ -43,6 +43,43 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Known benign warnings that should NOT cause a command to be treated as
+# a failure.  These are regex patterns matched against stderr.
+# ---------------------------------------------------------------------------
+_BENIGN_STDERR_PATTERNS = [
+    # ROCm/HIP does not support expandable_segments; PyTorch emits a
+    # UserWarning but the kernel still runs correctly.
+    r"(?i)expandable.?segments",
+    # Triton cache / compilation info messages
+    r"(?i)triton.*compilation",
+    # General Python UserWarnings (non-fatal)
+    r"UserWarning:",
+    # hipBLAS/rocBLAS informational messages
+    r"(?i)rocblas.*info",
+    # torch.cuda setup messages
+    r"(?i)setting.*cuda.*device",
+]
+
+import re as _re
+_BENIGN_RE = _re.compile("|".join(_BENIGN_STDERR_PATTERNS))
+
+
+def _filter_benign_stderr(stderr: str) -> str:
+    """
+    Remove lines matching known benign warning patterns from stderr.
+
+    Returns the filtered stderr string.  If all lines are benign, returns
+    an empty string -- the caller can then avoid treating the command as
+    failed just because stderr was non-empty.
+    """
+    filtered = []
+    for line in stderr.splitlines():
+        if not _BENIGN_RE.search(line):
+            filtered.append(line)
+    return "\n".join(filtered)
+
+
+# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -275,11 +312,21 @@ class CommandmentEvaluator:
         env["GEAK_KERNEL_DIR"] = self.kernel_dir or work_dir
         env["GEAK_WORK_DIR"] = work_dir
 
+        # On ROCm/HIP, remove PYTORCH_CUDA_ALLOC_CONF if it contains
+        # expandable_segments -- this option is unsupported on ROCm and
+        # triggers a UserWarning that can cause false failures.
+        alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF", "")
+        if "expandable_segments" in alloc_conf and env.get("HIP_VISIBLE_DEVICES") is not None:
+            env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+
         # GPU isolation: set per-subprocess environment variables
         # This is thread-safe because each subprocess.run() gets its own env dict.
         if gpu_id is not None:
             env["GEAK_GPU_DEVICE"] = str(gpu_id)
             env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+            # Also strip expandable_segments for ROCm
+            if "PYTORCH_CUDA_ALLOC_CONF" in env and "expandable_segments" in env.get("PYTORCH_CUDA_ALLOC_CONF", ""):
+                env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
 
         for cmd in section.commands:
             if not cmd.strip():
@@ -300,9 +347,14 @@ class CommandmentEvaluator:
                 all_stderr.append(result.stderr)
 
                 if result.returncode != 0:
+                    # Filter out known benign warnings before reporting
+                    # failure -- some warnings (e.g. expandable_segments
+                    # on ROCm) produce a non-zero exit code but the
+                    # kernel actually ran correctly.
+                    filtered_stderr = _filter_benign_stderr(result.stderr)
                     logger.warning(
                         f"[{section_name}] Command failed (rc={result.returncode}): {cmd}\n"
-                        f"stderr: {result.stderr[-300:]}"
+                        f"stderr: {filtered_stderr[-300:]}"
                     )
                     return False, "\n".join(all_stdout), "\n".join(all_stderr)
 
@@ -416,12 +468,28 @@ class CommandmentEvaluator:
 
         return metrics
 
+    # Maximum allowed regression factor.  Candidates slower than
+    # baseline by more than this factor are flagged as "catastrophic
+    # regression" and their speedup is clamped to a very low value
+    # instead of receiving the raw number.  This prevents extreme
+    # outliers (e.g. 25,000x regressions from fused_rms_fp8) from
+    # polluting the evolutionary population.
+    _MAX_REGRESSION_FACTOR = 5.0
+    _REGRESSION_FLOOR_SPEEDUP = 0.01  # assigned to catastrophic regressions
+
     def _calculate_speedup(self, metrics: Dict[str, Any]) -> float:
         """Calculate speedup vs baseline metrics.
 
         Checks multiple latency key names (duration_us, latency_us,
         latency_avg_us) because Metrix may report under any of these.
         Falls back to throughput-based if latency is unavailable.
+
+        **Regression guard**: if the candidate is more than
+        ``_MAX_REGRESSION_FACTOR`` times slower than baseline, the
+        speedup is clamped to ``_REGRESSION_FLOOR_SPEEDUP`` and a
+        warning is logged.  This prevents catastrophic regressions from
+        receiving a near-zero (but positive) speedup that might still
+        survive selection pressure in the evolutionary population.
         """
         if not self.baseline_metrics:
             return 1.0
@@ -444,14 +512,41 @@ class CommandmentEvaluator:
                 break
 
         if baseline_latency > 0 and target_latency > 0:
-            return baseline_latency / target_latency
+            raw_speedup = baseline_latency / target_latency
+
+            # --- Regression guard ---
+            if raw_speedup < (1.0 / self._MAX_REGRESSION_FACTOR):
+                regression_factor = target_latency / baseline_latency
+                logger.warning(
+                    f"CATASTROPHIC REGRESSION: candidate is {regression_factor:.0f}x "
+                    f"slower than baseline (latency {target_latency:.1f} us vs "
+                    f"{baseline_latency:.1f} us baseline). Clamping speedup to "
+                    f"{self._REGRESSION_FLOOR_SPEEDUP}."
+                )
+                metrics["_regression"] = True
+                metrics["_regression_factor"] = regression_factor
+                return self._REGRESSION_FLOOR_SPEEDUP
+
+            return raw_speedup
 
         # Try throughput-based speedup
         baseline_tflops = self.baseline_metrics.get("tflops", 0.0)
         target_tflops = metrics.get("tflops", 0.0)
 
         if baseline_tflops > 0 and target_tflops > 0:
-            return target_tflops / baseline_tflops
+            raw_speedup = target_tflops / baseline_tflops
+
+            # --- Regression guard (throughput) ---
+            if raw_speedup < (1.0 / self._MAX_REGRESSION_FACTOR):
+                logger.warning(
+                    f"CATASTROPHIC REGRESSION (throughput): candidate tflops "
+                    f"{target_tflops:.2f} vs baseline {baseline_tflops:.2f}. "
+                    f"Clamping speedup to {self._REGRESSION_FLOOR_SPEEDUP}."
+                )
+                metrics["_regression"] = True
+                return self._REGRESSION_FLOOR_SPEEDUP
+
+            return raw_speedup
 
         return 1.0
 
