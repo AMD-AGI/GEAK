@@ -247,9 +247,21 @@ def main(
         agent_config["metric"] = metric
 
     agent = agent_class(model, env, **agent_config)
+    # Load INSTRUCTIONS.md if available (pipeline reference for the agent)
+    instructions_content = ""
+    for instructions_candidate in [
+        Path(workspace) / "INSTRUCTIONS.md" if workspace else None,
+        Path.cwd() / "INSTRUCTIONS.md",
+        Path(__file__).resolve().parent.parent.parent.parent / "INSTRUCTIONS.md",
+    ]:
+        if instructions_candidate and instructions_candidate.is_file():
+            instructions_content = instructions_candidate.read_text()
+            console.print(f"Loaded pipeline instructions from [bold green]'{instructions_candidate}'[/bold green]")
+            break
+
     exit_status, result, extra_info = None, None, None
     try:
-        exit_status, result = agent.run(task)  # type: ignore[arg-type]
+        exit_status, result = agent.run(task, instructions=instructions_content)  # type: ignore[arg-type]
     except Exception as e:
         logger.error(f"Error running agent: {e}", exc_info=True)
         exit_status, result = type(e).__name__, str(e)

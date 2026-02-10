@@ -19,6 +19,14 @@ agent:
     Please solve this issue: {{task}}
 
     You can execute bash commands and edit files to implement the necessary changes.
+    {% if instructions %}
+
+    ## Pipeline Tool Reference (INSTRUCTIONS.md)
+
+    <instructions>
+    {{instructions}}
+    </instructions>
+    {% endif %}
 
     ## Recommended Workflow
 

@@ -12,7 +12,7 @@ actual kernel directory (e.g., `/workspace/AIG-Eval/tasks/geak_eval/gemm`).
 
 ### kernel-profile (Metrix hardware profiler)
 ```
-kernel-profile [-h] [--gpu-devices GPU_DEVICES] [--filter FILTER]
+kernel-profile [-h] [--gpu-devices GPU_DEVICES]
                [--replays REPLAYS] [--auto-select] [--quick]
                command
 
@@ -21,7 +21,6 @@ positional arguments:
 
 options:
   --gpu-devices GPU_DEVICES   GPU device ID(s): "0" or "0,1,2" (default: 3)
-  --filter FILTER             Kernel name filter (e.g., "*topk*")
   --replays REPLAYS           Number of profiling replays (default: 3)
   --auto-select               Automatically select main kernel
   --quick                     Fast profiling (3 metrics, 1 pass)
@@ -80,34 +79,82 @@ cd KERNEL_DIR && python3 kernel.py
 
 ---
 
-## 2. BENCHMARKING: Profile with Metrix (kernel-profile)
+## 2. PROFILING: kernel-profile (Metrix)
 
-### Command
+kernel-profile is a hardware profiler.  It can be used at **any stage**:
+baseline measurement, post-optimisation validation, or ad-hoc investigation.
+OpenEvolve also invokes it during evolution via the COMMANDMENT PROFILE section.
+
+### Running the profiler
 ```bash
 kernel-profile "python3 KERNEL_DIR/kernel.py --profile" \
-  --gpu-devices 0 --auto-select --replays 5
+  --gpu-devices 0 --replays 5
 ```
 
-### Saving Baseline Metrics
-To save metrics as JSON for OpenEvolve (pre-built mode only):
+The profiler reports **every** GPU kernel it observes during the run, not
+just the one you intend to optimise.  The output will include framework
+overhead (PyTorch internals, memory copies, etc.) alongside the actual
+compute kernels.
+
+### YOUR job: choose which kernels matter
+
+Read the profiler output carefully.  Based on the optimisation task:
+
+1. Identify which kernel(s) are the target of optimisation.
+2. Decide whether the task involves a single kernel or a group that must
+   be considered together (e.g. a fused operation that dispatches multiple
+   GPU kernels).
+3. Ignore framework overhead unless the task explicitly concerns it.
+
+This decision cannot be automated — it depends on the task context.
+
+### Saving baseline_metrics.json (pre-built COMMANDMENT mode only)
+
+Once you know which kernels to include, use `geakagent.baseline_metrics`
+to format them into the JSON that `run_openevolve.py --baseline-metrics`
+expects.  You must tell it **exactly** which kernels to include.
+
 ```bash
 mkdir -p KERNEL_DIR/optimization_output
+
+# Step 1: Profile and save the raw profiler output
 python3 -c "
 from geak_agent.mcp_tools.metrix import MetrixTool
+from geakagent.baseline_metrics import list_kernels
 import json
+
 tool = MetrixTool(gpu_devices='0')
-result = tool.profile(
-    command='python3 KERNEL_DIR/kernel.py --profile',
-    auto_select=True,
-    num_replays=5,
-    quick=False
-)
-metrics = result.get('metrics', result)
-with open('KERNEL_DIR/optimization_output/baseline_metrics.json', 'w') as f:
-    json.dump(metrics, f, indent=2)
-print(json.dumps(metrics, indent=2))
+result = tool.profile(command='python3 KERNEL_DIR/kernel.py --profile', auto_select=False, num_replays=5, quick=False)
+with open('KERNEL_DIR/optimization_output/profiler_output.json', 'w') as f:
+    json.dump(result, f, indent=2)
+
+# Print all kernels so you can decide which are relevant
+for i, k in enumerate(list_kernels(result)):
+    print(f'[{i}] {k[\"duration_us\"]:>10.2f} µs  {k[\"bottleneck\"]:<10}  {k[\"name\"]}')
 "
+
+# Step 2: Build baseline_metrics.json from the kernels YOU chose
+#   --kernels "name1,name2"   select by exact name
+#   --indices 0,2             select by index from the listing above
+#   --all                     use every kernel (when only the relevant ones are present)
+python3 -m geakagent.baseline_metrics build \
+  KERNEL_DIR/optimization_output/profiler_output.json \
+  --kernels "topk_stage1,topk_stage2" \
+  -o KERNEL_DIR/optimization_output/baseline_metrics.json
 ```
+
+Or equivalently from Python:
+```python
+from geakagent.baseline_metrics import build_baseline_metrics
+baseline = build_baseline_metrics(result, kernel_names=["topk_stage1", "topk_stage2"])
+# or: build_baseline_metrics(result, kernel_indices=[0, 2])
+# or: build_baseline_metrics(result, include_all=True)
+```
+
+When multiple kernels are selected:
+- `duration_us` is **summed** (total wall-time of the group).
+- Other hardware metrics are **duration-weighted averages**.
+- `bottleneck` and `observations` come from the dominant (longest) kernel.
 
 ### Key Metrics
 - `duration_us` — kernel execution time in microseconds (PRIMARY metric for scoring)
@@ -115,6 +162,15 @@ print(json.dumps(metrics, indent=2))
 - `memory.l2_hit_rate` — L2 cache hit rate (%)
 - `memory.coalescing_efficiency` — memory access pattern quality (%)
 - Bottleneck classification: memory-bound, compute-bound, latency-bound, etc.
+
+### Profiling after optimisation
+
+After OpenEvolve completes, profile the best kernel to verify the improvement:
+```bash
+kernel-profile "python3 KERNEL_DIR/optimization_output/best_kernel.py --profile" \
+  --gpu-devices 0 --replays 5
+```
+Compare with the baseline to confirm the speedup is real and not an artefact.
 
 ---
 
@@ -165,6 +221,15 @@ cd KERNEL_DIR && python3 /workspace/geak-oe/examples/geak_eval/run_openevolve.py
   --baseline-metrics optimization_output/baseline_metrics.json
 ```
 
+### OpenEvolve's profiling freedom
+
+OpenEvolve invokes `kernel-profile` during every candidate evaluation via the
+COMMANDMENT PROFILE section.  This is how it scores each candidate against the
+baseline.  Do NOT restrict OpenEvolve's ability to profile — the COMMANDMENT
+PROFILE section must always include the full profiling command.  OpenEvolve
+decides when and how often to profile; the baseline_metrics.json is only the
+starting reference point.
+
 ### OpenEvolve Output Files
 - `optimization_output/best_kernel.py` — the best optimized kernel found
 - `optimization_output/openevolve_result.json` — final results with best score
@@ -210,7 +275,7 @@ python3 /workspace/geak-oe/examples/geak_eval/correctness_check.py --baseline KE
 ## PROFILE
 python3 ${GEAK_WORK_DIR}/kernel.py --profile > /dev/null 2>&1 || true
 python3 ${GEAK_WORK_DIR}/kernel.py --profile > /dev/null 2>&1 || true
-kernel-profile "python3 ${GEAK_WORK_DIR}/kernel.py --profile" --gpu-devices ${GEAK_GPU_DEVICE} --auto-select --replays 5
+kernel-profile "python3 ${GEAK_WORK_DIR}/kernel.py --profile" --gpu-devices ${GEAK_GPU_DEVICE} --replays 5
 ```
 
 ### Common Mistakes to Avoid
