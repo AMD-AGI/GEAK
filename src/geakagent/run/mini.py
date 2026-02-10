@@ -53,21 +53,64 @@ def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -
     if line_num:
         line_info = f" Line: {line_num}"
         kernel_info = f", kernel name: {kernel_name!r}" if kernel_name else ""
-        profile_hint = " When profiling, all kernels are reported; the agent can choose which to use."
+        profile_hint = "When profiling, all kernels are reported; the agent can choose which to use."
     else:
         line_info = ""
         kernel_info = ""
-        profile_hint = " Line number was not specified; discovery should identify the kernel(s) in the file."
-    profile_usage = (
-        "To profile: run kernel-profile '<command>' (one quoted argument = command that runs the kernel). "
-        f"Example: kernel-profile 'python3 {path} --profile' — or use the project's benchmark script if the file has no --profile. "
-    )
-    block = (
-        f"\n\n--- Resolved kernel (from --kernel-url) ---\n"
-        f"Use this path for all steps (discover, test, profile, optimize): {path}.{line_info}{kernel_info}\n"
-        f"{profile_usage}{profile_hint}\n"
-        f"---\n"
-    )
+        profile_hint = "Line number was not specified; discovery should identify the kernel(s) in the file."
+
+    kernel_dir = str(Path(path).parent)
+    output_dir = f"{kernel_dir}/optimization_output"
+    oe_script = f"${{GEAK_OE_ROOT:-/opt/geak-oe}}/examples/geak_eval/run_openevolve.py"
+
+    block = f"""\n
+--- Resolved kernel (from --kernel-url) ---
+Kernel path: {path}{(' |' + line_info + kernel_info) if line_info else ''}
+---
+
+--- Workflow ---
+Follow these steps IN ORDER. Do one step per response.
+
+Step 1 - DISCOVER: Read and analyse the kernel file. Identify the kernel function, its inputs/outputs, dependencies, and any existing tests in the repo.
+
+Step 2 - TEST GEN: Create a standalone test harness that can (a) verify correctness and (b) benchmark performance. Save it next to the kernel (e.g. {kernel_dir}/test_harness.py).
+
+Step 3 - BENCHMARK & COMMANDMENT: Profile the baseline kernel with kernel-profile and create two artifacts:
+  a) baseline_metrics.json — latency/bandwidth numbers from profiling.
+  b) COMMANDMENT.md — the evaluation contract for OpenEvolve.
+  {profile_hint}
+  Profile command example: kernel-profile 'python3 {path} --profile'
+
+  <critical>
+  COMMANDMENT.md FORMAT RULES — every section body must contain ONLY executable shell commands, one per line.
+  No markdown, no comments, no descriptions, no blank lines, no headers inside the body.
+  Example of a CORRECT COMMANDMENT.md:
+
+  ## SETUP
+  export HIP_VISIBLE_DEVICES=0
+  export PYTHONPATH=/workspace/myrepo:$PYTHONPATH
+
+  ## CORRECTNESS
+  python3 /workspace/test_harness.py --correctness
+
+  ## PROFILE
+  python3 /workspace/test_harness.py --baseline --output /tmp/profile_result.json
+
+  WRONG (will break OpenEvolve — do NOT do this):
+  ## SETUP
+  Environment setup commands (run once before evaluation):
+  export HIP_VISIBLE_DEVICES=0
+  </critical>
+
+Step 4 - OPTIMIZE: Do NOT edit the kernel by hand. Run the OpenEvolve optimizer:
+  python3 {oe_script} {path} --iterations 10 --gpu 0 --output {output_dir}
+  If you created COMMANDMENT.md and baseline_metrics.json, add:
+  --commandment <path_to_COMMANDMENT.md> --baseline-metrics <path_to_baseline_metrics.json>
+
+Step 5 - REPORT: Summarise results (speedup, best score, any errors) and submit:
+  echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+---
+"""
     return task + block, kernel_name
 
 

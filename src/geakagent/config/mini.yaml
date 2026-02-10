@@ -22,7 +22,9 @@ agent:
 
     ## Recommended Workflow
 
-    This workflows should be done step-by-step so that you can iterate on your changes and any possible problems.
+    <important>If the task above includes a "--- Workflow ---" section, follow THAT workflow instead of the default one below.</important>
+
+    This default workflow is for general code changes. Follow it step-by-step unless the task specifies otherwise.
 
     1. Analyze the codebase by finding and reading relevant files
     2. Create a script to reproduce the issue
@@ -95,6 +97,13 @@ agent:
     # View specific lines with numbers
     nl -ba filename.py | sed -n '10,20p'
     ```
+
+    ### Run OpenEvolve optimizer (for kernel optimization tasks)
+    When the task asks for OPTIMIZATION or OpenEvolve, do NOT edit the kernel by hand. Run the optimizer script:
+    ```bash
+    python3 ${GEAK_OE_ROOT:-/opt/geak-oe}/examples/geak_eval/run_openevolve.py <kernel_path> --iterations 10 --gpu 0 --output <output_dir>
+    ```
+    Use --commandment and --baseline-metrics if you created them in an earlier step.
 
     ### Any other command you want to run
 

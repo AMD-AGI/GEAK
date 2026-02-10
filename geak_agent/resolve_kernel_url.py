@@ -105,14 +105,17 @@ def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
             base = Path(clone_into)
             base.mkdir(parents=True, exist_ok=True)
             tmpdir_path = base / ".geak_resolved" / f"{owner}_{repo}"
-            tmpdir_path.mkdir(parents=True, exist_ok=True)
-            tmpdir = str(tmpdir_path)
-            if (tmpdir_path / file_path).exists():
-                out["local_repo_path"] = tmpdir
+            # If the target file already exists from a previous clone, reuse it
+            if tmpdir_path.exists() and (tmpdir_path / file_path).exists():
+                out["local_repo_path"] = str(tmpdir_path)
                 out["local_file_path"] = str((tmpdir_path / file_path).resolve())
                 out["line_number"] = line_start
                 out["line_end"] = line_end
                 return out
+            # Remove any leftover partial clone before re-cloning
+            if tmpdir_path.exists():
+                shutil.rmtree(tmpdir_path, ignore_errors=True)
+            tmpdir = str(tmpdir_path)
         else:
             tmpdir = tempfile.mkdtemp(prefix=f"geak_kernel_{repo}_")
         result = subprocess.run(
