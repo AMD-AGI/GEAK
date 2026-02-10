@@ -27,6 +27,7 @@ from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.utils.save import save_traj
 from minisweagent.run.utils.config_editor import load_and_merge_configs
+from minisweagent.run.utils.task_parser import _resolve_path_case
 from minisweagent.utils.log import logger
 from minisweagent.agents.unit_test_agent import run_unit_test_agent
 
@@ -253,10 +254,15 @@ def main(
         console.print(f"[bold cyan]Using Parallel Mode: {num_parallel} agents[/bold cyan]")
         console.print(f"[dim]GPU IDs: {parsed_gpu_ids}[/dim]")
         
-        # Configure repo path for parallel execution
+        # Configure repo path for parallel execution (preserve filesystem case)
         repo_path = repo or config.get("patch", {}).get("repo")
         if repo_path:
-            agent_config["repo"] = str(Path(repo_path).resolve())
+            p = Path(repo_path)
+            if not p.exists():
+                resolved = _resolve_path_case(p)
+                if resolved is not None:
+                    p = resolved
+            agent_config["repo"] = str(p.resolve())
             console.print(f"[dim]Repository: {agent_config['repo']}[/dim]")
         else:
             console.print("[bold yellow]Warning: No repo path specified for parallel execution[/bold yellow]")

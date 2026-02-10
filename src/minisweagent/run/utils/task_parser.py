@@ -6,6 +6,29 @@ from datetime import datetime
 from pathlib import Path
 
 
+def _resolve_path_case(path: Path) -> Path | None:
+    """Resolve path to filesystem case (e.g. geak -> GEAK on case-sensitive filesystems).
+    Walks each component and matches case-insensitively against directory listing.
+    Returns None if any component is not found.
+    """
+    if not path.is_absolute():
+        return None
+    parts = path.parts[1:]  # drop leading /
+    resolved = Path(path.anchor)
+    for name in parts:
+        if not resolved.is_dir():
+            return None
+        found = None
+        for entry in resolved.iterdir():
+            if entry.name.lower() == name.lower():
+                found = entry
+                break
+        if found is None:
+            return None
+        resolved = found
+    return resolved
+
+
 def parse_task_info(task_content: str, model) -> dict:
     """Parse task content to extract optimization configuration.
     
@@ -69,11 +92,16 @@ If any field cannot be determined from the task, set it to null.
             "gpu_ids": parsed.get("gpu_ids"),
         }
         
-        # Normalize repo path if it exists
+        # Normalize repo path and preserve filesystem case (LLM often returns lowercase)
         if result["repo"]:
             repo_path = Path(result["repo"])
             if repo_path.exists():
                 result["repo"] = str(repo_path.resolve())
+            else:
+                # Path may have wrong case (e.g. geak -> GEAK); resolve via directory listing
+                resolved = _resolve_path_case(repo_path)
+                if resolved is not None:
+                    result["repo"] = str(resolved.resolve())
         
         return result
         
