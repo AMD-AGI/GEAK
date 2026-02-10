@@ -1,201 +1,202 @@
+English | [中文](README_zh.md)
+
 # Mini SWE Agent
 
-基于 LLM 驱动 Bash 命令的极简 AI 编码智能体，核心代码约 100 行。
+A minimal AI coding agent powered by LLM-generated Bash commands. The core agent is ~100 lines of code.
 
-## 安装
+## Installation
 
 ```bash
 pip install -e .
 
-# 如需使用 MCP RAG 功能，额外安装 langchain 依赖
+# To use the MCP RAG feature, also install the langchain dependencies
 pip install -e '.[langchain]'
 ```
 
-## 使用
+## Usage
 
 ```bash
-# REPL 交互界面
+# Interactive REPL
 mini
 
-# 直接指定任务
-mini -t "修复 main.py 中的 bug"
+# Run with a specific task
+mini -t "fix the bug in main.py"
 
-# 自动执行模式（跳过确认）
+# Auto-execute mode (no confirmation needed)
 mini --yolo
 
-# 启用 MCP
+# Enable MCP
 mini --mcp
 ```
 
-## MCP 集成
+## MCP Integration
 
-集成 AMD AI DevTool，提供基于知识库的混合检索能力（BGE Embedding + BM25 + 重排序）。内置 AMD GPU 和 NVIDIA GPU 知识库。
+Integrates AMD AI DevTool for hybrid knowledge base retrieval (BGE Embedding + BM25 + Reranking), with built-in AMD GPU and NVIDIA GPU knowledge bases.
 
-### 1. 预下载 ROCm 库源码（推荐）
+### 1. Pre-download ROCm Library Source (Recommended)
 
-agent 运行时可能需要参考 ROCm 库的源码，建议提前 clone 到本地，避免 agent 运行时下载大仓库导致超时中断：
+The agent may need to reference ROCm library source code at runtime. Pre-cloning is recommended to avoid timeouts when downloading a large repo on the fly:
 
 ```bash
 git clone --depth 1 https://github.com/ROCm/rocm-libraries.git ~/.cache/rocm-libraries
 ```
 
-### 2. 构建语义索引（首次使用必须）
+### 2. Build Semantic Index (Required for First Use)
 
-使用 MCP 前需要先构建知识库索引，否则检索功能无法工作：
+The knowledge base index must be built before MCP retrieval can work:
 
 ```bash
-# 基本用法：对 knowledge-base/ 下所有文档构建索引
-# 强制重建（覆盖已有索引）
+# Build index for all documents under knowledge-base/
+# --force overwrites any existing index
 python scripts/build_index.py --force
-
 ```
 
-索引默认输出到 `~/.cache/amd-ai-devtool/semantic-index/`，构建产物：
+The index is saved to `~/.cache/amd-ai-devtool/semantic-index/` by default. Output files:
 
-- `index.faiss` + `index.pkl` — FAISS 语义搜索索引
-- `bm25_index.pkl` — BM25 关键词搜索索引
+- `index.faiss` + `index.pkl` — FAISS semantic search index
+- `bm25_index.pkl` — BM25 keyword search index
 
-以下情况需要重建索引：
+You need to rebuild the index when:
 
-1. 添加/修改知识库文档
-2. 更改分块或索引逻辑
-3. 修复元数据解析 bug
+1. Knowledge base documents are added or modified
+2. Chunking or indexing logic is changed
+3. Metadata parsing bugs are fixed
 
-### 3. 测试检索
+### 3. Test Retrieval
 
-构建索引后可运行测试脚本验证：
+After building the index, verify it with the test scripts:
 
 ```bash
-python scripts/test_embedding_search.py      # 测试 FAISS 语义搜索
-python scripts/test_hybrid_retrieval.py      # 测试混合检索（Embedding + BM25 + Reranker）
-python scripts/test_rrf_fusion.py            # 测试 RRF 融合算法
+python scripts/test_embedding_search.py      # Test FAISS semantic search
+python scripts/test_hybrid_retrieval.py      # Test hybrid retrieval (Embedding + BM25 + Reranker)
+python scripts/test_rrf_fusion.py            # Test RRF fusion algorithm
 ```
 
-### 4. 启用 MCP
+### 4. Enable MCP
 
 ```bash
-mini --mcp        # 启用 MCP
-mini --mcp -d     # 启用 MCP + 调试输出
+mini --mcp        # Enable MCP
+mini --mcp -d     # Enable MCP with debug output
 ```
 
-在智能体中通过 `@amd:查询内容` 调用检索。
+Inside the agent, use `@amd:your query` to invoke retrieval.
 
-### 5. RAG 检索架构
+### 5. RAG Retrieval Architecture
 
 ```
-Semantic + BM25 → RRF 融合去重 → BGE Reranker 精排 → Top K
+Semantic + BM25 → RRF Fusion → BGE Reranker → Top K
 ```
 
-- **Embedding**: BAAI/bge-large-en-v1.5（语义召回）
-- **BM25**: 关键词召回
-- **Fusion**: RRF (Reciprocal Rank Fusion) 融合去重
-- **Reranker**: BAAI/bge-reranker-large（精排）
+- **Embedding**: BAAI/bge-large-en-v1.5 (semantic recall)
+- **BM25**: Keyword-based recall
+- **Fusion**: RRF (Reciprocal Rank Fusion) for deduplication and merging
+- **Reranker**: BAAI/bge-reranker-large (re-ranking)
 
-配置文件：`src/minisweagent/config/rag_config.yaml`，可调整检索参数、是否启用 BM25 双路召回、重排序、LLM 总结等。
+Config file: `src/minisweagent/config/rag_config.yaml` — tune retrieval parameters, toggle BM25 dual-path recall, reranking, LLM summarization, etc.
 
-## 项目结构
+## Project Structure
 
 ```
 src/minisweagent/
-├── __init__.py                # 版本号、协议定义、全局配置
-├── agents/                    # 智能体实现
-│   ├── default.py             #   核心智能体（~100 行）
-│   ├── interactive.py         #   人机交互智能体
-│   └── interactive_textual.py #   Textual TUI 智能体
-├── models/                    # LLM 模型接口
-│   ├── litellm_model.py       #   LiteLLM（支持大多数模型）
+├── __init__.py                # Version, protocols, global config
+├── agents/                    # Agent implementations
+│   ├── default.py             #   Core agent (~100 lines)
+│   ├── interactive.py         #   Human-in-the-loop agent
+│   └── interactive_textual.py #   Textual TUI agent
+├── models/                    # LLM model interfaces
+│   ├── litellm_model.py       #   LiteLLM (supports most providers)
 │   ├── anthropic_model.py     #   Anthropic
-│   ├── amd_llm.py             #   AMD LLM 网关
+│   ├── amd_llm.py             #   AMD LLM Gateway
 │   ├── openrouter_model.py    #   OpenRouter
 │   └── portkey_model.py       #   Portkey
-├── environments/              # 执行环境
-│   ├── local.py               #   本地 subprocess
+├── environments/              # Execution environments
+│   ├── local.py               #   Local subprocess
 │   ├── docker.py              #   Docker/Podman
 │   └── singularity.py         #   Singularity/Apptainer
-├── config/                    # YAML 配置文件
-│   ├── mini.yaml              #   mini 命令默认配置
-│   ├── default.yaml           #   DefaultAgent 默认配置
-│   ├── github_issue.yaml      #   GitHub Issue 解决配置
-│   └── rag_config.yaml        #   RAG 检索配置
-├── run/                       # 入口脚本
-│   ├── mini.py                #   主 CLI（mini 命令）
-│   ├── hello_world.py         #   简单示例
-│   ├── github_issue.py        #   GitHub Issue 自动解决
-│   └── inspector.py           #   轨迹浏览器
-├── mcp_integration/           # MCP（AMD AI DevTool）集成
-│   ├── mcp_environment.py     #   MCP 环境封装
-│   ├── langchain_retrieval.py #   混合检索（Embedding + BM25）
-│   └── prompts.py             #   MCP 专用提示词
-└── utils/                     # 工具函数
-    ├── log.py                 #   日志
-    └── subagent.py            #   子智能体
+├── config/                    # YAML config files (see "Configuration" below)
+│   ├── mini.yaml              #   Default config for `mini` command
+│   ├── default.yaml           #   DefaultAgent base config
+│   ├── github_issue.yaml      #   GitHub issue solving config
+│   └── rag_config.yaml        #   RAG retrieval config
+├── run/                       # Entry points
+│   ├── mini.py                #   Main CLI (`mini` command)
+│   ├── hello_world.py         #   Simple example
+│   ├── github_issue.py        #   GitHub issue solver
+│   └── inspector.py           #   Trajectory browser
+├── mcp_integration/           # MCP (AMD AI DevTool) integration
+│   ├── mcp_environment.py     #   MCP environment wrapper
+│   ├── langchain_retrieval.py #   Hybrid retrieval (Embedding + BM25)
+│   └── prompts.py             #   MCP-specific prompts
+└── utils/                     # Utilities
+    ├── log.py                 #   Logging
+    └── subagent.py            #   Sub-agent utilities
 ```
 
-其他顶层目录：
+Other top-level directories:
 
-- `scripts/` — 辅助脚本
-- `knowledge-base/` — RAG 知识库（AMD / NVIDIA）
+- `scripts/` — Utility scripts
+- `knowledge-base/` — RAG knowledge base (AMD / NVIDIA)
 
-## 配置文件
+## Configuration
 
-所有配置文件位于 `src/minisweagent/config/`，通过 `mini -c <配置名>` 指定使用。
+All config files are located in `src/minisweagent/config/`. Use `mini -c <config_name>` to select one.
 
-### 智能体配置
+### Agent Configs
 
-| 文件 | 用途 | 模型 | 模式 | 说明 |
-|------|------|------|------|------|
-| `mini.yaml` | `mini` 命令默认配置 | AMD LLM 网关 claude-opus-4.5 | yolo | 日常使用的主配置，temperature=0.0，输出截断 20000 字符，timeout 3600s |
-| `default.yaml` | DefaultAgent 基础配置 | 不绑定具体模型 | confirm | 通用基础配置，temperature=0.0，输出截断 10000 字符（头尾各 5000） |
-| `mini_no_temp.yaml` | 无 temperature 版本 | 不绑定具体模型 | confirm | 和 default.yaml 基本一致，但不设 temperature，cost_limit=3 |
-| `mini_reverse_kl.yaml` | GPU kernel 优化分析 | AMD LLM 网关 claude-opus-4.5 | confirm | 专用于分析仓库的 kernel 优化历史并生成报告，prompt 较长 |
-| `github_issue.yaml` | 自动解决 GitHub Issue | 不绑定具体模型 | — | 运行在 Docker 容器中（python:3.11，工作目录 /testbed） |
+| File | Purpose | Model | Mode | Notes |
+|------|---------|-------|------|-------|
+| `mini.yaml` | Default config for `mini` | AMD LLM Gateway claude-opus-4.5 | yolo | Primary config for daily use. temperature=0.0, output truncation at 20000 chars, timeout 3600s |
+| `default.yaml` | DefaultAgent base config | Not bound to a specific model | confirm | Generic base config. temperature=0.0, output truncation at 10000 chars (5000 head + 5000 tail) |
+| `mini_no_temp.yaml` | No-temperature variant | Not bound to a specific model | confirm | Nearly identical to default.yaml but without temperature setting. cost_limit=3 |
+| `mini_reverse_kl.yaml` | GPU kernel optimization analysis | AMD LLM Gateway claude-opus-4.5 | confirm | Analyzes kernel optimization history in a repo and generates reports. Long prompt |
+| `github_issue.yaml` | Auto-solve GitHub Issues | Not bound to a specific model | — | Runs inside Docker (python:3.11, working dir /testbed) |
 
-### RAG 配置
+### RAG Config
 
-文件：`rag_config.yaml`，控制 RAG 检索管道参数：
+File: `rag_config.yaml` — controls the RAG retrieval pipeline:
 
-| 配置项 | 说明 |
-|--------|------|
-| `retrieval.embed_top_k` / `bm25_top_k` | Embedding / BM25 检索候选数 |
-| `retrieval.enable_bm25` | 是否启用 BM25 双路召回 |
-| `retrieval.mcp_top_k` | 最终返回结果数 |
-| `reranker.enable_reranker` | 是否启用精排 |
-| `fusion.semantic_weight` / `bm25_weight` | Embedding 和 BM25 的融合权重 |
-| `summary.enable_rag_subagent` | 是否启用 LLM 总结 |
-| `debug.verbose` | 是否打印 MCP 工具详细日志 |
+| Parameter | Description |
+|-----------|-------------|
+| `retrieval.embed_top_k` / `bm25_top_k` | Number of candidates from Embedding / BM25 retrieval |
+| `retrieval.enable_bm25` | Whether to enable BM25 dual-path recall |
+| `retrieval.mcp_top_k` | Number of final results returned |
+| `reranker.enable_reranker` | Whether to enable re-ranking |
+| `fusion.semantic_weight` / `bm25_weight` | Fusion weights for Embedding and BM25 |
+| `summary.enable_rag_subagent` | Whether to enable LLM summarization |
+| `debug.verbose` | Whether to print verbose MCP tool logs |
 
-## 知识库
+## Knowledge Base
 
-### 目录结构
+### Directory Structure
 
 ```
 knowledge-base/
 ├── amd-knowledge-base/
-│   ├── layer-1-hardware/         # 硬件架构
-│   ├── layer-2-compute-stack/    # 计算栈（HIP、ROCm）
-│   ├── layer-3-libraries/        # 库（rocBLAS、MIOpen 等）
-│   ├── layer-4-frameworks/       # 框架（PyTorch、TensorFlow）
-│   ├── layer-5-llm/              # LLM 相关
-│   ├── layer-6-extended/         # 扩展知识
-│   └── best-practices/           # 最佳实践
-├── nvidia-knowledge-base/        # 同样层级结构
-├── comparisons/                  # 跨平台对比文档
+│   ├── layer-1-hardware/         # Hardware architecture
+│   ├── layer-2-compute-stack/    # Compute stack (HIP, ROCm)
+│   ├── layer-3-libraries/        # Libraries (rocBLAS, MIOpen, etc.)
+│   ├── layer-4-frameworks/       # Frameworks (PyTorch, TensorFlow)
+│   ├── layer-5-llm/              # LLM related
+│   ├── layer-6-extended/         # Extended knowledge
+│   └── best-practices/           # Best practices
+├── nvidia-knowledge-base/        # Same layer structure
+├── comparisons/                  # Cross-platform comparison docs
 └── INDEX.md
 ```
 
-### 添加新文档
+### Adding New Documents
 
-1. **位置**：文件放在对应分类子目录下（如 `layer-6-extended/optimize-guides/*.md`）
-2. **格式**：所有 `.md` 文件必须包含 YAML frontmatter：
+1. **Location**: Place the file under the appropriate subdirectory (e.g., `layer-6-extended/optimize-guides/*.md`)
+2. **Format**: Every `.md` file must include a YAML frontmatter:
    ```yaml
    ---
-   tags: ["category1", "category2"]   # 必需
-   priority: "L1-important"           # 必需
-   source_url: "https://..."          # 必需
-   rocm_version: "6.0+"              # 必需
-   last_updated: 2026-01-14           # 必需
+   tags: ["category1", "category2"]   # Required
+   priority: "L1-important"           # Required
+   source_url: "https://..."          # Required
+   rocm_version: "6.0+"              # Required
+   last_updated: 2026-01-14           # Required
    ---
    ```
-3. **文件名**：英文，反映内容（如 `bf16-vector-load-store.md`）
-4. **质量**：800-1200 字，每个文档至少 2 个语法正确的代码示例
-5. **添加后必须重建索引**：`python scripts/build_index.py --force`
+3. **Filename**: Use English, make it descriptive (e.g., `bf16-vector-load-store.md`)
+4. **Quality**: 800–1200 words, with at least 2 syntactically correct code examples
+5. **Rebuild index after adding**: `python scripts/build_index.py --force`
