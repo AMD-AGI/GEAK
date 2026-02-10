@@ -38,7 +38,6 @@ python3 -m geakagent.run.mini -m claude-opus-4-5 \
 # Clone AIG-Eval (inside container or mounted)
 git clone -b geak-eval-kernels git@github.com:AMD-AGI/AIG-Eval.git
 
-# Run optimization on a single kernel
 cd AIG-Eval/tasks/geak_eval
 bash run.sh fused_qkv_rope --optimize --gpu 0 --iterations 5
 
@@ -54,7 +53,7 @@ python3 $GEAK_OE_ROOT/examples/geak_eval/run_openevolve.py \
   /path/to/kernel.py \
   --iterations 10 --gpu 0 --output /path/to/output
 
-# Pre-built COMMANDMENT mode (for custom evaluation pipelines)
+# Pre-built COMMANDMENT mode
 python3 $GEAK_OE_ROOT/examples/geak_eval/run_openevolve.py \
   /path/to/kernel.py \
   --iterations 10 --gpu 0 --output /path/to/output \
@@ -88,10 +87,7 @@ COMMANDMENT.md = Universal Contract
   SETUP:        Environment setup, GPU warmup
   CORRECTNESS:  Deterministic correctness check vs baseline
   PROFILE:      Metrix hardware profiling (warm-up + measurement)
-  - Written ONLY after all commands validated on baseline
-  - Frozen during OpenEvolve evolution (never changes)
-  - Each candidate evaluated with exact same commands
-  - GPU isolation: one GPU per evaluation, no contention
+  - Frozen during OpenEvolve evolution; GPU isolation per evaluation
 ```
 
 ### MCP Tools
@@ -104,17 +100,17 @@ COMMANDMENT.md = Universal Contract
 | `kernel-ercs` | Evaluation/reflection |
 | `automated-test-discovery` | Find tests/benchmarks |
 
-### OpenEvolve Integration
+### OpenEvolve Integration (geak-oe)
 
-OpenEvolve uses this repo as the root: `GEAK_OE_ROOT=/workspace`. When `examples/geak_eval/run_openevolve.py` exists (e.g. on the branch you build from), openevolve-mcp and the optimizer can use it.
+OpenEvolve is auto-installed in the Docker container from the [`optimizer-geak-openevolve`](https://github.com/AMD-AGI/GEAK/tree/optimizer-geak-openevolve) branch (clone name: **geak-oe**, path: `GEAK_OE_ROOT`).
 
-**What the optimizer can use:**
+**What the optimizer can use (from the cherry-pick / newer additions):**
 
 | Component | Purpose |
 |-----------|---------|
-| **GEAK_OE_ROOT** | This repo (`/workspace` in Docker); `run_openevolve.py` at `examples/geak_eval/` when present |
+| **geak-oe** | GEAK repo clone; contains `run_openevolve.py` (builds COMMANDMENT.md, runs evolution) |
 | **openevolve-mcp** | MCP server that invokes `run_openevolve.py`; tool `optimize_kernel(kernel_path, max_iterations, gpu, output_dir, commandment_path, baseline_metrics_path)` |
-| **geakagent.optimizer** | Python API: `optimize_kernel(..., optimizer=OptimizerType.OPENEVOLVE)` → calls openevolve-mcp |
+| **geakagent.optimizer** | Python API: `optimize_kernel(..., optimizer=OptimizerType.OPENEVOLVE)` → calls openevolve-mcp (and thus geak-oe) |
 
 **From code:**
 
@@ -135,32 +131,33 @@ result = optimize_kernel(
 
 **From a run script (e.g. AIG-Eval):** Set `GEAK_OE_ROOT` and either run `run_openevolve.py` directly, or call the optimizer API / openevolve-mcp. COMMANDMENT.md is produced in the output directory when `run_openevolve.py` runs (auto-built if not passed via `--commandment`).
 
-Key features:
 - **Multi-file support**: Kernels can span multiple files (no SEPARATOR format)
 - **COMMANDMENT.md**: Frozen, deterministic evaluation contract
 - **GPU isolation**: GPUPool ensures exclusive GPU per concurrent evaluation
-- **Metrix profiler**: Hardware-level metrics (bandwidth, cache hit rates, compute utilization)
-- **Warm-up passes**: Stable baseline measurements (not cold-start inflated)
-- **Baseline profiling in prompts**: LLM receives hardware metrics to guide optimization
+- **Metrix profiler**: Hardware-level metrics; warm-up passes for stable baselines
+
+---
 
 ## Installation
 
 ### Docker (Recommended)
 
 ```bash
-git clone -b msa https://github.com/AMD-AGI/GEAK.git
-cd GEAK
+git clone -b msa https://github.com/AMD-AGI/GEAK-agent.git
+cd GEAK-agent
 export AMD_LLM_API_KEY=<your-key>
 ./scripts/run-docker.sh
 ```
 
-The Dockerfile installs: this repo (GEAK), Metrix, and all MCP servers; no separate clone (GEAK_OE_ROOT=/workspace).
+The Dockerfile installs: GEAK-agent, OpenEvolve (optimizer-geak-openevolve), Metrix, and all MCP servers.
 
 ### Manual Installation
 
 ```bash
 pip install -e .
-export GEAK_OE_ROOT=$(pwd)   # this repo; run_openevolve.py at examples/geak_eval/ when present
+git clone -b optimizer-geak-openevolve https://github.com/AMD-AGI/GEAK.git geak-oe
+cd geak-oe && pip install -e . --no-build-isolation && cd ..
+export GEAK_OE_ROOT=$(pwd)/geak-oe
 pip install -e mcp_tools/openevolve-mcp/ -e mcp_tools/mcp-client/
 # See Dockerfile for full MCP list; install Metrix if using profiling
 ```
@@ -170,7 +167,7 @@ pip install -e mcp_tools/openevolve-mcp/ -e mcp_tools/mcp-client/
 | Variable | Description |
 |----------|-------------|
 | `AMD_LLM_API_KEY` | API key for AMD LLM gateway (required) |
-| `GEAK_OE_ROOT` | Root for OpenEvolve (default: `/workspace` in Docker, or current repo) |
+| `GEAK_OE_ROOT` | Path to OpenEvolve repo (default: `/workspace/geak-oe`) |
 | `HIP_VISIBLE_DEVICES` | GPU devices (default: `0`) |
 
 ---
@@ -178,25 +175,14 @@ pip install -e mcp_tools/openevolve-mcp/ -e mcp_tools/mcp-client/
 ## Project Structure
 
 ```
-GEAK/
-├── src/geakagent/       # Main agent (mini-swe-based)
-│   ├── agents/          # Agent implementations
-│   ├── config/          # Configuration (mini.yaml, mini_patch_agent.yaml)
-│   ├── environments/    # Local, Docker, protected_files
-│   ├── models/          # LLM interfaces (AMD LLM gateway)
-│   ├── optimizer/       # Optimizer interface (OpenEvolve)
-│   └── run/             # CLI (geak, mini)
-├── mcp_tools/           # MCP servers & client
-│   ├── openevolve-mcp/  # OpenEvolve optimizer
-│   ├── kernel-profiler/ # Metrix hardware profiling
-│   ├── kernel-evolve/   # LLM mutation strategies
-│   ├── kernel-ercs/     # Evaluation/reflection
-│   └── mcp-client/      # MCP protocol client
+GEAK-agent/
+├── src/geakagent/       # Main agent
+├── mcp_tools/           # MCP servers & client (openevolve-mcp, kernel-profiler, etc.)
 ├── geak_agent/          # Discovery, examples, resolve_kernel_url
-├── examples/             # Example kernels
-├── scripts/              # run-docker.sh
-├── docs/                 # Documentation
-└── reference/            # optimization_strategies.py, state.py
+├── examples/            # Example kernels
+├── scripts/             # run-docker.sh
+├── docs/                # Documentation
+└── reference/           # optimization_strategies.py, state.py
 ```
 
 ---
