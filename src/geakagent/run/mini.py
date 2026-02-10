@@ -53,10 +53,7 @@ def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -
     if line_num:
         line_info = f" Line: {line_num}"
         kernel_info = f", kernel name: {kernel_name!r}" if kernel_name else ""
-        profile_hint = (
-            " When profiling, all kernels are reported (--auto-select is not used); the kernel of interest is filtered when set."
-            if kernel_name else " When profiling, all kernels are reported; use --filter if the file has multiple kernels."
-        )
+        profile_hint = " When profiling, all kernels are reported; the agent can choose which to use."
     else:
         line_info = ""
         kernel_info = ""
@@ -133,10 +130,9 @@ def main(
         )
         console.print("[bold green]Got that, thanks![/bold green]")
 
-    # Resolve --kernel-url to local path, line, and kernel name; inject into task (profiler filter set after env config)
-    resolved_kernel_name = None
+    # Resolve --kernel-url to local path, line, and kernel name; inject into task
     if kernel_url:
-        task, resolved_kernel_name = _inject_resolved_kernel(kernel_url, workspace, task)
+        task, _ = _inject_resolved_kernel(kernel_url, workspace, task)
 
     # Runtime environment detection and configuration
     runtime_env = None
@@ -186,10 +182,6 @@ def main(
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
     model = get_model(model_name, config.get("model", {}))
-    
-    # Put resolved kernel filter into env vars for the agent's shell (kernel-profile will use it)
-    if resolved_kernel_name:
-        config.setdefault("env", {}).setdefault("env", {})["GEAK_PROFILE_KERNEL_FILTER"] = resolved_kernel_name
     
     # Create environment based on runtime configuration
     env_config = config.get("env", {})

@@ -116,9 +116,6 @@ python mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile' --au
 # Quick profile (faster, fewer metrics)
 python mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile' --quick
 
-# Filter specific kernel by name
-python mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile' --filter '*topk*'
-
 # More replays for better statistics
 python mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile' --replays 5
 
@@ -224,8 +221,7 @@ result = tool.execute(
 cd /workspace
 python geak_agent/examples/profile_kernel.py \
     'python3 /path/to/kernel.py --profile' \
-    --gpu-devices 3 \
-    --filter '*topk*'
+    --gpu-devices 3
 ```
 
 **Sample Output:**

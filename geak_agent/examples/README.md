@@ -38,7 +38,7 @@ python geak_agent/examples/resolve_kernel_url.py /path/to/kernel.py
 # GitHub blob URL (clones repo to temp, returns local path)
 python geak_agent/examples/resolve_kernel_url.py 'https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/moe/moe_op_gelu.py'
 
-# With optional line number (output includes line_number and kernel_name for use with kernel-profile --filter)
+# With optional line number (output includes line_number and kernel_name)
 python geak_agent/examples/resolve_kernel_url.py 'https://github.com/.../rope.py#L106'
 ```
 
@@ -56,9 +56,6 @@ python geak_agent/examples/profile_kernel.py 'python3 /path/to/kernel.py --profi
 
 # Specify GPU device
 python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --gpu-devices 3
-
-# Filter specific kernel
-python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --filter '*topk*'
 
 # More replays for better statistics
 python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --replays 5
@@ -80,8 +77,7 @@ python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --gpu
 cd /workspace
 python geak_agent/examples/profile_kernel.py \
     'python3 /path/to/topk/kernel.py --profile' \
-    --gpu-devices 3 \
-    --filter '*topk*'
+    --gpu-devices 3
 
 python geak_agent/examples/profile_kernel.py \
     'python3 /path/to/gemm/kernel.py --profile' \
@@ -96,8 +92,7 @@ The script displays (by default):
 - Bottleneck classifications: memory, compute, latency, LDS, balanced
 - Factual observations (not prescriptive suggestions - LLM makes optimization decisions)
 - Comprehensive hardware metrics (HBM bandwidth, cache hit rates, coalescing efficiency, LDS conflicts, etc.)
-- Use `--auto-select` to show only the main kernel
-- Use `--quick` for fast profiling (3 metrics, 1 pass)
+- All kernels are reported; use `--quick` for fast profiling (3 metrics, 1 pass)
 
 ### Profile Modes
 
@@ -121,12 +116,10 @@ tool = MetrixTool(gpu_devices="3")
 # Or multiple GPUs
 # tool = MetrixTool(gpu_devices=["0", "1", "2"])
 
-# Full profile (default)
+# Full profile (default); all kernels are profiled and returned
 result = tool.profile(
     command="python3 kernel.py --profile",
     num_replays=3,
-    kernel_filter="*topk*",
-    auto_select=False,  # Default: show all kernels
     quick=False  # Default: full (memory) profile
 )
 

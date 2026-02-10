@@ -43,14 +43,14 @@ python3 -m geakagent.run.mini -m claude-opus-4-5 \
   -t "Complete GEAK Agent Pipeline: 1. DISCOVER 2. TEST GEN 3. BENCHMARK 4. OPTIMIZE 5. Save results" \
   --yolo
 
-# URL with line (e.g. #L106): resolved kernel name is passed; agent uses kernel-profile --filter '<name>' when profiling
+# URL with line (e.g. #L106): resolved kernel name is included in the task for discovery/context
 python3 -m geakagent.run.mini -m claude-opus-4-5 \
   --kernel-url "https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/rope/rope.py#L106" \
   -t "Complete GEAK Agent Pipeline: 1. DISCOVER 2. TEST GEN 3. BENCHMARK 4. OPTIMIZE 5. Save results" \
   --yolo
 ```
 
-- **Line number is optional.** Without `#L123`, the injected task tells the agent that discovery should identify the kernel(s). With `#L123`, the resolved kernel function name is included and the agent is instructed to use `kernel-profile --filter '<name>'` when the file has multiple kernels.
+- **Line number is optional.** Without `#L123`, the injected task tells the agent that discovery should identify the kernel(s). With `#L123`, the resolved kernel function name is included for context. When profiling, all kernels are reported and the agent chooses which to use.
 - Resolving uses `geak_agent.resolve_kernel_url`; when using Docker, the clone is placed under the workspace so the container sees the file.
 
 ### Run on AIG-Eval Kernels
