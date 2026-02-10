@@ -1,6 +1,45 @@
-# MetrixTool Examples
+# GEAK Agent Examples
 
-Example scripts demonstrating how to use the MetrixTool MCP.
+Example scripts for kernel profiling and resolving kernel specs from URLs. Run these inside the container (after `./scripts/run-docker.sh`; you land in `/workspace`).
+
+## Discovery CLI
+
+```bash
+# Discover tests and benchmarks
+python -m geak_agent.cli /path/to/kernel.py --discover-only
+
+# With explicit test/bench commands
+python -m geak_agent.cli /path/to/kernel.py --test "pytest test.py" --bench "python bench.py"
+```
+
+## Python API (Discovery)
+
+```python
+from geak_agent.mcp_tools.discovery import discover
+
+result = discover(workspace="/path/to/project")
+print(f"Found {len(result.tests)} tests")
+```
+
+---
+
+## resolve_kernel_url.py
+
+Resolve a kernel spec to a local path. If the spec is a GitHub URL, the repo is cloned to a temp dir and the file path is returned. Requires `git` and network access for GitHub URLs.
+
+### Basic Usage
+
+```bash
+# Local path (returned unchanged)
+python geak_agent/examples/resolve_kernel_url.py /path/to/kernel.py
+# or run as executable (from repo root):
+./geak_agent/examples/resolve_kernel_url.py /path/to/kernel.py
+
+# GitHub blob URL (clones repo to temp, returns local path)
+python geak_agent/examples/resolve_kernel_url.py 'https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/moe/moe_op_gelu.py'
+```
+
+---
 
 ## profile_kernel.py
 
@@ -31,19 +70,18 @@ python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --qui
 python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile' --gpu-devices 0,1,2
 ```
 
-### Example with GEAK-Eval Kernels
+### Example with external kernels
 
 ```bash
-# Profile TopK kernel
-cd /home/sdubagun/work/repos/GEAK-agent
+# Profile a kernel (paths are examples)
+cd /workspace
 python geak_agent/examples/profile_kernel.py \
-    'python3 /home/sdubagun/work/repos/AIG-Eval/tasks/geak_eval/topk/kernel.py --profile' \
+    'python3 /path/to/topk/kernel.py --profile' \
     --gpu-devices 3 \
     --filter '*topk*'
 
-# Profile GEMM kernel
 python geak_agent/examples/profile_kernel.py \
-    'python3 /home/sdubagun/work/repos/AIG-Eval/tasks/geak_eval/gemm/kernel.py --profile' \
+    'python3 /path/to/gemm/kernel.py --profile' \
     --gpu-devices 3
 ```
 

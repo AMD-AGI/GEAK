@@ -221,9 +221,9 @@ result = tool.execute(
 ### Example 1: Profile TopK Kernel
 
 ```bash
-cd /home/sdubagun/work/repos/GEAK-agent
-python mini_kernel/examples/profile_kernel.py \
-    'python3 /home/sdubagun/work/repos/AIG-Eval/tasks/geak_eval/topk/kernel.py --profile' \
+cd /workspace
+python geak_agent/examples/profile_kernel.py \
+    'python3 /path/to/kernel.py --profile' \
     --gpu-devices 3 \
     --filter '*topk*'
 ```
@@ -342,31 +342,27 @@ Automatically selects and profiles only the longest-running kernel.
 
 MetrixTool requires:
 - AMD ROCm stack with `metrix` profiler installed
-- Docker container: `minikernel_sdubagun` (recommended)
+- Run inside the container (e.g. after `./scripts/run-docker.sh`)
 - Python 3.8+
 
 ### Docker Setup
 
-The tool is designed to run inside a Docker container with the ROCm stack:
+Run inside the container; repo is at `/workspace`:
 
 ```bash
-# Run inside Docker container
-docker exec -it minikernel_sdubagun bash
+./scripts/run-docker.sh   # enter container
 
-# Verify metrix is available
+# Inside container
 python3 -c "from metrix import Metrix; print('Metrix available!')"
-
-# Run profiling
-cd /home/sdubagun/work/repos/GEAK-agent
-python3 mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile'
+python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile'
 ```
 
 ## Integration with GEAK Agent
 
 MetrixTool is a core component of the GEAK (GPU Evolutionary Agent for Kernels) system:
 
-1. **Discovery Pipeline** (`mini_kernel.mcp_tools.discovery`) finds test and benchmark files
-2. **MetrixTool** (`mini_kernel.mcp_tools.metrix`) profiles kernel performance
+1. **Discovery Pipeline** (`geak_agent.mcp_tools.discovery`) finds test and benchmark files
+2. **MetrixTool** (`geak_agent.mcp_tools.metrix`) profiles kernel performance
 3. **LLM Agent** uses metrics + observations to propose optimizations
 4. **Kernel-ERCS** evaluates and reflects on optimization attempts
 
@@ -414,11 +410,10 @@ The `num_replays` parameter controls statistical robustness:
 
 ### "Module metrix not found"
 
+Run inside the container (after `./scripts/run-docker.sh`), then:
+
 ```bash
-# Must run inside Docker container
-docker exec -it minikernel_sdubagun bash
-cd /home/sdubagun/work/repos/GEAK-agent
-python3 mini_kernel/examples/profile_kernel.py 'python3 kernel.py --profile'
+python geak_agent/examples/profile_kernel.py 'python3 kernel.py --profile'
 ```
 
 ### "Missing expected metrics"
@@ -440,12 +435,12 @@ Solution: Use full profile for comprehensive bottleneck analysis.
 
 ## Testing
 
-Comprehensive test suite at `mini_kernel/tests/test_metrix.py`:
+Comprehensive test suite at `geak_agent/tests/test_metrix.py`:
 
 ```bash
-# Run tests
-cd /home/sdubagun/work/repos/GEAK-agent
-pytest mini_kernel/tests/test_metrix.py -v
+# Run tests (inside container)
+cd /workspace
+pytest geak_agent/tests/test_metrix.py -v
 
 # Test coverage includes:
 # - Initialization and GPU detection

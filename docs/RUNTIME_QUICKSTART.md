@@ -78,33 +78,6 @@ Complete local (GPU + torch + triton)?
 
 ---
 
-## Examples
-
-### Check What Runtime Will Be Used
-
-```bash
-cd .
-python3 -m geakagent.runtime_env
-```
-
-### Test with Simple Task
-
-```bash
-python3 -m geakagent.run.mini -m claude-sonnet-4.5 \
-  -t "Run: python3 -c 'import torch; print(torch.cuda.is_available())'" \
-  --runtime docker --yolo
-```
-
-### Discovery Pipeline with Runtime
-
-```bash
-python3 -m geak_agent.cli /path/to/kernel.py \
-  --runtime docker \
-  --no-confirm
-```
-
----
-
 ## Troubleshooting
 
 | Problem | Solution |
@@ -116,39 +89,4 @@ python3 -m geak_agent.cli /path/to/kernel.py \
 
 ---
 
-## Files
-
-- **Module:** `src/geakagent/runtime_env.py`
-- **Tests:** `test_runtime_env.sh`
-- **Docs:** `RUNTIME_ENV.md` (full guide)
-- **Implementation:** `RUNTIME_ENV_IMPLEMENTATION.md` (technical details)
-
----
-
-## Default Docker Image
-
-```
-lmsysorg/sglang:v0.5.6.post1-rocm700-mi35x
-```
-
-**Contains:**
-- ROCm 7.0.0
-- PyTorch + Triton
-- SGLang runtime
-- Python 3.10+
-
-**Devices Passed:**
-- `/dev/kfd` (AMD GPU kernel)
-- `/dev/dri` (Direct Rendering)
-
----
-
-## Status
-
-✅ Implemented  
-✅ Tested (6/6 tests passing)  
-✅ Documented  
-✅ Backward Compatible  
-⏳ Pending GPU integration tests
-
-**Ready to use!**
+Full details: [RUNTIME_ENV.md](RUNTIME_ENV.md).
