@@ -58,6 +58,8 @@ _BENIGN_STDERR_PATTERNS = [
     r"(?i)rocblas.*info",
     # torch.cuda setup messages
     r"(?i)setting.*cuda.*device",
+    # aiter module import info messages (common in ROCm containers)
+    r"\[aiter\]\s*import",
 ]
 
 import re as _re
