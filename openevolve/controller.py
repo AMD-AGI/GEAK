@@ -369,6 +369,17 @@ class OpenEvolve:
         for i in range(start_iteration, total_iterations):
             iteration_start = time.time()
 
+            # Prominent iteration header (flushed to stdout)
+            _best = self.database.get_best_program()
+            _best_sp = _best.metrics.get("speedup", _best.metrics.get("combined_score", 0)) if _best else 0
+            print(
+                f"\n{'=' * 60}\n"
+                f"[OpenEvolve] ITERATION {i + 1}/{total_iterations}  "
+                f"(best so far: {_best_sp:.4f}x)\n"
+                f"{'=' * 60}",
+                flush=True,
+            )
+
             # Manage island evolution - switch islands periodically
             # if i > start_iteration and current_island_counter >= programs_per_island:
             #     self.database.next_island()
@@ -698,6 +709,53 @@ class OpenEvolve:
             f"{format_metrics_safe(child.metrics)} "
             f"(Δ: {improvement_str})"
         )
+
+        # Write real-time progress file for monitoring
+        # This file is append-only and can be tailed during the run.
+        self._write_progress(iteration, elapsed_time)
+
+    def _write_progress(self, iteration: int, elapsed_time: float) -> None:
+        """
+        Append a progress summary to ``progress.log`` in the output directory.
+
+        The file is human-readable and designed to be monitored in real-time
+        (e.g. ``tail -f progress.log``).  Each iteration appends a block with:
+          - iteration number, elapsed time
+          - per-candidate: speedup, correctness, error (if any)
+          - current best speedup across all islands
+        """
+        progress_path = os.path.join(self.output_dir, "progress.log")
+        try:
+            best = self.database.get_best_program()
+            best_speedup = best.metrics.get("speedup", best.metrics.get("combined_score", 0)) if best else 0
+
+            lines = []
+            lines.append(f"{'=' * 60}")
+            lines.append(f"ITERATION {iteration + 1}  ({elapsed_time:.1f}s)")
+            lines.append(f"{'=' * 60}")
+
+            # Per-island summary
+            for island_idx in range(self.database.num_islands):
+                island_programs = self.database.get_island_programs(island_idx)
+                if island_programs:
+                    island_best = max(
+                        island_programs,
+                        key=lambda p: p.metrics.get("combined_score", 0),
+                    )
+                    ib_score = island_best.metrics.get("combined_score", 0)
+                    ib_speedup = island_best.metrics.get("speedup", 0)
+                    lines.append(
+                        f"  Island {island_idx}: {len(island_programs)} programs, "
+                        f"best_speedup={ib_speedup:.4f}x, best_score={ib_score:.4f}"
+                    )
+
+            lines.append(f"  *** OVERALL BEST SPEEDUP: {best_speedup:.4f}x ***")
+            lines.append("")
+
+            with open(progress_path, "a") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception as e:
+            logger.debug(f"Could not write progress file: {e}")
 
     def _save_checkpoint(self, iteration: int) -> None:
         """

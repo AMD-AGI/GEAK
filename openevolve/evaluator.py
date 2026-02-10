@@ -424,6 +424,27 @@ class Evaluator:
                     f"{format_metrics_safe(eval_result.metrics)}"
                 )
 
+                # Print a prominent, flushed summary line to stdout so that
+                # it is visible even when output is piped (e.g. by the
+                # mini-SWE-agent).  This is the primary real-time signal.
+                _correctness = eval_result.metrics.get("correctness_score", 0)
+                _speedup = eval_result.metrics.get("speedup", 0)
+                _dur = eval_result.metrics.get("duration_us", 0)
+                _base_dur = eval_result.metrics.get("baseline_duration_us", 0)
+                _err = eval_result.metrics.get("error", "")
+                if _correctness and _correctness > 0:
+                    _status = "PASS"
+                else:
+                    _status = "FAIL"
+                _summary = eval_result.metrics.get("summary", "")
+                print(
+                    f"[OpenEvolve] {_status} | speedup={_speedup:.4f}x | "
+                    f"dur={_dur:.1f}us (baseline={_base_dur:.1f}us) | "
+                    f"elapsed={elapsed:.1f}s"
+                    + (f" | error={_err[:80]}" if _err else ""),
+                    flush=True,
+                )
+
                 # Return just metrics for backward compatibility
                 return eval_result.metrics, analysis
 
