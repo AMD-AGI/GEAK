@@ -6,10 +6,12 @@ agent:
 
     Goal
     - Output **exactly ONE** shell command that, in order:
-      - Runs a correctness test (required, first)
+      - **cd to the correct absolute path** (the repo root / worktree where the agent runs; use the actual path you discover, e.g. from `pwd` or task context).
+      - **Build the kernel** (and tests/benchmarks): run the project's build (e.g. cmake + make, or build script) so that test and benchmark executables exist. Do not assume `build/` already exists—it may be missing in worktrees.
+      - Runs a correctness test (required, after build)
       - Runs a benchmark test (required)
       - Enables **before-vs-after comparison**
-    - If correctness fails, the command must fail (non-zero exit).
+    - If build or correctness fails, the command must fail (non-zero exit).
 
     Definitions (must follow)
     - There are two kinds of tasks:
@@ -26,24 +28,29 @@ agent:
 
     TEST_COMMAND rules (strict)
     - One command:
-      - Output exactly one command line
-      - Correctness and benchmark must run in the same command
-      - Correctness must gate benchmark execution (use `CORRECTNESS_CMD && BENCHMARK_CMD`)
-      - Correctness failure must produce non-zero exit
+      - Output exactly one command line.
+      - **Start with `cd <ABSOLUTE_PATH> &&`** so the command runs in the correct repo/worktree root (absolute path; do not use relative or unspecified cwd).
+      - **Include a build step** before tests: e.g. `mkdir -p build && cd build && cmake ... && make <test_target> <benchmark_target> && cd ..` (or equivalent), then run the executables. The worktree may have no pre-existing `build/`; the command must create and build it.
+      - Order: cd → build (cmake + make) → correctness test → benchmark. Chain with `&&`.
+      - Correctness must gate benchmark execution (use `CORRECTNESS_CMD && BENCHMARK_CMD`).
+      - Build or correctness failure must produce non-zero exit.
 
 
     Workflow (required)
     Part 1: Discovery existing tests/benchmarks
     (Mandatory: do this before proposing any new test/bench.)
-    1) Explore the repository for existing tests/benchmarks:
+    1) Determine working directory and build process:
+       - Establish the **absolute path** of the repo root (e.g. run `pwd` or use task context); the final TEST_COMMAND must start with `cd <that_absolute_path> &&`.
+       - Learn how to **build** the project (README, CMakeLists.txt, scripts): typically `mkdir -p build && cd build && cmake -DBUILD_TEST=ON -DBUILD_BENCHMARK=ON .. && make <targets>`. The test command must run this (or equivalent) before running any test/benchmark—do not assume `build/` or binaries exist.
+    2) Explore the repository for existing tests/benchmarks:
        - From repo root, read `README.md` (and any referenced docs/scripts) to learn intended build/run commands.
        - Enumerate existing runnable assets: source benchmarks under `benchmark/` and tests under `test/`.
        - Do NOT use interactive terminal programs to view files (`view`, `less`, `vi`, `vim`, etc.). Use non-interactive output.
-    2) Prefer and reuse existing tests/benchmarks:
+    3) Prefer and reuse existing tests/benchmarks:
        - If an existing benchmark executable for this kernel exists, run it with `--trials 20` (or equivalent).
        - If benchmark sources exist but the current `build/` was configured with benchmarks OFF,
          reconfigure/build benchmarks (e.g. cmake with `-DBUILD_BENCHMARK=ON`) instead of inventing a new benchmark.
-    3) Avoid inventing inputs:
+    4) Avoid inventing inputs:
        - Do NOT manually define dtype/shape lists if an existing test/benchmark already covers them.
        - Prefer defaults and existing CLI flags (`--trials`, `--size`, etc.).
 
@@ -63,8 +70,9 @@ agent:
       - Never output multiple ```bash``` blocks in a single response.
     - When you are ready to finish, your ONE command must print exactly:
       - first line: MINI_SWE_AGENT_FINAL_OUTPUT
-      - second line: TEST_COMMAND: <command> (relative path, executed from repo root)
-      and nothing else.
+      - second line: TEST_COMMAND: <command>
+      where <command> must start with `cd <absolute_path> &&` and include build then test then benchmark. Nothing else.
+    - **Submit only after** you have reverted to original git status, run the test command once, and confirmed it succeeds; do not submit an unverified command.
     - If you create a new test script, you may edit that new file to fix errors.
       Do NOT modify existing test scripts or kernel code.
 
