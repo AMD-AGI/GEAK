@@ -528,6 +528,16 @@ Respond with JSON only:
             kernel_info = self._analyze_kernel_file(search_path)
             if kernel_info:
                 self.result.kernels.append(kernel_info)
+            else:
+                # Wrapper files (import @triton.jit from elsewhere) won't have
+                # kernel patterns directly, but we still need the file stem for
+                # test/benchmark matching.  Create a minimal KernelInfo.
+                self.result.kernels.append(KernelInfo(
+                    file_path=search_path,
+                    kernel_name=search_path.stem,
+                    kernel_type="triton",
+                    function_names=[],
+                ))
         else:
             # Search directory
             for py_file in search_path.rglob("*.py"):

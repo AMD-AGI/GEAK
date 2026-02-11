@@ -34,6 +34,66 @@ from geakagent.runtime_env import (
 )
 from geakagent.utils.log import logger
 
+def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str:
+    """Run test discovery on the resolved kernel and return formatted results for the task prompt."""
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    try:
+        from geak_agent.mcp_tools.discovery import discover
+    except ImportError:
+        return ""
+
+    console = Console(highlight=False)
+    console.print("\n[bold cyan]━━━ Test Discovery ━━━[/bold cyan]")
+    if kernel_name:
+        console.print(f"[dim]Kernel function: {kernel_name}[/dim]")
+    try:
+        kp = Path(kernel_path)
+        # Find repo root (parent with .git) for workspace scope
+        ws = kp.parent
+        for p in kp.parents:
+            if (p / ".git").exists():
+                ws = p
+                break
+        result = discover(workspace=ws, kernel_path=kp, interactive=False)
+        lines = []
+        # Match by both filename stem and kernel function name
+        kernel_stem = kp.stem.lower()  # e.g. "rope" from "rope.py"
+        match_terms = [kernel_stem]
+        if kernel_name:
+            # Add kernel function name parts (e.g. "rope_fwd" -> ["rope", "fwd"])
+            match_terms.extend([p for p in kernel_name.lower().split("_") if len(p) > 2])
+        def _is_relevant(path_str):
+            path_lower = path_str.lower()
+            return any(term in path_lower for term in match_terms)
+        # Show kernel-relevant tests first (name match), then top others
+        relevant_tests = [t for t in result.tests if _is_relevant(str(t.file_path))]
+        other_tests = [t for t in result.tests if not _is_relevant(str(t.file_path))][:3]
+        all_display = relevant_tests + other_tests
+        if all_display:
+            console.print(f"[bold green]Found {len(result.tests)} test(s) ({len(relevant_tests)} matching '{kernel_stem}'):[/bold green]")
+            for t in all_display[:5]:
+                marker = "★" if kernel_stem in str(t.file_path).lower() else "·"
+                console.print(f"  [green]{marker}[/green] {t.file_path} [dim](confidence: {t.confidence:.1f})[/dim]")
+                lines.append(f"  - {t.file_path} (confidence: {t.confidence:.1f}, command: {t.command})")
+        else:
+            console.print("[yellow]No existing tests found.[/yellow]")
+        relevant_bench = [b for b in result.benchmarks if kernel_stem in str(b.file_path).lower()]
+        if relevant_bench:
+            console.print(f"[bold green]Found {len(relevant_bench)} matching benchmark(s):[/bold green]")
+            for b in relevant_bench[:3]:
+                console.print(f"  [green]★[/green] {b.file_path} [dim](confidence: {b.confidence:.1f})[/dim]")
+                lines.append(f"  - Benchmark: {b.file_path} (confidence: {b.confidence:.1f})")
+        console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
+
+        if lines:
+            return "\n--- Discovered Tests ---\n" + "\n".join(lines) + "\nRead these test files and reuse their reference implementations, input patterns, and tolerances.\n---\n"
+    except Exception as e:
+        console.print(f"[yellow]Discovery failed: {e}[/yellow]")
+    return ""
+
+
 def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -> tuple[str, str | None]:
     """Resolve kernel URL to local path/line/kernel name and append to task. Returns (task, kernel_name or None). Raises on resolve error."""
     repo_root = Path(__file__).resolve().parent.parent.parent.parent
@@ -161,21 +221,53 @@ def main(
     config = yaml.safe_load(config_path.read_text())
 
     if not task:
-        console.print("[bold yellow]What do you want to do?")
-        task = prompt_session.prompt(
-            "",
-            multiline=True,
-            bottom_toolbar=HTML(
-                "Submit task: <b fg='yellow' bg='black'>Esc+Enter</b> | "
-                "Navigate history: <b fg='yellow' bg='black'>Arrow Up/Down</b> | "
-                "Search history: <b fg='yellow' bg='black'>Ctrl+R</b>"
-            ),
-        )
-        console.print("[bold green]Got that, thanks![/bold green]")
+        if kernel_url:
+            # Default task for kernel optimization when --kernel-url is provided without -t
+            # We'll inject the resolved kernel path later via _inject_resolved_kernel,
+            # but we need to set the task now before that runs.
+            task = (
+                "Optimize this kernel for maximum speedup. Do NOT use OpenEvolve. Instead:\n"
+                "1. DISCOVER: Read the wrapper file AND trace imports to find the inner "
+                "@triton.jit kernel "
+                "Read the discovered test files shown above.\n"
+                "2. Profile the baseline with kernel-profile.\n"
+                "3. OPTIMIZE: Edit ONLY the inner kernel file "
+                "Do NOT change the wrapper file (BLOCK_S, num_warps etc give negligible gains). "
+                "Analyze the profiling metrics to identify bottlenecks and fix them. "
+                "Revert any change that makes performance worse before trying something new.\n"
+                "4. After EACH edit, run correctness check and re-profile. Iterate until you "
+                "achieve significant speedup.\n"
+                "5. Report final speedup."
+            )
+            console.print(f"[bold green]Using default kernel optimization task[/bold green]")
+        else:
+            console.print("[bold yellow]What do you want to do?")
+            task = prompt_session.prompt(
+                "",
+                multiline=True,
+                bottom_toolbar=HTML(
+                    "Submit task: <b fg='yellow' bg='black'>Esc+Enter</b> | "
+                    "Navigate history: <b fg='yellow' bg='black'>Arrow Up/Down</b> | "
+                    "Search history: <b fg='yellow' bg='black'>Ctrl+R</b>"
+                ),
+            )
+            console.print("[bold green]Got that, thanks![/bold green]")
 
     # Resolve --kernel-url to local path, line, and kernel name; inject into task
+    _resolved_kernel_path = None
+    _resolved_kernel_name = None
     if kernel_url:
-        task, _ = _inject_resolved_kernel(kernel_url, workspace, task)
+        task, _resolved_kernel_name = _inject_resolved_kernel(kernel_url, workspace, task)
+        # Extract the resolved path from the task (it's in the injected block)
+        import re as _re
+        _m = _re.search(r"Kernel path: (\S+)", task)
+        if _m:
+            _resolved_kernel_path = _m.group(1)
+    # Run test discovery and inject results into task
+    if _resolved_kernel_path:
+        discovery_block = _run_discovery(_resolved_kernel_path, _resolved_kernel_name)
+        if discovery_block:
+            task = task + discovery_block
 
     # Runtime environment detection and configuration
     runtime_env = None
