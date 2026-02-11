@@ -417,6 +417,8 @@ def load_and_merge_configs(
     
     # Apply merged configuration
     repo_value, repo_source = get_highest_priority(config_sources["repo"])
+    if repo_value is None:
+        repo_value, repo_source = Path.cwd(), "cwd"
     test_command_value, test_command_source = get_highest_priority(config_sources["test_command"])
     metric_value, metric_source = get_highest_priority(config_sources["metric"])
     num_parallel_value, num_parallel_source = get_highest_priority(config_sources["num_parallel"])
@@ -484,7 +486,7 @@ def load_and_merge_configs(
         num_parallel = num_parallel_value
         gpu_ids = gpu_ids_value
         patch_output = patch_output_value
-    
+
     # Parse GPU IDs into list[int]
     parsed_gpu_ids = []
     if gpu_ids:
