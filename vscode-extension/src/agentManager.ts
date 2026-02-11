@@ -1,0 +1,845 @@
+import * as vscode from 'vscode';
+import * as path from 'path';
+import { PythonBridge } from './pythonBridge';
+import { AgentState, AgentMessage, InitializeParams, ConfirmationResponse, Task, StrategySelectionResponse, StrategyFilePathInfo } from './types';
+import { StrategyManagerClient, StrategyListData } from './strategyManager';
+
+export class AgentManager {
+    private bridge: PythonBridge;
+    private strategyFilePath: string = '.optimization_strategies.md';
+    private workspacePath: string = '';
+    private state: AgentState = {
+        status: 'idle',
+        currentStep: 0,
+        totalCost: 0,
+        mode: 'confirm',
+        messages: [],
+        taskHistory: [],
+        currentStrategies: [],
+        waitingForStrategySelection: false,
+        strategyData: null,
+        hasPendingUserMessage: false,
+        strategyModeEnabled: true  // Default to true, will be updated on agent start
+    };
+    private stateChangeEmitter = new vscode.EventEmitter<AgentState>();
+    public onStateChange = this.stateChangeEmitter.event;
+    
+    private pendingActionResolvers: Map<string, (response: ConfirmationResponse) => void> = new Map();
+    private nextActionId: number = 1;
+    private pendingStrategyResolver?: (response: StrategySelectionResponse) => void;
+    private strategyManager?: StrategyManagerClient;
+    
+    constructor(private context: vscode.ExtensionContext) {
+        this.bridge = new PythonBridge(context);
+        this.setupBridgeHandlers();
+        this.setupConfigWatcher();
+    }
+    
+    private setupBridgeHandlers() {
+        // Handle agent messages
+        this.bridge.onNotification('agent/message', (params) => {
+            const message: AgentMessage = {
+                role: params.role,
+                content: params.content,
+                step: params.step,
+                cost: params.cost,
+                timestamp: new Date()
+            };
+            
+            if (params.action == "" || !params.need_confirm) {
+                this.state.messages.push(message);
+                this.state.currentStep = params.step;
+                this.state.totalCost = params.cost;
+                
+                // Update current task
+                if (this.state.currentTask) {
+                    this.state.currentTask.totalSteps = params.step;
+                    this.state.currentTask.totalCost = params.cost;
+                }
+                
+                this.emitStateChange();
+            }
+        });
+        
+        // Handle confirmation requests (blocking on Python side)
+        this.bridge.onRequest('agent/requestConfirmation', async (params) => {
+            // Generate action ID
+            const actionId = `action_${this.nextActionId++}_${Date.now()}`;
+            
+            // Check mode
+            if (this.state.mode === 'yolo') {
+                // Auto-approve in YOLO mode
+                const actionMessage: AgentMessage = {
+                    role: 'assistant',
+                    content: params.action,
+                    step: this.state.currentStep,
+                    timestamp: new Date(),
+                    isAction: true,
+                    actionId: actionId,
+                    actionStatus: 'auto-approved',
+                    actionCommand: params.action,
+                    actionTimestamp: new Date()
+                };
+                this.state.messages.push(actionMessage);
+                this.emitStateChange();
+                
+                return { approved: true };
+            }
+            
+            // Create pending action message
+            const actionMessage: AgentMessage = {
+                role: 'assistant',
+                content: params.action,
+                step: this.state.currentStep,
+                timestamp: new Date(),
+                isAction: true,
+                actionId: actionId,
+                actionStatus: 'pending',
+                actionCommand: params.action
+            };
+            
+            this.state.messages.push(actionMessage);
+            this.state.status = 'waiting_approval';
+            this.state.pendingAction = {
+                action: params.action,
+                actionId: actionId,
+                step: this.state.currentStep
+            };
+            this.emitStateChange();
+            
+            // Wait for user action
+            return new Promise<ConfirmationResponse>((resolve) => {
+                this.pendingActionResolvers.set(actionId, resolve);
+            });
+        });
+        
+        // Handle human command requests
+        this.bridge.onRequest('agent/requestHumanCommand', async (params) => {
+            this.state.status = 'waiting_input';
+            this.emitStateChange();
+            
+            const command = await vscode.window.showInputBox({
+                prompt: 'Enter bash command to execute:',
+                placeHolder: 'e.g., cat app.py',
+                title: 'Human Mode - Enter Command'
+            });
+            
+            this.state.status = 'running';
+            this.emitStateChange();
+            
+            return { command: command || '' };
+        });
+        
+        // Handle limits exceeded
+        this.bridge.onNotification('agent/limitsExceeded', (params) => {
+            vscode.window.showWarningMessage(
+                `Agent limits exceeded: ${params.current_steps} steps, $${params.current_cost.toFixed(2)} cost`
+            );
+        });
+        
+        // Handle request for new limits
+        this.bridge.onRequest('agent/requestNewLimits', async (params) => {
+            const newStepLimit = await vscode.window.showInputBox({
+                prompt: 'Enter new step limit (0 for unlimited):',
+                value: '100',
+                validateInput: (value) => {
+                    const num = parseInt(value);
+                    return isNaN(num) || num < 0 ? 'Please enter a valid number >= 0' : null;
+                }
+            });
+            
+            const newCostLimit = await vscode.window.showInputBox({
+                prompt: 'Enter new cost limit in dollars (0 for unlimited):',
+                value: '5.0',
+                validateInput: (value) => {
+                    const num = parseFloat(value);
+                    return isNaN(num) || num < 0 ? 'Please enter a valid number >= 0' : null;
+                }
+            });
+            
+            return {
+                step_limit: parseInt(newStepLimit || '100'),
+                cost_limit: parseFloat(newCostLimit || '5.0')
+            };
+        });
+        
+        // Handle exit confirmation
+        this.bridge.onRequest('agent/confirmExit', async (params) => {
+            const choice = await vscode.window.showInformationMessage(
+                'Agent wants to finish. Continue with a new task?',
+                'Finish',
+                'Continue'
+            );
+            
+            if (choice === 'Continue') {
+                const newTask = await vscode.window.showInputBox({
+                    prompt: 'Enter new task:',
+                    placeHolder: 'e.g., Now add unit tests'
+                });
+                
+                if (newTask) {
+                    return { continue: true, newTask };
+                }
+            }
+            
+            return { continue: false };
+        });
+        
+        // Handle strategy selection request (confirm mode - blocking)
+        this.bridge.onRequest('agent/requestStrategySelection', async (params) => {
+            console.log('[AgentManager] Received requestStrategySelection:', params);
+            
+            // Update state
+            this.state.currentStrategies = params.strategies;
+            this.state.waitingForStrategySelection = true;
+            this.state.status = 'waiting_strategy';
+            this.emitStateChange();
+            
+            // Wait for user selection
+            return new Promise((resolve) => {
+                this.pendingStrategyResolver = resolve;
+            });
+        });
+        
+        // Handle strategy generated notification (yolo mode - non-blocking)
+        this.bridge.onNotification('agent/strategiesGenerated', (params) => {
+            console.log('[AgentManager] Received strategiesGenerated:', params);
+            
+            // Update state to show auto-selected strategy
+            this.state.currentStrategies = params.strategies;
+            this.emitStateChange();
+            
+            // Clear after a few seconds
+            setTimeout(() => {
+                this.state.currentStrategies = [];
+                this.emitStateChange();
+            }, 5000);
+        });
+        
+        // Handle agent started
+        this.bridge.onNotification('agent/started', () => {
+            this.state.status = 'running';
+            this.emitStateChange();
+        });
+        
+        // Handle info notifications
+        this.bridge.onNotification('agent/info', (params) => {
+            vscode.window.showInformationMessage(params.message);
+        });
+        
+        // Handle warning notifications
+        this.bridge.onNotification('agent/warning', (params) => {
+            vscode.window.showWarningMessage(params.message);
+        });
+        
+        // Handle strategy data updates from Python agent
+        this.bridge.onNotification('agent/strategyData', (params) => {
+            console.log('[AgentManager] Received strategy data from Python agent:', params);
+            
+            // Preserve filePath from previous strategyData if new data doesn't have it
+            if (!params.filePath && this.state.strategyData?.filePath) {
+                console.log('[AgentManager] Preserving filePath from previous data:', this.state.strategyData.filePath);
+                params.filePath = this.state.strategyData.filePath;
+            }
+            
+            this.state.strategyData = params;
+            console.log('[AgentManager] Updated state with Agent strategy data');
+            this.emitStateChange();
+        });
+        
+        // Handle step completed - trigger strategy list refresh
+        this.bridge.onNotification('step/completed', () => {
+            this.refreshStrategyList();
+        });
+        
+        // Handle agent finished
+        this.bridge.onNotification('agent/finished', (params) => {
+            this.state.status = 'finished';
+            
+            // Mark current task as completed
+            if (this.state.currentTask) {
+                this.state.currentTask.status = params.exitStatus === 'success' ? 'completed' : 'failed';
+                this.state.currentTask.endTime = new Date();
+                this.state.currentTask.exitStatus = params.exitStatus;
+                
+                // Move to history
+                this.state.taskHistory.unshift(this.state.currentTask);
+                this.state.currentTask = undefined;
+            }
+            
+            this.emitStateChange();
+            
+            vscode.window.showInformationMessage(
+                `Agent finished: ${params.exitStatus}`,
+                'View Output'
+            ).then(choice => {
+                if (choice === 'View Output') {
+                    vscode.window.showInformationMessage(params.result);
+                }
+            });
+        });
+        
+        // Handle errors
+        this.bridge.onNotification('agent/error', (params) => {
+            this.state.status = 'error';
+            
+            // Mark current task as failed
+            if (this.state.currentTask) {
+                this.state.currentTask.status = 'failed';
+                this.state.currentTask.endTime = new Date();
+                this.state.currentTask.exitStatus = 'error: ' + params.error;
+                
+                // Move to history
+                this.state.taskHistory.unshift(this.state.currentTask);
+                this.state.currentTask = undefined;
+            }
+            
+            this.emitStateChange();
+            
+            vscode.window.showErrorMessage(`Agent error: ${params.error}`, 'Show Details').then(choice => {
+                if (choice === 'Show Details') {
+                    const channel = vscode.window.createOutputChannel('mini-swe-agent Error');
+                    channel.appendLine(params.traceback);
+                    channel.show();
+                }
+            });
+        });
+    }
+    
+    async startAgent(task: string): Promise<void> {
+        const config = vscode.workspace.getConfiguration('mini-swe-agent');
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        
+        if (!workspaceFolder) {
+            vscode.window.showErrorMessage('Please open a workspace folder first');
+            return;
+        }
+        
+        // Update workspace path
+        this.workspacePath = workspaceFolder.uri.fsPath;
+        
+        // Start Python bridge
+        await this.bridge.start();
+        
+        // 1. Read strategy mode and tools configuration
+        const strategyEnabled = config.get<boolean>('strategyMode.enabled', true);
+        const strategyFilePath = config.get<string>('strategyMode.filePath', '.optimization_strategies.md');
+        const profilingEnabled = config.get<boolean>('profiling.enabled', false);
+        const profilingType = config.get<string>('profiling.type', 'profiling');
+        
+        // 2. Auto-select template based on strategy mode
+        const templateName = strategyEnabled 
+            ? 'mini_kernel_strategy_list.yaml'
+            : 'mini_kernel.yaml';
+        
+        console.log('[AgentManager] Strategy mode:', strategyEnabled ? 'enabled' : 'disabled');
+        console.log('[AgentManager] Auto-selected template:', templateName);
+        console.log('[AgentManager] Using default user config: geak.yaml (VSCode mode)');
+        console.log('[AgentManager] Workspace path:', this.workspacePath);
+        if (strategyEnabled) {
+            console.log('[AgentManager] Strategy file path:', strategyFilePath);
+        }
+        
+        // 3. Prepare initialization parameters
+        const apiKey = config.get<string>('apiKey', '');
+        console.log('[AgentManager] API Key read from config:', apiKey ? `${apiKey.substring(0, 8)}...` : '(empty)');
+        
+        // Build VSCode settings config (only include non-empty values)
+        const vscodeConfig: any = {
+            agent: {
+                mode: config.get('defaultMode', 'confirm'),
+                confirm_exit: false,
+                cost_limit: config.get('costLimit', 3.0),
+                step_limit: config.get('stepLimit', 50),
+                whitelist_actions: config.get('whitelistActions', [
+                    '^ls', '^cat', '^pwd',
+                    '^cd .+ && ls($| .*)',
+                    '^cd .+ && cat($| .*)'
+                ]),
+            },
+            env: {}
+        };
+        
+        // Only add model config if API key is provided
+        if (apiKey && apiKey.trim()) {
+            vscodeConfig.model = { api_key: apiKey.trim() };
+            console.log('[AgentManager] Adding API key to VSCode config');
+        } else {
+            console.log('[AgentManager] No API key in VSCode settings, will use template/file default');
+        }
+        
+        const initParams: InitializeParams = {
+            workspacePath: workspaceFolder.uri.fsPath,
+            modelName: config.get<string>('modelName', 'claude-opus-4.5'),
+            task: task,
+            templateName: templateName,
+            config: vscodeConfig,
+            strategyMode: {
+                enabled: strategyEnabled,
+                filePath: strategyFilePath
+            },
+            tools: {
+                profiling: { enabled: profilingEnabled, type: profilingType }
+            }
+        };
+        
+        console.log('[AgentManager] VSCode config being sent:', JSON.stringify(vscodeConfig, null, 2));
+        
+        // Update local state
+        this.strategyFilePath = strategyFilePath;
+        
+        // Create new task
+        const newTask: Task = {
+            id: `task_${Date.now()}`,
+            query: task,
+            status: 'running',
+            startTime: new Date(),
+            totalSteps: 0,
+            totalCost: 0
+        };
+        
+        this.state = {
+            status: 'running',
+            currentStep: 0,
+            totalCost: 0,
+            mode: config.get('defaultMode', 'confirm'),
+            messages: [],
+            currentTask: newTask,
+            taskHistory: this.state.taskHistory,
+            currentStrategies: [],
+            waitingForStrategySelection: false,
+            strategyData: this.state.strategyData,
+            hasPendingUserMessage: this.state.hasPendingUserMessage,
+            strategyFilePath: this.getStrategyFilePath(),
+            strategyModeEnabled: strategyEnabled
+        };
+        this.emitStateChange();
+        
+        // Send initialization - this will block on Python side until agent completes
+        this.bridge.sendRequest('agent/waitInitialize', initParams).catch((err) => {
+            vscode.window.showErrorMessage(`Failed to initialize agent: ${err}`);
+            
+            // Mark task as failed
+            if (this.state.currentTask) {
+                this.state.currentTask.status = 'failed';
+                this.state.currentTask.endTime = new Date();
+                this.state.taskHistory.unshift(this.state.currentTask);
+                this.state.currentTask = undefined;
+            }
+            
+            this.state.status = 'error';
+            this.emitStateChange();
+        });
+    }
+    
+    stopAgent(): void {
+        // Mark current task as cancelled
+        if (this.state.currentTask) {
+            this.state.currentTask.status = 'cancelled';
+            this.state.currentTask.endTime = new Date();
+            this.state.taskHistory.unshift(this.state.currentTask);
+            this.state.currentTask = undefined;
+        }
+        
+        this.bridge.stop();
+        this.state.status = 'idle';
+        this.emitStateChange();
+        vscode.window.showInformationMessage('Agent stopped');
+    }
+    
+    /**
+     * Clear message history (for starting a fresh task)
+     */
+    clearMessages(): void {
+        this.state.messages = [];
+        this.emitStateChange();
+    }
+    
+    /**
+     * Check if there are any messages in history
+     */
+    hasMessages(): boolean {
+        return this.state.messages.length > 0;
+    }
+    
+    setMode(mode: 'confirm' | 'yolo' | 'human'): void {
+        this.state.mode = mode;
+        this.bridge.sendNotification('agent/setMode', { mode });
+        this.emitStateChange();
+        vscode.window.showInformationMessage(`Switched to ${mode} mode`);
+    }
+    
+    /**
+     * Handle action approval/rejection from the UI
+     */
+    handleAction(actionId: string, decision: 'approve' | 'reject', reason?: string, editedCommand?: string): void {
+        // Find the action message
+        const messageIndex = this.state.messages.findIndex(m => m.actionId === actionId);
+        if (messageIndex === -1) {
+            vscode.window.showErrorMessage('Action not found');
+            return;
+        }
+        
+        const message = this.state.messages[messageIndex];
+        
+        // Update message status
+        message.actionStatus = decision === 'approve' ? 'approved' : 'rejected';
+        message.actionTimestamp = new Date();
+        if (reason) {
+            message.actionReason = reason;
+        }
+        
+        // Clear pending action
+        this.state.status = 'running';
+        this.state.pendingAction = undefined;
+        this.emitStateChange();
+        
+        // Resolve the promise
+        const resolver = this.pendingActionResolvers.get(actionId);
+        if (resolver) {
+            this.pendingActionResolvers.delete(actionId);
+            
+            const response: ConfirmationResponse = {
+                approved: decision === 'approve',
+                reason: reason,
+                editedCommand: editedCommand
+            };
+            
+            resolver(response);
+        }
+    }
+    
+    /**
+     * Handle strategy selection from the UI
+     */
+    handleStrategySelection(strategyId: string | null, action: 'select' | 'skip'): void {
+        console.log('[AgentManager] handleStrategySelection:', strategyId, action);
+        
+        // Clear strategy state
+        this.state.currentStrategies = [];
+        this.state.waitingForStrategySelection = false;
+        this.state.status = 'running';
+        this.emitStateChange();
+        
+        // Resolve the promise
+        if (this.pendingStrategyResolver) {
+            const response: StrategySelectionResponse = {
+                selectedStrategyId: strategyId,
+                action: action
+            };
+            
+            this.pendingStrategyResolver(response);
+            this.pendingStrategyResolver = undefined;
+        }
+    }
+    
+    getState(): AgentState {
+        return { ...this.state };
+    }
+    
+    private emitStateChange() {
+        this.stateChangeEmitter.fire({ ...this.state });
+    }
+    
+    /**
+     * Initialize strategy manager
+     */
+    initStrategyManager(workspacePath: string): void {
+        console.log('[AgentManager] Initializing strategy manager for workspace:', workspacePath);
+        
+        // Store workspace path for later use
+        this.workspacePath = workspacePath;
+        
+        // Read strategy file path from config
+        const config = vscode.workspace.getConfiguration('mini-swe-agent');
+        this.strategyFilePath = config.get('strategyMode.filePath', '.optimization_strategies.md');
+        
+        console.log('[AgentManager] Creating StrategyManagerClient with path:', this.strategyFilePath);
+        this.strategyManager = new StrategyManagerClient(
+            workspacePath,
+            this.context.extensionPath,
+            this.strategyFilePath
+        );
+        
+        // Listen to strategy data changes
+        this.strategyManager.onChange((data) => {
+            console.log('[AgentManager] StrategyManagerClient data loaded:', JSON.stringify(data, null, 2));
+            
+            // Preserve filePath from previous strategyData if new data doesn't have it
+            if (!data.filePath && this.state.strategyData?.filePath) {
+                console.log('[AgentManager] Preserving filePath from previous data:', this.state.strategyData.filePath);
+                (data as any).filePath = this.state.strategyData.filePath;
+            }
+            
+            this.state.strategyData = data;
+            console.log('[AgentManager] Updated state with StrategyManagerClient data');
+            this.emitStateChange();
+        });
+        
+        // Start event-driven mode
+        console.log('[AgentManager] Starting event-driven mode...');
+        this.strategyManager.startEventDriven();
+        
+        // Update initial state with path info
+        this.state.strategyFilePath = this.getStrategyFilePath();
+        this.emitStateChange();
+    }
+    
+    /**
+     * Refresh strategy list (for event-driven updates)
+     */
+    async refreshStrategyList(): Promise<void> {
+        if (this.strategyManager) {
+            await this.strategyManager.triggerRefresh();
+        }
+    }
+    
+    /**
+     * Explore selected strategies - send message to agent
+     */
+    async exploreStrategies(selectedIndices: number[]): Promise<void> {
+        if (selectedIndices.length === 0) {
+            vscode.window.showWarningMessage('No strategies selected');
+            return;
+        }
+        
+        const strategyData = this.state.strategyData;
+        if (!strategyData || !strategyData.exists) {
+            vscode.window.showWarningMessage('Strategy data not available. Please ensure the agent is running.');
+            return;
+        }
+        
+        // Get all strategy indices
+        const allIndices = strategyData.strategies.map(s => s.index);
+        
+        try {
+            // Set selected strategies to High Priority
+            for (const idx of selectedIndices) {
+                await this.sendOptoolCommand(`optool priority ${idx} high`);
+            }
+            
+            // Set unselected strategies to Normal Priority
+            const unselectedIndices = allIndices.filter(idx => !selectedIndices.includes(idx));
+            for (const idx of unselectedIndices) {
+                await this.sendOptoolCommand(`optool priority ${idx} normal`);
+            }
+            
+            vscode.window.showInformationMessage(
+                `Set ${selectedIndices.length} ${selectedIndices.length === 1 ? 'strategy' : 'strategies'} to high priority`
+            );
+            
+            // Refresh strategy list to show updated priorities
+            await this.refreshStrategyList();
+            
+        } catch (error) {
+            vscode.window.showErrorMessage(`Failed to update priorities: ${error}`);
+        }
+    }
+    
+    /**
+     * Send optool command by directly modifying the strategy file
+     * The Python agent will read the updated priorities when selecting strategies
+     */
+    private async sendOptoolCommand(command: string): Promise<void> {
+        console.log(`[AgentManager] Sending optool command: ${command}`);
+        
+        // Parse the command to extract index and priority
+        const match = command.match(/optool priority (\d+) (high|normal|\d+)/i);
+        if (!match) {
+            throw new Error(`Invalid optool command format: ${command}`);
+        }
+        
+        const index = parseInt(match[1]);
+        const priorityInput = match[2].toLowerCase();
+        
+        // Convert to numeric value (for file update)
+        let priority: number;
+        if (priorityInput === 'high') {
+            priority = 100;
+        } else if (priorityInput === 'normal') {
+            priority = 50;
+        } else {
+            priority = parseInt(priorityInput);  // Backward compatibility
+        }
+        
+        // Update in-memory strategy data
+        if (this.state.strategyData && this.state.strategyData.strategies) {
+            const strategy = this.state.strategyData.strategies.find(s => s.index === index);
+            if (strategy) {
+                strategy.priority = priority;
+            }
+        }
+        
+        // Write to file using Node.js fs module
+        const fs = require('fs');
+        const path = require('path');
+        
+        // Get file path - try strategyData.filePath first, then fallback to calculated path
+        let filePath: string;
+        
+        if (this.state.strategyData?.filePath) {
+            filePath = this.state.strategyData.filePath;
+            console.log(`[AgentManager] Using filePath from strategyData: ${filePath}`);
+        } else {
+            // Fallback: calculate the path
+            const pathInfo = this.getStrategyFilePath();
+            filePath = pathInfo.absolute;
+            console.log(`[AgentManager] Using calculated filePath: ${filePath}`);
+        }
+        
+        if (!filePath) {
+            throw new Error('Strategy file path not available');
+        }
+        
+        try {
+            // Read current file
+            const content = fs.readFileSync(filePath, 'utf8');
+            
+            // Update the priority in the file
+            const lines = content.split('\n');
+            let inStrategy = false;
+            let strategyIndex = 0;
+            
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                
+                // Check if this is a strategy header
+                const headerMatch = line.match(/^## Strategy (\d+):/);
+                if (headerMatch) {
+                    strategyIndex = parseInt(headerMatch[1]);
+                    inStrategy = (strategyIndex === index);
+                    continue;
+                }
+                
+                // If we're in the target strategy, update the priority line
+                if (inStrategy && line.match(/^\[priority:(high|normal|\d+)\]/i)) {
+                    // Convert priority to label
+                    const priorityLabel = priority >= 100 ? 'high' : 'normal';
+                    lines[i] = line.replace(/\[priority:(high|normal|\d+)\]/i, `[priority:${priorityLabel}]`);
+                    break;
+                }
+            }
+            
+            // Write back to file
+            fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+            console.log(`[AgentManager] Updated priority for strategy ${index} to ${priority}`);
+            
+        } catch (error) {
+            console.error(`[AgentManager] Failed to update strategy file: ${error}`);
+            throw error;
+        }
+    }
+    
+    /**
+     * Get strategy file path info
+     */
+    getStrategyFilePath(): StrategyFilePathInfo {
+        const isRunning = this.state.status === 'running' || this.state.status.includes('waiting');
+        
+        // If path is absolute, use it directly; otherwise join with workspace path
+        const absolutePath = path.isAbsolute(this.strategyFilePath) 
+            ? this.strategyFilePath
+            : (this.workspacePath ? path.join(this.workspacePath, this.strategyFilePath) : this.strategyFilePath);
+        
+        return {
+            relative: this.strategyFilePath,
+            absolute: absolutePath,
+            isModifiable: !isRunning
+        };
+    }
+    
+    /**
+     * Update strategy file path (only when agent is not running)
+     */
+    async updateStrategyFilePath(newPath: string): Promise<boolean> {
+        const isRunning = this.state.status === 'running' || this.state.status.includes('waiting');
+        
+        if (isRunning) {
+            // Agent is running, prompt user to stop
+            const choice = await vscode.window.showWarningMessage(
+                `Cannot change path while agent is running. Restart agent to use: ${newPath}`,
+                'Stop & Change',
+                'Cancel'
+            );
+            
+            if (choice === 'Stop & Change') {
+                this.stopAgent();
+                // Continue with the change
+            } else {
+                return false;
+            }
+        }
+        
+        // Update configuration
+        const config = vscode.workspace.getConfiguration('mini-swe-agent');
+        await config.update('strategyMode.filePath', newPath, vscode.ConfigurationTarget.Workspace);
+        
+        // Update local variable
+        this.strategyFilePath = newPath;
+        
+        // Update strategy manager
+        if (this.strategyManager && this.workspacePath) {
+            this.strategyManager.stop();
+            console.log('[AgentManager] Recreating StrategyManagerClient with new path:', this.strategyFilePath);
+            this.strategyManager = new StrategyManagerClient(
+                this.workspacePath,
+                this.context.extensionPath,
+                this.strategyFilePath
+            );
+            this.strategyManager.onChange((data) => {
+                console.log('[AgentManager] Strategy data changed:', JSON.stringify(data, null, 2));
+                
+                // Preserve filePath from previous strategyData if new data doesn't have it
+                if (!data.filePath && this.state.strategyData?.filePath) {
+                    console.log('[AgentManager] Preserving filePath from previous data:', this.state.strategyData.filePath);
+                    (data as any).filePath = this.state.strategyData.filePath;
+                }
+                
+                this.state.strategyData = data;
+                this.emitStateChange();
+            });
+            this.strategyManager.startEventDriven();
+        }
+        
+        // Update state
+        this.state.strategyFilePath = this.getStrategyFilePath();
+        this.emitStateChange();
+        
+        vscode.window.showInformationMessage(`Strategy file path updated to: ${newPath}`);
+        return true;
+    }
+    
+    /**
+     * Setup config watcher
+     */
+    private setupConfigWatcher(): void {
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('mini-swe-agent.strategyMode.filePath')) {
+                const newPath = vscode.workspace.getConfiguration('mini-swe-agent').get('strategyMode.filePath', '.optimization_strategies.md');
+                const isRunning = this.state.status === 'running' || this.state.status.includes('waiting');
+                
+                if (isRunning && newPath !== this.strategyFilePath) {
+                    vscode.window.showWarningMessage(
+                        `Strategy path changed in settings, but agent is still using: ${this.strategyFilePath}. Restart to apply.`,
+                        'Restart Now'
+                    ).then(choice => {
+                        if (choice === 'Restart Now') {
+                            this.stopAgent();
+                            // User needs to manually restart
+                            vscode.window.showInformationMessage('Agent stopped. Please start it again to use the new path.');
+                        }
+                    });
+                }
+            }
+        });
+    }
+    
+    /**
+     * Cleanup
+     */
+    dispose(): void {
+        if (this.strategyManager) {
+            this.strategyManager.stop();
+        }
+    }
+}

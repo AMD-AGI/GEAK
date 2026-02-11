@@ -1,0 +1,28 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Extension (from GEAK root)",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}/vscode-extension"
+            ],
+            "outFiles": [
+                "${workspaceFolder}/vscode-extension/out/**/*.js"
+            ],
+            "preLaunchTask": "npm: compile (vscode-extension)"
+        },
+        {
+            "name": "Run Extension (no preLaunch)",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}/vscode-extension"
+            ],
+            "outFiles": [
+                "${workspaceFolder}/vscode-extension/out/**/*.js"
+            ]
+        }
+    ]
+}

@@ -1,0 +1,23 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "npm",
+            "script": "compile",
+            "path": "vscode-extension/",
+            "problemMatcher": "$tsc",
+            "presentation": { "reveal": "silent" },
+            "group": "build",
+            "label": "npm: compile (vscode-extension)"
+        },
+        {
+            "type": "npm",
+            "script": "watch",
+            "path": "vscode-extension/",
+            "problemMatcher": "$tsc-watch",
+            "isBackground": true,
+            "presentation": { "reveal": "never" },
+            "label": "npm: watch (vscode-extension)"
+        }
+    ]
+}

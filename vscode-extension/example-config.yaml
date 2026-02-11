@@ -1,0 +1,64 @@
+# Example configuration file for mini-swe-agent VS Code extension
+# Save this as 'my-config.yaml' and set the path in VS Code settings:
+# "mini-swe-agent.configPath": "my-config.yaml"
+
+# Agent configuration
+agent:
+  # Interaction mode: confirm (default), yolo, or human
+  # mode: confirm
+  
+  # Maximum cost in dollars (0 for unlimited)
+  cost_limit: 5.0
+  
+  # Maximum number of steps (0 for unlimited)
+  step_limit: 100
+  
+  # Regex patterns for commands that don't require confirmation
+  # whitelist_actions:
+  #   - "^ls"
+  #   - "^cat"
+  #   - "^pwd"
+  #   - "^echo"
+  
+  # Custom system template (optional)
+  # system_template: |
+  #   You are a helpful assistant...
+  
+  # Custom instance template (optional)
+  # instance_template: |
+  #   Task: {{task}}
+
+# Model configuration
+model:
+  # Model name (e.g., gpt-4, claude-3-5-sonnet-20241022, gpt-3.5-turbo)
+  model_name: gpt-4
+  
+  # API key (store here instead of environment variable)
+  # For OpenAI:
+  # api_key: "sk-your-openai-key-here"
+  # For Anthropic:
+  # api_key: "sk-ant-your-anthropic-key-here"
+  
+  # Model class (optional, auto-detected from model_name)
+  # model_class: litellm
+  
+  # Model-specific parameters
+  model_kwargs:
+    temperature: 0.0
+    max_tokens: 8000
+    # For GPT reasoning models:
+    # reasoning:
+    #   effort: high  # none, low, medium, high
+    # text:
+    #   verbosity: low  # low or high
+
+# Environment configuration (optional)
+env:
+  # Environment variables for commands
+  env:
+    PAGER: cat
+    MANPAGER: cat
+  
+  # Command timeout in seconds
+  timeout: 3600
+

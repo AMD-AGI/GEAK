@@ -1,0 +1,180 @@
+{
+  "name": "geak-agent-vscode",
+  "displayName": "GEAK",
+  "description": "AI-coding Agent for Generating Efficient AI Kernels",
+  "version": "0.1.0",
+  "publisher": "mini-swe-agent",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SWE-agent/mini-swe-agent"
+  },
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=20.0.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "coding assistant",
+    "swe-bench",
+    "automation"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mini-swe-agent.start",
+        "title": "mini: Start Agent",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "mini-swe-agent.stop",
+        "title": "mini: Stop Agent",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "mini-swe-agent.yolo",
+        "title": "mini: Toggle YOLO Mode",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "mini-swe-agent.confirm",
+        "title": "mini: Switch to Confirm Mode",
+        "icon": "$(question)"
+      },
+      {
+        "command": "mini-swe-agent.human",
+        "title": "mini: Switch to Human Mode",
+        "icon": "$(person)"
+      },
+      {
+        "command": "mini-swe-agent.showPanel",
+        "title": "mini: Show Full Chat",
+        "icon": "$(comment-discussion)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mini-swe-agent",
+          "title": "geak-agent",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "mini-swe-agent": [
+        {
+          "id": "mini-swe-agent-sidebar",
+          "name": "Agent Status",
+          "type": "webview"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "geak-agent",
+      "properties": {
+        "mini-swe-agent.modelName": {
+          "type": "string",
+          "default": "claude-opus-4.5",
+          "description": "Model to use (e.g., gpt-5, claude-opus-4.5)"
+        },
+        "mini-swe-agent.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for the model"
+        },
+        "mini-swe-agent.costLimit": {
+          "type": "number",
+          "default": 0.0,
+          "description": "Maximum cost limit in dollars (0 = unlimited)"
+        },
+        "mini-swe-agent.stepLimit": {
+          "type": "number",
+          "default": 0,
+          "description": "Maximum number of steps (0 = unlimited)"
+        },
+        "mini-swe-agent.defaultMode": {
+          "type": "string",
+          "enum": [
+            "confirm",
+            "yolo",
+            "human"
+          ],
+          "default": "confirm",
+          "description": "Default interaction mode"
+        },
+        "mini-swe-agent.whitelistActions": {
+          "type": "array",
+          "default": [
+            "^ls",
+            "^cat",
+            "^pwd",
+            "^echo"
+          ],
+          "description": "Regex patterns for auto-approved commands"
+        },
+        "mini-swe-agent.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Python executable (leave empty to auto-detect)"
+        },
+        "mini-swe-agent.strategyMode.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable strategy list management mode with optool support. Auto-selects appropriate template (mini_kernel_strategy_list.yaml or mini_kernel.yaml). Requires agent restart to take effect.",
+          "scope": "resource"
+        },
+        "mini-swe-agent.strategyMode.filePath": {
+          "type": "string",
+          "default": ".optimization_strategies.md",
+          "description": "Path to the optimization strategies file (relative to workspace or absolute path). Only used when strategy mode is enabled.",
+          "scope": "resource"
+        },
+        "mini-swe-agent.profiling.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the profiling tool (ROCm/GPU profiling). Requires agent restart.",
+          "scope": "resource"
+        },
+        "mini-swe-agent.profiling.type": {
+          "type": "string",
+          "enum": [
+            "profiling",
+            "roofline",
+            "profiler_analyzer"
+          ],
+          "default": "profiling",
+          "description": "Profiling tool type. Only used when profiling is enabled.",
+          "scope": "resource"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.3.3"
+  },
+  "overrides": {
+    "cheerio": "1.0.0",
+    "undici": "6.23.0"
+  }
+}

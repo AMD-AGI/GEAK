@@ -1,0 +1,4 @@
+{
+    "mini-swe-agent.strategyMode.enabled": true,
+    "mini-swe-agent.profiling.enabled": false
+}
