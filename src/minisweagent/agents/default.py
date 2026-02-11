@@ -286,15 +286,15 @@ class DefaultAgent:
 
     def parse_action(self, response: dict) -> dict:
         """Parse the action from the message. Returns the action."""
-        if response["content"]:
-            actions = re.findall(r"```bash\s*\n(.*?)\n```", response["content"], re.DOTALL)
-            if len(actions) == 1:
-                actions = {"action": actions[0].strip(), **response}
-                return self.execute_action(actions)
-        if response["tools"]:
+        content = response.get("content", "")
+        actions = re.findall(r"```bash\s*\n(.*?)\n```", content, re.DOTALL) if content else []
+        if len(actions) == 1:
+            return self.execute_action({"action": actions[0].strip(), **response})
+        if response.get("tools"):
             from minisweagent.tools.submit import Submitted as ToolSubmitted
             try:
                 result = self.toolruntime.dispatch(tool_call=response["tools"]["function"])
+                self.has_finished(result)
             except ToolSubmitted as e:
                 raise Submitted(str(e))
             # Handle tool results (sync state, etc.)
