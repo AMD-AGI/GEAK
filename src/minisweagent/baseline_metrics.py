@@ -24,19 +24,17 @@ Usage (Python — agent calls this after choosing kernels):
 
 Usage (CLI):
     # List all kernels so the agent can choose
-    python -m geakagent.baseline_metrics list profiler_output.json
+    python -m minisweagent.baseline_metrics list profiler_output.json
 
     # Build baseline from agent-chosen kernels
-    python -m geakagent.baseline_metrics build profiler_output.json --kernels "topk_stage1,topk_stage2"
-    python -m geakagent.baseline_metrics build profiler_output.json --indices 0,2
-    python -m geakagent.baseline_metrics build profiler_output.json --all  # include every kernel
+    python -m minisweagent.baseline_metrics build profiler_output.json --kernels "topk_stage1,topk_stage2"
+    python -m minisweagent.baseline_metrics build profiler_output.json --indices 0,2
+    python -m minisweagent.baseline_metrics build profiler_output.json --all  # include every kernel
 """
 
 import json
 import sys
 from pathlib import Path
-from typing import Optional
-
 
 # Metrics where summation is the correct aggregation (total cost).
 _SUM_METRICS = {"duration_us"}
@@ -121,8 +119,8 @@ def aggregate_metrics(kernels: list[dict]) -> dict[str, float]:
 def build_baseline_metrics(
     metrixtool_result: dict,
     *,
-    kernel_names: Optional[list[str]] = None,
-    kernel_indices: Optional[list[int]] = None,
+    kernel_names: list[str] | None = None,
+    kernel_indices: list[int] | None = None,
     include_all: bool = False,
     gpu_index: int = 0,
 ) -> dict:

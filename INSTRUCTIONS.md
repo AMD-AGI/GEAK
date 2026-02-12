@@ -311,7 +311,7 @@ This decision cannot be automated — it depends on the task context.
 
 ### Saving baseline_metrics.json (pre-built COMMANDMENT mode only)
 
-Once you know which kernels to include, use `geakagent.baseline_metrics`
+Once you know which kernels to include, use `minisweagent.baseline_metrics`
 to format them into the JSON that `run_openevolve.py --baseline-metrics`
 expects.  You must tell it **exactly** which kernels to include.
 
@@ -342,7 +342,7 @@ for i, k in enumerate(list_kernels(result)):
 #   --kernels "name1,name2"   select by exact name
 #   --indices 0,2             select by index from the listing above
 #   --all                     use every kernel (when only the relevant ones are present)
-python3 -m geakagent.baseline_metrics build \
+python3 -m minisweagent.baseline_metrics build \
   KERNEL_DIR/optimization_output/profiler_output.json \
   --kernels "topk_stage1,topk_stage2" \
   -o KERNEL_DIR/optimization_output/baseline_metrics.json

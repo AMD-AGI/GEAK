@@ -1,3 +1,13 @@
+# DEPRECATED
+
+**This MCP server is superseded by `mcp_tools/profiler-mcp/`.**
+
+`profiler-mcp` provides a unified profiler that wraps both Metrix and rocprof-compute
+with a single `profile_kernel` tool and a `backend` parameter. It does not require
+Docker-in-Docker.
+
+---
+
 # Kernel Profiler MCP Server
 
 Hardware-level GPU kernel profiling with rocprof-compute for AMD GPUs.

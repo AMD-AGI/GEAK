@@ -6,17 +6,13 @@ and kernel function name. Used by the agent when given a --kernel-url.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
 
 def _ensure_importable():
-    """Add geak_agent to sys.path if needed."""
-    repo_root = Path(__file__).resolve().parent.parent.parent.parent
-    ga = str(repo_root / "geak_agent")
-    if ga not in sys.path:
-        sys.path.insert(0, str(repo_root))
+    """No-op: resolve_kernel_url_impl is now a sibling module."""
+    pass
 
 
 class ResolveKernelUrlTool:

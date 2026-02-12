@@ -21,7 +21,6 @@ RUN git clone https://github.com/AMDResearch/intellikit.git /tmp/intellikit \
 RUN pip install -e mcp_tools/mcp-client/ && \
     pip install -e mcp_tools/metrix-mcp/ && \
     pip install -e mcp_tools/openevolve-mcp/ && \
-    pip install -e mcp_tools/kernel-profiler/ && \
     pip install -e mcp_tools/kernel-ercs/ && \
     pip install -e mcp_tools/kernel-evolve/ && \
     pip install -e mcp_tools/automated-test-discovery/ && \

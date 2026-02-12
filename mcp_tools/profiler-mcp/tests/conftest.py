@@ -37,7 +37,7 @@ HAS_GPU = _has_gpu()
 requires_gpu = pytest.mark.skipif(not HAS_GPU, reason="No AMD GPU available")
 
 DEFAULT_TEST_COMMAND = (
-    "python3 /home/sdubagun/work/repos/AIG-Eval/tasks/geak_eval/rope/kernel.py --profile"
+    "python3 /workspace/examples/add_kernel/kernel.py --profile"
 )
 
 
@@ -52,5 +52,5 @@ def test_workdir():
     """Working directory for rocprof-compute. Override with PROFILER_TEST_WORKDIR."""
     return os.environ.get(
         "PROFILER_TEST_WORKDIR",
-        "/home/sdubagun/work/repos/AIG-Eval/tasks/geak_eval/rope",
+        "/workspace/examples/add_kernel",
     )

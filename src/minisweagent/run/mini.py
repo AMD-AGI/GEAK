@@ -6,7 +6,6 @@
 import copy
 import os
 import sys
-import traceback
 from pathlib import Path
 from typing import Any
 
@@ -20,17 +19,18 @@ from rich.console import Console
 from minisweagent import global_config_dir
 from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.agents.interactive_textual import TextualAgent
-from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 from minisweagent.agents.parallel_agent import ParallelAgent
+from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+from minisweagent.agents.unit_test_agent import run_discovery_pipeline, run_unit_test_agent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
-from minisweagent.run.utils.save import save_traj
 from minisweagent.run.utils.config_editor import load_and_merge_configs
+from minisweagent.run.utils.save import save_traj
 from minisweagent.run.utils.task_parser import _resolve_path_case
 from minisweagent.utils.log import logger
-from minisweagent.agents.unit_test_agent import run_unit_test_agent, run_discovery_pipeline
+
 
 def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str:
     """Run test discovery on the resolved kernel and return formatted results for the task prompt."""
@@ -38,7 +38,7 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     try:
-        from geak_agent.mcp_tools.discovery import discover
+        from minisweagent.tools.discovery import discover
     except ImportError:
         return ""
 
@@ -92,7 +92,7 @@ def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     try:
-        from geak_agent.resolve_kernel_url import resolve_kernel_url, get_kernel_name_at_line
+        from minisweagent.tools.resolve_kernel_url_impl import get_kernel_name_at_line, resolve_kernel_url
     except ImportError as e:
         raise SystemExit(f"Cannot resolve --kernel-url: geak_agent not found ({e}).") from e
     clone_into = (Path(workspace) if workspace else Path.cwd())
@@ -112,7 +112,7 @@ def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -
         profile_hint = "Line number was not specified; discovery should identify the kernel(s) in the file."
     kernel_dir = str(Path(path).parent)
     output_dir = f"{kernel_dir}/optimization_output"
-    oe_script = f"${{GEAK_OE_ROOT:-/opt/geak-oe}}/examples/geak_eval/run_openevolve.py"
+    oe_script = "${GEAK_OE_ROOT:-/opt/geak-oe}/examples/geak_eval/run_openevolve.py"
     block = f"""\n
 --- Resolved kernel (from --kernel-url) ---
 Kernel path: {path}{(' |' + line_info + kernel_info) if line_info else ''}
@@ -214,7 +214,7 @@ def main(
     # 0. Runtime environment check (ported from MSA branch)
     if runtime in ("auto", "docker"):
         try:
-            from minisweagent.runtime_env import detect_runtime_environment, RuntimeType
+            from minisweagent.runtime_env import RuntimeType, detect_runtime_environment
             rt_env = detect_runtime_environment()
             if runtime == "auto" and not rt_env.has_gpu:
                 console.print(
@@ -328,7 +328,7 @@ def main(
         if discovery_block:
             task_content = task_content + discovery_block
     elif task and '.md' in task:
-        with open(task, "r", encoding="utf-8") as f:
+        with open(task, encoding="utf-8") as f:
             task = f.read()
 
     if yolo:
@@ -455,7 +455,7 @@ def main(
         else:
             console.print("[bold yellow]Warning: No repo path specified for parallel execution[/bold yellow]")
     else:
-        console.print(f"[bold cyan]Using Single Agent Mode[/bold cyan]")
+        console.print("[bold cyan]Using Single Agent Mode[/bold cyan]")
         console.print(f"[dim]Using GPU: {parsed_gpu_ids[0]}[/dim]")
         # Set HIP_VISIBLE_DEVICES for single agent GPU isolation
         env.config.env = env.config.env or {}

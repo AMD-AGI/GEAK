@@ -521,8 +521,8 @@ GEAK Agent (unified)
 │   ├── kernel_profile.py      # CLI for hardware-level GPU profiling
 │   └── runtime_env.py         # Runtime environment detection (local/Docker)
 ├── mcp_tools/                 # 6 standalone MCP servers + client
-├── reference/                 # GPU optimization strategies database (50+)
-├── test_suite/                # Regression suite (10 AITER kernels)
+├── knowledge_base/                 # GPU optimization strategies database (50+)
+├── eval_suite/                # Regression suite (10 AITER kernels)
 ├── examples/                  # Example kernels
 └── Dockerfile                 # Docker image with all tools
 ```
