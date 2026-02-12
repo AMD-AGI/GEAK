@@ -1,0 +1,7 @@
+.archive
+.venv
+.git
+.pytest_cache
+*.pyc
+__pycache__
+.rocprofv3

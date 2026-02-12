@@ -29,6 +29,12 @@ class AgentConfig:
     action_observation_template: str = "Observation: {{output}}"
     step_limit: int = 0
     cost_limit: float = 3.0
+    summary_on_cost_limit: bool = False
+    """When True, on LimitsExceeded allow one extra step (e.g. to write a summary)."""
+    summary_on_limit_prompt: str = (
+        "The cost limit has been reached. Before stopping, run exactly one command to document "
+        "what you did so far (e.g. create a summary file or add to your final output)."
+    )
     # Save patch configuration (always enabled)
     save_patch: bool = True
     test_command: str | None = None
@@ -71,6 +77,7 @@ class DefaultAgent:
         self.model = model
         self.env = env
         self.extra_template_vars = {}
+        self._allow_one_summary_step = False
         # Initialize save_patch related attributes
         self.patch_counter = 0
         self.log_file: Path | None = None
@@ -192,9 +199,23 @@ class DefaultAgent:
             except NonTerminatingException as e:
                 self.add_message("user", str(e))
             except TerminatingException as e:
-                self.add_message("user", str(e))
+                e_type = type(e)
+                e_msg = str(e)
+                self.add_message("user", e_msg)
+                if (
+                    e_type is LimitsExceeded
+                    and getattr(self.config, "summary_on_cost_limit", False)
+                ):
+                    self.add_message("user", self.config.summary_on_limit_prompt)
+                    self._allow_one_summary_step = True
+                    try:
+                        self.step()
+                    except (TerminatingException, NonTerminatingException):
+                        pass
+                    finally:
+                        self._allow_one_summary_step = False
                 self._run_select_patch_agent()
-                return type(e).__name__, str(e)
+                return e_type.__name__, e_msg
             finally:
                 self._save_traj()
     
@@ -241,8 +262,12 @@ class DefaultAgent:
 
     def query(self) -> dict:
         """Query the model and return the response."""
-        if 0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost:
+        if not self._allow_one_summary_step and (
+            0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost
+        ):
             raise LimitsExceeded()
+        if self._allow_one_summary_step:
+            self._allow_one_summary_step = False
         response = self.model.query(self.messages)
         output = response["content"]
         # Include tool_calls in assistant message when the model requests a tool call

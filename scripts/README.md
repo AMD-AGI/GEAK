@@ -1,3 +1,20 @@
+# Scripts
+
+## run-docker.sh
+
+Build and run the GEAK-agent Docker container. Run tests and examples **inside** the container. The repo is mounted at `/workspace`, so edits on the host are visible without rebuilding.
+
+Requires `AMD_LLM_API_KEY`.
+
+```bash
+./scripts/run-docker.sh          # build if needed, start container, exec into bash
+./scripts/run-docker.sh --rebuild # rebuild image (no cache) and start
+```
+
+Inside the container you land in `/workspace`. Run e.g. `pytest geak_agent/tests/ -v` or `python geak_agent/examples/resolve_kernel_url.py <spec>`.
+
+---
+
 # Kernel Setup Generator
 
 Generates instruction files and run scripts for new kernel workspaces.

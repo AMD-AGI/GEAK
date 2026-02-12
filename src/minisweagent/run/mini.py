@@ -5,6 +5,7 @@
 
 import copy
 import os
+import sys
 import traceback
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,117 @@ from minisweagent.run.utils.config_editor import load_and_merge_configs
 from minisweagent.run.utils.task_parser import _resolve_path_case
 from minisweagent.utils.log import logger
 from minisweagent.agents.unit_test_agent import run_unit_test_agent, run_discovery_pipeline
+
+def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str:
+    """Run test discovery on the resolved kernel and return formatted results for the task prompt."""
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    try:
+        from geak_agent.mcp_tools.discovery import discover
+    except ImportError:
+        return ""
+
+    console = Console(highlight=False)
+    console.print("\n[bold cyan]--- Test Discovery ---[/bold cyan]")
+    if kernel_name:
+        console.print(f"[dim]Kernel function: {kernel_name}[/dim]")
+    try:
+        kp = Path(kernel_path)
+        ws = kp.parent
+        for p in kp.parents:
+            if (p / ".git").exists():
+                ws = p
+                break
+        result = discover(workspace=ws, kernel_path=kp, interactive=False)
+        lines = []
+        kernel_stem = kp.stem.lower()
+        match_terms = [kernel_stem]
+        if kernel_name:
+            match_terms.extend([p for p in kernel_name.lower().split("_") if len(p) > 2])
+        def _is_relevant(path_str):
+            return any(term in path_str.lower() for term in match_terms)
+        relevant_tests = [t for t in result.tests if _is_relevant(str(t.file_path))]
+        other_tests = [t for t in result.tests if not _is_relevant(str(t.file_path))][:3]
+        all_display = relevant_tests + other_tests
+        if all_display:
+            console.print(f"[bold green]Found {len(result.tests)} test(s) ({len(relevant_tests)} matching '{kernel_stem}'):[/bold green]")
+            for t in all_display[:5]:
+                marker = "+" if kernel_stem in str(t.file_path).lower() else "-"
+                console.print(f"  [green]{marker}[/green] {t.file_path} [dim](confidence: {t.confidence:.1f})[/dim]")
+                lines.append(f"  - {t.file_path} (confidence: {t.confidence:.1f}, command: {t.command})")
+        else:
+            console.print("[yellow]No existing tests found.[/yellow]")
+        relevant_bench = [b for b in result.benchmarks if kernel_stem in str(b.file_path).lower()]
+        if relevant_bench:
+            console.print(f"[bold green]Found {len(relevant_bench)} matching benchmark(s):[/bold green]")
+            for b in relevant_bench[:3]:
+                console.print(f"  [green]+[/green] {b.file_path} [dim](confidence: {b.confidence:.1f})[/dim]")
+                lines.append(f"  - Benchmark: {b.file_path} (confidence: {b.confidence:.1f})")
+        console.print("[bold cyan]---------------------[/bold cyan]\n")
+        if lines:
+            return "\n--- Discovered Tests ---\n" + "\n".join(lines) + "\nRead these test files and reuse their reference implementations, input patterns, and tolerances.\n---\n"
+    except Exception as e:
+        console.print(f"[yellow]Discovery failed: {e}[/yellow]")
+    return ""
+
+
+def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -> tuple[str, str | None]:
+    """Resolve kernel URL to local path/line/kernel name and append to task."""
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    try:
+        from geak_agent.resolve_kernel_url import resolve_kernel_url, get_kernel_name_at_line
+    except ImportError as e:
+        raise SystemExit(f"Cannot resolve --kernel-url: geak_agent not found ({e}).") from e
+    clone_into = (Path(workspace) if workspace else Path.cwd())
+    resolved = resolve_kernel_url(kernel_url, clone_into=clone_into)
+    if resolved.get("error"):
+        raise SystemExit(f"Kernel URL resolve failed: {resolved['error']}")
+    path = resolved["local_file_path"]
+    line_num = resolved.get("line_number")
+    kernel_name = get_kernel_name_at_line(path, line_num) if line_num else None
+    if line_num:
+        line_info = f" Line: {line_num}"
+        kernel_info = f", kernel name: {kernel_name!r}" if kernel_name else ""
+        profile_hint = "When profiling, all kernels are reported; the agent can choose which to use."
+    else:
+        line_info = ""
+        kernel_info = ""
+        profile_hint = "Line number was not specified; discovery should identify the kernel(s) in the file."
+    kernel_dir = str(Path(path).parent)
+    output_dir = f"{kernel_dir}/optimization_output"
+    oe_script = f"${{GEAK_OE_ROOT:-/opt/geak-oe}}/examples/geak_eval/run_openevolve.py"
+    block = f"""\n
+--- Resolved kernel (from --kernel-url) ---
+Kernel path: {path}{(' |' + line_info + kernel_info) if line_info else ''}
+---
+
+--- Workflow ---
+Follow these steps IN ORDER. Do one step per response.
+
+Step 1 - DISCOVER: Read and analyse the kernel file. Identify the kernel function, its inputs/outputs, dependencies, and any existing tests in the repo.
+
+Step 2 - TEST GEN: Create a standalone test harness that can (a) verify correctness and (b) benchmark performance. Save it next to the kernel (e.g. {kernel_dir}/test_harness.py).
+
+Step 3 - BENCHMARK & COMMANDMENT: Profile the baseline kernel with kernel-profile and create two artifacts:
+  a) baseline_metrics.json -- latency/bandwidth numbers from profiling.
+  b) COMMANDMENT.md -- the evaluation contract for OpenEvolve.
+  {profile_hint}
+  Profile command example: kernel-profile 'python3 {path} --profile'
+
+Step 4 - OPTIMIZE: Do NOT edit the kernel by hand. Run the OpenEvolve optimizer:
+  python3 {oe_script} {path} --iterations 10 --gpu 0 --output {output_dir}
+  If you created COMMANDMENT.md and baseline_metrics.json, add:
+  --commandment <path_to_COMMANDMENT.md> --baseline-metrics <path_to_baseline_metrics.json>
+
+Step 5 - REPORT: Summarise results (speedup, best score, any errors) and submit:
+  echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+---
+"""
+    return task + block, kernel_name
+
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
 DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
@@ -94,6 +206,7 @@ def main(
     runtime: str = typer.Option("local", "--runtime", help="Runtime environment: local, docker, or auto (auto-detects GPU availability).", rich_help_panel="Advanced"),
     docker_image: str | None = typer.Option(None, "--docker-image", help="Docker image to use when --runtime=docker.", rich_help_panel="Advanced"),
     workspace: Path | None = typer.Option(None, "--workspace", help="Workspace directory to mount in Docker.", rich_help_panel="Advanced"),
+    kernel_url: str | None = typer.Option(None, "--kernel-url", help="Kernel as URL (e.g. https://github.com/.../file.py#L106). Resolved path/line/kernel name are injected into the task.", rich_help_panel="Kernel"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
@@ -173,17 +286,47 @@ def main(
             task_content = None
     
     if not task_content:
-        console.print("[bold yellow]What do you want to do?")
-        task_content = prompt_session.prompt(
-            "",
-            multiline=True,
-            bottom_toolbar=HTML(
-                "Submit task: <b fg='yellow' bg='black'>Esc+Enter</b> | "
-                "Navigate history: <b fg='yellow' bg='black'>Arrow Up/Down</b> | "
-                "Search history: <b fg='yellow' bg='black'>Ctrl+R</b>"
-            ),
-        )
-        console.print("[bold green]Got that, thanks![/bold green]")
+        if kernel_url:
+            task_content = (
+                "Optimize this kernel for maximum speedup. Do NOT use OpenEvolve. Instead:\n"
+                "1. DISCOVER: Read the wrapper file AND trace imports to find the inner @triton.jit kernel. "
+                "Read the discovered test files shown above.\n"
+                "2. Profile the baseline with kernel-profile.\n"
+                "3. OPTIMIZE: Edit ONLY the inner kernel file. "
+                "Analyze the profiling metrics to identify bottlenecks and fix them. "
+                "Revert any change that makes performance worse before trying something new.\n"
+                "4. After EACH edit, run correctness check and re-profile. Iterate until you "
+                "achieve significant speedup.\n"
+                "5. Report final speedup."
+            )
+            console.print("[bold green]Using default kernel optimization task[/bold green]")
+        else:
+            console.print("[bold yellow]What do you want to do?")
+            task_content = prompt_session.prompt(
+                "",
+                multiline=True,
+                bottom_toolbar=HTML(
+                    "Submit task: <b fg='yellow' bg='black'>Esc+Enter</b> | "
+                    "Navigate history: <b fg='yellow' bg='black'>Arrow Up/Down</b> | "
+                    "Search history: <b fg='yellow' bg='black'>Ctrl+R</b>"
+                ),
+            )
+            console.print("[bold green]Got that, thanks![/bold green]")
+
+    # Resolve --kernel-url to local path, line, and kernel name; inject into task
+    _resolved_kernel_path = None
+    _resolved_kernel_name = None
+    if kernel_url:
+        task_content, _resolved_kernel_name = _inject_resolved_kernel(kernel_url, str(workspace) if workspace else None, task_content)
+        import re as _re
+        _m = _re.search(r"Kernel path: (\S+)", task_content)
+        if _m:
+            _resolved_kernel_path = _m.group(1)
+    # Run test discovery and inject results into task
+    if _resolved_kernel_path:
+        discovery_block = _run_discovery(_resolved_kernel_path, _resolved_kernel_name)
+        if discovery_block:
+            task_content = task_content + discovery_block
     elif task and '.md' in task:
         with open(task, "r", encoding="utf-8") as f:
             task = f.read()
@@ -194,6 +337,14 @@ def main(
         config.setdefault("agent", {})["cost_limit"] = cost_limit
     if exit_immediately:
         config.setdefault("agent", {})["confirm_exit"] = False
+    if os.getenv("GEAK_PROTECTED_FILES"):
+        config.setdefault("env", {})["protected_files"] = [
+            f.strip() for f in os.getenv("GEAK_PROTECTED_FILES", "").split(",") if f.strip()
+        ]
+    if os.getenv("GEAK_SUMMARY_ON_COST_LIMIT", "").lower() in ("1", "true", "yes"):
+        config.setdefault("agent", {})["summary_on_cost_limit"] = True
+    if os.getenv("GEAK_SUMMARY_ON_LIMIT_PROMPT"):
+        config.setdefault("agent", {})["summary_on_limit_prompt"] = os.getenv("GEAK_SUMMARY_ON_LIMIT_PROMPT")
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
     # Set use_strategy_manager in model config based on enable_strategies flag
@@ -314,10 +465,22 @@ def main(
     agent = agent_class(model, env, **agent_config)
     agent.log_file = agent_log_file
     console.print(f"[dim]Agent log: {agent_log_file}[/dim]")
-    
+
+    # Load INSTRUCTIONS.md if available (pipeline reference for the agent)
+    instructions_content = ""
+    for instructions_candidate in [
+        Path(workspace) / "INSTRUCTIONS.md" if workspace else None,
+        Path.cwd() / "INSTRUCTIONS.md",
+        Path(__file__).resolve().parent.parent.parent.parent / "INSTRUCTIONS.md",
+    ]:
+        if instructions_candidate and instructions_candidate.is_file():
+            instructions_content = instructions_candidate.read_text()
+            console.print(f"Loaded pipeline instructions from [bold green]'{instructions_candidate}'[/bold green]")
+            break
+
     try:
         exit_status, result = agent.run(
-            task_content,
+            task_content, instructions=instructions_content,
             output=output,
             save_traj_fn=save_traj,
             console=console,

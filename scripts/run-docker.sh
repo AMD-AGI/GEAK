@@ -6,6 +6,8 @@ set -e
 IMAGE_NAME="geak-agent:latest"
 CONTAINER_NAME="geak-agent-${USER}"
 
+# Repo root (directory containing scripts/); mount this over /workspace for live code without rebuild
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Set directories to user's home
 PARENT_DIR="${HOME}"
 HOST_CODE_DIR="${HOME}"
@@ -130,11 +132,12 @@ docker run -d \
     -e GEAK_MODEL="${GEAK_MODEL}" \
     -v /cephfs:/cephfs \
     --shm-size 8G \
+    -v "${REPO_ROOT}:/workspace" \
     -v ${PARENT_DIR}:${PARENT_DIR} \
     -v /mnt:/mnt \
     -v /shared-nfs:/shared-nfs \
     -v /shared-aig:/shared-aig \
-    -w ${HOST_CODE_DIR} \
+    -w /workspace \
     ${IMAGE_NAME}
 
 # Now exec into the running container

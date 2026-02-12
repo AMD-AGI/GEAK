@@ -1,6 +1,7 @@
 """kernel-profile: Profile GPU kernels using MetrixTool (AMD ROCm).
 
 CLI for hardware-level kernel profiling. Naming aligned with kernel-evolve and kernel-ercs.
+All kernels are profiled and reported; the agent chooses which to use. --auto-select is not used.
 """
 import argparse
 import sys
@@ -17,8 +18,7 @@ EXAMPLES = """
 Examples:
   %(prog)s 'python3 /path/to/kernel.py --profile'
   %(prog)s 'python3 kernel.py --profile' --gpu-devices 3
-  %(prog)s 'python3 kernel.py --profile' --filter '*topk*' --replays 5
-  %(prog)s 'python3 kernel.py --profile' --auto-select  # Auto-select main kernel only
+  %(prog)s 'python3 kernel.py --profile' --replays 5
   %(prog)s 'python3 kernel.py --profile' --quick  # Fast profiling (3 metrics, 1 pass)
   %(prog)s 'python3 kernel.py --profile' --gpu-devices 0,1,2  # Profile on multiple GPUs
 """
@@ -38,7 +38,6 @@ def main():
         default="3",
         help='GPU device ID(s): single ("3") or multiple comma-separated ("0,1,2") (default: 3)',
     )
-    parser.add_argument("--filter", help='Kernel name filter pattern (e.g., "*topk*")')
     parser.add_argument(
         "--replays",
         type=int,
@@ -48,7 +47,7 @@ def main():
     parser.add_argument(
         "--auto-select",
         action="store_true",
-        help="Automatically select main kernel (default: show all kernels)",
+        help="(Ignored: all kernels are always profiled and reported for the agent to use)",
     )
     parser.add_argument(
         "--quick",
@@ -57,6 +56,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # All kernels are profiled and reported; agent chooses which to use.
+    args.auto_select = False
 
     # Parse GPU argument (support comma-separated list)
     gpu_devices = (
@@ -67,7 +69,7 @@ def main():
     result = tool.profile(
         command=args.command,
         num_replays=args.replays,
-        kernel_filter=args.filter,
+        kernel_filter=None,
         auto_select=args.auto_select,
         quick=args.quick,
     )

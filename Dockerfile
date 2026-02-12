@@ -26,6 +26,13 @@ RUN pip install -e mcp_tools/mcp-client/ && \
     pip install -e mcp_tools/kernel-evolve/ && \
     pip install -e mcp_tools/automated-test-discovery/
 
+# Install OpenEvolve (multi-file COMMANDMENT-based evaluation with GPU isolation)
+# Clone to /opt/geak-oe so it is NOT hidden by the runtime mount -v REPO_ROOT:/workspace
+ENV GIT_TERMINAL_PROMPT=0
+RUN git clone --depth 1 --branch optimizer-geak-openevolve https://github.com/AMD-AGI/GEAK.git /opt/geak-oe \
+    && cd /opt/geak-oe && pip install -e . --no-build-isolation \
+    && cd /workspace
+
 # Verify core imports (metrix is ROCm runtime dependency)
 RUN python3 -c "from minisweagent.optimizer import optimize_kernel; from mcp_client import MCPClient; print('✅ Core imports verified')"
 
@@ -37,5 +44,6 @@ COPY entrypoint.sh /workspace/entrypoint.sh
 RUN chmod +x /workspace/entrypoint.sh
 
 ENV HIP_VISIBLE_DEVICES=0
+ENV GEAK_OE_ROOT=/opt/geak-oe
 ENTRYPOINT ["/workspace/entrypoint.sh"]
 CMD ["tail", "-f", "/dev/null"]
