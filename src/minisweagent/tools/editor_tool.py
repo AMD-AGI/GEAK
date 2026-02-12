@@ -6,18 +6,16 @@ However, we made it python 3.6 compatible and stateless (all state is saved in a
 """
 
 import argparse
+import ast
+import io
 import json
 import re
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Optional, Tuple
-import io
-import ast
 
 from registry import registry as REGISTRY
-
 
 # There are some super strange "ascii can't decode x" errors,
 # that can be solved with setting the default encoding for stdout
@@ -54,7 +52,7 @@ Edit the file again if necessary.
 """
 
 
-def maybe_truncate(content: str, truncate_after: Optional[int] = MAX_RESPONSE_LEN):
+def maybe_truncate(content: str, truncate_after: int | None = MAX_RESPONSE_LEN):
     """Truncate content and append a notice if content exceeds the specified length."""
     return (
         content
@@ -97,8 +95,8 @@ class Flake8Error:
 
 
 def _update_previous_errors(
-    previous_errors: List[Flake8Error], replacement_window: Tuple[int, int], replacement_n_lines: int
-) -> List[Flake8Error]:
+    previous_errors: list[Flake8Error], replacement_window: tuple[int, int], replacement_n_lines: int
+) -> list[Flake8Error]:
     """Update the line numbers of the previous errors to what they would be after the edit window.
     This is a helper function for `_filter_previous_errors`.
 
@@ -134,8 +132,8 @@ def format_flake8_output(
     show_line_numbers: bool = False,
     *,
     previous_errors_string: str = "",
-    replacement_window: Optional[Tuple[int, int]] = None,
-    replacement_n_lines: Optional[int] = None,
+    replacement_window: tuple[int, int] | None = None,
+    replacement_n_lines: int | None = None,
 ) -> str:
     """Filter flake8 output for previous errors and print it for a given file.
 
@@ -191,6 +189,7 @@ def flake8(file_path: str) -> str:
 class Filemap:
     def show_filemap(self, file_contents: str, encoding: str = "utf8"):
         import warnings
+
         from tree_sitter_languages import get_language, get_parser
 
         warnings.simplefilter("ignore", category=FutureWarning)
@@ -238,7 +237,7 @@ class WindowExpander:
         if self.suffix:
             assert self.suffix.startswith(".")
 
-    def _find_breakpoints(self, lines: List[str], current_line: int, direction=1, max_added_lines: int = 30) -> int:
+    def _find_breakpoints(self, lines: list[str], current_line: int, direction=1, max_added_lines: int = 30) -> int:
         """Returns 1-based line number of breakpoint. This line is meant to still be included in the viewport.
 
         Args:
@@ -311,7 +310,7 @@ class WindowExpander:
 
         return best_breakpoint
 
-    def expand_window(self, lines: List[str], start: int, stop: int, max_added_lines: int) -> Tuple[int, int]:
+    def expand_window(self, lines: list[str], start: int, stop: int, max_added_lines: int) -> tuple[int, int]:
         """
 
         Args:
@@ -365,11 +364,11 @@ class EditTool:
         *,
         command: Command,
         path: str,
-        file_text: Optional[str] = None,
-        view_range: Optional[list[int]] = None,
-        old_str: Optional[str] = None,
-        new_str: Optional[str] = None,
-        insert_line: Optional[int] = None,
+        file_text: str | None = None,
+        view_range: list[int] | None = None,
+        old_str: str | None = None,
+        new_str: str | None = None,
+        insert_line: int | None = None,
         **kwargs,
     ):
         _path = Path(path)
@@ -434,7 +433,7 @@ class EditTool:
         self._file_history[path].append(file_text)
         print(f"File created successfully at: {path}")
 
-    def view(self, path: Path, view_range: Optional[list[int]] = None):
+    def view(self, path: Path, view_range: list[int] | None = None):
         """Implement the view command"""
         if path.is_dir():
             if view_range:
@@ -512,7 +511,7 @@ class EditTool:
         # init_line is 1-based
         print(self._make_output(file_content, str(path), init_line=init_line))
 
-    def str_replace(self, path: Path, old_str: str, new_str: Optional[str]):
+    def str_replace(self, path: Path, old_str: str, new_str: str | None):
         """Implement the str_replace command, which replaces old_str with new_str in the file content"""
         # Read the file content
         file_content = self.read_file(path).expandtabs()

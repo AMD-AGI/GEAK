@@ -4,12 +4,14 @@ This module provides a structured way to manage optimization strategies,
 avoiding manual markdown editing and ensuring consistent formatting.
 """
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-import re
+from typing import Annotated
+
 import typer
-from typing_extensions import Annotated
+
 
 class StrategyStatus(Enum):
     """Strategy status enumeration."""

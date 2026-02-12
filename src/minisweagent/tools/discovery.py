@@ -23,12 +23,10 @@ Content-based detection keywords:
 - Benchmarks: elapsed_time, latency, throughput, TFLOPS, benchmark, warmup
 """
 
-import json
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, List, Any
 
 # Try to import TOML support
 try:
@@ -61,21 +59,21 @@ class DiscoveryConfig:
     - Where tests are typically located
     """
     # Auto-detected test keywords from scanning the codebase
-    detected_test_keywords: List[tuple] = field(default_factory=list)
+    detected_test_keywords: list[tuple] = field(default_factory=list)
     # Auto-detected benchmark keywords
-    detected_bench_keywords: List[tuple] = field(default_factory=list)
+    detected_bench_keywords: list[tuple] = field(default_factory=list)
     # Auto-detected test directories
-    detected_test_dirs: List[str] = field(default_factory=list)
+    detected_test_dirs: list[str] = field(default_factory=list)
     # Auto-detected benchmark directories
-    detected_bench_dirs: List[str] = field(default_factory=list)
+    detected_bench_dirs: list[str] = field(default_factory=list)
     # Whether C++ files were found
     include_cpp: bool = True
     # Monorepo boundary markers
-    monorepo_markers: List[str] = field(default_factory=lambda: [
+    monorepo_markers: list[str] = field(default_factory=lambda: [
         "lerna.json", "nx.json", "pnpm-workspace.yaml", "rush.json"
     ])
     # Exclude directories
-    exclude_dirs: List[str] = field(default_factory=list)
+    exclude_dirs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -115,8 +113,8 @@ class DiscoveryResult:
     benchmarks: list[BenchmarkInfo] = field(default_factory=list)
     workspace_path: Path = None
     needs_user_confirmation: bool = True
-    user_provided_test: Optional[str] = None
-    user_provided_bench: Optional[str] = None
+    user_provided_test: str | None = None
+    user_provided_bench: str | None = None
 
 
 class DiscoveryPipeline:
@@ -351,7 +349,7 @@ class DiscoveryPipeline:
         except Exception:
             self.use_llm = False
     
-    def _llm_analyze_file(self, file_path: Path, file_type: str) -> Optional[dict]:
+    def _llm_analyze_file(self, file_path: Path, file_type: str) -> dict | None:
         """Use LLM to analyze a file when content-based detection is uncertain."""
         if not self.use_llm or not self._llm_client:
             return None
@@ -400,9 +398,9 @@ Respond with JSON only:
     
     def run(
         self,
-        kernel_path: Optional[Path] = None,
-        test_command: Optional[str] = None,
-        bench_command: Optional[str] = None,
+        kernel_path: Path | None = None,
+        test_command: str | None = None,
+        bench_command: str | None = None,
         interactive: bool = True
     ) -> DiscoveryResult:
         """
@@ -517,7 +515,7 @@ Respond with JSON only:
             self.result.workspace_path = best_workspace
             print(f"      Expanded workspace to: {best_workspace}")
     
-    def _discover_kernels(self, kernel_path: Optional[Path] = None):
+    def _discover_kernels(self, kernel_path: Path | None = None):
         """Discover kernel files in the workspace."""
         print("\n[1/4] Discovering kernels...")
         
@@ -541,7 +539,7 @@ Respond with JSON only:
         
         print(f"      Found {len(self.result.kernels)} kernel(s)")
     
-    def _analyze_kernel_file(self, file_path: Path) -> Optional[KernelInfo]:
+    def _analyze_kernel_file(self, file_path: Path) -> KernelInfo | None:
         """Analyze a file to determine if it contains kernels."""
         try:
             content = file_path.read_text()
@@ -666,7 +664,7 @@ Respond with JSON only:
         else:
             print(f"      Found {len(self.result.tests)} potential test(s)")
     
-    def _analyze_test_file(self, file_path: Path) -> Optional[TestInfo]:
+    def _analyze_test_file(self, file_path: Path) -> TestInfo | None:
         """
         Analyze a file to determine if it's a test (content-based).
         
@@ -838,7 +836,7 @@ Respond with JSON only:
         else:
             print(f"      Found {len(self.result.benchmarks)} potential benchmark(s)")
     
-    def _analyze_bench_file(self, file_path: Path) -> Optional[BenchmarkInfo]:
+    def _analyze_bench_file(self, file_path: Path) -> BenchmarkInfo | None:
         """
         Analyze a file to determine if it's a benchmark (content-based).
         
@@ -1006,7 +1004,7 @@ Respond with JSON only:
         # will be done by the agent or CLI
         print("\n  (Awaiting user input...)")
     
-    def get_test_command(self) -> Optional[str]:
+    def get_test_command(self) -> str | None:
         """Get the best test command from discovery."""
         if self.result.user_provided_test:
             return self.result.user_provided_test
@@ -1014,7 +1012,7 @@ Respond with JSON only:
             return self.result.tests[0].command
         return None
     
-    def get_bench_command(self) -> Optional[str]:
+    def get_bench_command(self) -> str | None:
         """Get the best benchmark command from discovery."""
         if self.result.user_provided_bench:
             return self.result.user_provided_bench
@@ -1022,7 +1020,7 @@ Respond with JSON only:
             return self.result.benchmarks[0].command
         return None
     
-    def get_kernel_path(self) -> Optional[Path]:
+    def get_kernel_path(self) -> Path | None:
         """Get the primary kernel path."""
         if self.result.kernels:
             return self.result.kernels[0].file_path
