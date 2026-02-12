@@ -195,6 +195,40 @@ agent:
 
     ### profiling
     Profile GPU kernel with rocprof to identify bottlenecks. Parameters: profiling_workdir, profiling_cmd
+
+    ### profile_kernel (MCP)
+    Unified GPU profiler with two backends:
+    - **backend="metrix"** (default): Structured JSON with bottleneck classification, hardware metrics
+    - **backend="rocprof-compute"**: Deep roofline analysis, instruction mix, cache hierarchy
+    - Parameters: command (required), backend, quick, workdir, profiling_type
+
+    ### generate_optimization (MCP)
+    Generate an optimized kernel variant using LLM-guided kernel evolution.
+    - Parameters: kernel_code (required), bottleneck (required: compute/memory/latency/lds/balanced), language
+
+    ### evaluate_kernel_quality (MCP)
+    Score a kernel across AMD GPU optimization criteria. Returns scores and suggestions.
+    - Parameters: kernel_code (required), language
+
+    ### reflect_on_kernel_result (MCP)
+    Analyze test results and suggest next optimization steps.
+    - Parameters: kernel_code (required), test_output (required), previous_attempts
+
+    ### resolve_kernel_url
+    Resolve a GitHub URL to local file path, line number, and kernel function name.
+    - Parameters: url (required), workspace
+
+    ### baseline_metrics
+    Format profiler output into baseline_metrics.json for OpenEvolve.
+    - Parameters: profiler_output (required), kernel_names, kernel_indices, output_path
+
+    ### check_kernel_compatibility
+    Scan kernel code for CUDA-only patterns incompatible with AMD GPUs.
+    - Parameters: kernel_code or file_path
+
+    ### sub_agent
+    Spawn a child agent for focused sub-tasks (algorithm rewrites, cross-file edits).
+    - Parameters: task (required), step_limit (default 10), cost_limit (default 1.0), system_prompt
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
     <output>
@@ -209,6 +243,14 @@ agent:
     - **submit**: Submit final result and complete task
     - **strategy_manager**: Track optimization strategies
     - **profiling**: Profile GPU kernel with rocprof
+    - **profile_kernel**: Unified profiler (metrix or rocprof-compute backend)
+    - **generate_optimization**: LLM-guided kernel optimization
+    - **evaluate_kernel_quality**: Score kernel against AMD GPU criteria
+    - **reflect_on_kernel_result**: Analyze test results, suggest next steps
+    - **resolve_kernel_url**: Resolve GitHub URL to local path
+    - **baseline_metrics**: Format profiler output for OpenEvolve
+    - **check_kernel_compatibility**: Scan for CUDA-only patterns
+    - **sub_agent**: Spawn child agent for focused sub-tasks
     </available_tools>
 
 tools:
