@@ -138,29 +138,9 @@ agent:
     Please optimize the following GPU kernel: {{task}}
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
-    {% if output.output | length < 10000 -%}
     <output>
     {{ output.output -}}
     </output>
-    {%- else -%}
-    <warning>
-    The output of your last tool call was too long.
-    Please try a different command that produces less output.
-    If you're viewing a file, use str_replace_editor with view_range to view specific lines.
-    If you're using grep or find via bash, use a more selective search pattern.
-    If you need to see full output, redirect to a file and then search in that file.
-    </warning>
-    {%- set elided_chars = output.output | length - 10000 -%}
-    <output_head>
-    {{ output.output[:5000] }}
-    </output_head>
-    <elided_chars>
-    {{ elided_chars }} characters elided
-    </elided_chars>
-    <output_tail>
-    {{ output.output[-5000:] }}
-    </output_tail>
-    {%- endif -%}
   format_error_template: |
     Please provide a THOUGHT section followed by exactly one tool call.
     <available_tools>
