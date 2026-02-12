@@ -2,12 +2,10 @@
 
 import concurrent.futures
 import json
-import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import traceback
 from contextlib import contextmanager
@@ -17,7 +15,6 @@ from typing import Any
 
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent
-from minisweagent.models import get_model
 from minisweagent.agents.select_patch_agent import SelectPatchAgent
 
 
@@ -52,6 +49,7 @@ class ParallelAgentConfig(AgentConfig):
     repo: Path | None = None
     gpu_ids: list[int] | None = None
     agent_class: type | None = None
+    agent_specs: list | None = None  # list[AgentSpec] for heterogeneous parallel
     # Strategy agent compatibility
     strategy_file_path: str | None = None
 
@@ -107,7 +105,7 @@ class ParallelAgent(DefaultAgent):
             is_git_repo=is_git_repo,
             task_content=task,
             agent_class=self.config.agent_class if self.config.agent_class else type(self),
-            agent_config={k: v for k, v in self.config.__dict__.items() if k not in ("num_parallel", "repo", "gpu_ids", "agent_class")},
+            agent_config={k: v for k, v in self.config.__dict__.items() if k not in ("num_parallel", "repo", "gpu_ids", "agent_class", "agent_specs")},
             model_factory=model_factory,
             env_factory=env_factory,
             base_patch_dir=base_patch_dir,
@@ -115,6 +113,7 @@ class ParallelAgent(DefaultAgent):
             gpu_ids=self.config.gpu_ids,
             save_traj_fn=save_traj_fn,
             console=console,
+            agent_specs=self.config.agent_specs,
         )
 
         metric = self.config.metric or "Extract the performance metrics from the test output and calculate the best speedup."
@@ -133,9 +132,10 @@ class ParallelAgent(DefaultAgent):
     @staticmethod
     def _select_best_from_parallel_runs(base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory) -> BestPatchResult | None:
         """Select the best patch from multiple parallel runs using SelectPatchAgent."""
-        from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
-        from minisweagent.config import get_config_path
         import yaml
+
+        from minisweagent.config import get_config_path
+        from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
         
         print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
         
@@ -435,8 +435,34 @@ class ParallelAgent(DefaultAgent):
         redirect_output_fn=redirect_output_to_file,
         save_traj_fn=None,
         console=None,
+        agent_specs: list | None = None,
     ) -> list[tuple[int, Any, Any, Any]]:
-        """Run multiple parallel agents and return their results."""
+        """Run multiple parallel agents and return their results.
+
+        Supports two modes:
+        - Homogeneous (default): num_parallel identical agents, each with 1 GPU.
+        - Heterogeneous: pass agent_specs (list[AgentSpec]) for different agent
+          types with different GPU allocations. num_parallel and agent_class are
+          ignored when agent_specs is provided.
+        """
+        # Heterogeneous mode: use agent_specs if provided
+        if agent_specs:
+            return cls._run_parallel_heterogeneous(
+                agent_specs=agent_specs,
+                repo_path=repo_path,
+                is_git_repo=is_git_repo,
+                task_content=task_content,
+                agent_config=agent_config,
+                model_factory=model_factory,
+                env_factory=env_factory,
+                base_patch_dir=base_patch_dir,
+                output=output,
+                redirect_output_fn=redirect_output_fn,
+                save_traj_fn=save_traj_fn,
+                console=console,
+            )
+
+        # Homogeneous mode (original behavior)
         if console:
             console.print(f"[bold green]Running {num_parallel} parallel patch agents...[/bold green]")
         
@@ -557,3 +583,127 @@ class ParallelAgent(DefaultAgent):
                     from minisweagent.utils.log import logger
                     logger.error(f"Error in parallel agent {agent_id}: {e}", exc_info=True)
         return results
+
+    @classmethod
+    def _run_parallel_heterogeneous(
+        cls,
+        agent_specs: list,
+        repo_path: Path,
+        is_git_repo: bool,
+        task_content: str,
+        agent_config: dict,
+        model_factory,
+        env_factory,
+        base_patch_dir: Path,
+        output: Path | None,
+        redirect_output_fn=redirect_output_to_file,
+        save_traj_fn=None,
+        console=None,
+    ) -> list[tuple[int, Any, Any, Any]]:
+        """Run heterogeneous parallel agents from AgentSpec list."""
+        num_agents = len(agent_specs)
+        if console:
+            labels = [s.label or s.agent_class.__name__ for s in agent_specs]
+            console.print(f"[bold green]Running {num_agents} heterogeneous agents: {labels}[/bold green]")
+
+        base_patch_dir = base_patch_dir.resolve()
+        worktree_base = base_patch_dir / "worktrees"
+        worktree_base.mkdir(parents=True, exist_ok=True)
+        repo_path_resolved = repo_path.resolve()
+
+        def run_spec_agent(agent_id: int, spec):
+            """Run one agent from an AgentSpec."""
+            if is_git_repo:
+                worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
+            else:
+                worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
+            worktree_path_str = str(worktree_path.resolve())
+
+            label = spec.label or spec.agent_class.__name__
+            if console:
+                with _stdout_lock:
+                    console.print(
+                        f"[bold green]Agent {agent_id} ({label}): "
+                        f"GPU {spec.hip_visible_devices}, worktree {worktree_path}[/bold green]"
+                    )
+
+            parallel_patch_dir = (base_patch_dir / f"parallel_{agent_id}").resolve()
+            parallel_patch_dir.mkdir(parents=True, exist_ok=True)
+
+            # Merge base config with spec overrides
+            parallel_agent_config = agent_config.copy()
+            parallel_agent_config.update(spec.config)
+            parallel_agent_config["patch_output_dir"] = str(parallel_patch_dir)
+            parallel_agent_config["mode"] = "yolo"
+            parallel_agent_config["confirm_exit"] = False
+            if spec.step_limit:
+                parallel_agent_config["step_limit"] = spec.step_limit
+            if spec.cost_limit:
+                parallel_agent_config["cost_limit"] = spec.cost_limit
+
+            log_file = parallel_patch_dir / f"agent_{agent_id}.log"
+
+            if parallel_agent_config.get("test_command"):
+                parallel_agent_config["test_command"] = cls._replace_paths(
+                    parallel_agent_config["test_command"], repo_path, worktree_path
+                )
+
+            task_with_repo = cls._replace_paths(task_content, repo_path, worktree_path)
+
+            # Create model and environment with GPU assignment
+            parallel_model = model_factory()
+            base_env = env_factory()
+            env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
+            env_config_dict["cwd"] = worktree_path_str
+            env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = spec.hip_visible_devices
+
+            parallel_env = type(base_env)(**env_config_dict)
+
+            parallel_output = None
+            if output:
+                parallel_output = output.parent / f"{output.stem}_parallel_{agent_id}{output.suffix}"
+
+            agent = spec.agent_class(parallel_model, parallel_env, **parallel_agent_config)
+            if hasattr(agent, "base_repo_path"):
+                agent.base_repo_path = repo_path_resolved
+            if hasattr(agent, "log_file"):
+                agent.log_file = log_file
+
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write(f"Agent {agent_id} ({label}) Conversation Log\n")
+                f.write(f"GPU: {spec.hip_visible_devices}\n")
+                f.write("=" * 60 + "\n\n")
+
+            exit_status, result, extra_info = None, None, None
+            with redirect_output_fn(log_file):
+                try:
+                    exit_status, result = agent.run(task_with_repo, _is_parallel_mode=True)
+                except Exception as e:
+                    exit_status, result = type(e).__name__, str(e)
+                    extra_info = {"traceback": traceback.format_exc()}
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        f.write(f"\n\nERROR: {exit_status}: {result}\n")
+                        f.write(f"Traceback:\n{extra_info['traceback']}\n")
+                finally:
+                    if parallel_output and save_traj_fn:
+                        save_traj_fn(agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info)
+
+            return agent_id, agent, exit_status, result
+
+        # Run all agents concurrently
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_agents) as executor:
+            futures = {
+                executor.submit(run_spec_agent, i, spec): i
+                for i, spec in enumerate(agent_specs)
+            }
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    r = future.result()
+                    results.append(r)
+                except Exception as e:
+                    agent_id = futures[future]
+                    from minisweagent.utils.log import logger
+                    logger.error(f"Error in heterogeneous agent {agent_id}: {e}", exc_info=True)
+        return results
+
