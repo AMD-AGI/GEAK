@@ -349,5 +349,74 @@
         "test_output"
       ]
     }
+  },
+  {
+    "name": "resolve_kernel_url",
+    "type": "function",
+    "description": "Resolve a GitHub kernel URL to a local file path, line number, and kernel function name. Clones the repo if needed.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "GitHub URL (e.g. https://github.com/org/repo/blob/main/kernel.py#L106)"
+        },
+        "workspace": {
+          "type": "string",
+          "description": "Directory to clone into (default: current directory)"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  },
+  {
+    "name": "baseline_metrics",
+    "type": "function",
+    "description": "Format profiler output into baseline_metrics.json for OpenEvolve. Takes profiler JSON output and selected kernel names/indices.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "profiler_output": {
+          "type": "string",
+          "description": "JSON string from profiler-mcp profile_kernel output"
+        },
+        "kernel_names": {
+          "type": "string",
+          "description": "Comma-separated kernel names to include"
+        },
+        "kernel_indices": {
+          "type": "string",
+          "description": "Comma-separated kernel indices (0-based) to include"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "File path to write the baseline_metrics.json"
+        }
+      },
+      "required": [
+        "profiler_output"
+      ]
+    }
+  },
+  {
+    "name": "check_kernel_compatibility",
+    "type": "function",
+    "description": "Scan kernel code for CUDA-only patterns that are incompatible with AMD GPUs. Returns a list of issues found with suggested AMD/ROCm alternatives.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kernel_code": {
+          "type": "string",
+          "description": "Kernel source code as a string"
+        },
+        "file_path": {
+          "type": "string",
+          "description": "Path to kernel file (used if kernel_code not provided)"
+        }
+      },
+      "required": []
+    }
   }
 ]

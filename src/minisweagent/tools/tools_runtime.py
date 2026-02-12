@@ -51,6 +51,14 @@ class ToolRuntime:
                 on_change_callback=on_strategy_change
             )
         
+        # Register new native tools
+        from minisweagent.tools.baseline_metrics_tool import BaselineMetricsTool
+        from minisweagent.tools.check_compat import CheckKernelCompatibilityTool
+        from minisweagent.tools.resolve_kernel_url import ResolveKernelUrlTool
+        self._tool_table["resolve_kernel_url"] = ResolveKernelUrlTool()
+        self._tool_table["baseline_metrics"] = BaselineMetricsTool()
+        self._tool_table["check_kernel_compatibility"] = CheckKernelCompatibilityTool()
+
         # Register MCP tool bridges (lazy start -- subprocess spawned on first call)
         self._register_mcp_tools()
 
