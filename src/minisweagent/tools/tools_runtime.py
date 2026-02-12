@@ -59,6 +59,11 @@ class ToolRuntime:
         self._tool_table["baseline_metrics"] = BaselineMetricsTool()
         self._tool_table["check_kernel_compatibility"] = CheckKernelCompatibilityTool()
 
+        # sub_agent tool (needs model/env set later via set_context)
+        from minisweagent.tools.sub_agent_tool import SubAgentTool
+        self._sub_agent_tool = SubAgentTool()
+        self._tool_table["sub_agent"] = self._sub_agent_tool
+
         # Register MCP tool bridges (lazy start -- subprocess spawned on first call)
         self._register_mcp_tools()
 

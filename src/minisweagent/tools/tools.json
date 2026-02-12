@@ -418,5 +418,34 @@
       },
       "required": []
     }
+  },
+  {
+    "name": "sub_agent",
+    "type": "function",
+    "description": "Spawn a child agent to perform a focused sub-task. The child runs independently with its own step/cost budget and returns the result. Use for algorithm rewrites, cross-file edits, or any task that benefits from dedicated agent reasoning.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "string",
+          "description": "The sub-task description for the child agent"
+        },
+        "step_limit": {
+          "type": "integer",
+          "description": "Max steps for the child agent (default: 10)"
+        },
+        "cost_limit": {
+          "type": "number",
+          "description": "Max cost in dollars for the child agent (default: 1.0)"
+        },
+        "system_prompt": {
+          "type": "string",
+          "description": "Override the child agent's system prompt (optional)"
+        }
+      },
+      "required": [
+        "task"
+      ]
+    }
   }
 ]
