@@ -178,7 +178,7 @@ More information about the usage: [bold green]https://mini-swe-agent.com/latest/
 def main(
     visual: bool = typer.Option(False, "-v", "--visual", help="Toggle (pager-style) UI (Textual) depending on the MSWEA_VISUAL_MODE_DEFAULT environment setting",),
     model_name: str | None = typer.Option( None, "-m", "--model", help="Model to use",),
-    model_class: str | None = typer.Option(None, "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),
+    model_class: str | None = typer.Option(None, "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic_model.AnthropicModel')", rich_help_panel="Advanced"),
     task: str | None = typer.Option(None, "-t", "--task", help="Task/problem statement", show_default=False),
     yolo: bool = typer.Option(False, "-y", "--yolo", help="Run without confirmation"),
     cost_limit: float | None = typer.Option(None, "-l", "--cost-limit", help="Cost limit. Set to 0 to disable."),

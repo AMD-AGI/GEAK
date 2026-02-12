@@ -43,7 +43,7 @@ def main(
     issue_url: str = typer.Option(prompt="Enter GitHub issue URL", help="GitHub issue URL"),
     config: Path = typer.Option(DEFAULT_CONFIG, "-c", "--config", help="Path to config file"),
     model: str | None = typer.Option(None, "-m", "--model", help="Model to use"),
-    model_class: str | None = typer.Option(None, "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),
+    model_class: str | None = typer.Option(None, "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic_model.AnthropicModel')", rich_help_panel="Advanced"),
     yolo: bool = typer.Option(False, "-y", "--yolo", help="Run without confirmation"),
 ) -> InteractiveAgent:
     # fmt: on
