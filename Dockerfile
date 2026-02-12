@@ -24,7 +24,8 @@ RUN pip install -e mcp_tools/mcp-client/ && \
     pip install -e mcp_tools/kernel-profiler/ && \
     pip install -e mcp_tools/kernel-ercs/ && \
     pip install -e mcp_tools/kernel-evolve/ && \
-    pip install -e mcp_tools/automated-test-discovery/
+    pip install -e mcp_tools/automated-test-discovery/ && \
+    pip install -e mcp_tools/profiler-mcp/
 
 # Install OpenEvolve (multi-file COMMANDMENT-based evaluation with GPU isolation)
 # Clone to /opt/geak-oe so it is NOT hidden by the runtime mount -v REPO_ROOT:/workspace
@@ -34,7 +35,7 @@ RUN git clone --depth 1 --branch optimizer-geak-openevolve https://github.com/AM
     && cd /workspace
 
 # Verify core imports (metrix is ROCm runtime dependency)
-RUN python3 -c "from minisweagent.optimizer import optimize_kernel; from mcp_client import MCPClient; print('✅ Core imports verified')"
+RUN python3 -c "from minisweagent.optimizer import optimize_kernel; from mcp_client import MCPClient; from profiler_mcp.server import profile_kernel; print('✅ Core imports verified')"
 
 # Verify metrix is available
 RUN python3 -c "from metrix import Metrix; print('✅ Metrix installed')" || echo "⚠️  Metrix not available (will be needed for profiling)"
