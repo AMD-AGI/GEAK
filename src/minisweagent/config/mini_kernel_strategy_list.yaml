@@ -116,7 +116,7 @@ agent:
        - Combine multiple successful strategies for maximum performance
        - Test for synergistic effects (combined effect may be better than sum of parts)
        - Re-balance parameters to optimize strategy interactions (parameters optimal for individual strategies may need adjustment when combined)
-       - Verify correctness is maintained after combining strategies
+       - Verify correctness and performance are maintained after combining strategies
 
     10. **Final Verification and Benchmarking**
        - Verify correctness is maintained after combining strategies
@@ -197,29 +197,9 @@ agent:
     Profile GPU kernel with rocprof to identify bottlenecks. Parameters: profiling_workdir, profiling_cmd
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
-    {% if output.output | length < 10000 -%}
     <output>
     {{ output.output -}}
     </output>
-    {%- else -%}
-    <warning>
-    The output of your last tool call was too long.
-    Please try a different approach that produces less output.
-    If you're viewing a file, use str_replace_editor with view_range to view specific lines.
-    If you're using grep or find via bash, use a more selective search pattern.
-    If you need to see full output, redirect to a file and then search in that file.
-    </warning>
-    {%- set elided_chars = output.output | length - 10000 -%}
-    <output_head>
-    {{ output.output[:5000] }}
-    </output_head>
-    <elided_chars>
-    {{ elided_chars }} characters elided
-    </elided_chars>
-    <output_tail>
-    {{ output.output[-5000:] }}
-    </output_tail>
-    {%- endif -%}
   format_error_template: |
     Please provide a THOUGHT section followed by exactly one tool call.
     <available_tools>

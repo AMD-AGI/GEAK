@@ -40,6 +40,34 @@ class AgentConfig:
     profiling_type: str | None = None
 
 
+# Unified observation truncation for both bash output and tool call results (head + tail).
+OBSERVATION_MAX_LEN: int = 10000
+OBSERVATION_HEAD_LEN: int = 5000
+OBSERVATION_TAIL_LEN: int = 5000
+OBSERVATION_TRUNCATED_NOTICE: str = (
+    "\n<warning>\n"
+    "The output of your last command was too long.\n"
+    "Please try a different command that produces less output.\n"
+    "If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.\n"
+    "If you're using grep or find and it produced too much output, you can use a more selective search pattern.\n"
+    "If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.\n"
+    "</warning>\n"
+)
+
+
+def truncate_observation(text: str) -> str:
+    """Truncate long observation to head + notice + elided + tail. Same logic for bash and tool results."""
+    if not text or len(text) <= OBSERVATION_MAX_LEN:
+        return text
+    elided = len(text) - OBSERVATION_HEAD_LEN - OBSERVATION_TAIL_LEN
+    return (
+        text[:OBSERVATION_HEAD_LEN]
+        + OBSERVATION_TRUNCATED_NOTICE
+        + f"<elided>{elided} characters elided</elided>\n"
+        + text[-OBSERVATION_TAIL_LEN:]
+    )
+
+
 class NonTerminatingException(Exception):
     """Raised for conditions that can be handled by the agent."""
 
@@ -266,13 +294,21 @@ class DefaultAgent:
         if last_msg.get("role") == "assistant" and last_msg.get("tool_calls") and response.get("tools"):
             tool_info = response["tools"]
             result_content = json.dumps(output) if isinstance(output, dict) else str(output)
+            result_content = truncate_observation(result_content)
             self.add_message(
                 "tool", result_content,
                 tool_call_id=tool_info.get("id", ""),
                 name=tool_info["function"]["name"],
             )
         else:
-            observation = self.render_template(self.config.action_observation_template, output=output)
+            # Bash: truncate output body in Python so template only renders returncode + (possibly truncated) output.
+            output_for_render = {
+                **output,
+                "output": truncate_observation(output.get("output", "")),
+            }
+            observation = self.render_template(
+                self.config.action_observation_template, output=output_for_render
+            )
             self.add_message("user", observation)
         return output
 
