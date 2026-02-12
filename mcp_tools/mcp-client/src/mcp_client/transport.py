@@ -2,10 +2,9 @@
 MCP transport layer - handles JSON-RPC communication over stdio.
 """
 
-import asyncio
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,7 @@ class StdioTransport:
         self._request_id += 1
         return self._request_id
     
-    async def send(self, request: Dict[str, Any]) -> None:
+    async def send(self, request: dict[str, Any]) -> None:
         """
         Send JSON-RPC request via stdin.
         
@@ -40,7 +39,7 @@ class StdioTransport:
         self.process.stdin.write(message.encode())
         await self.process.stdin.drain()
     
-    async def receive(self) -> Dict[str, Any]:
+    async def receive(self) -> dict[str, Any]:
         """
         Receive JSON-RPC response from stdout.
         
@@ -55,7 +54,7 @@ class StdioTransport:
         logger.debug(f"Received response: {response}")
         return response
     
-    async def send_and_receive(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    async def send_and_receive(self, request: dict[str, Any]) -> dict[str, Any]:
         """
         Send request and wait for response.
         

@@ -489,7 +489,7 @@ def main(
         )
     except Exception as e:
         logger.error(f"Error running agent: {e}", exc_info=True)
-        exit_status, result = type(e).__name__, str(e)
+        _exit_status, result = type(e).__name__, str(e)
     
     return agent
 

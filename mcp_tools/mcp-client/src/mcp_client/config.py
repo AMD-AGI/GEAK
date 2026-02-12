@@ -3,7 +3,7 @@ MCP server configuration registry.
 """
 
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any
 
 # Get the msa root directory (mcp-client is in mcp_tools/mcp-client)
 MSA_ROOT = Path(__file__).parent.parent.parent.parent.parent
@@ -58,7 +58,7 @@ MCP_SERVERS = {
 }
 
 
-def get_server_config(server_name: str) -> Dict[str, Any]:
+def get_server_config(server_name: str) -> dict[str, Any]:
     """
     Get configuration for an MCP server.
     
@@ -81,7 +81,7 @@ def get_server_config(server_name: str) -> Dict[str, Any]:
     return MCP_SERVERS[server_name]
 
 
-def list_servers() -> Dict[str, str]:
+def list_servers() -> dict[str, str]:
     """
     List all available MCP servers with descriptions.
     

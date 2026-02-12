@@ -9,14 +9,12 @@ Tools:
 """
 
 import json
-import os
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
-
 
 # Create the MCP server
 mcp = FastMCP(

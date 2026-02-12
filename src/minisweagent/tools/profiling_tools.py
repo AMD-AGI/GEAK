@@ -48,7 +48,7 @@ class ProfilingAnalyzer:
         lines = self.content.split('\n')
         in_section = False
         
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '4.1 Roofline Rate Metrics' in line:
                 in_section = True
                 continue
@@ -60,7 +60,7 @@ class ProfilingAnalyzer:
                 parts = [p.strip() for p in line.split('│')]
                 if len(parts) >= 6:
                     try:
-                        metric_id = parts[1]
+                        parts[1]
                         metric_name = parts[2]
                         value = float(parts[3])
                         unit = parts[4]
@@ -107,7 +107,7 @@ class ProfilingAnalyzer:
         lines = self.content.split('\n')
         in_section = False
         
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '1. System Info' in line:
                 in_section = True
                 continue
@@ -183,7 +183,7 @@ class ProfilingAnalyzer:
         lines = self.content.split('\n')
         in_section = False
         rows=[]
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '2. System Speed-of-Light' in line:
                 in_section = True
                 continue
@@ -195,7 +195,7 @@ class ProfilingAnalyzer:
                 parts = [p.strip() for p in line.split('│')]
                 if len(parts) >= 6:
                     try:
-                        metric_id = parts[1]
+                        parts[1]
                         metric = parts[2]
                         avg = safe_float(parts[3])
                         unit = parts[4]
@@ -252,7 +252,7 @@ class ProfilingAnalyzer:
         in_section = False
         current_section = None
         tables = defaultdict(dict)
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '10. Compute Units - Instruction Mix' in line:
                 in_section = True
                 continue
@@ -340,7 +340,7 @@ class ProfilingAnalyzer:
         in_section = False
         feat = defaultdict(dict)
         reads = writes = atomics = total = 0
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '16. Vector L1 Data Cache' in line:
                 in_section = True
                 continue
@@ -434,7 +434,7 @@ class ProfilingAnalyzer:
         lines = self.content.split('\n')
         in_section = False
         feat = defaultdict(dict)
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '17. L2' in line:
                 in_section = True
                 continue
@@ -506,7 +506,7 @@ class ProfilingAnalyzer:
         lines = self.content.split('\n')
         in_section = False
         feat = defaultdict(list)
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '7.1 Wavefront Launch Stats' in line:
                 in_section = True
                 continue
@@ -533,7 +533,7 @@ class ProfilingAnalyzer:
         lines = self.content.split('\n')
         in_section = False
         
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '4.2 Roofline AI Plot Points' in line:
                 in_section = True
                 continue
@@ -545,7 +545,7 @@ class ProfilingAnalyzer:
                 parts = [p.strip() for p in line.split('│')]
                 if len(parts) >= 5:
                     try:
-                        metric_id = parts[1]
+                        parts[1]
                         metric_name = parts[2]
                         value = float(parts[3])
                         unit = parts[4]

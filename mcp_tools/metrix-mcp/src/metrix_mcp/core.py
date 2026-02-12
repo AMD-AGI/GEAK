@@ -6,7 +6,7 @@ Provides hardware metrics, bottleneck classification, and factual observations.
 
 import logging
 import os
-from typing import Any, Dict, List, Union
+from typing import Any
 
 from metrix import Metrix
 
@@ -76,7 +76,7 @@ class MetrixTool:
         "required": ["command"],
     }
 
-    def __init__(self, gpu_devices: Union[str, List[str]] = None):
+    def __init__(self, gpu_devices: str | list[str] = None):
         """
         Initialize MetrixTool.
 
@@ -109,7 +109,7 @@ class MetrixTool:
                     f"{gpu_info.get('peak_hbm_bandwidth_gbs'):.0f} GB/s HBM"
                 )
 
-    def _get_gpu_info_from_metrix(self, device: str) -> Dict[str, Any]:
+    def _get_gpu_info_from_metrix(self, device: str) -> dict[str, Any]:
         """
         Get GPU information from metrix backend.
 
@@ -148,7 +148,7 @@ class MetrixTool:
         kernel_filter: str = None,
         auto_select: bool = False,
         quick: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Profile a kernel using metrix.
 
@@ -208,7 +208,7 @@ class MetrixTool:
         kernel_filter: str,
         auto_select: bool,
         quick: bool,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Profile on a single GPU."""
         logger.info(f"Profiling GPU {device}...")
 
@@ -319,7 +319,7 @@ class MetrixTool:
 
         return main_kernel
 
-    def _extract_all_metrics(self, kernel) -> Dict[str, float]:
+    def _extract_all_metrics(self, kernel) -> dict[str, float]:
         """Extract all metrics from kernel object, including duration."""
         metrics = {}
 
@@ -334,7 +334,7 @@ class MetrixTool:
         return metrics
 
     def _validate_metrics(
-        self, metrics: Dict[str, float], kernel_name: str, quick: bool = False
+        self, metrics: dict[str, float], kernel_name: str, quick: bool = False
     ) -> None:
         """Validate that expected metrics are present."""
         expected = self.EXPECTED_METRICS_QUICK if quick else self.EXPECTED_METRICS_FULL
@@ -351,7 +351,7 @@ class MetrixTool:
         logger.debug(f"Validated {len(expected)} metrics for '{kernel_name[:60]}...'")
 
     def _classify_bottleneck(
-        self, metrics: Dict[str, float], quick: bool = False
+        self, metrics: dict[str, float], quick: bool = False
     ) -> str:
         """Classify bottleneck based on metrics."""
         duration_us = metrics.get("duration_us", 0)
@@ -408,10 +408,10 @@ class MetrixTool:
     def _generate_observations(
         self,
         bottleneck: str,
-        metrics: Dict[str, float],
+        metrics: dict[str, float],
         quick: bool = False,
-        gpu_info: Dict[str, Any] = None,
-    ) -> List[str]:
+        gpu_info: dict[str, Any] = None,
+    ) -> list[str]:
         """Generate factual observations based on metrics with GPU context."""
         logger.debug(
             f"Generating observations for {bottleneck} bottleneck "
@@ -431,7 +431,7 @@ class MetrixTool:
         store_eff = metrics.get("memory.global_store_efficiency", None)
         hbm_read_bw = metrics.get("memory.hbm_read_bandwidth", None)
         hbm_write_bw = metrics.get("memory.hbm_write_bandwidth", None)
-        l2_bw_pct = metrics.get("memory.l2_bandwidth", None)
+        metrics.get("memory.l2_bandwidth", None)
 
         # State the bottleneck classification
         if bottleneck == "memory":
@@ -526,7 +526,7 @@ class MetrixTool:
         )
         return observations
 
-    def get_tool_definition(self) -> Dict[str, Any]:
+    def get_tool_definition(self) -> dict[str, Any]:
         """Return MCP tool definition."""
         return {
             "name": self.TOOL_NAME,
@@ -534,7 +534,7 @@ class MetrixTool:
             "inputSchema": self.TOOL_SCHEMA,
         }
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Execute the tool with given arguments."""
         return self.profile(
             command=arguments["command"],

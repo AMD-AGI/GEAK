@@ -6,8 +6,10 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from jinja2 import StrictUndefined, Template
 from pathlib import Path
+
+from jinja2 import StrictUndefined, Template
+
 from minisweagent import Environment, Model
 from minisweagent.tools.tools_runtime import ToolRuntime
 
@@ -136,7 +138,7 @@ class DefaultAgent:
     
     def _get_strategy_callback(self):
         """Get the callback for strategy changes. Override in subclasses for UI notifications."""
-        return None
+        return
     
     def _setup_test_perf_context(self):
         """Setup context for test_perf tool."""
@@ -381,9 +383,10 @@ class DefaultAgent:
 
         try:
             import yaml
+
+            from minisweagent.agents.select_patch_agent import SelectPatchAgent
             from minisweagent.config import get_config_path
             from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
-            from minisweagent.agents.select_patch_agent import SelectPatchAgent
 
             parallel_ids: list[int] = []
             for d in base_patch_dir.glob("parallel_*"):

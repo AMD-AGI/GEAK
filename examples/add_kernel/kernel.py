@@ -70,7 +70,8 @@ def triton_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     n_elements = x.numel()
     
     # Fixed BLOCK_SIZE - not optimized!
-    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+    def grid(meta):
+        return (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
     add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
     
     return output

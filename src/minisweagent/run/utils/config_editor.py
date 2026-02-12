@@ -1,9 +1,8 @@
 """Interactive configuration editor for auto-detected settings."""
 
-import re
 import sys
-from select import select
 from pathlib import Path
+from select import select
 from typing import Any
 
 from minisweagent.run.utils.task_parser import generate_patch_output_dir
@@ -309,7 +308,7 @@ def load_and_merge_configs(
         Updated tuple of (repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name)
         Note: gpu_ids is returned as a list[int], not str
     """
-    from minisweagent.run.utils.task_parser import parse_task_info, generate_patch_output_dir
+    from minisweagent.run.utils.task_parser import generate_patch_output_dir, parse_task_info
     
     # Track kernel_name for returning
     kernel_name = None
@@ -412,7 +411,7 @@ def load_and_merge_configs(
         if len(sources) > 1:
             # Check if values are actually different
             values = list(sources.values())
-            if len(set(str(v) for v in values)) > 1:
+            if len({str(v) for v in values}) > 1:
                 conflicts[field] = sources
     
     # Apply merged configuration

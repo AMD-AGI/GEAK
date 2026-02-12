@@ -14,7 +14,6 @@ from tenacity import (
 
 from minisweagent.models.amd_base import AmdLlmModelBase, logger
 
-
 CACHE_CONTROL_EPHEMERAL = {"type": "ephemeral"}
 
 

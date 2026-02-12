@@ -6,13 +6,15 @@ Always outputs to: <kernel_dir>/benchmark/baseline/metrics.json
 Always includes: latency, throughput, FLOPS, bandwidth (when calculable)
 """
 
-import numpy as np
+import datetime
 import json
 import time
-import datetime
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Callable
-from dataclasses import dataclass, asdict
+from typing import Any
+
+import numpy as np
 
 
 @dataclass
@@ -33,12 +35,12 @@ class StandardMetrics:
     throughput_ops_per_sec: float
     
     # Compute (if calculable)
-    flops: Optional[float] = None
-    tflops: Optional[float] = None
+    flops: float | None = None
+    tflops: float | None = None
     
     # Memory (if calculable)
-    bandwidth_gb_s: Optional[float] = None
-    memory_mb: Optional[float] = None
+    bandwidth_gb_s: float | None = None
+    memory_mb: float | None = None
     
     # Metadata
     num_iterations: int = 1000
@@ -57,13 +59,13 @@ class BenchmarkResult:
     baseline_metrics: StandardMetrics
     
     # Test case information
-    test_cases: List[Dict[str, Any]]
+    test_cases: list[dict[str, Any]]
     
     # Additional kernel-specific data
-    kernel_info: Dict[str, Any]
+    kernel_info: dict[str, Any]
     
     # Environment info
-    device_info: Dict[str, str]
+    device_info: dict[str, str]
     
     # Correctness
     all_tests_passed: bool
@@ -78,7 +80,7 @@ class StandardBenchmark:
     def __init__(
         self,
         kernel_path: Path,
-        output_dir: Optional[Path] = None,
+        output_dir: Path | None = None,
         warmup_iters: int = 100,
         benchmark_iters: int = 1000
     ):
@@ -97,7 +99,7 @@ class StandardBenchmark:
         func: Callable,
         *args,
         **kwargs
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """
         Measure timing statistics for any function.
         Returns standardized timing metrics.
@@ -115,7 +117,7 @@ class StandardBenchmark:
         for _ in range(self.benchmark_iters):
             try:
                 start = time.perf_counter()
-                result = func(*args, **kwargs)
+                func(*args, **kwargs)
                 end = time.perf_counter()
                 times_ms.append((end - start) * 1000)  # Convert to ms
             except Exception as e:
@@ -143,10 +145,10 @@ class StandardBenchmark:
     
     def calculate_flops(
         self,
-        kernel_info: Dict[str, Any],
-        test_case: Dict[str, Any],
+        kernel_info: dict[str, Any],
+        test_case: dict[str, Any],
         latency_s: float
-    ) -> Dict[str, Optional[float]]:
+    ) -> dict[str, float | None]:
         """
         Calculate FLOPS metrics if possible.
         Returns None if not calculable for this kernel type.
@@ -172,9 +174,9 @@ class StandardBenchmark:
     
     def calculate_bandwidth(
         self,
-        test_case: Dict[str, Any],
+        test_case: dict[str, Any],
         latency_s: float
-    ) -> Optional[float]:
+    ) -> float | None:
         """
         Calculate memory bandwidth if possible.
         """
@@ -186,8 +188,8 @@ class StandardBenchmark:
     def benchmark_kernel(
         self,
         kernel_func: Callable,
-        test_cases: List[Dict[str, Any]],
-        kernel_info: Optional[Dict[str, Any]] = None
+        test_cases: list[dict[str, Any]],
+        kernel_info: dict[str, Any] | None = None
     ) -> BenchmarkResult:
         """
         Benchmark a kernel with discovered test cases.
@@ -254,7 +256,7 @@ class StandardBenchmark:
         """Get current timestamp in ISO format."""
         return datetime.datetime.now().isoformat()
 
-    def _get_device_info(self) -> Dict[str, str]:
+    def _get_device_info(self) -> dict[str, str]:
         """Get device information (GPU, CPU, etc.)."""
         device_info = {
             'type': 'unknown',
@@ -296,12 +298,12 @@ class StandardBenchmark:
         print(f"✓ Baseline metrics saved to: {self.metrics_path}")
         return self.metrics_path
     
-    def load_metrics(self) -> Optional[BenchmarkResult]:
+    def load_metrics(self) -> BenchmarkResult | None:
         """Load metrics from standard location."""
         if not self.metrics_path.exists():
             return None
         
-        with open(self.metrics_path, 'r') as f:
+        with open(self.metrics_path) as f:
             data = json.load(f)
         
         # Reconstruct dataclasses

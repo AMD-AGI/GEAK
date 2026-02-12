@@ -3,6 +3,7 @@
 
 from kernel_ercs.server import mcp
 
+
 def main():
     tools = mcp._tool_manager._tools
     

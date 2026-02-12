@@ -555,7 +555,6 @@ class EditTool:
             except Exception as e:
                 print(f"Warning: Failed to run post-edit linter on {path}: {e}")
 
-        epilogue = ""
         if post_edit_lint:
             ...
             replacement_window_start_line = file_content.split(old_str)[0].count("\n") + 1
@@ -569,7 +568,7 @@ class EditTool:
                 replacement_n_lines=replacement_lines,
             )
             if errors.strip():
-                epilogue = LINT_WARNING_TEMPLATE.format(errors=errors)
+                LINT_WARNING_TEMPLATE.format(errors=errors)
 
         # Save the content to history
         self._file_history[path].append(file_content)
@@ -581,7 +580,7 @@ class EditTool:
         start_line, end_line = WindowExpander(suffix=path.suffix).expand_window(
             new_file_content.split("\n"), start_line, end_line, max_added_lines=MAX_WINDOW_EXPANSION_EDIT_CONFIRM
         )
-        snippet = "\n".join(new_file_content.split("\n")[start_line - 1 : end_line])
+        "\n".join(new_file_content.split("\n")[start_line - 1 : end_line])
 
         # Prepare the success message
         success_msg = f"The file {path} has been edited. "

@@ -6,7 +6,7 @@ bottleneck classification, and factual observations.
 """
 
 import logging
-from typing import Optional, Union, List, Dict, Any
+from typing import Any
 
 from fastmcp import FastMCP
 
@@ -29,11 +29,11 @@ mcp = FastMCP(
 def _profile_kernel_impl(
     command: str,
     num_replays: int = 3,
-    kernel_filter: Optional[str] = None,
+    kernel_filter: str | None = None,
     auto_select: bool = False,
     quick: bool = False,
-    gpu_devices: Optional[Union[str, List[str]]] = None
-) -> Dict[str, Any]:
+    gpu_devices: str | list[str] | None = None
+) -> dict[str, Any]:
     """
     Profile a GPU kernel using Metrix.
     
@@ -127,11 +127,11 @@ def _profile_kernel_impl(
 def profile_kernel(
     command: str,
     num_replays: int = 3,
-    kernel_filter: Optional[str] = None,
+    kernel_filter: str | None = None,
     auto_select: bool = False,
     quick: bool = False,
-    gpu_devices: Optional[Union[str, List[str]]] = None
-) -> Dict[str, Any]:
+    gpu_devices: str | list[str] | None = None
+) -> dict[str, Any]:
     """
     Profile a GPU kernel using AMD Metrix profiler.
     

@@ -12,11 +12,9 @@ If you create similar test scripts:
 - Use flush=True for print statements to ensure immediate output
 - ParallelAgent will automatically capture all output via tee
 """
+import os
 import subprocess
 import sys
-import os
-import re
-import tempfile
 
 if len(sys.argv) < 3:
     print("Usage: python test_correctness_benchmark.py <bench_name> <workdir>")

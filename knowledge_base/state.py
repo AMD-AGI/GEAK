@@ -18,10 +18,11 @@ Transitions:
 - Any → COMPLETE: Optimization finished
 """
 
-from enum import Enum, auto
-from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional, Callable
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any
 
 
 class AgentState(Enum):
@@ -68,7 +69,7 @@ class StateTransition:
     to_state: AgentState
     trigger: TransitionTrigger
     timestamp: float
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -78,13 +79,13 @@ class OptimizationProgress:
     baseline_latency_us: float = 0.0
     current_latency_us: float = 0.0
     best_latency_us: float = float('inf')
-    best_checkpoint: Optional[str] = None
+    best_checkpoint: str | None = None
     speedup_vs_baseline: float = 1.0
     speedup_vs_best: float = 1.0
     consecutive_failures: int = 0
     time_since_improvement: float = 0.0
     total_cost: float = 0.0
-    strategies_tried: List[str] = field(default_factory=list)
+    strategies_tried: list[str] = field(default_factory=list)
 
 
 class StateMachine:
@@ -108,14 +109,14 @@ class StateMachine:
     
     def __init__(self, intervention_policy: 'InterventionPolicy' = None):
         self.state = AgentState.INIT
-        self.history: List[StateTransition] = []
+        self.history: list[StateTransition] = []
         self.progress = OptimizationProgress()
         self.policy = intervention_policy
         self._last_improvement_time = time.time()
-        self._callbacks: Dict[AgentState, List[Callable]] = {}
+        self._callbacks: dict[AgentState, list[Callable]] = {}
     
     def transition(self, trigger: TransitionTrigger, 
-                  details: Dict[str, Any] = None) -> AgentState:
+                  details: dict[str, Any] = None) -> AgentState:
         """
         Attempt a state transition based on trigger.
         
@@ -146,7 +147,7 @@ class StateMachine:
         return self.state
     
     def _determine_new_state(self, trigger: TransitionTrigger,
-                            details: Dict[str, Any]) -> Optional[AgentState]:
+                            details: dict[str, Any]) -> AgentState | None:
         """Determine new state based on trigger and current state."""
         
         # Success triggers → CHECKPOINT
@@ -183,7 +184,7 @@ class StateMachine:
         
         return None
     
-    def check_intervention_needed(self) -> Optional[TransitionTrigger]:
+    def check_intervention_needed(self) -> TransitionTrigger | None:
         """
         Check if intervention is needed based on policy and progress.
         
@@ -244,7 +245,7 @@ class StateMachine:
             except Exception as e:
                 print(f"Callback error: {e}")
     
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self) -> dict[str, Any]:
         """Get current status."""
         return {
             "state": self.state.name,

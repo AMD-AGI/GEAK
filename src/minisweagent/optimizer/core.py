@@ -2,10 +2,10 @@
 Compact optimizer core - wraps existing optimizers with unified interface.
 """
 
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Any, Optional
-from dataclasses import dataclass
+from typing import Any
 
 
 class OptimizerType(Enum):
@@ -19,7 +19,7 @@ class OptimizerType(Enum):
 class OptimizeResult:
     """Compact optimization result."""
     optimized_code: str
-    metrics: Dict[str, float]
+    metrics: dict[str, float]
     optimizer_used: str
     iterations: int = 1
 
@@ -29,7 +29,7 @@ def optimize_kernel(
     *,
     optimizer: OptimizerType = OptimizerType.AUTO,
     bottleneck: str = "balanced",
-    strategy: Optional[str] = None,
+    strategy: str | None = None,
     target_speedup: float = 2.0,
     budget_usd: float = 1.0,
     **kwargs
@@ -86,7 +86,7 @@ def _select_optimizer(bottleneck: str, budget: float) -> OptimizerType:
 def _optimize_with_openevolve(
     kernel_code: str,
     bottleneck: str,
-    strategy: Optional[str],
+    strategy: str | None,
     **kwargs
 ) -> OptimizeResult:
     """Use OpenEvolve optimizer via MCP (openevolve-mcp calls run_openevolve.py from geak-oe)."""
@@ -102,7 +102,7 @@ def _optimize_with_openevolve(
         kernel_path = Path(kernel_path)
 
     # openevolve-mcp tool API: kernel_path, max_iterations, gpu, output_dir, commandment_path, baseline_metrics_path
-    mcp_request: Dict[str, Any] = {
+    mcp_request: dict[str, Any] = {
         "kernel_path": str(kernel_path.resolve()),
         "max_iterations": kwargs.get("max_iterations", 10),
         "gpu": kwargs.get("gpu", 0),
@@ -114,8 +114,9 @@ def _optimize_with_openevolve(
     mcp_request = {k: v for k, v in mcp_request.items() if v is not None}
 
     try:
-        from mcp_client import MCPClient
         import asyncio
+
+        from mcp_client import MCPClient
 
         mcp_path = Path(__file__).parent.parent.parent.parent / "mcp_tools" / "openevolve-mcp"
         server_config = {

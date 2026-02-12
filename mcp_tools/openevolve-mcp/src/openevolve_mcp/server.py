@@ -12,11 +12,10 @@ The server invokes run_openevolve.py as a subprocess, which:
 """
 
 import json
+import logging
 import os
 import subprocess
-import logging
 from pathlib import Path
-from typing import Optional
 
 from fastmcp import FastMCP
 
@@ -80,9 +79,9 @@ def optimize_kernel(
     kernel_path: str,
     max_iterations: int = 10,
     gpu: int = 0,
-    output_dir: Optional[str] = None,
-    commandment_path: Optional[str] = None,
-    baseline_metrics_path: Optional[str] = None,
+    output_dir: str | None = None,
+    commandment_path: str | None = None,
+    baseline_metrics_path: str | None = None,
 ) -> dict:
     """
     Optimize a GPU kernel using OpenEvolve LLM-guided evolution.

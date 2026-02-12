@@ -11,11 +11,10 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
+from rich.prompt import Confirm, Prompt
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -32,7 +31,7 @@ class RuntimeType(Enum):
 class RuntimeEnvironment:
     """Configuration for a runtime environment."""
     runtime_type: RuntimeType
-    docker_image: Optional[str] = None
+    docker_image: str | None = None
     docker_devices: list[str] = None
     docker_volumes: list[str] = None
     has_gpu: bool = False

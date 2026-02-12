@@ -105,7 +105,7 @@ If any field cannot be determined from the task, set it to null.
         
         return result
         
-    except (json.JSONDecodeError, Exception) as e:
+    except (json.JSONDecodeError, Exception):
         # If parsing fails, return all None
         return {
             "kernel_name": None,

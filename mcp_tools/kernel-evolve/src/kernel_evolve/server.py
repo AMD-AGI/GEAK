@@ -10,7 +10,6 @@ Tools:
 - get_optimization_strategies: Get strategies for a bottleneck type
 """
 
-import json
 import os
 from typing import Any
 

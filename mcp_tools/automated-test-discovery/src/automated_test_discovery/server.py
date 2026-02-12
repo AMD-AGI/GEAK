@@ -7,7 +7,7 @@ No configuration files needed - uses content-based detection.
 
 import re
 from pathlib import Path
-from typing import Optional
+
 from mcp.server.fastmcp import FastMCP
 
 # Initialize MCP server

@@ -29,7 +29,6 @@ from minisweagent.baseline_metrics import (
     list_kernels,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures: realistic profiler output
 # ---------------------------------------------------------------------------

@@ -9,7 +9,6 @@ Results are saved to eval_suite/results/ (gitignored).
 import json
 import os
 import subprocess
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -149,7 +148,7 @@ def run_suite(kernels_to_run: list = None, max_iterations: int = 10):
     for i, kernel in enumerate(kernels, 1):
         # Use relative path (works in Docker where MSA_ROOT is mounted as /workspace)
         kernel_rel_path = f"aiter/{kernel['path']}"
-        kernel_abs_path = str(aiter_path / kernel["path"])
+        str(aiter_path / kernel["path"])
         print(f"\n[{i}/{len(kernels)}] {kernel['id']} ({kernel['category']})")
         print(f"    Path: {kernel_rel_path}")
         print(f"    {kernel['description']}")

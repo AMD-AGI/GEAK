@@ -14,10 +14,10 @@ import json
 import sys
 
 from .server import (
-    profile_kernel,
     benchmark_kernel,
-    get_roofline_analysis,
     get_bottleneck_suggestions,
+    get_roofline_analysis,
+    profile_kernel,
 )
 
 

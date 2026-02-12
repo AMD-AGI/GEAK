@@ -8,7 +8,6 @@ This agent only provides the callback mechanism for UI notifications.
 """
 
 import sys
-from pathlib import Path
 
 from minisweagent.agents.interactive import InteractiveAgent
 

@@ -16,10 +16,10 @@ import sys
 from pathlib import Path
 
 from .server import (
-    generate_optimization,
-    mutate_kernel,
     crossover_kernels,
+    generate_optimization,
     get_optimization_strategies,
+    mutate_kernel,
     suggest_kernel_params,
 )
 

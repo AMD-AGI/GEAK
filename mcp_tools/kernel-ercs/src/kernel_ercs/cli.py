@@ -15,10 +15,10 @@ import sys
 from pathlib import Path
 
 from .server import (
-    evaluate_kernel_quality,
-    reflect_on_kernel_result,
-    get_amd_gpu_specs,
     check_kernel_compatibility,
+    evaluate_kernel_quality,
+    get_amd_gpu_specs,
+    reflect_on_kernel_result,
 )
 
 

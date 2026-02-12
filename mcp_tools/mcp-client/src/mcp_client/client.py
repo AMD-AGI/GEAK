@@ -5,11 +5,10 @@ MCP Protocol Client - implements JSON-RPC 2.0 over stdio.
 import asyncio
 import logging
 import os
-from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Any
 
-from .transport import StdioTransport
 from .config import get_server_config
+from .transport import StdioTransport
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,7 @@ class MCPClient:
     Implements JSON-RPC 2.0 protocol over stdio transport.
     """
     
-    def __init__(self, server_name: str, server_config: Optional[Dict[str, Any]] = None):
+    def __init__(self, server_name: str, server_config: dict[str, Any] | None = None):
         """
         Initialize MCP client.
         
@@ -110,7 +109,7 @@ class MCPClient:
         self._initialized = True
         logger.debug("MCP session initialized")
     
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """
         Call an MCP tool.
         
@@ -152,7 +151,7 @@ class MCPClient:
         
         return result
     
-    async def list_tools(self) -> List[Dict[str, Any]]:
+    async def list_tools(self) -> list[dict[str, Any]]:
         """
         List available tools from MCP server.
         
@@ -227,9 +226,9 @@ class MCPClient:
 async def call_mcp_tool(
     server_name: str,
     tool_name: str,
-    arguments: Dict[str, Any],
-    server_config: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
+    arguments: dict[str, Any],
+    server_config: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """
     Convenience function to call an MCP tool.
     

@@ -13,9 +13,9 @@ Based on:
 - Techniques used by top kernel engineers at AMD, NVIDIA, and the ML community
 """
 
-from enum import Enum
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
+from enum import Enum
+from typing import Any
 
 
 class BottleneckType(Enum):
@@ -57,12 +57,12 @@ class OptimizationStrategy:
     """A single optimization strategy."""
     name: str
     description: str
-    bottlenecks: List[BottleneckType]  # Which bottlenecks this helps
-    languages: List[KernelLanguage]    # Which languages support this
+    bottlenecks: list[BottleneckType]  # Which bottlenecks this helps
+    languages: list[KernelLanguage]    # Which languages support this
     difficulty: str                     # "easy", "medium", "hard"
     expected_speedup: str              # e.g., "1.1-1.5x"
-    code_pattern: Optional[str] = None  # Example code or pattern
-    requirements: Optional[str] = None  # Prerequisites
+    code_pattern: str | None = None  # Example code or pattern
+    requirements: str | None = None  # Prerequisites
 
 
 # =============================================================================
@@ -1416,7 +1416,7 @@ def get_strategies_for_bottleneck(
     bottleneck: BottleneckType,
     language: KernelLanguage = None,
     max_difficulty: str = "hard"
-) -> List[OptimizationStrategy]:
+) -> list[OptimizationStrategy]:
     """
     Get optimization strategies for a specific bottleneck.
     
@@ -1453,7 +1453,7 @@ def get_strategies_for_bottleneck(
     return strategies
 
 
-def get_all_strategies_for_language(language: KernelLanguage) -> Dict[BottleneckType, List[OptimizationStrategy]]:
+def get_all_strategies_for_language(language: KernelLanguage) -> dict[BottleneckType, list[OptimizationStrategy]]:
     """Get all strategies organized by bottleneck type for a specific language."""
     result = {}
     for bottleneck in BottleneckType:
@@ -1466,7 +1466,7 @@ def get_all_strategies_for_language(language: KernelLanguage) -> Dict[Bottleneck
 def print_strategy_guide(language: KernelLanguage = None):
     """Print a human-readable optimization guide."""
     print("=" * 80)
-    print(f"  OPTIMIZATION STRATEGY GUIDE")
+    print("  OPTIMIZATION STRATEGY GUIDE")
     if language:
         print(f"  Language: {language.value.upper()}")
     print("=" * 80)
@@ -1488,7 +1488,7 @@ def print_strategy_guide(language: KernelLanguage = None):
             print(f"    Languages: {langs}")
             
             if s.code_pattern:
-                print(f"    Example:")
+                print("    Example:")
                 for line in s.code_pattern.strip().split('\n')[:5]:
                     print(f"      {line}")
     
@@ -1500,11 +1500,11 @@ def print_strategy_guide(language: KernelLanguage = None):
 # =============================================================================
 
 def recommend_strategies(
-    profiler_metrics: Dict[str, Any],
+    profiler_metrics: dict[str, Any],
     language: KernelLanguage,
     max_strategies: int = 8,
     kernel_type: str = None  # "gemm", "attention", "elementwise", "reduction", etc.
-) -> List[OptimizationStrategy]:
+) -> list[OptimizationStrategy]:
     """
     Dynamically recommend strategies based on profiler metrics.
     
@@ -1533,13 +1533,13 @@ def recommend_strategies(
     launch_overhead = profiler_metrics.get('launch_overhead_ratio', 0)
     mem_bw = profiler_metrics.get('memory_bw_utilization', 0.5)
     compute = profiler_metrics.get('compute_utilization', 0.5)
-    lds_util = profiler_metrics.get('lds_utilization', 0.5)
+    profiler_metrics.get('lds_utilization', 0.5)
     occupancy = profiler_metrics.get('occupancy', 0.5)
     vgpr_count = profiler_metrics.get('vgpr_count', 64)
     lds_size = profiler_metrics.get('lds_size', 0)
     divergence = profiler_metrics.get('divergence_ratio', 0)
     cache_hit = profiler_metrics.get('l2_cache_hit_rate', 0.5)
-    arith_intensity = profiler_metrics.get('arithmetic_intensity', 1.0)
+    profiler_metrics.get('arithmetic_intensity', 1.0)
     
     # =================================================================
     # LAUNCH OVERHEAD DOMINATED (>30% time in launch)
@@ -1658,7 +1658,7 @@ def recommend_strategies(
     # Sort by priority score (higher = more important) and deduplicate
     seen = set()
     unique_recs = []
-    for s, score in sorted(recommendations, key=lambda x: -x[1]):
+    for s, _score in sorted(recommendations, key=lambda x: -x[1]):
         if s.name not in seen:
             seen.add(s.name)
             unique_recs.append(s)
@@ -1666,7 +1666,7 @@ def recommend_strategies(
     return unique_recs[:max_strategies]
 
 
-def get_strategies_summary() -> Dict[str, Any]:
+def get_strategies_summary() -> dict[str, Any]:
     """Get a summary of all available strategies."""
     summary = {
         'total_strategies': len(OPTIMIZATION_STRATEGIES),
