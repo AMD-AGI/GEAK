@@ -11,7 +11,9 @@
           "description": "The bash command to execute."
         }
       },
-      "required": ["command"]
+      "required": [
+        "command"
+      ]
     }
   },
   {
@@ -53,7 +55,12 @@
       "properties": {
         "command": {
           "type": "string",
-          "enum": ["view", "create", "str_replace", "insert"],
+          "enum": [
+            "view",
+            "create",
+            "str_replace",
+            "insert"
+          ],
           "description": "The editor command to execute."
         },
         "path": {
@@ -66,7 +73,9 @@
         },
         "view_range": {
           "type": "array",
-          "items": {"type": "integer"},
+          "items": {
+            "type": "integer"
+          },
           "description": "Line range [start, end] to view. Optional for: view."
         },
         "old_str": {
@@ -82,7 +91,10 @@
           "description": "Line number to insert at. Required for: insert."
         }
       },
-      "required": ["command", "path"]
+      "required": [
+        "command",
+        "path"
+      ]
     }
   },
   {
@@ -101,7 +113,10 @@
           "description": "The command to execute the kernel during profiling, e.g. execution command using in performance test."
         }
       },
-      "required": ["profiling_workdir", "profiling_cmd"]
+      "required": [
+        "profiling_workdir",
+        "profiling_cmd"
+      ]
     }
   },
   {
@@ -113,7 +128,17 @@
       "properties": {
         "command": {
           "type": "string",
-          "enum": ["create", "show", "next", "mark", "add", "remove", "update", "note", "summary"],
+          "enum": [
+            "create",
+            "show",
+            "next",
+            "mark",
+            "add",
+            "remove",
+            "update",
+            "note",
+            "summary"
+          ],
           "description": "The operation to perform."
         },
         "index": {
@@ -122,7 +147,15 @@
         },
         "status": {
           "type": "string",
-          "enum": ["pending", "exploring", "successful", "failed", "partial", "skipped", "combined"],
+          "enum": [
+            "pending",
+            "exploring",
+            "successful",
+            "failed",
+            "partial",
+            "skipped",
+            "combined"
+          ],
           "description": "Strategy status. Required for: mark. Optional for: update."
         },
         "result": {
@@ -151,7 +184,9 @@
         },
         "baseline_metrics": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "description": "Baseline metrics in 'Key:Value' format. Required for: create."
         },
         "baseline_log": {
@@ -160,12 +195,17 @@
         },
         "strategies": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "description": "Initial strategies in 'Name|Description|Expected|Target' format. Optional for: create."
         },
         "method": {
           "type": "string",
-          "enum": ["skip", "delete"],
+          "enum": [
+            "skip",
+            "delete"
+          ],
           "description": "Remove method. Default: skip. For: remove."
         },
         "note": {
@@ -173,7 +213,141 @@
           "description": "Note message. Required for: note."
         }
       },
-      "required": ["command"]
+      "required": [
+        "command"
+      ]
+    }
+  },
+  {
+    "name": "profile_kernel",
+    "type": "function",
+    "description": "Profile a GPU kernel using Metrix (structured JSON) or rocprof-compute (deep roofline analysis). Set backend='metrix' for bottleneck classification with hardware metrics, or backend='rocprof-compute' for detailed instruction mix and cache analysis.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Command to execute for profiling (e.g. 'python3 kernel.py --profile')"
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "metrix",
+            "rocprof-compute"
+          ],
+          "description": "Profiling backend. Default: metrix"
+        },
+        "workdir": {
+          "type": "string",
+          "description": "Working directory (rocprof-compute only)"
+        },
+        "profiling_type": {
+          "type": "string",
+          "enum": [
+            "profiling",
+            "roofline",
+            "profiler_analyzer"
+          ],
+          "description": "Profiling depth for rocprof-compute. Default: profiling"
+        },
+        "quick": {
+          "type": "boolean",
+          "description": "Quick profile with fewer metrics (metrix only). Default: false"
+        }
+      },
+      "required": [
+        "command"
+      ]
+    }
+  },
+  {
+    "name": "generate_optimization",
+    "type": "function",
+    "description": "Generate an optimized kernel variant using LLM-guided kernel evolution. Targets a specific bottleneck type.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kernel_code": {
+          "type": "string",
+          "description": "The kernel source code to optimize"
+        },
+        "bottleneck": {
+          "type": "string",
+          "enum": [
+            "compute",
+            "memory",
+            "latency",
+            "lds",
+            "balanced"
+          ],
+          "description": "The bottleneck type to target"
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "triton",
+            "hip",
+            "cuda"
+          ],
+          "description": "Kernel language. Default: triton"
+        }
+      },
+      "required": [
+        "kernel_code",
+        "bottleneck"
+      ]
+    }
+  },
+  {
+    "name": "evaluate_kernel_quality",
+    "type": "function",
+    "description": "Evaluate a GPU kernel across AMD GPU optimization criteria. Returns scores and suggestions.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kernel_code": {
+          "type": "string",
+          "description": "The kernel source code to evaluate"
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "triton",
+            "hip",
+            "cuda"
+          ],
+          "description": "Kernel language. Default: triton"
+        }
+      },
+      "required": [
+        "kernel_code"
+      ]
+    }
+  },
+  {
+    "name": "reflect_on_kernel_result",
+    "type": "function",
+    "description": "Analyze kernel test results and suggest next optimization steps.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kernel_code": {
+          "type": "string",
+          "description": "The kernel source code"
+        },
+        "test_output": {
+          "type": "string",
+          "description": "Output from running the kernel test/benchmark"
+        },
+        "previous_attempts": {
+          "type": "string",
+          "description": "Summary of previous optimization attempts"
+        }
+      },
+      "required": [
+        "kernel_code",
+        "test_output"
+      ]
     }
   }
 ]

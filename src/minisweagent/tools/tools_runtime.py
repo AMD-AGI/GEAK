@@ -1,16 +1,16 @@
-import os
 import json
-from pathlib import Path
-from typing import Dict, Any
+import os
+from typing import Any
+
 from minisweagent.tools.bash_command import BashCommand
-from minisweagent.tools.strategy_manager import StrategyManagerTool
 from minisweagent.tools.str_replace_editor import str_replace_editor
-from minisweagent.tools.test_perf import TestPerfTool
+from minisweagent.tools.strategy_manager import StrategyManagerTool
 from minisweagent.tools.submit import SubmitTool
+from minisweagent.tools.test_perf import TestPerfTool
 
 current_dir = os.path.dirname(__file__)
 json_path = os.path.join(current_dir, "tools.json")
-with open(json_path,"r",encoding="utf-8") as f:
+with open(json_path,encoding="utf-8") as f:
     _all_tools = json.load(f)
 
 def get_tools_list(use_strategy_manager: bool = False) -> list:
@@ -51,14 +51,41 @@ class ToolRuntime:
                 on_change_callback=on_strategy_change
             )
         
+        # Register MCP tool bridges (lazy start -- subprocess spawned on first call)
+        self._register_mcp_tools()
+
         # Store settings for tools list generation
         self.use_strategy_manager = use_strategy_manager
     
+    def _register_mcp_tools(self):
+        """Register MCP server tools via MCPToolBridge.
+
+        Each bridge wraps one MCP server process. The `.tool(name)` factory
+        returns a sync callable that ToolRuntime can dispatch like a native tool.
+        """
+        try:
+            from minisweagent.tools.mcp_bridge import MCPToolBridge
+        except ImportError:
+            return  # mcp_bridge not available (e.g., minimal install)
+
+        # profiler-mcp (unified: metrix + rocprof-compute)
+        profiler = MCPToolBridge("profiler-mcp", timeout=600)
+        self._tool_table["profile_kernel"] = profiler.tool("profile_kernel")
+
+        # kernel-evolve (generate / mutate / crossover)
+        evolve = MCPToolBridge("kernel-evolve", timeout=300)
+        self._tool_table["generate_optimization"] = evolve.tool("generate_optimization")
+
+        # kernel-ercs (evaluate / reflect / compatibility)
+        ercs = MCPToolBridge("kernel-ercs", timeout=300)
+        self._tool_table["evaluate_kernel_quality"] = ercs.tool("evaluate_kernel_quality")
+        self._tool_table["reflect_on_kernel_result"] = ercs.tool("reflect_on_kernel_result")
+
     def get_tools_list(self) -> list:
         """Get the tools list for API based on current settings."""
         return get_tools_list(self.use_strategy_manager)
 
-    def dispatch(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    def dispatch(self, tool_call: dict[str, Any]) -> dict[str, Any]:
         """
         tool_call format:
         {
