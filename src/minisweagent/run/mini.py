@@ -39,6 +39,7 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str:
         sys.path.insert(0, str(repo_root))
     try:
         from minisweagent.tools.discovery import discover
+        from minisweagent.tools.resolve_kernel_url_impl import find_resolved_clone_root
     except ImportError:
         return ""
 
@@ -48,24 +49,34 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str:
         console.print(f"[dim]Kernel function: {kernel_name}[/dim]")
     try:
         kp = Path(kernel_path)
-        ws = kp.parent
-        for p in kp.parents:
-            if (p / ".git").exists():
-                ws = p
-                break
+        # If the kernel lives inside a resolved clone, scope discovery to
+        # that clone root so we don't accidentally scan the whole workspace.
+        clone_root = find_resolved_clone_root(kp)
+        if clone_root is not None:
+            ws = clone_root
+        else:
+            ws = kp.parent
+            for p in kp.parents:
+                if (p / ".git").exists():
+                    ws = p
+                    break
         result = discover(workspace=ws, kernel_path=kp, interactive=False)
         lines = []
         kernel_stem = kp.stem.lower()
         match_terms = [kernel_stem]
         if kernel_name:
             match_terms.extend([p for p in kernel_name.lower().split("_") if len(p) > 2])
+
         def _is_relevant(path_str):
             return any(term in path_str.lower() for term in match_terms)
+
         relevant_tests = [t for t in result.tests if _is_relevant(str(t.file_path))]
         other_tests = [t for t in result.tests if not _is_relevant(str(t.file_path))][:3]
         all_display = relevant_tests + other_tests
         if all_display:
-            console.print(f"[bold green]Found {len(result.tests)} test(s) ({len(relevant_tests)} matching '{kernel_stem}'):[/bold green]")
+            console.print(
+                f"[bold green]Found {len(result.tests)} test(s) ({len(relevant_tests)} matching '{kernel_stem}'):[/bold green]"
+            )
             for t in all_display[:5]:
                 marker = "+" if kernel_stem in str(t.file_path).lower() else "-"
                 console.print(f"  [green]{marker}[/green] {t.file_path} [dim](confidence: {t.confidence:.1f})[/dim]")
@@ -80,7 +91,11 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str:
                 lines.append(f"  - Benchmark: {b.file_path} (confidence: {b.confidence:.1f})")
         console.print("[bold cyan]---------------------[/bold cyan]\n")
         if lines:
-            return "\n--- Discovered Tests ---\n" + "\n".join(lines) + "\nRead these test files and reuse their reference implementations, input patterns, and tolerances.\n---\n"
+            return (
+                "\n--- Discovered Tests ---\n"
+                + "\n".join(lines)
+                + "\nRead these test files and reuse their reference implementations, input patterns, and tolerances.\n---\n"
+            )
     except Exception as e:
         console.print(f"[yellow]Discovery failed: {e}[/yellow]")
     return ""
@@ -95,7 +110,7 @@ def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -
         from minisweagent.tools.resolve_kernel_url_impl import get_kernel_name_at_line, resolve_kernel_url
     except ImportError as e:
         raise SystemExit(f"Cannot resolve --kernel-url: geak_agent not found ({e}).") from e
-    clone_into = (Path(workspace) if workspace else Path.cwd())
+    clone_into = Path(workspace) if workspace else Path.cwd()
     resolved = resolve_kernel_url(kernel_url, clone_into=clone_into)
     if resolved.get("error"):
         raise SystemExit(f"Kernel URL resolve failed: {resolved['error']}")
@@ -115,7 +130,7 @@ def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -
     oe_script = "${GEAK_OE_ROOT:-/opt/geak-oe}/examples/geak_eval/run_openevolve.py"
     block = f"""\n
 --- Resolved kernel (from --kernel-url) ---
-Kernel path: {path}{(' |' + line_info + kernel_info) if line_info else ''}
+Kernel path: {path}{(" |" + line_info + kernel_info) if line_info else ""}
 ---
 
 --- Workflow ---
@@ -160,6 +175,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
 _HELP_TEXT = """Run mini-SWE-agent in your local environment.
 
 [not dim]
@@ -370,7 +387,13 @@ def main(
 
         # Step 0a: Run content-based discovery (fast, free, no LLM)
         discovery_context = ""
-        _kernel_path = Path(task) if task and Path(task).is_file() else None
+        _kernel_path = (
+            Path(_resolved_kernel_path)
+            if _resolved_kernel_path
+            else Path(task)
+            if task and Path(task).is_file()
+            else None
+        )
         if _kernel_path or repo:
             console.print("[bold cyan]Running content-based test discovery...[/bold cyan]")
             discovery_context = run_discovery_pipeline(

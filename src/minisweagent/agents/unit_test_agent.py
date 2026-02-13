@@ -43,11 +43,18 @@ def run_discovery_pipeline(kernel_path: Path, repo: Path) -> str:
     """
     try:
         from minisweagent.tools.discovery import DiscoveryPipeline
+        from minisweagent.tools.resolve_kernel_url_impl import find_resolved_clone_root
     except ImportError:
         return ""
 
     try:
-        pipeline = DiscoveryPipeline(workspace_path=repo)
+        # If the kernel lives inside a resolved clone, scope discovery to
+        # the clone root instead of the (potentially huge) main workspace.
+        workspace = repo
+        clone_root = find_resolved_clone_root(kernel_path)
+        if clone_root is not None:
+            workspace = clone_root
+        pipeline = DiscoveryPipeline(workspace_path=workspace)
         result = pipeline.run(kernel_path=kernel_path, interactive=False)
     except Exception:
         return ""

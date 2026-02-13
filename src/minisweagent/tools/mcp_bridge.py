@@ -16,8 +16,10 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,12 @@ class MCPToolBridge:
     - Configurable timeout per call (default 300s / 5 min).
     - All exceptions are caught and returned as ``{output, returncode}``.
     - ``.tool(name)`` returns a callable bound to one MCP tool name.
+
+    Internally, each bridge maintains a **persistent background event loop**
+    in a daemon thread.  The ``MCPClient`` (subprocess + stdio pipes) lives
+    on that loop for its entire lifetime, avoiding the "Future attached to a
+    different loop" error that occurs when ``asyncio.run()`` creates and
+    destroys a new loop on every call.
     """
 
     def __init__(
@@ -43,6 +51,10 @@ class MCPToolBridge:
         self.server_config = server_config or self._default_config(server_name)
         self.timeout = timeout
         self._client = None
+
+        # Persistent event loop -- created lazily by _get_loop().
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -83,21 +95,52 @@ class MCPToolBridge:
             logger.info(f"MCPToolBridge: started {self.server_name}")
         return self._client
 
-    def _run_async(self, coro):
-        """Run an async coroutine from sync context."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
+    # ------------------------------------------------------------------
+    # Persistent background event loop
+    # ------------------------------------------------------------------
 
-        if loop and loop.is_running():
-            # We're inside an async context -- use a new thread
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result(timeout=self.timeout + 10)
-        else:
-            return asyncio.run(coro)
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        """Return (and lazily create) a persistent event loop on a daemon thread.
+
+        The loop stays alive for the lifetime of this bridge instance so that
+        the ``MCPClient`` subprocess and its asyncio pipes remain valid across
+        multiple ``call_tool`` invocations.
+        """
+        if self._loop is not None and not self._loop.is_closed():
+            return self._loop
+
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever,
+            name=f"mcp-loop-{self.server_name}",
+            daemon=True,
+        )
+        self._loop_thread.start()
+
+        # Best-effort cleanup at interpreter shutdown
+        atexit.register(self._shutdown_loop)
+
+        return self._loop
+
+    def _shutdown_loop(self):
+        """Stop the background loop (called at exit or manually)."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(loop.stop)
+        if self._loop_thread is not None:
+            self._loop_thread.join(timeout=5)
+
+    def _run_async(self, coro):
+        """Schedule *coro* on the persistent background loop and block until done.
+
+        This replaces the old approach of calling ``asyncio.run()`` (which
+        creates and destroys a new loop each time, invalidating cached
+        MCPClient subprocess handles).
+        """
+        loop = self._get_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=self.timeout + 10)
 
     @staticmethod
     def _format_result(raw: dict[str, Any]) -> dict[str, Any]:
