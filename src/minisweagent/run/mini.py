@@ -305,16 +305,10 @@ def main(
     if not task_content:
         if kernel_url:
             task_content = (
-                "Optimize this kernel for maximum speedup. Do NOT use OpenEvolve. Instead:\n"
-                "1. DISCOVER: Read the wrapper file AND trace imports to find the inner @triton.jit kernel. "
-                "Read the discovered test files shown above.\n"
-                "2. Profile the baseline with kernel-profile.\n"
-                "3. OPTIMIZE: Edit ONLY the inner kernel file. "
-                "Analyze the profiling metrics to identify bottlenecks and fix them. "
-                "Revert any change that makes performance worse before trying something new.\n"
-                "4. After EACH edit, run correctness check and re-profile. Iterate until you "
-                "achieve significant speedup.\n"
-                "5. Report final speedup."
+                "Optimize this kernel for maximum speedup.\n"
+                "Follow the workflow described in the pipeline instructions (INSTRUCTIONS.md).\n"
+                "Use the discovered tests and benchmarks listed above for correctness and performance.\n"
+                "Report final speedup when done."
             )
             console.print("[bold green]Using default kernel optimization task[/bold green]")
         else:
@@ -462,8 +456,7 @@ def main(
     agent_config["gpu_ids"] = parsed_gpu_ids
     
     if num_parallel and num_parallel > 1:
-        console.print(f"[bold cyan]Using Parallel Mode: {num_parallel} agents[/bold cyan]")
-        console.print(f"[dim]GPU IDs: {parsed_gpu_ids}[/dim]")
+        console.print(f"[bold cyan]Using Parallel Mode: {num_parallel} agents on GPUs {parsed_gpu_ids}[/bold cyan]")
         
         # Configure repo path for parallel execution (preserve filesystem case)
         repo_path = repo or config.get("patch", {}).get("repo")

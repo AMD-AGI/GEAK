@@ -5,7 +5,11 @@ Provides GPU kernel profiling using AMD Metrix with hardware metrics,
 bottleneck classification, and factual observations.
 """
 
+import json
 import logging
+import os
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
@@ -109,10 +113,26 @@ def _profile_kernel_impl(
         logger.info(f"  Across {len(result['results'])} GPU(s)")
         logger.info("="*60)
         
-        return {
+        full_result = {
             "success": True,
             **result
         }
+
+        # If the serialized result exceeds 32KB, write it to a temp file
+        # and return a file reference instead.  This avoids hitting the
+        # asyncio StreamReader readline limit on the JSON-RPC stdio
+        # transport when kernel names contain very long C++ mangled symbols.
+        _LARGE_RESULT_THRESHOLD = 32 * 1024  # 32 KB
+        result_json = json.dumps(full_result)
+        if len(result_json) > _LARGE_RESULT_THRESHOLD:
+            result_dir = Path(tempfile.gettempdir()) / "mcp_results" / "metrix"
+            result_dir.mkdir(parents=True, exist_ok=True)
+            result_file = result_dir / f"{os.getpid()}_{id(full_result)}.json"
+            result_file.write_text(result_json)
+            logger.info(f"Large result ({len(result_json)} bytes) written to {result_file}")
+            return {"_result_file": str(result_file)}
+
+        return full_result
         
     except Exception as e:
         logger.error(f"Metrix profiling failed: {e}", exc_info=True)

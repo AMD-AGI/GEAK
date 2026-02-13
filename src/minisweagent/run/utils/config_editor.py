@@ -509,4 +509,13 @@ def load_and_merge_configs(
             # Default to GPU 0
             parsed_gpu_ids = [0]
     
+    # Auto-detect num_parallel from gpu_ids when not explicitly provided.
+    # If the user passed --gpu-ids 4,5,6,7 but didn't set --num-parallel,
+    # default to one agent per GPU instead of forcing single-agent mode.
+    if num_parallel is None and parsed_gpu_ids and len(parsed_gpu_ids) > 1:
+        num_parallel = len(parsed_gpu_ids)
+        console.print(
+            f"[bold cyan]Auto-detected num_parallel={num_parallel} from gpu_ids {parsed_gpu_ids}[/bold cyan]"
+        )
+
     return repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name

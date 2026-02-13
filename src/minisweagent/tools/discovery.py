@@ -55,30 +55,35 @@ except ImportError:
 @dataclass
 class DiscoveryConfig:
     """
-    Auto-detected configuration for discovery patterns.
+    Configuration for discovery patterns.
 
-    This is NOT user-configured - it's automatically detected from the codebase.
-    The discovery pipeline learns:
-    - What test frameworks are used (pytest, gtest, custom)
-    - What custom decorators/functions are used (@perftest, checkAllclose)
-    - Where tests are typically located
+    Three-layer resolution (highest to lowest priority):
+      1. Per-project:  <repo>/.geak/discovery.toml
+      2. Auto-detect:  runtime scan of the codebase (appends to loaded config)
+      3. Defaults:     discovery_defaults.toml shipped with GEAK
+
+    The ``_load_config`` helper in ``DiscoveryPipeline`` populates this.
     """
 
-    # Auto-detected test keywords from scanning the codebase
-    detected_test_keywords: list[tuple] = field(default_factory=list)
-    # Auto-detected benchmark keywords
-    detected_bench_keywords: list[tuple] = field(default_factory=list)
-    # Auto-detected test directories
-    detected_test_dirs: list[str] = field(default_factory=list)
-    # Auto-detected benchmark directories
-    detected_bench_dirs: list[str] = field(default_factory=list)
-    # Whether C++ files were found
+    # --- Kernel detection ---
+    kernel_patterns: list[str] = field(default_factory=list)
+    wrapper_functions: list[str] = field(default_factory=list)
+
+    # --- Test keywords  (regex, weight) ---
+    test_python_keywords: list[tuple] = field(default_factory=list)
+    test_cpp_keywords: list[tuple] = field(default_factory=list)
+
+    # --- Benchmark keywords (regex, weight) ---
+    bench_keywords: list[tuple] = field(default_factory=list)
+
+    # --- Workspace settings ---
+    skip_dirs: list[str] = field(default_factory=list)
+    project_markers: list[str] = field(default_factory=list)
+    monorepo_markers: list[str] = field(default_factory=list)
+
+    # Whether C++ files should be searched
     include_cpp: bool = True
-    # Monorepo boundary markers
-    monorepo_markers: list[str] = field(
-        default_factory=lambda: ["lerna.json", "nx.json", "pnpm-workspace.yaml", "rush.json"]
-    )
-    # Exclude directories
+    # Extra exclude directories (from per-project config)
     exclude_dirs: list[str] = field(default_factory=list)
 
 
@@ -137,132 +142,16 @@ class DiscoveryPipeline:
     3. Present findings to user for confirmation
     4. Offer to create tests if none found (TODO)
     5. Use LLM for uncertain cases (confidence 0.3-0.6)
-    6. Support configurable patterns per-project
+    6. Support configurable patterns per-project via .geak/discovery.toml
+
+    Pattern resolution priority (highest to lowest):
+    1. Per-project config:  <repo>/.geak/discovery.toml
+    2. Auto-detection:      _auto_detect_patterns()
+    3. Built-in defaults:   discovery_defaults.toml shipped with GEAK
     """
 
-    # Patterns for finding kernel files
-    KERNEL_PATTERNS = [
-        r"@triton\.jit",
-        r"@triton\.autotune",
-        r"__global__\s+void",  # CUDA/HIP
-        r"tl\.load|tl\.store",  # Triton ops
-    ]
-
-    # Content keywords for PYTHON TEST detection
-    TEST_CONTENT_KEYWORDS_PYTHON = [
-        # Pytest
-        (r"import pytest", 0.3),
-        (r"@pytest\.mark", 0.3),
-        (r"def test_\w+\s*\(", 0.4),
-        # Assertions
-        (r"assert\s+", 0.2),
-        (r"\.allclose\(", 0.3),
-        (r"\.assertEqual\(", 0.2),
-        (r"torch\.testing\.assert", 0.3),
-        # Custom test frameworks (aiter)
-        (r"@perftest\(\)", 0.35),
-        (r"checkAllclose", 0.35),
-        (r"from.*test_common import", 0.2),
-        # Correctness checking
-        (r"correctness", 0.2),
-        (r"verify|verification", 0.15),
-        (r"expected.*actual|actual.*expected", 0.2),
-        (r"reference.*output|output.*reference", 0.2),
-        # Test structure
-        (r"class Test\w+", 0.3),
-        (r"unittest", 0.2),
-    ]
-
-    # Content keywords for C++ TEST detection (GTest, Catch2, etc.)
-    TEST_CONTENT_KEYWORDS_CPP = [
-        # GTest
-        (r"#include\s*[<\"]gtest", 0.4),
-        (r"TEST\s*\(\s*\w+\s*,", 0.5),
-        (r"TEST_F\s*\(\s*\w+\s*,", 0.5),
-        (r"TEST_P\s*\(\s*\w+\s*,", 0.5),
-        (r"EXPECT_TRUE|EXPECT_FALSE", 0.3),
-        (r"EXPECT_EQ|EXPECT_NE|EXPECT_LT|EXPECT_GT", 0.35),
-        (r"ASSERT_TRUE|ASSERT_FALSE", 0.3),
-        (r"ASSERT_EQ|ASSERT_NE", 0.35),
-        # Catch2
-        (r"#include\s*[<\"]catch", 0.4),
-        (r"TEST_CASE\s*\(", 0.5),
-        (r"SECTION\s*\(", 0.25),
-        (r"REQUIRE\s*\(", 0.35),
-        (r"CHECK\s*\(", 0.3),
-        # HIP/CUDA test patterns
-        (r"hipMemcpy.*hipMemcpyDeviceToHost", 0.2),
-        (r"cudaMemcpy.*cudaMemcpyDeviceToHost", 0.2),
-        # Generic C++ test patterns
-        (r"void\s+test_\w+\s*\(", 0.3),
-        (r"compare.*reference|reference.*compare", 0.2),
-    ]
-
-    # Content keywords for BENCHMARK detection
-    BENCH_CONTENT_KEYWORDS = [
-        # Timing
-        (r"elapsed_time|elapsed", 0.3),
-        (r"latency", 0.25),
-        (r"throughput", 0.25),
-        (r"TFLOPS|GFLOPS|TFLOPs|GFLOPs", 0.4),
-        (r"us/iter|ms/iter|μs", 0.3),
-        # Benchmarking patterns
-        (r"warmup|warm_up|warm-up", 0.25),
-        (r"benchmark|bench_", 0.3),
-        (r"time\.time\(\)|time\.perf_counter", 0.2),
-        (r"torch\.cuda\.Event\(enable_timing", 0.4),
-        (r"start\.record\(\)|end\.record\(\)", 0.35),
-        (r"triton\.testing\.do_bench", 0.5),
-        # Performance reporting
-        (r"speedup", 0.25),
-        (r"GB/s|TB/s", 0.3),
-        (r"bandwidth", 0.2),
-        (r"median|percentile|p50|p99", 0.2),
-        # C++ benchmark patterns
-        (r"std::chrono", 0.25),
-        (r"hipEventElapsedTime|cudaEventElapsedTime", 0.4),
-        (r"hipEventRecord|cudaEventRecord", 0.3),
-    ]
-
-    # Filename patterns (lower priority than content)
-    TEST_FILE_PATTERNS = [
-        "test_*.py",
-        "*_test.py",
-        "tests/*.py",
-        "test/*.py",
-        # Additional patterns
-        "check_*.py",
-        "verify_*.py",
-    ]
-
-    # C++ test file patterns
-    TEST_FILE_PATTERNS_CPP = [
-        "test_*.cpp",
-        "*_test.cpp",
-        "test_*.cu",
-        "*_test.cu",
-        "test_*.hip",
-        "*_test.hip",
-        "*_test.cc",
-        "test_*.cc",
-    ]
-
-    BENCH_FILE_PATTERNS = [
-        "bench*.py",
-        "*benchmark*.py",
-        "*_perf.py",
-        "perf_*.py",
-        # Additional patterns
-        "perf/*.py",
-        "performance_*.py",
-    ]
-
-    BENCH_FILE_PATTERNS_CPP = [
-        "bench*.cpp",
-        "*benchmark*.cpp",
-        "bench*.cu",
-        "*_perf.cpp",
-    ]
+    # Path to the built-in defaults TOML (relative to the package config dir)
+    _DEFAULTS_TOML = "discovery_defaults.toml"
 
     def __init__(self, workspace_path: Path = None, use_llm: bool = False):
         self.workspace = Path(workspace_path) if workspace_path else Path.cwd()
@@ -271,15 +160,109 @@ class DiscoveryPipeline:
         self._llm_client = None
         self._kernel_file = None
 
-        # Config is auto-detected, not loaded from files
-        self.config = DiscoveryConfig()
+        # Load patterns from TOML config (defaults + per-project overrides)
+        self.config = self._load_config()
 
-        # Content-based keywords - these are what matter, not directories
-        self._test_keywords = list(self.TEST_CONTENT_KEYWORDS_PYTHON)
-        self._bench_keywords = list(self.BENCH_CONTENT_KEYWORDS)
+        # Mutable keyword lists -- start from loaded config, auto-detect appends later
+        self._test_keywords = list(self.config.test_python_keywords)
+        self._bench_keywords = list(self.config.bench_keywords)
 
         if self.use_llm:
             self._init_llm()
+
+    # ------------------------------------------------------------------
+    # Configuration loading
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _toml_keywords_to_tuples(entries: list[dict]) -> list[tuple]:
+        """Convert ``[{pattern: ..., weight: ...}, ...]`` to ``[(pattern, weight), ...]``."""
+        return [(e["pattern"], e.get("weight", 0.3)) for e in entries if "pattern" in e]
+
+    def _load_config(self) -> DiscoveryConfig:
+        """Load discovery patterns from the defaults TOML and per-project overrides.
+
+        Resolution order:
+        1. Load ``discovery_defaults.toml`` shipped with the package.
+        2. Deep-merge any ``<workspace>/.geak/discovery.toml`` on top.
+        3. Populate a ``DiscoveryConfig`` dataclass from the merged dict.
+        """
+        defaults = self._load_defaults_toml()
+        overrides = self._load_project_toml()
+
+        # Deep-merge: overrides extend defaults for list fields, replace for scalars
+        merged = self._deep_merge(defaults, overrides)
+
+        # Build DiscoveryConfig from the merged dict
+        kernel_cfg = merged.get("kernel", {})
+        test_cfg = merged.get("test", {})
+        bench_cfg = merged.get("benchmark", {})
+        ws_cfg = merged.get("workspace", {})
+
+        cfg = DiscoveryConfig(
+            kernel_patterns=kernel_cfg.get("patterns", []),
+            wrapper_functions=kernel_cfg.get("wrapper_functions", []),
+            test_python_keywords=self._toml_keywords_to_tuples(test_cfg.get("python_keywords", [])),
+            test_cpp_keywords=self._toml_keywords_to_tuples(test_cfg.get("cpp_keywords", [])),
+            bench_keywords=self._toml_keywords_to_tuples(bench_cfg.get("keywords", [])),
+            skip_dirs=ws_cfg.get("skip_dirs", []),
+            project_markers=ws_cfg.get("project_markers", []),
+            monorepo_markers=ws_cfg.get("monorepo_markers", []),
+        )
+
+        # Handle ``skip_dirs_extra`` from per-project config (additive)
+        extra_skip = ws_cfg.get("skip_dirs_extra", [])
+        if extra_skip:
+            cfg.exclude_dirs = list(extra_skip)
+
+        return cfg
+
+    def _load_defaults_toml(self) -> dict:
+        """Load the built-in ``discovery_defaults.toml``."""
+        if not HAS_TOML:
+            return {}
+        defaults_path = Path(__file__).resolve().parent.parent / "config" / self._DEFAULTS_TOML
+        if not defaults_path.exists():
+            return {}
+        try:
+            with open(defaults_path, "rb") as f:
+                return tomllib.load(f)
+        except Exception:
+            return {}
+
+    def _load_project_toml(self) -> dict:
+        """Load per-project ``<workspace>/.geak/discovery.toml`` if it exists."""
+        if not HAS_TOML:
+            return {}
+        project_toml = self.workspace / ".geak" / "discovery.toml"
+        if not project_toml.exists():
+            return {}
+        try:
+            with open(project_toml, "rb") as f:
+                return tomllib.load(f)
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _deep_merge(base: dict, override: dict) -> dict:
+        """Recursively merge *override* into *base*.
+
+        - Lists are **extended** (override items appended to base).
+        - Dicts are merged recursively.
+        - Scalars are replaced by the override value.
+        """
+        merged = dict(base)
+        for key, val in override.items():
+            if key in merged:
+                if isinstance(merged[key], dict) and isinstance(val, dict):
+                    merged[key] = DiscoveryPipeline._deep_merge(merged[key], val)
+                elif isinstance(merged[key], list) and isinstance(val, list):
+                    merged[key] = merged[key] + val
+                else:
+                    merged[key] = val
+            else:
+                merged[key] = val
+        return merged
 
     def _auto_detect_patterns(self):
         """
@@ -485,19 +468,15 @@ Respond with JSON only:
         - Prefers the closest valid root
         """
         # Project root markers (we want to expand TO these)
-        project_markers = [
-            "pyproject.toml",
-            "setup.py",
-            "setup.cfg",
-            ".git",
-            "op_tests",
-            "tests",
-            "Makefile",
-            "CMakeLists.txt",
+        project_markers = self.config.project_markers or [
+            "pyproject.toml", "setup.py", "setup.cfg", ".git",
+            "op_tests", "tests", "Makefile", "CMakeLists.txt",
         ]
 
         # Monorepo markers (we want to STOP BEFORE these if they're not the immediate parent)
-        monorepo_markers = self.config.monorepo_markers
+        monorepo_markers = self.config.monorepo_markers or [
+            "lerna.json", "nx.json", "pnpm-workspace.yaml", "rush.json",
+        ]
 
         current = kernel_file.parent
         best_workspace = None
@@ -561,7 +540,13 @@ Respond with JSON only:
         print(f"      Found {len(self.result.kernels)} kernel(s)")
 
     def _analyze_kernel_file(self, file_path: Path) -> KernelInfo | None:
-        """Analyze a file to determine if it contains kernels."""
+        """Analyze a file to determine if it contains kernels.
+
+        Detects both direct kernel definitions (with @triton.jit, __global__, etc.)
+        and **wrapper files** that import and launch kernel functions defined elsewhere.
+        Wrapper files are common in projects like aiter where the public API lives in
+        a separate module from the @triton.jit implementations.
+        """
         try:
             content = file_path.read_text()
         except Exception:
@@ -581,6 +566,18 @@ Respond with JSON only:
         elif "__global__" in content and "cuda" in content.lower():
             kernel_type = "cuda"
 
+        # Detect Triton wrapper files: they import triton and import/call kernel
+        # functions (e.g. ``from ..._triton_kernels.rope.rope import _rope_kernel_*``)
+        # but don't define @triton.jit kernels themselves.
+        if not kernel_type:
+            has_triton_import = bool(re.search(r"import\s+triton", content))
+            imports_kernel_funcs = bool(
+                re.search(r"from\s+\S+\s+import\s+[^)]*_kernel", content, re.DOTALL)
+            )
+            calls_kernel_with_grid = bool(re.search(r"_kernel\w*\[", content))
+            if has_triton_import and (imports_kernel_funcs or calls_kernel_with_grid):
+                kernel_type = "triton"
+
         if not kernel_type:
             return None
 
@@ -592,11 +589,22 @@ Respond with JSON only:
         for match in re.finditer(jit_pattern, content):
             function_names.append(match.group(1))
 
-        # Find wrapper functions (triton_op, run_baseline, etc.)
-        wrapper_pattern = r"def\s+(triton_op|run_baseline|torch_op|forward|main)\s*\("
+        # Find wrapper functions (configurable via discovery.toml)
+        wrapper_fns = self.config.wrapper_functions or ["forward", "main"]
+        wrapper_alt = "|".join(re.escape(fn) for fn in wrapper_fns)
+        wrapper_pattern = rf"def\s+({wrapper_alt})\s*\("
         for match in re.finditer(wrapper_pattern, content):
             if match.group(1) not in function_names:
                 function_names.append(match.group(1))
+
+        # For wrapper files with no @triton.jit, also extract public API functions
+        # (e.g. rope_fwd, rope_bwd) so they appear in the kernel info.
+        if not has_jit:
+            public_fn_pattern = r"^def\s+(\w+)\s*\("
+            for match in re.finditer(public_fn_pattern, content, re.MULTILINE):
+                fname = match.group(1)
+                if not fname.startswith("_") and fname not in function_names:
+                    function_names.append(fname)
 
         # Use file stem as kernel name (more reliable for matching tests/benchmarks)
         # Function names may be helpers like "fast_exp" that don't match test names
@@ -631,11 +639,16 @@ Respond with JSON only:
         if self.config.include_cpp:
             extensions.extend([".cpp", ".cc", ".cu", ".hip", ".cxx"])
 
-        # Get kernel name parts for matching
+        # Get kernel name parts for matching.
+        # Fall back to the kernel_file stem when _discover_kernels found nothing
+        # (e.g. wrapper files that import @triton.jit kernels from another module).
         kernel_name = None
         kernel_parts = []
         if self.result.kernels:
             kernel_name = self.result.kernels[0].kernel_name
+        elif self._kernel_file:
+            kernel_name = self._kernel_file.stem
+        if kernel_name:
             kernel_parts = [p for p in kernel_name.split("_") if len(p) > 2]
 
         # Get kernel file paths to exclude
@@ -705,7 +718,7 @@ Respond with JSON only:
 
         # Select appropriate keywords based on file type
         if is_cpp and self.config.include_cpp:
-            keywords = self.TEST_CONTENT_KEYWORDS_CPP
+            keywords = self.config.test_cpp_keywords
         else:
             keywords = self._test_keywords
 
@@ -798,11 +811,16 @@ Respond with JSON only:
         if self.config.include_cpp:
             extensions.extend([".cpp", ".cc", ".cu", ".hip", ".cxx"])
 
-        # Get kernel name parts for matching
+        # Get kernel name parts for matching.
+        # Fall back to the kernel_file stem when _discover_kernels found nothing
+        # (e.g. wrapper files that import @triton.jit kernels from another module).
         kernel_name = None
         kernel_parts = []
         if self.result.kernels:
             kernel_name = self.result.kernels[0].kernel_name
+        elif self._kernel_file:
+            kernel_name = self._kernel_file.stem
+        if kernel_name:
             kernel_parts = [p for p in kernel_name.split("_") if len(p) > 2]
 
         # Get kernel file paths to exclude
@@ -929,22 +947,13 @@ Respond with JSON only:
 
     def _should_skip_file(self, file_path: Path) -> bool:
         """Check if a file should be skipped during discovery."""
-        # Default skip directories
-        skip_dirs = {
-            "__pycache__",
-            ".git",
-            ".venv",
-            "venv",
-            "node_modules",
-            "build",
-            "dist",
-            ".eggs",
-            "site-packages",
-            ".tox",
-            ".pytest_cache",
+        # Use skip_dirs from loaded config (defaults + per-project overrides)
+        skip_dirs = set(self.config.skip_dirs) if self.config.skip_dirs else {
+            "__pycache__", ".git", ".venv", "venv", "node_modules",
+            "build", "dist", ".eggs", "site-packages", ".tox", ".pytest_cache",
         }
 
-        # Add configured exclude directories
+        # Add configured exclude directories (from per-project skip_dirs_extra)
         skip_dirs.update(self.config.exclude_dirs)
 
         for part in file_path.parts:
@@ -960,8 +969,12 @@ Respond with JSON only:
         except Exception:
             return False
 
-        # Check for kernel definition patterns
-        for pattern in self.KERNEL_PATTERNS:
+        # Check for kernel definition patterns (loaded from config)
+        kernel_patterns = self.config.kernel_patterns or [
+            r"@triton\.jit", r"@triton\.autotune",
+            r"__global__\s+void", r"tl\.load|tl\.store",
+        ]
+        for pattern in kernel_patterns:
             if re.search(pattern, content):
                 return True
 

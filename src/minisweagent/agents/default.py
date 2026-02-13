@@ -46,6 +46,8 @@ class AgentConfig:
     use_strategy_manager: bool = False
     strategy_file_path: str = ".optimization_strategies.md"
     profiling_type: str | None = None
+    # Interactive/exit behaviour (set by --exit-immediately)
+    confirm_exit: bool = True
 
 
 # Unified observation truncation for both bash output and tool call results (head + tail).

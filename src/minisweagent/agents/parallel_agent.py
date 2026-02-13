@@ -52,6 +52,8 @@ class ParallelAgentConfig(AgentConfig):
     agent_specs: list | None = None  # list[AgentSpec] for heterogeneous parallel
     # Strategy agent compatibility
     strategy_file_path: str | None = None
+    # Interactive/exit behaviour (passed through from --exit-immediately)
+    confirm_exit: bool = True
 
 
 class ParallelAgent(DefaultAgent):

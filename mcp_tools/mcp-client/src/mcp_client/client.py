@@ -3,8 +3,10 @@ MCP Protocol Client - implements JSON-RPC 2.0 over stdio.
 """
 
 import asyncio
+import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from .config import get_server_config
@@ -64,7 +66,12 @@ class MCPClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
-                env=env
+                env=env,
+                # Raise the default 64KB readline limit to 16MB as a safety net
+                # for MCP servers that haven't adopted the file-based transport
+                # convention for large responses (e.g. profiler output with
+                # extremely long C++ mangled kernel names).
+                limit=16 * 1024 * 1024,
             )
             
             self.transport = StdioTransport(self.process)
@@ -147,6 +154,24 @@ class MCPClient:
             raise RuntimeError(f"Tool {tool_name} failed: {error.get('message', str(error))}")
         
         result = response.get("result", {})
+
+        # Handle file-based large responses: when an MCP server writes a
+        # large result to disk instead of inlining it in the JSON-RPC
+        # response, it returns {"_result_file": "/path/to/result.json"}.
+        # We transparently read the file, delete it, and return the contents.
+        if isinstance(result, dict) and "_result_file" in result:
+            result_path = Path(result["_result_file"])
+            if result_path.exists():
+                try:
+                    with open(result_path) as f:
+                        result = json.load(f)
+                    result_path.unlink(missing_ok=True)
+                    logger.debug("Loaded large result from file: %s", result_path)
+                except Exception as exc:
+                    logger.warning("Failed to load _result_file %s: %s", result_path, exc)
+            else:
+                logger.warning("_result_file does not exist: %s", result_path)
+
         logger.debug(f"Tool result: {result}")
         
         return result
