@@ -11,6 +11,8 @@ ignored, resulting in 0 iterations and ``Metrix: N/A``.
 Additionally, ``rocprofv3`` uses ``os.execvpe()`` to run commands, which
 means shell built-ins like ``cd``, ``source``, and ``export`` cannot be
 used as command prefixes -- they will crash with ``FileNotFoundError``.
+Inline environment variable prefixes (``VAR=value command ...``) also
+crash ``rocprofv3`` for the same reason.
 
 This module provides ``validate_commandment()`` which can be called:
 1. As a standalone tool by the agent
@@ -95,6 +97,20 @@ def validate_commandment(content: str) -> dict:
                     f"Use absolute paths instead, or wrap the command in: "
                     f"bash -c \"{stripped}\""
                 )
+
+        # Check for inline env var prefixes (VAR=value command ...)
+        # These work in a shell but NOT with os.execvpe() used by rocprofv3
+        env_prefix = re.match(r"^(\w+=\S+)\s+(.+)", stripped)
+        if env_prefix and current_section in ("CORRECTNESS", "PROFILE"):
+            var_assign = env_prefix.group(1)
+            errors.append(
+                f"Command uses inline env var prefix '{var_assign}' in "
+                f"## {current_section}: {stripped!r}. "
+                f"rocprofv3 uses os.execvpe() and treats '{var_assign}' as "
+                f"the executable name, causing FileNotFoundError. "
+                f"Set the variable in ## SETUP (via a wrapper script) or "
+                f"use: bash -c \"{stripped}\""
+            )
 
     # --- Check for common mistakes ---
     if "HIP_VISIBLE_DEVICES" in content and not re.search(r'\$\{?HIP_VISIBLE_DEVICES', content):

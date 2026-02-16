@@ -237,7 +237,12 @@ Focus on the inner kernel for the biggest gains:
 >    by the OpenEvolve evaluator, resulting in 0 iterations and no speedup.
 > 2. Commands must NOT start with shell built-ins (`cd`, `source`, `export`).
 >    `rocprofv3` uses `os.execvpe()`, not a shell. Use absolute paths or `bash -c "..."`.
-> 3. Each section must contain at least one executable command.
+> 3. Commands must NOT use inline env var prefixes like `HIP_VISIBLE_DEVICES=1 python3 ...`.
+>    `rocprofv3` treats `HIP_VISIBLE_DEVICES=1` as the executable name and crashes with
+>    `FileNotFoundError`. Set env vars in a wrapper script created in `## SETUP`.
+> 4. Do NOT set or export `HIP_VISIBLE_DEVICES` — it is ALREADY SET in the environment
+>    by the scheduler. Use `${GEAK_GPU_DEVICE}` if you need the GPU ID.
+> 5. Each section must contain at least one executable command.
 
 **What to do — OpenEvolve mode:**
 
@@ -536,17 +541,21 @@ These are available in every command — do NOT set them yourself:
 
 ```
 ## SETUP
-export HIP_VISIBLE_DEVICES=${GEAK_GPU_DEVICE}
-export PYTHONPATH=${GEAK_WORK_DIR}:${PYTHONPATH}
+printf '#!/bin/bash\nexport HIP_VISIBLE_DEVICES=%s\nexport PYTHONPATH=%s:${PYTHONPATH}\nexec python3 "$@"\n' "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" > ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh
 
 ## CORRECTNESS
-python3 /workspace/geak-oe/examples/geak_eval/correctness_check.py --baseline KERNEL_DIR/kernel.py --generated ${GEAK_WORK_DIR}/kernel.py
+${GEAK_WORK_DIR}/run.sh /workspace/geak-oe/examples/geak_eval/correctness_check.py --baseline KERNEL_DIR/kernel.py --generated ${GEAK_WORK_DIR}/kernel.py
 
 ## PROFILE
-python3 ${GEAK_WORK_DIR}/kernel.py --profile > /dev/null 2>&1 || true
-python3 ${GEAK_WORK_DIR}/kernel.py --profile > /dev/null 2>&1 || true
-kernel-profile "python3 ${GEAK_WORK_DIR}/kernel.py --profile" --gpu-devices ${GEAK_GPU_DEVICE} --replays 5
+${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --profile > /dev/null 2>&1 || true
+${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --profile > /dev/null 2>&1 || true
+kernel-profile "${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --profile" --gpu-devices ${GEAK_GPU_DEVICE} --replays 5
 ```
+
+**WHY a wrapper script:** All COMMANDMENT commands are run via `os.execvpe()`,
+not a shell.  Shell built-ins (`export`, `cd`, `source`) and inline env var
+prefixes (`VAR=val cmd`) crash with `FileNotFoundError`.  A wrapper script
+sets the environment inside the same process that runs python3.
 
 ### Common Mistakes to Avoid
 - Adding `cp $GEAK_CANDIDATE_PATH ...` in SETUP — this variable does not exist
@@ -555,6 +564,9 @@ kernel-profile "python3 ${GEAK_WORK_DIR}/kernel.py --profile" --gpu-devices ${GE
 - Wrapping commands in markdown code fences inside the COMMANDMENT file
 - Adding sections like `## SCORING` or `## BASELINE METRICS` — they end the PROFILE section
 - Using `--output-dir` instead of `--output` for run_openevolve.py
+- Using inline env vars: `HIP_VISIBLE_DEVICES=1 python3 ...` — crashes `rocprofv3`
+- Using bare `export`, `cd`, or `source` as command prefixes — use a wrapper script
+- Setting `HIP_VISIBLE_DEVICES` at all — it is already set by the scheduler
 
 ---
 

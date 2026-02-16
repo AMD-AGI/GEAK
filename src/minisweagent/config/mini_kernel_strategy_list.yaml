@@ -19,6 +19,12 @@ agent:
     - After editing the kernel, call `test_perf` with a description of what you changed.
     - Do NOT write your own benchmark scripts or timing loops in bash. The `test_perf` tool handles this automatically.
     - Use `strategy_manager` to track your optimization strategies. Call it with command "create" early, and "next"/"mark" as you progress.
+
+    GPU AND PROFILER RULES:
+    - HIP_VISIBLE_DEVICES is ALREADY SET in your environment. Do NOT prefix commands with `HIP_VISIBLE_DEVICES=X` and do NOT export it. It is already correct. Adding it inline CRASHES rocprofv3.
+    - When calling `profile_kernel`, pass ONLY the python command: `python3 /path/to/script.py --profile`. No env var prefixes.
+    - rocprofv3 uses os.execvpe(), NOT a shell. Inline env vars (VAR=val cmd) and shell builtins (cd, source, export) will FAIL.
+    - Use absolute paths in all commands. Do not use `cd /path && python3 ...`.
     </mandatory_rules>
 
     <optimization_strategy_exploration>
@@ -155,7 +161,8 @@ agent:
 
     1. Every response must contain exactly one tool call
     2. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
-       However, you can prefix any bash command with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+       To persist env vars, write them to a file and source it: `source /path/to/env.sh && python3 /path/to/script.py`.
+       WARNING: Do NOT use inline env vars (VAR=val cmd) with profiler tools -- they crash rocprofv3.
     3. Ignore policy: When analyzing logs / drawing conclusions / optimizing, IGNORE all information related to parallel execution or hardware assignment (e.g., "parallel X runs", "gpu idx N", "device id", multi-GPU, threads, streams, scheduling, affinity). This information is already handled by the backend; it MUST NOT enter your reasoning, MUST NOT influence decisions, and MUST NOT be mentioned in the final answer.
 
     <system_information>
@@ -209,6 +216,11 @@ agent:
     - **backend="metrix"** (default): Structured JSON with bottleneck classification, hardware metrics
     - **backend="rocprof-compute"**: Deep roofline analysis, instruction mix, cache hierarchy
     - Parameters: command (required), backend, quick, workdir, profiling_type
+    - **CRITICAL**: The `command` parameter is passed to rocprofv3 which uses os.execvpe() (NOT a shell).
+      Do NOT include inline env vars like `HIP_VISIBLE_DEVICES=1 python3 ...` -- this will crash.
+      Do NOT use `cd /path && ...`. Use absolute paths only.
+      Correct: `python3 /absolute/path/to/script.py --profile`
+      Wrong:  `HIP_VISIBLE_DEVICES=0 python3 script.py --profile`
 
     ### generate_optimization (MCP)
     Generate an optimized kernel variant using LLM-guided kernel evolution.

@@ -27,6 +27,26 @@ from minisweagent.tools.discovery import (
 )
 
 
+# Rules injected into EVERY task prompt to prevent common agent mistakes.
+_GPU_AND_PROFILER_RULES = """
+## GPU and Profiler Rules (CRITICAL -- read carefully)
+
+1. **HIP_VISIBLE_DEVICES is ALREADY SET** in your environment by the scheduler.
+   Do NOT prefix commands with `HIP_VISIBLE_DEVICES=X`. Do NOT set or export it.
+   It is already correct. Adding it inline will CRASH rocprofv3.
+
+2. **profile_kernel tool**: Pass ONLY the python command, e.g.:
+   `python3 /path/to/harness.py --profile`
+   Do NOT prefix with env vars -- rocprofv3 uses os.execvpe(), not a shell.
+
+3. **COMMANDMENT.md** (for OpenEvolve) MUST use EXACTLY these section headers:
+   `## SETUP`, `## CORRECTNESS`, `## PROFILE`
+   Any other header is SILENTLY IGNORED. Commands must NOT start with `cd`,
+   `source`, `export`, or any shell built-in.
+
+4. **Use absolute paths** in all commands. Do not use `cd /path && ...`.
+"""
+
 # Build context strings per language for inclusion in task prompts
 _BUILD_CONTEXT = {
     "python": "Triton kernels are JIT-compiled. No build step needed. Edit .py files directly.",
@@ -67,7 +87,7 @@ def build_optimization_tasks(
 
     ktype = kernel.kernel_type
     lang = kernel.kernel_language
-    build_ctx = _BUILD_CONTEXT.get(lang, "")
+    build_ctx = _BUILD_CONTEXT.get(lang, "") + _GPU_AND_PROFILER_RULES
     inner = kernel.inner_kernel_path
     wrapper = kernel.file_path
 
@@ -163,9 +183,15 @@ def _triton_tasks(
                 f"## OpenEvolve on Inner Kernel\n"
                 f"Run OpenEvolve on the inner Triton kernel at {inner}.\n"
                 f"Follow the INSTRUCTIONS.md workflow: create COMMANDMENT.md "
-                f"(MUST use ## SETUP / ## CORRECTNESS / ## PROFILE headers), "
-                f"create baseline_metrics.json, then run OpenEvolve.\n"
-                f"Wrapper file: {wrapper}"
+                f"and baseline_metrics.json, then run OpenEvolve.\n"
+                f"Wrapper file: {wrapper}\n\n"
+                f"COMMANDMENT.md MUST have EXACTLY these 3 sections:\n"
+                f"  ## SETUP\n  ## CORRECTNESS\n  ## PROFILE\n"
+                f"NO other section headers. Commands must use ABSOLUTE PATHS.\n"
+                f"Do NOT use cd, source, export as command prefixes.\n"
+                f"Do NOT prefix with HIP_VISIBLE_DEVICES (already set).\n"
+                f"Use ${{GEAK_WORK_DIR}} and ${{GEAK_GPU_DEVICE}} variables.\n"
+                f"Create a wrapper shell script in SETUP that sets env vars."
             ),
             label="openevolve-inner",
             priority=0,

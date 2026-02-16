@@ -156,6 +156,78 @@ def test_format_errors():
     assert "must fix" in msg.lower() or "ERRORS" in msg
 
 
+# ---- Inline env var prefixes ----
+
+def test_inline_env_var_in_profile():
+    """HIP_VISIBLE_DEVICES=1 python3 ... in PROFILE should be caught."""
+    content = """\
+## SETUP
+mkdir -p /tmp/test
+
+## CORRECTNESS
+python3 /path/to/test.py
+
+## PROFILE
+HIP_VISIBLE_DEVICES=1 python3 /path/to/bench.py --profile
+"""
+    result = validate_commandment(content)
+    assert result["valid"] is False
+    assert any("inline env var" in e and "HIP_VISIBLE_DEVICES=1" in e for e in result["errors"])
+
+
+def test_inline_env_var_in_correctness():
+    """Inline env var in CORRECTNESS should also be caught."""
+    content = """\
+## SETUP
+mkdir -p /tmp/test
+
+## CORRECTNESS
+PYTHONPATH=/workspace python3 /path/to/test.py
+
+## PROFILE
+python3 /path/to/bench.py --profile
+"""
+    result = validate_commandment(content)
+    assert result["valid"] is False
+    assert any("inline env var" in e and "PYTHONPATH=/workspace" in e for e in result["errors"])
+
+
+def test_inline_env_var_in_setup_not_flagged():
+    """Inline env var in SETUP should NOT be flagged (SETUP doesn't go through rocprofv3)."""
+    content = """\
+## SETUP
+MY_VAR=hello mkdir -p /tmp/test
+
+## CORRECTNESS
+python3 /path/to/test.py
+
+## PROFILE
+python3 /path/to/bench.py --profile
+"""
+    result = validate_commandment(content)
+    # Should not have inline env var errors (only CORRECTNESS/PROFILE are checked)
+    assert not any("inline env var" in e for e in result["errors"])
+
+
+def test_inline_env_var_multiple_vars():
+    """Multiple inline env vars should each be caught."""
+    content = """\
+## SETUP
+mkdir -p /tmp/test
+
+## CORRECTNESS
+python3 /path/to/test.py
+
+## PROFILE
+HIP_VISIBLE_DEVICES=0 python3 /path/to/bench.py
+CUDA_VISIBLE_DEVICES=1 python3 /path/to/bench.py
+"""
+    result = validate_commandment(content)
+    assert result["valid"] is False
+    env_var_errors = [e for e in result["errors"] if "inline env var" in e]
+    assert len(env_var_errors) == 2
+
+
 # ---- Edge cases ----
 
 def test_code_block_does_not_false_positive():
