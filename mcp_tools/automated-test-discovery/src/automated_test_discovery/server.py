@@ -18,11 +18,14 @@ mcp = FastMCP(
     
     Single tool: discover - finds tests, benchmarks, and kernel info.
     
-    Just provide a kernel file path and it returns everything:
+    Provide a kernel file path OR a repository directory and it returns everything:
     - Kernel name and type (triton/hip/cuda)
     - Related test files with confidence scores and run commands
     - Related benchmark files with confidence scores
     - Project workspace path
+    
+    When a directory is given, all kernels inside it are discovered first,
+    then tests and benchmarks are matched against every discovered kernel.
     
     Uses content-based detection (not directory names) and works on any project.
     """
@@ -157,9 +160,15 @@ def _get_test_command(path: Path) -> str:
 
 
 def _expand_workspace(kernel_path: Path) -> Path:
+    """Find the project root by walking up from *kernel_path*.
+
+    When *kernel_path* is a directory (e.g. a repository root) we start the
+    marker search from the directory itself, not its parent.  This ensures
+    that ``/path/to/repo/.git`` is found when the caller passes ``/path/to/repo``.
+    """
     markers = ["pyproject.toml", "setup.py", ".git", "tests", "op_tests"]
-    
-    current = kernel_path.parent
+
+    current = kernel_path if kernel_path.is_dir() else kernel_path.parent
     for _ in range(15):
         for marker in markers:
             if (current / marker).exists():
@@ -168,8 +177,8 @@ def _expand_workspace(kernel_path: Path) -> Path:
         if parent == current:
             break
         current = parent
-    
-    return kernel_path.parent
+
+    return kernel_path if kernel_path.is_dir() else kernel_path.parent
 
 
 def _get_kernel_type(content: str) -> str:
@@ -186,6 +195,30 @@ def _get_kernel_type(content: str) -> str:
 # Single Monolithic Tool
 # ============================================================================
 
+def _find_kernels_in_dir(directory: Path) -> list[dict]:
+    """Recursively scan *directory* for kernel files and return info dicts."""
+    extensions = {".py", ".cpp", ".cc", ".cu", ".hip"}
+    kernels: list[dict] = []
+    for candidate in directory.rglob("*"):
+        if not candidate.is_file():
+            continue
+        if candidate.suffix not in extensions:
+            continue
+        if _should_skip(candidate):
+            continue
+        if _is_kernel_file(candidate):
+            try:
+                content = candidate.read_text()[:3000]
+            except Exception:
+                content = ""
+            kernels.append({
+                "name": candidate.stem,
+                "type": _get_kernel_type(content),
+                "file": str(candidate),
+            })
+    return kernels
+
+
 @mcp.tool()
 def discover(
     kernel_path: str,
@@ -199,13 +232,16 @@ def discover(
     detection. No configuration needed - works on any project structure.
     
     Args:
-        kernel_path: Path to the kernel file (.py for Triton, .cu/.hip for CUDA/HIP)
+        kernel_path: Path to a kernel file (.py/.cu/.hip) OR a repository
+            directory.  When a directory is given, all kernel files inside it
+            are discovered first, and tests/benchmarks are matched against each
+            discovered kernel.
         max_tests: Maximum number of test results to return (default: 5)
         max_benchmarks: Maximum number of benchmark results to return (default: 5)
     
     Returns:
         Complete discovery result with:
-        - kernel: Name, type (triton/hip/cuda), file path
+        - kernel: Name, type (triton/hip/cuda), file path  (or list when directory)
         - workspace: Detected project root directory
         - tests: List of {file, name, confidence, command} sorted by relevance
         - benchmarks: List of {file, name, confidence, command} sorted by relevance
@@ -213,34 +249,106 @@ def discover(
     
     Example:
         discover("/path/to/gemm_a16w16.py")
-        
-        Returns:
-        {
-            "kernel": {"name": "gemm_a16w16", "type": "triton", "file": "..."},
-            "workspace": "/path/to/project",
-            "tests": [
-                {"name": "test_gemm_a16w16.py", "confidence": 1.0, "command": "pytest ..."}
-            ],
-            "benchmarks": [
-                {"name": "bench_gemm_a16w16.py", "confidence": 1.0, "command": "python ..."}
-            ],
-            "summary": "Found 1 test and 1 benchmark for gemm_a16w16 (triton kernel)"
-        }
+        discover("/path/to/repo")  # scans repo recursively for kernels
     """
     path = Path(kernel_path)
     if not path.exists():
         return {
-            "error": f"Kernel file not found: {kernel_path}",
+            "error": f"Path not found: {kernel_path}",
             "kernel": None,
             "tests": [],
             "benchmarks": [],
-            "summary": "Error: file not found"
+            "summary": "Error: path not found"
         }
-    
-    # Expand to workspace
+
+    # --- Directory mode: discover kernels first, then find tests for all ---
+    if path.is_dir():
+        workspace = _expand_workspace(path)
+        discovered_kernels = _find_kernels_in_dir(workspace)
+
+        kernel_files = {Path(k["file"]) for k in discovered_kernels}
+        all_kernel_names = [k["name"] for k in discovered_kernels]
+        all_kernel_parts: list[str] = []
+        for kname in all_kernel_names:
+            all_kernel_parts.extend(p.lower() for p in kname.split("_") if len(p) > 2)
+        all_kernel_parts = list(set(all_kernel_parts))
+
+        tests: list[dict] = []
+        benchmarks: list[dict] = []
+        extensions = [".py", ".cpp", ".cc", ".cu", ".hip"]
+
+        for ext in extensions:
+            for file_path in workspace.rglob(f"*{ext}"):
+                if _should_skip(file_path):
+                    continue
+                if file_path in kernel_files:
+                    continue
+                if _is_kernel_file(file_path):
+                    continue
+
+                fname_lower = file_path.name.lower()
+
+                test_score = _score_as_test(file_path)
+                if test_score >= 0.3:
+                    for kname in all_kernel_names:
+                        if kname.lower() in fname_lower:
+                            test_score += 1.0
+                            break
+                    else:
+                        matches = sum(1 for p in all_kernel_parts if p in fname_lower)
+                        if matches >= 2:
+                            test_score += 0.3 * matches
+                    tests.append({
+                        "file": str(file_path),
+                        "name": file_path.name,
+                        "confidence": round(min(test_score, 1.0), 2),
+                        "command": _get_test_command(file_path),
+                    })
+
+                bench_score = _score_as_bench(file_path)
+                if bench_score >= 0.3:
+                    for kname in all_kernel_names:
+                        if kname.lower() in fname_lower:
+                            bench_score += 1.0
+                            break
+                    else:
+                        matches = sum(1 for p in all_kernel_parts if p in fname_lower)
+                        if matches >= 2:
+                            bench_score += 0.3 * matches
+                    benchmarks.append({
+                        "file": str(file_path),
+                        "name": file_path.name,
+                        "confidence": round(min(bench_score, 1.0), 2),
+                        "command": f"python {file_path}",
+                    })
+
+        tests.sort(key=lambda x: x["confidence"], reverse=True)
+        benchmarks.sort(key=lambda x: x["confidence"], reverse=True)
+
+        test_count = len(tests)
+        bench_count = len(benchmarks)
+        k_count = len(discovered_kernels)
+        summary = (
+            f"Scanned repository: found {k_count} kernel(s), "
+            f"{test_count} test(s), {bench_count} benchmark(s)"
+        )
+        if tests:
+            summary += f". Recommended test: {tests[0]['name']}"
+
+        return {
+            "kernel": discovered_kernels if len(discovered_kernels) != 1 else discovered_kernels[0],
+            "workspace": str(workspace),
+            "tests": tests[:max_tests],
+            "benchmarks": benchmarks[:max_benchmarks],
+            "total_kernels_found": k_count,
+            "total_tests_found": test_count,
+            "total_benchmarks_found": bench_count,
+            "summary": summary,
+        }
+
+    # --- Single-file mode (original behaviour) ---
     workspace = _expand_workspace(path)
-    
-    # Get kernel info
+
     kernel_name = path.stem
     try:
         content = path.read_text()[:3000]
@@ -250,7 +358,6 @@ def discover(
     
     kernel_parts = [p.lower() for p in kernel_name.split("_") if len(p) > 2]
     
-    # Scan for tests and benchmarks
     tests = []
     benchmarks = []
     extensions = [".py", ".cpp", ".cc", ".cu", ".hip"]
@@ -266,7 +373,6 @@ def discover(
             
             fname_lower = file_path.name.lower()
             
-            # Score as test
             test_score = _score_as_test(file_path)
             if test_score >= 0.3:
                 if kernel_name.lower() in fname_lower:
@@ -283,7 +389,6 @@ def discover(
                     "command": _get_test_command(file_path)
                 })
             
-            # Score as benchmark
             bench_score = _score_as_bench(file_path)
             if bench_score >= 0.3:
                 if kernel_name.lower() in fname_lower:
@@ -300,11 +405,9 @@ def discover(
                     "command": f"python {file_path}"
                 })
     
-    # Sort by confidence
     tests.sort(key=lambda x: x["confidence"], reverse=True)
     benchmarks.sort(key=lambda x: x["confidence"], reverse=True)
     
-    # Build summary
     test_count = len(tests)
     bench_count = len(benchmarks)
     
@@ -317,7 +420,6 @@ def discover(
     else:
         summary = f"No tests or benchmarks found for {kernel_name} ({kernel_type} kernel)"
     
-    # Add top recommendation
     if tests:
         summary += f". Recommended test: {tests[0]['name']}"
     

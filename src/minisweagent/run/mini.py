@@ -61,11 +61,16 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tu
         if clone_root is not None:
             ws = clone_root
         else:
-            ws = kp.parent
-            for p in kp.parents:
-                if (p / ".git").exists():
-                    ws = p
-                    break
+            # When kp is a directory (repo root), check it first before
+            # walking up — kp.parents does not include kp itself.
+            if kp.is_dir() and (kp / ".git").exists():
+                ws = kp
+            else:
+                ws = kp.parent
+                for p in kp.parents:
+                    if (p / ".git").exists():
+                        ws = p
+                        break
         result = discover(workspace=ws, kernel_path=kp, interactive=False)
         _run_discovery._last_result = result  # stash for task planner
         lines = []

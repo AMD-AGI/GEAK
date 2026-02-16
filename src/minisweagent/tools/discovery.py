@@ -506,12 +506,16 @@ Respond with JSON only:
         self.result.user_provided_test = test_command
         self.result.user_provided_bench = bench_command
 
-        # If kernel_path is a file, expand workspace to find related tests
+        # Scope the workspace based on what we were given
         self._kernel_file = None
         if kernel_path and kernel_path.is_file():
             self._kernel_file = kernel_path
             # Search for workspace root (look for common markers)
             self._expand_workspace_for_file(kernel_path)
+        elif kernel_path and kernel_path.is_dir():
+            # Directory (repository) mode: use the directory as workspace
+            # if it looks like a project root, otherwise expand upward.
+            self._expand_workspace_for_dir(kernel_path)
 
         # Step 0: Auto-detect patterns from the codebase
         self._auto_detect_patterns()
@@ -614,6 +618,31 @@ Respond with JSON only:
             self.workspace = best_workspace
             self.result.workspace_path = best_workspace
             print(f"      Expanded workspace to: {best_workspace}")
+
+    def _expand_workspace_for_dir(self, dir_path: Path):
+        """Set the workspace when *kernel_path* is a directory.
+
+        The caller explicitly chose this directory, so we honour it as the
+        workspace boundary.  This prevents test discovery from pulling in
+        unrelated files from sibling directories (e.g. scanning the entire
+        monorepo when only ``geak_eval/`` was requested).
+
+        If the directory itself is a project root (``.git``, ``pyproject.toml``,
+        etc.) we note that, but either way the workspace is the directory.
+        """
+        self.workspace = dir_path
+        self.result.workspace_path = dir_path
+
+        project_markers = self.config.project_markers or [
+            "pyproject.toml", "setup.py", "setup.cfg", ".git",
+            "op_tests", "tests", "Makefile", "CMakeLists.txt",
+        ]
+        for marker in project_markers:
+            if (dir_path / marker).exists():
+                print(f"      Directory is a project root: {dir_path}")
+                return
+
+        print(f"      Using specified directory as workspace: {dir_path}")
 
     def _discover_kernels(self, kernel_path: Path | None = None):
         """Discover kernel files in the workspace."""
@@ -816,6 +845,13 @@ Respond with JSON only:
                         function_names.append(fname)
 
         kernel_name = file_path.stem
+        # When the filename is generic (e.g. "kernel.py", "main.py"), the
+        # parent directory often carries the real identity (e.g. "rope/kernel.py"
+        # → kernel_name = "rope").  Use the parent dir name instead so that
+        # test-name matching can work properly.
+        _GENERIC_STEMS = {"kernel", "main", "module", "op", "impl"}
+        if kernel_name.lower() in _GENERIC_STEMS and file_path.parent.name:
+            kernel_name = file_path.parent.name
 
         return KernelInfo(
             file_path=file_path,
@@ -1639,6 +1675,12 @@ def discover(
     if workspace and Path(workspace).is_file():
         kernel_path = Path(workspace)
         workspace = kernel_path.parent
+
+    # When kernel_path is a directory and no explicit workspace was given,
+    # let the pipeline determine the workspace from the directory itself
+    # rather than defaulting to cwd.
+    if kernel_path and Path(kernel_path).is_dir() and workspace is None:
+        workspace = kernel_path
 
     pipeline = DiscoveryPipeline(workspace, use_llm=use_llm)
     return pipeline.run(
