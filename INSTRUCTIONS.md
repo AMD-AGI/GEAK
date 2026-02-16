@@ -177,6 +177,24 @@ creates test inputs, and provides `--correctness`, `--profile`, and
    x = torch.randn(S, B, H, D, dtype=torch.float16, device='cpu').to('cuda')
    ```
 
+**Language-specific test harness notes:**
+
+When the kernel is NOT a Python/Triton kernel, the test harness approach varies:
+
+- **HIP/CUDA kernels (.cu, .hip, .cpp):** The test harness should still be a
+  Python script that calls the kernel via its pybind11 binding (e.g.,
+  `torch.ops.aiter.my_kernel(...)`) or via ctypes. If no Python binding exists,
+  create a C++ test that compiles with `hipcc` and outputs timing to stdout.
+  Use `--correctness` and `--profile` flags.
+
+- **Composable Kernel (CK):** CK kernels are template-heavy C++. After editing
+  template parameters, rebuild with `hipcc` or `cmake`. The test harness should
+  import the rebuilt module and call the kernel.
+
+- **Assembly (HSACO):** HSACO binaries are precompiled. You cannot edit the
+  assembly. The test harness should test the Python wrapper's launch config
+  (grid dims, block dims, shared memory size).
+
 ### 1c. DISCOVER: Identify the optimisation target file
 
 **CRITICAL:** When the target kernel file is a **wrapper** that imports the
@@ -211,6 +229,15 @@ Focus on the inner kernel for the biggest gains:
 - Use `tl.trans()` to transpose data in registers
 - Vectorise loads/stores for better bandwidth
 - Change the loop structure for better pipelining
+
+**CRITICAL — COMMANDMENT.md rules (violating these causes silent failure):**
+
+> 1. MUST use EXACTLY these section headers: `## SETUP`, `## CORRECTNESS`, `## PROFILE`.
+>    Any other header (e.g., `## Test Command`, `## Benchmark`) will be **SILENTLY IGNORED**
+>    by the OpenEvolve evaluator, resulting in 0 iterations and no speedup.
+> 2. Commands must NOT start with shell built-ins (`cd`, `source`, `export`).
+>    `rocprofv3` uses `os.execvpe()`, not a shell. Use absolute paths or `bash -c "..."`.
+> 3. Each section must contain at least one executable command.
 
 **What to do — OpenEvolve mode:**
 

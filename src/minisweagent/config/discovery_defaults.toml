@@ -22,7 +22,15 @@ patterns = [
     '@triton\.autotune',
     '__global__\s+void',
     'tl\.load|tl\.store',
+    '\bck::',
+    '#include\s+[<"]ck/',
+    'hipModuleLoad|hipModuleLaunchKernel',
+    '\.hsaco\b',
 ]
+
+# File extensions to scan for kernel definitions.
+# Discovery searches all files with these extensions (not just .py).
+extensions = [".py", ".cu", ".hip", ".cpp", ".cc", ".cxx"]
 
 # Function names considered "wrapper" entry-points around kernels.
 # Used when extracting function names from kernel files.

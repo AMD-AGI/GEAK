@@ -33,12 +33,24 @@ Usage (CLI):
 """
 
 import json
+import math
 import sys
 from pathlib import Path
 
 # Metrics where summation is the correct aggregation (total cost).
 _SUM_METRICS = {"duration_us"}
 # All other numeric metrics use duration-weighted averaging.
+
+
+def _sanitize_value(v):
+    """Replace NaN/inf floats with None (JSON-safe) before serialization."""
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return None
+    if isinstance(v, dict):
+        return {k: _sanitize_value(val) for k, val in v.items()}
+    if isinstance(v, list):
+        return [_sanitize_value(item) for item in v]
+    return v
 
 
 def list_kernels(metrixtool_result: dict, gpu_index: int = 0) -> list[dict]:
@@ -101,17 +113,23 @@ def aggregate_metrics(kernels: list[dict]) -> dict[str, float]:
     aggregated: dict[str, float] = {}
     for key in sorted(all_keys):
         if key in _SUM_METRICS:
-            aggregated[key] = sum(k.get("metrics", {}).get(key, 0) for k in kernels)
+            raw = sum(k.get("metrics", {}).get(key, 0) for k in kernels)
         elif total_duration > 0:
             weighted = sum(
                 k.get("metrics", {}).get(key, 0)
                 * k.get("duration_us", k.get("metrics", {}).get("duration_us", 0))
                 for k in kernels
             )
-            aggregated[key] = weighted / total_duration
+            raw = weighted / total_duration
         else:
             values = [k.get("metrics", {}).get(key, 0) for k in kernels]
-            aggregated[key] = sum(values) / len(values)
+            raw = sum(values) / len(values)
+
+        # Sanitize NaN/inf to None for JSON compatibility
+        if isinstance(raw, float) and (math.isnan(raw) or math.isinf(raw)):
+            aggregated[key] = None
+        else:
+            aggregated[key] = raw
 
     return aggregated
 
@@ -225,7 +243,7 @@ def _format_baseline(selected: list[dict]) -> dict:
                 seen.add(obs)
                 observations.append(obs)
 
-    return {
+    result = {
         "duration_us": aggregated.get("duration_us", 0),
         "kernel_name": kernel_name,
         "kernel_names": [k["name"] for k in selected],
@@ -233,6 +251,8 @@ def _format_baseline(selected: list[dict]) -> dict:
         "bottleneck": dominant.get("bottleneck", "unknown"),
         "observations": observations,
     }
+    # Sanitize NaN/inf values to ensure valid JSON output
+    return _sanitize_value(result)
 
 
 # ---------------------------------------------------------------------------

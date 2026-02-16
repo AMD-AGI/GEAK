@@ -32,8 +32,14 @@ from minisweagent.run.utils.task_parser import _resolve_path_case
 from minisweagent.utils.log import logger
 
 
-def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str:
-    """Run test discovery on the resolved kernel and return formatted results for the task prompt."""
+def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tuple[str, object]:
+    """Run test discovery on the resolved kernel and return formatted results for the task prompt.
+
+    Returns:
+        A formatted string for the task prompt.  The raw DiscoveryResult is
+        stashed on the function object as ``_run_discovery._last_result`` so the
+        caller can pass it to the task planner without a second discovery pass.
+    """
     repo_root = Path(__file__).resolve().parent.parent.parent.parent
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
@@ -61,6 +67,7 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str:
                     ws = p
                     break
         result = discover(workspace=ws, kernel_path=kp, interactive=False)
+        _run_discovery._last_result = result  # stash for task planner
         lines = []
         kernel_stem = kp.stem.lower()
         match_terms = [kernel_stem]
@@ -90,11 +97,31 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str:
                 console.print(f"  [green]+[/green] {b.file_path} [dim](confidence: {b.confidence:.1f})[/dim]")
                 lines.append(f"  - Benchmark: {b.file_path} (confidence: {b.confidence:.1f})")
         console.print("[bold cyan]---------------------[/bold cyan]\n")
-        if lines:
+        # Include dependency graph and kernel info if available
+        dep_graph_lines = []
+        if result.kernels:
+            k = result.kernels[0]
+            dep_graph_lines.append(f"\n--- Kernel Analysis ---")
+            dep_graph_lines.append(f"Type: {k.kernel_type} | Language: {k.kernel_language}")
+            if k.inner_kernel_path:
+                dep_graph_lines.append(f"Inner kernel: {k.inner_kernel_path} ({k.inner_kernel_language or 'unknown'})")
+            if k.fusion_opportunities:
+                dep_graph_lines.append(f"Fusion opportunities: {len(k.fusion_opportunities)}")
+                for opp in k.fusion_opportunities[:3]:
+                    dep_graph_lines.append(f"  - {opp}")
+
+        dep_graph = result.dependency_graphs.get(result.kernels[0].kernel_name) if result.kernels else None
+        if dep_graph:
+            dep_graph_lines.append(f"\n{dep_graph.summary()}")
+
+        dep_block = "\n".join(dep_graph_lines) + "\n---\n" if dep_graph_lines else ""
+
+        if lines or dep_block:
             return (
                 "\n--- Discovered Tests ---\n"
                 + "\n".join(lines)
                 + "\nRead these test files and reuse their reference implementations, input patterns, and tolerances.\n---\n"
+                + dep_block
             )
     except Exception as e:
         console.print(f"[yellow]Discovery failed: {e}[/yellow]")
@@ -470,6 +497,26 @@ def main(
             console.print(f"[dim]Repository: {agent_config['repo']}[/dim]")
         else:
             console.print("[bold yellow]Warning: No repo path specified for parallel execution[/bold yellow]")
+
+        # Generate dynamic optimization tasks from discovery results (if available)
+        discovery_result = getattr(_run_discovery, "_last_result", None)
+        if discovery_result and discovery_result.kernels:
+            try:
+                from minisweagent.run.task_planner import build_optimization_tasks
+                tasks = build_optimization_tasks(
+                    discovery_result=discovery_result,
+                    base_task_context=task_content,
+                    agent_class=base_agent_class,
+                )
+                if tasks:
+                    agent_config["tasks"] = tasks
+                    console.print(f"[bold cyan]Task planner: {len(tasks)} optimization tasks generated (pool mode)[/bold cyan]")
+                    for t in tasks[:6]:
+                        console.print(f"  [dim]- [{t.priority:2d}] {t.label} ({t.kernel_language})[/dim]")
+                    if len(tasks) > 6:
+                        console.print(f"  [dim]  ... and {len(tasks) - 6} more[/dim]")
+            except Exception as e:
+                console.print(f"[yellow]Task planner failed ({e}), falling back to homogeneous mode[/yellow]")
     else:
         console.print("[bold cyan]Using Single Agent Mode[/bold cyan]")
         console.print(f"[dim]Using GPU: {parsed_gpu_ids[0]}[/dim]")

@@ -30,6 +30,11 @@ from pathlib import Path
 
 from minisweagent.tools.resolve_kernel_url_impl import RESOLVED_DIR_NAME
 
+# Shared extension constants -- single source of truth
+CPP_EXTENSIONS = frozenset((".cpp", ".cc", ".cu", ".hip", ".cxx"))
+CPP_HEADER_EXTENSIONS = frozenset((".h", ".hpp"))
+ALL_KERNEL_EXTENSIONS = frozenset((".py",)) | CPP_EXTENSIONS
+
 # Try to import TOML support
 try:
     import tomllib
@@ -67,6 +72,9 @@ class DiscoveryConfig:
 
     # --- Kernel detection ---
     kernel_patterns: list[str] = field(default_factory=list)
+    kernel_extensions: list[str] = field(
+        default_factory=lambda: list(ALL_KERNEL_EXTENSIONS)
+    )
     wrapper_functions: list[str] = field(default_factory=list)
 
     # --- Test keywords  (regex, weight) ---
@@ -88,15 +96,94 @@ class DiscoveryConfig:
 
 
 @dataclass
+class BuildInfo:
+    """How to compile/build a kernel."""
+
+    compiler: str | None = None  # "triton" (JIT), "hipcc", "nvcc", "cmake", None (precompiled)
+    build_system: str | None = None  # "setup.py", "CMakeLists.txt", "Makefile", None
+    build_dir: Path | None = None  # Where compiled artifacts go
+    pybind_module: str | None = None  # e.g., "aiter._C" or "torch.ops.aiter"
+
+
+@dataclass
 class KernelInfo:
     """Information about a discovered kernel."""
 
     file_path: Path
     kernel_name: str
-    kernel_type: str  # triton, hip, cuda
+    kernel_type: str  # triton, hip, cuda, ck, asm
+    kernel_language: str = "python"  # "python", "cpp", "asm"
     function_names: list[str] = field(default_factory=list)
     has_jit_decorator: bool = False
     has_autotune: bool = False
+    inner_kernel_path: Path | None = None
+    inner_kernel_language: str | None = None
+    build_info: BuildInfo | None = None
+    # Populated by the dependency graph builder (Fix 2)
+    fusion_opportunities: list[str] = field(default_factory=list)
+
+
+@dataclass
+class KernelNode:
+    """A single function/kernel in the dependency graph."""
+
+    name: str
+    file_path: Path
+    language: str  # "python", "triton", "hip", "ck", "asm"
+    node_type: str  # "wrapper", "jit_kernel", "device_func", "asm_module", "torch_op"
+    line_range: tuple[int, int] | None = None
+
+
+@dataclass
+class FusionOpportunity:
+    """A detected opportunity to fuse operations."""
+
+    description: str  # Human-readable description
+    involved_nodes: list[str] = field(default_factory=list)  # Names of kernels/ops
+    languages: set[str] = field(default_factory=set)  # Languages involved
+    fusion_type: str = ""  # "sequential_launch", "absorb_wrapper_op", "cross_language"
+    estimated_benefit: str = "medium"  # "high", "medium", "low"
+
+
+@dataclass
+class KernelDependencyGraph:
+    """Cross-language dependency graph for a kernel and its sub-kernels."""
+
+    root_name: str  # Name of the Python wrapper entry point
+    nodes: dict[str, KernelNode] = field(default_factory=dict)
+    edges: list[tuple[str, str]] = field(default_factory=list)  # (caller, callee)
+    sequential_launches: list[list[str]] = field(default_factory=list)
+    wrapper_ops: list[str] = field(default_factory=list)  # e.g., ["dtype conversion", "reshape"]
+    language_boundaries: list[tuple[str, str, str]] = field(default_factory=list)
+    fusion_opportunities: list[FusionOpportunity] = field(default_factory=list)
+
+    def summary(self) -> str:
+        """Human-readable summary for inclusion in agent task prompts."""
+        lines = [f"Dependency graph for {self.root_name}:"]
+        lines.append(f"  Nodes ({len(self.nodes)}):")
+        for name, node in self.nodes.items():
+            lines.append(f"    - {name} [{node.language}/{node.node_type}] in {node.file_path.name}")
+        if self.edges:
+            lines.append(f"  Call edges ({len(self.edges)}):")
+            for caller, callee in self.edges:
+                lines.append(f"    {caller} -> {callee}")
+        if self.sequential_launches:
+            lines.append(f"  Sequential kernel launches (potential fusion targets):")
+            for group in self.sequential_launches:
+                lines.append(f"    [{' -> '.join(group)}]")
+        if self.wrapper_ops:
+            lines.append(f"  Wrapper operations between launches:")
+            for op in self.wrapper_ops:
+                lines.append(f"    - {op}")
+        if self.language_boundaries:
+            lines.append(f"  Language boundaries:")
+            for caller, callee, boundary in self.language_boundaries:
+                lines.append(f"    {caller} -> {callee} ({boundary})")
+        if self.fusion_opportunities:
+            lines.append(f"  Fusion opportunities ({len(self.fusion_opportunities)}):")
+            for opp in self.fusion_opportunities:
+                lines.append(f"    - [{opp.estimated_benefit}] {opp.description}")
+        return "\n".join(lines)
 
 
 @dataclass
@@ -126,6 +213,7 @@ class DiscoveryResult:
     kernels: list[KernelInfo] = field(default_factory=list)
     tests: list[TestInfo] = field(default_factory=list)
     benchmarks: list[BenchmarkInfo] = field(default_factory=list)
+    dependency_graphs: dict[str, KernelDependencyGraph] = field(default_factory=dict)
     workspace_path: Path = None
     needs_user_confirmation: bool = True
     user_provided_test: str | None = None
@@ -201,6 +289,7 @@ class DiscoveryPipeline:
 
         cfg = DiscoveryConfig(
             kernel_patterns=kernel_cfg.get("patterns", []),
+            kernel_extensions=kernel_cfg.get("extensions", list(ALL_KERNEL_EXTENSIONS)),
             wrapper_functions=kernel_cfg.get("wrapper_functions", []),
             test_python_keywords=self._toml_keywords_to_tuples(test_cfg.get("python_keywords", [])),
             test_cpp_keywords=self._toml_keywords_to_tuples(test_cfg.get("cpp_keywords", [])),
@@ -430,6 +519,17 @@ Respond with JSON only:
         # Step 1: Discover kernels
         self._discover_kernels(kernel_path)
 
+        # Step 1b: Build dependency graphs and detect fusion opportunities
+        self._dependency_graphs: dict[str, KernelDependencyGraph] = {}
+        for kernel in self.result.kernels:
+            dep_graph = self.build_dependency_graph(kernel)
+            if dep_graph:
+                self._dependency_graphs[kernel.kernel_name] = dep_graph
+                if dep_graph.fusion_opportunities:
+                    print(f"      {kernel.kernel_name}: {len(dep_graph.fusion_opportunities)} fusion opportunity(ies)")
+
+        self.result.dependency_graphs = self._dependency_graphs
+
         # Step 2: Discover tests (unless user provided)
         if test_command:
             self.result.tests.append(
@@ -527,49 +627,95 @@ Respond with JSON only:
             if kernel_info:
                 self.result.kernels.append(kernel_info)
         else:
-            # Search directory
-            for py_file in search_path.rglob("*.py"):
-                # Skip test files and common non-kernel dirs
-                if self._should_skip_file(py_file):
+            # Search directory -- scan all kernel-relevant extensions
+            kernel_exts = set(self.config.kernel_extensions or [".py"])
+            for candidate in search_path.rglob("*"):
+                if not candidate.is_file():
+                    continue
+                if candidate.suffix not in kernel_exts:
+                    continue
+                if self._should_skip_file(candidate):
                     continue
 
-                kernel_info = self._analyze_kernel_file(py_file)
+                kernel_info = self._analyze_kernel_file(candidate)
                 if kernel_info:
                     self.result.kernels.append(kernel_info)
 
         print(f"      Found {len(self.result.kernels)} kernel(s)")
 
+    # ------------------------------------------------------------------
+    # Kernel language / build info mapping
+    # ------------------------------------------------------------------
+
+    _KERNEL_TYPE_TO_LANGUAGE = {
+        "triton": "python",
+        "hip": "cpp",
+        "cuda": "cpp",
+        "ck": "cpp",
+        "asm": "asm",
+    }
+
+    _KERNEL_TYPE_TO_COMPILER = {
+        "triton": "triton",
+        "hip": "hipcc",
+        "cuda": "nvcc",
+        "ck": "hipcc",
+        "asm": None,
+    }
+
     def _analyze_kernel_file(self, file_path: Path) -> KernelInfo | None:
         """Analyze a file to determine if it contains kernels.
 
-        Detects both direct kernel definitions (with @triton.jit, __global__, etc.)
-        and **wrapper files** that import and launch kernel functions defined elsewhere.
-        Wrapper files are common in projects like aiter where the public API lives in
-        a separate module from the @triton.jit implementations.
+        Detects:
+        - Triton: ``@triton.jit``, ``tl.load``/``tl.store``
+        - HIP: ``__global__`` + ``__device__``/``hipLaunch``
+        - CUDA: ``__global__`` + cuda references
+        - Composable Kernel (CK): ``ck::`` namespace, ``#include "ck/..."``
+        - Assembly (HSACO): ``hipModuleLoad``, ``hipModuleLaunchKernel``
+        - Python wrapper files that import/call kernel functions from other modules
+          (including cross-language via ``torch.ops.*`` and ``ctypes``)
         """
         try:
             content = file_path.read_text()
         except Exception:
             return None
 
-        # Check for kernel patterns
+        is_cpp = file_path.suffix in CPP_EXTENSIONS | CPP_HEADER_EXTENSIONS
+
+        # --- Detect kernel type ---
         kernel_type = None
         has_jit = False
         has_autotune = False
 
+        # Triton kernels (Python)
         if "@triton.jit" in content or "tl.load" in content:
             kernel_type = "triton"
             has_jit = "@triton.jit" in content
             has_autotune = "@triton.autotune" in content
+
+        # Composable Kernel (CK) -- check BEFORE generic HIP to avoid misclassifying
+        elif re.search(r'\bck::', content) or re.search(r'#include\s+[<"]ck/', content):
+            kernel_type = "ck"
+
+        # Assembly (HSACO) -- precompiled binaries loaded via HIP runtime
+        elif re.search(r'hipModuleLoad|hipModuleLaunchKernel|\.hsaco\b', content):
+            kernel_type = "asm"
+
+        # HIP kernels
         elif "__global__" in content and ("__device__" in content or "hipLaunch" in content):
             kernel_type = "hip"
+
+        # CUDA kernels
         elif "__global__" in content and "cuda" in content.lower():
             kernel_type = "cuda"
 
-        # Detect Triton wrapper files: they import triton and import/call kernel
-        # functions (e.g. ``from ..._triton_kernels.rope.rope import _rope_kernel_*``)
-        # but don't define @triton.jit kernels themselves.
-        if not kernel_type:
+        # --- Detect Python wrapper files ---
+        inner_kernel_path = None
+        inner_kernel_language = None
+        build_info = None
+
+        if not kernel_type and not is_cpp:
+            # Triton wrapper: imports triton and imports/calls _kernel functions
             has_triton_import = bool(re.search(r"import\s+triton", content))
             imports_kernel_funcs = bool(
                 re.search(r"from\s+\S+\s+import\s+[^)]*_kernel", content, re.DOTALL)
@@ -577,73 +723,510 @@ Respond with JSON only:
             calls_kernel_with_grid = bool(re.search(r"_kernel\w*\[", content))
             if has_triton_import and (imports_kernel_funcs or calls_kernel_with_grid):
                 kernel_type = "triton"
+                # Trace the import to find the inner kernel file
+                inner_kernel_path = self._trace_triton_import(content, file_path)
+                if inner_kernel_path:
+                    inner_kernel_language = "python"
+
+            # Cross-language wrapper: calls torch.ops.* (pybind11 -> C++/HIP/CK)
+            if not kernel_type:
+                torch_ops_calls = re.findall(r'torch\.ops\.(\w+)\.(\w+)', content)
+                if torch_ops_calls:
+                    kernel_type = "hip"  # Default for torch.ops wrappers; refine below
+                    namespace, op_name = torch_ops_calls[0]
+                    pybind_file = self._find_pybind_registration(op_name)
+                    if pybind_file:
+                        inner_kernel_path = pybind_file
+                        # Determine inner language from pybind file content
+                        inner_kernel_language, refined_type = self._detect_cpp_kernel_type(pybind_file)
+                        if refined_type:
+                            kernel_type = refined_type
+                    build_info = BuildInfo(
+                        compiler="hipcc",
+                        pybind_module=f"torch.ops.{namespace}",
+                    )
+
+            # ctypes wrapper: loads .so directly
+            if not kernel_type:
+                ctypes_loads = re.findall(r'ctypes\.CDLL\(["\']([^"\']+)', content)
+                if ctypes_loads:
+                    kernel_type = "hip"
+                    build_info = BuildInfo(compiler="hipcc")
+
+            # HSACO wrapper: uses hipModuleLoad from Python (hip-python)
+            if not kernel_type:
+                if re.search(r'hipModuleLoadData|HsacoLauncher', content):
+                    kernel_type = "asm"
 
         if not kernel_type:
             return None
 
-        # Extract function names
+        # --- Determine language and build info ---
+        kernel_language = self._KERNEL_TYPE_TO_LANGUAGE.get(kernel_type, "python")
+        # For Python wrappers around non-Python kernels, the wrapper itself is Python
+        if not is_cpp and kernel_type in ("hip", "cuda", "ck", "asm"):
+            kernel_language = "python"
+
+        if not build_info:
+            compiler = self._KERNEL_TYPE_TO_COMPILER.get(kernel_type)
+            build_sys = None
+            build_dir = None
+            if is_cpp:
+                kernel_language = self._KERNEL_TYPE_TO_LANGUAGE.get(kernel_type, "cpp")
+                # Try to find build system
+                parent = file_path.parent
+                if (parent / "CMakeLists.txt").exists():
+                    build_sys = "CMakeLists.txt"
+                    build_dir = parent / "build"
+                elif (parent / "Makefile").exists():
+                    build_sys = "Makefile"
+            build_info = BuildInfo(compiler=compiler, build_system=build_sys, build_dir=build_dir)
+
+        # --- Extract function names ---
         function_names = []
 
-        # Find @triton.jit decorated functions
-        jit_pattern = r"@triton\.jit\s*\n\s*def\s+(\w+)"
-        for match in re.finditer(jit_pattern, content):
-            function_names.append(match.group(1))
-
-        # Find wrapper functions (configurable via discovery.toml)
-        wrapper_fns = self.config.wrapper_functions or ["forward", "main"]
-        wrapper_alt = "|".join(re.escape(fn) for fn in wrapper_fns)
-        wrapper_pattern = rf"def\s+({wrapper_alt})\s*\("
-        for match in re.finditer(wrapper_pattern, content):
-            if match.group(1) not in function_names:
+        if is_cpp:
+            # C++: extract __global__ function names
+            for match in re.finditer(r'__global__\s+void\s+(\w+)', content):
+                function_names.append(match.group(1))
+            # CK: extract template instantiation names
+            if kernel_type == "ck":
+                for match in re.finditer(r'using\s+(\w+)\s*=\s*ck::', content):
+                    function_names.append(match.group(1))
+        else:
+            # Python: @triton.jit decorated functions
+            jit_pattern = r"@triton\.jit\s*\n\s*def\s+(\w+)"
+            for match in re.finditer(jit_pattern, content):
                 function_names.append(match.group(1))
 
-        # For wrapper files with no @triton.jit, also extract public API functions
-        # (e.g. rope_fwd, rope_bwd) so they appear in the kernel info.
-        if not has_jit:
-            public_fn_pattern = r"^def\s+(\w+)\s*\("
-            for match in re.finditer(public_fn_pattern, content, re.MULTILINE):
-                fname = match.group(1)
-                if not fname.startswith("_") and fname not in function_names:
-                    function_names.append(fname)
+            # Wrapper functions (configurable via discovery.toml)
+            wrapper_fns = self.config.wrapper_functions or ["forward", "main"]
+            wrapper_alt = "|".join(re.escape(fn) for fn in wrapper_fns)
+            wrapper_pattern = rf"def\s+({wrapper_alt})\s*\("
+            for match in re.finditer(wrapper_pattern, content):
+                if match.group(1) not in function_names:
+                    function_names.append(match.group(1))
 
-        # Use file stem as kernel name (more reliable for matching tests/benchmarks)
-        # Function names may be helpers like "fast_exp" that don't match test names
+            # For wrapper files with no @triton.jit, also extract public API functions
+            if not has_jit:
+                public_fn_pattern = r"^def\s+(\w+)\s*\("
+                for match in re.finditer(public_fn_pattern, content, re.MULTILINE):
+                    fname = match.group(1)
+                    if not fname.startswith("_") and fname not in function_names:
+                        function_names.append(fname)
+
         kernel_name = file_path.stem
 
         return KernelInfo(
             file_path=file_path,
             kernel_name=kernel_name,
             kernel_type=kernel_type,
+            kernel_language=kernel_language,
             function_names=function_names,
             has_jit_decorator=has_jit,
             has_autotune=has_autotune,
+            inner_kernel_path=inner_kernel_path,
+            inner_kernel_language=inner_kernel_language,
+            build_info=build_info,
         )
 
-    def _discover_tests(self):
+    # ------------------------------------------------------------------
+    # Cross-language import tracing helpers
+    # ------------------------------------------------------------------
+
+    def _trace_triton_import(self, content: str, wrapper_file: Path) -> Path | None:
+        """Trace a Triton wrapper's import to resolve the inner kernel file.
+
+        Given wrapper content like:
+            from aiter.ops.triton._triton_kernels.rope.rope import _rope_kernel_sbhd_fwd
+        resolves the module path to an actual file on disk.
         """
-        Discover test files in the workspace (purely content-based).
+        import_match = re.search(
+            r"from\s+([\w.]+)\s+import\s+[^)]*_kernel", content, re.DOTALL
+        )
+        if not import_match:
+            return None
 
-        No hardcoded directories - scans everything and scores by content.
+        module_path = import_match.group(1)
+        return self._resolve_module_to_file(module_path, wrapper_file)
 
-        Strategy:
-        1. Files matching kernel name get priority boost
-        2. All files scored by content keywords
-        3. Rank by final confidence score
+    def _resolve_module_to_file(self, module_path: str, reference_file: Path) -> Path | None:
+        """Resolve a Python dotted module path to a file on disk.
+
+        Tries multiple strategies:
+        1. Convert dots to path separators relative to the workspace root
+        2. Try relative to the reference file's package hierarchy
+        3. Walk up from the reference file looking for matching directories
         """
-        print("\n[2/4] Discovering tests (content-based)...")
+        parts = module_path.split(".")
+        relative = Path(*parts).with_suffix(".py")
 
-        seen_paths = set()
+        # Strategy 1: relative to workspace
+        candidate = self.workspace / relative
+        if candidate.exists():
+            return candidate
 
-        # File extensions to search
+        # Strategy 2: search within the workspace for the leaf portion
+        # e.g., for "aiter.ops.triton._triton_kernels.rope.rope", try finding
+        # _triton_kernels/rope/rope.py anywhere under workspace
+        for depth in range(1, len(parts)):
+            sub_parts = parts[depth:]
+            sub_relative = Path(*sub_parts).with_suffix(".py")
+            for match in self.workspace.rglob(str(sub_relative)):
+                return match
+
+        # Strategy 3: walk up from the reference file
+        current = reference_file.parent
+        for _ in range(10):
+            candidate = current / relative
+            if candidate.exists():
+                return candidate
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+
+        return None
+
+    def _find_pybind_registration(self, op_name: str) -> Path | None:
+        """Find the C++ file that registers a given torch.ops operation via pybind11.
+
+        Searches for ``m.def("op_name", ...)`` patterns in .cu/.cpp files.
+        """
+        pybind_pattern = re.compile(
+            rf'm\.def\(\s*"{re.escape(op_name)}"', re.IGNORECASE
+        )
+        # Search common pybind directories first
+        search_dirs = ["csrc/pybind", "csrc", "src"]
+        for search_dir in search_dirs:
+            candidate_dir = self.workspace / search_dir
+            if not candidate_dir.is_dir():
+                continue
+            for f in candidate_dir.rglob("*"):
+                if f.suffix not in CPP_EXTENSIONS:
+                    continue
+                try:
+                    text = f.read_text()[:10000]
+                    if pybind_pattern.search(text):
+                        return f
+                except Exception:
+                    continue
+        return None
+
+    def _detect_cpp_kernel_type(self, cpp_file: Path) -> tuple[str, str | None]:
+        """Detect the kernel language and refined type from a C++ file.
+
+        Returns (language, kernel_type) where kernel_type may refine the
+        initial guess (e.g., "hip" -> "ck" if file uses Composable Kernel).
+        """
+        try:
+            text = cpp_file.read_text()[:5000]
+        except Exception:
+            return ("cpp", None)
+
+        if re.search(r'\bck::', text) or re.search(r'#include\s+[<"]ck/', text):
+            return ("cpp", "ck")
+        if re.search(r'hipModuleLoad|hipModuleLaunchKernel|\.hsaco\b', text):
+            return ("asm", "asm")
+        if "__global__" in text:
+            return ("cpp", "hip")
+        return ("cpp", None)
+
+    # ------------------------------------------------------------------
+    # Dependency graph and fusion detection
+    # ------------------------------------------------------------------
+
+    def build_dependency_graph(self, kernel: KernelInfo) -> KernelDependencyGraph | None:
+        """Build a cross-language dependency graph for a kernel.
+
+        Given a KernelInfo (typically a wrapper), traces the call chain from
+        the Python entry point down to the lowest-level kernel functions,
+        annotating each node with its language. Then detects fusion opportunities.
+
+        Call this after ``_discover_kernels`` has populated ``self.result.kernels``.
+        """
+        try:
+            content = kernel.file_path.read_text()
+        except Exception:
+            return None
+
+        graph = KernelDependencyGraph(root_name=kernel.kernel_name)
+        is_cpp = kernel.file_path.suffix in CPP_EXTENSIONS
+
+        if is_cpp:
+            self._build_graph_cpp(graph, kernel, content)
+        else:
+            self._build_graph_python(graph, kernel, content)
+
+        # Detect fusion opportunities from the completed graph
+        graph.fusion_opportunities = self._detect_fusion_opportunities(graph)
+
+        # Store fusion descriptions on the KernelInfo for easy access
+        kernel.fusion_opportunities = [opp.description for opp in graph.fusion_opportunities]
+
+        return graph
+
+    def _build_graph_python(
+        self, graph: KernelDependencyGraph, kernel: KernelInfo, content: str
+    ) -> None:
+        """Build dependency graph for a Python wrapper / Triton kernel."""
+        # Add the wrapper as the root node
+        wrapper_lang = "python"
+        wrapper_type = "wrapper"
+        graph.nodes[kernel.kernel_name] = KernelNode(
+            name=kernel.kernel_name,
+            file_path=kernel.file_path,
+            language=wrapper_lang,
+            node_type=wrapper_type,
+        )
+
+        # --- Parse sequential kernel launches in wrapper functions ---
+        # Match patterns like: _kernel_name[grid](...) or _kernel_name.run(...)
+        launch_pattern = re.compile(r'(\w+_kernel\w*)\s*\[')
+        torch_ops_pattern = re.compile(r'torch\.ops\.(\w+)\.(\w+)\s*\(')
+
+        # Track sequential operations in each function body
+        current_launches: list[str] = []
+        wrapper_ops: list[str] = []
+
+        for line in content.splitlines():
+            stripped = line.strip()
+
+            # Detect kernel launches
+            launch_match = launch_pattern.search(stripped)
+            if launch_match:
+                kname = launch_match.group(1)
+                current_launches.append(kname)
+                if kname not in graph.nodes:
+                    graph.nodes[kname] = KernelNode(
+                        name=kname,
+                        file_path=kernel.inner_kernel_path or kernel.file_path,
+                        language="triton",
+                        node_type="jit_kernel",
+                    )
+                graph.edges.append((kernel.kernel_name, kname))
+                continue
+
+            # Detect torch.ops calls (cross-language)
+            ops_match = torch_ops_pattern.search(stripped)
+            if ops_match:
+                ns, op = ops_match.group(1), ops_match.group(2)
+                full_name = f"torch.ops.{ns}.{op}"
+                current_launches.append(full_name)
+                if full_name not in graph.nodes:
+                    inner_file = kernel.inner_kernel_path or kernel.file_path
+                    graph.nodes[full_name] = KernelNode(
+                        name=full_name,
+                        file_path=inner_file,
+                        language="hip",
+                        node_type="torch_op",
+                    )
+                graph.edges.append((kernel.kernel_name, full_name))
+                graph.language_boundaries.append(
+                    (kernel.kernel_name, full_name, "python->hip_pybind")
+                )
+                continue
+
+            # Detect wrapper-level torch operations that could be fused
+            for op_name, op_label in [
+                (r'\.to\(', "dtype conversion"),
+                (r'\.reshape\(', "reshape"),
+                (r'\.permute\(', "permute"),
+                (r'\.contiguous\(', "contiguous"),
+                (r'\.view\(', "view/reshape"),
+                (r'torch\.empty', "tensor allocation"),
+                (r'\.transpose\(', "transpose"),
+            ]:
+                if re.search(op_name, stripped):
+                    wrapper_ops.append(op_label)
+
+        if len(current_launches) >= 2:
+            graph.sequential_launches.append(current_launches)
+        graph.wrapper_ops = list(dict.fromkeys(wrapper_ops))  # deduplicate, preserve order
+
+        # --- Parse inner kernel file for sub-kernel calls ---
+        if kernel.inner_kernel_path and kernel.inner_kernel_path.exists():
+            try:
+                inner_content = kernel.inner_kernel_path.read_text()
+            except Exception:
+                inner_content = ""
+
+            if inner_content:
+                # Find all @triton.jit functions and their internal calls
+                jit_fns: dict[str, list[str]] = {}
+                current_fn = None
+
+                for line in inner_content.splitlines():
+                    jit_match = re.match(r'\s*@triton\.jit', line)
+                    if jit_match:
+                        # Next def line is the function
+                        current_fn = "__pending__"
+                        continue
+
+                    if current_fn == "__pending__":
+                        fn_match = re.match(r'\s*def\s+(\w+)\s*\(', line)
+                        if fn_match:
+                            current_fn = fn_match.group(1)
+                            jit_fns[current_fn] = []
+                            if current_fn not in graph.nodes:
+                                graph.nodes[current_fn] = KernelNode(
+                                    name=current_fn,
+                                    file_path=kernel.inner_kernel_path,
+                                    language="triton",
+                                    node_type="jit_kernel",
+                                )
+                        else:
+                            current_fn = None
+                        continue
+
+                    if current_fn and current_fn != "__pending__":
+                        # Look for calls to other known jit functions
+                        for called_fn in jit_fns:
+                            if called_fn != current_fn and re.search(
+                                rf'\b{re.escape(called_fn)}\s*\(', line
+                            ):
+                                if called_fn not in jit_fns[current_fn]:
+                                    jit_fns[current_fn].append(called_fn)
+
+                    # Detect end of function (next def or decorator at same/lower indentation)
+                    if current_fn and current_fn != "__pending__":
+                        if re.match(r'(def |class |@)', line) and not line.startswith(' '):
+                            current_fn = None
+
+                # Add edges for internal calls
+                for fn, calls in jit_fns.items():
+                    for called in calls:
+                        graph.edges.append((fn, called))
+
+                # Add language boundary for wrapper -> inner kernel
+                for launch in current_launches:
+                    if launch in jit_fns:
+                        graph.language_boundaries.append(
+                            (kernel.kernel_name, launch, "python->triton")
+                        )
+
+    def _build_graph_cpp(
+        self, graph: KernelDependencyGraph, kernel: KernelInfo, content: str
+    ) -> None:
+        """Build dependency graph for a C++/HIP/CK kernel file."""
+        graph.nodes[kernel.kernel_name] = KernelNode(
+            name=kernel.kernel_name,
+            file_path=kernel.file_path,
+            language=kernel.kernel_language,
+            node_type="jit_kernel" if kernel.kernel_type == "triton" else "device_func",
+        )
+
+        # Extract __global__ functions
+        for match in re.finditer(r'__global__\s+void\s+(\w+)', content):
+            fname = match.group(1)
+            if fname not in graph.nodes:
+                graph.nodes[fname] = KernelNode(
+                    name=fname,
+                    file_path=kernel.file_path,
+                    language="hip",
+                    node_type="device_func",
+                )
+                graph.edges.append((kernel.kernel_name, fname))
+
+        # Extract CK template instantiations
+        if kernel.kernel_type == "ck":
+            for match in re.finditer(r'using\s+(\w+)\s*=\s*ck::', content):
+                tname = match.group(1)
+                if tname not in graph.nodes:
+                    graph.nodes[tname] = KernelNode(
+                        name=tname,
+                        file_path=kernel.file_path,
+                        language="ck",
+                        node_type="device_func",
+                    )
+                    graph.edges.append((kernel.kernel_name, tname))
+
+    def _detect_fusion_opportunities(
+        self, graph: KernelDependencyGraph
+    ) -> list[FusionOpportunity]:
+        """Detect fusion opportunities from the dependency graph.
+
+        Patterns detected:
+        1. Sequential same-language kernel launches in the wrapper
+        2. Wrapper-level torch operations that could be absorbed into adjacent kernels
+        3. Cross-language boundaries where rewriting in one language could help
+        """
+        opportunities: list[FusionOpportunity] = []
+
+        # 1. Sequential same-language launches
+        for launch_group in graph.sequential_launches:
+            if len(launch_group) < 2:
+                continue
+            langs = set()
+            for n in launch_group:
+                if n in graph.nodes:
+                    langs.add(graph.nodes[n].language)
+            if len(langs) == 1 and "asm" not in langs:
+                lang = next(iter(langs))
+                opportunities.append(FusionOpportunity(
+                    description=(
+                        f"Fuse {len(launch_group)} sequential {lang} kernel launches "
+                        f"({', '.join(launch_group)}) into a single kernel to eliminate "
+                        f"intermediate memory round-trips and launch overhead"
+                    ),
+                    involved_nodes=list(launch_group),
+                    languages=langs,
+                    fusion_type="sequential_launch",
+                    estimated_benefit="high",
+                ))
+            elif len(langs) > 1 and "asm" not in langs:
+                opportunities.append(FusionOpportunity(
+                    description=(
+                        f"Cross-language sequential launches ({', '.join(launch_group)}): "
+                        f"languages {langs}. Rewriting in a single language could "
+                        f"eliminate intermediate memory transfers"
+                    ),
+                    involved_nodes=list(launch_group),
+                    languages=langs,
+                    fusion_type="cross_language",
+                    estimated_benefit="medium",
+                ))
+
+        # 2. Wrapper operations absorbable into adjacent kernel
+        fusible_ops = {"dtype conversion", "reshape", "permute", "contiguous",
+                       "view/reshape", "transpose"}
+        for op in graph.wrapper_ops:
+            if op in fusible_ops:
+                # Find the nearest kernel launch this op sits between
+                adjacent_kernels = [
+                    n for n in graph.nodes.values()
+                    if n.node_type in ("jit_kernel", "device_func", "torch_op")
+                    and n.language != "asm"
+                ]
+                if adjacent_kernels:
+                    adj = adjacent_kernels[0]
+                    opportunities.append(FusionOpportunity(
+                        description=(
+                            f"Absorb wrapper-level '{op}' operation into "
+                            f"kernel '{adj.name}' to avoid an extra memory pass"
+                        ),
+                        involved_nodes=[adj.name],
+                        languages={adj.language, "python"},
+                        fusion_type="absorb_wrapper_op",
+                        estimated_benefit="medium",
+                    ))
+
+        return opportunities
+
+    def _discover_scored_files(self, analyze_fn, label: str) -> list:
+        """Shared scanner for test and benchmark discovery.
+
+        Scans all files in the workspace, scores by content using *analyze_fn*,
+        boosts by kernel-name match, and returns a sorted list.
+        """
+        seen_paths: set[Path] = set()
+
         extensions = [".py"]
         if self.config.include_cpp:
-            extensions.extend([".cpp", ".cc", ".cu", ".hip", ".cxx"])
+            extensions.extend(sorted(CPP_EXTENSIONS))
 
-        # Get kernel name parts for matching.
-        # Fall back to the kernel_file stem when _discover_kernels found nothing
-        # (e.g. wrapper files that import @triton.jit kernels from another module).
         kernel_name = None
-        kernel_parts = []
+        kernel_parts: list[str] = []
         if self.result.kernels:
             kernel_name = self.result.kernels[0].kernel_name
         elif self._kernel_file:
@@ -651,47 +1234,50 @@ Respond with JSON only:
         if kernel_name:
             kernel_parts = [p for p in kernel_name.split("_") if len(p) > 2]
 
-        # Get kernel file paths to exclude
         kernel_files = {k.file_path for k in self.result.kernels}
+        results: list = []
 
-        # Scan ALL files, score by content
         for ext in extensions:
             for file_path in self.workspace.rglob(f"*{ext}"):
                 if self._should_skip_file(file_path) or file_path in seen_paths:
                     continue
-
-                # Skip kernel files themselves
                 if file_path in kernel_files:
                     continue
-
-                # Skip files that contain kernel definitions (have @triton.jit, etc.)
                 if self._is_kernel_file(file_path):
                     continue
 
-                # Analyze file content - must have minimum content confidence
-                test_info = self._analyze_test_file(file_path)
-                if not test_info:
+                info = analyze_fn(file_path)
+                if not info:
                     continue
 
-                # Only boost for kernel name match if content analysis shows it's a test
-                # (confidence >= 0.3 means content has test-like patterns)
                 fname_lower = file_path.name.lower()
                 if kernel_name and kernel_name.lower() in fname_lower:
-                    # Exact kernel name match - highest priority
-                    test_info.confidence += 1.0
+                    info.confidence += 1.0
                 elif kernel_parts:
-                    # Partial match bonus - proportional to how many parts match
                     matches = sum(1 for p in kernel_parts if p.lower() in fname_lower)
                     if matches >= 2:
-                        test_info.confidence += 0.3 * matches
+                        info.confidence += 0.3 * matches
 
-                self.result.tests.append(test_info)
+                results.append(info)
                 seen_paths.add(file_path)
 
-        # Sort by confidence
-        self.result.tests.sort(key=lambda t: t.confidence, reverse=True)
+        results.sort(key=lambda x: x.confidence, reverse=True)
+        return results
 
-        # Limit results
+    def _discover_tests(self):
+        """
+        Discover test files in the workspace (purely content-based).
+
+        No hardcoded directories - scans everything and scores by content.
+        """
+        print("\n[2/4] Discovering tests (content-based)...")
+
+        seen_paths = set()
+
+        self.result.tests = self._discover_scored_files(
+            analyze_fn=self._analyze_test_file,
+            label="test",
+        )
         if len(self.result.tests) > 10:
             print(f"      Found {len(self.result.tests)} potential test(s), showing top 10")
             self.result.tests = self.result.tests[:10]
@@ -714,7 +1300,7 @@ Respond with JSON only:
 
         confidence = 0.0
         test_type = "script"
-        is_cpp = file_path.suffix in [".cpp", ".cc", ".cu", ".hip", ".cxx"]
+        is_cpp = file_path.suffix in CPP_EXTENSIONS
 
         # Select appropriate keywords based on file type
         if is_cpp and self.config.include_cpp:
@@ -796,74 +1382,13 @@ Respond with JSON only:
         Discover benchmark files in the workspace (purely content-based).
 
         No hardcoded directories - scans everything and scores by content.
-
-        Strategy:
-        1. Files matching kernel name get priority boost
-        2. All files scored by content keywords (TFLOPS, latency, etc.)
-        3. Rank by final confidence score
         """
         print("\n[3/4] Discovering benchmarks (content-based)...")
 
-        seen_paths = set()
-
-        # File extensions to search
-        extensions = [".py"]
-        if self.config.include_cpp:
-            extensions.extend([".cpp", ".cc", ".cu", ".hip", ".cxx"])
-
-        # Get kernel name parts for matching.
-        # Fall back to the kernel_file stem when _discover_kernels found nothing
-        # (e.g. wrapper files that import @triton.jit kernels from another module).
-        kernel_name = None
-        kernel_parts = []
-        if self.result.kernels:
-            kernel_name = self.result.kernels[0].kernel_name
-        elif self._kernel_file:
-            kernel_name = self._kernel_file.stem
-        if kernel_name:
-            kernel_parts = [p for p in kernel_name.split("_") if len(p) > 2]
-
-        # Get kernel file paths to exclude
-        kernel_files = {k.file_path for k in self.result.kernels}
-
-        # Scan ALL files, score by content
-        for ext in extensions:
-            for file_path in self.workspace.rglob(f"*{ext}"):
-                if self._should_skip_file(file_path) or file_path in seen_paths:
-                    continue
-
-                # Skip kernel files themselves
-                if file_path in kernel_files:
-                    continue
-
-                # Skip files that contain kernel definitions
-                if self._is_kernel_file(file_path):
-                    continue
-
-                # Analyze file content
-                bench_info = self._analyze_bench_file(file_path)
-                if not bench_info:
-                    continue
-
-                # Boost score for kernel name match (this is what matters most)
-                # Allow confidence > 1.0 for ranking, display capped at 100%
-                fname_lower = file_path.name.lower()
-                if kernel_name and kernel_name.lower() in fname_lower:
-                    # Exact kernel name match - highest priority
-                    bench_info.confidence += 1.0
-                elif kernel_parts:
-                    # Partial match bonus - proportional to how many parts match
-                    matches = sum(1 for p in kernel_parts if p.lower() in fname_lower)
-                    if matches >= 2:
-                        bench_info.confidence += 0.3 * matches
-
-                self.result.benchmarks.append(bench_info)
-                seen_paths.add(file_path)
-
-        # Sort by confidence
-        self.result.benchmarks.sort(key=lambda b: b.confidence, reverse=True)
-
-        # Limit results
+        self.result.benchmarks = self._discover_scored_files(
+            analyze_fn=self._analyze_bench_file,
+            label="benchmark",
+        )
         if len(self.result.benchmarks) > 10:
             print(f"      Found {len(self.result.benchmarks)} potential benchmark(s), showing top 10")
             self.result.benchmarks = self.result.benchmarks[:10]
@@ -886,7 +1411,7 @@ Respond with JSON only:
 
         confidence = 0.0
         bench_type = "script"
-        is_cpp = file_path.suffix in [".cpp", ".cc", ".cu", ".hip", ".cxx"]
+        is_cpp = file_path.suffix in CPP_EXTENSIONS
 
         # Content-based scoring (same keywords work for both Python and C++)
         for pattern, score in self._bench_keywords:
@@ -969,10 +1494,12 @@ Respond with JSON only:
         except Exception:
             return False
 
-        # Check for kernel definition patterns (loaded from config)
+        # Check for kernel definition patterns (loaded from config, includes CK/ASM)
         kernel_patterns = self.config.kernel_patterns or [
             r"@triton\.jit", r"@triton\.autotune",
             r"__global__\s+void", r"tl\.load|tl\.store",
+            r"\bck::", r'#include\s+[<"]ck/',
+            r"hipModuleLoad|hipModuleLaunchKernel",
         ]
         for pattern in kernel_patterns:
             if re.search(pattern, content):
@@ -989,10 +1516,17 @@ Respond with JSON only:
         print("\n  KERNELS FOUND:")
         if self.result.kernels:
             for k in self.result.kernels:
-                print(f"    - {k.kernel_name} ({k.kernel_type})")
+                lang_label = f"{k.kernel_type}/{k.kernel_language}"
+                print(f"    - {k.kernel_name} ({lang_label})")
                 print(f"      File: {k.file_path}")
                 if k.function_names:
                     print(f"      Functions: {', '.join(k.function_names)}")
+                if k.inner_kernel_path:
+                    inner_lang = k.inner_kernel_language or "unknown"
+                    print(f"      Inner kernel: {k.inner_kernel_path} ({inner_lang})")
+                if k.build_info and k.build_info.compiler:
+                    print(f"      Build: {k.build_info.compiler}"
+                          + (f" ({k.build_info.build_system})" if k.build_info.build_system else ""))
         else:
             print("    (none found)")
 

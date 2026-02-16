@@ -302,6 +302,8 @@ class TestMiniDiscoveryWiring:
         class FakeResult:
             tests = []
             benchmarks = []
+            kernels = []
+            dependency_graphs = {}
 
         def fake_discover(workspace=None, kernel_path=None, **kw):
             captured["workspace"] = workspace

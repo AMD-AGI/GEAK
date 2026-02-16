@@ -69,10 +69,18 @@ class SelectPatchAgent(DefaultAgent):
         base_patch_dir = base_patch_dir.resolve()
         self.patch_dir = base_patch_dir
 
+        # Count actual completed task/parallel directories for accurate hint
+        actual_count = num_parallel
+        task_dirs = sorted(base_patch_dir.glob("task_*"))
+        parallel_dirs = sorted(base_patch_dir.glob("parallel_*"))
+        total = len(task_dirs) + len(parallel_dirs)
+        if total > 0:
+            actual_count = total
+
         return self.render_template(
             self.config.task_template,
             metric=metric,
-            num_parallel=num_parallel,
+            num_parallel=actual_count,
             base_patch_dir=str(base_patch_dir),
         )
     

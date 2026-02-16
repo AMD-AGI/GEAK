@@ -50,6 +50,7 @@ class ParallelAgentConfig(AgentConfig):
     gpu_ids: list[int] | None = None
     agent_class: type | None = None
     agent_specs: list | None = None  # list[AgentSpec] for heterogeneous parallel
+    tasks: list | None = None  # list[AgentTask] for GPU pool mode
     # Strategy agent compatibility
     strategy_file_path: str | None = None
     # Interactive/exit behaviour (passed through from --exit-immediately)
@@ -107,7 +108,7 @@ class ParallelAgent(DefaultAgent):
             is_git_repo=is_git_repo,
             task_content=task,
             agent_class=self.config.agent_class if self.config.agent_class else type(self),
-            agent_config={k: v for k, v in self.config.__dict__.items() if k not in ("num_parallel", "repo", "gpu_ids", "agent_class", "agent_specs")},
+            agent_config={k: v for k, v in self.config.__dict__.items() if k not in ("num_parallel", "repo", "gpu_ids", "agent_class", "agent_specs", "tasks")},
             model_factory=model_factory,
             env_factory=env_factory,
             base_patch_dir=base_patch_dir,
@@ -116,6 +117,7 @@ class ParallelAgent(DefaultAgent):
             save_traj_fn=save_traj_fn,
             console=console,
             agent_specs=self.config.agent_specs,
+            tasks=self.config.tasks,
         )
 
         metric = self.config.metric or "Extract the performance metrics from the test output and calculate the best speedup."
@@ -187,12 +189,14 @@ class ParallelAgent(DefaultAgent):
             # Read the best_results.json for additional details
             best_results = json.loads((base_patch_dir / "best_results.json").read_text())
             
-            # Parse best_patch_id: either "parallel_X/patch_Y" (multi-run) or "patch_Y" (single run)
+            # Parse best_patch_id: "parallel_X/patch_Y", "task_X/patch_Y", or "patch_Y"
             if "/" in best_patch_id:
-                # Multi-run format: "parallel_X/patch_Y"
-                parallel_dir_name, patch_name = best_patch_id.split("/")
-                agent_id = int(parallel_dir_name.replace("parallel_", ""))
-                patch_dir = base_patch_dir / parallel_dir_name
+                dir_name, patch_name = best_patch_id.split("/", 1)
+                patch_dir = base_patch_dir / dir_name
+                # Extract numeric ID from either "parallel_X" or "task_X"
+                import re as _re
+                id_match = _re.search(r'(\d+)', dir_name)
+                agent_id = int(id_match.group(1)) if id_match else 0
             else:
                 # Single run format: "patch_Y" (directly in base_patch_dir)
                 patch_name = best_patch_id
@@ -438,16 +442,37 @@ class ParallelAgent(DefaultAgent):
         save_traj_fn=None,
         console=None,
         agent_specs: list | None = None,
+        tasks: list | None = None,
     ) -> list[tuple[int, Any, Any, Any]]:
         """Run multiple parallel agents and return their results.
 
-        Supports two modes:
+        Supports three modes (checked in priority order):
+        - Pool (preferred): pass tasks (list[AgentTask]) for M tasks on N GPUs.
+          Tasks are decoupled from GPUs; overflow tasks queue and run as GPUs free up.
+        - Heterogeneous (legacy): pass agent_specs (list[AgentSpec]) for different
+          agent types with fixed GPU assignments.
         - Homogeneous (default): num_parallel identical agents, each with 1 GPU.
-        - Heterogeneous: pass agent_specs (list[AgentSpec]) for different agent
-          types with different GPU allocations. num_parallel and agent_class are
-          ignored when agent_specs is provided.
         """
-        # Heterogeneous mode: use agent_specs if provided
+        # Pool mode: M tasks on N GPU slots (preferred)
+        if tasks:
+            effective_gpu_ids = gpu_ids or [0]
+            return cls._run_pool(
+                tasks=tasks,
+                gpu_ids=effective_gpu_ids,
+                repo_path=repo_path,
+                is_git_repo=is_git_repo,
+                base_task_content=task_content,
+                agent_config=agent_config,
+                model_factory=model_factory,
+                env_factory=env_factory,
+                base_patch_dir=base_patch_dir,
+                output=output,
+                redirect_output_fn=redirect_output_fn,
+                save_traj_fn=save_traj_fn,
+                console=console,
+            )
+
+        # Heterogeneous mode: use agent_specs if provided (legacy)
         if agent_specs:
             return cls._run_parallel_heterogeneous(
                 agent_specs=agent_specs,
@@ -707,5 +732,177 @@ class ParallelAgent(DefaultAgent):
                     agent_id = futures[future]
                     from minisweagent.utils.log import logger
                     logger.error(f"Error in heterogeneous agent {agent_id}: {e}", exc_info=True)
+        return results
+
+    @classmethod
+    def _run_pool(
+        cls,
+        tasks: list,
+        gpu_ids: list[int],
+        repo_path: Path,
+        is_git_repo: bool,
+        base_task_content: str,
+        agent_config: dict,
+        model_factory,
+        env_factory,
+        base_patch_dir: Path,
+        output: Path | None,
+        redirect_output_fn=redirect_output_to_file,
+        save_traj_fn=None,
+        console=None,
+    ) -> list[tuple[int, Any, Any, Any]]:
+        """Run M tasks across N GPU slots with overflow queuing.
+
+        Unlike _run_parallel_heterogeneous (which runs exactly N agents on N GPUs),
+        this method accepts M tasks (where M can be > N) and schedules them across
+        N GPU slots using a thread pool. When a task finishes and frees a GPU slot,
+        the next queued task starts immediately -- like ProcessPoolExecutor.
+
+        Args:
+            tasks: List of AgentTask objects (from agent_spec.py), sorted by priority.
+            gpu_ids: Available GPU device IDs (determines pool size N).
+            base_task_content: Fallback task text if a task has no .task set.
+            Other args: Same as run_parallel.
+        """
+        import queue as queue_mod
+
+        n_slots = len(gpu_ids)
+        n_tasks = len(tasks)
+
+        if console:
+            labels = [t.label or t.agent_class.__name__ for t in tasks]
+            console.print(
+                f"[bold green]GPU Pool: {n_tasks} tasks on {n_slots} GPU slots "
+                f"(labels: {labels[:8]}{'...' if len(labels) > 8 else ''})[/bold green]"
+            )
+
+        base_patch_dir = base_patch_dir.resolve()
+        worktree_base = base_patch_dir / "worktrees"
+        worktree_base.mkdir(parents=True, exist_ok=True)
+        repo_path_resolved = repo_path.resolve()
+
+        # Thread-safe GPU pool: each GPU ID can be acquired/released
+        gpu_queue = queue_mod.Queue()
+        for gid in gpu_ids:
+            gpu_queue.put(gid)
+
+        # Map gpu_id -> slot index for worktree naming
+        gpu_to_slot = {gid: idx for idx, gid in enumerate(gpu_ids)}
+
+        # Sort tasks by priority (lower = runs first)
+        sorted_tasks = sorted(enumerate(tasks), key=lambda t: t[1].priority)
+
+        def execute_task(task_id: int, task) -> tuple[int, Any, Any, Any]:
+            """Execute a single task on a dynamically-assigned GPU."""
+            gpu_id = gpu_queue.get()  # blocks until a GPU is free
+            slot_idx = gpu_to_slot[gpu_id]
+
+            try:
+                label = task.label or task.agent_class.__name__
+                if console:
+                    with _stdout_lock:
+                        console.print(
+                            f"[bold green]Task {task_id} ({label}): "
+                            f"assigned to GPU {gpu_id} (slot {slot_idx})[/bold green]"
+                        )
+
+                # Create or reset worktree for this slot
+                wt_path = worktree_base / f"slot_{slot_idx}"
+                if is_git_repo:
+                    cls._create_worktree(repo_path, wt_path)
+                else:
+                    cls._create_copy_workdir(repo_path, wt_path)
+                wt_path_str = str(wt_path.resolve())
+
+                # Each task gets its own patch dir (persists across worktree resets)
+                task_patch_dir = (base_patch_dir / f"task_{task_id}").resolve()
+                task_patch_dir.mkdir(parents=True, exist_ok=True)
+
+                # Build agent config
+                cfg = agent_config.copy()
+                cfg.update(task.config)
+                cfg["patch_output_dir"] = str(task_patch_dir)
+                cfg["mode"] = "yolo"
+                cfg["confirm_exit"] = False
+                if task.step_limit:
+                    cfg["step_limit"] = task.step_limit
+                if task.cost_limit:
+                    cfg["cost_limit"] = task.cost_limit
+
+                log_file = task_patch_dir / f"task_{task_id}.log"
+
+                if cfg.get("test_command"):
+                    cfg["test_command"] = cls._replace_paths(
+                        cfg["test_command"], repo_path, wt_path
+                    )
+
+                # Resolve task text
+                agent_task = task.task if task.task else base_task_content
+                agent_task = cls._replace_paths(agent_task, repo_path, wt_path)
+
+                # Create model and environment with GPU assignment
+                parallel_model = model_factory()
+                base_env = env_factory()
+                env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
+                env_config_dict["cwd"] = wt_path_str
+                env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+                parallel_env = type(base_env)(**env_config_dict)
+
+                parallel_output = None
+                if output:
+                    parallel_output = output.parent / f"{output.stem}_task_{task_id}{output.suffix}"
+
+                agent = task.agent_class(parallel_model, parallel_env, **cfg)
+                if hasattr(agent, "base_repo_path"):
+                    agent.base_repo_path = repo_path_resolved
+                if hasattr(agent, "log_file"):
+                    agent.log_file = log_file
+
+                with open(log_file, "w", encoding="utf-8") as f:
+                    f.write(f"Task {task_id} ({label}) Conversation Log\n")
+                    f.write(f"GPU: {gpu_id} | Priority: {task.priority} | Language: {task.kernel_language}\n")
+                    f.write("=" * 60 + "\n\n")
+
+                exit_status, result, extra_info = None, None, None
+                with redirect_output_fn(log_file):
+                    try:
+                        exit_status, result = agent.run(agent_task, _is_parallel_mode=True)
+                    except Exception as e:
+                        exit_status, result = type(e).__name__, str(e)
+                        extra_info = {"traceback": traceback.format_exc()}
+                        with open(log_file, "a", encoding="utf-8") as f:
+                            f.write(f"\n\nERROR: {exit_status}: {result}\n")
+                            f.write(f"Traceback:\n{extra_info['traceback']}\n")
+                    finally:
+                        if parallel_output and save_traj_fn:
+                            save_traj_fn(agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info)
+
+                if console:
+                    with _stdout_lock:
+                        console.print(
+                            f"[bold blue]Task {task_id} ({label}): completed on GPU {gpu_id}[/bold blue]"
+                        )
+
+                return task_id, agent, exit_status, result
+
+            finally:
+                gpu_queue.put(gpu_id)  # return GPU to pool
+
+        # Submit ALL M tasks; ThreadPoolExecutor(max_workers=N) queues overflow
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_slots) as executor:
+            futures = {
+                executor.submit(execute_task, tid, task): tid
+                for tid, task in sorted_tasks
+            }
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    r = future.result()
+                    results.append(r)
+                except Exception as e:
+                    task_id = futures[future]
+                    from minisweagent.utils.log import logger
+                    logger.error(f"Error in pool task {task_id}: {e}", exc_info=True)
+
         return results
 
