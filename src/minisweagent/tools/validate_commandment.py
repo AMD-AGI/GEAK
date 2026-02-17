@@ -162,3 +162,41 @@ def format_validation_message(result: dict) -> str:
             parts.append(f"  WARNING: {warn}")
 
     return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    """Validate one or more COMMANDMENT.md files from the command line."""
+    import sys
+
+    if len(sys.argv) < 2:
+        print("Usage: python -m minisweagent.tools.validate_commandment <file> [<file> ...]", file=sys.stderr)
+        sys.exit(2)
+
+    any_invalid = False
+    for path_str in sys.argv[1:]:
+        from pathlib import Path
+
+        path = Path(path_str)
+        if not path.is_file():
+            print(f"ERROR: {path_str}: file not found", file=sys.stderr)
+            any_invalid = True
+            continue
+
+        content = path.read_text()
+        result = validate_commandment(content)
+        message = format_validation_message(result)
+        print(f"--- {path_str} ---")
+        print(message)
+
+        if not result["valid"]:
+            any_invalid = True
+
+    sys.exit(1 if any_invalid else 0)
+
+
+if __name__ == "__main__":
+    main()

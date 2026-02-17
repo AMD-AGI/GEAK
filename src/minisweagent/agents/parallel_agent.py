@@ -227,153 +227,20 @@ class ParallelAgent(DefaultAgent):
     @staticmethod
     def _ensure_safe_directory(repo_path: Path):
         """Ensure repository is in git's safe.directory list."""
-        repo_path_str = str(repo_path.resolve())
-        try:
-            result = subprocess.run(
-                ["git", "config", "--global", "--get-all", "safe.directory"],
-                capture_output=True,
-                text=True,
-            )
-            safe_dirs = result.stdout.strip().split("\n") if result.stdout.strip() else []
-            if repo_path_str not in safe_dirs:
-                subprocess.run(
-                    ["git", "config", "--global", "--add", "safe.directory", repo_path_str],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-        except subprocess.CalledProcessError:
-            try:
-                subprocess.run(
-                    ["git", "config", "--global", "--add", "safe.directory", repo_path_str],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except subprocess.CalledProcessError:
-                pass
+        from minisweagent.run.task_file import _ensure_safe_directory
+        _ensure_safe_directory(repo_path)
 
     @staticmethod
     def _create_worktree(repo_path: Path, worktree_path: Path) -> Path:
         """Create a git worktree, cleaning up any existing one first."""
-        worktree_str = str(worktree_path.resolve())
-        
-        # Clean up any existing worktree
-        try:
-            result = subprocess.run(
-                ["git", "worktree", "list"],
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            worktree_exists = any(worktree_str in line or str(worktree_path) in line for line in result.stdout.splitlines())
-            
-            if worktree_exists:
-                try:
-                    subprocess.run(
-                        ["git", "worktree", "remove", str(worktree_path), "--force"],
-                        cwd=repo_path,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                    )
-                except subprocess.CalledProcessError:
-                    subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
-        except subprocess.CalledProcessError:
-            subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
-        except Exception:
-            pass
-        
-        # Remove directory if it still exists
-        if worktree_path.exists():
-            try:
-                shutil.rmtree(worktree_path)
-            except Exception:
-                pass
-        
-        worktree_path.parent.mkdir(parents=True, exist_ok=True)
-        ParallelAgent._ensure_safe_directory(repo_path)
-        
-        # Create new worktree with detached HEAD to avoid branch name conflicts
-        try:
-            subprocess.run(
-                ["git", "worktree", "add", "--detach", str(worktree_path)],
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr if e.stderr else (e.stdout if e.stdout else str(e))
-            if "missing but already registered worktree" in error_msg.lower():
-                subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
-                subprocess.run(
-                    ["git", "worktree", "add", "--detach", "-f", str(worktree_path)],
-                    cwd=repo_path,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            elif "dubious ownership" in error_msg.lower():
-                ParallelAgent._ensure_safe_directory(repo_path)
-                ParallelAgent._ensure_safe_directory(worktree_path)
-                subprocess.run(
-                    ["git", "worktree", "add", "--detach", str(worktree_path)],
-                    cwd=repo_path,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            elif "already used by worktree" in error_msg.lower():
-                # Branch name conflict - remove old worktree and retry
-                subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
-                # Extract branch name from error message if possible, otherwise use worktree path
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(worktree_path)],
-                    cwd=repo_path,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                subprocess.run(
-                    ["git", "worktree", "add", "--detach", str(worktree_path)],
-                    cwd=repo_path,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            else:
-                raise RuntimeError(f"Failed to create worktree: {error_msg}") from e
-        
-        # Ensure worktree path is also marked as safe
-        ParallelAgent._ensure_safe_directory(worktree_path)
-        
-        # Copy untracked files from repo to worktree (e.g., newly created test files)
-        ParallelAgent._copy_untracked_files(repo_path, worktree_path)
-        
-        return worktree_path
+        from minisweagent.run.task_file import create_worktree
+        return create_worktree(repo_path, worktree_path)
     
     @staticmethod
     def _copy_untracked_files(repo_path: Path, worktree_path: Path) -> None:
         """Copy untracked files from repo to worktree."""
-        try:
-            result = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard"],
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            untracked_files = [f.strip() for f in result.stdout.splitlines() if f.strip()]
-            for rel_path in untracked_files:
-                src = repo_path / rel_path
-                dst = worktree_path / rel_path
-                if src.is_file():
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst)
-        except subprocess.CalledProcessError:
-            pass  # If git command fails, skip copying untracked files
+        from minisweagent.run.task_file import _copy_untracked_files
+        _copy_untracked_files(repo_path, worktree_path)
 
     @staticmethod
     def _create_copy_workdir(repo_path: Path, workdir_path: Path) -> Path:

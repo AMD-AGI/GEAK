@@ -4,6 +4,7 @@ CLI for hardware-level kernel profiling. Naming aligned with kernel-evolve and k
 All kernels are profiled and reported; the agent chooses which to use. --auto-select is not used.
 """
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -19,9 +20,37 @@ Examples:
   %(prog)s 'python3 /path/to/kernel.py --profile'
   %(prog)s 'python3 kernel.py --profile' --gpu-devices 3
   %(prog)s 'python3 kernel.py --profile' --replays 5
-  %(prog)s 'python3 kernel.py --profile' --quick  # Fast profiling (3 metrics, 1 pass)
-  %(prog)s 'python3 kernel.py --profile' --gpu-devices 0,1,2  # Profile on multiple GPUs
+  %(prog)s 'python3 kernel.py --profile' --quick
+  %(prog)s 'python3 kernel.py --profile' --gpu-devices 0,1,2
+
+Pipeline chaining (read test command from discovery output):
+  %(prog)s --from-discovery discovery.json --json -o profile.json
+  %(prog)s --from-discovery discovery.json --quick --json -o profile.json
 """
+
+
+def _extract_command_from_discovery(discovery_path: str) -> str:
+    """Extract the profiling command from a discovery JSON file.
+
+    Prefers focused_test.focused_command, falls back to tests[0].command.
+    """
+    data = json.loads(Path(discovery_path).read_text())
+
+    focused = data.get("focused_test") or {}
+    cmd = focused.get("focused_command")
+    if cmd:
+        return cmd
+
+    tests = data.get("tests") or []
+    if tests:
+        cmd = tests[0].get("command")
+        if cmd:
+            return cmd
+
+    raise ValueError(
+        f"No profiling command found in {discovery_path}: "
+        "need focused_test.focused_command or tests[0].command"
+    )
 
 
 def main():
@@ -31,7 +60,20 @@ def main():
         epilog=EXAMPLES,
     )
     parser.add_argument(
-        "command", help='Command to profile (e.g., "python3 kernel.py --profile")'
+        "command", nargs="?", default=None,
+        help='Command to profile (e.g., "python3 kernel.py --profile")',
+    )
+    parser.add_argument(
+        "--from-discovery", default=None, metavar="FILE",
+        help="Read discovery.json and extract the test command for profiling",
+    )
+    parser.add_argument(
+        "--json", action="store_true", dest="output_json",
+        help="Output raw MetrixTool result as JSON (for piping to baseline-metrics)",
+    )
+    parser.add_argument(
+        "-o", "--output", default=None, metavar="FILE",
+        help="Write output to file instead of stdout (implies --json)",
     )
     parser.add_argument(
         "--gpu-devices",
@@ -57,6 +99,23 @@ def main():
 
     args = parser.parse_args()
 
+    # Resolve the command to profile
+    command = args.command
+    if args.from_discovery:
+        try:
+            discovery_cmd = _extract_command_from_discovery(args.from_discovery)
+        except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not command:
+            command = discovery_cmd
+        print(f"[kernel-profile] Using command from discovery: {command}", file=sys.stderr)
+
+    if not command:
+        parser.error("command is required (positional or via --from-discovery)")
+
+    use_json = args.output_json or args.output is not None
+
     # All kernels are profiled and reported; agent chooses which to use.
     args.auto_select = False
 
@@ -67,21 +126,29 @@ def main():
 
     tool = MetrixTool(gpu_devices=gpu_devices)
     result = tool.profile(
-        command=args.command,
+        command=command,
         num_replays=args.replays,
         kernel_filter=None,
         auto_select=args.auto_select,
         quick=args.quick,
     )
 
-    # Display results (always a list, even for single GPU)
-    for gpu_result in result["results"]:
-        if len(result["results"]) > 1:
-            device_id = gpu_result.get("device_id", "?")
-            print(f"\n{'='*70}")
-            print(f"GPU {device_id}")
-            print(f"{'='*70}")
-        _display_single_gpu_result(gpu_result, args.auto_select)
+    if use_json:
+        output_text = json.dumps(result, indent=2)
+        if args.output:
+            Path(args.output).write_text(output_text + "\n")
+            print(f"Wrote {args.output}", file=sys.stderr)
+        else:
+            print(output_text)
+    else:
+        # Display human-readable results (always a list, even for single GPU)
+        for gpu_result in result["results"]:
+            if len(result["results"]) > 1:
+                device_id = gpu_result.get("device_id", "?")
+                print(f"\n{'='*70}")
+                print(f"GPU {device_id}")
+                print(f"{'='*70}")
+            _display_single_gpu_result(gpu_result, args.auto_select)
 
 
 def _display_single_gpu_result(result, auto_select):

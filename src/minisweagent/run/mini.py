@@ -133,6 +133,52 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tu
     return ""
 
 
+def _run_baseline_profile(test_command: str, gpu_id: int = 0, console=None) -> dict:
+    """Run kernel-profile on the test harness and return the raw profiling dict.
+
+    This is a lightweight wrapper that calls MetrixTool.profile() directly,
+    replicating what the ``kernel-profile`` CLI does but returning the dict
+    instead of printing to stdout.
+    """
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from metrix_mcp.core import MetrixTool
+
+    profile_cmd = _extract_harness_path(test_command) + " --profile"
+    if console:
+        console.print(f"[dim]Profiling: {profile_cmd} on GPU {gpu_id}[/dim]")
+
+    tool = MetrixTool(gpu_devices=str(gpu_id))
+    return tool.profile(command=f"python3 {profile_cmd}", num_replays=3, quick=True)
+
+
+def _extract_harness_path(test_command: str) -> str:
+    """Extract the harness script path from a test command string.
+
+    Handles patterns like:
+        'pytest /path/to/test.py -v'  -> '/path/to/test.py'
+        'python /path/to/harness.py --correctness' -> '/path/to/harness.py'
+        '/path/to/harness.py' -> '/path/to/harness.py'
+    """
+    import shlex
+    try:
+        tokens = shlex.split(test_command)
+    except ValueError:
+        tokens = test_command.split()
+
+    for token in tokens:
+        if token.endswith(".py") and "/" in token:
+            return token
+
+    # Fallback: return first token that looks like a path
+    for token in tokens:
+        if "/" in token:
+            return token
+
+    return test_command
+
+
 def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -> tuple[str, str | None]:
     """Resolve kernel URL to local path/line/kernel name and append to task."""
     repo_root = Path(__file__).resolve().parent.parent.parent.parent
@@ -256,9 +302,42 @@ def main(
     docker_image: str | None = typer.Option(None, "--docker-image", help="Docker image to use when --runtime=docker.", rich_help_panel="Advanced"),
     workspace: Path | None = typer.Option(None, "--workspace", help="Workspace directory to mount in Docker.", rich_help_panel="Advanced"),
     kernel_url: str | None = typer.Option(None, "--kernel-url", help="Kernel as URL (e.g. https://github.com/.../file.py#L106). Resolved path/line/kernel name are injected into the task.", rich_help_panel="Kernel"),
+    from_task: Path | None = typer.Option(None, "--from-task", help="Path to a task .md file (YAML frontmatter). Populates --task, --repo, and other settings. Implies --yolo.", rich_help_panel="Task File"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
+
+    # --from-task: populate CLI parameters from the task file, unless explicitly set
+    _task_worktree: Path | None = None
+    if from_task:
+        from minisweagent.run.task_file import (
+            read_task_file as _read_tf,
+            create_worktree as _create_wt,
+            is_git_repo as _is_git,
+            replace_paths as _repl_paths,
+        )
+        _tf_meta, _tf_body = _read_tf(from_task)
+        console.print(f"[bold cyan]Loading task file: {from_task}[/bold cyan]")
+
+        if not task:
+            task = _tf_body
+
+        if not repo and _tf_meta.get("kernel_path"):
+            repo = Path(_tf_meta["kernel_path"]).resolve().parent
+        if not repo and _tf_meta.get("repo_root"):
+            repo = Path(_tf_meta["repo_root"]).resolve()
+
+        # Auto-worktree isolation
+        _tf_repo = Path(_tf_meta["repo_root"]).resolve() if _tf_meta.get("repo_root") else (repo.resolve() if repo else None)
+        if _tf_repo and _tf_repo.is_dir() and _is_git(_tf_repo):
+            _wt_dest = Path(from_task).resolve().parent.parent / "results" / (from_task.stem + "_wt")
+            console.print(f"[bold cyan]Creating isolated worktree at {_wt_dest}...[/bold cyan]")
+            _task_worktree = _create_wt(_tf_repo, _wt_dest)
+            # Rewrite repo to point at worktree
+            repo = _task_worktree
+
+        # Imply --yolo for task file runs
+        yolo = True
 
     # 0. Runtime environment check (ported from MSA branch)
     if runtime in ("auto", "docker"):
@@ -452,7 +531,51 @@ def main(
             discovery_context=discovery_context,
         )
         console.print(f"[bold green]Using UnitTestAgent test_command:[/bold green] {test_command}")
-    
+
+    # ============ Step 0c: Pre-agent baseline profiling + commandment generation ============
+    # These run once up front so the task generator has richer context.
+    # Results are stored in _pre_agent_* variables and passed to the task generator.
+    _pre_agent_profiling: dict | None = None
+    _pre_agent_baseline_metrics: dict | None = None
+    _pre_agent_commandment: str | None = None
+
+    if _resolved_kernel_path and test_command and (num_parallel and num_parallel > 1):
+        # -- Baseline profiling --
+        try:
+            console.print("[bold cyan]--- Pre-agent Baseline Profiling ---[/bold cyan]")
+            _pre_agent_profiling = _run_baseline_profile(
+                test_command, gpu_id=parsed_gpu_ids[0], console=console,
+            )
+        except Exception as e:
+            console.print(f"[yellow]Pre-agent profiling failed ({e}); tasks will use discovery only[/yellow]")
+
+        # -- Baseline metrics (from profiling) --
+        if _pre_agent_profiling:
+            try:
+                from minisweagent.baseline_metrics import build_baseline_metrics
+                _pre_agent_baseline_metrics = build_baseline_metrics(
+                    _pre_agent_profiling, include_all=True,
+                )
+                dur = _pre_agent_baseline_metrics.get("duration_us", "?")
+                bn = _pre_agent_baseline_metrics.get("bottleneck", "?")
+                console.print(f"[bold green]Baseline: {dur} us, bottleneck={bn}[/bold green]")
+            except Exception as e:
+                console.print(f"[yellow]Baseline metrics extraction failed ({e})[/yellow]")
+
+        # -- Commandment generation --
+        if _resolved_kernel_path:
+            try:
+                from minisweagent.tools.commandment import generate_commandment
+                _harness_path = _extract_harness_path(test_command)
+                _pre_agent_commandment = generate_commandment(
+                    kernel_path=_resolved_kernel_path,
+                    harness_path=_harness_path,
+                    repo_root=repo,
+                )
+                console.print("[bold green]COMMANDMENT.md generated (pre-agent)[/bold green]")
+            except Exception as e:
+                console.print(f"[yellow]Commandment generation failed ({e})[/yellow]")
+
     # ============ Step 1: Choose base agent class ============
     # Based on enable_strategies flag, select appropriate agent and template
     if enable_strategies:
@@ -512,25 +635,30 @@ def main(
         else:
             console.print("[bold yellow]Warning: No repo path specified for parallel execution[/bold yellow]")
 
-        # Generate dynamic optimization tasks from discovery results (if available)
+        # Generate dynamic optimization tasks (LLM-assisted if model available, else rule-based)
         discovery_result = getattr(_run_discovery, "_last_result", None)
         if discovery_result and discovery_result.kernels:
             try:
-                from minisweagent.run.task_planner import build_optimization_tasks
-                tasks = build_optimization_tasks(
+                from minisweagent.run.task_generator import generate_tasks
+                tasks = generate_tasks(
                     discovery_result=discovery_result,
                     base_task_context=task_content,
                     agent_class=base_agent_class,
+                    model=model if _pre_agent_profiling else None,
+                    profiling_result=_pre_agent_profiling,
+                    commandment_content=_pre_agent_commandment,
+                    baseline_metrics=_pre_agent_baseline_metrics,
                 )
                 if tasks:
                     agent_config["tasks"] = tasks
-                    console.print(f"[bold cyan]Task planner: {len(tasks)} optimization tasks generated (pool mode)[/bold cyan]")
+                    source = "LLM" if (_pre_agent_profiling and model) else "rule-based"
+                    console.print(f"[bold cyan]Task generator ({source}): {len(tasks)} optimization tasks (pool mode)[/bold cyan]")
                     for t in tasks[:6]:
                         console.print(f"  [dim]- [{t.priority:2d}] {t.label} ({t.kernel_language})[/dim]")
                     if len(tasks) > 6:
                         console.print(f"  [dim]  ... and {len(tasks) - 6} more[/dim]")
             except Exception as e:
-                console.print(f"[yellow]Task planner failed ({e}), falling back to homogeneous mode[/yellow]")
+                console.print(f"[yellow]Task generator failed ({e}), falling back to homogeneous mode[/yellow]")
     else:
         console.print("[bold cyan]Using Single Agent Mode[/bold cyan]")
         console.print(f"[dim]Using GPU: {parsed_gpu_ids[0]}[/dim]")

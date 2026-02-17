@@ -214,3 +214,62 @@ def cleanup_resolved_path(local_repo_path: str | None) -> None:
             shutil.rmtree(path, ignore_errors=True)
         except OSError:
             pass
+
+
+# ============================================================================
+# CLI
+# ============================================================================
+
+def main():
+    """Resolve a GitHub kernel URL to a local file path."""
+    import argparse
+    import json
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="Clone a GitHub repo and resolve a kernel URL to a local path",
+    )
+    parser.add_argument("url", help="GitHub file URL (blob link)")
+    parser.add_argument(
+        "--json", action="store_true", dest="output_json",
+        help="Output result as JSON (for piping to test-discovery --from-resolved)",
+    )
+    parser.add_argument(
+        "-o", "--output", default=None,
+        help="Write output to file instead of stdout (implies --json)",
+    )
+    args = parser.parse_args()
+
+    use_json = args.output_json or args.output is not None
+
+    print(f"Resolving: {args.url}", file=sys.stderr)
+    result = resolve_kernel_url(args.url)
+
+    if result.get("error"):
+        print(f"ERROR: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    if use_json:
+        output_text = json.dumps(result, indent=2)
+        if args.output:
+            Path(args.output).write_text(output_text + "\n")
+            print(f"Wrote {args.output}", file=sys.stderr)
+        else:
+            print(output_text)
+    else:
+        local_path = result["local_file_path"]
+        line = result.get("line_number")
+        repo_root = result.get("local_repo_path")
+
+        print(f"Local path:  {local_path}")
+        if repo_root:
+            print(f"Repo root:   {repo_root}")
+        if line:
+            print(f"Line number: {line}")
+            name = get_kernel_name_at_line(local_path, line)
+            if name:
+                print(f"Kernel name: {name}")
+
+
+if __name__ == "__main__":
+    main()
