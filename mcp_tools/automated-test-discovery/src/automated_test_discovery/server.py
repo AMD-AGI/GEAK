@@ -1,11 +1,19 @@
 """
 Automated Test Discovery MCP Server
 
-Single-tool MCP for discovering tests and benchmarks for GPU kernels.
+Two-phase discovery for GPU kernels:
+  Phase 1 (automated): Content-based scan, relevance scoring, ranking
+  Phase 2 (LLM finisher, optional): Validates top results, isolates specific
+    test functions for the target kernel, or creates a focused test if nothing
+    matches.  Writes a focused test script to output_dir.
+
 No configuration files needed - uses content-based detection.
 """
 
+import json
+import os
 import re
+import textwrap
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -237,7 +245,151 @@ def _get_kernel_type(content: str) -> str:
 
 
 # ============================================================================
-# Single Monolithic Tool
+# Phase 2: LLM Finisher
+# ============================================================================
+
+def _init_llm_client():
+    """Initialize the AMD LLM gateway client. Returns None if unavailable."""
+    api_key = os.environ.get("AMD_LLM_API_KEY") or os.environ.get("LLM_GATEWAY_KEY")
+    if not api_key:
+        return None
+    try:
+        import anthropic
+        return anthropic.Anthropic(
+            api_key="dummy",
+            base_url="https://llm-api.amd.com/Anthropic",
+            default_headers={
+                "Ocp-Apim-Subscription-Key": api_key,
+                "anthropic-version": "2023-10-16",
+            },
+        )
+    except Exception:
+        return None
+
+
+def _llm_finalize_discovery(
+    kernel_file: Path,
+    kernel_name: str,
+    kernel_functions: list[str],
+    top_tests: list[dict],
+    workspace: Path,
+    output_dir: Path | None,
+) -> dict | None:
+    """Phase 2: Use LLM to validate top test results and generate a focused test.
+
+    Reads the kernel source and the top test candidate, asks the LLM to:
+    1. Confirm whether the top test actually tests the target kernel function(s)
+    2. If yes: extract the specific test functions and generate a focused script
+    3. If no: generate a minimal focused test from scratch
+
+    Returns a dict with 'focused_test_file' and 'focused_command', or None if
+    the LLM is unavailable or fails.
+    """
+    client = _init_llm_client()
+    if not client:
+        return None
+
+    # Read kernel source (truncated)
+    try:
+        kernel_source = kernel_file.read_text()[:4000]
+    except Exception:
+        return None
+
+    # Read top test candidate (if any)
+    top_test_source = ""
+    top_test_path = ""
+    if top_tests:
+        top_test_path = top_tests[0]["file"]
+        try:
+            top_test_source = Path(top_test_path).read_text()[:6000]
+        except Exception:
+            top_test_source = ""
+
+    func_list = ", ".join(kernel_functions[:5]) if kernel_functions else kernel_name
+
+    prompt = textwrap.dedent(f"""\
+    You are a test isolation agent. Given a kernel and candidate test files,
+    produce a focused Python test script that tests ONLY the specified kernel function(s).
+
+    TARGET KERNEL:
+    - File: {kernel_file}
+    - Name: {kernel_name}
+    - Functions to test: {func_list}
+    - Source (first 4000 chars):
+    ```python
+    {kernel_source}
+    ```
+
+    TOP CANDIDATE TEST (confidence-ranked):
+    - File: {top_test_path}
+    - Source (first 6000 chars):
+    ```python
+    {top_test_source}
+    ```
+
+    TASK:
+    1. Does the candidate test ACTUALLY test the target kernel function(s) ({func_list})?
+       Look for imports of the kernel, calls to those functions, relevant assertions.
+    2. If YES: Extract ONLY the test functions that exercise {func_list} and write a
+       focused script that imports and runs them.
+    3. If NO (the candidate tests something else): Write a minimal test from scratch
+       that imports {func_list} from the kernel, creates appropriate inputs, runs the
+       kernel, and validates correctness against a torch reference.
+
+    The focused test script MUST:
+    - Be a standalone Python script (no pytest required)
+    - Import the kernel functions correctly (use sys.path if needed)
+    - Use torch.manual_seed(42) for reproducibility
+    - Print PASS/FAIL clearly
+    - Exit with code 0 on success, 1 on failure
+
+    Respond with ONLY a JSON object (no markdown fences):
+    {{
+        "top_test_is_relevant": true/false,
+        "reason": "brief explanation",
+        "focused_test_code": "the complete Python script as a string",
+        "focused_command": "python <output_path>/test_{kernel_name}_focused.py"
+    }}
+    """)
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4.5",
+            max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+        )
+        result_text = response.content[0].text.strip()
+        # Strip markdown code fences if present
+        if result_text.startswith("```"):
+            result_text = re.sub(r"^```\w*\n?", "", result_text)
+            result_text = re.sub(r"\n?```$", "", result_text)
+        result = json.loads(result_text)
+    except Exception:
+        return None
+
+    # Write the focused test script
+    focused_code = result.get("focused_test_code", "")
+    if not focused_code:
+        return None
+
+    out_dir = output_dir or (workspace / ".geak_discovery_output")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    focused_file = out_dir / f"test_{kernel_name}_focused.py"
+    focused_file.write_text(focused_code)
+
+    focused_command = f"python {focused_file}"
+
+    return {
+        "focused_test_file": str(focused_file),
+        "focused_command": focused_command,
+        "top_test_is_relevant": result.get("top_test_is_relevant", False),
+        "reason": result.get("reason", ""),
+    }
+
+
+# ============================================================================
+# Kernel scanning
 # ============================================================================
 
 def _find_kernels_in_dir(directory: Path) -> list[dict]:
@@ -267,22 +419,34 @@ def _find_kernels_in_dir(directory: Path) -> list[dict]:
 @mcp.tool()
 def discover(
     kernel_path: str,
+    kernel_function: str = "",
+    output_dir: str = "",
     max_tests: int = 5,
-    max_benchmarks: int = 5
+    max_benchmarks: int = 5,
+    use_llm: bool = True,
 ) -> dict:
     """
     Discover tests and benchmarks for a GPU kernel.
     
-    Automatically finds related test and benchmark files using content-based
-    detection. No configuration needed - works on any project structure.
+    Two-phase discovery:
+      Phase 1 (automated): Content-based scan with relevance scoring.
+      Phase 2 (LLM finisher, optional): Validates top results and generates
+        a focused test script that tests ONLY the target kernel function(s).
     
     Args:
         kernel_path: Path to a kernel file (.py/.cu/.hip) OR a repository
             directory.  When a directory is given, all kernel files inside it
             are discovered first, and tests/benchmarks are matched against each
             discovered kernel.
+        kernel_function: Name of the specific kernel function to test
+            (e.g. "_rope_fwd" from resolve_kernel_url).  When provided,
+            Phase 2 uses this to isolate the exact test functions needed.
+        output_dir: Directory where the focused test script is written.
+            Defaults to <workspace>/.geak_discovery_output/.
         max_tests: Maximum number of test results to return (default: 5)
         max_benchmarks: Maximum number of benchmark results to return (default: 5)
+        use_llm: Whether to run Phase 2 LLM finisher (default: True).
+            Set to False for fast automated-only results.
     
     Returns:
         Complete discovery result with:
@@ -290,10 +454,11 @@ def discover(
         - workspace: Detected project root directory
         - tests: List of {file, name, confidence, command} sorted by relevance
         - benchmarks: List of {file, name, confidence, command} sorted by relevance
+        - focused_test: (Phase 2) Focused test script path and command, if generated
         - summary: Human-readable summary of what was found
     
     Example:
-        discover("/path/to/gemm_a16w16.py")
+        discover("/path/to/rope.py", kernel_function="_rope_fwd")
         discover("/path/to/repo")  # scans repo recursively for kernels
     """
     path = Path(kernel_path)
@@ -391,22 +556,39 @@ def discover(
             "summary": summary,
         }
 
-    # --- Single-file mode (original behaviour) ---
+    # --- Single-file mode ---
     workspace = _expand_workspace(path)
 
     kernel_name = path.stem
-    # Use parent dir name if file has a generic name
     _GENERIC_STEMS = {"kernel", "main", "module", "op", "impl"}
     if kernel_name.lower() in _GENERIC_STEMS and path.parent.name:
         kernel_name = path.parent.name
 
     try:
-        content = path.read_text()[:3000]
+        content = path.read_text()[:5000]
         kernel_type = _get_kernel_type(content)
     except Exception:
+        content = ""
         kernel_type = "unknown"
 
+    # Extract kernel function names from source
+    kernel_functions: list[str] = []
+    if kernel_function:
+        kernel_functions.append(kernel_function)
+    # Also extract @triton.jit decorated functions and __global__ functions
+    for m in re.finditer(r'@triton\.jit\s*\n\s*def\s+(\w+)', content):
+        if m.group(1) not in kernel_functions:
+            kernel_functions.append(m.group(1))
+    for m in re.finditer(r'__global__\s+void\s+(\w+)', content):
+        if m.group(1) not in kernel_functions:
+            kernel_functions.append(m.group(1))
+
     kernel_parts = [p.lower() for p in kernel_name.split("_") if len(p) > 2]
+    # Add kernel_function parts for matching too
+    if kernel_function:
+        kernel_parts.extend(
+            p.lower() for p in kernel_function.split("_") if len(p) > 2 and p.lower() not in kernel_parts
+        )
 
     tests = []
     benchmarks = []
@@ -423,10 +605,19 @@ def discover(
 
             relevance = _relevance_score(file_path, path, kernel_name, kernel_parts)
 
+            # Bonus: if kernel_function name appears inside the test file content
+            if kernel_functions and relevance < 2.0:
+                try:
+                    test_content = file_path.read_text()[:5000]
+                    for kf in kernel_functions:
+                        if kf in test_content:
+                            relevance += 2.0
+                            break
+                except Exception:
+                    pass
+
             test_score = _score_as_test(file_path)
             if test_score >= 0.3:
-                # Combine: content score (0-1) + relevance bonus (0-3+)
-                # Relevant tests score much higher than generic ones
                 combined = test_score + relevance
                 tests.append({
                     "file": str(file_path),
@@ -447,10 +638,10 @@ def discover(
 
     tests.sort(key=lambda x: x["confidence"], reverse=True)
     benchmarks.sort(key=lambda x: x["confidence"], reverse=True)
-    
+
     test_count = len(tests)
     bench_count = len(benchmarks)
-    
+
     if test_count > 0 and bench_count > 0:
         summary = f"Found {test_count} test(s) and {bench_count} benchmark(s) for {kernel_name} ({kernel_type} kernel)"
     elif test_count > 0:
@@ -459,23 +650,43 @@ def discover(
         summary = f"Found {bench_count} benchmark(s) for {kernel_name} ({kernel_type} kernel), no tests"
     else:
         summary = f"No tests or benchmarks found for {kernel_name} ({kernel_type} kernel)"
-    
+
     if tests:
         summary += f". Recommended test: {tests[0]['file']}"
 
-    return {
+    # --- Phase 2: LLM finisher (optional) ---
+    focused_test = None
+    if use_llm:
+        out_dir = Path(output_dir) if output_dir else None
+        focused_test = _llm_finalize_discovery(
+            kernel_file=path,
+            kernel_name=kernel_name,
+            kernel_functions=kernel_functions,
+            top_tests=tests[:3],
+            workspace=workspace,
+            output_dir=out_dir,
+        )
+        if focused_test:
+            summary += f". Focused test: {focused_test['focused_test_file']}"
+
+    result = {
         "kernel": {
             "name": kernel_name,
             "type": kernel_type,
-            "file": str(path)
+            "file": str(path),
+            "functions": kernel_functions,
         },
         "workspace": str(workspace),
         "tests": tests[:max_tests],
         "benchmarks": benchmarks[:max_benchmarks],
         "total_tests_found": test_count,
         "total_benchmarks_found": bench_count,
-        "summary": summary
+        "summary": summary,
     }
+    if focused_test:
+        result["focused_test"] = focused_test
+
+    return result
 
 
 def main():
