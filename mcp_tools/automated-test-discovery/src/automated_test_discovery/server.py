@@ -471,22 +471,23 @@ def discover(
             "summary": "Error: path not found"
         }
 
-    # --- Directory mode: discover kernels first, then find tests for all ---
+    # --- Directory mode: discover kernels, then find per-kernel tests ---
     if path.is_dir():
         workspace = _expand_workspace(path)
         discovered_kernels = _find_kernels_in_dir(workspace)
 
+        # Apply generic stem fix (kernel.py -> parent dir name)
+        _GENERIC_STEMS = {"kernel", "main", "module", "op", "impl"}
+        for k in discovered_kernels:
+            kpath = Path(k["file"])
+            if k["name"].lower() in _GENERIC_STEMS and kpath.parent.name:
+                k["name"] = kpath.parent.name
+
         kernel_files = {Path(k["file"]) for k in discovered_kernels}
-        all_kernel_names = [k["name"] for k in discovered_kernels]
-        all_kernel_parts: list[str] = []
-        for kname in all_kernel_names:
-            all_kernel_parts.extend(p.lower() for p in kname.split("_") if len(p) > 2)
-        all_kernel_parts = list(set(all_kernel_parts))
 
-        tests: list[dict] = []
-        benchmarks: list[dict] = []
+        # Collect all candidate test/benchmark files once
+        candidate_files: list[Path] = []
         extensions = [".py", ".cpp", ".cc", ".cu", ".hip"]
-
         for ext in extensions:
             for file_path in workspace.rglob(f"*{ext}"):
                 if _should_skip(file_path):
@@ -495,61 +496,93 @@ def discover(
                     continue
                 if _is_kernel_file(file_path):
                     continue
+                candidate_files.append(file_path)
 
-                fname_lower = file_path.name.lower()
+        # Score each candidate as test/bench (content-based, computed once)
+        candidate_test_scores: dict[Path, float] = {}
+        candidate_bench_scores: dict[Path, float] = {}
+        for fp in candidate_files:
+            ts = _score_as_test(fp)
+            if ts >= 0.3:
+                candidate_test_scores[fp] = ts
+            bs = _score_as_bench(fp)
+            if bs >= 0.3:
+                candidate_bench_scores[fp] = bs
 
-                test_score = _score_as_test(file_path)
-                if test_score >= 0.3:
-                    for kname in all_kernel_names:
-                        if kname.lower() in fname_lower:
-                            test_score += 1.0
-                            break
-                    else:
-                        matches = sum(1 for p in all_kernel_parts if p in fname_lower)
-                        if matches >= 2:
-                            test_score += 0.3 * matches
-                    tests.append({
-                        "file": str(file_path),
-                        "name": file_path.name,
-                        "confidence": round(min(test_score, 1.0), 2),
-                        "command": _get_test_command(file_path),
-                    })
+        # For each kernel, compute per-kernel relevance and find best matches
+        global_tests: list[dict] = []
+        global_benchmarks: list[dict] = []
+        global_test_seen: set[str] = set()
+        global_bench_seen: set[str] = set()
 
-                bench_score = _score_as_bench(file_path)
-                if bench_score >= 0.3:
-                    for kname in all_kernel_names:
-                        if kname.lower() in fname_lower:
-                            bench_score += 1.0
-                            break
-                    else:
-                        matches = sum(1 for p in all_kernel_parts if p in fname_lower)
-                        if matches >= 2:
-                            bench_score += 0.3 * matches
-                    benchmarks.append({
-                        "file": str(file_path),
-                        "name": file_path.name,
-                        "confidence": round(min(bench_score, 1.0), 2),
-                        "command": f"python {file_path}",
-                    })
+        for k in discovered_kernels:
+            kname = k["name"]
+            kpath = Path(k["file"])
+            kparts = [p.lower() for p in kname.split("_") if len(p) > 2]
 
-        tests.sort(key=lambda x: x["confidence"], reverse=True)
-        benchmarks.sort(key=lambda x: x["confidence"], reverse=True)
+            per_kernel_tests: list[dict] = []
+            per_kernel_benchmarks: list[dict] = []
 
-        test_count = len(tests)
-        bench_count = len(benchmarks)
+            for fp in candidate_files:
+                relevance = _relevance_score(fp, kpath, kname, kparts)
+
+                if fp in candidate_test_scores:
+                    combined = candidate_test_scores[fp] + relevance
+                    entry = {
+                        "file": str(fp),
+                        "name": fp.name,
+                        "confidence": round(combined, 2),
+                        "command": _get_test_command(fp),
+                    }
+                    per_kernel_tests.append(entry)
+                    if str(fp) not in global_test_seen:
+                        global_tests.append(entry)
+                        global_test_seen.add(str(fp))
+
+                if fp in candidate_bench_scores:
+                    combined = candidate_bench_scores[fp] + relevance
+                    entry = {
+                        "file": str(fp),
+                        "name": fp.name,
+                        "confidence": round(combined, 2),
+                        "command": f"python {fp}",
+                    }
+                    per_kernel_benchmarks.append(entry)
+                    if str(fp) not in global_bench_seen:
+                        global_benchmarks.append(entry)
+                        global_bench_seen.add(str(fp))
+
+            per_kernel_tests.sort(key=lambda x: x["confidence"], reverse=True)
+            per_kernel_benchmarks.sort(key=lambda x: x["confidence"], reverse=True)
+
+            k["recommended_test"] = per_kernel_tests[0] if per_kernel_tests else None
+            k["recommended_benchmark"] = per_kernel_benchmarks[0] if per_kernel_benchmarks else None
+
+        global_tests.sort(key=lambda x: x["confidence"], reverse=True)
+        global_benchmarks.sort(key=lambda x: x["confidence"], reverse=True)
+
+        test_count = len(global_tests)
+        bench_count = len(global_benchmarks)
         k_count = len(discovered_kernels)
-        summary = (
-            f"Scanned repository: found {k_count} kernel(s), "
-            f"{test_count} test(s), {bench_count} benchmark(s)"
-        )
-        if tests:
-            summary += f". Recommended test: {tests[0]['file']}"
+
+        # Build per-kernel summary
+        rec_parts = []
+        for k in discovered_kernels:
+            rt = k.get("recommended_test")
+            if rt:
+                rec_parts.append(f"{k['name']} -> {rt['file']}")
+            else:
+                rec_parts.append(f"{k['name']} -> (no test found)")
+
+        summary = f"Scanned repository: found {k_count} kernel(s), {test_count} test(s), {bench_count} benchmark(s)"
+        if rec_parts:
+            summary += ". Per-kernel recommendations: " + "; ".join(rec_parts[:10])
 
         return {
             "kernel": discovered_kernels if len(discovered_kernels) != 1 else discovered_kernels[0],
             "workspace": str(workspace),
-            "tests": tests[:max_tests],
-            "benchmarks": benchmarks[:max_benchmarks],
+            "tests": global_tests[:max_tests],
+            "benchmarks": global_benchmarks[:max_benchmarks],
             "total_kernels_found": k_count,
             "total_tests_found": test_count,
             "total_benchmarks_found": bench_count,
