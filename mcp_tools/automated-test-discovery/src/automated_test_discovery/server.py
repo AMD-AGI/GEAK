@@ -95,6 +95,51 @@ def _should_skip(path: Path) -> bool:
     return False
 
 
+def _relevance_score(file_path: Path, kernel_path: Path, kernel_name: str, kernel_parts: list[str]) -> float:
+    """Score how relevant a test/bench file is to the kernel.
+
+    Returns a multiplier (0.0 - 3.0+) based on:
+    - Name match: kernel name appears in the file name or path
+    - Path proximity: file is in the same or nearby directory
+    - Path component match: kernel path components appear in file path
+    """
+    score = 0.0
+    fname_lower = file_path.name.lower()
+    fpath_lower = str(file_path).lower()
+    kname_lower = kernel_name.lower()
+
+    # Exact kernel name in filename (strongest signal)
+    if kname_lower in fname_lower:
+        score += 3.0
+
+    # Kernel name in path (e.g. triton_tests/rope/test_something.py)
+    elif kname_lower in fpath_lower:
+        score += 2.0
+
+    # Partial name match (kernel parts in filename)
+    elif kernel_parts:
+        matches = sum(1 for p in kernel_parts if p in fname_lower)
+        if matches > 0:
+            score += 0.5 * matches
+
+    # Path proximity: same parent directory tree
+    try:
+        kernel_parents = set(kernel_path.resolve().parents)
+        file_parents = set(file_path.resolve().parents)
+        shared = kernel_parents & file_parents
+        if shared:
+            deepest_shared = max(shared, key=lambda p: len(p.parts))
+            depth_from_shared = len(file_path.resolve().parts) - len(deepest_shared.parts)
+            if depth_from_shared <= 2:
+                score += 1.0
+            elif depth_from_shared <= 4:
+                score += 0.3
+    except Exception:
+        pass
+
+    return score
+
+
 def _is_kernel_file(path: Path) -> bool:
     try:
         content = path.read_text()[:3000]
@@ -350,18 +395,23 @@ def discover(
     workspace = _expand_workspace(path)
 
     kernel_name = path.stem
+    # Use parent dir name if file has a generic name
+    _GENERIC_STEMS = {"kernel", "main", "module", "op", "impl"}
+    if kernel_name.lower() in _GENERIC_STEMS and path.parent.name:
+        kernel_name = path.parent.name
+
     try:
         content = path.read_text()[:3000]
         kernel_type = _get_kernel_type(content)
     except Exception:
         kernel_type = "unknown"
-    
+
     kernel_parts = [p.lower() for p in kernel_name.split("_") if len(p) > 2]
-    
+
     tests = []
     benchmarks = []
     extensions = [".py", ".cpp", ".cc", ".cu", ".hip"]
-    
+
     for ext in extensions:
         for file_path in workspace.rglob(f"*{ext}"):
             if _should_skip(file_path):
@@ -370,41 +420,31 @@ def discover(
                 continue
             if _is_kernel_file(file_path):
                 continue
-            
-            fname_lower = file_path.name.lower()
-            
+
+            relevance = _relevance_score(file_path, path, kernel_name, kernel_parts)
+
             test_score = _score_as_test(file_path)
             if test_score >= 0.3:
-                if kernel_name.lower() in fname_lower:
-                    test_score += 1.0
-                elif kernel_parts:
-                    matches = sum(1 for p in kernel_parts if p in fname_lower)
-                    if matches >= 2:
-                        test_score += 0.3 * matches
-                
+                # Combine: content score (0-1) + relevance bonus (0-3+)
+                # Relevant tests score much higher than generic ones
+                combined = test_score + relevance
                 tests.append({
                     "file": str(file_path),
                     "name": file_path.name,
-                    "confidence": round(min(test_score, 1.0), 2),
+                    "confidence": round(combined, 2),
                     "command": _get_test_command(file_path)
                 })
-            
+
             bench_score = _score_as_bench(file_path)
             if bench_score >= 0.3:
-                if kernel_name.lower() in fname_lower:
-                    bench_score += 1.0
-                elif kernel_parts:
-                    matches = sum(1 for p in kernel_parts if p in fname_lower)
-                    if matches >= 2:
-                        bench_score += 0.3 * matches
-                
+                combined = bench_score + relevance
                 benchmarks.append({
                     "file": str(file_path),
                     "name": file_path.name,
-                    "confidence": round(min(bench_score, 1.0), 2),
+                    "confidence": round(combined, 2),
                     "command": f"python {file_path}"
                 })
-    
+
     tests.sort(key=lambda x: x["confidence"], reverse=True)
     benchmarks.sort(key=lambda x: x["confidence"], reverse=True)
     
