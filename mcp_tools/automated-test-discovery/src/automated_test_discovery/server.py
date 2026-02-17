@@ -378,7 +378,7 @@ def discover(
             f"{test_count} test(s), {bench_count} benchmark(s)"
         )
         if tests:
-            summary += f". Recommended test: {tests[0]['name']}"
+            summary += f". Recommended test: {tests[0]['file']}"
 
         return {
             "kernel": discovered_kernels if len(discovered_kernels) != 1 else discovered_kernels[0],
@@ -461,8 +461,8 @@ def discover(
         summary = f"No tests or benchmarks found for {kernel_name} ({kernel_type} kernel)"
     
     if tests:
-        summary += f". Recommended test: {tests[0]['name']}"
-    
+        summary += f". Recommended test: {tests[0]['file']}"
+
     return {
         "kernel": {
             "name": kernel_name,
