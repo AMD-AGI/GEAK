@@ -21,7 +21,7 @@ from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.agents.interactive_textual import TextualAgent
 from minisweagent.agents.parallel_agent import ParallelAgent
 from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
-from minisweagent.agents.unit_test_agent import run_discovery_pipeline, run_unit_test_agent
+from minisweagent.agents.unit_test_agent import format_discovery_for_agent, run_discovery_pipeline, run_unit_test_agent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
@@ -411,29 +411,38 @@ def main(
         if not repo:
             raise ValueError("repo is required for --create-test or when test_command is missing. Please pass --repo.")
 
-        # Step 0a: Run content-based discovery (fast, free, no LLM)
+        # Step 0a: Format discovery context for UnitTestAgent
+        # Reuse the stashed result from _run_discovery() if available so we
+        # don't run a second redundant scan of the same codebase.
         discovery_context = ""
-        _kernel_path = (
-            Path(_resolved_kernel_path)
-            if _resolved_kernel_path
-            else Path(task)
-            if task and Path(task).is_file()
-            else None
-        )
-        if _kernel_path or repo:
-            console.print("[bold cyan]Running content-based test discovery...[/bold cyan]")
-            discovery_context = run_discovery_pipeline(
-                kernel_path=_kernel_path or repo,
-                repo=repo,
+        _stashed_result = getattr(_run_discovery, "_last_result", None)
+        if _stashed_result:
+            console.print("[bold cyan]Formatting stashed discovery results for UnitTestAgent...[/bold cyan]")
+            discovery_context = format_discovery_for_agent(_stashed_result)
+        else:
+            # No stashed result (e.g. no --kernel-url) — run discovery once
+            _kernel_path = (
+                Path(_resolved_kernel_path)
+                if _resolved_kernel_path
+                else Path(task)
+                if task and Path(task).is_file()
+                else None
             )
-            if discovery_context:
-                console.print("[dim]Discovery found candidates — feeding into UnitTestAgent.[/dim]")
-            else:
-                console.print("[dim]Discovery found nothing — UnitTestAgent will search/create from scratch.[/dim]")
+            if _kernel_path or repo:
+                console.print("[bold cyan]Running content-based test discovery...[/bold cyan]")
+                discovery_context = run_discovery_pipeline(
+                    kernel_path=_kernel_path or repo,
+                    repo=repo,
+                )
 
-        # Step 0b: Run UnitTestAgent with discovery context
+        if discovery_context:
+            console.print("[dim]Discovery results ready — feeding into UnitTestAgent.[/dim]")
+        else:
+            console.print("[dim]No discovery results — UnitTestAgent will search/create from scratch.[/dim]")
+
+        # Step 0b: Run UnitTestAgent to create the fixed test harness
         console.print(
-            "[bold yellow]Running UnitTestAgent to find or create test command...[/bold yellow]"
+            "[bold yellow]Running UnitTestAgent to create test harness...[/bold yellow]"
         )
         test_command = run_unit_test_agent(
             model=get_model(model_name, config.get("model", {})),

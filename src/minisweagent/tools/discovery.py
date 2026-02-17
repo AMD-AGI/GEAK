@@ -187,6 +187,22 @@ class KernelDependencyGraph:
 
 
 @dataclass
+class TestPatterns:
+    """Patterns extracted from a discovered test file.
+
+    These help the UnitTestAgent (or main agent) create better test
+    harnesses by reusing tolerances, input shapes, and import patterns
+    from existing tests rather than inventing them from scratch.
+    """
+
+    tolerances: list[str] = field(default_factory=list)  # e.g. ["atol=1e-3", "rtol=1e-3"]
+    input_shapes: list[str] = field(default_factory=list)  # e.g. ["(1024, 1024)", "(batch, seq_len, hidden)"]
+    dtypes: list[str] = field(default_factory=list)  # e.g. ["torch.float16", "torch.bfloat16"]
+    reference_impls: list[str] = field(default_factory=list)  # e.g. ["torch.nn.functional.softmax"]
+    import_patterns: list[str] = field(default_factory=list)  # e.g. ["from aiter.ops import rope_fwd"]
+
+
+@dataclass
 class TestInfo:
     """Information about a discovered test."""
 
@@ -194,6 +210,7 @@ class TestInfo:
     test_type: str  # pytest, script, makefile
     command: str  # Command to run the test
     confidence: float  # 0-1, how confident we are this is the right test
+    patterns: TestPatterns | None = None
 
 
 @dataclass
@@ -1319,6 +1336,61 @@ Respond with JSON only:
             self.result.tests = self.result.tests[:10]
         else:
             print(f"      Found {len(self.result.tests)} potential test(s)")
+
+        # Extract patterns from top-confidence test files
+        self._extract_test_patterns()
+
+    def _extract_test_patterns(self):
+        """Extract reusable patterns from high-confidence test files.
+
+        Reads the top test files and pulls out tolerances, input shapes,
+        dtypes, reference implementations, and import patterns so the
+        UnitTestAgent can reuse them instead of inventing from scratch.
+        """
+        for test in self.result.tests[:3]:  # Top 3 by confidence
+            if test.confidence < 0.5:
+                continue
+            try:
+                content = test.file_path.read_text()
+            except Exception:
+                continue
+
+            patterns = TestPatterns()
+
+            # Tolerances: atol=X, rtol=X, assert_close(..., atol=, rtol=)
+            for m in re.finditer(r'[ar]tol\s*=\s*([0-9eE.\-+]+)', content):
+                tok = f"{'atol' if 'atol' in content[m.start()-4:m.start()] else 'rtol'}={m.group(1)}"
+                if tok not in patterns.tolerances:
+                    patterns.tolerances.append(tok)
+
+            # Input shapes: tuples of ints like (1024, 1024) or named like (batch, seq_len)
+            for m in re.finditer(r'\(\s*\d+(?:\s*,\s*\d+)+\s*\)', content):
+                shape = m.group(0)
+                if shape not in patterns.input_shapes and len(shape) < 60:
+                    patterns.input_shapes.append(shape)
+
+            # Dtypes: torch.float16, torch.bfloat16, etc.
+            for m in re.finditer(r'torch\.(float16|float32|float64|bfloat16|int32|int64|half|float|double)', content):
+                dtype = f"torch.{m.group(1)}"
+                if dtype not in patterns.dtypes:
+                    patterns.dtypes.append(dtype)
+
+            # Reference implementations: torch.nn.functional.X, torch.X
+            for m in re.finditer(r'torch\.nn\.functional\.(\w+)', content):
+                ref = f"torch.nn.functional.{m.group(1)}"
+                if ref not in patterns.reference_impls:
+                    patterns.reference_impls.append(ref)
+
+            # Import patterns: from X import Y (kernel-related)
+            for m in re.finditer(r'^(from\s+\S+\s+import\s+.+)$', content, re.MULTILINE):
+                imp = m.group(1).strip()
+                if len(imp) < 120 and imp not in patterns.import_patterns:
+                    patterns.import_patterns.append(imp)
+
+            # Only attach if we found something useful
+            if any([patterns.tolerances, patterns.input_shapes, patterns.dtypes,
+                     patterns.reference_impls, patterns.import_patterns]):
+                test.patterns = patterns
 
     def _analyze_test_file(self, file_path: Path) -> TestInfo | None:
         """

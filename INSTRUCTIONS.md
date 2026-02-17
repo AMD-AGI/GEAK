@@ -61,57 +61,58 @@ Read `kernel.py` and identify:
 - Whether `--profile` flag is supported
 - Supported activations, data types, etc.
 
-### 1a. DISCOVER: Run Test Discovery (MANDATORY)
+### 1a. DISCOVER: Review Pre-Scanned Discovery Results
 
-**ALWAYS run test discovery before creating any test harness.** The repo
-likely has existing tests that you should reuse.  The discovery tool scans
-the entire repo for test files that match the kernel, ranked by confidence.
+**Test discovery was already run by the pre-agent pipeline.** The results
+are included in your task context (look for "Discovered Tests" and "Kernel
+Analysis" sections).  You do NOT need to re-run discovery manually.
 
-```bash
-PYTHONPATH=/workspace:/workspace/src:$PYTHONPATH python3 -c "
-from geak_agent.mcp_tools.discovery import discover
-from pathlib import Path
-result = discover(workspace='KERNEL_DIR', kernel_path=Path('KERNEL_DIR/kernel.py'), interactive=False)
-print(f'Kernels: {len(result.kernels)}')
-print(f'Tests: {len(result.tests)}')
-print(f'Benchmarks: {len(result.benchmarks)}')
-for t in result.tests[:5]:
-    print(f'  Test: {t.file_path} (confidence: {t.confidence:.1f})')
-    print(f'    Command: {t.command}')
-for b in result.benchmarks[:3]:
-    print(f'  Bench: {b.file_path} (confidence: {b.confidence:.1f})')
-"
-```
+The pre-scan found:
+- Kernel type, language, and build info
+- Existing test files ranked by confidence with suggested commands
+- Existing benchmark files
+- Extracted test patterns (tolerances, input shapes, dtypes, import patterns)
 
-**IMPORTANT:**
-- Replace `KERNEL_DIR/kernel.py` with the actual kernel file path (e.g.,
-  `KERNEL_DIR/rope.py`).  Passing `kernel_path` makes discovery prioritise
-  tests that match the kernel name — without it, results are generic.
-- The `PYTHONPATH=/workspace:/workspace/src:$PYTHONPATH` prefix is required
-  because `geak_agent` is installed at `/workspace`.
-
-If discovery finds existing tests (confidence > 0.5):
-1. **Read the test file** to understand what it tests and how
-2. **Use the existing tests** as the basis for your test harness — import
-   the same functions, use the same test patterns, reuse reference impls
-3. **Add `--profile` mode** if the existing test doesn't have one
-4. Look in the test file for: input shapes, dtypes, reference implementations,
-   tolerance values, edge cases — use all of these
-
-If discovery finds no tests, proceed to section 1b to create one from scratch.
+**Review the discovery results in your task context:**
+1. If a **test harness was already created** by the pre-agent pipeline,
+   use it as-is.  Do NOT recreate it.  The path will be noted in your task.
+2. If discovery found high-confidence existing tests (confidence > 0.5),
+   **read the test file** and reuse its reference implementations, input
+   patterns, tolerances, and import patterns.
+3. If no pre-built harness exists and discovery found nothing, proceed to
+   section 1b to create one from scratch.
 
 Also run the kernel evaluation to verify correctness:
 ```bash
 cd KERNEL_DIR && python3 kernel.py
 ```
 
+**If you need to re-run discovery manually** (e.g., the pre-scan results are
+missing or the kernel path changed), use:
+```bash
+PYTHONPATH=/workspace:/workspace/src:$PYTHONPATH python3 -c "
+from minisweagent.tools.discovery import discover
+from pathlib import Path
+result = discover(workspace='KERNEL_DIR', kernel_path=Path('KERNEL_DIR/kernel.py'), interactive=False)
+print(f'Kernels: {len(result.kernels)}')
+print(f'Tests: {len(result.tests)}')
+for t in result.tests[:5]:
+    print(f'  Test: {t.file_path} (confidence: {t.confidence:.1f})')
+    print(f'    Command: {t.command}')
+"
+```
+
 ### 1b. DISCOVER: Build a Test Harness (for non-standard kernels)
 
-When no suitable existing tests are found, or the kernel file does NOT have
-a built-in `--profile` flag or standard `triton_op`/`torch_op` interface,
-create a **test harness** — a small Python script that imports the kernel,
-creates test inputs, and provides `--correctness`, `--profile`, and
-`--benchmark` modes.
+**Check first:** If the pre-agent pipeline (UnitTestAgent) already created a
+test harness, use it as-is.  The harness is an immutable evaluation contract
+— do NOT modify it.  Skip to section 1c.
+
+When no pre-built harness exists, no suitable existing tests are found, or
+the kernel file does NOT have a built-in `--profile` flag or standard
+`triton_op`/`torch_op` interface, create a **test harness** — a small Python
+script that imports the kernel, creates test inputs, and provides
+`--correctness`, `--profile`, and `--benchmark` modes.
 
 **If discovery found existing test files**, read them first and reuse:
 - Their reference implementations for correctness checking
