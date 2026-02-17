@@ -375,6 +375,26 @@ class TestRelevanceScoring:
 
         assert score_path > score_no
 
+    def test_exact_stem_beats_substring(self, tmp_path):
+        """test_gemm_a8w8.py should score higher than test_gemm_a8w8_blockscale.py
+        for kernel gemm_a8w8 (exact stem match vs substring containment)."""
+        from automated_test_discovery.server import _relevance_score
+
+        kernel = tmp_path / "gemm_a8w8.py"
+        kernel.touch()
+        test_exact = tmp_path / "test_gemm_a8w8.py"
+        test_exact.touch()
+        test_substring = tmp_path / "test_gemm_a8w8_blockscale.py"
+        test_substring.touch()
+
+        score_exact = _relevance_score(test_exact, kernel, "gemm_a8w8", ["gemm", "a8w8"])
+        score_sub = _relevance_score(test_substring, kernel, "gemm_a8w8", ["gemm", "a8w8"])
+
+        assert score_exact > score_sub, (
+            f"Exact match ({score_exact}) should beat substring ({score_sub}). "
+            f"test_gemm_a8w8.py must rank above test_gemm_a8w8_blockscale.py for kernel gemm_a8w8"
+        )
+
     def test_path_proximity_boosts_nearby_tests(self, tmp_path):
         from automated_test_discovery.server import _relevance_score
 

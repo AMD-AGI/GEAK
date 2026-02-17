@@ -106,19 +106,33 @@ def _should_skip(path: Path) -> bool:
 def _relevance_score(file_path: Path, kernel_path: Path, kernel_name: str, kernel_parts: list[str]) -> float:
     """Score how relevant a test/bench file is to the kernel.
 
-    Returns a multiplier (0.0 - 3.0+) based on:
-    - Name match: kernel name appears in the file name or path
+    Returns a multiplier (0.0 - 4.0+) based on:
+    - Exact stem match: test_<kernel_name>.py scores highest
+    - Substring match: kernel name appears in filename (lower than exact)
+    - Path match: kernel name in file path
+    - Partial match: kernel name parts in filename
     - Path proximity: file is in the same or nearby directory
-    - Path component match: kernel path components appear in file path
     """
     score = 0.0
     fname_lower = file_path.name.lower()
+    fstem_lower = file_path.stem.lower()
     fpath_lower = str(file_path).lower()
     kname_lower = kernel_name.lower()
 
-    # Exact kernel name in filename (strongest signal)
-    if kname_lower in fname_lower:
-        score += 3.0
+    # Strip common test/bench prefixes to get the "subject" of the test file
+    subject = fstem_lower
+    for prefix in ("test_", "bench_", "benchmark_", "test", "bench"):
+        if subject.startswith(prefix):
+            subject = subject[len(prefix):]
+            break
+
+    # Exact stem match: test_gemm_a8w8.py for kernel gemm_a8w8 (strongest)
+    if subject == kname_lower:
+        score += 4.0
+
+    # Substring in filename: test_gemm_a8w8_blockscale.py for kernel gemm_a8w8
+    elif kname_lower in fname_lower:
+        score += 2.5
 
     # Kernel name in path (e.g. triton_tests/rope/test_something.py)
     elif kname_lower in fpath_lower:
