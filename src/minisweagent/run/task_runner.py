@@ -121,6 +121,7 @@ def main():
         gpu_ids = [int(g.strip()) for g in args.gpu_ids.split(",")]
     else:
         from minisweagent.agents.agent_spec import detect_available_gpus
+
         gpu_ids = detect_available_gpus()
     print(f"[run-tasks] Using GPU(s): {gpu_ids}", file=sys.stderr)
 
@@ -130,6 +131,7 @@ def main():
         repo_root = Path(args.repo_root).resolve()
     else:
         from minisweagent.run.task_file import read_task_file
+
         first_task = sorted(task_dir.glob("*.md"))[0]
         meta, _ = read_task_file(first_task)
         if meta.get("repo_root"):
@@ -141,13 +143,19 @@ def main():
         print("ERROR: could not determine repo root. Use --repo-root.", file=sys.stderr)
         sys.exit(1)
 
-    # Output directory
-    output_dir = Path(args.output_dir).resolve() if args.output_dir else (task_dir.parent / "results")
+    # Output directory: default mirrors the task dir structure under results/
+    # e.g. tasks/round_1/ -> results/round_1/
+    if args.output_dir:
+        output_dir = Path(args.output_dir).resolve()
+    else:
+        round_name = task_dir.name
+        output_dir = task_dir.parent.parent / "results" / round_name
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"[run-tasks] Output directory: {output_dir}", file=sys.stderr)
 
     # Check if repo is a git repo
     from minisweagent.run.task_file import is_git_repo
+
     is_git = is_git_repo(repo_root)
 
     # Create model
@@ -160,14 +168,14 @@ def main():
         model_config: dict[str, Any] = {}
         if geak_cfg.exists():
             import yaml
+
             full_cfg = yaml.safe_load(geak_cfg.read_text()) or {}
             model_config = full_cfg.get("model", {})
         model = get_model(model_name, config=model_config)
         print(f"[run-tasks] Using model: {model.config.model_name}", file=sys.stderr)
     except Exception as e:
         print(
-            f"ERROR: run-tasks requires an LLM model. "
-            f"Set GEAK_MODEL or use --model. ({e})",
+            f"ERROR: run-tasks requires an LLM model. Set GEAK_MODEL or use --model. ({e})",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -213,12 +221,14 @@ def main():
         task = tasks[agent_id] if agent_id < len(tasks) else None
         label = task.label if task else f"task_{agent_id}"
         print(f"  [{agent_id}] {label}: {exit_status}", file=sys.stderr)
-        summary.append({
-            "task_id": agent_id,
-            "label": label,
-            "exit_status": str(exit_status),
-            "result_preview": str(result)[:300] if result else "",
-        })
+        summary.append(
+            {
+                "task_id": agent_id,
+                "label": label,
+                "exit_status": str(exit_status),
+                "result_preview": str(result)[:300] if result else "",
+            }
+        )
 
     print(json.dumps(summary, indent=2))
 

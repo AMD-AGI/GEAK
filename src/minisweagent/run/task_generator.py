@@ -136,17 +136,35 @@ parameter containing a JSON array of task objects. Each task has:
 
 {gpu_rules}
 
+**FORBIDDEN tasks**: NEVER generate tasks that modify the test harness,
+test file, or test command. The test harness is the evaluation contract --
+it defines correctness and must remain unchanged. Tasks like "test harness
+optimization", "test improvement", or "benchmark refactoring" are INVALID.
+Only generate tasks that optimize the *kernel* code itself.
+
 **Path deduplication**: The task file metadata already stores kernel_path,
 commandment, baseline_metrics, and profiling paths. Do NOT repeat these
 file paths in the task_prompt body. Instead, reference them generically
 (e.g. "the kernel file", "the COMMANDMENT", "baseline metrics"). The
 sub-agent receives these paths automatically from the task metadata.
 
+**Baseline comparison**: Each task_prompt MUST instruct the sub-agent to
+compare its results against the baseline metrics provided in the task
+metadata. The sub-agent should report the specific metric improvement
+(e.g. duration reduction, bandwidth improvement) relative to baseline.
+
+**COMMANDMENT adherence**: Each task_prompt MUST instruct the sub-agent
+to read and follow the COMMANDMENT file. The COMMANDMENT defines the
+correctness criteria and constraints. Any changes that violate the
+COMMANDMENT must be rejected by the sub-agent itself.
+
 **Verification for strategy_agent tasks**: Each task_prompt for
 strategy_agent tasks MUST include instructions to:
-1. Verify correctness after making changes (use the `test_perf` tool)
-2. Profile the result to measure improvement (use the `profile_kernel` tool)
-3. Report the before/after performance comparison
+1. Read the COMMANDMENT and follow its constraints
+2. Verify correctness after making changes (use the `test_perf` tool)
+3. Profile the result to measure improvement (use the `profile_kernel` tool)
+4. Compare results against baseline metrics and report before/after numbers
+5. If correctness tests fail, revert changes and report failure
 
 OpenEvolve tasks handle verification automatically via COMMANDMENT.md.
 
@@ -269,27 +287,21 @@ def generate_tasks_from_content(
     """
     tmp_files: list[Path] = []
     try:
-        profiling_path = _write_temp(
-            json.dumps(profiling_result, indent=2), ".json"
-        ) if profiling_result else None
+        profiling_path = _write_temp(json.dumps(profiling_result, indent=2), ".json") if profiling_result else None
         if profiling_path:
             tmp_files.append(profiling_path)
 
-        commandment_path = _write_temp(
-            commandment_content, ".md"
-        ) if commandment_content else None
+        commandment_path = _write_temp(commandment_content, ".md") if commandment_content else None
         if commandment_path:
             tmp_files.append(commandment_path)
 
-        baseline_metrics_path = _write_temp(
-            json.dumps(baseline_metrics, indent=2), ".json"
-        ) if baseline_metrics else None
+        baseline_metrics_path = (
+            _write_temp(json.dumps(baseline_metrics, indent=2), ".json") if baseline_metrics else None
+        )
         if baseline_metrics_path:
             tmp_files.append(baseline_metrics_path)
 
-        deep_search_path = _write_temp(
-            deep_search_content, ".md"
-        ) if deep_search_content else None
+        deep_search_path = _write_temp(deep_search_content, ".md") if deep_search_content else None
         if deep_search_path:
             tmp_files.append(deep_search_path)
 
@@ -354,10 +366,7 @@ def _run_task_agent(
     kernel = discovery_result.kernels[0]
     workspace = discovery_result.workspace_path or kernel.file_path.parent
 
-    read_only_tools = [
-        t for t in get_tools_list()
-        if t["name"] in ("str_replace_editor", "submit")
-    ]
+    read_only_tools = [t for t in get_tools_list() if t["name"] in ("str_replace_editor", "submit")]
     model_impl = getattr(model, "_impl", model)
     original_tools = list(model_impl.tools) if hasattr(model_impl, "tools") else None
     model_impl.tools = read_only_tools
@@ -412,10 +421,7 @@ def _run_task_agent(
         if exit_type == "Submitted":
             return exit_msg
 
-        raise RuntimeError(
-            f"Task-generation agent did not submit results (exit: {exit_type}): "
-            f"{exit_msg[:500]}"
-        )
+        raise RuntimeError(f"Task-generation agent did not submit results (exit: {exit_type}): {exit_msg[:500]}")
     finally:
         if original_tools is not None:
             model_impl.tools = original_tools
@@ -520,7 +526,11 @@ def _scan_previous_results(results_dir: Path) -> str:
     import re as _re
 
     sections: list[str] = []
-    task_dirs = sorted(results_dir.glob("task_*"))
+    # Scan all subdirectories that contain results (task labels or task_N).
+    # Skip 'worktrees' and hidden directories.
+    task_dirs = sorted(
+        d for d in results_dir.iterdir() if d.is_dir() and d.name not in ("worktrees",) and not d.name.startswith(".")
+    )
     if not task_dirs:
         return ""
 
@@ -626,10 +636,14 @@ def main():
             args.kernel_path = (disc_json.get("kernel") or {}).get("file")
         if not args.repo_root:
             args.repo_root = disc_json.get("workspace")
-        for t in disc_json.get("tests") or []:
-            if t.get("command"):
-                test_command = t["command"]
-                break
+        focused = disc_json.get("focused_test") or {}
+        if focused.get("focused_command"):
+            test_command = focused["focused_command"]
+        else:
+            for t in disc_json.get("tests") or []:
+                if t.get("command"):
+                    test_command = t["command"]
+                    break
 
     if not args.kernel_path:
         parser.error("--kernel-path is required (or provide --from-discovery)")
@@ -720,8 +734,7 @@ def main():
         print(f"[task-generator] Using model: {model.config.model_name}", file=sys.stderr)
     except Exception as e:
         print(
-            f"ERROR: task-generator requires an LLM model. "
-            f"Set GEAK_MODEL or use --model. ({e})",
+            f"ERROR: task-generator requires an LLM model. Set GEAK_MODEL or use --model. ({e})",
             file=sys.stderr,
         )
         sys.exit(1)

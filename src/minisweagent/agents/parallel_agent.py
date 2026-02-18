@@ -663,8 +663,9 @@ class ParallelAgent(DefaultAgent):
                     cls._create_copy_workdir(repo_path, wt_path)
                 wt_path_str = str(wt_path.resolve())
 
-                # Each task gets its own patch dir (persists across worktree resets)
-                task_patch_dir = (base_patch_dir / f"task_{task_id}").resolve()
+                # Each task gets its own patch dir named by label (persists across worktree resets)
+                dir_name = task.label if task.label else f"task_{task_id}"
+                task_patch_dir = (base_patch_dir / dir_name).resolve()
                 task_patch_dir.mkdir(parents=True, exist_ok=True)
 
                 # Build agent config

@@ -1,11 +1,17 @@
-"""kernel-profile: Profile GPU kernels via Metrix or rocprof-compute.
+"""kernel-profile: Profile GPU kernels via profiler-mcp.
 
-CLI for hardware-level kernel profiling. Supports two backends:
+Thin CLI wrapper around ``profiler_mcp.server.profile_kernel()``.  Supports
+two backends:
   - metrix (default): AMD Metrix Python API -- structured per-kernel metrics
   - rocprof-compute: rocprof-compute CLI -- deep roofline, instruction mix, cache analysis
 
 Both backends produce the same top-level JSON structure (backend-neutral) so that
 downstream tools like baseline-metrics work with either.
+
+The heavy lifting is done by profiler-mcp; this module adds:
+  * ``--from-discovery`` convenience (extract command from discovery.json)
+  * Human-readable (non-JSON) display mode
+  * rocprof-compute → backend-neutral conversion helpers (also used by profiler-mcp)
 """
 
 import argparse
@@ -14,8 +20,10 @@ import sys
 from pathlib import Path
 
 _repo_root = Path(__file__).resolve().parent.parent.parent
-if str(_repo_root) not in sys.path:
-    sys.path.insert(0, str(_repo_root))
+for _sub in ("mcp_tools/profiler-mcp/src", "mcp_tools/metrix-mcp/src"):
+    _p = str(_repo_root / _sub)
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 EXAMPLES = """
 Examples (metrix backend, default):
@@ -396,13 +404,19 @@ def main():
 
     use_json = args.output_json or args.output is not None
 
-    # Dispatch to backend
-    if args.backend == "metrix":
-        gpu_devices = args.gpu_devices.split(",") if "," in args.gpu_devices else args.gpu_devices
-        result = _profile_with_metrix(command, gpu_devices, args.replays, args.quick)
-    else:
-        workdir = args.workdir or str(Path.cwd())
-        result = _profile_with_rocprof(command, workdir, args.profiling_type, args.gpu_devices.split(",")[0])
+    # Dispatch via profiler-mcp (single code path for both backends)
+    from profiler_mcp.server import profile_kernel
+
+    _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
+    result = _profile_fn(
+        command=command,
+        backend=args.backend,
+        workdir=args.workdir,
+        profiling_type=args.profiling_type,
+        num_replays=args.replays,
+        quick=args.quick,
+        gpu_devices=args.gpu_devices,
+    )
 
     if use_json:
         output_text = json.dumps(result, indent=2)

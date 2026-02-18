@@ -83,7 +83,12 @@ class TestPerfTool:
 
         if self._is_git_repo(Path(cwd)):
             result = subprocess.run(
-                "git add -N . && git diff", cwd=cwd, capture_output=True, text=True, timeout=10, shell=True
+                "git add -N . && git diff -- . ':!traj.json' ':!*.log'",
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                shell=True,
             )
             return result.stdout
 

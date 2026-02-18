@@ -1,6 +1,6 @@
 # GEAK — GPU Evolutionary Agent for Kernels
 
-GEAK is an AI-powered framework for automated GPU kernel optimization. It profiles kernels, identifies bottlenecks, generates optimization strategies, and applies them -- either as a single pipeline or through modular, chainable CLI commands.
+GEAK is an AI-powered framework for automated GPU kernel optimization. It profiles kernels, identifies bottlenecks, generates optimization strategies, and applies them via an LLM-driven orchestrator.
 
 ## Quick Start
 
@@ -17,59 +17,81 @@ scripts/run-docker.sh              # interactive shell
 scripts/run-docker.sh --rebuild    # rebuild image first
 ```
 
-### All-in-one
+### Full pipeline (recommended)
 
 ```bash
-geak <github_url>                  # full optimization pipeline
+geak --kernel-url <github_url>                    # single GPU
+geak --kernel-url <github_url> --gpu-ids 0,1,2,3  # multi-GPU parallel
 ```
 
-### Modular pipeline
+This runs the three-layer architecture automatically:
+1. **Preprocessor**: resolve URL, discover tests, profile, build baselines, generate commandments
+2. **Orchestrator**: LLM agent that generates tasks, dispatches to GPUs, iterates until converged or step limit reached
+3. **Sub-agents**: `geak --from-task` executes individual optimisation tasks
 
-Each step reads the previous step's output via `--from-*` flags:
+Output is written to `geak_output/` with independently verifiable stages:
+```
+geak_output/
+├── resolved.json               # Preprocessor: resolved kernel URL
+├── discovery.json              # Preprocessor: discovered tests/benchmarks
+├── profile.json                # Preprocessor: GPU profiling results
+├── baseline_metrics.json       # Preprocessor: baseline performance
+├── COMMANDMENT.md              # Preprocessor: correctness/profiling contract
+├── tasks/round_N/*.md          # Orchestrator: generated task files per round
+├── results/round_N/<label>/    # Sub-agents: patches, test outputs, logs
+└── final_report.json           # Orchestrator: best result summary
+```
+
+## High-Level Commands
+
+| Command | Description |
+|---------|-------------|
+| `geak --kernel-url <url>` | Full pipeline: preprocess + orchestrate + optimize |
+| `geak --from-task <task.md>` | Run a single optimization task on one GPU |
+| `geak-preprocess <url> -o dir/` | Run only the preprocessor stage |
+| `geak-orchestrate --preprocess-dir dir/ --gpu-ids 0,1` | Run only the orchestrator on existing preprocessor output |
+
+## Low-Level Pipeline Commands
+
+Each step reads the previous step's output via `--from-*` flags and can be run independently:
 
 ```bash
-# 1. Resolve a GitHub kernel URL to a local clone
+# 1. Resolve a GitHub kernel URL to a local checkout
 resolve-kernel-url <url> --json -o resolved.json
 
-# 2. Discover tests and benchmarks in the repo
-test-discovery --from-resolved resolved.json -o discovery.json
+# 2. Discover tests and benchmarks for the kernel
+#    (uses the automated-test-discovery MCP tool internally)
 
-# 3. Profile the kernel (Metrix or rocprof-compute backend)
+# 3. Profile the kernel on GPU
 kernel-profile --from-discovery discovery.json --json -o profile.json
-kernel-profile --from-discovery discovery.json --backend rocprof-compute --json -o profile.json
 
-# 4. Extract baseline metrics for OpenEvolve
+# 4. Extract baseline performance metrics
 baseline-metrics build --from-profile profile.json --all -o baseline_metrics.json
 
-# 5. Generate a COMMANDMENT (optimization constraints doc)
+# 5. Generate the correctness/profiling contract
 commandment --from-discovery discovery.json -o COMMANDMENT.md
 
-# 6. Generate optimization tasks
-task-generator --from-discovery discovery.json --profiling profile.json \
-    --commandment COMMANDMENT.md --baseline-metrics baseline_metrics.json \
+# 6. Generate optimization tasks (LLM-driven)
+task-generator --from-discovery discovery.json \
+    --profiling profile.json \
+    --commandment COMMANDMENT.md \
+    --baseline-metrics baseline_metrics.json \
     -o tasks/round_1/
+
+# 7. Run tasks in parallel across GPUs
+run-tasks --task-dir tasks/round_1/ --gpu-ids 0,1,2,3
+
+# 8. Select the best patch from results
+select-patch --patch-dir results/round_1/<label>/
 ```
 
-### Run individual tasks
+## Other Tools
 
-```bash
-openevolve-worker --from-task tasks/round_1/00_openevolve-inner.md --gpu 0
-geak --from-task tasks/round_1/10_triton-autotune.md --gpu-ids 2
-```
-
-### Iterative refinement
-
-```bash
-task-generator ... --from-results results/round_1/ --round 2 -o tasks/round_2/
-```
-
-### Other tools
-
-```bash
-validate-commandment <path>                     # validate a COMMANDMENT.md
-openevolve-worker --kernel-path <p> ...          # run OpenEvolve optimizer (manual)
-select-patch --patch-dir <dir> ...               # select best patch from runs
-```
+| Command | Description |
+|---------|-------------|
+| `validate-commandment <path>` | Validate a COMMANDMENT.md file |
+| `openevolve-worker --from-task <task.md>` | Run an OpenEvolve optimization task |
+| `select-patch --patch-dir <dir>` | LLM-driven patch selection from parallel runs |
 
 ## Configuration
 
@@ -89,10 +111,9 @@ Standalone MCP servers for specialized tasks:
 | Server | Purpose |
 |--------|---------|
 | `automated-test-discovery` | Content-based test/benchmark discovery |
-| `kernel-profiler` | GPU profiling via rocprof-compute |
+| `kernel-profiler` | GPU profiling via Metrix and rocprof-compute |
 | `kernel-evolve` | LLM-guided kernel optimization |
 | `kernel-ercs` | Kernel evaluation, reflection, compatibility checks |
-| `metrix-mcp` | AMD Metrix API for GPU metrics |
 | `openevolve-mcp` | OpenEvolve evolutionary optimizer |
 | `mcp-client` | JSON-RPC 2.0 client for MCP communication |
 
@@ -101,21 +122,35 @@ Install individually: `pip install -e mcp_tools/<server-name>/`
 ## Architecture
 
 ```
-GEAK
-├── src/minisweagent/          # Core agent framework
-│   ├── agents/                # Agent types (default, parallel, select_patch, etc.)
-│   ├── tools/                 # Built-in tools (bash, editor, profiling, discovery, etc.)
-│   ├── config/                # YAML configs
-│   ├── environments/          # Execution environments (local, docker, singularity)
-│   ├── models/                # LLM backends (amd_llm, anthropic, litellm, etc.)
-│   ├── optimizer/             # OpenEvolve + Autotune
-│   ├── kernel_profile.py      # Dual-backend GPU profiling CLI
-│   └── baseline_metrics.py    # Format profiler output for OpenEvolve
-├── mcp_tools/                 # Standalone MCP servers + client
-├── knowledge_base/            # GPU optimization strategies database
-├── eval_suite/                # Regression suite
-├── examples/                  # Example kernels
-└── Dockerfile                 # Docker image with all tools
+geak <url> --gpu-ids 0,1,2,3
+  │
+  ├─ Preprocessor (sequential, no LLM)
+  │    resolve_kernel_url → discover → profile_kernel → baseline_metrics → commandment
+  │
+  ├─ Orchestrator (LLM agent with tools)
+  │    generate_tasks → dispatch_tasks → collect_results → [iterate or finalize]
+  │    Auto-finalizes with best result if step limit reached
+  │
+  └─ Sub-agents (per task, per GPU, isolated worktrees)
+       geak --from-task (kernel-ercs, kernel-evolve, openevolve, minisweagent)
+```
+
+```
+src/minisweagent/
+├── run/
+│   ├── mini.py              # geak entry point: routes to preprocessor+orchestrator or --from-task
+│   ├── preprocessor.py      # Sequential pipeline calling existing Python APIs
+│   ├── orchestrator.py      # LLM orchestrator agent with tools + auto-finalization
+│   ├── dispatch.py          # Task dispatch via ParallelAgent pool mode
+│   ├── task_generator.py    # LLM-driven task generation (agent-based, no rule fallbacks)
+│   ├── task_runner.py       # Batch task execution CLI
+│   └── task_file.py         # Task file I/O (YAML frontmatter + Markdown)
+├── agents/                  # Agent types (default, parallel, strategy, openevolve, select_patch)
+├── tools/                   # Built-in tools (bash, editor, profiling, discovery, commandment)
+├── models/                  # LLM backends (amd_llm, anthropic, litellm, etc.)
+├── kernel_profile.py        # Dual-backend GPU profiling CLI (Metrix + rocprof-compute)
+└── baseline_metrics.py      # Format profiler output for downstream tools
+mcp_tools/                   # Standalone MCP servers (profiler, kernel-evolve, kernel-ercs, etc.)
 ```
 
 ## License
