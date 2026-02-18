@@ -1,9 +1,19 @@
 import json
 import re
+import sys
 import threading
 from pathlib import Path
 
 import pytest
+
+# Make MCP tool packages importable when running outside Docker.
+# In-container, these are installed via `pip install -e mcp_tools/*/` in the
+# Dockerfile; for local dev we add their src/ directories to sys.path.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+for _mcp_src in sorted((_REPO_ROOT / "mcp_tools").glob("*/src")):
+    _p = str(_mcp_src)
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from minisweagent.models import GLOBAL_MODEL_STATS
 
