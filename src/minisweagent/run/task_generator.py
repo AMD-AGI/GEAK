@@ -402,16 +402,23 @@ def _run_task_agent(
             "base_task_context": base_task_context,
         }
 
+        tg_step_limit = int(os.getenv("GEAK_TASKGEN_STEP_LIMIT", "75"))
+        tg_cost_limit = float(os.getenv("GEAK_TASKGEN_COST_LIMIT", "10.0"))
+
         agent = DefaultAgent(
             model,
             env,
             system_template=_SYSTEM_PROMPT,
             instance_template=_INSTANCE_TEMPLATE,
-            step_limit=30,
-            cost_limit=2.0,
+            step_limit=tg_step_limit,
+            cost_limit=tg_cost_limit,
         )
 
-        logger.info("Starting task-generation agent (step_limit=30, cost_limit=2.0)")
+        logger.info(
+            "Starting task-generation agent (step_limit=%d, cost_limit=%.1f)",
+            tg_step_limit,
+            tg_cost_limit,
+        )
 
         exit_type, exit_msg = agent.run(
             task="generate optimization tasks",
