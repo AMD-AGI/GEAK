@@ -15,6 +15,7 @@ import typer
 
 class StrategyStatus(Enum):
     """Strategy status enumeration."""
+
     BASELINE = "baseline"
     PENDING = "pending"
     EXPLORING = "exploring"
@@ -23,15 +24,17 @@ class StrategyStatus(Enum):
     PARTIAL = "partial"
     SKIPPED = "skipped"
     COMBINED = "combined"
-    
+
     @classmethod
     def from_string(cls, s: str) -> "StrategyStatus":
         """Create status from string."""
         return cls[s.upper()]
 
+
 @dataclass
 class Strategy:
     """Single optimization strategy."""
+
     name: str
     status: StrategyStatus
     description: str
@@ -40,7 +43,7 @@ class Strategy:
     result: str | None = None
     details: str | None = None
     target: str | None = None
-    
+
     @property
     def priority_label(self) -> str:
         """Get human-readable priority label."""
@@ -48,7 +51,7 @@ class Strategy:
             return "high"
         else:
             return "normal"
-    
+
     @staticmethod
     def priority_from_label(label: str) -> int:
         """Convert priority label to numeric value."""
@@ -57,12 +60,12 @@ class Strategy:
             return 100
         else:  # "normal" or any other value
             return 50
-    
+
     def to_markdown(self, index: int) -> str:
         """Convert to markdown format."""
         lines = [f"## Strategy {index}: {self.name}"]
         lines.append(f"[priority:{self.priority_label}][{self.status.value}] {self.description}")
-        
+
         if self.expected:
             lines.append(f"- Expected: {self.expected}")
         if self.target:
@@ -71,15 +74,17 @@ class Strategy:
             lines.append(f"- Result: {self.result}")
         if self.details:
             lines.append(f"- Details: {self.details}")
-            
+
         return "\n".join(lines)
+
 
 @dataclass
 class Baseline:
     """Baseline performance."""
+
     metrics: dict[str, str] = field(default_factory=dict)
     log_file: str | None = None
-    
+
     def to_markdown(self) -> str:
         """Convert to markdown format."""
         lines = ["## Baseline Performance", "[baseline]"]
@@ -89,41 +94,40 @@ class Baseline:
             lines.append(f"- Detailed results: {self.log_file}")
         return "\n".join(lines)
 
+
 @dataclass
 class StrategyList:
     """Complete strategy list."""
+
     baseline: Baseline
     strategies: list[Strategy] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    
+
     def to_markdown(self) -> str:
         """Convert to complete markdown file."""
         lines = ["# Kernel Optimization Strategies", ""]
-        
+
         lines.append(self.baseline.to_markdown())
         lines.append("")
-        
+
         for i, strategy in enumerate(self.strategies, start=1):
             lines.append(strategy.to_markdown(i))
             lines.append("")
-        
+
         if self.notes:
             for note in self.notes:
                 lines.append(f"# Note: {note}")
             lines.append("")
-        
+
         return "\n".join(lines)
+
 
 class StrategyManager:
     """Strategy list manager."""
-    
-    def __init__(
-        self, 
-        filepath: Path | str = ".optimization_strategies.md",
-        on_change_callback = None
-    ):
+
+    def __init__(self, filepath: Path | str = ".optimization_strategies.md", on_change_callback=None):
         """Initialize strategy manager.
-        
+
         Args:
             filepath: Path to strategy markdown file
             on_change_callback: Optional callback function called when strategies change.
@@ -131,25 +135,25 @@ class StrategyManager:
         """
         self.filepath = Path(filepath)
         self.on_change_callback = on_change_callback
-    
+
     def create(self, baseline: Baseline, strategies: list[Strategy]) -> None:
         """Create new strategy list file."""
         strategy_list = StrategyList(baseline=baseline, strategies=strategies)
         self.save(strategy_list)
-    
+
     def load(self) -> StrategyList:
         """Load strategy list from markdown file."""
         if not self.filepath.exists():
             raise FileNotFoundError(f"Strategy file not found: {self.filepath}")
-        
+
         content = self.filepath.read_text()
         return self._parse_markdown(content)
-    
+
     def save(self, strategy_list: StrategyList) -> None:
         """Save strategy list to markdown file."""
         content = strategy_list.to_markdown()
         self.filepath.write_text(content)
-        
+
         # Trigger callback if provided
         if self.on_change_callback:
             try:
@@ -157,42 +161,34 @@ class StrategyManager:
             except Exception as e:
                 # Don't let callback errors break the save operation
                 import sys
+
                 print(f"Warning: on_change_callback failed: {e}", file=sys.stderr)
-    
+
     def exists(self) -> bool:
         """Check if strategy file exists."""
         return self.filepath.exists()
-    
+
     def add_strategy(
-        self, 
-        name: str,
-        description: str,
-        expected: str,
-        position: int | None = None,
-        target: str | None = None
+        self, name: str, description: str, expected: str, position: int | None = None, target: str | None = None
     ) -> None:
         """Add new strategy."""
         strategy_list = self.load()
         new_strategy = Strategy(
-            name=name,
-            status=StrategyStatus.PENDING,
-            description=description,
-            expected=expected,
-            target=target
+            name=name, status=StrategyStatus.PENDING, description=description, expected=expected, target=target
         )
-        
+
         if position is None:
             strategy_list.strategies.append(new_strategy)
         else:
             strategy_list.strategies.insert(position - 1, new_strategy)
-        
+
         self.save(strategy_list)
-    
+
     def remove_strategy(self, index: int, method: str = "skip") -> None:
         """Remove strategy."""
         strategy_list = self.load()
         idx = index - 1
-        
+
         if method == "skip":
             strategy_list.strategies[idx].status = StrategyStatus.SKIPPED
             strategy_list.strategies[idx].result = "Not applicable"
@@ -200,88 +196,71 @@ class StrategyManager:
             del strategy_list.strategies[idx]
         else:
             raise ValueError(f"Unknown method: {method}. Use 'skip' or 'delete'")
-        
+
         self.save(strategy_list)
-    
+
     def update_strategy(
-        self,
-        index: int,
-        status: str | None = None,
-        result: str | None = None,
-        details: str | None = None,
-        **kwargs
+        self, index: int, status: str | None = None, result: str | None = None, details: str | None = None, **kwargs
     ) -> None:
         """Update strategy fields."""
         strategy_list = self.load()
         idx = index - 1
         strategy = strategy_list.strategies[idx]
-        
+
         if status:
             strategy.status = StrategyStatus.from_string(status)
         if result is not None:
             strategy.result = result
         if details is not None:
             strategy.details = details
-        
+
         for key, value in kwargs.items():
             if hasattr(strategy, key):
                 setattr(strategy, key, value)
-        
+
         self.save(strategy_list)
-    
-    def mark_status(
-        self,
-        index: int,
-        status: str,
-        result: str | None = None,
-        details: str | None = None
-    ) -> None:
+
+    def mark_status(self, index: int, status: str, result: str | None = None, details: str | None = None) -> None:
         """Mark strategy status."""
         self.update_strategy(index, status=status, result=result, details=details)
-    
+
     def get_strategy(self, index: int) -> Strategy:
         """Get specific strategy."""
         strategy_list = self.load()
         return strategy_list.strategies[index - 1]
-    
-    def list_strategies(
-        self,
-        status: str | None = None
-    ) -> list[tuple[int, Strategy]]:
+
+    def list_strategies(self, status: str | None = None) -> list[tuple[int, Strategy]]:
         """List strategies with indices."""
         strategy_list = self.load()
         result = []
-        
+
         for i, strategy in enumerate(strategy_list.strategies, start=1):
             if status is None or strategy.status.value == status:
                 result.append((i, strategy))
-        
+
         return result
-    
+
     def get_summary(self) -> dict:
         """Get strategy list summary statistics."""
         strategy_list = self.load()
-        
-        summary = {
-            "total": len(strategy_list.strategies),
-            "by_status": {}
-        }
-        
+
+        summary = {"total": len(strategy_list.strategies), "by_status": {}}
+
         for status in StrategyStatus:
             count = sum(1 for s in strategy_list.strategies if s.status == status)
             if count > 0:
                 summary["by_status"][status.value] = count
-        
+
         return summary
-    
+
     def get_full_content(self) -> str:
         """Get full content of the strategy file as formatted text."""
         if not self.exists():
             return "Strategy file does not exist"
-        
+
         strategy_list = self.load()
         lines = []
-        
+
         # Baseline section
         if strategy_list.baseline:
             lines.append("## Baseline Performance")
@@ -290,7 +269,7 @@ class StrategyManager:
             if strategy_list.baseline.log_file:
                 lines.append(f"- Detailed results: {strategy_list.baseline.log_file}")
             lines.append("")
-        
+
         # Strategies
         for idx, strategy in enumerate(strategy_list.strategies, start=1):
             priority_label = "🔴 HIGH" if strategy.priority >= 100 else ""
@@ -305,45 +284,45 @@ class StrategyManager:
             if strategy.details:
                 lines.append(f"- Details: {strategy.details}")
             lines.append("")
-        
+
         # Notes
         if strategy_list.notes:
             lines.append("## Notes")
             for note in strategy_list.notes:
                 lines.append(f"- {note}")
             lines.append("")
-        
+
         return "\n".join(lines)
-    
+
     def add_note(self, note: str) -> None:
         """Add note to strategy list."""
         strategy_list = self.load()
         strategy_list.notes.append(note)
         self.save(strategy_list)
-    
+
     def update_priority(self, index: int, priority: int) -> None:
         """Update strategy priority."""
         strategy_list = self.load()
         idx = index - 1
-        
+
         if idx < 0 or idx >= len(strategy_list.strategies):
             raise IndexError(f"Strategy index {index} out of range")
-        
+
         strategy_list.strategies[idx].priority = priority
         self.save(strategy_list)
-    
+
     def _parse_markdown(self, content: str) -> StrategyList:
         """Parse markdown content to StrategyList object."""
         lines = content.split("\n")
-        
+
         baseline = None
         strategies = []
         notes = []
-        
+
         i = 0
         while i < len(lines):
             line = lines[i].strip()
-            
+
             if line.startswith("## Baseline Performance"):
                 baseline, i = self._parse_baseline(lines, i + 1)
             elif line.startswith("## Strategy"):
@@ -360,24 +339,28 @@ class StrategyManager:
                 i += 1
             else:
                 i += 1
-        
+
         if baseline is None:
             baseline = Baseline()
-        
+
         return StrategyList(baseline=baseline, strategies=strategies, notes=notes)
-    
+
     def _parse_baseline(self, lines: list[str], start_idx: int) -> tuple[Baseline, int]:
         """Parse baseline section."""
         metrics = {}
         log_file = None
         i = start_idx
-        
+
         while i < len(lines):
             line = lines[i].strip()
             # Stop at next section
-            if line.startswith("##") or line.startswith("# Note:") or (line.startswith("#") and not line.startswith("##")):
+            if (
+                line.startswith("##")
+                or line.startswith("# Note:")
+                or (line.startswith("#") and not line.startswith("##"))
+            ):
                 break
-            
+
             if line.startswith("- "):
                 content = line[2:].strip()
                 if ":" in content:
@@ -389,9 +372,9 @@ class StrategyManager:
                     else:
                         metrics[key] = value
             i += 1
-        
+
         return Baseline(metrics=metrics, log_file=log_file), i
-    
+
     def _parse_strategy(self, lines: list[str], start_idx: int, name: str) -> tuple[Strategy, int]:
         """Parse strategy section."""
         status = StrategyStatus.PENDING
@@ -401,21 +384,25 @@ class StrategyManager:
         result = None
         details = None
         target = None
-        
+
         i = start_idx
-        
+
         while i < len(lines):
             line = lines[i].strip()
             # Stop at next strategy, note, or any other top-level markdown heading
-            if line.startswith("##") or line.startswith("# Note:") or (line.startswith("#") and not line.startswith("##")):
+            if (
+                line.startswith("##")
+                or line.startswith("# Note:")
+                or (line.startswith("#") and not line.startswith("##"))
+            ):
                 break
-            
+
             if line.startswith("[") and "]" in line:
                 # Parse priority if present: [priority:high][status] description
                 remaining = line
-                
+
                 # Try to parse priority (supports both numeric and text labels)
-                priority_match = re.match(r'\[priority:(high|normal|\d+)\]', remaining, re.IGNORECASE)
+                priority_match = re.match(r"\[priority:(high|normal|\d+)\]", remaining, re.IGNORECASE)
                 if priority_match:
                     priority_value = priority_match.group(1)
                     if priority_value.isdigit():
@@ -424,16 +411,16 @@ class StrategyManager:
                     else:
                         # Text label (high/normal)
                         priority = Strategy.priority_from_label(priority_value)
-                    remaining = remaining[priority_match.end():]
-                
+                    remaining = remaining[priority_match.end() :]
+
                 # Parse status
                 if remaining.startswith("[") and "]" in remaining:
-                    status_str = remaining[remaining.index("[") + 1:remaining.index("]")]
+                    status_str = remaining[remaining.index("[") + 1 : remaining.index("]")]
                     try:
                         status = StrategyStatus(status_str)
                     except ValueError:
                         status = StrategyStatus.PENDING
-                    description = remaining[remaining.index("]") + 1:].strip()
+                    description = remaining[remaining.index("]") + 1 :].strip()
             elif line.startswith("- Expected:"):
                 expected = line.replace("- Expected:", "").strip()
             elif line.startswith("- Target:"):
@@ -442,9 +429,9 @@ class StrategyManager:
                 result = line.replace("- Result:", "").strip()
             elif line.startswith("- Details:"):
                 details = line.replace("- Details:", "").strip()
-            
+
             i += 1
-        
+
         return Strategy(
             name=name,
             status=status,
@@ -453,31 +440,26 @@ class StrategyManager:
             expected=expected,
             result=result,
             details=details,
-            target=target
+            target=target,
         ), i
 
 
 # CLI Interface
 app = typer.Typer(help="Strategy list management tool for kernel optimization")
 
+
 @app.command()
 def create(
-    baseline_metrics: Annotated[list[str], typer.Option(
-        help="Baseline metrics in format 'Key:Value'"
-    )],
-    baseline_log: Annotated[str | None, typer.Option(
-        help="Path to baseline benchmark log file"
-    )] = None,
-    strategies: Annotated[list[str] | None, typer.Option(
-        help="Strategies in format 'Name|Description|Expected|Target'"
-    )] = None,
-    file: Annotated[str, typer.Option(
-        help="Output file path"
-    )] = ".optimization_strategies.md"
+    baseline_metrics: Annotated[list[str], typer.Option(help="Baseline metrics in format 'Key:Value'")],
+    baseline_log: Annotated[str | None, typer.Option(help="Path to baseline benchmark log file")] = None,
+    strategies: Annotated[
+        list[str] | None, typer.Option(help="Strategies in format 'Name|Description|Expected|Target'")
+    ] = None,
+    file: Annotated[str, typer.Option(help="Output file path")] = ".optimization_strategies.md",
 ):
     """Create a new strategy list file."""
     manager = StrategyManager(file)
-    
+
     metrics = {}
     for metric in baseline_metrics:
         if ":" not in metric:
@@ -485,9 +467,9 @@ def create(
             continue
         key, value = metric.split(":", 1)
         metrics[key.strip()] = value.strip()
-    
+
     baseline = Baseline(metrics=metrics, log_file=baseline_log)
-    
+
     strategy_list = []
     if strategies:
         for s in strategies:
@@ -500,12 +482,13 @@ def create(
                 status=StrategyStatus.PENDING,
                 description=parts[1].strip(),
                 expected=parts[2].strip() if len(parts) > 2 else None,
-                target=parts[3].strip() if len(parts) > 3 else None
+                target=parts[3].strip() if len(parts) > 3 else None,
             )
             strategy_list.append(strategy)
-    
+
     manager.create(baseline, strategy_list)
     typer.echo(f"✓ Created strategy list: {file}")
+
 
 @app.command()
 def add(
@@ -514,12 +497,13 @@ def add(
     expected: Annotated[str, typer.Argument(help="Expected improvement")],
     position: Annotated[int | None, typer.Option(help="Insert position (1-based)")] = None,
     target: Annotated[str | None, typer.Option(help="Optimization target")] = None,
-    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md"
+    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md",
 ):
     """Add a new strategy."""
     manager = StrategyManager(file)
     manager.add_strategy(name, description, expected, position, target)
     typer.echo(f"✓ Added strategy: {name}")
+
 
 @app.command()
 def mark(
@@ -527,12 +511,13 @@ def mark(
     status: Annotated[str, typer.Argument(help="New status")],
     result: Annotated[str | None, typer.Option(help="Result description")] = None,
     details: Annotated[str | None, typer.Option(help="Additional details")] = None,
-    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md"
+    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md",
 ):
     """Mark strategy status."""
     manager = StrategyManager(file)
     manager.mark_status(index, status, result, details)
     typer.echo(f"✓ Marked Strategy {index} as [{status}]")
+
 
 @app.command()
 def update(
@@ -541,22 +526,23 @@ def update(
     result: Annotated[str | None, typer.Option(help="Result")] = None,
     details: Annotated[str | None, typer.Option(help="Details")] = None,
     expected: Annotated[str | None, typer.Option(help="Expected improvement")] = None,
-    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md"
+    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md",
 ):
     """Update strategy fields."""
     manager = StrategyManager(file)
     kwargs = {}
     if expected:
         kwargs["expected"] = expected
-    
+
     manager.update_strategy(index, status, result, details, **kwargs)
     typer.echo(f"✓ Updated Strategy {index}")
+
 
 @app.command()
 def remove(
     index: Annotated[int, typer.Argument(help="Strategy index (1-based)")],
     method: Annotated[str, typer.Option(help="Remove method: 'skip' or 'delete'")] = "skip",
-    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md"
+    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md",
 ):
     """Remove or skip a strategy."""
     manager = StrategyManager(file)
@@ -564,25 +550,26 @@ def remove(
     action = "Skipped" if method == "skip" else "Deleted"
     typer.echo(f"✓ {action} Strategy {index}")
 
+
 @app.command()
 def show(
     status: Annotated[str | None, typer.Option(help="Filter by status")] = None,
     summary: Annotated[bool, typer.Option(help="Show summary only")] = False,
-    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md"
+    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md",
 ):
     """Show strategy list."""
     manager = StrategyManager(file)
-    
+
     if summary:
         summary_data = manager.get_summary()
         typer.echo(f"Total strategies: {summary_data['total']}")
         typer.echo("By status:")
-        for status_name, count in summary_data['by_status'].items():
+        for status_name, count in summary_data["by_status"].items():
             typer.echo(f"  [{status_name}]: {count}")
     else:
         strategies = manager.list_strategies(status)
         for idx, strategy in strategies:
-            typer.echo(f"\n{'='*60}")
+            typer.echo(f"\n{'=' * 60}")
             typer.echo(f"Strategy {idx}: {strategy.name}")
             typer.echo(f"Status: [{strategy.status.value}]")
             typer.echo(f"Description: {strategy.description}")
@@ -595,15 +582,17 @@ def show(
             if strategy.details:
                 typer.echo(f"Details: {strategy.details}")
 
+
 @app.command()
 def note(
     message: Annotated[str, typer.Argument(help="Note message")],
-    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md"
+    file: Annotated[str, typer.Option(help="Strategy file path")] = ".optimization_strategies.md",
 ):
     """Add a note to the strategy list."""
     manager = StrategyManager(file)
     manager.add_note(message)
     typer.echo("✓ Added note")
+
 
 if __name__ == "__main__":
     app()
@@ -613,13 +602,14 @@ if __name__ == "__main__":
 # Tool wrapper for LLM tool calling
 # =============================================================================
 
+
 class StrategyManagerTool:
     """Tool wrapper for managing optimization strategies via tool calls."""
-    
+
     def __init__(self, filepath: str = ".optimization_strategies.md", on_change_callback=None):
         self.filepath = filepath
         self.on_change_callback = on_change_callback
-    
+
     def __call__(
         self,
         *,
@@ -640,12 +630,12 @@ class StrategyManagerTool:
         **kwargs,
     ):
         manager = StrategyManager(self.filepath, on_change_callback=self.on_change_callback)
-        
+
         try:
             if command == "create":
                 if not baseline_metrics:
                     return {"output": "baseline_metrics is required for create command", "returncode": 1}
-                
+
                 metrics = {k.strip(): v.strip() for m in baseline_metrics if ":" in m for k, v in [m.split(":", 1)]}
                 baseline = Baseline(metrics=metrics, log_file=baseline_log)
                 strategy_list = []
@@ -653,28 +643,39 @@ class StrategyManagerTool:
                     for s in strategies:
                         parts = s.split("|")
                         if len(parts) >= 2:
-                            strategy_list.append(Strategy(
-                                name=parts[0].strip(), status=StrategyStatus.PENDING,
-                                description=parts[1].strip(),
-                                expected=parts[2].strip() if len(parts) > 2 else None,
-                                target=parts[3].strip() if len(parts) > 3 else None
-                            ))
+                            strategy_list.append(
+                                Strategy(
+                                    name=parts[0].strip(),
+                                    status=StrategyStatus.PENDING,
+                                    description=parts[1].strip(),
+                                    expected=parts[2].strip() if len(parts) > 2 else None,
+                                    target=parts[3].strip() if len(parts) > 3 else None,
+                                )
+                            )
                 manager.create(baseline, strategy_list)
                 return {"output": f"Created strategy list: {self.filepath}", "returncode": 0}
-            
+
             elif command == "show":
                 if not manager.exists():
                     return {"output": "Strategy file does not exist", "returncode": 1}
                 if index is not None:
                     strategy = manager.get_strategy(index)
-                    lines = [f"Strategy {index}: {strategy.name}", f"Status: [{strategy.status.value}]", f"Description: {strategy.description}"]
-                    if strategy.expected: lines.append(f"Expected: {strategy.expected}")
-                    if strategy.target: lines.append(f"Target: {strategy.target}")
-                    if strategy.result: lines.append(f"Result: {strategy.result}")
-                    if strategy.details: lines.append(f"Details: {strategy.details}")
+                    lines = [
+                        f"Strategy {index}: {strategy.name}",
+                        f"Status: [{strategy.status.value}]",
+                        f"Description: {strategy.description}",
+                    ]
+                    if strategy.expected:
+                        lines.append(f"Expected: {strategy.expected}")
+                    if strategy.target:
+                        lines.append(f"Target: {strategy.target}")
+                    if strategy.result:
+                        lines.append(f"Result: {strategy.result}")
+                    if strategy.details:
+                        lines.append(f"Details: {strategy.details}")
                     return {"output": "\n".join(lines), "returncode": 0}
                 return {"output": manager.get_full_content(), "returncode": 0}
-            
+
             elif command == "next":
                 if not manager.exists():
                     return {"output": "Strategy file does not exist", "returncode": 1}
@@ -684,49 +685,54 @@ class StrategyManagerTool:
                     return {"output": "No pending strategies remaining", "returncode": 0}
                 idx, strategy = pending[0]
                 priority_label = "🔴 HIGH PRIORITY" if strategy.priority >= 100 else ""
-                return {"output": f"Next strategy:\n\nStrategy {idx}: {strategy.name} {priority_label}\n[{strategy.status.value}] {strategy.description}\nExpected: {strategy.expected or 'N/A'}\nTarget: {strategy.target or 'N/A'}", "returncode": 0}
-            
+                return {
+                    "output": f"Next strategy:\n\nStrategy {idx}: {strategy.name} {priority_label}\n[{strategy.status.value}] {strategy.description}\nExpected: {strategy.expected or 'N/A'}\nTarget: {strategy.target or 'N/A'}",
+                    "returncode": 0,
+                }
+
             elif command == "mark":
                 if index is None or status is None:
                     return {"output": "index and status are required for mark command", "returncode": 1}
                 manager.mark_status(index, status, result, details)
                 return {"output": f"Marked Strategy {index} as [{status}]", "returncode": 0}
-            
+
             elif command == "add":
                 if not name or not description or not expected:
                     return {"output": "name, description, and expected are required for add command", "returncode": 1}
                 manager.add_strategy(name, description, expected, target=target)
                 return {"output": f"Added strategy: {name}", "returncode": 0}
-            
+
             elif command == "remove":
                 if index is None:
                     return {"output": "index is required for remove command", "returncode": 1}
                 manager.remove_strategy(index, method)
                 return {"output": f"{'Skipped' if method == 'skip' else 'Deleted'} Strategy {index}", "returncode": 0}
-            
+
             elif command == "update":
                 if index is None:
                     return {"output": "index is required for update command", "returncode": 1}
                 manager.update_strategy(index, status, result, details, **({"expected": expected} if expected else {}))
                 return {"output": f"Updated Strategy {index}", "returncode": 0}
-            
+
             elif command == "note":
                 if not note:
                     return {"output": "note is required for note command", "returncode": 1}
                 manager.add_note(note)
                 return {"output": "Added note", "returncode": 0}
-            
+
             elif command == "summary":
                 if not manager.exists():
                     return {"output": "Strategy file does not exist", "returncode": 1}
                 summary = manager.get_summary()
                 lines = [f"Total strategies: {summary['total']}", "By status:"]
-                lines.extend(f"  [{s}]: {c}" for s, c in summary['by_status'].items())
+                lines.extend(f"  [{s}]: {c}" for s, c in summary["by_status"].items())
                 return {"output": "\n".join(lines), "returncode": 0}
-            
+
             else:
-                return {"output": f"Unknown command: {command}. Available: create, show, next, mark, add, remove, update, note, summary", "returncode": 1}
-        
+                return {
+                    "output": f"Unknown command: {command}. Available: create, show, next, mark, add, remove, update, note, summary",
+                    "returncode": 1,
+                }
+
         except Exception as e:
             return {"output": f"Error: {str(e)}", "returncode": 1}
-

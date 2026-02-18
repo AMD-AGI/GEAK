@@ -51,12 +51,14 @@ def check_compatibility(code: str) -> list[dict[str, str]]:
             continue
         for pattern, description in _CUDA_PATTERNS:
             if re.search(pattern, line):
-                issues.append({
-                    "pattern": pattern,
-                    "description": description,
-                    "line_number": i,
-                    "line_content": line.rstrip(),
-                })
+                issues.append(
+                    {
+                        "pattern": pattern,
+                        "description": description,
+                        "line_number": i,
+                        "line_content": line.rstrip(),
+                    }
+                )
     return issues
 
 
@@ -79,6 +81,7 @@ class CheckKernelCompatibilityTool:
         if not kernel_code:
             try:
                 from pathlib import Path
+
                 kernel_code = Path(file_path).read_text()
             except Exception as e:
                 return {"output": f"Cannot read file: {e}", "returncode": 1}
@@ -90,9 +93,6 @@ class CheckKernelCompatibilityTool:
 
         lines = [f"Found {len(issues)} CUDA-only pattern(s):"]
         for issue in issues:
-            lines.append(
-                f"  Line {issue['line_number']}: {issue['description']}"
-                f"\n    {issue['line_content']}"
-            )
+            lines.append(f"  Line {issue['line_number']}: {issue['description']}\n    {issue['line_content']}")
         lines.append("\nThese patterns need to be ported for AMD/ROCm compatibility.")
         return {"output": "\n".join(lines), "returncode": 0}

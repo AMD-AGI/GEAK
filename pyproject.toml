@@ -64,6 +64,7 @@ dev = [
     "pytest-xdist",
     "pre-commit",
     "ruff",
+    "fastmcp>=2.0.0",
 ]
 
 [project.urls]
@@ -78,6 +79,8 @@ mini-extra = "minisweagent.run.mini_extra:main"
 mini-e= "minisweagent.run.mini_extra:main"
 # GEAK-specific entry points (ported from MSA branch)
 geak = "minisweagent.run.mini:app"
+geak-preprocess = "minisweagent.run.preprocessor:main"
+geak-orchestrate = "minisweagent.run.orchestrator:main"
 kernel-profile = "minisweagent.kernel_profile:main"
 task-generator = "minisweagent.run.task_generator:main"
 # Modular pipeline steps
@@ -85,6 +88,7 @@ commandment = "minisweagent.tools.commandment:main"
 validate-commandment = "minisweagent.tools.validate_commandment:main"
 baseline-metrics = "minisweagent.baseline_metrics:main"
 openevolve-worker = "minisweagent.agents.openevolve_worker:main"
+run-tasks = "minisweagent.run.task_runner:main"
 select-patch = "minisweagent.agents.select_patch_agent:main"
 resolve-kernel-url = "minisweagent.tools.resolve_kernel_url_impl:main"
 

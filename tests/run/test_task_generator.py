@@ -1,17 +1,17 @@
-"""Tests for the LLM-assisted task generator with rule-based fallback."""
+"""Tests for the agent-based task generator."""
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from minisweagent.agents.agent_spec import AgentTask
-from minisweagent.run.task_generator import generate_tasks, _parse_llm_response
+from minisweagent.run.task_generator import _parse_llm_response, generate_tasks
 from minisweagent.tools.discovery import DiscoveryResult, KernelInfo
 
 
 class FakeAgentClass:
     """Stand-in for an agent class in tests."""
+
     pass
 
 
@@ -28,138 +28,146 @@ def _make_discovery(
         has_jit_decorator=True,
         inner_kernel_path=inner_kernel_path,
     )
-    return DiscoveryResult(kernels=[kernel])
+    return DiscoveryResult(kernels=[kernel], workspace_path=Path("/workspace"))
 
 
-# ---- Fallback: model=None -> rule-based ----
-
-def test_no_model_falls_back_to_rule_based():
-    dr = _make_discovery("triton", inner_kernel_path=Path("/ws/inner.py"))
-    tasks = generate_tasks(
-        discovery_result=dr,
-        base_task_context="ctx",
-        agent_class=FakeAgentClass,
-        model=None,
-    )
-    labels = [t.label for t in tasks]
-    assert "openevolve-inner" in labels
-    assert "triton-autotune" in labels
-    assert "profile-guided" in labels
+# ---- Agent submits valid JSON -> tasks produced ----
 
 
-# ---- Fallback: LLM raises exception -> rule-based ----
+VALID_TASK_JSON = """[
+    {
+        "label": "evolve-inner",
+        "priority": 0,
+        "agent_type": "openevolve",
+        "kernel_language": "python",
+        "task_prompt": "Run OpenEvolve on /ws/inner.py"
+    },
+    {
+        "label": "mem-opt",
+        "priority": 10,
+        "agent_type": "strategy_agent",
+        "kernel_language": "python",
+        "task_prompt": "Optimize memory patterns"
+    }
+]"""
 
-def test_llm_exception_falls_back():
-    mock_model = MagicMock()
-    mock_model.query.side_effect = RuntimeError("API error")
+
+@patch("minisweagent.run.task_generator._run_task_agent", return_value=VALID_TASK_JSON)
+def test_agent_submits_valid_json(mock_agent):
     dr = _make_discovery("triton")
+    model = MagicMock()
     tasks = generate_tasks(
         discovery_result=dr,
         base_task_context="ctx",
         agent_class=FakeAgentClass,
-        model=mock_model,
-    )
-    labels = [t.label for t in tasks]
-    assert "profile-guided" in labels
-
-
-# ---- Fallback: LLM returns garbage -> rule-based ----
-
-def test_llm_garbage_falls_back():
-    mock_model = MagicMock()
-    mock_model.query.return_value = {"content": "This is not JSON at all"}
-    dr = _make_discovery("hip")
-    tasks = generate_tasks(
-        discovery_result=dr,
-        base_task_context="ctx",
-        agent_class=FakeAgentClass,
-        model=mock_model,
-    )
-    labels = [t.label for t in tasks]
-    assert "hip-launch-config" in labels
-
-
-# ---- Fallback: LLM returns empty array -> rule-based ----
-
-def test_llm_empty_array_falls_back():
-    mock_model = MagicMock()
-    mock_model.query.return_value = {"content": "[]"}
-    dr = _make_discovery("triton")
-    tasks = generate_tasks(
-        discovery_result=dr,
-        base_task_context="ctx",
-        agent_class=FakeAgentClass,
-        model=mock_model,
-    )
-    labels = [t.label for t in tasks]
-    assert "profile-guided" in labels
-
-
-# ---- Success: LLM returns valid JSON ----
-
-def test_llm_valid_response_produces_tasks():
-    mock_model = MagicMock()
-    mock_model.query.return_value = {"content": """[
-        {
-            "label": "evolve-inner",
-            "priority": 0,
-            "agent_type": "openevolve",
-            "kernel_language": "python",
-            "task_prompt": "Run OpenEvolve on /ws/inner.py"
-        },
-        {
-            "label": "mem-opt",
-            "priority": 10,
-            "agent_type": "strategy_agent",
-            "kernel_language": "python",
-            "task_prompt": "Optimize memory patterns"
-        }
-    ]"""}
-    dr = _make_discovery("triton")
-    tasks = generate_tasks(
-        discovery_result=dr,
-        base_task_context="ctx",
-        agent_class=FakeAgentClass,
-        model=mock_model,
+        model=model,
     )
     assert len(tasks) == 2
     assert tasks[0].label == "evolve-inner"
     assert tasks[0].priority == 0
     assert tasks[1].label == "mem-opt"
+    mock_agent.assert_called_once()
 
 
-# ---- LLM wraps JSON in code fences -> still parsed ----
+@patch("minisweagent.run.task_generator._run_task_agent", return_value=VALID_TASK_JSON)
+def test_openevolve_dispatch(mock_agent):
+    """openevolve agent_type -> OpenEvolveWorker class + config."""
+    from minisweagent.agents.openevolve_worker import OpenEvolveWorker
 
-def test_llm_code_fenced_json_parsed():
-    mock_model = MagicMock()
-    mock_model.query.return_value = {"content": """```json
-[{"label": "opt-1", "priority": 5, "agent_type": "strategy_agent", "kernel_language": "python", "task_prompt": "Do something"}]
-```"""}
     dr = _make_discovery("triton")
+    model = MagicMock()
     tasks = generate_tasks(
         discovery_result=dr,
         base_task_context="ctx",
         agent_class=FakeAgentClass,
-        model=mock_model,
+        model=model,
+        commandment_path=Path("/ws/COMMANDMENT.md"),
+        baseline_metrics_path=Path("/ws/baseline.json"),
     )
-    assert len(tasks) == 1
-    assert tasks[0].label == "opt-1"
+    oe_tasks = [t for t in tasks if t.agent_class is OpenEvolveWorker]
+    assert len(oe_tasks) == 1
+    assert oe_tasks[0].label == "evolve-inner"
+    assert oe_tasks[0].config["kernel_path"] == "/workspace/kernel.py"
+    assert oe_tasks[0].config["commandment_path"] == "/ws/COMMANDMENT.md"
+    assert oe_tasks[0].config["baseline_metrics_path"] == "/ws/baseline.json"
+
+    strategy_tasks = [t for t in tasks if t.agent_class is FakeAgentClass]
+    assert len(strategy_tasks) == 1
+    assert strategy_tasks[0].label == "mem-opt"
+
+
+# ---- Agent fails -> RuntimeError propagates ----
+
+
+@patch(
+    "minisweagent.run.task_generator._run_task_agent",
+    side_effect=RuntimeError("agent did not submit"),
+)
+def test_agent_failure_propagates(mock_agent):
+    dr = _make_discovery("triton")
+    model = MagicMock()
+    with pytest.raises(RuntimeError, match="agent did not submit"):
+        generate_tasks(
+            discovery_result=dr,
+            base_task_context="ctx",
+            agent_class=FakeAgentClass,
+            model=model,
+        )
+
+
+# ---- No kernels -> empty ----
+
+
+def test_no_kernels_returns_empty():
+    dr = DiscoveryResult()
+    tasks = generate_tasks(dr, "ctx", FakeAgentClass, model=MagicMock())
+    assert tasks == []
 
 
 # ---- _parse_llm_response edge cases ----
 
+
+def test_parse_valid_json():
+    tasks = _parse_llm_response(VALID_TASK_JSON, FakeAgentClass)
+    assert len(tasks) == 2
+    assert tasks[0].label == "evolve-inner"
+
+
+def test_parse_openevolve_uses_correct_class():
+    from minisweagent.agents.openevolve_worker import OpenEvolveWorker
+
+    tasks = _parse_llm_response(
+        VALID_TASK_JSON,
+        FakeAgentClass,
+        kernel_path="/ws/k.py",
+        commandment_path="/ws/CMD.md",
+        baseline_metrics_path="/ws/bm.json",
+    )
+    oe = [t for t in tasks if t.agent_class is OpenEvolveWorker]
+    assert len(oe) == 1
+    assert oe[0].config["kernel_path"] == "/ws/k.py"
+    assert oe[0].config["commandment_path"] == "/ws/CMD.md"
+    assert oe[0].config["baseline_metrics_path"] == "/ws/bm.json"
+
+
+def test_parse_strategy_agent_uses_default_class():
+    tasks = _parse_llm_response(
+        '[{"label": "opt", "priority": 5, "agent_type": "strategy_agent", "task_prompt": "Do it"}]',
+        FakeAgentClass,
+    )
+    assert tasks[0].agent_class is FakeAgentClass
+
+
 def test_parse_rejects_non_array():
     with pytest.raises(TypeError, match="Expected JSON array"):
-        _parse_llm_response('{"not": "array"}', FakeAgentClass, "ctx")
+        _parse_llm_response('{"not": "array"}', FakeAgentClass)
 
 
 def test_parse_rejects_empty_task_prompt():
-    # Tasks with empty task_prompt are skipped; if all are empty -> ValueError
     with pytest.raises(ValueError, match="no valid tasks"):
         _parse_llm_response(
             '[{"label": "x", "priority": 5, "task_prompt": ""}]',
             FakeAgentClass,
-            "ctx",
         )
 
 
@@ -167,14 +175,22 @@ def test_parse_clamps_priority():
     tasks = _parse_llm_response(
         '[{"label": "x", "priority": 99, "task_prompt": "Do it"}]',
         FakeAgentClass,
-        "ctx",
     )
-    assert tasks[0].priority == 15  # clamped to max
+    assert tasks[0].priority == 15
 
 
-# ---- No kernels -> empty ----
+def test_parse_code_fenced_json():
+    fenced = '```json\n[{"label": "opt-1", "priority": 5, "agent_type": "strategy_agent", "kernel_language": "python", "task_prompt": "Do something"}]\n```'
+    tasks = _parse_llm_response(fenced, FakeAgentClass)
+    assert len(tasks) == 1
+    assert tasks[0].label == "opt-1"
 
-def test_no_kernels_returns_empty():
-    dr = DiscoveryResult()
-    tasks = generate_tasks(dr, "ctx", FakeAgentClass, model=MagicMock())
-    assert tasks == []
+
+def test_parse_sorts_by_priority():
+    json_text = """[
+        {"label": "low", "priority": 15, "task_prompt": "Low priority task"},
+        {"label": "high", "priority": 0, "task_prompt": "High priority task"},
+        {"label": "mid", "priority": 5, "task_prompt": "Mid priority task"}
+    ]"""
+    tasks = _parse_llm_response(json_text, FakeAgentClass)
+    assert [t.label for t in tasks] == ["high", "mid", "low"]

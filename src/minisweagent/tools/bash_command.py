@@ -2,7 +2,6 @@ import re
 import subprocess
 from pathlib import Path
 
-
 # Regex to extract the path of a COMMANDMENT.md file being written by a bash command.
 # Matches patterns like:
 #   cat > /path/to/COMMANDMENT.md
@@ -10,9 +9,9 @@ from pathlib import Path
 #   tee /path/to/COMMANDMENT.md
 #   ... > /path/to/COMMANDMENT.md (redirect)
 _COMMANDMENT_WRITE_RE = re.compile(
-    r"""(?:cat\s+>|>\s*|tee\s+)"""          # write indicators
-    r"""\s*([^\s<|&]+COMMANDMENT\.md)"""     # capture the file path
-    r"""|"""                                 # OR
+    r"""(?:cat\s+>|>\s*|tee\s+)"""  # write indicators
+    r"""\s*([^\s<|&]+COMMANDMENT\.md)"""  # capture the file path
+    r"""|"""  # OR
     r"""(?:>\s*|\s+)([^\s<|&]+COMMANDMENT\.md)\s*<<""",  # heredoc target
     re.VERBOSE,
 )
@@ -51,7 +50,7 @@ class BashCommand:
             "mkfs",
             "rm -rf /",
         ]
-    
+
     def __call__(
         self,
         *,
@@ -107,6 +106,7 @@ class BashCommand:
                         format_validation_message,
                         validate_commandment,
                     )
+
                     content = p.read_text()
                     result = validate_commandment(content)
                     msg = format_validation_message(result)

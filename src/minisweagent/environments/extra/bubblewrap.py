@@ -89,16 +89,24 @@ class BubblewrapEnvironment:
 
         cmd.extend(["bash", "-c", command])
 
-        result = subprocess.run(
-            cmd,
-            text=True,
-            timeout=timeout or self.config.timeout,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        return {"output": result.stdout, "returncode": result.returncode}
+        try:
+            result = subprocess.run(
+                cmd,
+                text=True,
+                timeout=timeout or self.config.timeout,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            return {"output": result.stdout, "returncode": result.returncode}
+        except subprocess.TimeoutExpired as e:
+            return {
+                "output": e.stdout or "",
+                "returncode": -1,
+                "exception_info": f"Command timed out after {e.timeout} seconds",
+                "extra": {"exception_type": "TimeoutExpired"},
+            }
 
     def cleanup(self):
         if self.working_dir.exists():

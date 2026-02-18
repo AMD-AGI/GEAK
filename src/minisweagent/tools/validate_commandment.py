@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import re
 
-
 REQUIRED_SECTIONS = {"SETUP", "CORRECTNESS", "PROFILE"}
 SHELL_BUILTINS = {"cd", "source", "export", "alias", "ulimit", "pushd", "popd"}
 
@@ -95,7 +94,7 @@ def validate_commandment(content: str) -> dict:
                     f"Command starts with shell built-in '{builtin}': {stripped!r}. "
                     f"rocprofv3 uses os.execvpe() and cannot execute shell built-ins. "
                     f"Use absolute paths instead, or wrap the command in: "
-                    f"bash -c \"{stripped}\""
+                    f'bash -c "{stripped}"'
                 )
 
         # Check for inline env var prefixes (VAR=value command ...)
@@ -109,11 +108,11 @@ def validate_commandment(content: str) -> dict:
                 f"rocprofv3 uses os.execvpe() and treats '{var_assign}' as "
                 f"the executable name, causing FileNotFoundError. "
                 f"Set the variable in ## SETUP (via a wrapper script) or "
-                f"use: bash -c \"{stripped}\""
+                f'use: bash -c "{stripped}"'
             )
 
     # --- Check for common mistakes ---
-    if "HIP_VISIBLE_DEVICES" in content and not re.search(r'\$\{?HIP_VISIBLE_DEVICES', content):
+    if "HIP_VISIBLE_DEVICES" in content and not re.search(r"\$\{?HIP_VISIBLE_DEVICES", content):
         warnings.append(
             "COMMANDMENT.md contains a hardcoded HIP_VISIBLE_DEVICES value. "
             "Consider using $HIP_VISIBLE_DEVICES to inherit from the environment."
@@ -167,6 +166,7 @@ def format_validation_message(result: dict) -> str:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def main():
     """Validate one or more COMMANDMENT.md files from the command line."""

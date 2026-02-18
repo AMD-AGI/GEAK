@@ -1,8 +1,6 @@
 """Tests for MCPToolBridge -- sync wrapper around MCP servers."""
 
 import json
-import threading
-
 from unittest.mock import MagicMock
 
 import pytest
@@ -104,6 +102,7 @@ class TestPersistentEventLoop:
 
         async def capture_loop():
             import asyncio
+
             loops_seen.append(asyncio.get_running_loop())
             return "ok"
 
@@ -113,8 +112,7 @@ class TestPersistentEventLoop:
 
         assert len(loops_seen) == 2
         assert loops_seen[0] is loops_seen[1], (
-            "Both calls must run on the same event loop to avoid "
-            "'Future attached to a different loop' errors"
+            "Both calls must run on the same event loop to avoid 'Future attached to a different loop' errors"
         )
         bridge._shutdown_loop()
 

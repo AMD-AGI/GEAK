@@ -130,35 +130,35 @@ class DefaultAgent:
         )
         # Setup test_perf tool context
         self._setup_test_perf_context()
-    
+
     def _get_strategy_file(self) -> str:
         """Get the strategy file path. Override in subclasses to customize."""
         cwd = Path(getattr(self.env.config, "cwd", None) or Path.cwd())
         strategy_file_path = self.config.strategy_file_path or ".optimization_strategies.md"
         strategy_path = Path(strategy_file_path)
         return str(strategy_path if strategy_path.is_absolute() else cwd / strategy_path)
-    
+
     def _get_strategy_callback(self):
         """Get the callback for strategy changes. Override in subclasses for UI notifications."""
         return
-    
+
     def _setup_test_perf_context(self):
         """Setup context for test_perf tool."""
         from minisweagent.tools.test_perf import TestPerfContext
-        
-        cwd = getattr(self.env.config, 'cwd', None) or os.getcwd()
-        
+
+        cwd = getattr(self.env.config, "cwd", None) or os.getcwd()
+
         context = TestPerfContext(
             cwd=cwd,
             test_command=self.config.test_command,
-            timeout=getattr(self.env.config, 'timeout', 3600),
+            timeout=getattr(self.env.config, "timeout", 3600),
             patch_output_dir=self.config.patch_output_dir,
-            env_vars=getattr(self.env.config, 'env', None),
+            env_vars=getattr(self.env.config, "env", None),
             base_repo_path=self.base_repo_path,
             log_fn=self._log_message,
             patch_counter=self.patch_counter,
         )
-        
+
         test_perf_tool = self.toolruntime._tool_table.get("test_perf")
         if test_perf_tool:
             test_perf_tool.set_context(context)
@@ -234,10 +234,7 @@ class DefaultAgent:
                 e_type = type(e)
                 e_msg = str(e)
                 self.add_message("user", e_msg)
-                if (
-                    e_type is LimitsExceeded
-                    and getattr(self.config, "summary_on_cost_limit", False)
-                ):
+                if e_type is LimitsExceeded and getattr(self.config, "summary_on_cost_limit", False):
                     self.add_message("user", self.config.summary_on_limit_prompt)
                     self._allow_one_summary_step = True
                     try:
@@ -250,7 +247,7 @@ class DefaultAgent:
                 return e_type.__name__, e_msg
             finally:
                 self._save_traj()
-    
+
     def _save_traj(self):
         """Incrementally append new messages to `traj.json` (JSONL style).
 
@@ -325,7 +322,8 @@ class DefaultAgent:
             result_content = json.dumps(output) if isinstance(output, dict) else str(output)
             result_content = truncate_observation(result_content)
             self.add_message(
-                "tool", result_content,
+                "tool",
+                result_content,
                 tool_call_id=tool_info.get("id", ""),
                 name=tool_info["function"]["name"],
             )
@@ -335,9 +333,7 @@ class DefaultAgent:
                 **output,
                 "output": truncate_observation(output.get("output", "")),
             }
-            observation = self.render_template(
-                self.config.action_observation_template, output=output_for_render
-            )
+            observation = self.render_template(self.config.action_observation_template, output=output_for_render)
             self.add_message("user", observation)
         return output
 
@@ -357,20 +353,20 @@ class DefaultAgent:
             return self.execute_action({"action": actions[0].strip(), **response})
         if response.get("tools"):
             from minisweagent.tools.submit import Submitted as ToolSubmitted
+
             try:
                 result = self.toolruntime.dispatch(tool_call=response["tools"]["function"])
                 self.has_finished(result)
             except ToolSubmitted as e:
                 raise Submitted(str(e))
             # Handle tool results (sync state, etc.)
-            result = self._handle_tool_result(result)
-            return result
+            return self._handle_tool_result(result)
         raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
-    
+
     def _handle_tool_result(self, result: dict) -> dict:
         """Handle tool results. Submit tool raises Submitted, test_perf handles itself."""
         # Sync test_perf context state back to agent
-        if hasattr(self, '_test_perf_context'):
+        if hasattr(self, "_test_perf_context"):
             self.patch_counter = self._test_perf_context.patch_counter
         return result
 
@@ -384,10 +380,8 @@ class DefaultAgent:
             return
 
         try:
-            import yaml
-
             from minisweagent.agents.select_patch_agent import SelectPatchAgent
-            from minisweagent.config import get_config_path
+            from minisweagent.config import load_agent_config
             from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
 
             parallel_ids: list[int] = []
@@ -398,9 +392,7 @@ class DefaultAgent:
                         parallel_ids.append(int(m.group(1)))
             num_parallel = (max(parallel_ids) + 1) if parallel_ids else 1
 
-            config_path = get_config_path("mini_select_patch")
-            config = yaml.safe_load(config_path.read_text())
-            agent_config = config.get("agent", {})
+            agent_config, _ = load_agent_config("mini_select_patch")
 
             env_config = LocalEnvironmentConfig(cwd=str(base_patch_dir))
             env = LocalEnvironment(**env_config.__dict__)
@@ -425,7 +417,7 @@ class DefaultAgent:
         except TimeoutError:
             raise ExecutionTimeoutError(self.render_template(self.config.timeout_template, action=action, output=""))
         self.has_finished(output)
-        
+
         return output
 
     def has_finished(self, output: dict[str, str]):
@@ -434,9 +426,9 @@ class DefaultAgent:
         lines = output.get("output", "").lstrip().splitlines(keepends=True)
         if lines and lines[0].strip() in ["MINI_SWE_AGENT_FINAL_OUTPUT", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]:
             raise Submitted("".join(lines[1:]))
-    
+
     # ============ Logging ============
-    
+
     def _log_message(self, message: str):
         """Log a message to log file or console."""
         if self.log_file:

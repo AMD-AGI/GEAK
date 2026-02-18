@@ -9,10 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-
-def _ensure_importable():
-    """No-op: resolve_kernel_url_impl is now a sibling module."""
-    pass
+from minisweagent.tools.resolve_kernel_url_impl import get_kernel_name_at_line, resolve_kernel_url
 
 
 class ResolveKernelUrlTool:
@@ -28,11 +25,6 @@ class ResolveKernelUrlTool:
         Returns:
             {output: str, returncode: int}
         """
-        _ensure_importable()
-        try:
-            from geak_agent.resolve_kernel_url import get_kernel_name_at_line, resolve_kernel_url
-        except ImportError as e:
-            return {"output": f"resolve_kernel_url not available: {e}", "returncode": 1}
 
         clone_into = Path(workspace) if workspace else Path.cwd()
         try:

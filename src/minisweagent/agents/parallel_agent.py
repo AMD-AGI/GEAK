@@ -4,7 +4,6 @@ import concurrent.futures
 import json
 import re
 import shutil
-import subprocess
 import sys
 import threading
 import traceback
@@ -15,12 +14,13 @@ from typing import Any
 
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent
-from minisweagent.agents.select_patch_agent import SelectPatchAgent
+from minisweagent.agents.select_patch_agent import run_select_patch
 
 
 @dataclass
 class BestPatchResult:
     """Result of selecting the best patch from parallel runs."""
+
     agent_id: int
     patch_id: str
     test_output: str
@@ -35,7 +35,7 @@ _stdout_lock = threading.Lock()
 @contextmanager
 def redirect_output_to_file(log_file: Path):
     """No-op context manager. Agent writes to log file directly via add_message/log_message.
-    
+
     Stdout/stderr redirection doesn't work for parallel threads since sys.stdout is global.
     """
     yield
@@ -69,7 +69,9 @@ class ParallelAgent(DefaultAgent):
         num_parallel = self.config.num_parallel or 1
         console = kwargs.get("console")
 
-        base_patch_dir = (Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")).resolve()
+        base_patch_dir = (
+            Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")
+        ).resolve()
         model_factory = kwargs.get("model_factory") or (lambda: self.model)
         env_factory = kwargs.get("env_factory") or (lambda: self.env)
 
@@ -83,7 +85,10 @@ class ParallelAgent(DefaultAgent):
             finally:
                 self.config.patch_output_dir = prev_patch_output_dir
 
-            metric = self.config.metric or "Extract the performance metrics from the test output and calculate the best speedup."
+            metric = (
+                self.config.metric
+                or "Extract the performance metrics from the test output and calculate the best speedup."
+            )
             if console:
                 console.print("\n[bold green]Selecting best patch from 1 run...[/bold green]")
             best_result = self._select_best_from_parallel_runs(base_patch_dir, 1, metric, model_factory)
@@ -94,7 +99,9 @@ class ParallelAgent(DefaultAgent):
 
         if not self.config.repo:
             raise ValueError("Please specify the repository path.")
-        repo_path = (Path(self.config.repo) if isinstance(self.config.repo, (str, Path)) else self.config.repo).resolve()
+        repo_path = (
+            Path(self.config.repo) if isinstance(self.config.repo, (str, Path)) else self.config.repo
+        ).resolve()
         if not repo_path.exists():
             raise ValueError(f"Repository path does not exist: {repo_path}")
 
@@ -108,7 +115,11 @@ class ParallelAgent(DefaultAgent):
             is_git_repo=is_git_repo,
             task_content=task,
             agent_class=self.config.agent_class if self.config.agent_class else type(self),
-            agent_config={k: v for k, v in self.config.__dict__.items() if k not in ("num_parallel", "repo", "gpu_ids", "agent_class", "agent_specs", "tasks")},
+            agent_config={
+                k: v
+                for k, v in self.config.__dict__.items()
+                if k not in ("num_parallel", "repo", "gpu_ids", "agent_class", "agent_specs", "tasks")
+            },
             model_factory=model_factory,
             env_factory=env_factory,
             base_patch_dir=base_patch_dir,
@@ -120,7 +131,9 @@ class ParallelAgent(DefaultAgent):
             tasks=self.config.tasks,
         )
 
-        metric = self.config.metric or "Extract the performance metrics from the test output and calculate the best speedup."
+        metric = (
+            self.config.metric or "Extract the performance metrics from the test output and calculate the best speedup."
+        )
         if console:
             console.print(f"\n[bold green]Selecting best patch from {num_parallel} parallel runs...[/bold green]")
         best_result = self._select_best_from_parallel_runs(base_patch_dir, num_parallel, metric, model_factory)
@@ -132,86 +145,50 @@ class ParallelAgent(DefaultAgent):
             return results[0][2], results[0][3]
         return "Error", "All parallel agents failed"
 
-
     @staticmethod
-    def _select_best_from_parallel_runs(base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory) -> BestPatchResult | None:
+    def _select_best_from_parallel_runs(
+        base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory
+    ) -> BestPatchResult | None:
         """Select the best patch from multiple parallel runs using SelectPatchAgent."""
-        import yaml
-
-        from minisweagent.config import get_config_path
-        from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
-        
         print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
-        
-        # Load SelectPatchAgent config
-        config_path = get_config_path("mini_select_patch")
-        config = yaml.safe_load(config_path.read_text())
-        agent_config = config.get("agent", {})
-        
-        # Create model and environment for the SelectPatchAgent
+
         model = model_factory()
-        env_config = LocalEnvironmentConfig(cwd=str(base_patch_dir))
-        env = LocalEnvironment(**env_config.__dict__)
-        
-        # Create SelectPatchAgent with config
-        select_agent = SelectPatchAgent(model, env, **agent_config)
-        
-        # Setup the selection task
-        task = select_agent.setup_selection_task(base_patch_dir, num_parallel, metric)
-        
-        if task is None:
-            print("[ParallelAgent] Failed to setup selection task", flush=True)
-            return None
-        
-        # Save agent conversation log
-        log_file = base_patch_dir / "select_agent.log"
-        select_agent.log_file = log_file
-        
-        print(f"[ParallelAgent] Running SelectPatchAgent (log: {log_file})...", flush=True)
-        
-        # Run the agent
-        try:
-            exit_status, result = select_agent.run(task)
-            print(f"[ParallelAgent] SelectPatchAgent finished with status: {exit_status}", flush=True)
-        except Exception as e:
-            print(f"[ParallelAgent] SelectPatchAgent failed: {e}", flush=True)
-            traceback.print_exc()
-        
-        # Read best_results.json saved by SelectPatchAgent
-        best_patch_id = select_agent.extract_final_result()
+        _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
+
         if not best_patch_id:
-            print("[ParallelAgent] SelectPatchAgent did not save best_results.json", flush=True)
+            print("[ParallelAgent] SelectPatchAgent did not produce best_results.json", flush=True)
             return None
-        
+
         print(f"[ParallelAgent] Selected best patch: {best_patch_id}", flush=True)
-        
+
         try:
             # Read the best_results.json for additional details
             best_results = json.loads((base_patch_dir / "best_results.json").read_text())
-            
+
             # Parse best_patch_id: "parallel_X/patch_Y", "task_X/patch_Y", or "patch_Y"
             if "/" in best_patch_id:
                 dir_name, patch_name = best_patch_id.split("/", 1)
                 patch_dir = base_patch_dir / dir_name
                 # Extract numeric ID from either "parallel_X" or "task_X"
                 import re as _re
-                id_match = _re.search(r'(\d+)', dir_name)
+
+                id_match = _re.search(r"(\d+)", dir_name)
                 agent_id = int(id_match.group(1)) if id_match else 0
             else:
                 # Single run format: "patch_Y" (directly in base_patch_dir)
                 patch_name = best_patch_id
                 agent_id = 0
                 patch_dir = base_patch_dir
-            
+
             # metric_result is no longer persisted (results.json removed); rely on test logs if needed
             metric_result = None
-            
+
             # Read test output if path provided
             test_output = ""
             test_output_path = best_results.get("best_patch_test_output")
             if test_output_path and Path(test_output_path).exists():
                 test_output = Path(test_output_path).read_text()
-            
+
             return BestPatchResult(
                 agent_id=agent_id,
                 patch_id=patch_name,
@@ -228,18 +205,21 @@ class ParallelAgent(DefaultAgent):
     def _ensure_safe_directory(repo_path: Path):
         """Ensure repository is in git's safe.directory list."""
         from minisweagent.run.task_file import _ensure_safe_directory
+
         _ensure_safe_directory(repo_path)
 
     @staticmethod
     def _create_worktree(repo_path: Path, worktree_path: Path) -> Path:
         """Create a git worktree, cleaning up any existing one first."""
         from minisweagent.run.task_file import create_worktree
+
         return create_worktree(repo_path, worktree_path)
-    
+
     @staticmethod
     def _copy_untracked_files(repo_path: Path, worktree_path: Path) -> None:
         """Copy untracked files from repo to worktree."""
         from minisweagent.run.task_file import _copy_untracked_files
+
         _copy_untracked_files(repo_path, worktree_path)
 
     @staticmethod
@@ -272,9 +252,7 @@ class ParallelAgent(DefaultAgent):
         # (e.g. "<repo>/optimization_logs/<run>/worktrees/agent_X/..."),
         # collapse that whole prefix back to the current worktree root first.
         # This prevents path "nesting" when replacement is applied more than once.
-        prev_worktree_pat = re.compile(
-            re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/agent_\d+"
-        )
+        prev_worktree_pat = re.compile(re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/agent_\d+")
         text = prev_worktree_pat.sub(worktree_path_str, text)
 
         # Replace repo path (resolved and unresolved forms) with worktree path
@@ -284,12 +262,11 @@ class ParallelAgent(DefaultAgent):
 
         # Keep agent id in any remaining /worktrees/agent_<id> segments aligned
         # with this worktree.
-        text = re.sub(
+        return re.sub(
             r"/worktrees/agent_\d+",
             f"/worktrees/agent_{worktree_path.name.split('_')[-1]}",
             text,
         )
-        return text
 
     @classmethod
     def run_parallel(
@@ -359,17 +336,19 @@ class ParallelAgent(DefaultAgent):
         # Homogeneous mode (original behavior)
         if console:
             console.print(f"[bold green]Running {num_parallel} parallel patch agents...[/bold green]")
-        
+
         base_patch_dir = base_patch_dir.resolve()
         worktree_base = base_patch_dir / "worktrees"
         worktree_base.mkdir(parents=True, exist_ok=True)
         repo_path_resolved = repo_path.resolve()
         repo_path_str = str(repo_path_resolved)
-        
+
         if gpu_ids and len(gpu_ids) < num_parallel:
             if console:
-                console.print(f"[bold yellow]Warning: Only {len(gpu_ids)} GPU IDs provided for {num_parallel} parallel agents. Some agents will not have GPU isolation.[/bold yellow]")
-        
+                console.print(
+                    f"[bold yellow]Warning: Only {len(gpu_ids)} GPU IDs provided for {num_parallel} parallel agents. Some agents will not have GPU isolation.[/bold yellow]"
+                )
+
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
             if is_git_repo:
@@ -377,10 +356,10 @@ class ParallelAgent(DefaultAgent):
             else:
                 worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
             worktree_path_str = str(worktree_path.resolve())
-            
+
             if console:
                 console.print(f"[bold green]Created worktree for agent {agent_id}: {worktree_path}[/bold green]")
-            
+
             parallel_patch_dir = (base_patch_dir / f"parallel_{agent_id}").resolve()
             parallel_patch_dir.mkdir(parents=True, exist_ok=True)
             parallel_agent_config = agent_config.copy()
@@ -388,22 +367,22 @@ class ParallelAgent(DefaultAgent):
             # Force yolo mode for parallel agents (no interactive confirmation prompts)
             parallel_agent_config["mode"] = "yolo"
             parallel_agent_config["confirm_exit"] = False
-            
+
             log_file = parallel_patch_dir / f"agent_{agent_id}.log"
-            
+
             # test_command should use relative paths, executed from worktree cwd
             # Path replacement kept for backward compatibility with absolute paths
             if parallel_agent_config.get("test_command"):
                 parallel_agent_config["test_command"] = cls._replace_paths(
                     parallel_agent_config["test_command"], repo_path, worktree_path
                 )
-            
+
             task_with_repo = cls._replace_paths(task_content, repo_path, worktree_path)
-            
+
             # Create model and environment
             parallel_model = model_factory()
             base_env = env_factory()
-            env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, 'config') else {}
+            env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
             env_config_dict["cwd"] = worktree_path_str
             env_config_dict.setdefault("env", {})[repo_path_str] = worktree_path_str
             if gpu_ids and agent_id < len(gpu_ids):
@@ -414,34 +393,34 @@ class ParallelAgent(DefaultAgent):
                     with _stdout_lock:
                         console.print(f"[bold green]Parallel agent {agent_id} using GPU {gpu_id}[/bold green]")
                         # Force flush to ensure output is written before redirection
-                        if hasattr(sys.stdout, 'flush'):
+                        if hasattr(sys.stdout, "flush"):
                             sys.stdout.flush()
             parallel_env = type(base_env)(**env_config_dict)
-            
+
             parallel_output = None
             if output:
                 parallel_output = output.parent / f"{output.stem}_parallel_{agent_id}{output.suffix}"
-            
+
             agent = agent_class(parallel_model, parallel_env, **parallel_agent_config)
             # Set agent attributes if they exist (for ParallelAgent compatibility)
-            if hasattr(agent, 'extra_template_vars'):
+            if hasattr(agent, "extra_template_vars"):
                 agent.extra_template_vars[repo_path_str] = worktree_path_str
-            if hasattr(agent, 'base_repo_path'):
+            if hasattr(agent, "base_repo_path"):
                 agent.base_repo_path = repo_path_resolved
-            if hasattr(agent, 'log_file'):
+            if hasattr(agent, "log_file"):
                 agent.log_file = log_file
-            
+
             with open(log_file, "w", encoding="utf-8") as f:
                 f.write(f"Agent {agent_id} Conversation Log\n")
                 f.write("=" * 60 + "\n\n")
 
             init_msg = (
-                f"\n{'='*60}\n"
+                f"\n{'=' * 60}\n"
                 "[ParallelAgent] Starting with patch saving enabled\n"
                 f"[ParallelAgent] Test command: {parallel_agent_config.get('test_command')}\n"
                 f"[ParallelAgent] Patch output directory: {parallel_agent_config.get('patch_output_dir')}\n"
                 f"[ParallelAgent] Metric extraction: {parallel_agent_config.get('metric') or 'Automatic (LLM will extract performance metrics and calculate speedup)'}\n"
-                f"{'='*60}\n\n"
+                f"{'=' * 60}\n\n"
             )
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(init_msg)
@@ -460,10 +439,12 @@ class ParallelAgent(DefaultAgent):
                         f.write(f"Traceback:\n{extra_info['traceback']}\n")
                 finally:
                     if parallel_output and save_traj_fn:
-                        save_traj_fn(agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info)
-            
+                        save_traj_fn(
+                            agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info
+                        )
+
             return agent_id, agent, exit_status, result
-        
+
         # Run parallel agents
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel) as executor:
@@ -475,6 +456,7 @@ class ParallelAgent(DefaultAgent):
                 except Exception as e:
                     agent_id = futures[future]
                     from minisweagent.utils.log import logger
+
                     logger.error(f"Error in parallel agent {agent_id}: {e}", exc_info=True)
         return results
 
@@ -580,17 +562,16 @@ class ParallelAgent(DefaultAgent):
                         f.write(f"Traceback:\n{extra_info['traceback']}\n")
                 finally:
                     if parallel_output and save_traj_fn:
-                        save_traj_fn(agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info)
+                        save_traj_fn(
+                            agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info
+                        )
 
             return agent_id, agent, exit_status, result
 
         # Run all agents concurrently
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_agents) as executor:
-            futures = {
-                executor.submit(run_spec_agent, i, spec): i
-                for i, spec in enumerate(agent_specs)
-            }
+            futures = {executor.submit(run_spec_agent, i, spec): i for i, spec in enumerate(agent_specs)}
             for future in concurrent.futures.as_completed(futures):
                 try:
                     r = future.result()
@@ -598,6 +579,7 @@ class ParallelAgent(DefaultAgent):
                 except Exception as e:
                     agent_id = futures[future]
                     from minisweagent.utils.log import logger
+
                     logger.error(f"Error in heterogeneous agent {agent_id}: {e}", exc_info=True)
         return results
 
@@ -681,8 +663,9 @@ class ParallelAgent(DefaultAgent):
                     cls._create_copy_workdir(repo_path, wt_path)
                 wt_path_str = str(wt_path.resolve())
 
-                # Each task gets its own patch dir (persists across worktree resets)
-                task_patch_dir = (base_patch_dir / f"task_{task_id}").resolve()
+                # Each task gets its own patch dir named by label (persists across worktree resets)
+                dir_name = task.label if task.label else f"task_{task_id}"
+                task_patch_dir = (base_patch_dir / dir_name).resolve()
                 task_patch_dir.mkdir(parents=True, exist_ok=True)
 
                 # Build agent config
@@ -699,9 +682,7 @@ class ParallelAgent(DefaultAgent):
                 log_file = task_patch_dir / f"task_{task_id}.log"
 
                 if cfg.get("test_command"):
-                    cfg["test_command"] = cls._replace_paths(
-                        cfg["test_command"], repo_path, wt_path
-                    )
+                    cfg["test_command"] = cls._replace_paths(cfg["test_command"], repo_path, wt_path)
 
                 # Resolve task text
                 agent_task = task.task if task.task else base_task_content
@@ -742,13 +723,13 @@ class ParallelAgent(DefaultAgent):
                             f.write(f"Traceback:\n{extra_info['traceback']}\n")
                     finally:
                         if parallel_output and save_traj_fn:
-                            save_traj_fn(agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info)
+                            save_traj_fn(
+                                agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info
+                            )
 
                 if console:
                     with _stdout_lock:
-                        console.print(
-                            f"[bold blue]Task {task_id} ({label}): completed on GPU {gpu_id}[/bold blue]"
-                        )
+                        console.print(f"[bold blue]Task {task_id} ({label}): completed on GPU {gpu_id}[/bold blue]")
 
                 return task_id, agent, exit_status, result
 
@@ -758,10 +739,7 @@ class ParallelAgent(DefaultAgent):
         # Submit ALL M tasks; ThreadPoolExecutor(max_workers=N) queues overflow
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_slots) as executor:
-            futures = {
-                executor.submit(execute_task, tid, task): tid
-                for tid, task in sorted_tasks
-            }
+            futures = {executor.submit(execute_task, tid, task): tid for tid, task in sorted_tasks}
             for future in concurrent.futures.as_completed(futures):
                 try:
                     r = future.result()
@@ -769,7 +747,7 @@ class ParallelAgent(DefaultAgent):
                 except Exception as e:
                     task_id = futures[future]
                     from minisweagent.utils.log import logger
+
                     logger.error(f"Error in pool task {task_id}: {e}", exc_info=True)
 
         return results
-

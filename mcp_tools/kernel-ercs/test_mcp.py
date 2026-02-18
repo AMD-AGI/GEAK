@@ -6,12 +6,12 @@ from kernel_ercs.server import mcp
 
 def main():
     tools = mcp._tool_manager._tools
-    
+
     # Test 1: check_kernel_compatibility with bad kernel
     print("=" * 50)
     print("Test 1: check_kernel_compatibility (bad kernel)")
     print("=" * 50)
-    
+
     bad_kernel = """
 @triton.jit
 def bad_kernel(x_ptr):
@@ -26,7 +26,7 @@ def bad_kernel(x_ptr):
     print("=" * 50)
     print("Test 2: check_kernel_compatibility (good kernel)")
     print("=" * 50)
-    
+
     good_kernel = """
 @triton.jit
 def good_kernel(x_ptr, BLOCK_SIZE: tl.constexpr):
@@ -56,6 +56,7 @@ def good_kernel(x_ptr, BLOCK_SIZE: tl.constexpr):
     print("=" * 50)
     print("All tests passed! MCP Server is ready.")
     print("=" * 50)
+
 
 if __name__ == "__main__":
     main()

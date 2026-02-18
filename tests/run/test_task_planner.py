@@ -1,24 +1,19 @@
 """Tests for the dynamic task planner."""
 
-import pytest
-from dataclasses import dataclass, field
 from pathlib import Path
-from unittest.mock import MagicMock
 
-from minisweagent.agents.agent_spec import AgentTask
-from minisweagent.run.task_planner import build_optimization_tasks, _pick_fusion_target_lang
+from minisweagent.run.task_planner import _pick_fusion_target_lang, build_optimization_tasks
 from minisweagent.tools.discovery import (
-    BuildInfo,
     DiscoveryResult,
     FusionOpportunity,
     KernelDependencyGraph,
     KernelInfo,
-    KernelNode,
 )
 
 
 class FakeAgentClass:
     """Stand-in for an agent class in tests."""
+
     pass
 
 
@@ -58,6 +53,7 @@ def _make_discovery(
 
 # ---- Empty / no kernels ----
 
+
 def test_no_kernels_returns_empty():
     result = DiscoveryResult()
     tasks = build_optimization_tasks(result, "context", FakeAgentClass)
@@ -65,6 +61,7 @@ def test_no_kernels_returns_empty():
 
 
 # ---- Triton tasks ----
+
 
 def test_triton_generates_openevolve_autotune_and_algorithmic():
     dr = _make_discovery("triton", "python", inner_kernel_path=Path("/ws/inner.py"))
@@ -87,6 +84,7 @@ def test_triton_without_inner_kernel_still_generates_tasks():
 
 # ---- HIP tasks ----
 
+
 def test_hip_generates_launch_and_memory_tasks():
     dr = _make_discovery("hip", "cpp")
     tasks = build_optimization_tasks(dr, "ctx", FakeAgentClass)
@@ -98,6 +96,7 @@ def test_hip_generates_launch_and_memory_tasks():
 
 # ---- CK tasks ----
 
+
 def test_ck_generates_template_tuning():
     dr = _make_discovery("ck", "cpp")
     tasks = build_optimization_tasks(dr, "ctx", FakeAgentClass)
@@ -108,6 +107,7 @@ def test_ck_generates_template_tuning():
 
 # ---- ASM tasks ----
 
+
 def test_asm_generates_wrapper_optimization():
     dr = _make_discovery("asm", "asm")
     tasks = build_optimization_tasks(dr, "ctx", FakeAgentClass)
@@ -117,6 +117,7 @@ def test_asm_generates_wrapper_optimization():
 
 
 # ---- Fusion opportunity tasks ----
+
 
 def test_fusion_opportunities_generate_tasks():
     fusion_opps = [
@@ -137,6 +138,7 @@ def test_fusion_opportunities_generate_tasks():
 
 # ---- Priority ordering ----
 
+
 def test_tasks_sorted_by_priority():
     dr = _make_discovery("triton", "python", inner_kernel_path=Path("/ws/inner.py"))
     tasks = build_optimization_tasks(dr, "ctx", FakeAgentClass)
@@ -145,6 +147,7 @@ def test_tasks_sorted_by_priority():
 
 
 # ---- kernel_language set correctly ----
+
 
 def test_hip_tasks_have_cpp_language():
     dr = _make_discovery("hip", "cpp")
@@ -156,6 +159,7 @@ def test_hip_tasks_have_cpp_language():
 
 # ---- AgentTask fields ----
 
+
 def test_agent_task_has_correct_class():
     dr = _make_discovery("triton", "python")
     tasks = build_optimization_tasks(dr, "ctx", FakeAgentClass)
@@ -164,6 +168,7 @@ def test_agent_task_has_correct_class():
 
 
 # ---- _pick_fusion_target_lang ----
+
 
 def test_pick_fusion_target_lang_triton():
     assert _pick_fusion_target_lang({"triton"}) == "python"
@@ -181,6 +186,7 @@ def test_pick_fusion_target_lang_asm():
 
 
 # ---- Profile-guided task always present ----
+
 
 def test_profile_guided_always_present():
     for ktype in ("triton", "hip", "ck", "asm"):

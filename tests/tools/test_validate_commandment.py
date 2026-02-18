@@ -1,11 +1,9 @@
 """Tests for validate_commandment -- COMMANDMENT.md validation."""
 
-import pytest
 from minisweagent.tools.validate_commandment import (
     format_validation_message,
     validate_commandment,
 )
-
 
 # ---- Valid COMMANDMENT files ----
 
@@ -29,6 +27,7 @@ def test_valid_commandment():
 
 
 # ---- Missing sections ----
+
 
 def test_missing_profile_section():
     content = """\
@@ -54,6 +53,7 @@ def test_missing_all_sections():
 
 # ---- Unknown sections ----
 
+
 def test_unknown_section_header():
     content = """\
 ## SETUP
@@ -74,6 +74,7 @@ python3 test.py --profile
 
 
 # ---- Shell built-ins ----
+
 
 def test_cd_as_command_prefix():
     content = """\
@@ -125,6 +126,7 @@ python3 bench.py
 
 # ---- Empty sections ----
 
+
 def test_empty_section():
     content = """\
 ## SETUP
@@ -142,6 +144,7 @@ python3 bench.py
 
 # ---- format_validation_message ----
 
+
 def test_format_valid():
     result = validate_commandment(VALID_COMMANDMENT)
     msg = format_validation_message(result)
@@ -157,6 +160,7 @@ def test_format_errors():
 
 
 # ---- Inline env var prefixes ----
+
 
 def test_inline_env_var_in_profile():
     """HIP_VISIBLE_DEVICES=1 python3 ... in PROFILE should be caught."""
@@ -229,6 +233,7 @@ CUDA_VISIBLE_DEVICES=1 python3 /path/to/bench.py
 
 
 # ---- Edge cases ----
+
 
 def test_code_block_does_not_false_positive():
     """Shell built-in inside a code block WITHIN a recognized section should still be caught."""

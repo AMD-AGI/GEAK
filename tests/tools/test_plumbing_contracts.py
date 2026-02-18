@@ -20,16 +20,15 @@ import tempfile
 import pytest
 
 from minisweagent.baseline_metrics import (
-    aggregate_metrics,
     build_baseline_metrics,
     list_kernels,
 )
 from minisweagent.tools.mcp_bridge import MCPToolBridge
 
-
 # ---------------------------------------------------------------------------
 # Realistic synthetic data (matching MetrixTool output structure)
 # ---------------------------------------------------------------------------
+
 
 def _kernel(
     name: str,
@@ -75,17 +74,17 @@ def _profiler_result(kernels: list[dict], device_id: str = "0") -> dict:
     }
 
 
-ADD_KERNEL = _kernel("add_kernel_0d1d2d3d4", duration_us=8.5, hbm_bw_util=65.0,
-                      l2_hit=80.0, coalescing=95.0, bottleneck="memory")
-FRAMEWORK_COPY = _kernel("Memcpy DtoD (Device -> Device)", duration_us=1.2,
-                          bottleneck="latency")
-FRAMEWORK_EW = _kernel("at::native::vectorized_elementwise_kernel<4>",
-                        duration_us=0.8, bottleneck="latency")
+ADD_KERNEL = _kernel(
+    "add_kernel_0d1d2d3d4", duration_us=8.5, hbm_bw_util=65.0, l2_hit=80.0, coalescing=95.0, bottleneck="memory"
+)
+FRAMEWORK_COPY = _kernel("Memcpy DtoD (Device -> Device)", duration_us=1.2, bottleneck="latency")
+FRAMEWORK_EW = _kernel("at::native::vectorized_elementwise_kernel<4>", duration_us=0.8, bottleneck="latency")
 
 
 # ---------------------------------------------------------------------------
 # 4a. profiler-mcp output format -> baseline_metrics input
 # ---------------------------------------------------------------------------
+
 
 class TestProfilerToBaselineContract:
     """Verify that realistic profiler output is consumed by baseline_metrics."""
@@ -145,6 +144,7 @@ class TestProfilerToBaselineContract:
 # 4b. baseline_metrics output -> OpenEvolve input
 # ---------------------------------------------------------------------------
 
+
 class TestBaselineToOpenEvolveContract:
     """Verify baseline_metrics JSON matches what OpenEvolve consumes."""
 
@@ -189,6 +189,7 @@ class TestBaselineToOpenEvolveContract:
 # ---------------------------------------------------------------------------
 # 4c. MCPToolBridge._format_result() fidelity
 # ---------------------------------------------------------------------------
+
 
 class TestFormatResultFidelity:
     """Verify _format_result preserves structured JSON and handles edge cases."""
@@ -265,6 +266,7 @@ class TestFormatResultFidelity:
 # 4d. generate_optimization output format
 # ---------------------------------------------------------------------------
 
+
 class TestGenerateOptimizationOutput:
     """Verify the expected output shape of generate_optimization.
 
@@ -293,6 +295,7 @@ class TestGenerateOptimizationOutput:
 # ---------------------------------------------------------------------------
 # 4e. evaluate/reflect chain -- input format compatibility
 # ---------------------------------------------------------------------------
+
 
 class TestEvaluateReflectChain:
     """Verify that typical tool outputs can serve as inputs to evaluate/reflect.

@@ -220,6 +220,7 @@ def cleanup_resolved_path(local_repo_path: str | None) -> None:
 # CLI
 # ============================================================================
 
+
 def main():
     """Resolve a GitHub kernel URL to a local file path."""
     import argparse
@@ -231,11 +232,15 @@ def main():
     )
     parser.add_argument("url", help="GitHub file URL (blob link)")
     parser.add_argument(
-        "--json", action="store_true", dest="output_json",
+        "--json",
+        action="store_true",
+        dest="output_json",
         help="Output result as JSON (for piping to test-discovery --from-resolved)",
     )
     parser.add_argument(
-        "-o", "--output", default=None,
+        "-o",
+        "--output",
+        default=None,
         help="Write output to file instead of stdout (implies --json)",
     )
     args = parser.parse_args()
