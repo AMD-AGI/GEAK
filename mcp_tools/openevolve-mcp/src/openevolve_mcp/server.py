@@ -21,10 +21,7 @@ from fastmcp import FastMCP
 
 # Setup logging
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 # Create MCP server
 mcp = FastMCP(
@@ -33,7 +30,7 @@ mcp = FastMCP(
         "GPU kernel optimization using LLM-guided evolution (OpenEvolve). "
         "Uses COMMANDMENT.md for deterministic, reproducible evaluation with "
         "Metrix hardware profiling and GPU isolation."
-    )
+    ),
 )
 
 # Auto-detect GEAK_OE_ROOT from environment or common locations
@@ -43,30 +40,28 @@ if not GEAK_OE_ROOT:
         "/opt/geak-oe",
         "/workspace/geak-oe",
         str(Path(__file__).parent.parent.parent.parent.parent / "geak-oe"),
-        os.path.join(os.path.expanduser("~"), "geak-oe-fresh"),
+        str(Path.home() / "geak-oe-fresh"),
     ]:
-        if os.path.isdir(candidate) and os.path.isfile(
-            os.path.join(candidate, "examples", "geak_eval", "run_openevolve.py")
-        ):
+        cand = Path(candidate)
+        run_script = cand / "examples" / "geak_eval" / "run_openevolve.py"
+        if cand.is_dir() and run_script.is_file():
             GEAK_OE_ROOT = candidate
             break
 
-RUN_OPENEVOLVE_SCRIPT = os.path.join(
-    GEAK_OE_ROOT, "examples", "geak_eval", "run_openevolve.py"
-) if GEAK_OE_ROOT else ""
+RUN_OPENEVOLVE_SCRIPT = str(Path(GEAK_OE_ROOT) / "examples" / "geak_eval" / "run_openevolve.py") if GEAK_OE_ROOT else ""
 
 
 def _find_run_openevolve() -> str:
     """Locate run_openevolve.py, raising if not found."""
-    if RUN_OPENEVOLVE_SCRIPT and os.path.isfile(RUN_OPENEVOLVE_SCRIPT):
+    if RUN_OPENEVOLVE_SCRIPT and Path(RUN_OPENEVOLVE_SCRIPT).is_file():
         return RUN_OPENEVOLVE_SCRIPT
 
     # Try environment again at call time (may have been set after import)
     oe_root = os.environ.get("GEAK_OE_ROOT", "")
     if oe_root:
-        script = os.path.join(oe_root, "examples", "geak_eval", "run_openevolve.py")
-        if os.path.isfile(script):
-            return script
+        script = Path(oe_root) / "examples" / "geak_eval" / "run_openevolve.py"
+        if script.is_file():
+            return str(script)
 
     raise FileNotFoundError(
         "run_openevolve.py not found. Set GEAK_OE_ROOT environment variable "
@@ -117,8 +112,8 @@ def optimize_kernel(
         logger.info("=" * 60)
 
         # Validate kernel path
-        kernel_path = os.path.abspath(kernel_path)
-        if not os.path.exists(kernel_path):
+        kernel_path = str(Path(kernel_path).resolve())
+        if not Path(kernel_path).exists():
             return {"success": False, "error": f"Kernel not found: {kernel_path}"}
 
         # Find run_openevolve.py
@@ -127,29 +122,32 @@ def optimize_kernel(
 
         # Determine output directory
         if not output_dir:
-            if os.path.isdir(kernel_path):
-                output_dir = os.path.join(kernel_path, "optimization_output")
+            kp = Path(kernel_path)
+            if kp.is_dir():
+                output_dir = str(kp / "optimization_output")
             else:
-                output_dir = os.path.join(
-                    os.path.dirname(kernel_path), "optimization_output"
-                )
-        output_dir = os.path.abspath(output_dir)
-        os.makedirs(output_dir, exist_ok=True)
+                output_dir = str(kp.parent / "optimization_output")
+        output_dir = str(Path(output_dir).resolve())
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
         logger.info(f"Output directory: {output_dir}")
 
         # Build command
         cmd = [
-            "python3", script,
+            "python3",
+            script,
             kernel_path,
-            "--iterations", str(max_iterations),
-            "--gpu", str(gpu),
-            "--output", output_dir,
+            "--iterations",
+            str(max_iterations),
+            "--gpu",
+            str(gpu),
+            "--output",
+            output_dir,
         ]
 
         if commandment_path:
-            cmd.extend(["--commandment", os.path.abspath(commandment_path)])
+            cmd.extend(["--commandment", str(Path(commandment_path).resolve())])
         if baseline_metrics_path:
-            cmd.extend(["--baseline-metrics", os.path.abspath(baseline_metrics_path)])
+            cmd.extend(["--baseline-metrics", str(Path(baseline_metrics_path).resolve())])
 
         logger.info(f"Command: {' '.join(cmd)}")
 
@@ -187,15 +185,16 @@ def optimize_kernel(
                 logger.warning(f"  [stderr] {line}")
 
         # Parse results from output JSON
-        result_path = os.path.join(output_dir, "openevolve_result.json")
-        if os.path.isfile(result_path):
+        out = Path(output_dir)
+        result_path = out / "openevolve_result.json"
+        if result_path.is_file():
             with open(result_path) as f:
                 result_data = json.load(f)
 
             best_metrics = result_data.get("best_metrics", {})
             baseline_metrics = result_data.get("baseline_metrics", {})
-            best_kernel = os.path.join(output_dir, "best_kernel.py")
-            commandment = os.path.join(output_dir, "COMMANDMENT.md")
+            best_kernel = out / "best_kernel.py"
+            commandment = out / "COMMANDMENT.md"
 
             response = {
                 "success": result_data.get("success", proc.returncode == 0),
@@ -205,8 +204,8 @@ def optimize_kernel(
                 "baseline_latency_us": baseline_metrics.get("duration_us", 0),
                 "best_latency_us": best_metrics.get("duration_us", 0),
                 "output_dir": output_dir,
-                "best_kernel_path": best_kernel if os.path.isfile(best_kernel) else "",
-                "commandment_path": commandment if os.path.isfile(commandment) else "",
+                "best_kernel_path": str(best_kernel) if best_kernel.is_file() else "",
+                "commandment_path": str(commandment) if commandment.is_file() else "",
                 "error": None,
             }
             logger.info(f"Optimization complete: speedup={response['speedup']:.4f}x")
@@ -214,7 +213,7 @@ def optimize_kernel(
 
         elif proc.returncode == 0:
             # Process succeeded but no result JSON -- check for best_kernel.py
-            best_kernel = os.path.join(output_dir, "best_kernel.py")
+            best_kernel = Path(output_dir) / "best_kernel.py"
             return {
                 "success": True,
                 "speedup": 1.0,
@@ -223,7 +222,7 @@ def optimize_kernel(
                 "baseline_latency_us": 0,
                 "best_latency_us": 0,
                 "output_dir": output_dir,
-                "best_kernel_path": best_kernel if os.path.isfile(best_kernel) else "",
+                "best_kernel_path": str(best_kernel) if best_kernel.is_file() else "",
                 "commandment_path": "",
                 "error": "No result JSON found but process succeeded",
             }
@@ -269,6 +268,7 @@ def check_openevolve_status() -> dict:
     # Check OpenEvolve importable
     try:
         import openevolve  # noqa: F401
+
         status["openevolve_importable"] = True
     except ImportError:
         status["openevolve_importable"] = False
@@ -276,10 +276,7 @@ def check_openevolve_status() -> dict:
 
     # Check kernel-profile tool
     try:
-        result = subprocess.run(
-            ["kernel-profile", "--help"],
-            capture_output=True, text=True, timeout=10
-        )
+        result = subprocess.run(["kernel-profile", "--help"], capture_output=True, text=True, timeout=10)
         status["kernel_profile_available"] = result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         status["errors"].append("kernel-profile command not found")

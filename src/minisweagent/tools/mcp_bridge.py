@@ -166,10 +166,7 @@ class MCPToolBridge:
         mcp_dir = repo_root / "mcp_tools" / server_name
 
         if not mcp_dir.exists():
-            raise FileNotFoundError(
-                f"MCP server directory not found: {mcp_dir}. "
-                f"Provide explicit server_config."
-            )
+            raise FileNotFoundError(f"MCP server directory not found: {mcp_dir}. Provide explicit server_config.")
 
         # Derive the Python module name from the directory name (e.g., profiler-mcp -> profiler_mcp)
         module_name = server_name.replace("-", "_")

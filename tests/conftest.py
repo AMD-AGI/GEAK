@@ -30,13 +30,11 @@ def reset_global_stats():
     to ensure thread safety and test isolation.
     """
     with _global_stats_lock:
-        # Reset at start
-        GLOBAL_MODEL_STATS._cost = 0.0  # noqa: protected-access
-        GLOBAL_MODEL_STATS._n_calls = 0  # noqa: protected-access
+        GLOBAL_MODEL_STATS._cost = 0.0
+        GLOBAL_MODEL_STATS._n_calls = 0
         yield
-        # Reset at end to clean up
-        GLOBAL_MODEL_STATS._cost = 0.0  # noqa: protected-access
-        GLOBAL_MODEL_STATS._n_calls = 0  # noqa: protected-access
+        GLOBAL_MODEL_STATS._cost = 0.0
+        GLOBAL_MODEL_STATS._n_calls = 0
 
 
 def get_test_data(trajectory_name: str) -> dict[str, list[str]]:

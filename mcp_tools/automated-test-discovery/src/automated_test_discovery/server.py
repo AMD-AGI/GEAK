@@ -36,7 +36,7 @@ mcp = FastMCP(
     then tests and benchmarks are matched against every discovered kernel.
     
     Uses content-based detection (not directory names) and works on any project.
-    """
+    """,
 )
 
 
@@ -87,14 +87,24 @@ BENCH_KEYWORDS = [
 ]
 
 SKIP_DIRS = {
-    "__pycache__", ".git", ".venv", "venv", "node_modules",
-    "build", "dist", ".eggs", "site-packages", ".tox", ".pytest_cache"
+    "__pycache__",
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "build",
+    "dist",
+    ".eggs",
+    "site-packages",
+    ".tox",
+    ".pytest_cache",
 }
 
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
 
 def _should_skip(path: Path) -> bool:
     for part in path.parts:
@@ -123,7 +133,7 @@ def _relevance_score(file_path: Path, kernel_path: Path, kernel_name: str, kerne
     subject = fstem_lower
     for prefix in ("test_", "bench_", "benchmark_", "test", "bench"):
         if subject.startswith(prefix):
-            subject = subject[len(prefix):]
+            subject = subject[len(prefix) :]
             break
 
     # Exact stem match: test_gemm_a8w8.py for kernel gemm_a8w8 (strongest)
@@ -178,15 +188,15 @@ def _score_as_test(path: Path) -> float:
         content = path.read_text()
     except Exception:
         return 0.0
-    
+
     score = 0.0
     for pattern, points in TEST_KEYWORDS:
         if re.search(pattern, content, re.IGNORECASE):
             score += points
-    
+
     if "test" in path.name.lower():
         score += 0.1
-    
+
     return score
 
 
@@ -195,15 +205,15 @@ def _score_as_bench(path: Path) -> float:
         content = path.read_text()
     except Exception:
         return 0.0
-    
+
     score = 0.0
     for pattern, points in BENCH_KEYWORDS:
         if re.search(pattern, content, re.IGNORECASE):
             score += points
-    
+
     if "bench" in path.name.lower() or "perf" in path.name.lower():
         score += 0.1
-    
+
     return score
 
 
@@ -212,7 +222,7 @@ def _get_test_command(path: Path) -> str:
         content = path.read_text()[:2000]
     except Exception:
         content = ""
-    
+
     if path.suffix == ".py":
         if "import pytest" in content or "@pytest" in content:
             return f"pytest {path} -v"
@@ -262,6 +272,7 @@ def _get_kernel_type(content: str) -> str:
 # Phase 2: LLM Finisher
 # ============================================================================
 
+
 def _init_llm_client():
     """Initialize the AMD LLM gateway client. Returns None if unavailable."""
     api_key = os.environ.get("AMD_LLM_API_KEY") or os.environ.get("LLM_GATEWAY_KEY")
@@ -269,6 +280,7 @@ def _init_llm_client():
         return None
     try:
         import anthropic
+
         return anthropic.Anthropic(
             api_key="dummy",
             base_url="https://llm-api.amd.com/Anthropic",
@@ -406,6 +418,7 @@ def _llm_finalize_discovery(
 # Kernel scanning
 # ============================================================================
 
+
 def _find_kernels_in_dir(directory: Path) -> list[dict]:
     """Recursively scan *directory* for kernel files and return info dicts."""
     extensions = {".py", ".cpp", ".cc", ".cu", ".hip"}
@@ -422,11 +435,13 @@ def _find_kernels_in_dir(directory: Path) -> list[dict]:
                 content = candidate.read_text()[:3000]
             except Exception:
                 content = ""
-            kernels.append({
-                "name": candidate.stem,
-                "type": _get_kernel_type(content),
-                "file": str(candidate),
-            })
+            kernels.append(
+                {
+                    "name": candidate.stem,
+                    "type": _get_kernel_type(content),
+                    "file": str(candidate),
+                }
+            )
     return kernels
 
 
@@ -441,12 +456,12 @@ def discover(
 ) -> dict:
     """
     Discover tests and benchmarks for a GPU kernel.
-    
+
     Two-phase discovery:
       Phase 1 (automated): Content-based scan with relevance scoring.
       Phase 2 (LLM finisher, optional): Validates top results and generates
         a focused test script that tests ONLY the target kernel function(s).
-    
+
     Args:
         kernel_path: Path to a kernel file (.py/.cu/.hip) OR a repository
             directory.  When a directory is given, all kernel files inside it
@@ -461,7 +476,7 @@ def discover(
         max_benchmarks: Maximum number of benchmark results to return (default: 5)
         use_llm: Whether to run Phase 2 LLM finisher (default: True).
             Set to False for fast automated-only results.
-    
+
     Returns:
         Complete discovery result with:
         - kernel: Name, type (triton/hip/cuda), file path  (or list when directory)
@@ -470,7 +485,7 @@ def discover(
         - benchmarks: List of {file, name, confidence, command} sorted by relevance
         - focused_test: (Phase 2) Focused test script path and command, if generated
         - summary: Human-readable summary of what was found
-    
+
     Example:
         discover("/path/to/rope.py", kernel_function="_rope_fwd")
         discover("/path/to/repo")  # scans repo recursively for kernels
@@ -482,7 +497,7 @@ def discover(
             "kernel": None,
             "tests": [],
             "benchmarks": [],
-            "summary": "Error: path not found"
+            "summary": "Error: path not found",
         }
 
     # --- Directory mode: discover kernels, then find per-kernel tests ---
@@ -623,10 +638,10 @@ def discover(
     if kernel_function:
         kernel_functions.append(kernel_function)
     # Also extract @triton.jit decorated functions and __global__ functions
-    for m in re.finditer(r'@triton\.jit\s*\n\s*def\s+(\w+)', content):
+    for m in re.finditer(r"@triton\.jit\s*\n\s*def\s+(\w+)", content):
         if m.group(1) not in kernel_functions:
             kernel_functions.append(m.group(1))
-    for m in re.finditer(r'__global__\s+void\s+(\w+)', content):
+    for m in re.finditer(r"__global__\s+void\s+(\w+)", content):
         if m.group(1) not in kernel_functions:
             kernel_functions.append(m.group(1))
 
@@ -666,22 +681,26 @@ def discover(
             test_score = _score_as_test(file_path)
             if test_score >= 0.3:
                 combined = test_score + relevance
-                tests.append({
-                    "file": str(file_path),
-                    "name": file_path.name,
-                    "confidence": round(combined, 2),
-                    "command": _get_test_command(file_path)
-                })
+                tests.append(
+                    {
+                        "file": str(file_path),
+                        "name": file_path.name,
+                        "confidence": round(combined, 2),
+                        "command": _get_test_command(file_path),
+                    }
+                )
 
             bench_score = _score_as_bench(file_path)
             if bench_score >= 0.3:
                 combined = bench_score + relevance
-                benchmarks.append({
-                    "file": str(file_path),
-                    "name": file_path.name,
-                    "confidence": round(combined, 2),
-                    "command": f"python {file_path}"
-                })
+                benchmarks.append(
+                    {
+                        "file": str(file_path),
+                        "name": file_path.name,
+                        "confidence": round(combined, 2),
+                        "command": f"python {file_path}",
+                    }
+                )
 
     tests.sort(key=lambda x: x["confidence"], reverse=True)
     benchmarks.sort(key=lambda x: x["confidence"], reverse=True)

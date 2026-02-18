@@ -11,11 +11,9 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent
-from minisweagent.config import get_config_path
+from minisweagent.config import load_agent_config
 from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
 
 
@@ -152,7 +150,7 @@ def format_discovery_for_agent(result) -> str:
         if p.reference_impls:
             lines.append(f"  Reference implementations: {', '.join(p.reference_impls)}")
         if p.import_patterns:
-            lines.append(f"  Import patterns:")
+            lines.append("  Import patterns:")
             for imp in p.import_patterns[:5]:
                 lines.append(f"    `{imp}`")
     if patterns_found:
@@ -221,9 +219,7 @@ def run_unit_test_agent(
     it is appended to the task prompt so the agent starts with pre-scanned results
     instead of exploring from scratch.
     """
-    config_path = get_config_path("mini_unit_test_agent")
-    config = yaml.safe_load(config_path.read_text())
-    agent_config = config.get("agent", {})
+    agent_config, _ = load_agent_config("mini_unit_test_agent")
 
     env = LocalEnvironment(**LocalEnvironmentConfig(cwd=str(repo)).__dict__)
     agent = UnitTestAgent(model, env, **agent_config)

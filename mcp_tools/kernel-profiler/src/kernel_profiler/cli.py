@@ -22,10 +22,7 @@ from .server import (
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        prog="kernel-profiler",
-        description="GPU kernel profiling tools for AMD GPUs"
-    )
+    parser = argparse.ArgumentParser(prog="kernel-profiler", description="GPU kernel profiling tools for AMD GPUs")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # profile command
@@ -54,8 +51,9 @@ def main():
 
     # suggestions command
     sugg_parser = subparsers.add_parser("suggestions", help="Get optimization suggestions")
-    sugg_parser.add_argument("bottleneck", choices=["latency", "memory", "compute", "lds", "cache", "balanced"],
-                             help="Bottleneck type")
+    sugg_parser.add_argument(
+        "bottleneck", choices=["latency", "memory", "compute", "lds", "cache", "balanced"], help="Bottleneck type"
+    )
 
     args = parser.parse_args()
 
@@ -66,7 +64,7 @@ def main():
             gpu_device=args.gpu,
             warmup_iters=args.warmup,
             profile_iters=args.iters,
-            docker_image=args.docker_image
+            docker_image=args.docker_image,
         )
     elif args.command == "benchmark":
         result = benchmark_kernel(
@@ -75,14 +73,10 @@ def main():
             gpu_device=args.gpu,
             warmup_iters=args.warmup,
             bench_iters=args.iters,
-            docker_image=args.docker_image
+            docker_image=args.docker_image,
         )
     elif args.command == "roofline":
-        result = get_roofline_analysis(
-            latency_us=args.latency,
-            flops=args.flops,
-            bytes_transferred=args.bytes
-        )
+        result = get_roofline_analysis(latency_us=args.latency, flops=args.flops, bytes_transferred=args.bytes)
     elif args.command == "suggestions":
         result = get_bottleneck_suggestions(bottleneck=args.bottleneck)
     else:

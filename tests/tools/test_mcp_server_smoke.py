@@ -22,10 +22,10 @@ import pytest
 
 from minisweagent.tools.mcp_bridge import MCPToolBridge
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _has_amd_llm_key() -> bool:
     return bool(os.environ.get("AMD_LLM_API_KEY") or os.environ.get("LLM_GATEWAY_KEY"))
@@ -41,6 +41,7 @@ requires_llm_key = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 # kernel-ercs: non-LLM tools work without API key
 # ---------------------------------------------------------------------------
+
 
 class TestKernelErcsSmoke:
     """Live smoke tests for kernel-ercs MCP server."""
@@ -90,25 +91,31 @@ def add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
         """evaluate_kernel_quality requires LLM -- only run if key available."""
         bridge = self._bridge()
         simple_kernel = "import triton\nimport triton.language as tl\n\n@triton.jit\ndef add(x_ptr, y_ptr, out, n, BLOCK: tl.constexpr):\n    pid = tl.program_id(0)\n    offs = pid * BLOCK + tl.arange(0, BLOCK)\n    tl.store(out + offs, tl.load(x_ptr + offs) + tl.load(y_ptr + offs))\n"
-        result = bridge.call_tool("evaluate_kernel_quality", {
-            "kernel_code": simple_kernel,
-            "model": "claude-sonnet-4.5",
-        })
+        result = bridge.call_tool(
+            "evaluate_kernel_quality",
+            {
+                "kernel_code": simple_kernel,
+                "model": "claude-sonnet-4.5",
+            },
+        )
         assert result["returncode"] == 0, f"evaluate_kernel_quality failed: {result['output']}"
 
     @requires_llm_key
     def test_reflect_on_kernel_result(self):
         """reflect_on_kernel_result requires LLM."""
         bridge = self._bridge()
-        result = bridge.call_tool("reflect_on_kernel_result", {
-            "kernel_code": "@triton.jit\ndef add(x, y, out, n, B: tl.constexpr): pass",
-            "test_output": "PASSED correctness, latency 120us",
-            "speedup": 1.05,
-            "correctness_status": "passed",
-            "history": "",
-            "tried_strategies": "",
-            "model": "claude-sonnet-4.5",
-        })
+        result = bridge.call_tool(
+            "reflect_on_kernel_result",
+            {
+                "kernel_code": "@triton.jit\ndef add(x, y, out, n, B: tl.constexpr): pass",
+                "test_output": "PASSED correctness, latency 120us",
+                "speedup": 1.05,
+                "correctness_status": "passed",
+                "history": "",
+                "tried_strategies": "",
+                "model": "claude-sonnet-4.5",
+            },
+        )
         assert result["returncode"] == 0, f"reflect_on_kernel_result failed: {result['output']}"
 
 
@@ -116,6 +123,7 @@ def add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
 # kernel-evolve: all tools need LLM except get_optimization_strategies
 #                and suggest_kernel_params
 # ---------------------------------------------------------------------------
+
 
 class TestKernelEvolveSmoke:
     """Live smoke tests for kernel-evolve MCP server."""
@@ -136,10 +144,13 @@ class TestKernelEvolveSmoke:
     def test_suggest_kernel_params(self):
         """suggest_kernel_params is a data lookup -- no LLM needed."""
         bridge = self._bridge()
-        result = bridge.call_tool("suggest_kernel_params", {
-            "kernel_type": "elementwise",
-            "problem_size": 1048576,
-        })
+        result = bridge.call_tool(
+            "suggest_kernel_params",
+            {
+                "kernel_type": "elementwise",
+                "problem_size": 1048576,
+            },
+        )
 
         assert result["returncode"] == 0, f"Unexpected error: {result['output']}"
         data = json.loads(result["output"])
@@ -152,12 +163,15 @@ class TestKernelEvolveSmoke:
         """generate_optimization requires LLM."""
         bridge = self._bridge()
         kernel = "@triton.jit\ndef add(x, y, out, n, B: tl.constexpr):\n    pid = tl.program_id(0)\n    offs = pid * B + tl.arange(0, B)\n    tl.store(out + offs, tl.load(x + offs) + tl.load(y + offs))\n"
-        result = bridge.call_tool("generate_optimization", {
-            "kernel_code": kernel,
-            "bottleneck": "memory",
-            "strategy": "vectorize_loads",
-            "model": "claude-sonnet-4.5",
-        })
+        result = bridge.call_tool(
+            "generate_optimization",
+            {
+                "kernel_code": kernel,
+                "bottleneck": "memory",
+                "strategy": "vectorize_loads",
+                "model": "claude-sonnet-4.5",
+            },
+        )
         assert result["returncode"] == 0, f"generate_optimization failed: {result['output']}"
 
 
@@ -165,6 +179,7 @@ class TestKernelEvolveSmoke:
 # profiler-mcp: requires GPU for actual profiling, but we can test
 #               that the server starts and the tool is reachable
 # ---------------------------------------------------------------------------
+
 
 class TestProfilerMcpSmoke:
     """Live smoke tests for profiler-mcp MCP server."""
@@ -179,11 +194,14 @@ class TestProfilerMcpSmoke:
         the server is alive and returns a proper error (not a crash).
         """
         bridge = self._bridge()
-        result = bridge.call_tool("profile_kernel", {
-            "command": "echo 'smoke test -- not a real kernel'",
-            "backend": "metrix",
-            "quick": True,
-        })
+        result = bridge.call_tool(
+            "profile_kernel",
+            {
+                "command": "echo 'smoke test -- not a real kernel'",
+                "backend": "metrix",
+                "quick": True,
+            },
+        )
         # We expect either success (unlikely with echo) or a clean error
         # from the server -- NOT a crash / MCP transport error.
         assert isinstance(result, dict)

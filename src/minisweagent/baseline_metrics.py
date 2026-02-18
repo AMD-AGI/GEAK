@@ -1,35 +1,17 @@
-"""Format kernel-profile (MetrixTool) output into baseline_metrics.json for OpenEvolve.
+"""Format kernel-profile output into baseline_metrics.json for OpenEvolve.
+
+Works with both profiling backends (metrix and rocprof-compute).  The input
+is the backend-neutral JSON produced by ``kernel-profile --json``.
 
 This module is a **formatting layer**, not a decision-making layer.
 Kernel selection — which kernel(s) are relevant to the optimisation task —
-is the LLM agent's responsibility.  The agent reads the full profiler output,
-reasons about which kernels matter, and passes those choices here.
-
-Profiling itself is not limited to baseline extraction.  kernel-profile can
-be invoked at any point: before optimisation (baseline), after optimisation
-(validation), or by OpenEvolve during evolution (via COMMANDMENT.md PROFILE
-section).  This module only handles the *formatting* of profiler output into
-the JSON structure that ``run_openevolve.py --baseline-metrics`` expects.
-
-Usage (Python — agent calls this after choosing kernels):
-    from minisweagent.baseline_metrics import build_baseline_metrics, format_for_openevolve
-
-    profiler_output = tool.profile(command=..., ...)
-    all_kernels = list_kernels(profiler_output)  # show to agent
-    # Agent picks kernel indices/names based on the task:
-    baseline = build_baseline_metrics(profiler_output, kernel_names=["topk_stage1", "topk_stage2"])
-    # Or by indices:
-    baseline = build_baseline_metrics(profiler_output, kernel_indices=[0, 2])
-    write_json(baseline, "baseline_metrics.json")
+is the LLM agent's responsibility.
 
 Usage (CLI):
-    # List all kernels so the agent can choose
-    python -m minisweagent.baseline_metrics list profiler_output.json
-
-    # Build baseline from agent-chosen kernels
-    python -m minisweagent.baseline_metrics build profiler_output.json --kernels "topk_stage1,topk_stage2"
-    python -m minisweagent.baseline_metrics build profiler_output.json --indices 0,2
-    python -m minisweagent.baseline_metrics build profiler_output.json --all  # include every kernel
+    baseline-metrics list profile.json
+    baseline-metrics build profile.json --all -o baseline_metrics.json
+    baseline-metrics build profile.json --kernels "topk_stage1,topk_stage2"
+    baseline-metrics build profile.json --indices 0,2
 """
 
 import json
@@ -53,34 +35,25 @@ def _sanitize_value(v):
     return v
 
 
-def list_kernels(metrixtool_result: dict, gpu_index: int = 0) -> list[dict]:
-    """Return all kernels from a MetrixTool.profile() result, unchanged.
+def list_kernels(profiler_result: dict, gpu_index: int = 0) -> list[dict]:
+    """Return all kernels from a kernel-profile JSON result.
 
-    This is a convenience accessor — the agent reads this listing, reasons
-    about the task, and decides which kernels to include.
+    Works with both metrix and rocprof-compute backends.
 
     Args:
-        metrixtool_result: Dict from ``MetrixTool.profile()``.
+        profiler_result: Dict from ``kernel-profile --json`` (either backend).
         gpu_index: Which GPU result to read (default: 0).
 
     Returns:
         List of kernel dicts, each with keys:
         ``name``, ``duration_us``, ``metrics``, ``bottleneck``, ``observations``.
-
-    Raises:
-        ValueError: If the result structure is unexpected.
     """
-    results = metrixtool_result.get("results")
+    results = profiler_result.get("results")
     if not results or not isinstance(results, list):
-        raise ValueError(
-            "MetrixTool result missing 'results' list. "
-            f"Got top-level keys: {list(metrixtool_result.keys())}"
-        )
+        raise ValueError(f"Profiler result missing 'results' list. Got top-level keys: {list(profiler_result.keys())}")
     if gpu_index >= len(results):
-        raise ValueError(
-            f"gpu_index={gpu_index} but only {len(results)} GPU result(s) available."
-        )
-    return metrixtool_result["results"][gpu_index].get("kernels", [])
+        raise ValueError(f"gpu_index={gpu_index} but only {len(results)} GPU result(s) available.")
+    return profiler_result["results"][gpu_index].get("kernels", [])
 
 
 def aggregate_metrics(kernels: list[dict]) -> dict[str, float]:
@@ -101,10 +74,7 @@ def aggregate_metrics(kernels: list[dict]) -> dict[str, float]:
     if len(kernels) == 1:
         return dict(kernels[0].get("metrics", {}))
 
-    total_duration = sum(
-        k.get("duration_us", k.get("metrics", {}).get("duration_us", 0))
-        for k in kernels
-    )
+    total_duration = sum(k.get("duration_us", k.get("metrics", {}).get("duration_us", 0)) for k in kernels)
 
     all_keys: set[str] = set()
     for k in kernels:
@@ -116,8 +86,7 @@ def aggregate_metrics(kernels: list[dict]) -> dict[str, float]:
             raw = sum(k.get("metrics", {}).get(key, 0) for k in kernels)
         elif total_duration > 0:
             weighted = sum(
-                k.get("metrics", {}).get(key, 0)
-                * k.get("duration_us", k.get("metrics", {}).get("duration_us", 0))
+                k.get("metrics", {}).get(key, 0) * k.get("duration_us", k.get("metrics", {}).get("duration_us", 0))
                 for k in kernels
             )
             raw = weighted / total_duration
@@ -135,7 +104,7 @@ def aggregate_metrics(kernels: list[dict]) -> dict[str, float]:
 
 
 def build_baseline_metrics(
-    metrixtool_result: dict,
+    profiler_result: dict,
     *,
     kernel_names: list[str] | None = None,
     kernel_indices: list[int] | None = None,
@@ -144,46 +113,27 @@ def build_baseline_metrics(
 ) -> dict:
     """Build a baseline_metrics dict from agent-chosen kernels.
 
-    The agent must specify which kernels to include via exactly one of:
-    - ``kernel_names``: list of exact kernel name strings
-    - ``kernel_indices``: list of 0-based indices into the kernel list
-    - ``include_all=True``: use every kernel (useful when only one exists)
+    Works with both metrix and rocprof-compute backends.
 
     Args:
-        metrixtool_result: Dict from ``MetrixTool.profile()``.
+        profiler_result: Dict from ``kernel-profile --json`` (either backend).
         kernel_names: Kernel names to include (exact match).
         kernel_indices: Kernel indices to include (0-based).
         include_all: If True, include all kernels.
         gpu_index: Which GPU result to read.
 
     Returns:
-        Dict ready to be written as ``baseline_metrics.json``::
-
-            {
-                "duration_us": float,        # summed if multiple kernels
-                "kernel_name": str,          # single name or "name1+N"
-                "kernel_names": [str, ...],  # all included kernel names
-                "metrics": {str: float},     # aggregated hardware metrics
-                "bottleneck": str,           # from the longest-duration kernel
-                "observations": [str, ...],  # merged, deduplicated
-            }
-
-    Raises:
-        ValueError: If selection args are ambiguous, or no kernels match.
+        Dict ready to be written as ``baseline_metrics.json``.
     """
-    # --- Validate exactly one selection mode ---
     modes = sum([kernel_names is not None, kernel_indices is not None, include_all])
     if modes == 0:
         raise ValueError(
-            "Specify how to select kernels: kernel_names=[...], "
-            "kernel_indices=[...], or include_all=True."
+            "Specify how to select kernels: kernel_names=[...], kernel_indices=[...], or include_all=True."
         )
     if modes > 1:
-        raise ValueError(
-            "Specify only one of kernel_names, kernel_indices, or include_all."
-        )
+        raise ValueError("Specify only one of kernel_names, kernel_indices, or include_all.")
 
-    all_kernels = list_kernels(metrixtool_result, gpu_index=gpu_index)
+    all_kernels = list_kernels(profiler_result, gpu_index=gpu_index)
     if not all_kernels:
         raise ValueError("No kernels found in profiling results.")
 
@@ -194,7 +144,7 @@ def build_baseline_metrics(
         for idx in kernel_indices:
             if idx < 0 or idx >= len(all_kernels):
                 raise ValueError(
-                    f"Kernel index {idx} out of range (0..{len(all_kernels)-1}). "
+                    f"Kernel index {idx} out of range (0..{len(all_kernels) - 1}). "
                     f"Available: {[k['name'] for k in all_kernels]}"
                 )
         selected = [all_kernels[i] for i in kernel_indices]
@@ -206,10 +156,7 @@ def build_baseline_metrics(
         missing = name_set - found_names
         if missing:
             available = [k["name"] for k in all_kernels]
-            raise ValueError(
-                f"Kernel(s) not found: {sorted(missing)}. "
-                f"Available: {available}"
-            )
+            raise ValueError(f"Kernel(s) not found: {sorted(missing)}. Available: {available}")
 
     if not selected:
         raise ValueError("No kernels selected.")
@@ -259,6 +206,7 @@ def _format_baseline(selected: list[dict]) -> dict:
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main():
     import argparse
 
@@ -270,13 +218,17 @@ def main():
     # --- list ---
     p_list = sub.add_parser("list", help="List all profiled kernels (for the agent to inspect)")
     p_list.add_argument("input", nargs="?", default=None, help="MetrixTool JSON output (or '-' for stdin)")
-    p_list.add_argument("--from-profile", default=None, metavar="FILE", help="Read profile JSON from kernel-profile output")
+    p_list.add_argument(
+        "--from-profile", default=None, metavar="FILE", help="Read profile JSON from kernel-profile output"
+    )
     p_list.add_argument("--gpu", type=int, default=0, help="GPU index (default: 0)")
 
     # --- build ---
     p_build = sub.add_parser("build", help="Build baseline_metrics.json from chosen kernels")
     p_build.add_argument("input", nargs="?", default=None, help="MetrixTool JSON output (or '-' for stdin)")
-    p_build.add_argument("--from-profile", default=None, metavar="FILE", help="Read profile JSON from kernel-profile output")
+    p_build.add_argument(
+        "--from-profile", default=None, metavar="FILE", help="Read profile JSON from kernel-profile output"
+    )
     p_build.add_argument("-o", "--output", default=None, help="Output path (default: stdout)")
     p_build.add_argument("--gpu", type=int, default=0, help="GPU index (default: 0)")
     sel = p_build.add_mutually_exclusive_group(required=True)

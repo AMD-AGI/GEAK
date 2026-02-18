@@ -10,14 +10,16 @@ from typing import Any
 
 class OptimizerType(Enum):
     """Available optimizer types."""
-    OPENEVOLVE = "openevolve"      # LLM-guided evolution
-    AUTOTUNE = "autotune"          # Parameter search (future)
-    AUTO = "auto"                   # Auto-select best
+
+    OPENEVOLVE = "openevolve"  # LLM-guided evolution
+    AUTOTUNE = "autotune"  # Parameter search (future)
+    AUTO = "auto"  # Auto-select best
 
 
 @dataclass
 class OptimizeResult:
     """Compact optimization result."""
+
     optimized_code: str
     metrics: dict[str, float]
     optimizer_used: str
@@ -32,11 +34,11 @@ def optimize_kernel(
     strategy: str | None = None,
     target_speedup: float = 2.0,
     budget_usd: float = 1.0,
-    **kwargs
+    **kwargs,
 ) -> OptimizeResult:
     """
     Optimize a kernel using specified optimizer.
-    
+
     Args:
         kernel_code: Kernel code to optimize
         optimizer: Which optimizer to use (auto-selects if AUTO)
@@ -45,10 +47,10 @@ def optimize_kernel(
         target_speedup: Target speedup multiplier
         budget_usd: Max cost budget
         **kwargs: Additional optimizer-specific args
-    
+
     Returns:
         OptimizeResult with optimized code and metrics
-    
+
     Example:
         >>> result = optimize_kernel(
         ...     kernel_code=my_kernel,
@@ -60,16 +62,12 @@ def optimize_kernel(
     # Auto-select optimizer if needed
     if optimizer == OptimizerType.AUTO:
         optimizer = _select_optimizer(bottleneck, budget_usd)
-    
+
     # Route to appropriate optimizer
     if optimizer == OptimizerType.OPENEVOLVE:
-        return _optimize_with_openevolve(
-            kernel_code, bottleneck, strategy, **kwargs
-        )
+        return _optimize_with_openevolve(kernel_code, bottleneck, strategy, **kwargs)
     elif optimizer == OptimizerType.AUTOTUNE:
-        return _optimize_with_autotune(
-            kernel_code, **kwargs
-        )
+        return _optimize_with_autotune(kernel_code, **kwargs)
     else:
         raise ValueError(f"Unknown optimizer: {optimizer}")
 
@@ -83,19 +81,13 @@ def _select_optimizer(bottleneck: str, budget: float) -> OptimizerType:
         return OptimizerType.OPENEVOLVE  # Powerful, expensive
 
 
-def _optimize_with_openevolve(
-    kernel_code: str,
-    bottleneck: str,
-    strategy: str | None,
-    **kwargs
-) -> OptimizeResult:
+def _optimize_with_openevolve(kernel_code: str, bottleneck: str, strategy: str | None, **kwargs) -> OptimizeResult:
     """Use OpenEvolve optimizer via MCP (openevolve-mcp calls run_openevolve.py from geak-oe)."""
     kernel_path = kwargs.get("kernel_path")
     if not kernel_path:
         import tempfile
-        with tempfile.NamedTemporaryFile(
-            mode='w', suffix='.py', delete=False
-        ) as f:
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write(kernel_code)
             kernel_path = Path(f.name)
     else:
@@ -124,19 +116,23 @@ def _optimize_with_openevolve(
             "cwd": str(mcp_path),
             "env": {"PYTHONPATH": str(mcp_path / "src")},
         }
+
         async def run_mcp():
             async with MCPClient("openevolve-mcp", server_config) as client:
                 return await client.call_tool("optimize_kernel", mcp_request)
+
         result = asyncio.run(run_mcp())
     except ImportError:
         # Fallback: invoke via openevolve-mcp server module directly
         import os
         import sys
+
         mcp_src = Path(__file__).parent.parent.parent.parent / "mcp_tools" / "openevolve-mcp" / "src"
         if str(mcp_src) not in sys.path:
             sys.path.insert(0, str(mcp_src))
         os.environ.setdefault("GEAK_OE_ROOT", str(Path(__file__).parent.parent.parent.parent / "geak-oe"))
         from openevolve_mcp.server import optimize_kernel as _mcp_optimize_kernel
+
         result = _mcp_optimize_kernel(**mcp_request)
 
     if not result.get("success"):

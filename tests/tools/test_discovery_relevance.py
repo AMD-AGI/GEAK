@@ -32,17 +32,16 @@ Covers scenarios discovered during development:
 import textwrap
 from pathlib import Path
 
-import pytest
-
-
 # ---------------------------------------------------------------------------
 # Helpers to build fake filesystem trees
 # ---------------------------------------------------------------------------
 
+
 def _write_triton_kernel(path: Path, func_name: str = "_my_kernel"):
     """Write a minimal Triton kernel file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(textwrap.dedent(f"""\
+    path.write_text(
+        textwrap.dedent(f"""\
         import triton
         import triton.language as tl
 
@@ -52,11 +51,11 @@ def _write_triton_kernel(path: Path, func_name: str = "_my_kernel"):
             offsets = pid * BLOCK + tl.arange(0, BLOCK)
             x = tl.load(x_ptr + offsets)
             tl.store(output_ptr + offsets, x * 2)
-    """))
+    """)
+    )
 
 
-def _write_test_file(path: Path, *, imports: str = "", has_pytest: bool = True,
-                     kernel_ref: str = "", extra: str = ""):
+def _write_test_file(path: Path, *, imports: str = "", has_pytest: bool = True, kernel_ref: str = "", extra: str = ""):
     """Write a test file that scores as a test by content-based detection."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = []
@@ -79,7 +78,8 @@ def _write_test_file(path: Path, *, imports: str = "", has_pytest: bool = True,
 def _write_bench_file(path: Path):
     """Write a benchmark file that scores as a benchmark."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(textwrap.dedent("""\
+    path.write_text(
+        textwrap.dedent("""\
         import torch
         import time
 
@@ -100,12 +100,14 @@ def _write_bench_file(path: Path):
 
         if __name__ == "__main__":
             bench()
-    """))
+    """)
+    )
 
 
 # ---------------------------------------------------------------------------
 # MCP server tests (automated-test-discovery)
 # ---------------------------------------------------------------------------
+
 
 class TestMCPDiscoverSingleFile:
     """Single-file mode: kernel_path is a file."""
@@ -135,9 +137,7 @@ class TestMCPDiscoverSingleFile:
 
         result = discover(str(tmp_path / "gemm" / "kernel.py"), use_llm=False)
 
-        assert result["kernel"]["name"] == "gemm", (
-            f"Expected kernel name 'gemm', got '{result['kernel']['name']}'"
-        )
+        assert result["kernel"]["name"] == "gemm", f"Expected kernel name 'gemm', got '{result['kernel']['name']}'"
 
     def test_kernel_function_param_boosts_matching_tests(self, tmp_path):
         """Tests containing the kernel_function name should rank higher."""
@@ -318,9 +318,7 @@ class TestMCPDiscoverDirectory:
 
         result = discover(str(tmp_path), use_llm=False)
 
-        assert isinstance(result["kernel"], dict), (
-            f"Single kernel should be a dict, got {type(result['kernel'])}"
-        )
+        assert isinstance(result["kernel"], dict), f"Single kernel should be a dict, got {type(result['kernel'])}"
 
     def test_per_kernel_summary(self, tmp_path):
         """Summary should list per-kernel recommendations."""
@@ -414,9 +412,7 @@ class TestRelevanceScoring:
         score_near = _relevance_score(test_near, kernel, "something", [])
         score_far = _relevance_score(test_far, kernel, "something", [])
 
-        assert score_near > score_far, (
-            f"Nearby test ({score_near}) should score higher than far test ({score_far})"
-        )
+        assert score_near > score_far, f"Nearby test ({score_near}) should score higher than far test ({score_far})"
 
 
 class TestDiscoveryPipelineDirectory:
@@ -445,9 +441,7 @@ class TestDiscoveryPipelineDirectory:
         pipeline = DiscoveryPipeline(workspace_path=target)
         pipeline._expand_workspace_for_dir(target)
 
-        assert pipeline.workspace == target, (
-            f"Should use dir itself as workspace, got {pipeline.workspace}"
-        )
+        assert pipeline.workspace == target, f"Should use dir itself as workspace, got {pipeline.workspace}"
 
     def test_kernel_name_uses_parent_for_generic(self, tmp_path):
         """Kernel files named kernel.py should use parent dir as name."""
@@ -463,9 +457,7 @@ class TestDiscoveryPipelineDirectory:
         result = pipeline.run(kernel_path=kernel, interactive=False)
 
         assert len(result.kernels) == 1
-        assert result.kernels[0].kernel_name == "rope", (
-            f"Expected 'rope', got '{result.kernels[0].kernel_name}'"
-        )
+        assert result.kernels[0].kernel_name == "rope", f"Expected 'rope', got '{result.kernels[0].kernel_name}'"
 
     def test_directory_discovery_finds_nested_kernels(self, tmp_path):
         """Directory mode should recursively find kernels in subdirectories."""
@@ -494,14 +486,16 @@ class TestDiscoveryPatternExtraction:
         (tmp_path / ".git").mkdir()
         _write_triton_kernel(tmp_path / "rope.py")
         test = tmp_path / "test_rope.py"
-        test.write_text(textwrap.dedent("""\
+        test.write_text(
+            textwrap.dedent("""\
             import pytest
             import torch
 
             def test_correctness():
                 x = torch.randn(128)
                 torch.testing.assert_close(x, x, atol=1e-3, rtol=1e-4)
-        """))
+        """)
+        )
 
         pipeline = DiscoveryPipeline(workspace_path=tmp_path)
         result = pipeline.run(kernel_path=tmp_path / "rope.py", interactive=False)
@@ -518,7 +512,8 @@ class TestDiscoveryPatternExtraction:
         (tmp_path / ".git").mkdir()
         _write_triton_kernel(tmp_path / "rope.py")
         test = tmp_path / "test_rope.py"
-        test.write_text(textwrap.dedent("""\
+        test.write_text(
+            textwrap.dedent("""\
             import pytest
             import torch
 
@@ -526,7 +521,8 @@ class TestDiscoveryPatternExtraction:
                 x = torch.randn(128, dtype=torch.float16)
                 y = torch.randn(128, dtype=torch.bfloat16)
                 assert True
-        """))
+        """)
+        )
 
         pipeline = DiscoveryPipeline(workspace_path=tmp_path)
         result = pipeline.run(kernel_path=tmp_path / "rope.py", interactive=False)
@@ -543,8 +539,8 @@ class TestFormatDiscoveryForAgent:
 
     def test_includes_kernel_analysis(self, tmp_path):
         """Formatted context should include kernel type and language."""
-        from minisweagent.tools.discovery import discover
         from minisweagent.agents.unit_test_agent import format_discovery_for_agent
+        from minisweagent.tools.discovery import discover
 
         (tmp_path / ".git").mkdir()
         _write_triton_kernel(tmp_path / "rope.py", "_rope_fwd")
@@ -557,8 +553,8 @@ class TestFormatDiscoveryForAgent:
 
     def test_includes_language_guidance(self, tmp_path):
         """Formatted context should include language-specific testing guidance."""
-        from minisweagent.tools.discovery import discover
         from minisweagent.agents.unit_test_agent import format_discovery_for_agent
+        from minisweagent.tools.discovery import discover
 
         (tmp_path / ".git").mkdir()
         _write_triton_kernel(tmp_path / "rope.py")
@@ -577,20 +573,22 @@ class TestFormatDiscoveryForAgent:
 
     def test_includes_extracted_patterns(self, tmp_path):
         """Formatted context should include extracted test patterns when available."""
-        from minisweagent.tools.discovery import discover
         from minisweagent.agents.unit_test_agent import format_discovery_for_agent
+        from minisweagent.tools.discovery import discover
 
         (tmp_path / ".git").mkdir()
         _write_triton_kernel(tmp_path / "rope.py")
         test = tmp_path / "test_rope.py"
-        test.write_text(textwrap.dedent("""\
+        test.write_text(
+            textwrap.dedent("""\
             import pytest
             import torch
 
             def test_correctness():
                 x = torch.randn(128, dtype=torch.float16)
                 torch.testing.assert_close(x, x, atol=1e-3, rtol=1e-4)
-        """))
+        """)
+        )
 
         result = discover(kernel_path=tmp_path / "rope.py", interactive=False)
         context = format_discovery_for_agent(result)

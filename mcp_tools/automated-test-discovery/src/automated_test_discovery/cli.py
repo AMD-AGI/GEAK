@@ -28,23 +28,26 @@ def main():
     )
 
     parser.add_argument(
-        "kernel_path", nargs="?", default=None,
+        "kernel_path",
+        nargs="?",
+        default=None,
         help="Path to a kernel file (.py/.cu/.hip) or a repository directory",
     )
     parser.add_argument(
-        "--from-resolved", default=None, metavar="FILE",
+        "--from-resolved",
+        default=None,
+        metavar="FILE",
         help="Read resolved.json from resolve-kernel-url and extract kernel path",
     )
     parser.add_argument(
-        "-o", "--output", default=None, metavar="FILE",
+        "-o",
+        "--output",
+        default=None,
+        metavar="FILE",
         help="Write JSON output to file instead of stdout",
     )
-    parser.add_argument(
-        "--max-tests", "-t", type=int, default=5, help="Max tests to return (default: 5)"
-    )
-    parser.add_argument(
-        "--max-benchmarks", "-b", type=int, default=5, help="Max benchmarks to return (default: 5)"
-    )
+    parser.add_argument("--max-tests", "-t", type=int, default=5, help="Max tests to return (default: 5)")
+    parser.add_argument("--max-benchmarks", "-b", type=int, default=5, help="Max benchmarks to return (default: 5)")
 
     args = parser.parse_args()
 

@@ -36,6 +36,7 @@ mcp = FastMCP(
 # Backend: Metrix
 # ---------------------------------------------------------------------------
 
+
 def _profile_with_metrix(
     command: str,
     num_replays: int = 3,
@@ -79,54 +80,56 @@ def _profile_with_metrix(
 # Backend: rocprof-compute
 # ---------------------------------------------------------------------------
 
+
 def _profile_with_rocprof(
     command: str,
     workdir: str | None = None,
     profiling_type: str = "profiling",
 ) -> dict[str, Any]:
-    """Profile using rocprof-compute. Returns text-based analysis.
+    """Profile using rocprof-compute. Returns backend-neutral structured JSON.
 
     Args:
         command: Command to execute for profiling.
         workdir: Working directory (defaults to cwd).
         profiling_type: One of 'profiling' (full), 'roofline', 'profiler_analyzer'.
     """
-    # Import ProfilingAnalyzer from the agent package
     try:
+        from minisweagent.kernel_profile import _build_rocprof_result
         from minisweagent.tools.profiling_tools import ProfilingAnalyzer
     except ImportError:
         _agent_root = Path(__file__).resolve().parent.parent.parent.parent.parent
         _src = _agent_root / "src"
         if str(_src) not in sys.path:
             sys.path.insert(0, str(_src))
+        from minisweagent.kernel_profile import _build_rocprof_result
         from minisweagent.tools.profiling_tools import ProfilingAnalyzer
 
     analyzer = ProfilingAnalyzer(profiling_type=profiling_type)
-    result = analyzer(
-        profiling_workdir=workdir or str(Path.cwd()),
-        profiling_cmd=command,
-    )
+    try:
+        raw = analyzer.profile_structured(
+            profiling_workdir=workdir or str(Path.cwd()),
+            profiling_cmd=command,
+        )
+    finally:
+        analyzer.cleanup()
 
-    if result.get("returncode", 1) != 0:
+    if not raw.get("success"):
         return {
             "success": False,
             "backend": "rocprof-compute",
-            "error": result.get("output", "rocprof-compute profiling failed"),
+            "error": raw.get("error", "rocprof-compute profiling failed"),
             "results": [],
         }
 
-    return {
-        "success": True,
-        "backend": "rocprof-compute",
-        "profiling_type": profiling_type,
-        "analysis": result["output"],
-        "results": [],  # rocprof-compute returns text, not structured kernels
-    }
+    result = _build_rocprof_result(raw)
+    result["success"] = True
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Unified MCP tool
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool()
 def profile_kernel(

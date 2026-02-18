@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 from dataclasses import asdict, dataclass, field
@@ -16,6 +15,7 @@ from tenacity import (
 
 from minisweagent.models import GLOBAL_MODEL_STATS
 from minisweagent.models.utils.cache_control import set_cache_control
+from minisweagent.models.utils.registry import register_litellm_models
 
 logger = logging.getLogger("litellm_model")
 
@@ -34,8 +34,7 @@ class LitellmModel:
         self.config = config_class(**kwargs)
         self.cost = 0.0
         self.n_calls = 0
-        if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
-            litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
+        register_litellm_models(self.config.litellm_model_registry)
 
     @retry(
         stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "10"))),

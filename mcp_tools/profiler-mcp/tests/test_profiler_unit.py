@@ -156,9 +156,7 @@ class TestDefaultBackend:
 
 
 class TestRocprofProfilingTypes:
-    @pytest.mark.parametrize(
-        "profiling_type", ["profiling", "roofline", "profiler_analyzer"]
-    )
+    @pytest.mark.parametrize("profiling_type", ["profiling", "roofline", "profiler_analyzer"])
     @patch("profiler_mcp.server._profile_with_rocprof")
     def test_type_passed_through(self, mock_rocprof, profiling_type):
         mock_rocprof.return_value = {

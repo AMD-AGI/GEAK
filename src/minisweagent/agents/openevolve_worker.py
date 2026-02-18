@@ -82,10 +82,12 @@ class OpenEvolveWorker(DefaultAgent):
 
         # Call openevolve via ToolRuntime (uses MCPToolBridge)
         try:
-            result = self.toolruntime.dispatch({
-                "name": "openevolve",
-                "arguments": mcp_args,
-            })
+            result = self.toolruntime.dispatch(
+                {
+                    "name": "openevolve",
+                    "arguments": mcp_args,
+                }
+            )
         except ValueError:
             # openevolve not registered in ToolRuntime -- fall back to optimizer
             self._log_message("[OpenEvolveWorker] openevolve tool not in ToolRuntime, using optimizer.core")
@@ -102,12 +104,14 @@ class OpenEvolveWorker(DefaultAgent):
                     baseline_metrics_path=self.config.baseline_metrics_path,
                 )
                 result = {
-                    "output": json.dumps({
-                        "success": True,
-                        "optimized_code": opt_result.optimized_code,
-                        "metrics": opt_result.metrics,
-                        "iterations": opt_result.iterations,
-                    }),
+                    "output": json.dumps(
+                        {
+                            "success": True,
+                            "optimized_code": opt_result.optimized_code,
+                            "metrics": opt_result.metrics,
+                            "iterations": opt_result.iterations,
+                        }
+                    ),
                     "returncode": 0,
                 }
             except Exception as e:
@@ -152,6 +156,7 @@ class OpenEvolveWorker(DefaultAgent):
 #       --iterations 10 --gpu 0
 # ---------------------------------------------------------------------------
 
+
 def main():
     import argparse
     import os
@@ -162,7 +167,9 @@ def main():
     )
     parser.add_argument("--kernel-path", default=None, help="Path to the kernel file to optimize")
     parser.add_argument(
-        "--from-task", default=None, metavar="FILE",
+        "--from-task",
+        default=None,
+        metavar="FILE",
         help="Read a task .md file (YAML frontmatter) to populate kernel-path, commandment, etc.",
     )
     parser.add_argument("--commandment", default=None, help="Path to COMMANDMENT.md")
@@ -176,6 +183,7 @@ def main():
     # Populate from task file if provided (explicit flags override)
     if args.from_task:
         from minisweagent.run.task_file import read_task_file
+
         meta, _body = read_task_file(Path(args.from_task))
         if not args.kernel_path:
             args.kernel_path = meta.get("kernel_path")
@@ -202,19 +210,20 @@ def main():
 
     # Auto-worktree isolation when using --from-task with a git repo
     worktree_path = None
-    original_repo = None
     if args.from_task:
-        from minisweagent.run.task_file import read_task_file, create_worktree, is_git_repo, replace_paths
+        from minisweagent.run.task_file import create_worktree, is_git_repo, read_task_file, replace_paths
+
         meta, _ = read_task_file(Path(args.from_task))
         repo_root = meta.get("repo_root")
         if repo_root:
             repo_path = Path(repo_root).resolve()
             if repo_path.is_dir() and is_git_repo(repo_path):
-                output_dir_base = Path(args.output_dir).resolve() if args.output_dir else kernel_path.parent / "optimization_output"
+                output_dir_base = (
+                    Path(args.output_dir).resolve() if args.output_dir else kernel_path.parent / "optimization_output"
+                )
                 wt_dest = output_dir_base / "worktree"
                 print(f"[OpenEvolveWorker CLI] Creating isolated worktree at {wt_dest}...", file=sys.stderr)
                 worktree_path = create_worktree(repo_path, wt_dest)
-                original_repo = repo_path
                 # Rewrite kernel_path into worktree
                 kernel_path = Path(replace_paths(str(kernel_path), repo_path, worktree_path))
                 if args.commandment:
@@ -233,8 +242,7 @@ def main():
         f"  baseline_metrics: {args.baseline_metrics or '(none)'}\n"
         f"  iterations:       {args.iterations}\n"
         f"  gpu:              {args.gpu}\n"
-        f"  output_dir:       {output_dir}"
-        + (f"\n  worktree:         {worktree_path}" if worktree_path else ""),
+        f"  output_dir:       {output_dir}" + (f"\n  worktree:         {worktree_path}" if worktree_path else ""),
         flush=True,
     )
 
@@ -255,12 +263,17 @@ def main():
         print(f"ERROR: OpenEvolve failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(json.dumps({
-        "optimizer": result.optimizer_used,
-        "iterations": result.iterations,
-        "metrics": result.metrics,
-        "optimized_code_length": len(result.optimized_code),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "optimizer": result.optimizer_used,
+                "iterations": result.iterations,
+                "metrics": result.metrics,
+                "optimized_code_length": len(result.optimized_code),
+            },
+            indent=2,
+        )
+    )
     print("[OpenEvolveWorker CLI] Done.", flush=True)
 
 

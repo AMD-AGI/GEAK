@@ -357,7 +357,7 @@ python3 KERNEL_DIR/kernel.py --profile > /dev/null 2>&1 || true
 
 # Step 1: Profile and save the raw profiler output (kernel is now warm)
 python3 -c "
-from geak_agent.mcp_tools.metrix import MetrixTool
+from metrix_mcp.core import MetrixTool
 from minisweagent.baseline_metrics import list_kernels
 import json
 

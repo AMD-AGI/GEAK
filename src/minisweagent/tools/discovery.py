@@ -72,9 +72,7 @@ class DiscoveryConfig:
 
     # --- Kernel detection ---
     kernel_patterns: list[str] = field(default_factory=list)
-    kernel_extensions: list[str] = field(
-        default_factory=lambda: list(ALL_KERNEL_EXTENSIONS)
-    )
+    kernel_extensions: list[str] = field(default_factory=lambda: list(ALL_KERNEL_EXTENSIONS))
     wrapper_functions: list[str] = field(default_factory=list)
 
     # --- Test keywords  (regex, weight) ---
@@ -168,15 +166,15 @@ class KernelDependencyGraph:
             for caller, callee in self.edges:
                 lines.append(f"    {caller} -> {callee}")
         if self.sequential_launches:
-            lines.append(f"  Sequential kernel launches (potential fusion targets):")
+            lines.append("  Sequential kernel launches (potential fusion targets):")
             for group in self.sequential_launches:
                 lines.append(f"    [{' -> '.join(group)}]")
         if self.wrapper_ops:
-            lines.append(f"  Wrapper operations between launches:")
+            lines.append("  Wrapper operations between launches:")
             for op in self.wrapper_ops:
                 lines.append(f"    - {op}")
         if self.language_boundaries:
-            lines.append(f"  Language boundaries:")
+            lines.append("  Language boundaries:")
             for caller, callee, boundary in self.language_boundaries:
                 lines.append(f"    {caller} -> {callee} ({boundary})")
         if self.fusion_opportunities:
@@ -590,13 +588,22 @@ Respond with JSON only:
         """
         # Project root markers (we want to expand TO these)
         project_markers = self.config.project_markers or [
-            "pyproject.toml", "setup.py", "setup.cfg", ".git",
-            "op_tests", "tests", "Makefile", "CMakeLists.txt",
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            ".git",
+            "op_tests",
+            "tests",
+            "Makefile",
+            "CMakeLists.txt",
         ]
 
         # Monorepo markers (we want to STOP BEFORE these if they're not the immediate parent)
         monorepo_markers = self.config.monorepo_markers or [
-            "lerna.json", "nx.json", "pnpm-workspace.yaml", "rush.json",
+            "lerna.json",
+            "nx.json",
+            "pnpm-workspace.yaml",
+            "rush.json",
         ]
 
         current = kernel_file.parent
@@ -651,8 +658,14 @@ Respond with JSON only:
         self.result.workspace_path = dir_path
 
         project_markers = self.config.project_markers or [
-            "pyproject.toml", "setup.py", "setup.cfg", ".git",
-            "op_tests", "tests", "Makefile", "CMakeLists.txt",
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            ".git",
+            "op_tests",
+            "tests",
+            "Makefile",
+            "CMakeLists.txt",
         ]
         for marker in project_markers:
             if (dir_path / marker).exists():
@@ -740,11 +753,11 @@ Respond with JSON only:
             has_autotune = "@triton.autotune" in content
 
         # Composable Kernel (CK) -- check BEFORE generic HIP to avoid misclassifying
-        elif re.search(r'\bck::', content) or re.search(r'#include\s+[<"]ck/', content):
+        elif re.search(r"\bck::", content) or re.search(r'#include\s+[<"]ck/', content):
             kernel_type = "ck"
 
         # Assembly (HSACO) -- precompiled binaries loaded via HIP runtime
-        elif re.search(r'hipModuleLoad|hipModuleLaunchKernel|\.hsaco\b', content):
+        elif re.search(r"hipModuleLoad|hipModuleLaunchKernel|\.hsaco\b", content):
             kernel_type = "asm"
 
         # HIP kernels
@@ -763,9 +776,7 @@ Respond with JSON only:
         if not kernel_type and not is_cpp:
             # Triton wrapper: imports triton and imports/calls _kernel functions
             has_triton_import = bool(re.search(r"import\s+triton", content))
-            imports_kernel_funcs = bool(
-                re.search(r"from\s+\S+\s+import\s+[^)]*_kernel", content, re.DOTALL)
-            )
+            imports_kernel_funcs = bool(re.search(r"from\s+\S+\s+import\s+[^)]*_kernel", content, re.DOTALL))
             calls_kernel_with_grid = bool(re.search(r"_kernel\w*\[", content))
             if has_triton_import and (imports_kernel_funcs or calls_kernel_with_grid):
                 kernel_type = "triton"
@@ -776,7 +787,7 @@ Respond with JSON only:
 
             # Cross-language wrapper: calls torch.ops.* (pybind11 -> C++/HIP/CK)
             if not kernel_type:
-                torch_ops_calls = re.findall(r'torch\.ops\.(\w+)\.(\w+)', content)
+                torch_ops_calls = re.findall(r"torch\.ops\.(\w+)\.(\w+)", content)
                 if torch_ops_calls:
                     kernel_type = "hip"  # Default for torch.ops wrappers; refine below
                     namespace, op_name = torch_ops_calls[0]
@@ -801,7 +812,7 @@ Respond with JSON only:
 
             # HSACO wrapper: uses hipModuleLoad from Python (hip-python)
             if not kernel_type:
-                if re.search(r'hipModuleLoadData|HsacoLauncher', content):
+                if re.search(r"hipModuleLoadData|HsacoLauncher", content):
                     kernel_type = "asm"
 
         if not kernel_type:
@@ -833,11 +844,11 @@ Respond with JSON only:
 
         if is_cpp:
             # C++: extract __global__ function names
-            for match in re.finditer(r'__global__\s+void\s+(\w+)', content):
+            for match in re.finditer(r"__global__\s+void\s+(\w+)", content):
                 function_names.append(match.group(1))
             # CK: extract template instantiation names
             if kernel_type == "ck":
-                for match in re.finditer(r'using\s+(\w+)\s*=\s*ck::', content):
+                for match in re.finditer(r"using\s+(\w+)\s*=\s*ck::", content):
                     function_names.append(match.group(1))
         else:
             # Python: @triton.jit decorated functions
@@ -894,9 +905,7 @@ Respond with JSON only:
             from aiter.ops.triton._triton_kernels.rope.rope import _rope_kernel_sbhd_fwd
         resolves the module path to an actual file on disk.
         """
-        import_match = re.search(
-            r"from\s+([\w.]+)\s+import\s+[^)]*_kernel", content, re.DOTALL
-        )
+        import_match = re.search(r"from\s+([\w.]+)\s+import\s+[^)]*_kernel", content, re.DOTALL)
         if not import_match:
             return None
 
@@ -946,9 +955,7 @@ Respond with JSON only:
 
         Searches for ``m.def("op_name", ...)`` patterns in .cu/.cpp files.
         """
-        pybind_pattern = re.compile(
-            rf'm\.def\(\s*"{re.escape(op_name)}"', re.IGNORECASE
-        )
+        pybind_pattern = re.compile(rf'm\.def\(\s*"{re.escape(op_name)}"', re.IGNORECASE)
         # Search common pybind directories first
         search_dirs = ["csrc/pybind", "csrc", "src"]
         for search_dir in search_dirs:
@@ -977,9 +984,9 @@ Respond with JSON only:
         except Exception:
             return ("cpp", None)
 
-        if re.search(r'\bck::', text) or re.search(r'#include\s+[<"]ck/', text):
+        if re.search(r"\bck::", text) or re.search(r'#include\s+[<"]ck/', text):
             return ("cpp", "ck")
-        if re.search(r'hipModuleLoad|hipModuleLaunchKernel|\.hsaco\b', text):
+        if re.search(r"hipModuleLoad|hipModuleLaunchKernel|\.hsaco\b", text):
             return ("asm", "asm")
         if "__global__" in text:
             return ("cpp", "hip")
@@ -1019,9 +1026,7 @@ Respond with JSON only:
 
         return graph
 
-    def _build_graph_python(
-        self, graph: KernelDependencyGraph, kernel: KernelInfo, content: str
-    ) -> None:
+    def _build_graph_python(self, graph: KernelDependencyGraph, kernel: KernelInfo, content: str) -> None:
         """Build dependency graph for a Python wrapper / Triton kernel."""
         # Add the wrapper as the root node
         wrapper_lang = "python"
@@ -1035,8 +1040,8 @@ Respond with JSON only:
 
         # --- Parse sequential kernel launches in wrapper functions ---
         # Match patterns like: _kernel_name[grid](...) or _kernel_name.run(...)
-        launch_pattern = re.compile(r'(\w+_kernel\w*)\s*\[')
-        torch_ops_pattern = re.compile(r'torch\.ops\.(\w+)\.(\w+)\s*\(')
+        launch_pattern = re.compile(r"(\w+_kernel\w*)\s*\[")
+        torch_ops_pattern = re.compile(r"torch\.ops\.(\w+)\.(\w+)\s*\(")
 
         # Track sequential operations in each function body
         current_launches: list[str] = []
@@ -1075,20 +1080,18 @@ Respond with JSON only:
                         node_type="torch_op",
                     )
                 graph.edges.append((kernel.kernel_name, full_name))
-                graph.language_boundaries.append(
-                    (kernel.kernel_name, full_name, "python->hip_pybind")
-                )
+                graph.language_boundaries.append((kernel.kernel_name, full_name, "python->hip_pybind"))
                 continue
 
             # Detect wrapper-level torch operations that could be fused
             for op_name, op_label in [
-                (r'\.to\(', "dtype conversion"),
-                (r'\.reshape\(', "reshape"),
-                (r'\.permute\(', "permute"),
-                (r'\.contiguous\(', "contiguous"),
-                (r'\.view\(', "view/reshape"),
-                (r'torch\.empty', "tensor allocation"),
-                (r'\.transpose\(', "transpose"),
+                (r"\.to\(", "dtype conversion"),
+                (r"\.reshape\(", "reshape"),
+                (r"\.permute\(", "permute"),
+                (r"\.contiguous\(", "contiguous"),
+                (r"\.view\(", "view/reshape"),
+                (r"torch\.empty", "tensor allocation"),
+                (r"\.transpose\(", "transpose"),
             ]:
                 if re.search(op_name, stripped):
                     wrapper_ops.append(op_label)
@@ -1110,14 +1113,14 @@ Respond with JSON only:
                 current_fn = None
 
                 for line in inner_content.splitlines():
-                    jit_match = re.match(r'\s*@triton\.jit', line)
+                    jit_match = re.match(r"\s*@triton\.jit", line)
                     if jit_match:
                         # Next def line is the function
                         current_fn = "__pending__"
                         continue
 
                     if current_fn == "__pending__":
-                        fn_match = re.match(r'\s*def\s+(\w+)\s*\(', line)
+                        fn_match = re.match(r"\s*def\s+(\w+)\s*\(", line)
                         if fn_match:
                             current_fn = fn_match.group(1)
                             jit_fns[current_fn] = []
@@ -1135,15 +1138,13 @@ Respond with JSON only:
                     if current_fn and current_fn != "__pending__":
                         # Look for calls to other known jit functions
                         for called_fn in jit_fns:
-                            if called_fn != current_fn and re.search(
-                                rf'\b{re.escape(called_fn)}\s*\(', line
-                            ):
+                            if called_fn != current_fn and re.search(rf"\b{re.escape(called_fn)}\s*\(", line):
                                 if called_fn not in jit_fns[current_fn]:
                                     jit_fns[current_fn].append(called_fn)
 
                     # Detect end of function (next def or decorator at same/lower indentation)
                     if current_fn and current_fn != "__pending__":
-                        if re.match(r'(def |class |@)', line) and not line.startswith(' '):
+                        if re.match(r"(def |class |@)", line) and not line.startswith(" "):
                             current_fn = None
 
                 # Add edges for internal calls
@@ -1154,13 +1155,9 @@ Respond with JSON only:
                 # Add language boundary for wrapper -> inner kernel
                 for launch in current_launches:
                     if launch in jit_fns:
-                        graph.language_boundaries.append(
-                            (kernel.kernel_name, launch, "python->triton")
-                        )
+                        graph.language_boundaries.append((kernel.kernel_name, launch, "python->triton"))
 
-    def _build_graph_cpp(
-        self, graph: KernelDependencyGraph, kernel: KernelInfo, content: str
-    ) -> None:
+    def _build_graph_cpp(self, graph: KernelDependencyGraph, kernel: KernelInfo, content: str) -> None:
         """Build dependency graph for a C++/HIP/CK kernel file."""
         graph.nodes[kernel.kernel_name] = KernelNode(
             name=kernel.kernel_name,
@@ -1170,7 +1167,7 @@ Respond with JSON only:
         )
 
         # Extract __global__ functions
-        for match in re.finditer(r'__global__\s+void\s+(\w+)', content):
+        for match in re.finditer(r"__global__\s+void\s+(\w+)", content):
             fname = match.group(1)
             if fname not in graph.nodes:
                 graph.nodes[fname] = KernelNode(
@@ -1183,7 +1180,7 @@ Respond with JSON only:
 
         # Extract CK template instantiations
         if kernel.kernel_type == "ck":
-            for match in re.finditer(r'using\s+(\w+)\s*=\s*ck::', content):
+            for match in re.finditer(r"using\s+(\w+)\s*=\s*ck::", content):
                 tname = match.group(1)
                 if tname not in graph.nodes:
                     graph.nodes[tname] = KernelNode(
@@ -1194,9 +1191,7 @@ Respond with JSON only:
                     )
                     graph.edges.append((kernel.kernel_name, tname))
 
-    def _detect_fusion_opportunities(
-        self, graph: KernelDependencyGraph
-    ) -> list[FusionOpportunity]:
+    def _detect_fusion_opportunities(self, graph: KernelDependencyGraph) -> list[FusionOpportunity]:
         """Detect fusion opportunities from the dependency graph.
 
         Patterns detected:
@@ -1216,53 +1211,58 @@ Respond with JSON only:
                     langs.add(graph.nodes[n].language)
             if len(langs) == 1 and "asm" not in langs:
                 lang = next(iter(langs))
-                opportunities.append(FusionOpportunity(
-                    description=(
-                        f"Fuse {len(launch_group)} sequential {lang} kernel launches "
-                        f"({', '.join(launch_group)}) into a single kernel to eliminate "
-                        f"intermediate memory round-trips and launch overhead"
-                    ),
-                    involved_nodes=list(launch_group),
-                    languages=langs,
-                    fusion_type="sequential_launch",
-                    estimated_benefit="high",
-                ))
+                opportunities.append(
+                    FusionOpportunity(
+                        description=(
+                            f"Fuse {len(launch_group)} sequential {lang} kernel launches "
+                            f"({', '.join(launch_group)}) into a single kernel to eliminate "
+                            f"intermediate memory round-trips and launch overhead"
+                        ),
+                        involved_nodes=list(launch_group),
+                        languages=langs,
+                        fusion_type="sequential_launch",
+                        estimated_benefit="high",
+                    )
+                )
             elif len(langs) > 1 and "asm" not in langs:
-                opportunities.append(FusionOpportunity(
-                    description=(
-                        f"Cross-language sequential launches ({', '.join(launch_group)}): "
-                        f"languages {langs}. Rewriting in a single language could "
-                        f"eliminate intermediate memory transfers"
-                    ),
-                    involved_nodes=list(launch_group),
-                    languages=langs,
-                    fusion_type="cross_language",
-                    estimated_benefit="medium",
-                ))
+                opportunities.append(
+                    FusionOpportunity(
+                        description=(
+                            f"Cross-language sequential launches ({', '.join(launch_group)}): "
+                            f"languages {langs}. Rewriting in a single language could "
+                            f"eliminate intermediate memory transfers"
+                        ),
+                        involved_nodes=list(launch_group),
+                        languages=langs,
+                        fusion_type="cross_language",
+                        estimated_benefit="medium",
+                    )
+                )
 
         # 2. Wrapper operations absorbable into adjacent kernel
-        fusible_ops = {"dtype conversion", "reshape", "permute", "contiguous",
-                       "view/reshape", "transpose"}
+        fusible_ops = {"dtype conversion", "reshape", "permute", "contiguous", "view/reshape", "transpose"}
         for op in graph.wrapper_ops:
             if op in fusible_ops:
                 # Find the nearest kernel launch this op sits between
                 adjacent_kernels = [
-                    n for n in graph.nodes.values()
-                    if n.node_type in ("jit_kernel", "device_func", "torch_op")
-                    and n.language != "asm"
+                    n
+                    for n in graph.nodes.values()
+                    if n.node_type in ("jit_kernel", "device_func", "torch_op") and n.language != "asm"
                 ]
                 if adjacent_kernels:
                     adj = adjacent_kernels[0]
-                    opportunities.append(FusionOpportunity(
-                        description=(
-                            f"Absorb wrapper-level '{op}' operation into "
-                            f"kernel '{adj.name}' to avoid an extra memory pass"
-                        ),
-                        involved_nodes=[adj.name],
-                        languages={adj.language, "python"},
-                        fusion_type="absorb_wrapper_op",
-                        estimated_benefit="medium",
-                    ))
+                    opportunities.append(
+                        FusionOpportunity(
+                            description=(
+                                f"Absorb wrapper-level '{op}' operation into "
+                                f"kernel '{adj.name}' to avoid an extra memory pass"
+                            ),
+                            involved_nodes=[adj.name],
+                            languages={adj.language, "python"},
+                            fusion_type="absorb_wrapper_op",
+                            estimated_benefit="medium",
+                        )
+                    )
 
         return opportunities
 
@@ -1325,8 +1325,6 @@ Respond with JSON only:
         """
         print("\n[2/4] Discovering tests (content-based)...")
 
-        seen_paths = set()
-
         self.result.tests = self._discover_scored_files(
             analyze_fn=self._analyze_test_file,
             label="test",
@@ -1358,38 +1356,45 @@ Respond with JSON only:
             patterns = TestPatterns()
 
             # Tolerances: atol=X, rtol=X, assert_close(..., atol=, rtol=)
-            for m in re.finditer(r'[ar]tol\s*=\s*([0-9eE.\-+]+)', content):
-                tok = f"{'atol' if 'atol' in content[m.start()-4:m.start()] else 'rtol'}={m.group(1)}"
+            for m in re.finditer(r"[ar]tol\s*=\s*([0-9eE.\-+]+)", content):
+                tok = f"{'atol' if 'atol' in content[m.start() - 4 : m.start()] else 'rtol'}={m.group(1)}"
                 if tok not in patterns.tolerances:
                     patterns.tolerances.append(tok)
 
             # Input shapes: tuples of ints like (1024, 1024) or named like (batch, seq_len)
-            for m in re.finditer(r'\(\s*\d+(?:\s*,\s*\d+)+\s*\)', content):
+            for m in re.finditer(r"\(\s*\d+(?:\s*,\s*\d+)+\s*\)", content):
                 shape = m.group(0)
                 if shape not in patterns.input_shapes and len(shape) < 60:
                     patterns.input_shapes.append(shape)
 
             # Dtypes: torch.float16, torch.bfloat16, etc.
-            for m in re.finditer(r'torch\.(float16|float32|float64|bfloat16|int32|int64|half|float|double)', content):
+            for m in re.finditer(r"torch\.(float16|float32|float64|bfloat16|int32|int64|half|float|double)", content):
                 dtype = f"torch.{m.group(1)}"
                 if dtype not in patterns.dtypes:
                     patterns.dtypes.append(dtype)
 
             # Reference implementations: torch.nn.functional.X, torch.X
-            for m in re.finditer(r'torch\.nn\.functional\.(\w+)', content):
+            for m in re.finditer(r"torch\.nn\.functional\.(\w+)", content):
                 ref = f"torch.nn.functional.{m.group(1)}"
                 if ref not in patterns.reference_impls:
                     patterns.reference_impls.append(ref)
 
             # Import patterns: from X import Y (kernel-related)
-            for m in re.finditer(r'^(from\s+\S+\s+import\s+.+)$', content, re.MULTILINE):
+            for m in re.finditer(r"^(from\s+\S+\s+import\s+.+)$", content, re.MULTILINE):
                 imp = m.group(1).strip()
                 if len(imp) < 120 and imp not in patterns.import_patterns:
                     patterns.import_patterns.append(imp)
 
             # Only attach if we found something useful
-            if any([patterns.tolerances, patterns.input_shapes, patterns.dtypes,
-                     patterns.reference_impls, patterns.import_patterns]):
+            if any(
+                [
+                    patterns.tolerances,
+                    patterns.input_shapes,
+                    patterns.dtypes,
+                    patterns.reference_impls,
+                    patterns.import_patterns,
+                ]
+            ):
                 test.patterns = patterns
 
     def _analyze_test_file(self, file_path: Path) -> TestInfo | None:
@@ -1581,10 +1586,23 @@ Respond with JSON only:
     def _should_skip_file(self, file_path: Path) -> bool:
         """Check if a file should be skipped during discovery."""
         # Use skip_dirs from loaded config (defaults + per-project overrides)
-        skip_dirs = set(self.config.skip_dirs) if self.config.skip_dirs else {
-            "__pycache__", ".git", ".venv", "venv", "node_modules",
-            "build", "dist", ".eggs", "site-packages", ".tox", ".pytest_cache",
-        }
+        skip_dirs = (
+            set(self.config.skip_dirs)
+            if self.config.skip_dirs
+            else {
+                "__pycache__",
+                ".git",
+                ".venv",
+                "venv",
+                "node_modules",
+                "build",
+                "dist",
+                ".eggs",
+                "site-packages",
+                ".tox",
+                ".pytest_cache",
+            }
+        )
 
         # Add configured exclude directories (from per-project skip_dirs_extra)
         skip_dirs.update(self.config.exclude_dirs)
@@ -1604,9 +1622,12 @@ Respond with JSON only:
 
         # Check for kernel definition patterns (loaded from config, includes CK/ASM)
         kernel_patterns = self.config.kernel_patterns or [
-            r"@triton\.jit", r"@triton\.autotune",
-            r"__global__\s+void", r"tl\.load|tl\.store",
-            r"\bck::", r'#include\s+[<"]ck/',
+            r"@triton\.jit",
+            r"@triton\.autotune",
+            r"__global__\s+void",
+            r"tl\.load|tl\.store",
+            r"\bck::",
+            r'#include\s+[<"]ck/',
             r"hipModuleLoad|hipModuleLaunchKernel",
         ]
         for pattern in kernel_patterns:
@@ -1633,8 +1654,10 @@ Respond with JSON only:
                     inner_lang = k.inner_kernel_language or "unknown"
                     print(f"      Inner kernel: {k.inner_kernel_path} ({inner_lang})")
                 if k.build_info and k.build_info.compiler:
-                    print(f"      Build: {k.build_info.compiler}"
-                          + (f" ({k.build_info.build_system})" if k.build_info.build_system else ""))
+                    print(
+                        f"      Build: {k.build_info.compiler}"
+                        + (f" ({k.build_info.build_system})" if k.build_info.build_system else "")
+                    )
         else:
             print("    (none found)")
 

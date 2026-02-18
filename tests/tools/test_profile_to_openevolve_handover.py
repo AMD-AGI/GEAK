@@ -33,6 +33,7 @@ from minisweagent.baseline_metrics import (
 # Fixtures: realistic profiler output
 # ---------------------------------------------------------------------------
 
+
 def _kernel(
     name: str,
     duration_us: float = 100.0,
@@ -70,17 +71,20 @@ def _profiler_result(kernels: list[dict], device_id: str = "0") -> dict:
 
 
 # Reusable kernel fixtures
-TOPK_1 = _kernel("topk_stage1", duration_us=114.55, hbm_bw_util=2.34, l2_hit=49.72, coalescing=25.0, bottleneck="latency")
+TOPK_1 = _kernel(
+    "topk_stage1", duration_us=114.55, hbm_bw_util=2.34, l2_hit=49.72, coalescing=25.0, bottleneck="latency"
+)
 TOPK_2 = _kernel("topk_stage2", duration_us=38.20, hbm_bw_util=18.5, l2_hit=72.0, coalescing=60.0, bottleneck="memory")
-ROPE   = _kernel("fused_qkv_rope_triton", duration_us=220.0, hbm_bw_util=45.0, l2_hit=55.0, bottleneck="memory")
-FW_EW  = _kernel("at::native::vectorized_elementwise_kernel", duration_us=5.2, bottleneck="latency")
+ROPE = _kernel("fused_qkv_rope_triton", duration_us=220.0, hbm_bw_util=45.0, l2_hit=55.0, bottleneck="memory")
+FW_EW = _kernel("at::native::vectorized_elementwise_kernel", duration_us=5.2, bottleneck="latency")
 FW_RED = _kernel("reduce_kernel<float>", duration_us=3.1, bottleneck="latency")
-FW_CP  = _kernel("copyBuffer_impl", duration_us=1.0, bottleneck="latency")
+FW_CP = _kernel("copyBuffer_impl", duration_us=1.0, bottleneck="latency")
 
 
 # ---------------------------------------------------------------------------
 # Tests: list_kernels — all kernels visible to the agent
 # ---------------------------------------------------------------------------
+
 
 class TestListKernels:
     """The agent sees ALL kernels and makes its own decisions."""
@@ -121,6 +125,7 @@ class TestListKernels:
 # ---------------------------------------------------------------------------
 # Tests: build_baseline_metrics — explicit agent selection
 # ---------------------------------------------------------------------------
+
 
 class TestBuildBaselineMetrics:
     """Agent explicitly chooses kernels; the utility only formats."""
@@ -210,8 +215,8 @@ class TestBuildBaselineMetrics:
 # Tests: aggregation
 # ---------------------------------------------------------------------------
 
-class TestAggregateMetrics:
 
+class TestAggregateMetrics:
     def test_single_kernel_passthrough(self):
         agg = aggregate_metrics([TOPK_1])
         assert agg["duration_us"] == pytest.approx(114.55)
@@ -241,6 +246,7 @@ class TestAggregateMetrics:
 # Tests: output structure — what OpenEvolve needs
 # ---------------------------------------------------------------------------
 
+
 class TestOutputStructure:
     """The baseline dict must match what openevolve-mcp/run_openevolve.py reads."""
 
@@ -264,7 +270,12 @@ class TestOutputStructure:
         result = _profiler_result([TOPK_1])
         baseline = build_baseline_metrics(result, kernel_names=["topk_stage1"])
 
-        for key in ["duration_us", "memory.hbm_bandwidth_utilization", "memory.l2_hit_rate", "memory.coalescing_efficiency"]:
+        for key in [
+            "duration_us",
+            "memory.hbm_bandwidth_utilization",
+            "memory.l2_hit_rate",
+            "memory.coalescing_efficiency",
+        ]:
             assert key in baseline["metrics"], f"Missing metric: {key}"
 
     def test_observations_merged_and_deduplicated(self):
@@ -298,8 +309,8 @@ class TestOutputStructure:
 # Tests: OpenEvolve compatibility (simulate server.py parsing)
 # ---------------------------------------------------------------------------
 
-class TestOpenEvolveCompatibility:
 
+class TestOpenEvolveCompatibility:
     def _simulate_openevolve_parse(self, baseline_dict, best_duration_us=80.0):
         """Replicate openevolve-mcp/server.py result parsing."""
         baseline_latency = baseline_dict.get("duration_us", 0)

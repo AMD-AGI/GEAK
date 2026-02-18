@@ -57,6 +57,7 @@ class BaselineMetricsTool:
         if output_path:
             try:
                 from pathlib import Path
+
                 out = Path(output_path)
                 out.write_text(result_json)
                 # Post-write roundtrip validation: ensure the file is valid JSON

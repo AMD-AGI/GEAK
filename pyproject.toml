@@ -85,6 +85,7 @@ commandment = "minisweagent.tools.commandment:main"
 validate-commandment = "minisweagent.tools.validate_commandment:main"
 baseline-metrics = "minisweagent.baseline_metrics:main"
 openevolve-worker = "minisweagent.agents.openevolve_worker:main"
+run-tasks = "minisweagent.run.task_runner:main"
 select-patch = "minisweagent.agents.select_patch_agent:main"
 resolve-kernel-url = "minisweagent.tools.resolve_kernel_url_impl:main"
 

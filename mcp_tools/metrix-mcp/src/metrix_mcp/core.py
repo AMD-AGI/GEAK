@@ -17,9 +17,7 @@ class MetrixTool:
     """MCP tool for GPU kernel profiling using metrix Python API."""
 
     TOOL_NAME = "metrix"
-    TOOL_DESCRIPTION = (
-        "Profile GPU kernels with detailed hardware metrics and factual observations."
-    )
+    TOOL_DESCRIPTION = "Profile GPU kernels with detailed hardware metrics and factual observations."
 
     # Expected metrics from metrix "quick" profile
     # Expected metrics for full (memory) profile
@@ -117,9 +115,7 @@ class MetrixTool:
         """
         try:
             # Metrix backend contains device_specs with comprehensive GPU info
-            if hasattr(self.profiler, "backend") and hasattr(
-                self.profiler.backend, "device_specs"
-            ):
+            if hasattr(self.profiler, "backend") and hasattr(self.profiler.backend, "device_specs"):
                 specs = self.profiler.backend.device_specs
                 return {
                     "detected": True,
@@ -188,9 +184,7 @@ class MetrixTool:
         # Always return a list for consistency
         results_list = []
         for device in self.gpu_devices:
-            result = self._profile_single_gpu(
-                device, command, num_replays, kernel_filter, auto_select, quick
-            )
+            result = self._profile_single_gpu(device, command, num_replays, kernel_filter, auto_select, quick)
             # Add device_id to the result
             result["device_id"] = device
             results_list.append(result)
@@ -248,13 +242,10 @@ class MetrixTool:
             kernels_to_process = results.kernels
             if kernel_filter:
                 logger.info(
-                    f"GPU {device}: Processing {len(kernels_to_process)} kernel(s) "
-                    f"matching filter '{kernel_filter}'"
+                    f"GPU {device}: Processing {len(kernels_to_process)} kernel(s) matching filter '{kernel_filter}'"
                 )
             else:
-                logger.info(
-                    f"GPU {device}: Processing all {len(kernels_to_process)} kernel(s)"
-                )
+                logger.info(f"GPU {device}: Processing all {len(kernels_to_process)} kernel(s)")
 
         if not kernels_to_process:
             raise RuntimeError("No kernels found in profiling results")
@@ -268,18 +259,14 @@ class MetrixTool:
             metrics = self._extract_all_metrics(kernel)
             self._validate_metrics(metrics, kernel.name, quick)
             bottleneck = self._classify_bottleneck(metrics, quick)
-            logger.debug(
-                f"GPU {device}: Kernel '{kernel.name[:60]}...' classified as {bottleneck}"
-            )
+            logger.debug(f"GPU {device}: Kernel '{kernel.name[:60]}...' classified as {bottleneck}")
 
             kernels_data.append(
                 {
                     "name": kernel.name,
                     "duration_us": metrics["duration_us"],
                     "bottleneck": bottleneck,
-                    "observations": self._generate_observations(
-                        bottleneck, metrics, quick, gpu_info
-                    ),
+                    "observations": self._generate_observations(bottleneck, metrics, quick, gpu_info),
                     "metrics": metrics,
                 }
             )
@@ -333,26 +320,19 @@ class MetrixTool:
 
         return metrics
 
-    def _validate_metrics(
-        self, metrics: dict[str, float], kernel_name: str, quick: bool = False
-    ) -> None:
+    def _validate_metrics(self, metrics: dict[str, float], kernel_name: str, quick: bool = False) -> None:
         """Validate that expected metrics are present."""
         expected = self.EXPECTED_METRICS_QUICK if quick else self.EXPECTED_METRICS_FULL
         missing = [m for m in expected if m not in metrics]
         if missing:
-            logger.error(
-                f"Metric validation failed for '{kernel_name[:60]}...': "
-                f"missing {len(missing)} metric(s)"
-            )
+            logger.error(f"Metric validation failed for '{kernel_name[:60]}...': missing {len(missing)} metric(s)")
             raise RuntimeError(
                 f"Missing expected metrics for kernel '{kernel_name}': {missing}\n"
                 f"Available metrics: {list(metrics.keys())}"
             )
         logger.debug(f"Validated {len(expected)} metrics for '{kernel_name[:60]}...'")
 
-    def _classify_bottleneck(
-        self, metrics: dict[str, float], quick: bool = False
-    ) -> str:
+    def _classify_bottleneck(self, metrics: dict[str, float], quick: bool = False) -> str:
         """Classify bottleneck based on metrics."""
         duration_us = metrics.get("duration_us", 0)
 
@@ -438,44 +418,21 @@ class MetrixTool:
             observations.append(f"Classified as memory-bound (HBM util: {hbm:.1f}%)")
 
             # Add context from GPU specs
-            if (
-                not quick
-                and gpu_info.get("detected")
-                and hbm_read_bw is not None
-                and hbm_write_bw is not None
-            ):
+            if not quick and gpu_info.get("detected") and hbm_read_bw is not None and hbm_write_bw is not None:
                 achieved_bw = hbm_read_bw + hbm_write_bw
                 peak_bw = gpu_info.get("peak_hbm_bandwidth_gbs", 0)
                 if peak_bw > 0:
-                    observations.append(
-                        f"Achieved HBM bandwidth: {achieved_bw:.1f} GB/s (peak: {peak_bw:.0f} GB/s)"
-                    )
+                    observations.append(f"Achieved HBM bandwidth: {achieved_bw:.1f} GB/s (peak: {peak_bw:.0f} GB/s)")
 
             if not quick and coalescing is not None:
-                desc = (
-                    "poor"
-                    if coalescing < 50
-                    else "good" if coalescing > 80 else "moderate"
-                )
-                observations.append(
-                    f"Coalescing efficiency: {coalescing:.1f}% ({desc})"
-                )
+                desc = "poor" if coalescing < 50 else "good" if coalescing > 80 else "moderate"
+                observations.append(f"Coalescing efficiency: {coalescing:.1f}% ({desc})")
             if not quick and load_eff is not None:
-                desc = (
-                    "inefficient"
-                    if load_eff < 50
-                    else "efficient" if load_eff > 80 else "moderate"
-                )
+                desc = "inefficient" if load_eff < 50 else "efficient" if load_eff > 80 else "moderate"
                 observations.append(f"Global load efficiency: {load_eff:.1f}% ({desc})")
             if not quick and store_eff is not None:
-                desc = (
-                    "inefficient"
-                    if store_eff < 50
-                    else "efficient" if store_eff > 80 else "moderate"
-                )
-                observations.append(
-                    f"Global store efficiency: {store_eff:.1f}% ({desc})"
-                )
+                desc = "inefficient" if store_eff < 50 else "efficient" if store_eff > 80 else "moderate"
+                observations.append(f"Global store efficiency: {store_eff:.1f}% ({desc})")
 
         elif bottleneck == "compute":
             observations.append("Classified as compute-bound (high data reuse)")
@@ -488,30 +445,20 @@ class MetrixTool:
         elif bottleneck == "lds":
             observations.append("Classified as LDS-bound")
             if lds_conflicts is not None:
-                severity = (
-                    "severe"
-                    if lds_conflicts > 1.0
-                    else "high" if lds_conflicts > 0.1 else "moderate"
-                )
-                observations.append(
-                    f"Bank conflicts: {lds_conflicts:.3f} per instruction ({severity})"
-                )
+                severity = "severe" if lds_conflicts > 1.0 else "high" if lds_conflicts > 0.1 else "moderate"
+                observations.append(f"Bank conflicts: {lds_conflicts:.3f} per instruction ({severity})")
             if gpu_info.get("detected"):
                 lds_per_cu = gpu_info.get("lds_size_per_cu_kb", 0)
                 if lds_per_cu > 0:
                     observations.append(f"LDS available: {lds_per_cu:.0f} KB per CU")
 
         elif bottleneck == "latency":
-            observations.append(
-                f"Classified as latency-bound (HBM util: {hbm:.1f}%, severely under-utilized)"
-            )
+            observations.append(f"Classified as latency-bound (HBM util: {hbm:.1f}%, severely under-utilized)")
             if gpu_info.get("detected") and not quick:
                 peak_bw = gpu_info.get("peak_hbm_bandwidth_gbs", 0)
                 if peak_bw > 0 and hbm_read_bw is not None and hbm_write_bw is not None:
                     achieved_bw = hbm_read_bw + hbm_write_bw
-                    observations.append(
-                        f"Using only {achieved_bw:.1f} of {peak_bw:.0f} GB/s available HBM bandwidth"
-                    )
+                    observations.append(f"Using only {achieved_bw:.1f} of {peak_bw:.0f} GB/s available HBM bandwidth")
         else:
             observations.append("Classified as balanced")
             if not quick and l1_hit is not None:
@@ -521,9 +468,7 @@ class MetrixTool:
             if hbm > 0:
                 observations.append(f"HBM utilization: {hbm:.1f}%")
 
-        logger.debug(
-            f"Generated {len(observations)} observation(s) for {bottleneck} bottleneck"
-        )
+        logger.debug(f"Generated {len(observations)} observation(s) for {bottleneck} bottleneck")
         return observations
 
     def get_tool_definition(self) -> dict[str, Any]:

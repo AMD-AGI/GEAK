@@ -35,13 +35,12 @@ Usage (CLI):
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 # Import validate_commandment directly from the sibling module to avoid
 # pulling in the full minisweagent.tools package (whose __init__.py imports
 # heavy dependencies like typer via strategy_manager).
 import importlib.util as _ilu
+import re
+from pathlib import Path
 
 _vc_path = Path(__file__).with_name("validate_commandment.py")
 _vc_spec = _ilu.spec_from_file_location("validate_commandment", _vc_path)
@@ -60,7 +59,7 @@ def generate_commandment(
     *,
     inner_kernel: bool = False,
     inner_kernel_relpath: str | None = None,
-    warmup_runs: int = 2,
+    warmup_runs: int = 1,
     profile_replays: int = 5,
 ) -> str:
     """Generate a valid COMMANDMENT.md and return its content.
@@ -118,8 +117,20 @@ def generate_commandment(
             profile_replays=profile_replays,
         )
 
-    content = _validate_and_fix(content)
-    return content
+    return _validate_and_fix(content)
+
+
+def _warmup_block(command: str, warmup_runs: int) -> str:
+    """Build the warmup section for the PROFILE block.
+
+    Returns a single command for 1 run, or a bash for-loop for multiple runs
+    (avoids emitting duplicate identical lines).
+    """
+    if warmup_runs <= 0:
+        return ""
+    if warmup_runs == 1:
+        return command
+    return f"for _i in $(seq 1 {warmup_runs}); do {command}; done"
 
 
 def _generate_simple(
@@ -130,9 +141,9 @@ def _generate_simple(
     profile_replays: int,
 ) -> str:
     """Generate COMMANDMENT for a simple (non-inner) kernel."""
-    warmup_lines = "\n".join(
-        [f"${{GEAK_WORK_DIR}}/run.sh {harness_path} --profile > /dev/null 2>&1 || true"]
-        * warmup_runs
+    warmup_block = _warmup_block(
+        f"${{GEAK_WORK_DIR}}/run.sh {harness_path} --profile > /dev/null 2>&1 || true",
+        warmup_runs,
     )
 
     return f"""\
@@ -143,7 +154,7 @@ printf '#!/bin/bash\\nexport PYTHONPATH=%s:{repo_root}:${{PYTHONPATH}}\\nexport 
 ${{GEAK_WORK_DIR}}/run.sh {harness_path} --correctness
 
 ## PROFILE
-{warmup_lines}
+{warmup_block}
 kernel-profile "${{GEAK_WORK_DIR}}/run.sh {harness_path} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
 """
 
@@ -179,9 +190,9 @@ def _generate_inner_kernel(
     # Copy candidate to the correct import path
     copy_cmd = f"cp ${{GEAK_WORK_DIR}}/{kernel_path.name} ${{GEAK_WORK_DIR}}/{rel_dir}/{basename}"
 
-    warmup_lines = "\n".join(
-        [f"${{GEAK_WORK_DIR}}/run_harness.sh --profile > /dev/null 2>&1 || true"]
-        * warmup_runs
+    warmup_block = _warmup_block(
+        "${GEAK_WORK_DIR}/run_harness.sh --profile > /dev/null 2>&1 || true",
+        warmup_runs,
     )
 
     setup_lines = [
@@ -193,8 +204,8 @@ def _generate_inner_kernel(
 
     setup_lines.append(
         f"printf '#!/bin/bash\\nexport PYTHONPATH=%s:{repo_root}:${{PYTHONPATH}}\\n"
-        f"export HIP_VISIBLE_DEVICES=%s\\nexec python3 {harness_path} \"$@\"\\n' "
-        f"\"${{GEAK_WORK_DIR}}\" \"${{GEAK_GPU_DEVICE}}\" > ${{GEAK_WORK_DIR}}/run_harness.sh "
+        f'export HIP_VISIBLE_DEVICES=%s\\nexec python3 {harness_path} "$@"\\n\' '
+        f'"${{GEAK_WORK_DIR}}" "${{GEAK_GPU_DEVICE}}" > ${{GEAK_WORK_DIR}}/run_harness.sh '
         f"&& chmod +x ${{GEAK_WORK_DIR}}/run_harness.sh"
     )
 
@@ -208,7 +219,7 @@ def _generate_inner_kernel(
 ${{GEAK_WORK_DIR}}/run_harness.sh --correctness
 
 ## PROFILE
-{warmup_lines}
+{warmup_block}
 kernel-profile "${{GEAK_WORK_DIR}}/run_harness.sh --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
 """
 
@@ -263,9 +274,11 @@ def _auto_fix(content: str, errors: list[str]) -> str:
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def _extract_harness_from_command(command: str) -> str | None:
     """Extract the .py script path from a test command like 'python /path/to/test.py -v'."""
     import shlex
+
     try:
         tokens = shlex.split(command)
     except ValueError:
@@ -288,12 +301,14 @@ def main():
     parser.add_argument("--harness", default=None, help="Path to the test harness script")
     parser.add_argument("--repo-root", default=None, help="Repository root for PYTHONPATH (default: kernel parent dir)")
     parser.add_argument(
-        "--from-discovery", default=None, metavar="FILE",
+        "--from-discovery",
+        default=None,
+        metavar="FILE",
         help="Read discovery.json and extract kernel-path, harness, and repo-root",
     )
     parser.add_argument("--inner-kernel", action="store_true", help="Kernel is an inner file imported by a wrapper")
     parser.add_argument("--inner-kernel-relpath", default=None, help="Relative path from repo-root to inner kernel")
-    parser.add_argument("--warmup-runs", type=int, default=2, help="Warm-up runs before profiling (default: 2)")
+    parser.add_argument("--warmup-runs", type=int, default=1, help="Warm-up runs before profiling (default: 1)")
     parser.add_argument("--profile-replays", type=int, default=5, help="Profiling replay count (default: 5)")
     parser.add_argument("-o", "--output", default=None, help="Output file path (default: stdout)")
 

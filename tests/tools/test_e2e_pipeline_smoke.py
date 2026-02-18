@@ -27,7 +27,6 @@ from minisweagent.tools.check_compat import CheckKernelCompatibilityTool, check_
 from minisweagent.tools.resolve_kernel_url_impl import resolve_kernel_url
 from minisweagent.tools.tools_runtime import ToolRuntime
 
-
 # ---------------------------------------------------------------------------
 # Synthetic profiler output (realistic MetrixTool shape)
 # ---------------------------------------------------------------------------
@@ -77,7 +76,7 @@ SYNTHETIC_PROFILER_OUTPUT = {
 
 
 # The example add kernel from examples/add_kernel/kernel.py
-ADD_KERNEL_CODE = '''import torch
+ADD_KERNEL_CODE = """import torch
 import triton
 import triton.language as tl
 
@@ -99,12 +98,13 @@ def add_kernel(
     y = tl.load(y_ptr + offsets, mask=mask)
     output = x + y
     tl.store(output_ptr + offsets, output, mask=mask)
-'''
+"""
 
 
 # ---------------------------------------------------------------------------
 # End-to-end pipeline test
 # ---------------------------------------------------------------------------
+
 
 class TestE2EPipelineSmoke:
     """Walk the full pipeline using native tools + synthetic profiler data."""
@@ -187,20 +187,24 @@ class TestE2EPipelineSmoke:
         rt = ToolRuntime()
 
         # Step 1: check_kernel_compatibility via dispatch
-        compat_result = rt.dispatch({
-            "name": "check_kernel_compatibility",
-            "arguments": {"kernel_code": ADD_KERNEL_CODE},
-        })
+        compat_result = rt.dispatch(
+            {
+                "name": "check_kernel_compatibility",
+                "arguments": {"kernel_code": ADD_KERNEL_CODE},
+            }
+        )
         assert compat_result["returncode"] == 0
 
         # Step 2: baseline_metrics via dispatch with synthetic profiler output
-        baseline_result = rt.dispatch({
-            "name": "baseline_metrics",
-            "arguments": {
-                "profiler_output": json.dumps(SYNTHETIC_PROFILER_OUTPUT),
-                "kernel_names": "add_kernel_0d1d2d3d4",
-            },
-        })
+        baseline_result = rt.dispatch(
+            {
+                "name": "baseline_metrics",
+                "arguments": {
+                    "profiler_output": json.dumps(SYNTHETIC_PROFILER_OUTPUT),
+                    "kernel_names": "add_kernel_0d1d2d3d4",
+                },
+            }
+        )
         assert baseline_result["returncode"] == 0, f"baseline_metrics failed: {baseline_result['output']}"
 
         # The output should be parseable JSON
