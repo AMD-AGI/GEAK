@@ -29,8 +29,8 @@ class AnthropicModelConfig:
     base_url: str | None = None
     api_version: str = "2023-06-01"
     set_cache_control: Literal["default_end"] | None = "default_end"
-    cost_per_1k_input_tokens: float = 0.0
-    cost_per_1k_output_tokens: float = 0.0
+    cost_per_1k_input_tokens: float = 0.003
+    cost_per_1k_output_tokens: float = 0.003
     bash_tool: bool = True
     profiling: bool = False
     use_strategy_manager: bool = False
