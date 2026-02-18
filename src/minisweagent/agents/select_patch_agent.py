@@ -105,3 +105,114 @@ class SelectPatchAgent(DefaultAgent):
         
         return None
 
+
+# ---------------------------------------------------------------------------
+# Standalone CLI -- replicates what ParallelAgent._select_best_from_parallel_runs()
+# does, so a user can run patch selection on an existing patches directory.
+#
+# Usage:
+#   python -m minisweagent.agents.select_patch_agent \
+#       --patch-dir ./patches/run7 \
+#       --metric "Compare per-kernel latency; lower is better"
+# ---------------------------------------------------------------------------
+
+def main():
+    import argparse
+    import json
+    import sys
+
+    import yaml
+
+    from minisweagent.config import get_config_path
+    from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
+    from minisweagent.models import get_model
+
+    parser = argparse.ArgumentParser(
+        description="Select the best patch from parallel optimization runs (standalone)",
+    )
+    parser.add_argument(
+        "--patch-dir", required=True,
+        help="Base directory containing task_*/parallel_* subdirectories with patches",
+    )
+    parser.add_argument(
+        "--metric", default=None,
+        help="Metric description for the LLM (e.g. 'compare per-kernel latency; lower is better')",
+    )
+    parser.add_argument(
+        "--model", default=None,
+        help="Model name override (default: uses mini_select_patch.yaml config)",
+    )
+
+    args = parser.parse_args()
+
+    patch_dir = Path(args.patch_dir).resolve()
+    if not patch_dir.is_dir():
+        print(f"ERROR: patch directory not found: {args.patch_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    # Load config (same as ParallelAgent._select_best_from_parallel_runs)
+    config_path = get_config_path("mini_select_patch")
+    config = yaml.safe_load(config_path.read_text())
+    agent_config = config.get("agent", {})
+    model_config = config.get("model", {})
+
+    # Create model (CLI --model overrides config)
+    model = get_model(args.model, model_config)
+
+    # Create environment rooted at the patch directory
+    env_config = LocalEnvironmentConfig(cwd=str(patch_dir))
+    env = LocalEnvironment(**env_config.__dict__)
+
+    # Create and configure agent
+    agent = SelectPatchAgent(model, env, **agent_config)
+    log_file = patch_dir / "select_agent.log"
+    agent.log_file = log_file
+
+    # Count runs for the hint
+    task_dirs = sorted(patch_dir.glob("task_*"))
+    parallel_dirs = sorted(patch_dir.glob("parallel_*"))
+    num_parallel = len(task_dirs) + len(parallel_dirs)
+    if num_parallel == 0:
+        print("ERROR: no task_* or parallel_* directories found in patch-dir", file=sys.stderr)
+        sys.exit(1)
+
+    metric = args.metric or "Extract performance metrics and calculate the best speedup."
+
+    # Setup task and run
+    task = agent.setup_selection_task(patch_dir, num_parallel, metric)
+    if task is None:
+        print("ERROR: failed to setup selection task", file=sys.stderr)
+        sys.exit(1)
+
+    print(
+        f"[SelectPatchAgent CLI] Starting patch selection\n"
+        f"  patch_dir:   {patch_dir}\n"
+        f"  runs found:  {num_parallel} ({len(task_dirs)} task_*, {len(parallel_dirs)} parallel_*)\n"
+        f"  metric:      {metric}\n"
+        f"  log:         {log_file}",
+        flush=True,
+    )
+
+    try:
+        exit_status, result = agent.run(task)
+        print(f"[SelectPatchAgent CLI] Finished with status: {exit_status}", flush=True)
+    except Exception as e:
+        print(f"ERROR: SelectPatchAgent failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Report result
+    best_patch_id = agent.extract_final_result()
+    if best_patch_id:
+        print(f"\nBest patch: {best_patch_id}")
+        best_results_file = patch_dir / "best_results.json"
+        if best_results_file.exists():
+            best_results = json.loads(best_results_file.read_text())
+            print(json.dumps(best_results, indent=2))
+    else:
+        print("WARNING: agent did not produce best_results.json", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+

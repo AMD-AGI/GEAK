@@ -51,6 +51,17 @@ else
     FAILED_CHECKS=$((FAILED_CHECKS + 1))
 fi
 
+# Check modular pipeline CLIs
+for tool in resolve-kernel-url test-discovery commandment validate-commandment \
+            baseline-metrics task-generator openevolve-worker select-patch; do
+    if command -v "$tool" > /dev/null 2>&1; then
+        echo "✅ ${tool}: OK"
+    else
+        echo "❌ ${tool}: Not found"
+        FAILED_CHECKS=$((FAILED_CHECKS + 1))
+    fi
+done
+
 # Check geak command
 if geak --help > /dev/null 2>&1; then
     echo "✅ geak (mini-swe-agent): OK"

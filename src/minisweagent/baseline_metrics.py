@@ -269,12 +269,14 @@ def main():
 
     # --- list ---
     p_list = sub.add_parser("list", help="List all profiled kernels (for the agent to inspect)")
-    p_list.add_argument("input", help="MetrixTool JSON output (or '-' for stdin)")
+    p_list.add_argument("input", nargs="?", default=None, help="MetrixTool JSON output (or '-' for stdin)")
+    p_list.add_argument("--from-profile", default=None, metavar="FILE", help="Read profile JSON from kernel-profile output")
     p_list.add_argument("--gpu", type=int, default=0, help="GPU index (default: 0)")
 
     # --- build ---
     p_build = sub.add_parser("build", help="Build baseline_metrics.json from chosen kernels")
-    p_build.add_argument("input", help="MetrixTool JSON output (or '-' for stdin)")
+    p_build.add_argument("input", nargs="?", default=None, help="MetrixTool JSON output (or '-' for stdin)")
+    p_build.add_argument("--from-profile", default=None, metavar="FILE", help="Read profile JSON from kernel-profile output")
     p_build.add_argument("-o", "--output", default=None, help="Output path (default: stdout)")
     p_build.add_argument("--gpu", type=int, default=0, help="GPU index (default: 0)")
     sel = p_build.add_mutually_exclusive_group(required=True)
@@ -284,11 +286,16 @@ def main():
 
     args = parser.parse_args()
 
+    # Resolve input: --from-profile takes precedence, then positional, then stdin
+    input_source = args.from_profile or args.input
+    if not input_source:
+        parser.error("input is required (positional, --from-profile, or '-' for stdin)")
+
     # Load input
-    if args.input == "-":
+    if input_source == "-":
         data = json.load(sys.stdin)
     else:
-        data = json.loads(Path(args.input).read_text())
+        data = json.loads(Path(input_source).read_text())
 
     if args.command == "list":
         kernels = list_kernels(data, gpu_index=args.gpu)

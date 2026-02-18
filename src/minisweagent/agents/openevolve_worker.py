@@ -138,3 +138,131 @@ class OpenEvolveWorker(DefaultAgent):
             except Exception:
                 pass
         logger.info(message)
+
+
+# ---------------------------------------------------------------------------
+# Standalone CLI -- bypasses the agent runtime and calls optimizer.core
+# directly, reproducing the same behavior ParallelAgent would trigger.
+#
+# Usage:
+#   python -m minisweagent.agents.openevolve_worker \
+#       --kernel-path /path/to/kernel.py \
+#       --commandment COMMANDMENT.md \
+#       --baseline-metrics baseline_metrics.json \
+#       --iterations 10 --gpu 0
+# ---------------------------------------------------------------------------
+
+def main():
+    import argparse
+    import os
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="Run OpenEvolve optimization on a kernel (standalone, no agent runtime)",
+    )
+    parser.add_argument("--kernel-path", default=None, help="Path to the kernel file to optimize")
+    parser.add_argument(
+        "--from-task", default=None, metavar="FILE",
+        help="Read a task .md file (YAML frontmatter) to populate kernel-path, commandment, etc.",
+    )
+    parser.add_argument("--commandment", default=None, help="Path to COMMANDMENT.md")
+    parser.add_argument("--baseline-metrics", default=None, help="Path to baseline_metrics.json")
+    parser.add_argument("--iterations", type=int, default=10, help="Max iterations (default: 10)")
+    parser.add_argument("--gpu", type=int, default=0, help="GPU device ID (default: 0)")
+    parser.add_argument("--output-dir", default=None, help="Output directory for results")
+
+    args = parser.parse_args()
+
+    # Populate from task file if provided (explicit flags override)
+    if args.from_task:
+        from minisweagent.run.task_file import read_task_file
+        meta, _body = read_task_file(Path(args.from_task))
+        if not args.kernel_path:
+            args.kernel_path = meta.get("kernel_path")
+        if not args.commandment:
+            args.commandment = meta.get("commandment")
+        if not args.baseline_metrics:
+            args.baseline_metrics = meta.get("baseline_metrics")
+
+    if not args.kernel_path:
+        parser.error("--kernel-path is required (or provide --from-task)")
+
+    kernel_path = Path(args.kernel_path).resolve()
+    if not kernel_path.is_file():
+        print(f"ERROR: kernel file not found: {args.kernel_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.commandment and not Path(args.commandment).is_file():
+        print(f"ERROR: commandment file not found: {args.commandment}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.baseline_metrics and not Path(args.baseline_metrics).is_file():
+        print(f"ERROR: baseline metrics file not found: {args.baseline_metrics}", file=sys.stderr)
+        sys.exit(1)
+
+    # Auto-worktree isolation when using --from-task with a git repo
+    worktree_path = None
+    original_repo = None
+    if args.from_task:
+        from minisweagent.run.task_file import read_task_file, create_worktree, is_git_repo, replace_paths
+        meta, _ = read_task_file(Path(args.from_task))
+        repo_root = meta.get("repo_root")
+        if repo_root:
+            repo_path = Path(repo_root).resolve()
+            if repo_path.is_dir() and is_git_repo(repo_path):
+                output_dir_base = Path(args.output_dir).resolve() if args.output_dir else kernel_path.parent / "optimization_output"
+                wt_dest = output_dir_base / "worktree"
+                print(f"[OpenEvolveWorker CLI] Creating isolated worktree at {wt_dest}...", file=sys.stderr)
+                worktree_path = create_worktree(repo_path, wt_dest)
+                original_repo = repo_path
+                # Rewrite kernel_path into worktree
+                kernel_path = Path(replace_paths(str(kernel_path), repo_path, worktree_path))
+                if args.commandment:
+                    args.commandment = replace_paths(args.commandment, repo_path, worktree_path)
+                if args.baseline_metrics:
+                    args.baseline_metrics = replace_paths(args.baseline_metrics, repo_path, worktree_path)
+
+    output_dir = args.output_dir or str(kernel_path.parent / "optimization_output")
+
+    os.environ["HIP_VISIBLE_DEVICES"] = str(args.gpu)
+
+    print(
+        f"[OpenEvolveWorker CLI] Starting optimization\n"
+        f"  kernel:           {kernel_path}\n"
+        f"  commandment:      {args.commandment or '(none)'}\n"
+        f"  baseline_metrics: {args.baseline_metrics or '(none)'}\n"
+        f"  iterations:       {args.iterations}\n"
+        f"  gpu:              {args.gpu}\n"
+        f"  output_dir:       {output_dir}"
+        + (f"\n  worktree:         {worktree_path}" if worktree_path else ""),
+        flush=True,
+    )
+
+    from minisweagent.optimizer.core import OptimizerType, optimize_kernel
+
+    try:
+        result = optimize_kernel(
+            kernel_code="",
+            kernel_path=str(kernel_path),
+            optimizer=OptimizerType.OPENEVOLVE,
+            max_iterations=args.iterations,
+            gpu=args.gpu,
+            output_dir=output_dir,
+            commandment_path=args.commandment,
+            baseline_metrics_path=args.baseline_metrics,
+        )
+    except Exception as e:
+        print(f"ERROR: OpenEvolve failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(json.dumps({
+        "optimizer": result.optimizer_used,
+        "iterations": result.iterations,
+        "metrics": result.metrics,
+        "optimized_code_length": len(result.optimized_code),
+    }, indent=2))
+    print("[OpenEvolveWorker CLI] Done.", flush=True)
+
+
+if __name__ == "__main__":
+    main()

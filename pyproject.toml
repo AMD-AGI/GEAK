@@ -79,6 +79,14 @@ mini-e= "minisweagent.run.mini_extra:main"
 # GEAK-specific entry points (ported from MSA branch)
 geak = "minisweagent.run.mini:app"
 kernel-profile = "minisweagent.kernel_profile:main"
+task-generator = "minisweagent.run.task_generator:main"
+# Modular pipeline steps
+commandment = "minisweagent.tools.commandment:main"
+validate-commandment = "minisweagent.tools.validate_commandment:main"
+baseline-metrics = "minisweagent.baseline_metrics:main"
+openevolve-worker = "minisweagent.agents.openevolve_worker:main"
+select-patch = "minisweagent.agents.select_patch_agent:main"
+resolve-kernel-url = "minisweagent.tools.resolve_kernel_url_impl:main"
 
 [tool.setuptools]
 include-package-data = true
