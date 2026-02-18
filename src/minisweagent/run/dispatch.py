@@ -145,7 +145,7 @@ def run_task_batch(
     # Determine repo_path from first task's metadata
     meta_0, _ = read_task_file(task_files[0])
     repo_root = meta_0.get("repo_root")
-    repo_path = Path(repo_root) if repo_root else Path.cwd()
+    repo_path = Path(repo_root).resolve() if repo_root else Path.cwd()
 
     is_git = False
     if repo_path.is_dir():

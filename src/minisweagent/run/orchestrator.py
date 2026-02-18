@@ -716,7 +716,8 @@ def main() -> None:
     if resolved_path.exists():
         ctx["resolved"] = json.loads(resolved_path.read_text())
         ctx["kernel_path"] = ctx["resolved"].get("local_file_path", "")
-        ctx["repo_root"] = ctx["resolved"].get("local_repo_path", "")
+        _repo_root = ctx["resolved"].get("local_repo_path", "")
+        ctx["repo_root"] = str(Path(_repo_root).resolve()) if _repo_root else ""
 
     disc_path = pp_dir / "discovery.json"
     if disc_path.exists():

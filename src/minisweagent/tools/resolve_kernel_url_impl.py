@@ -132,7 +132,7 @@ def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
             tmpdir_path = base / RESOLVED_DIR_NAME / f"{owner}_{repo}"
             # If the target file already exists from a previous clone, reuse it
             if tmpdir_path.exists() and (tmpdir_path / file_path).exists():
-                out["local_repo_path"] = str(tmpdir_path)
+                out["local_repo_path"] = str(tmpdir_path.resolve())
                 out["local_file_path"] = str((tmpdir_path / file_path).resolve())
                 out["line_number"] = line_start
                 out["line_end"] = line_end
@@ -156,7 +156,7 @@ def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
         if not local_file.exists():
             out["error"] = f"File not found in repo: {file_path}"
             return out
-        out["local_repo_path"] = tmpdir
+        out["local_repo_path"] = str(Path(tmpdir).resolve())
         out["local_file_path"] = str(local_file.resolve())
         out["line_number"] = line_start
         out["line_end"] = line_end
