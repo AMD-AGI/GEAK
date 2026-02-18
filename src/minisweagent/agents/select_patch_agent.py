@@ -137,7 +137,9 @@ def run_select_patch(
     try:
         agent.run(task)
     except Exception:
-        pass
+        from minisweagent.utils.log import logger
+
+        logger.warning("SelectPatchAgent failed", exc_info=True)
 
     return agent, agent.extract_final_result()
 

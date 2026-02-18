@@ -192,19 +192,24 @@ def run_task_batch(
     summaries = []
 
     for entry in raw_results:
-        agent_idx, agent_result, agent_patches, agent_exit = entry
+        agent_idx, _agent, exit_status, result = entry
         label = tasks[agent_idx].label if agent_idx < len(tasks) else f"task_{agent_idx}"
-        success = agent_exit not in ("error", "Error", None)
+        success = exit_status not in ("error", "Error", None)
         if success:
             completed += 1
         else:
             failed += 1
+
+        # Count patches written to the task's result directory
+        task_result_dir = results_dir / label
+        patch_count = len(list(task_result_dir.glob("*.patch"))) if task_result_dir.is_dir() else 0
+
         summaries.append(
             {
                 "index": agent_idx,
                 "label": label,
-                "exit": str(agent_exit),
-                "patches": len(agent_patches) if agent_patches else 0,
+                "exit": str(exit_status),
+                "patches": patch_count,
             }
         )
 

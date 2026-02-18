@@ -453,16 +453,26 @@ def _dispatch_tool_call(
     tool_name: str,
     tool_args: dict[str, Any],
 ) -> str:
-    """Route a tool call to the appropriate implementation."""
-    if tool_name == "generate_tasks":
-        return _tool_generate_tasks(ctx, **tool_args)
-    if tool_name == "dispatch_tasks":
-        return _tool_dispatch_tasks(ctx, **tool_args)
-    if tool_name == "collect_results":
-        return _tool_collect_results(ctx, **tool_args)
-    if tool_name == "finalize":
-        return _tool_finalize(ctx, **tool_args)
-    return json.dumps({"error": f"Unknown tool: {tool_name}"})
+    """Route a tool call to the appropriate implementation.
+
+    Exceptions are caught and returned as JSON error payloads so the
+    orchestrator LLM can decide how to proceed (retry, skip, or finalize).
+    """
+    try:
+        if tool_name == "generate_tasks":
+            return _tool_generate_tasks(ctx, **tool_args)
+        if tool_name == "dispatch_tasks":
+            return _tool_dispatch_tasks(ctx, **tool_args)
+        if tool_name == "collect_results":
+            return _tool_collect_results(ctx, **tool_args)
+        if tool_name == "finalize":
+            return _tool_finalize(ctx, **tool_args)
+        return json.dumps({"error": f"Unknown tool: {tool_name}"})
+    except Exception as exc:
+        from minisweagent.utils.log import logger
+
+        logger.error("Tool %s failed: %s", tool_name, exc, exc_info=True)
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
 
 
 def run_orchestrator(
@@ -535,10 +545,13 @@ def run_orchestrator(
         "agent_class": StrategyInteractiveAgent,
     }
 
-    # Set the orchestrator's tools on the model so it can use tool calling
+    # Set the orchestrator's tools on the model so it can use tool calling.
+    # Copy the original tools so nested callers (e.g. task_generator) that also
+    # mutate model_impl.tools don't corrupt our saved reference.
     tools_schema = _build_tools_schema()
     model_impl = getattr(model, "_impl", model)
-    original_tools = getattr(model_impl, "tools", None)
+    _orig = getattr(model_impl, "tools", None)
+    original_tools = list(_orig) if isinstance(_orig, list) else _orig
     model_impl.tools = tools_schema
 
     # Prepare summaries for the instance prompt
