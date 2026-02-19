@@ -293,6 +293,222 @@ def _init_llm_client():
         return None
 
 
+def _verify_focused_test(focused_file: Path, timeout: int = 90) -> tuple[bool, str]:
+    """Run a generated focused test and return (passed, output).
+
+    A quick smoke-run to catch import errors, wrong tensor shapes, and
+    missing arguments before the rest of the pipeline relies on the harness.
+    """
+    import subprocess as _sp
+
+    abs_file = Path(focused_file).resolve()
+    env = {**os.environ, "HIP_VISIBLE_DEVICES": "0"}
+    try:
+        result = _sp.run(
+            ["python", str(abs_file)],
+            capture_output=True, text=True, timeout=timeout,
+            env=env, cwd=str(abs_file.parent),
+        )
+        output = (result.stdout + "\n" + result.stderr).strip()
+        passed = result.returncode == 0 and "FAIL" not in result.stdout
+        return passed, output
+    except _sp.TimeoutExpired:
+        return False, f"Test timed out after {timeout}s"
+    except Exception as e:
+        return False, f"Failed to run test: {e}"
+
+
+def _analyze_test_file(test_path: str) -> dict:
+    """Extract structured facts from a test file for the LLM.
+
+    Returns a dict with:
+      - module_name: importable module name (stem)
+      - directory: absolute directory containing the file
+      - helper_functions: list of non-test function names (importable)
+      - test_functions: list of test function names
+      - parametrize_values: dict of param_name -> list of values
+      - tolerances: list of (atol, rtol) tuples found
+      - imports: list of import lines from the file
+    """
+    p = Path(test_path)
+    if not p.is_file():
+        return {}
+
+    source = p.read_text()
+    lines = source.splitlines()
+
+    # Extract function names
+    helpers, tests = [], []
+    for line in lines:
+        m = re.match(r"^def ([\w]+)\(", line)
+        if m:
+            name = m.group(1)
+            (tests if name.startswith("test_") else helpers).append(name)
+
+    # Extract class/enum definitions
+    for line in lines:
+        m = re.match(r"^class ([\w]+)", line)
+        if m:
+            helpers.append(m.group(1))
+
+    # Extract @pytest.mark.parametrize values
+    parametrize = {}
+    for line in lines:
+        m = re.match(r'^@pytest\.mark\.parametrize\("(\w+)",\s*\[(.+)\]\)', line)
+        if m:
+            param_name, values_str = m.group(1), m.group(2)
+            parametrize[param_name] = values_str.strip()
+        # Multi-param: @pytest.mark.parametrize("a, b", [...])
+        m2 = re.match(r'^@pytest\.mark\.parametrize\(\s*"([\w, ]+)",\s*\[(.+)\]', line)
+        if m2:
+            param_names = m2.group(1).strip()
+            parametrize[param_names] = m2.group(2).strip()
+
+    # Extract tolerance values
+    tolerances = set()
+    for line in lines:
+        m = re.search(r"atol\s*=\s*([\d.eE+-]+)", line)
+        m2 = re.search(r"rtol\s*=\s*([\d.eE+-]+)", line)
+        if m and m2:
+            tolerances.add((m.group(1), m2.group(1)))
+        elif m:
+            tolerances.add((m.group(1), ""))
+
+    return {
+        "module_name": p.stem,
+        "directory": str(p.parent.resolve()),
+        "helper_functions": helpers,
+        "test_functions": tests,
+        "parametrize_values": parametrize,
+        "tolerances": sorted(tolerances),
+    }
+
+
+def _build_finisher_prompt(
+    kernel_file: Path,
+    kernel_name: str,
+    func_list: str,
+    kernel_source: str,
+    top_test_path: str,
+    top_test_source: str,
+    output_path: str,
+    test_analysis: dict,
+    *,
+    verification_error: str | None = None,
+) -> str:
+    """Build the LLM prompt for focused test generation."""
+    retry_block = ""
+    if verification_error:
+        retry_block = textwrap.dedent(f"""\
+        PREVIOUS ATTEMPT FAILED -- The test you generated did not pass:
+        ```
+        {verification_error[:3000]}
+        ```
+        Fix the issues. The most common problems are:
+        - Wrong import path: use the EXACT sys.path and module name from
+          PRE-COMPUTED IMPORTS below
+        - Missing function arguments: check the candidate test to see how
+          it calls the kernel
+        - Wrong tolerances: use the EXACT atol/rtol from PRE-COMPUTED IMPORTS
+
+        """)
+
+    # Build the pre-computed imports section
+    imports_block = ""
+    if test_analysis and test_analysis.get("helper_functions"):
+        ta = test_analysis
+        helper_list = ", ".join(ta["helper_functions"])
+        tol_lines = ""
+        if ta.get("tolerances"):
+            tol_lines = "\n".join(
+                f"  atol={a}, rtol={r}" for a, r in ta["tolerances"]
+            )
+        param_lines = ""
+        if ta.get("parametrize_values"):
+            param_lines = "\n".join(
+                f"  {k}: [{v}]" for k, v in ta["parametrize_values"].items()
+            )
+        imports_block = textwrap.dedent(f"""\
+
+        PRE-COMPUTED IMPORTS (use these EXACTLY -- do not change paths or names):
+
+        The candidate test file has been analyzed. Here is what you MUST import:
+
+        ```python
+        import sys
+        sys.path.insert(0, "{ta['directory']}")
+        from {ta['module_name']} import (
+            {helper_list}
+        )
+        ```
+
+        Helper functions to import: {helper_list}
+        Test functions in file: {', '.join(ta.get('test_functions', []))}
+        {f"Tolerances found: {chr(10)}{tol_lines}" if tol_lines else "No explicit tolerances found -- use atol=0.1, rtol=0.1"}
+        {f"Parametrize values:{chr(10)}{param_lines}" if param_lines else "No parametrize decorators found"}
+
+        IMPORTANT: Use sys.path.insert(0, "{ta['directory']}") and
+        from {ta['module_name']} import ... as shown above.
+        Do NOT change these paths. Do NOT rewrite these functions.
+        """)
+
+    return textwrap.dedent(f"""\
+    You are a test isolation agent. Given a kernel and candidate test files,
+    produce a focused Python test script that tests ONLY the specified kernel function(s).
+    {retry_block}
+    TARGET KERNEL:
+    - File: {kernel_file}
+    - Name: {kernel_name}
+    - Functions to test: {func_list}
+    - Source:
+    ```python
+    {kernel_source}
+    ```
+
+    TOP CANDIDATE TEST (confidence-ranked):
+    - File: {top_test_path}
+    - Source:
+    ```python
+    {top_test_source}
+    ```
+    {imports_block}
+    YOUR TASK:
+
+    Write a focused Python test script. Your #1 priority is to IMPORT and
+    REUSE code from the candidate test, NOT rewrite it.
+
+    If a candidate test exists and is relevant:
+    1. Use the PRE-COMPUTED IMPORTS above verbatim -- add the sys.path line
+       and import all listed helper functions.
+    2. Call the imported input generator (e.g., generate_*_inputs) to create
+       test inputs. NEVER write your own input generation.
+    3. Call the kernel function, call the imported reference function, and
+       compare with the exact atol/rtol from the candidate test.
+    4. Loop over a representative subset of the parametrize values listed
+       above (at least 20-50 combinations covering all parameter axes).
+
+    If no relevant candidate test exists:
+    1. Read the kernel function signatures carefully.
+    2. Create inputs with at least 3 shape configs (small, medium, large).
+    3. Use atol=0.1, rtol=0.1 for GPU kernel tolerance.
+
+    The script MUST:
+    - Support `--correctness` (default) and `--profile` modes via argparse
+    - Print PASS/FAIL per test case and "X/Y passed" summary
+    - Exit 0 if all pass, 1 if any fail
+    - Add workspace to sys.path for kernel imports
+    - Use torch.manual_seed(42) for reproducibility
+
+    Respond with ONLY a JSON object (no markdown fences):
+    {{{{
+        "top_test_is_relevant": true/false,
+        "reason": "brief explanation",
+        "focused_test_code": "the complete Python script as a string",
+        "focused_command": "python {output_path}/test_{kernel_name}_focused.py"
+    }}}}
+    """)
+
+
 def _llm_finalize_discovery(
     kernel_file: Path,
     kernel_name: str,
@@ -308,6 +524,10 @@ def _llm_finalize_discovery(
     2. If yes: extract the specific test functions and generate a focused script
     3. If no: generate a minimal focused test from scratch
 
+    After generation, runs the test to verify it works. If it fails, retries
+    once with the error output. If still failing, falls back to None so the
+    caller can use the original test command.
+
     Returns a dict with 'focused_test_file' and 'focused_command', or None if
     the LLM is unavailable or fails.
     """
@@ -315,102 +535,88 @@ def _llm_finalize_discovery(
     if not client:
         return None
 
-    # Read kernel source (truncated)
     try:
-        kernel_source = kernel_file.read_text()[:4000]
+        kernel_source = kernel_file.read_text()[:8000]
     except Exception:
         return None
 
-    # Read top test candidate (if any)
     top_test_source = ""
     top_test_path = ""
+    test_analysis: dict = {}
     if top_tests:
         top_test_path = top_tests[0]["file"]
         try:
-            top_test_source = Path(top_test_path).read_text()[:6000]
+            top_test_source = Path(top_test_path).read_text()[:10000]
         except Exception:
             top_test_source = ""
+        try:
+            test_analysis = _analyze_test_file(top_test_path)
+        except Exception:
+            test_analysis = {}
 
     func_list = ", ".join(kernel_functions[:5]) if kernel_functions else kernel_name
-
-    prompt = textwrap.dedent(f"""\
-    You are a test isolation agent. Given a kernel and candidate test files,
-    produce a focused Python test script that tests ONLY the specified kernel function(s).
-
-    TARGET KERNEL:
-    - File: {kernel_file}
-    - Name: {kernel_name}
-    - Functions to test: {func_list}
-    - Source (first 4000 chars):
-    ```python
-    {kernel_source}
-    ```
-
-    TOP CANDIDATE TEST (confidence-ranked):
-    - File: {top_test_path}
-    - Source (first 6000 chars):
-    ```python
-    {top_test_source}
-    ```
-
-    TASK:
-    1. Does the candidate test ACTUALLY test the target kernel function(s) ({func_list})?
-       Look for imports of the kernel, calls to those functions, relevant assertions.
-    2. If YES: Extract ONLY the test functions that exercise {func_list} and write a
-       focused script that imports and runs them.
-    3. If NO (the candidate tests something else): Write a minimal test from scratch
-       that imports {func_list} from the kernel, creates appropriate inputs, runs the
-       kernel, and validates correctness against a torch reference.
-
-    The focused test script MUST:
-    - Be a standalone Python script (no pytest required)
-    - Import the kernel functions correctly (use sys.path if needed)
-    - Use torch.manual_seed(42) for reproducibility
-    - Print PASS/FAIL clearly
-    - Exit with code 0 on success, 1 on failure
-
-    Respond with ONLY a JSON object (no markdown fences):
-    {{
-        "top_test_is_relevant": true/false,
-        "reason": "brief explanation",
-        "focused_test_code": "the complete Python script as a string",
-        "focused_command": "python <output_path>/test_{kernel_name}_focused.py"
-    }}
-    """)
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4.5",
-            max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-        )
-        result_text = response.content[0].text.strip()
-        # Strip markdown code fences if present
-        if result_text.startswith("```"):
-            result_text = re.sub(r"^```\w*\n?", "", result_text)
-            result_text = re.sub(r"\n?```$", "", result_text)
-        result = json.loads(result_text)
-    except Exception:
-        return None
-
-    # Write the focused test script
-    focused_code = result.get("focused_test_code", "")
-    if not focused_code:
-        return None
-
     out_dir = output_dir or (workspace / ".geak_discovery_output")
     out_dir.mkdir(parents=True, exist_ok=True)
     focused_file = out_dir / f"test_{kernel_name}_focused.py"
-    focused_file.write_text(focused_code)
 
-    focused_command = f"python {focused_file}"
+    verification_error: str | None = None
 
+    for attempt in range(2):
+        prompt = _build_finisher_prompt(
+            kernel_file=kernel_file,
+            kernel_name=kernel_name,
+            func_list=func_list,
+            kernel_source=kernel_source,
+            top_test_path=top_test_path,
+            top_test_source=top_test_source,
+            output_path=str(out_dir),
+            test_analysis=test_analysis,
+            verification_error=verification_error,
+        )
+
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4.5",
+                max_tokens=8000,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+            )
+            result_text = response.content[0].text.strip()
+            if result_text.startswith("```"):
+                result_text = re.sub(r"^```\w*\n?", "", result_text)
+                result_text = re.sub(r"\n?```$", "", result_text)
+            result = json.loads(result_text)
+        except Exception:
+            return None
+
+        focused_code = result.get("focused_test_code", "")
+        if not focused_code:
+            return None
+
+        focused_file.write_text(focused_code)
+
+        passed, output = _verify_focused_test(focused_file)
+        if passed:
+            return {
+                "focused_test_file": str(focused_file),
+                "focused_command": f"python {focused_file}",
+                "top_test_is_relevant": result.get("top_test_is_relevant", False),
+                "reason": result.get("reason", ""),
+                "verified": True,
+            }
+
+        if attempt == 0:
+            verification_error = output
+
+    # Both attempts failed -- return the result but mark as unverified so
+    # the caller can decide whether to fall back to the original test command.
     return {
         "focused_test_file": str(focused_file),
-        "focused_command": focused_command,
+        "focused_command": f"python {focused_file}",
         "top_test_is_relevant": result.get("top_test_is_relevant", False),
         "reason": result.get("reason", ""),
+        "verified": False,
+        "verification_error": (verification_error or "")[:1000],
     }
 
 

@@ -135,7 +135,18 @@ def run_preprocessor(
     (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))
 
     tests = disc_dict.get("tests", [])
-    test_command = tests[0]["command"] if tests else None
+    focused = disc_dict.get("focused_test") or {}
+
+    # Prefer the verified focused test command over the raw test file command.
+    # Fall back to the original test if the focused harness failed verification.
+    if focused.get("focused_command") and focused.get("verified", True):
+        test_command = focused["focused_command"]
+        _print(f"  Using focused test: {focused.get('focused_test_file', '?')}")
+    elif tests:
+        test_command = tests[0]["command"]
+    else:
+        test_command = None
+
     ctx["test_command"] = test_command
     _print(f"  Tests found: {len(tests)}")
     if test_command:
@@ -150,7 +161,6 @@ def run_preprocessor(
     if test_command:
         from profiler_mcp.server import profile_kernel
 
-        focused = disc_dict.get("focused_test", {})
         harness = focused.get("focused_test_file") or _extract_harness_path(test_command)
         profile_cmd = focused.get("focused_command") or test_command
         ctx["harness_path"] = harness
