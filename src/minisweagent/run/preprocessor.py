@@ -65,6 +65,8 @@ def run_preprocessor(
     output_dir: Path,
     gpu_id: int = 0,
     *,
+    model=None,
+    model_factory=None,
     console=None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
@@ -77,6 +79,10 @@ def run_preprocessor(
         Directory to write intermediate artefacts (resolved.json, etc.).
     gpu_id:
         GPU device to use for profiling.
+    model:
+        LLM model instance for the UnitTestAgent (optional).
+    model_factory:
+        Callable returning a new model instance (used if model is None).
     console:
         Optional Rich console for progress messages.
 
@@ -135,9 +141,62 @@ def run_preprocessor(
     (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))
 
     tests = disc_dict.get("tests", [])
-    test_command = tests[0]["command"] if tests else None
-    ctx["test_command"] = test_command
     _print(f"  Tests found: {len(tests)}")
+
+    # ── 2b. UnitTestAgent: create a proper test harness ──────────────
+    # The MCP discovery finds test files but doesn't create a validated
+    # harness with --correctness/--profile modes. The UnitTestAgent is a
+    # full LLM agent that can read the kernel, read existing tests, run
+    # them, see errors, and iterate until the harness works.
+    test_command = None
+    _uta_model = model or (model_factory() if model_factory else None)
+    if _uta_model and repo_root:
+        _print(
+            "[bold cyan]--- Step 2b: UnitTestAgent (harness creation) ---[/bold cyan]"
+            if console
+            else "--- Step 2b: UnitTestAgent (harness creation) ---"
+        )
+        try:
+            from minisweagent.agents.unit_test_agent import (
+                format_discovery_for_agent,
+                run_unit_test_agent,
+            )
+            from minisweagent.tools.discovery import DiscoveryPipeline
+
+            # Build DiscoveryResult for the agent's context
+            workspace = Path(repo_root)
+            pipeline = DiscoveryPipeline(workspace_path=workspace)
+            disc_result = pipeline.run(kernel_path=Path(kernel_path), interactive=False)
+            discovery_context = format_discovery_for_agent(disc_result)
+
+            kernel_name = Path(kernel_path).stem
+            discovery_context += (
+                "\n\nIMPORTANT: Your TEST_COMMAND must use absolute paths "
+                "to the test script (e.g., `python /absolute/path/to/test_harness.py --correctness`). "
+                "Do NOT use `cd` in the command. The profiler cannot handle compound shell commands."
+            )
+            test_command = run_unit_test_agent(
+                model=_uta_model,
+                repo=Path(repo_root),
+                kernel_name=kernel_name,
+                log_dir=output_dir,
+                discovery_context=discovery_context,
+            )
+            _print(f"  UnitTestAgent test_command: {test_command}")
+        except Exception as exc:
+            _print(
+                f"  [yellow]UnitTestAgent failed ({exc}), falling back to discovery[/yellow]"
+                if console
+                else f"  UnitTestAgent failed ({exc}), falling back to discovery"
+            )
+            logger.warning("UnitTestAgent failed: %s", exc, exc_info=True)
+
+    # Fall back to MCP discovery test command if UnitTestAgent didn't produce one
+    if not test_command and tests:
+        test_command = tests[0]["command"]
+        _print(f"  Falling back to discovery test: {test_command}")
+
+    ctx["test_command"] = test_command
     if test_command:
         _print(f"  Test command: {test_command}")
 
@@ -150,10 +209,9 @@ def run_preprocessor(
     if test_command:
         from profiler_mcp.server import profile_kernel
 
-        focused = disc_dict.get("focused_test", {})
-        harness = focused.get("focused_test_file") or _extract_harness_path(test_command)
-        profile_cmd = focused.get("focused_command") or test_command
+        harness = _extract_harness_path(test_command)
         ctx["harness_path"] = harness
+        profile_cmd = f"python {harness} --profile"
 
         try:
             _profile_fn = getattr(profile_kernel, "fn", profile_kernel)

@@ -596,6 +596,8 @@ def main(
             kernel_url,
             output_dir=_pipeline_output,
             gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
+            model=model,
+            model_factory=lambda: get_model(model_name, config.get("model", {})),
             console=console,
         )
 
