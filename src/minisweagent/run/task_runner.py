@@ -20,12 +20,18 @@ def _build_tasks_from_dir(task_dir: Path) -> list[Any]:
     from minisweagent.agents.agent_spec import AgentTask
     from minisweagent.agents.openevolve_worker import OpenEvolveWorker
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+    from minisweagent.agents.swe_agent import SweAgent
     from minisweagent.run.task_file import read_task_file
 
     task_files = sorted(task_dir.glob("*.md"))
     if not task_files:
         print(f"ERROR: no .md task files found in {task_dir}", file=sys.stderr)
         sys.exit(1)
+
+    _AGENT_TYPE_TO_CLASS = {
+        "openevolve": OpenEvolveWorker,
+        "swe_agent": SweAgent,
+    }
 
     tasks: list[AgentTask] = []
     for tf in task_files:
@@ -36,34 +42,27 @@ def _build_tasks_from_dir(task_dir: Path) -> list[Any]:
         priority = int(meta.get("priority", 10))
         kernel_language = meta.get("kernel_language", "python")
 
+        agent_class = _AGENT_TYPE_TO_CLASS.get(agent_type, StrategyInteractiveAgent)
+
+        cfg: dict[str, Any] = {}
         if agent_type == "openevolve":
-            oe_config: dict[str, Any] = {}
             if meta.get("kernel_path"):
-                oe_config["kernel_path"] = meta["kernel_path"]
+                cfg["kernel_path"] = meta["kernel_path"]
             if meta.get("commandment"):
-                oe_config["commandment_path"] = meta["commandment"]
+                cfg["commandment_path"] = meta["commandment"]
             if meta.get("baseline_metrics"):
-                oe_config["baseline_metrics_path"] = meta["baseline_metrics"]
-            tasks.append(
-                AgentTask(
-                    agent_class=OpenEvolveWorker,
-                    task=body,
-                    label=label,
-                    priority=priority,
-                    kernel_language=kernel_language,
-                    config=oe_config,
-                )
+                cfg["baseline_metrics_path"] = meta["baseline_metrics"]
+
+        tasks.append(
+            AgentTask(
+                agent_class=agent_class,
+                task=body,
+                label=label,
+                priority=priority,
+                kernel_language=kernel_language,
+                config=cfg,
             )
-        else:
-            tasks.append(
-                AgentTask(
-                    agent_class=StrategyInteractiveAgent,
-                    task=body,
-                    label=label,
-                    priority=priority,
-                    kernel_language=kernel_language,
-                )
-            )
+        )
 
     return tasks
 
@@ -184,8 +183,6 @@ def main():
     agent_config: dict[str, Any] = {
         "patch_output_dir": str(output_dir),
         "save_patch": True,
-        "mode": "yolo",
-        "confirm_exit": False,
     }
 
     # Load test_command from first task file if available

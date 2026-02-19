@@ -22,16 +22,39 @@ def _task_file_to_agent_task(task_file: Path):
 
     meta, body = read_task_file(task_file)
 
+    from minisweagent.agents.openevolve_worker import OpenEvolveWorker
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+    from minisweagent.agents.swe_agent import SweAgent
 
-    agent_class = StrategyInteractiveAgent
-
-    cfg: dict = {
-        "save_patch": True,
-        "step_limit": 0,
-        "cost_limit": 0.0,
-        "mode": "yolo",
+    agent_type = meta.get("agent_type", "strategy_agent")
+    _AGENT_TYPE_TO_CLASS = {
+        "openevolve": OpenEvolveWorker,
+        "swe_agent": SweAgent,
     }
+    agent_class = _AGENT_TYPE_TO_CLASS.get(agent_type, StrategyInteractiveAgent)
+
+    if agent_type == "openevolve":
+        # OpenEvolveWorker extends DefaultAgent (not InteractiveAgent),
+        # so it does not accept 'mode' or 'use_strategy_manager'.
+        cfg: dict = {
+            "save_patch": True,
+            "step_limit": 0,
+            "cost_limit": 0.0,
+        }
+        if meta.get("kernel_path"):
+            cfg["kernel_path"] = meta["kernel_path"]
+        if meta.get("commandment"):
+            cfg["commandment_path"] = meta["commandment"]
+        if meta.get("baseline_metrics"):
+            cfg["baseline_metrics_path"] = meta["baseline_metrics"]
+    else:
+        cfg: dict = {
+            "save_patch": True,
+            "step_limit": 0,
+            "cost_limit": 0.0,
+            "mode": "yolo",
+            "use_strategy_manager": True,
+        }
 
     if meta.get("test_command"):
         cfg["test_command"] = meta["test_command"]
@@ -93,6 +116,17 @@ def _task_file_to_agent_task(task_file: Path):
         context_lines.append(f"PROFILING DATA: {prof_path}")
         context_lines.append("(Read this file for detailed per-kernel profiling metrics)")
         context_lines.append("")
+
+    codebase_ctx_path = meta.get("codebase_context")
+    codebase_ctx_text: str | None = None
+    if codebase_ctx_path and Path(codebase_ctx_path).exists():
+        codebase_ctx_text = Path(codebase_ctx_path).read_text().strip()
+        context_lines.append("## Codebase Context (repo structure and key files)")
+        context_lines.append(codebase_ctx_text)
+        context_lines.append("")
+
+    if codebase_ctx_text:
+        cfg["codebase_context"] = codebase_ctx_text
 
     body = "\n".join(context_lines) + "\n" + body
 
@@ -156,7 +190,6 @@ def run_task_batch(
 
     agent_config: dict[str, Any] = {
         "save_patch": True,
-        "mode": "yolo",
     }
 
     def env_factory():

@@ -23,11 +23,14 @@ class SubAgentTool:
     def __init__(self, model=None, env=None):
         self._model = model
         self._env = env
+        self._codebase_context: str | None = None
 
-    def set_context(self, model, env):
-        """Set model and env (called by ToolRuntime after agent init)."""
+    def set_context(self, model, env, codebase_context: str | None = None):
+        """Set model, env, and optional codebase context."""
         self._model = model
         self._env = env
+        if codebase_context is not None:
+            self._codebase_context = codebase_context
 
     def __call__(
         self,
@@ -62,6 +65,14 @@ class SubAgentTool:
         }
         if system_prompt:
             child_config["system_template"] = system_prompt
+
+        if self._codebase_context:
+            task = (
+                "## Codebase Context (repo structure and key files)\n"
+                + self._codebase_context
+                + "\n\n"
+                + task
+            )
 
         logger.info(f"[sub_agent] Spawning child agent: steps={step_limit}, cost=${cost_limit}")
 

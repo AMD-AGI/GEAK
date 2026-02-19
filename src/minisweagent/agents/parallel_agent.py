@@ -672,8 +672,12 @@ class ParallelAgent(DefaultAgent):
                 cfg = agent_config.copy()
                 cfg.update(task.config)
                 cfg["patch_output_dir"] = str(task_patch_dir)
-                cfg["mode"] = "yolo"
-                cfg["confirm_exit"] = False
+                # Only set interactive-mode fields for agents that accept them
+                # (OpenEvolveWorker extends DefaultAgent, not InteractiveAgent)
+                from minisweagent.agents.interactive import InteractiveAgent
+                if issubclass(task.agent_class, InteractiveAgent):
+                    cfg.setdefault("mode", "yolo")
+                    cfg.setdefault("confirm_exit", False)
                 if task.step_limit:
                     cfg["step_limit"] = task.step_limit
                 if task.cost_limit:

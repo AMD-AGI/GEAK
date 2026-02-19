@@ -311,6 +311,7 @@ def main(
 
     # --from-task: populate CLI parameters from the task file, unless explicitly set
     _task_worktree: Path | None = None
+    _codebase_ctx_text: str | None = None
     if from_task:
         from minisweagent.run.task_file import (
             create_worktree as _create_wt,
@@ -416,6 +417,14 @@ def main(
             _skip_lines.append("")
             _skip_lines.append(f"PROFILING DATA: {_prof_path}")
             _skip_lines.append("(Read this file for detailed per-kernel profiling metrics)")
+
+        _codebase_ctx_path = _tf_meta.get("codebase_context")
+        _codebase_ctx_text: str | None = None
+        if _codebase_ctx_path and Path(_codebase_ctx_path).exists():
+            _codebase_ctx_text = Path(_codebase_ctx_path).read_text().strip()
+            _skip_lines.append("")
+            _skip_lines.append("## Codebase Context (repo structure and key files)")
+            _skip_lines.append(_codebase_ctx_text)
 
         _skip_lines.append("")
 
@@ -742,7 +751,11 @@ def main(
     patch_dir = patch_output or config.get("patch", {}).get("patch_output_dir") or (global_config_dir / "patches")
     agent_config["patch_output_dir"] = str(patch_dir)
     agent_config["metric"] = metric or config.get("patch", {}).get("metric")
-    
+
+    # Pass codebase context to agent config so SubAgentTool children receive it
+    if _codebase_ctx_text:
+        agent_config["codebase_context"] = _codebase_ctx_text
+
     # Create log directory and prepare log file path
     log_dir = Path(patch_dir)
     log_dir.mkdir(parents=True, exist_ok=True)

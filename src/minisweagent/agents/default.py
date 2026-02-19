@@ -46,6 +46,7 @@ class AgentConfig:
     use_strategy_manager: bool = False
     strategy_file_path: str = ".optimization_strategies.md"
     profiling_type: str | None = None
+    codebase_context: str | None = None
     # Interactive/exit behaviour (set by --exit-immediately)
     confirm_exit: bool = True
 
@@ -130,13 +131,28 @@ class DefaultAgent:
         )
         # Setup test_perf tool context
         self._setup_test_perf_context()
+        # Wire sub_agent context (needs model + env for recursive agent calls)
+        if getattr(self.toolruntime, "_sub_agent_tool", None):
+            self.toolruntime._sub_agent_tool.set_context(
+                self.model, self.env, codebase_context=self.config.codebase_context,
+            )
+        if self.config.codebase_context:
+            self.toolruntime.set_codebase_context(self.config.codebase_context)
 
     def _get_strategy_file(self) -> str:
-        """Get the strategy file path. Override in subclasses to customize."""
-        cwd = Path(getattr(self.env.config, "cwd", None) or Path.cwd())
+        """Get the strategy file path.
+
+        Prefers ``patch_output_dir`` (unique per dispatched task) so that
+        parallel agents on different GPUs don't clobber each other's
+        strategy files.  Falls back to ``cwd`` for standalone ``mini`` runs.
+        """
+        if getattr(self.config, "patch_output_dir", None):
+            base = Path(self.config.patch_output_dir)
+        else:
+            base = Path(getattr(self.env.config, "cwd", None) or Path.cwd())
         strategy_file_path = self.config.strategy_file_path or ".optimization_strategies.md"
         strategy_path = Path(strategy_file_path)
-        return str(strategy_path if strategy_path.is_absolute() else cwd / strategy_path)
+        return str(strategy_path if strategy_path.is_absolute() else base / strategy_path)
 
     def _get_strategy_callback(self):
         """Get the callback for strategy changes. Override in subclasses for UI notifications."""

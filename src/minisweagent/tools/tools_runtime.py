@@ -13,6 +13,14 @@ json_path = current_dir / "tools.json"
 with open(json_path, encoding="utf-8") as f:
     _all_tools = json.load(f)
 
+_TOOL_PROFILES: dict[str, set[str] | None] = {
+    "full": None,  # None = register all tools (existing behavior)
+    "swe": {
+        "bash", "str_replace_editor", "test_perf", "submit",
+        "profile_kernel", "baseline_metrics", "strategy_manager",
+    },
+}
+
 
 def get_tools_list(use_strategy_manager: bool = False) -> list:
     """Get filtered tools list based on settings.
@@ -41,48 +49,71 @@ class ToolRuntime:
         strategy_file: str = ".optimization_strategies.md",
         on_strategy_change=None,
         patch_output_dir: str | None = None,
+        tool_profile: str = "full",
     ):
+        self._tool_profile = tool_profile
+        allowed = _TOOL_PROFILES.get(tool_profile)
+
         self._tool_table = {
             "bash": BashCommand(),
             "str_replace_editor": str_replace_editor(),
             "test_perf": TestPerfTool(),
             "submit": SubmitTool(),
         }
-        if profiling_type in ["roofline", "profiling", "profiler_analyzer"]:
-            from minisweagent.tools.profiling_tools import ProfilingAnalyzer
 
-            self._tool_table["profiling"] = ProfilingAnalyzer(
-                profiling_type=profiling_type,
-                llm_model=llm_model,
-            )
-        if use_strategy_manager:
-            self._tool_table["strategy_manager"] = StrategyManagerTool(
-                filepath=strategy_file, on_change_callback=on_strategy_change
-            )
+        if allowed is not None:
+            # Profile-restricted mode: only register explicitly allowed tools
+            if "baseline_metrics" in allowed:
+                from minisweagent.tools.baseline_metrics_tool import BaselineMetricsTool
+                self._tool_table["baseline_metrics"] = BaselineMetricsTool()
+            if use_strategy_manager and "strategy_manager" in allowed:
+                self._tool_table["strategy_manager"] = StrategyManagerTool(
+                    filepath=strategy_file, on_change_callback=on_strategy_change
+                )
+            if "profile_kernel" in allowed:
+                self._register_profiler_mcp()
+            self._sub_agent_tool = None
+        else:
+            # Full mode: register everything (existing behavior)
+            if profiling_type in ["roofline", "profiling", "profiler_analyzer"]:
+                from minisweagent.tools.profiling_tools import ProfilingAnalyzer
+                self._tool_table["profiling"] = ProfilingAnalyzer(
+                    profiling_type=profiling_type,
+                    llm_model=llm_model,
+                )
+            if use_strategy_manager:
+                self._tool_table["strategy_manager"] = StrategyManagerTool(
+                    filepath=strategy_file, on_change_callback=on_strategy_change
+                )
 
-        # Register new native tools
-        from minisweagent.tools.baseline_metrics_tool import BaselineMetricsTool
-        from minisweagent.tools.check_compat import CheckKernelCompatibilityTool
-        from minisweagent.tools.resolve_kernel_url import ResolveKernelUrlTool
+            from minisweagent.tools.baseline_metrics_tool import BaselineMetricsTool
+            from minisweagent.tools.check_compat import CheckKernelCompatibilityTool
+            from minisweagent.tools.resolve_kernel_url import ResolveKernelUrlTool
 
-        self._tool_table["resolve_kernel_url"] = ResolveKernelUrlTool()
-        self._tool_table["baseline_metrics"] = BaselineMetricsTool()
-        self._tool_table["check_kernel_compatibility"] = CheckKernelCompatibilityTool()
+            self._tool_table["resolve_kernel_url"] = ResolveKernelUrlTool()
+            self._tool_table["baseline_metrics"] = BaselineMetricsTool()
+            self._tool_table["check_kernel_compatibility"] = CheckKernelCompatibilityTool()
 
-        # sub_agent tool (needs model/env set later via set_context)
-        from minisweagent.tools.sub_agent_tool import SubAgentTool
+            from minisweagent.tools.sub_agent_tool import SubAgentTool
+            self._sub_agent_tool = SubAgentTool()
+            self._tool_table["sub_agent"] = self._sub_agent_tool
 
-        self._sub_agent_tool = SubAgentTool()
-        self._tool_table["sub_agent"] = self._sub_agent_tool
+            self._register_mcp_tools()
 
-        # Register MCP tool bridges (lazy start -- subprocess spawned on first call)
-        self._register_mcp_tools()
-
-        # Store settings for tools list generation
         self.use_strategy_manager = use_strategy_manager
+        self._codebase_context: str | None = None
+
+    def _register_profiler_mcp(self):
+        """Register only the profiler-mcp tool."""
+        try:
+            from minisweagent.tools.mcp_bridge import MCPToolBridge
+        except ImportError:
+            return
+        profiler = MCPToolBridge("profiler-mcp", timeout=600)
+        self._tool_table["profile_kernel"] = profiler.tool("profile_kernel")
 
     def _register_mcp_tools(self):
-        """Register MCP server tools via MCPToolBridge.
+        """Register all MCP server tools via MCPToolBridge.
 
         Each bridge wraps one MCP server process. The `.tool(name)` factory
         returns a sync callable that ToolRuntime can dispatch like a native tool.
@@ -92,18 +123,33 @@ class ToolRuntime:
         except ImportError:
             return  # mcp_bridge not available (e.g., minimal install)
 
-        # profiler-mcp (unified: metrix + rocprof-compute)
         profiler = MCPToolBridge("profiler-mcp", timeout=600)
         self._tool_table["profile_kernel"] = profiler.tool("profile_kernel")
 
-        # kernel-evolve (generate / mutate / crossover)
         evolve = MCPToolBridge("kernel-evolve", timeout=300)
         self._tool_table["generate_optimization"] = evolve.tool("generate_optimization")
 
-        # kernel-ercs (evaluate / reflect / compatibility)
         ercs = MCPToolBridge("kernel-ercs", timeout=300)
         self._tool_table["evaluate_kernel_quality"] = ercs.tool("evaluate_kernel_quality")
         self._tool_table["reflect_on_kernel_result"] = ercs.tool("reflect_on_kernel_result")
+
+        openevolve = MCPToolBridge("openevolve-mcp", timeout=7200)
+        self._tool_table["openevolve"] = openevolve.tool("optimize_kernel")
+
+    def set_codebase_context(self, context: str | None) -> None:
+        """Store codebase context and propagate to SubAgentTool if present."""
+        self._codebase_context = context
+        if self._sub_agent_tool and context:
+            self._sub_agent_tool._codebase_context = context
+
+    def get_tools_schema(self) -> list[dict]:
+        """Return JSON tool schemas for only the tools registered in _tool_table.
+
+        This makes ToolRuntime the single source of truth: the agent can set
+        model.tools = self.toolruntime.get_tools_schema() and the LLM will
+        only see tools that are actually dispatchable.
+        """
+        return [t for t in _all_tools if t["name"] in self._tool_table]
 
     def get_tools_list(self) -> list:
         """Get the tools list for API based on current settings."""
