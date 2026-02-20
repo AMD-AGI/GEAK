@@ -423,6 +423,43 @@ kernel-profile "python3 KERNEL_DIR/optimization_output/best_kernel.py --profile"
 ```
 Compare with the baseline to confirm the speedup is real and not an artefact.
 
+### Apples-to-apples speedup comparison (CRITICAL)
+
+The test harness has two benchmark modes that use **different** shape sets:
+- `--benchmark` uses HARNESS_SHAPES (20-25 sampled shapes)
+- `--full-benchmark` uses ALL_SHAPES (every discovered shape)
+
+**You MUST compare matching modes.** Comparing `--full-benchmark` baseline
+against `--benchmark` iteration results (or vice versa) produces meaningless
+speedup numbers because the shape mix is different.
+
+**Baseline setup:** Run BOTH modes on the unmodified kernel and record both
+results separately:
+```bash
+# Reduced baseline (for comparing during iterations)
+python3 test_harness.py --benchmark > baseline_benchmark.txt
+# Full baseline (for start/end comparison)
+python3 test_harness.py --full-benchmark > baseline_full_benchmark.txt
+```
+
+**During optimization iterations:** Use `--benchmark` (reduced) and compare
+against the **reduced baseline** only.
+
+**At the end of optimization:** Run `--full-benchmark` on the best kernel
+and compare against the **full baseline** to report the final speedup.
+
+**Summary table:**
+
+| When                     | Run mode           | Compare against          |
+|--------------------------|--------------------|--------------------------|
+| Baseline (start)         | --benchmark AND --full-benchmark | (record both)  |
+| Each iteration           | --benchmark        | baseline --benchmark     |
+| Final result             | --full-benchmark   | baseline --full-benchmark|
+
+Never mix modes in a comparison. If you only have a `--full-benchmark`
+baseline, re-run `--benchmark` on the original kernel before comparing
+with iteration results.
+
 ---
 
 ## 3. OPTIMIZATION: Run OpenEvolve
