@@ -1,0 +1,175 @@
+"""Mock-based unit tests for the unified profiler MCP.
+
+These tests run anywhere without a GPU. They verify dispatch logic,
+error handling, and schema correctness.
+"""
+
+from unittest.mock import patch
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# Import the server module (conftest.py sets up sys.path)
+# ---------------------------------------------------------------------------
+from profiler_mcp.server import (
+    mcp,
+    profile_kernel,
+)
+
+
+# Helper to call the wrapped MCP tool function
+def _call(**kwargs):
+    return profile_kernel.fn(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidBackend:
+    def test_returns_failure(self):
+        result = _call(command="echo hello", backend="invalid")
+        assert result["success"] is False
+        assert "Unknown backend" in result["error"]
+        assert result["backend"] == "invalid"
+
+    def test_returns_empty_results(self):
+        result = _call(command="echo hello", backend="bogus")
+        assert result["results"] == []
+
+
+class TestMetrixDispatch:
+    @patch("profiler_mcp.server._profile_with_metrix")
+    def test_dispatches_to_metrix(self, mock_metrix):
+        mock_metrix.return_value = {"success": True, "backend": "metrix", "results": []}
+        result = _call(
+            command="python3 kernel.py",
+            backend="metrix",
+            num_replays=5,
+            kernel_filter="*rope*",
+            auto_select=True,
+            quick=True,
+            gpu_devices="0",
+        )
+        mock_metrix.assert_called_once_with(
+            command="python3 kernel.py",
+            num_replays=5,
+            kernel_filter="*rope*",
+            auto_select=True,
+            quick=True,
+            gpu_devices="0",
+        )
+        assert result["success"] is True
+
+
+class TestRocprofDispatch:
+    @patch("profiler_mcp.server._profile_with_rocprof")
+    def test_dispatches_to_rocprof(self, mock_rocprof):
+        mock_rocprof.return_value = {
+            "success": True,
+            "backend": "rocprof-compute",
+            "analysis": "roofline data...",
+            "results": [],
+        }
+        result = _call(
+            command="python3 kernel.py",
+            backend="rocprof-compute",
+            workdir="/tmp",
+            profiling_type="roofline",
+        )
+        mock_rocprof.assert_called_once_with(
+            command="python3 kernel.py",
+            workdir="/tmp",
+            profiling_type="roofline",
+        )
+        assert result["success"] is True
+        assert result["backend"] == "rocprof-compute"
+
+
+class TestMetrixErrorHandling:
+    @patch("profiler_mcp.server._profile_with_metrix")
+    def test_exception_returns_graceful_failure(self, mock_metrix):
+        mock_metrix.side_effect = RuntimeError("GPU on fire")
+        result = _call(command="python3 kernel.py", backend="metrix")
+        assert result["success"] is False
+        assert "GPU on fire" in result["error"]
+        assert result["results"] == []
+
+
+class TestRocprofErrorHandling:
+    @patch("profiler_mcp.server._profile_with_rocprof")
+    def test_exception_returns_graceful_failure(self, mock_rocprof):
+        mock_rocprof.side_effect = FileNotFoundError("rocprof-compute not found")
+        result = _call(command="echo hello", backend="rocprof-compute")
+        assert result["success"] is False
+        assert "rocprof-compute not found" in result["error"]
+
+    def test_rocprof_returncode_1(self):
+        """Verify _profile_with_rocprof returns failure when analyzer returns returncode=1."""
+        with patch("profiler_mcp.server._profile_with_rocprof") as mock_fn:
+            mock_fn.return_value = {
+                "success": False,
+                "backend": "rocprof-compute",
+                "error": "No ROCProf is installed.",
+                "results": [],
+            }
+            result = _call(command="echo hello", backend="rocprof-compute")
+            assert result["success"] is False
+            assert "ROCProf" in result["error"]
+
+
+class TestSchemaParams:
+    def test_command_is_required(self):
+        tool = mcp._tool_manager._tools["profile_kernel"]
+        assert "command" in tool.parameters.get("required", [])
+
+    def test_has_all_expected_params(self):
+        tool = mcp._tool_manager._tools["profile_kernel"]
+        props = set(tool.parameters.get("properties", {}).keys())
+        expected = {
+            "command",
+            "backend",
+            "workdir",
+            "profiling_type",
+            "num_replays",
+            "kernel_filter",
+            "auto_select",
+            "quick",
+            "gpu_devices",
+        }
+        assert expected.issubset(props), f"Missing params: {expected - props}"
+
+    def test_backend_not_required(self):
+        tool = mcp._tool_manager._tools["profile_kernel"]
+        required = tool.parameters.get("required", [])
+        assert "backend" not in required
+
+
+class TestDefaultBackend:
+    @patch("profiler_mcp.server._profile_with_metrix")
+    def test_default_is_metrix(self, mock_metrix):
+        mock_metrix.return_value = {"success": True, "backend": "metrix", "results": []}
+        result = _call(command="python3 kernel.py")
+        mock_metrix.assert_called_once()
+        assert result["backend"] == "metrix"
+
+
+class TestRocprofProfilingTypes:
+    @pytest.mark.parametrize("profiling_type", ["profiling", "roofline", "profiler_analyzer"])
+    @patch("profiler_mcp.server._profile_with_rocprof")
+    def test_type_passed_through(self, mock_rocprof, profiling_type):
+        mock_rocprof.return_value = {
+            "success": True,
+            "backend": "rocprof-compute",
+            "profiling_type": profiling_type,
+            "analysis": "...",
+            "results": [],
+        }
+        _call(
+            command="python3 kernel.py",
+            backend="rocprof-compute",
+            profiling_type=profiling_type,
+        )
+        call_kwargs = mock_rocprof.call_args[1]
+        assert call_kwargs["profiling_type"] == profiling_type

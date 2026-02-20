@@ -1,0 +1,314 @@
+# ============================================================
+# GEAK Discovery Defaults
+# ============================================================
+#
+# These are the built-in patterns used by the discovery pipeline to
+# identify kernel files, tests, and benchmarks.  Projects can override
+# or extend any section by placing a .geak/discovery.toml at the root
+# of the target repository.
+#
+# Priority (highest to lowest):
+#   1. Per-project:   <repo>/.geak/discovery.toml
+#   2. Auto-detect:   runtime scan of the codebase (appends to loaded config)
+#   3. Defaults:      this file
+# ============================================================
+
+# ------ Kernel Detection ------
+
+[kernel]
+# Regex patterns that identify a file as containing GPU kernel definitions.
+patterns = [
+    '@triton\.jit',
+    '@triton\.autotune',
+    '__global__\s+void',
+    'tl\.load|tl\.store',
+    '\bck::',
+    '#include\s+[<"]ck/',
+    'hipModuleLoad|hipModuleLaunchKernel',
+    '\.hsaco\b',
+]
+
+# File extensions to scan for kernel definitions.
+# Discovery searches all files with these extensions (not just .py).
+extensions = [".py", ".cu", ".hip", ".cpp", ".cc", ".cxx"]
+
+# Function names considered "wrapper" entry-points around kernels.
+# Used when extracting function names from kernel files.
+wrapper_functions = ['forward', 'main']
+
+# ------ Test Detection (Python) ------
+
+[[test.python_keywords]]
+pattern = 'import pytest'
+weight = 0.3
+
+[[test.python_keywords]]
+pattern = '@pytest\.mark'
+weight = 0.3
+
+[[test.python_keywords]]
+pattern = 'def test_\w+\s*\('
+weight = 0.4
+
+[[test.python_keywords]]
+pattern = 'assert\s+'
+weight = 0.2
+
+[[test.python_keywords]]
+pattern = '\.allclose\('
+weight = 0.3
+
+[[test.python_keywords]]
+pattern = '\.assertEqual\('
+weight = 0.2
+
+[[test.python_keywords]]
+pattern = 'torch\.testing\.assert'
+weight = 0.3
+
+[[test.python_keywords]]
+pattern = 'correctness'
+weight = 0.2
+
+[[test.python_keywords]]
+pattern = 'verify|verification'
+weight = 0.15
+
+[[test.python_keywords]]
+pattern = 'expected.*actual|actual.*expected'
+weight = 0.2
+
+[[test.python_keywords]]
+pattern = 'reference.*output|output.*reference'
+weight = 0.2
+
+[[test.python_keywords]]
+pattern = 'class Test\w+'
+weight = 0.3
+
+[[test.python_keywords]]
+pattern = 'unittest'
+weight = 0.2
+
+[[test.python_keywords]]
+pattern = 'from.*test_common import'
+weight = 0.2
+
+# ------ Test Detection (C++) ------
+
+[[test.cpp_keywords]]
+pattern = '#include\s*[<"]gtest'
+weight = 0.4
+
+[[test.cpp_keywords]]
+pattern = 'TEST\s*\(\s*\w+\s*,'
+weight = 0.5
+
+[[test.cpp_keywords]]
+pattern = 'TEST_F\s*\(\s*\w+\s*,'
+weight = 0.5
+
+[[test.cpp_keywords]]
+pattern = 'TEST_P\s*\(\s*\w+\s*,'
+weight = 0.5
+
+[[test.cpp_keywords]]
+pattern = 'EXPECT_TRUE|EXPECT_FALSE'
+weight = 0.3
+
+[[test.cpp_keywords]]
+pattern = 'EXPECT_EQ|EXPECT_NE|EXPECT_LT|EXPECT_GT'
+weight = 0.35
+
+[[test.cpp_keywords]]
+pattern = 'ASSERT_TRUE|ASSERT_FALSE'
+weight = 0.3
+
+[[test.cpp_keywords]]
+pattern = 'ASSERT_EQ|ASSERT_NE'
+weight = 0.35
+
+[[test.cpp_keywords]]
+pattern = '#include\s*[<"]catch'
+weight = 0.4
+
+[[test.cpp_keywords]]
+pattern = 'TEST_CASE\s*\('
+weight = 0.5
+
+[[test.cpp_keywords]]
+pattern = 'SECTION\s*\('
+weight = 0.25
+
+[[test.cpp_keywords]]
+pattern = 'REQUIRE\s*\('
+weight = 0.35
+
+[[test.cpp_keywords]]
+pattern = 'CHECK\s*\('
+weight = 0.3
+
+[[test.cpp_keywords]]
+pattern = 'hipMemcpy.*hipMemcpyDeviceToHost'
+weight = 0.2
+
+[[test.cpp_keywords]]
+pattern = 'cudaMemcpy.*cudaMemcpyDeviceToHost'
+weight = 0.2
+
+[[test.cpp_keywords]]
+pattern = 'void\s+test_\w+\s*\('
+weight = 0.3
+
+[[test.cpp_keywords]]
+pattern = 'compare.*reference|reference.*compare'
+weight = 0.2
+
+# ------ Test File Patterns ------
+
+[test.file_patterns]
+python = [
+    'test_*.py',
+    '*_test.py',
+    'tests/*.py',
+    'test/*.py',
+    'check_*.py',
+    'verify_*.py',
+]
+cpp = [
+    'test_*.cpp',
+    '*_test.cpp',
+    'test_*.cu',
+    '*_test.cu',
+    'test_*.hip',
+    '*_test.hip',
+    '*_test.cc',
+    'test_*.cc',
+]
+
+# ------ Benchmark Detection ------
+
+[[benchmark.keywords]]
+pattern = 'elapsed_time|elapsed'
+weight = 0.3
+
+[[benchmark.keywords]]
+pattern = 'latency'
+weight = 0.25
+
+[[benchmark.keywords]]
+pattern = 'throughput'
+weight = 0.25
+
+[[benchmark.keywords]]
+pattern = 'TFLOPS|GFLOPS|TFLOPs|GFLOPs'
+weight = 0.4
+
+[[benchmark.keywords]]
+pattern = 'us/iter|ms/iter|μs'
+weight = 0.3
+
+[[benchmark.keywords]]
+pattern = 'warmup|warm_up|warm-up'
+weight = 0.25
+
+[[benchmark.keywords]]
+pattern = 'benchmark|bench_'
+weight = 0.3
+
+[[benchmark.keywords]]
+pattern = 'time\.time\(\)|time\.perf_counter'
+weight = 0.2
+
+[[benchmark.keywords]]
+pattern = 'torch\.cuda\.Event\(enable_timing'
+weight = 0.4
+
+[[benchmark.keywords]]
+pattern = 'start\.record\(\)|end\.record\(\)'
+weight = 0.35
+
+[[benchmark.keywords]]
+pattern = 'triton\.testing\.do_bench'
+weight = 0.5
+
+[[benchmark.keywords]]
+pattern = 'speedup'
+weight = 0.25
+
+[[benchmark.keywords]]
+pattern = 'GB/s|TB/s'
+weight = 0.3
+
+[[benchmark.keywords]]
+pattern = 'bandwidth'
+weight = 0.2
+
+[[benchmark.keywords]]
+pattern = 'median|percentile|p50|p99'
+weight = 0.2
+
+[[benchmark.keywords]]
+pattern = 'std::chrono'
+weight = 0.25
+
+[[benchmark.keywords]]
+pattern = 'hipEventElapsedTime|cudaEventElapsedTime'
+weight = 0.4
+
+[[benchmark.keywords]]
+pattern = 'hipEventRecord|cudaEventRecord'
+weight = 0.3
+
+# ------ Benchmark File Patterns ------
+
+[benchmark.file_patterns]
+python = [
+    'bench*.py',
+    '*benchmark*.py',
+    '*_perf.py',
+    'perf_*.py',
+    'perf/*.py',
+    'performance_*.py',
+]
+cpp = [
+    'bench*.cpp',
+    '*benchmark*.cpp',
+    'bench*.cu',
+    '*_perf.cpp',
+]
+
+# ------ Workspace Settings ------
+
+[workspace]
+skip_dirs = [
+    '__pycache__',
+    '.git',
+    '.venv',
+    'venv',
+    'node_modules',
+    'build',
+    'dist',
+    '.eggs',
+    'site-packages',
+    '.tox',
+    '.pytest_cache',
+]
+
+project_markers = [
+    'pyproject.toml',
+    'setup.py',
+    'setup.cfg',
+    '.git',
+    'op_tests',
+    'tests',
+    'Makefile',
+    'CMakeLists.txt',
+]
+
+monorepo_markers = [
+    'lerna.json',
+    'nx.json',
+    'pnpm-workspace.yaml',
+    'rush.json',
+]

@@ -11,7 +11,9 @@
           "description": "The bash command to execute."
         }
       },
-      "required": ["command"]
+      "required": [
+        "command"
+      ]
     }
   },
   {
@@ -53,7 +55,12 @@
       "properties": {
         "command": {
           "type": "string",
-          "enum": ["view", "create", "str_replace", "insert"],
+          "enum": [
+            "view",
+            "create",
+            "str_replace",
+            "insert"
+          ],
           "description": "The editor command to execute."
         },
         "path": {
@@ -66,7 +73,9 @@
         },
         "view_range": {
           "type": "array",
-          "items": {"type": "integer"},
+          "items": {
+            "type": "integer"
+          },
           "description": "Line range [start, end] to view. Optional for: view."
         },
         "old_str": {
@@ -82,7 +91,10 @@
           "description": "Line number to insert at. Required for: insert."
         }
       },
-      "required": ["command", "path"]
+      "required": [
+        "command",
+        "path"
+      ]
     }
   },
   {
@@ -101,7 +113,10 @@
           "description": "The command to execute the kernel during profiling, e.g. execution command using in performance test."
         }
       },
-      "required": ["profiling_workdir", "profiling_cmd"]
+      "required": [
+        "profiling_workdir",
+        "profiling_cmd"
+      ]
     }
   },
   {
@@ -113,7 +128,17 @@
       "properties": {
         "command": {
           "type": "string",
-          "enum": ["create", "show", "next", "mark", "add", "remove", "update", "note", "summary"],
+          "enum": [
+            "create",
+            "show",
+            "next",
+            "mark",
+            "add",
+            "remove",
+            "update",
+            "note",
+            "summary"
+          ],
           "description": "The operation to perform."
         },
         "index": {
@@ -122,7 +147,15 @@
         },
         "status": {
           "type": "string",
-          "enum": ["pending", "exploring", "successful", "failed", "partial", "skipped", "combined"],
+          "enum": [
+            "pending",
+            "exploring",
+            "successful",
+            "failed",
+            "partial",
+            "skipped",
+            "combined"
+          ],
           "description": "Strategy status. Required for: mark. Optional for: update."
         },
         "result": {
@@ -151,7 +184,9 @@
         },
         "baseline_metrics": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "description": "Baseline metrics in 'Key:Value' format. Required for: create."
         },
         "baseline_log": {
@@ -160,12 +195,17 @@
         },
         "strategies": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "description": "Initial strategies in 'Name|Description|Expected|Target' format. Optional for: create."
         },
         "method": {
           "type": "string",
-          "enum": ["skip", "delete"],
+          "enum": [
+            "skip",
+            "delete"
+          ],
           "description": "Remove method. Default: skip. For: remove."
         },
         "note": {
@@ -173,7 +213,239 @@
           "description": "Note message. Required for: note."
         }
       },
-      "required": ["command"]
+      "required": [
+        "command"
+      ]
+    }
+  },
+  {
+    "name": "profile_kernel",
+    "type": "function",
+    "description": "Profile a GPU kernel using Metrix (structured JSON) or rocprof-compute (deep roofline analysis). Set backend='metrix' for bottleneck classification with hardware metrics, or backend='rocprof-compute' for detailed instruction mix and cache analysis.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Command to execute for profiling (e.g. 'python3 kernel.py --profile')"
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "metrix",
+            "rocprof-compute"
+          ],
+          "description": "Profiling backend. Default: metrix"
+        },
+        "workdir": {
+          "type": "string",
+          "description": "Working directory (rocprof-compute only)"
+        },
+        "profiling_type": {
+          "type": "string",
+          "enum": [
+            "profiling",
+            "roofline",
+            "profiler_analyzer"
+          ],
+          "description": "Profiling depth for rocprof-compute. Default: profiling"
+        },
+        "quick": {
+          "type": "boolean",
+          "description": "Quick profile with fewer metrics (metrix only). Default: false"
+        }
+      },
+      "required": [
+        "command"
+      ]
+    }
+  },
+  {
+    "name": "generate_optimization",
+    "type": "function",
+    "description": "Generate an optimized kernel variant using LLM-guided kernel evolution. Targets a specific bottleneck type.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kernel_code": {
+          "type": "string",
+          "description": "The kernel source code to optimize"
+        },
+        "bottleneck": {
+          "type": "string",
+          "enum": [
+            "compute",
+            "memory",
+            "latency",
+            "lds",
+            "balanced"
+          ],
+          "description": "The bottleneck type to target"
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "triton",
+            "hip",
+            "cuda"
+          ],
+          "description": "Kernel language. Default: triton"
+        }
+      },
+      "required": [
+        "kernel_code",
+        "bottleneck"
+      ]
+    }
+  },
+  {
+    "name": "evaluate_kernel_quality",
+    "type": "function",
+    "description": "Evaluate a GPU kernel across AMD GPU optimization criteria. Returns scores and suggestions.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kernel_code": {
+          "type": "string",
+          "description": "The kernel source code to evaluate"
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "triton",
+            "hip",
+            "cuda"
+          ],
+          "description": "Kernel language. Default: triton"
+        }
+      },
+      "required": [
+        "kernel_code"
+      ]
+    }
+  },
+  {
+    "name": "reflect_on_kernel_result",
+    "type": "function",
+    "description": "Analyze kernel test results and suggest next optimization steps.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kernel_code": {
+          "type": "string",
+          "description": "The kernel source code"
+        },
+        "test_output": {
+          "type": "string",
+          "description": "Output from running the kernel test/benchmark"
+        },
+        "previous_attempts": {
+          "type": "string",
+          "description": "Summary of previous optimization attempts"
+        }
+      },
+      "required": [
+        "kernel_code",
+        "test_output"
+      ]
+    }
+  },
+  {
+    "name": "resolve_kernel_url",
+    "type": "function",
+    "description": "Resolve a GitHub kernel URL to a local file path, line number, and kernel function name. Clones the repo if needed.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "GitHub URL (e.g. https://github.com/org/repo/blob/main/kernel.py#L106)"
+        },
+        "workspace": {
+          "type": "string",
+          "description": "Directory to clone into (default: current directory)"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  },
+  {
+    "name": "baseline_metrics",
+    "type": "function",
+    "description": "Format profiler output into baseline_metrics.json for OpenEvolve. Takes profiler JSON output and selected kernel names/indices.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "profiler_output": {
+          "type": "string",
+          "description": "JSON string from profiler-mcp profile_kernel output"
+        },
+        "kernel_names": {
+          "type": "string",
+          "description": "Comma-separated kernel names to include"
+        },
+        "kernel_indices": {
+          "type": "string",
+          "description": "Comma-separated kernel indices (0-based) to include"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "File path to write the baseline_metrics.json"
+        }
+      },
+      "required": [
+        "profiler_output"
+      ]
+    }
+  },
+  {
+    "name": "check_kernel_compatibility",
+    "type": "function",
+    "description": "Scan kernel code for CUDA-only patterns that are incompatible with AMD GPUs. Returns a list of issues found with suggested AMD/ROCm alternatives.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kernel_code": {
+          "type": "string",
+          "description": "Kernel source code as a string"
+        },
+        "file_path": {
+          "type": "string",
+          "description": "Path to kernel file (used if kernel_code not provided)"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "sub_agent",
+    "type": "function",
+    "description": "Spawn a child agent to perform a focused sub-task. The child runs independently with its own step/cost budget and returns the result. Use for algorithm rewrites, cross-file edits, or any task that benefits from dedicated agent reasoning.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "string",
+          "description": "The sub-task description for the child agent"
+        },
+        "step_limit": {
+          "type": "integer",
+          "description": "Max steps for the child agent (default: 10)"
+        },
+        "cost_limit": {
+          "type": "number",
+          "description": "Max cost in dollars for the child agent (default: 1.0)"
+        },
+        "system_prompt": {
+          "type": "string",
+          "description": "Override the child agent's system prompt (optional)"
+        }
+      },
+      "required": [
+        "task"
+      ]
     }
   }
 ]

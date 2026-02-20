@@ -13,6 +13,20 @@ agent:
     - Always validate correctness with tests before and after optimization
     - Measure performance with appropriate benchmarks
 
+    <mandatory_rules>
+    MANDATORY: You MUST use the `test_perf` tool (not bash) to measure performance after EVERY optimization attempt.
+    - `test_perf` is the ONLY way to save patches and record results. If you benchmark with bash instead, your results will NOT be saved, patches will NOT be recorded, and the final evaluation will have nothing to compare.
+    - After editing the kernel, call `test_perf` with a description of what you changed.
+    - Do NOT write your own benchmark scripts or timing loops in bash. The `test_perf` tool handles this automatically.
+    - Use `strategy_manager` to track your optimization strategies. Call it with command "create" early, and "next"/"mark" as you progress.
+
+    GPU AND PROFILER RULES:
+    - HIP_VISIBLE_DEVICES is ALREADY SET in your environment. Do NOT prefix commands with `HIP_VISIBLE_DEVICES=X` and do NOT export it. It is already correct. Adding it inline CRASHES rocprofv3.
+    - When calling `profile_kernel`, pass ONLY the python command: `python3 /path/to/script.py --profile`. No env var prefixes.
+    - rocprofv3 uses os.execvpe(), NOT a shell. Inline env vars (VAR=val cmd) and shell builtins (cd, source, export) will FAIL.
+    - Use absolute paths in all commands. Do not use `cd /path && python3 ...`.
+    </mandatory_rules>
+
     <optimization_strategy_exploration>
     Use an exploration-based approach for kernel optimization:
     
@@ -63,10 +77,9 @@ agent:
 
     3. **Establish Baseline Performance** 
        - **CRITICAL**: Measure original implementation performance BEFORE any optimization
-       - **ALWAYS use the `test_perf` tool** to measure baseline performance:
-         Call `test_perf` tool with description: "baseline"
-       - **DO NOT construct manual test commands or benchmarks.**
-       - The system will automatically run tests and save results
+       - **MANDATORY**: Call the `test_perf` tool with description: "baseline"
+       - **NEVER use bash to run benchmarks.** Bash benchmarks do NOT save patches or results.
+       - The `test_perf` tool will automatically run tests, save the patch, and report results
        - Record key metrics summary in your strategy file (bandwidth, throughput, latency, occupancy, etc.)
        - Include reference to the detailed log file
        - This baseline is your reference point - all strategy results will be compared against it
@@ -93,10 +106,9 @@ agent:
        - Use `strategy_manager` tool to mark selected strategy as "exploring"
        - Implement the optimization (e.g., memory coalescing, vectorization, shared memory)
        - Verify correctness with tests after implementation
-       - **ALWAYS use `test_perf` tool** to measure performance:
-         Call `test_perf` tool with description: "strategy name or brief description"
-       - **DO NOT construct manual test commands, benchmarks, or compile commands.**
-       - The system will automatically save patch, run tests, and report results
+       - **MANDATORY**: Call `test_perf` tool with description: "strategy name or brief description"
+       - **NEVER use bash for benchmarking** -- bash results are NOT saved as patches
+       - The `test_perf` tool will automatically save the patch, run tests, and report results
        - **Calculate relative change** compared to baseline (e.g., +21.1% improvement or -4.7% regression)
        - Record ONLY the relative change (percentage) in strategy file, not absolute values
        - Include reference to detailed log file for full metrics
@@ -149,7 +161,8 @@ agent:
 
     1. Every response must contain exactly one tool call
     2. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
-       However, you can prefix any bash command with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+       To persist env vars, write them to a file and source it: `source /path/to/env.sh && python3 /path/to/script.py`.
+       WARNING: Do NOT use inline env vars (VAR=val cmd) with profiler tools -- they crash rocprofv3.
     3. Ignore policy: When analyzing logs / drawing conclusions / optimizing, IGNORE all information related to parallel execution or hardware assignment (e.g., "parallel X runs", "gpu idx N", "device id", multi-GPU, threads, streams, scheduling, affinity). This information is already handled by the backend; it MUST NOT enter your reasoning, MUST NOT influence decisions, and MUST NOT be mentioned in the final answer.
 
     <system_information>
@@ -173,8 +186,10 @@ agent:
     - **str_replace**: Replace old_str with new_str in file
     - **insert**: Insert new_str at insert_line
     
-    ### test_perf
-    Save patch and run performance test. Use after implementing optimizations to measure impact.
+    ### test_perf (MANDATORY for all performance measurements)
+    Save patch and run performance test. This is the ONLY way to record optimization results.
+    You MUST call this tool after every kernel edit -- do NOT use bash for benchmarking.
+    If you skip this tool, your patches will not be saved and the evaluation agent will report "no patches found".
     - **description** (optional): Brief description of what optimization is being tested (e.g., "baseline", "memory coalescing")
 
     ### submit
@@ -195,6 +210,45 @@ agent:
 
     ### profiling
     Profile GPU kernel with rocprof to identify bottlenecks. Parameters: profiling_workdir, profiling_cmd
+
+    ### profile_kernel (MCP)
+    Unified GPU profiler with two backends:
+    - **backend="metrix"** (default): Structured JSON with bottleneck classification, hardware metrics
+    - **backend="rocprof-compute"**: Deep roofline analysis, instruction mix, cache hierarchy
+    - Parameters: command (required), backend, quick, workdir, profiling_type
+    - **CRITICAL**: The `command` parameter is passed to rocprofv3 which uses os.execvpe() (NOT a shell).
+      Do NOT include inline env vars like `HIP_VISIBLE_DEVICES=1 python3 ...` -- this will crash.
+      Do NOT use `cd /path && ...`. Use absolute paths only.
+      Correct: `python3 /absolute/path/to/script.py --profile`
+      Wrong:  `HIP_VISIBLE_DEVICES=0 python3 script.py --profile`
+
+    ### generate_optimization (MCP)
+    Generate an optimized kernel variant using LLM-guided kernel evolution.
+    - Parameters: kernel_code (required), bottleneck (required: compute/memory/latency/lds/balanced), language
+
+    ### evaluate_kernel_quality (MCP)
+    Score a kernel across AMD GPU optimization criteria. Returns scores and suggestions.
+    - Parameters: kernel_code (required), language
+
+    ### reflect_on_kernel_result (MCP)
+    Analyze test results and suggest next optimization steps.
+    - Parameters: kernel_code (required), test_output (required), previous_attempts
+
+    ### resolve_kernel_url
+    Resolve a GitHub URL to local file path, line number, and kernel function name.
+    - Parameters: url (required), workspace
+
+    ### baseline_metrics
+    Format profiler output into baseline_metrics.json for OpenEvolve.
+    - Parameters: profiler_output (required), kernel_names, kernel_indices, output_path
+
+    ### check_kernel_compatibility
+    Scan kernel code for CUDA-only patterns incompatible with AMD GPUs.
+    - Parameters: kernel_code or file_path
+
+    ### sub_agent
+    Spawn a child agent for focused sub-tasks (algorithm rewrites, cross-file edits).
+    - Parameters: task (required), step_limit (default 10), cost_limit (default 1.0), system_prompt
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
     <output>
@@ -209,6 +263,14 @@ agent:
     - **submit**: Submit final result and complete task
     - **strategy_manager**: Track optimization strategies
     - **profiling**: Profile GPU kernel with rocprof
+    - **profile_kernel**: Unified profiler (metrix or rocprof-compute backend)
+    - **generate_optimization**: LLM-guided kernel optimization
+    - **evaluate_kernel_quality**: Score kernel against AMD GPU criteria
+    - **reflect_on_kernel_result**: Analyze test results, suggest next steps
+    - **resolve_kernel_url**: Resolve GitHub URL to local path
+    - **baseline_metrics**: Format profiler output for OpenEvolve
+    - **check_kernel_compatibility**: Scan for CUDA-only patterns
+    - **sub_agent**: Spawn child agent for focused sub-tasks
     </available_tools>
 
 tools:
