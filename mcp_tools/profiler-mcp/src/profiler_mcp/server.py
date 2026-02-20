@@ -105,16 +105,16 @@ def _profile_with_rocprof(
         from minisweagent.kernel_profile import _build_rocprof_result
         from minisweagent.tools.profiling_tools import ProfilingAnalyzer
 
-    # Empty HIP_VISIBLE_DEVICES hides all GPUs -- strip it from the env
-    # passed to the profiling subprocess instead of mutating os.environ
-    # (library code must never mutate os.environ; see docs/gpu-isolation.md).
-    clean_env: dict[str, str] | None = None
+    # Empty HIP_VISIBLE_DEVICES hides all GPUs from ROCm.  We need to
+    # remove it for the profiling subprocess.  profiler-mcp runs as a
+    # dedicated single-threaded MCP server process (not inside the
+    # multi-threaded parallel agent), so a save/restore of os.environ
+    # is safe here -- no concurrent threads can observe the temporary gap.
+    _hip_removed: str | None = None
     if os.environ.get("HIP_VISIBLE_DEVICES") == "":
-        clean_env = {k: v for k, v in os.environ.items() if k != "HIP_VISIBLE_DEVICES"}
+        _hip_removed = os.environ.pop("HIP_VISIBLE_DEVICES")
 
     analyzer = ProfilingAnalyzer(profiling_type=profiling_type)
-    if clean_env is not None:
-        analyzer._env_override = clean_env
     try:
         raw = analyzer.profile_structured(
             profiling_workdir=workdir or str(Path.cwd()),
@@ -122,6 +122,8 @@ def _profile_with_rocprof(
         )
     finally:
         analyzer.cleanup()
+        if _hip_removed is not None:
+            os.environ["HIP_VISIBLE_DEVICES"] = _hip_removed
 
     if not raw.get("success"):
         return {
