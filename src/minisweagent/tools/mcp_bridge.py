@@ -60,6 +60,10 @@ class MCPToolBridge:
     # Public API
     # ------------------------------------------------------------------
 
+    def set_env(self, env: dict[str, str]) -> None:
+        """Merge extra env vars into server config (must be called before first tool call)."""
+        self.server_config.setdefault("env", {}).update(env)
+
     def tool(self, tool_name: str) -> _BoundTool:
         """Return a callable that invokes *tool_name* on this MCP server."""
         return _BoundTool(bridge=self, tool_name=tool_name)

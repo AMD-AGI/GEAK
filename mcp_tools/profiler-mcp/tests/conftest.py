@@ -36,7 +36,7 @@ HAS_GPU = _has_gpu()
 
 requires_gpu = pytest.mark.skipif(not HAS_GPU, reason="No AMD GPU available")
 
-DEFAULT_TEST_COMMAND = "python3 /workspace/examples/add_kernel/kernel.py --profile"
+DEFAULT_TEST_COMMAND = "python3 /workspace/examples/add_kernel/kernel.py"
 
 
 @pytest.fixture

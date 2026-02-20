@@ -15,6 +15,7 @@ class ProfilingAnalyzer:
     def __init__(self, profiling_type: str, llm_model=None):
         self.profiling_type = profiling_type
         self.model = llm_model
+        self._env_override: dict[str, str] = {}
         self.output_path = Path(tempfile.mkdtemp(prefix="rocprof_")).resolve()
 
     def cleanup(self):
@@ -765,8 +766,9 @@ class ProfilingAnalyzer:
         else:
             return False, f"Unknown profiling_type: {self.profiling_type}"
 
+        env = os.environ | self._env_override if self._env_override else None
         result = subprocess.run(
-            make_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600 * 6
+            make_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600 * 6, env=env
         )
         if result.returncode != 0:
             return False, result.stdout.strip() or result.stderr.strip()
@@ -779,7 +781,7 @@ class ProfilingAnalyzer:
             analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 11 16 17"]
 
         result = subprocess.run(
-            analysis_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600 * 6
+            analysis_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600 * 6, env=env
         )
         if result.returncode != 0:
             return False, result.stdout.strip() or result.stderr.strip()

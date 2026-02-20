@@ -85,3 +85,21 @@ def torch_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 # Exports for agent discovery
 triton_op = triton_add
 torch_op = torch_add
+
+
+if __name__ == "__main__":
+    size = 1_000_000
+    x = torch.randn(size, device="cuda", dtype=torch.float32)
+    y = torch.randn(size, device="cuda", dtype=torch.float32)
+
+    # Warm-up (compiles the kernel)
+    output = triton_add(x, y)
+    torch.cuda.synchronize()
+
+    # Profiling-friendly run
+    output = triton_add(x, y)
+    torch.cuda.synchronize()
+
+    expected = torch_add(x, y)
+    assert torch.allclose(output, expected), "Correctness check failed!"
+    print(f"add_kernel: {size} elements, output[0]={output[0].item():.4f}")

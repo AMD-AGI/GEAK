@@ -14,6 +14,25 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def _agent_type_to_class() -> dict[str, type]:
+    """Canonical mapping from task-file ``agent_type`` string to class.
+
+    Lazy import to avoid circular dependencies at module level.
+    """
+    from minisweagent.agents.openevolve_worker import OpenEvolveWorker
+    from minisweagent.agents.swe_agent import SweAgent
+
+    return {
+        "openevolve": OpenEvolveWorker,
+        "swe_agent": SweAgent,
+    }
+
+
+def _agent_class_to_type() -> dict[type, str]:
+    """Reverse mapping: agent class -> agent_type string."""
+    return {cls: name for name, cls in _agent_type_to_class().items()}
+
+
 @dataclass
 class AgentTask:
     """A single optimization task, independent of GPU assignment.
@@ -41,6 +60,7 @@ class AgentTask:
     config: dict[str, Any] = field(default_factory=dict)
     step_limit: int = 0
     cost_limit: float = 0.0
+    num_gpus: int = 1
 
 
 @dataclass

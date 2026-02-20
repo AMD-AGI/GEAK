@@ -65,26 +65,35 @@ optimization approach, then submit your task list as JSON via the
 ### Agents (task execution)
 
 1. **strategy_agent** (default) -- An LLM-guided agent with bash, editor,
-   and profiling tools. It reads code, reasons about bottlenecks, and edits
-   the kernel directly. Best for targeted optimizations: autotune config,
-   memory access patterns, launch configuration, kernel fusion. Has access
-   to the kernel-evolve and kernel-ercs MCP tools described below.
+   profiling tools, AND LLM-powered MCP assistants (kernel-evolve,
+   kernel-ercs). It can delegate code generation, quality evaluation, and
+   reflection to these MCP tools. Best for complex optimizations where
+   LLM-generated mutations and quality evaluation help: kernel fusion,
+   advanced tuning, multi-step refactoring.
 
-2. **openevolve** -- An evolutionary optimizer that mutates the kernel and
-   evaluates candidates automatically using COMMANDMENT.md and
-   baseline_metrics.json. No LLM reasoning during the optimization loop.
-   Best for inner kernels where small code changes yield large speedups.
+2. **swe_agent** -- An LLM-guided agent with bash, editor, test_perf,
+   submit, profile_kernel, baseline_metrics, and strategy_manager. It codes
+   manually -- reads code, reasons about bottlenecks, makes edits, then
+   tests and profiles. NO access to kernel-evolve or kernel-ercs MCP tools.
+   Best for targeted edits, autotune configs, and straightforward
+   optimizations where the agent should read-think-edit-test-profile
+   without LLM tool assistance.
+
+3. **openevolve** -- An LLM-guided evolutionary optimizer that mutates the
+   kernel and evaluates candidates automatically using COMMANDMENT.md and
+   baseline_metrics.json. Has its own internal orchestration loop. Best for
+   inner kernels where automated mutation + selection is effective.
 
 ### Tools (available to strategy_agent via MCP)
 
-3. **kernel-evolve** -- LLM-guided mutation/crossover of kernel code.
+4. **kernel-evolve** -- LLM-guided mutation/crossover of kernel code.
    Commands: `generate` (optimized variant from bottleneck + strategy),
    `mutate` (improve existing kernel), `crossover` (combine two kernels),
    `strategies` (list strategies for a bottleneck), `params` (suggest
    parameters for a kernel type). Instruct the strategy_agent to use
    kernel-evolve when the task involves generating new kernel variants.
 
-4. **kernel-ercs** -- LLM-based evaluation, reflection, compatibility
+5. **kernel-ercs** -- LLM-based evaluation, reflection, compatibility
    checking, and AMD GPU specs. Commands: `evaluate` (score kernel quality),
    `reflect` (analyze test results, suggest next steps), `compat` (check
    AMD compatibility), `specs` (AMD MI350X specs). Instruct the
@@ -126,8 +135,11 @@ When you are done analyzing, call the `submit` tool with the `summary`
 parameter containing a JSON array of task objects. Each task has:
 - "label": short kebab-case identifier (e.g. "openevolve-inner", "ck-tile-tuning")
 - "priority": integer 0-15
-- "agent_type": "strategy_agent" or "openevolve"
+- "agent_type": "strategy_agent", "swe_agent", or "openevolve"
 - "kernel_language": "python", "cpp", or "asm"
+- "num_gpus": integer (default 1). How many GPUs this task needs.
+  OpenEvolve tasks benefit from 2-4 GPUs for parallel candidate evaluation.
+  strategy_agent and swe_agent tasks should use 1 GPU.
 - "task_prompt": detailed instructions for the sub-agent (specific
   optimization focus, which tools to use, what to measure). This is
   the FULL prompt the agent will see.
@@ -158,8 +170,8 @@ to read and follow the COMMANDMENT file. The COMMANDMENT defines the
 correctness criteria and constraints. Any changes that violate the
 COMMANDMENT must be rejected by the sub-agent itself.
 
-**Verification for strategy_agent tasks**: Each task_prompt for
-strategy_agent tasks MUST include instructions to:
+**Verification for strategy_agent and swe_agent tasks**: Each task_prompt
+for strategy_agent or swe_agent tasks MUST include instructions to:
 1. Read the COMMANDMENT and follow its constraints
 2. Verify correctness after making changes (use the `test_perf` tool)
 3. Profile the result to measure improvement (use the `profile_kernel` tool)
@@ -185,13 +197,19 @@ Generate optimization tasks for the kernel at {{ kernel_path }}.
 {% endif %}{% if function_names %}- Functions: {{ function_names }}
 {% endif %}
 ## Files to read (use `str_replace_editor` with command "view")
-{% if discovery_path %}- **Discovery** (kernel info, tests, benchmarks): {{ discovery_path }}
+{% if codebase_context_path %}- **Codebase context** (repo layout, key files): {{ codebase_context_path }}
+{% endif %}{% if discovery_path %}- **Discovery** (kernel info, tests, benchmarks): {{ discovery_path }}
 {% endif %}{% if profiling_path %}- **Profiling** (sub-kernels, bottlenecks, metrics): {{ profiling_path }}
 {% endif %}{% if baseline_metrics_path %}- **Baseline metrics**: {{ baseline_metrics_path }}
 {% endif %}{% if commandment_path %}- **COMMANDMENT.md** (evaluation contract): {{ commandment_path }}
 {% endif %}{% if knowledge_base_path %}- **Knowledge base** (optimization strategies): {{ knowledge_base_path }}
 {% endif %}{% if deep_search_path %}- **Deep search findings**: {{ deep_search_path }}
 {% endif %}{% if previous_results_path %}- **Prior round results**: {{ previous_results_path }}
+{% endif %}
+{% if num_gpus > 1 %}## GPU Budget
+Available GPUs: {{ num_gpus }}
+Generate enough tasks so the total num_gpus across all tasks is close to {{ num_gpus }}.
+OpenEvolve tasks can use 2-4 GPUs each; strategy_agent and swe_agent tasks use 1 GPU each.
 {% endif %}
 ## Instructions
 
@@ -220,6 +238,8 @@ def generate_tasks(
     deep_search_path: Path | None = None,
     previous_results_dir: Path | None = None,
     discovery_path: Path | None = None,
+    codebase_context_path: Path | None = None,
+    num_gpus: int = 1,
 ) -> list[AgentTask]:
     """Generate optimization tasks using an LLM planning agent.
 
@@ -234,6 +254,7 @@ def generate_tasks(
         deep_search_path: Path to deep search findings file.
         previous_results_dir: Path to previous round results directory.
         discovery_path: Path to the discovery.json file.
+        codebase_context_path: Path to CODEBASE_CONTEXT.md file.
 
     Returns:
         List of AgentTask sorted by priority.
@@ -254,6 +275,8 @@ def generate_tasks(
         deep_search_path=deep_search_path,
         previous_results_dir=previous_results_dir,
         discovery_path=discovery_path,
+        codebase_context_path=codebase_context_path,
+        num_gpus=num_gpus,
     )
 
     kernel = discovery_result.kernels[0]
@@ -278,6 +301,8 @@ def generate_tasks_from_content(
     deep_search_content: str | None = None,
     previous_results_dir: Path | None = None,
     discovery_path: Path | None = None,
+    codebase_context_path: Path | None = None,
+    num_gpus: int = 1,
 ) -> list[AgentTask]:
     """Convenience wrapper that materializes in-memory content to temp files.
 
@@ -316,6 +341,8 @@ def generate_tasks_from_content(
             deep_search_path=deep_search_path,
             previous_results_dir=previous_results_dir,
             discovery_path=discovery_path,
+            codebase_context_path=codebase_context_path,
+            num_gpus=num_gpus,
         )
     finally:
         for f in tmp_files:
@@ -357,6 +384,8 @@ def _run_task_agent(
     deep_search_path: Path | None,
     previous_results_dir: Path | None,
     discovery_path: Path | None,
+    codebase_context_path: Path | None = None,
+    num_gpus: int = 1,
 ) -> str:
     """Run a read-only planning agent and return the submitted JSON text."""
     from minisweagent.agents.default import DefaultAgent
@@ -367,9 +396,13 @@ def _run_task_agent(
     workspace = discovery_result.workspace_path or kernel.file_path.parent
 
     read_only_tools = [t for t in get_tools_list() if t["name"] in ("str_replace_editor", "submit")]
-    model_impl = getattr(model, "_impl", model)
-    original_tools = list(model_impl.tools) if hasattr(model_impl, "tools") else None
-    model_impl.tools = read_only_tools
+    # Save and override tools via the public API when available
+    _model_target = model if hasattr(model, "set_tools") else getattr(model, "_impl", model)
+    original_tools = list(_model_target.tools) if hasattr(_model_target, "tools") else None
+    if hasattr(model, "set_tools"):
+        model.set_tools(read_only_tools)
+    else:
+        _model_target.tools = read_only_tools
 
     tmp_files: list[Path] = []
     try:
@@ -392,6 +425,7 @@ def _run_task_agent(
             "inner_kernel_language": kernel.inner_kernel_language or "",
             "has_autotune": kernel.has_autotune,
             "function_names": ", ".join(kernel.function_names) if kernel.function_names else "",
+            "codebase_context_path": str(codebase_context_path) if codebase_context_path else "",
             "discovery_path": str(discovery_path) if discovery_path else "",
             "profiling_path": str(profiling_path) if profiling_path else "",
             "commandment_path": str(commandment_path) if commandment_path else "",
@@ -400,6 +434,7 @@ def _run_task_agent(
             "deep_search_path": str(deep_search_path) if deep_search_path else "",
             "previous_results_path": str(prev_results_path) if prev_results_path else "",
             "base_task_context": base_task_context,
+            "num_gpus": num_gpus,
         }
 
         tg_step_limit = int(os.getenv("GEAK_TASKGEN_STEP_LIMIT", "75"))
@@ -431,7 +466,10 @@ def _run_task_agent(
         raise RuntimeError(f"Task-generation agent did not submit results (exit: {exit_type}): {exit_msg[:500]}")
     finally:
         if original_tools is not None:
-            model_impl.tools = original_tools
+            if hasattr(model, "set_tools"):
+                model.set_tools(original_tools)
+            else:
+                _model_target.tools = original_tools
         for f in tmp_files:
             try:
                 f.unlink(missing_ok=True)
@@ -467,7 +505,9 @@ def _parse_llm_response(
     if not isinstance(raw_tasks, list):
         raise TypeError(f"Expected JSON array, got {type(raw_tasks).__name__}")
 
-    from minisweagent.agents.openevolve_worker import OpenEvolveWorker
+    from minisweagent.agents.agent_spec import _agent_type_to_class
+
+    type_to_class = _agent_type_to_class()
 
     tasks: list[AgentTask] = []
     for item in raw_tasks:
@@ -480,38 +520,33 @@ def _parse_llm_response(
         agent_type = str(item.get("agent_type", "strategy_agent"))
         kernel_language = str(item.get("kernel_language", "python"))
         task_prompt = str(item.get("task_prompt", ""))
+        task_num_gpus = max(1, int(item.get("num_gpus", 1)))
 
         if not task_prompt:
             continue
 
+        resolved_class = type_to_class.get(agent_type, agent_class)
+
+        cfg: dict[str, Any] = {}
         if agent_type == "openevolve":
-            oe_config: dict[str, Any] = {}
             if kernel_path:
-                oe_config["kernel_path"] = kernel_path
+                cfg["kernel_path"] = kernel_path
             if commandment_path:
-                oe_config["commandment_path"] = commandment_path
+                cfg["commandment_path"] = commandment_path
             if baseline_metrics_path:
-                oe_config["baseline_metrics_path"] = baseline_metrics_path
-            tasks.append(
-                AgentTask(
-                    agent_class=OpenEvolveWorker,
-                    task=task_prompt,
-                    label=label,
-                    priority=priority,
-                    kernel_language=kernel_language,
-                    config=oe_config,
-                )
+                cfg["baseline_metrics_path"] = baseline_metrics_path
+
+        tasks.append(
+            AgentTask(
+                agent_class=resolved_class,
+                task=task_prompt,
+                label=label,
+                priority=priority,
+                kernel_language=kernel_language,
+                config=cfg,
+                num_gpus=task_num_gpus,
             )
-        else:
-            tasks.append(
-                AgentTask(
-                    agent_class=agent_class,
-                    task=task_prompt,
-                    label=label,
-                    priority=priority,
-                    kernel_language=kernel_language,
-                )
-            )
+        )
 
     if not tasks:
         raise ValueError("LLM response contained no valid tasks")
@@ -565,6 +600,21 @@ def _scan_previous_results(results_dir: Path) -> str:
                     section.append(f"- {tf.name} (tail): {' | '.join(tail)}")
             except Exception:
                 section.append(f"- {tf.name}: (unreadable)")
+
+        # OpenEvolve-specific result file (richer than patch_*_test.txt)
+        oe_result = td / "openevolve_result.json"
+        if oe_result.is_file():
+            try:
+                import json as _json
+                oe_data = _json.loads(oe_result.read_text(errors="replace"))
+                section.append(
+                    f"- OpenEvolve: speedup={oe_data.get('speedup', '?')}x, "
+                    f"iterations={oe_data.get('iterations_completed', '?')}, "
+                    f"baseline={oe_data.get('baseline_latency_us', '?')}us, "
+                    f"best={oe_data.get('best_latency_us', '?')}us"
+                )
+            except Exception:
+                pass
 
         for lf in log_files[:1]:
             try:
@@ -626,10 +676,22 @@ def main():
         help="Path to deep search findings (JSON or Markdown file)",
     )
     parser.add_argument(
+        "--codebase-context",
+        default=None,
+        metavar="FILE",
+        help="Path to CODEBASE_CONTEXT.md (auto-detected from --from-discovery directory if not set)",
+    )
+    parser.add_argument(
         "--round",
         type=int,
         default=1,
         help="Round number for task file frontmatter (default: 1)",
+    )
+    parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=1,
+        help="Number of available GPUs (guides task count and GPU allocation, default: 1)",
     )
 
     args = parser.parse_args()
@@ -651,6 +713,12 @@ def main():
                 if t.get("command"):
                     test_command = t["command"]
                     break
+
+    # Auto-detect codebase context from --from-discovery directory
+    if not args.codebase_context and args.from_discovery:
+        _ctx_sibling = Path(args.from_discovery).parent / "CODEBASE_CONTEXT.md"
+        if _ctx_sibling.exists():
+            args.codebase_context = str(_ctx_sibling)
 
     if not args.kernel_path:
         parser.error("--kernel-path is required (or provide --from-discovery)")
@@ -760,6 +828,7 @@ def main():
     deep_search_path = Path(args.deep_search).resolve() if args.deep_search else None
     previous_results_dir = Path(args.from_results).resolve() if args.from_results else None
     discovery_path = Path(args.from_discovery).resolve() if args.from_discovery else None
+    codebase_context_path = Path(args.codebase_context).resolve() if args.codebase_context else None
 
     # Generate tasks
     tasks = generate_tasks(
@@ -773,6 +842,8 @@ def main():
         deep_search_path=deep_search_path,
         previous_results_dir=previous_results_dir,
         discovery_path=discovery_path,
+        codebase_context_path=codebase_context_path,
+        num_gpus=args.num_gpus,
     )
 
     # Print summary to stderr
@@ -787,7 +858,9 @@ def main():
         out_dir = Path(args.output)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        from minisweagent.agents.openevolve_worker import OpenEvolveWorker as _OEW
+        from minisweagent.agents.agent_spec import _agent_class_to_type
+
+        _AGENT_CLASS_TO_TYPE = _agent_class_to_type()
 
         manifest = []
         for i, t in enumerate(tasks):
@@ -797,13 +870,15 @@ def main():
             metadata = {
                 "label": t.label,
                 "priority": t.priority,
-                "agent_type": "openevolve" if t.agent_class is _OEW else "strategy_agent",
+                "agent_type": _AGENT_CLASS_TO_TYPE.get(t.agent_class, "strategy_agent"),
                 "kernel_language": t.kernel_language,
                 "kernel_path": str(kernel_path),
                 "repo_root": args.repo_root,
                 "commandment": args.commandment,
                 "baseline_metrics": args.baseline_metrics,
                 "profiling": args.profiling,
+                "codebase_context": args.codebase_context,
+                "num_gpus": t.num_gpus,
                 "test_command": test_command,
                 "round": args.round,
             }

@@ -83,7 +83,7 @@ class MetrixTool:
                         Defaults to HIP_VISIBLE_DEVICES env var or "0".
         """
         if gpu_devices is None:
-            gpu_devices = os.environ.get("HIP_VISIBLE_DEVICES", "0")
+            gpu_devices = os.environ.get("HIP_VISIBLE_DEVICES") or "0"
 
         # Normalize to list for uniform handling
         if isinstance(gpu_devices, str):

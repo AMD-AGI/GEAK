@@ -64,21 +64,29 @@ class OpenEvolveWorker(DefaultAgent):
             f"  GPU: {self.env.config.env.get('HIP_VISIBLE_DEVICES', 'default')}\n"
         )
 
+        # Resolve output directory: prefer config.output_dir, fall back to
+        # patch_output_dir (set by ParallelAgent for each task), then kernel dir.
+        output_dir = (
+            self.config.output_dir
+            or getattr(self.config, "patch_output_dir", None)
+            or str(Path(kernel_path).parent / "optimization_output")
+        )
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
         # Build MCP tool arguments
         mcp_args: dict[str, Any] = {
             "kernel_path": str(Path(kernel_path).resolve()),
             "max_iterations": self.config.max_iterations,
+            "output_dir": output_dir,
         }
-        if self.config.output_dir:
-            mcp_args["output_dir"] = self.config.output_dir
         if self.config.commandment_path:
             mcp_args["commandment_path"] = self.config.commandment_path
         if self.config.baseline_metrics_path:
             mcp_args["baseline_metrics_path"] = self.config.baseline_metrics_path
 
-        # Get GPU from env
+        # Pass the full HIP_VISIBLE_DEVICES value so OpenEvolve can use all assigned GPUs
         gpu = self.env.config.env.get("HIP_VISIBLE_DEVICES", "0") if hasattr(self.env, "config") else "0"
-        mcp_args["gpu"] = int(gpu.split(",")[0]) if gpu else 0
+        mcp_args["gpu"] = gpu if gpu else "0"
 
         # Call openevolve via ToolRuntime (uses MCPToolBridge)
         try:
@@ -95,11 +103,12 @@ class OpenEvolveWorker(DefaultAgent):
                 from minisweagent.optimizer.core import OptimizerType, optimize_kernel
 
                 opt_result = optimize_kernel(
+                    "",
                     kernel_path=kernel_path,
-                    optimizer_type=OptimizerType.OPENEVOLVE,
+                    optimizer=OptimizerType.OPENEVOLVE,
                     max_iterations=self.config.max_iterations,
                     gpu=mcp_args.get("gpu", 0),
-                    output_dir=self.config.output_dir,
+                    output_dir=output_dir,
                     commandment_path=self.config.commandment_path,
                     baseline_metrics_path=self.config.baseline_metrics_path,
                 )
@@ -118,20 +127,85 @@ class OpenEvolveWorker(DefaultAgent):
                 result = {"output": f"OpenEvolve optimization failed: {e}", "returncode": 1}
 
         self._log_message(f"[OpenEvolveWorker] Result: returncode={result.get('returncode')}")
+        if result.get("returncode", 1) != 0:
+            self._log_message(f"[OpenEvolveWorker] Error output: {result.get('output', '(empty)')}")
 
         if result.get("returncode", 1) == 0:
-            # Try to save the result as a patch
             output_text = result.get("output", "")
             try:
                 data = json.loads(output_text)
-                speedup = data.get("metrics", {}).get("speedup", data.get("speedup", "unknown"))
-                self._log_message(f"[OpenEvolveWorker] Speedup: {speedup}")
             except (json.JSONDecodeError, AttributeError):
-                pass
+                data = {}
 
+            # MCP call succeeded but optimization itself may have failed
+            if data.get("success") is False:
+                error = data.get("error", "unknown error")
+                self._log_message(f"[OpenEvolveWorker] Optimization failed: {error}")
+                return "Error", f"OpenEvolve optimization failed: {error}"
+
+            speedup = data.get("metrics", {}).get("speedup", data.get("speedup", "unknown"))
+            self._log_message(f"[OpenEvolveWorker] Speedup: {speedup}")
+
+            self._save_result_artifacts(data, kernel_path, output_dir)
             raise Submitted(f"OpenEvolve completed: {output_text[:500]}")
 
         return "Error", result.get("output", "OpenEvolve failed")
+
+    def _save_result_artifacts(self, data: dict, kernel_path: str, output_dir: str) -> None:
+        """Save scannable artifacts so _scan_previous_results can pick them up.
+
+        Writes:
+        - openevolve_result.json  (full result data)
+        - patch_openevolve_test.txt  (human-readable summary with speedup)
+        - patch_openevolve.patch  (unified diff of original vs best kernel, if available)
+        """
+        result_dir = Path(output_dir)
+        result_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Save full result JSON
+        try:
+            (result_dir / "openevolve_result.json").write_text(
+                json.dumps(data, indent=2, default=str), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning("[OpenEvolveWorker] Failed to write openevolve_result.json: %s", e)
+
+        # 2. Save a test-output-like summary so the scanner picks up speedup
+        speedup = data.get("speedup", data.get("metrics", {}).get("speedup", "unknown"))
+        baseline_us = data.get("baseline_latency_us", "unknown")
+        best_us = data.get("best_latency_us", "unknown")
+        iters = data.get("iterations_completed", "unknown")
+        summary = (
+            f"OpenEvolve optimization result\n"
+            f"speedup: {speedup}x\n"
+            f"baseline duration: {baseline_us} us\n"
+            f"best duration: {best_us} us\n"
+            f"iterations: {iters}\n"
+        )
+        try:
+            (result_dir / "patch_openevolve_test.txt").write_text(summary, encoding="utf-8")
+        except Exception as e:
+            logger.warning("[OpenEvolveWorker] Failed to write patch_openevolve_test.txt: %s", e)
+
+        # 3. Generate a unified diff patch if best_kernel_path is available
+        best_kernel_path = data.get("best_kernel_path", "")
+        if best_kernel_path and Path(best_kernel_path).is_file():
+            try:
+                import difflib
+
+                original = Path(kernel_path).read_text(encoding="utf-8").splitlines(keepends=True)
+                optimized = Path(best_kernel_path).read_text(encoding="utf-8").splitlines(keepends=True)
+                diff = difflib.unified_diff(
+                    original, optimized,
+                    fromfile=f"a/{Path(kernel_path).name}",
+                    tofile=f"b/{Path(kernel_path).name}",
+                )
+                patch_text = "".join(diff)
+                if patch_text:
+                    (result_dir / "patch_openevolve.patch").write_text(patch_text, encoding="utf-8")
+                    self._log_message(f"[OpenEvolveWorker] Saved patch ({len(patch_text)} bytes)")
+            except Exception as e:
+                self._log_message(f"[OpenEvolveWorker] Could not generate patch: {e}")
 
     def _log_message(self, message: str):
         """Log to file or stdout."""
@@ -174,8 +248,9 @@ def main():
     )
     parser.add_argument("--commandment", default=None, help="Path to COMMANDMENT.md")
     parser.add_argument("--baseline-metrics", default=None, help="Path to baseline_metrics.json")
+    parser.add_argument("--codebase-context", default=None, help="Path to CODEBASE_CONTEXT.md")
     parser.add_argument("--iterations", type=int, default=10, help="Max iterations (default: 10)")
-    parser.add_argument("--gpu", type=int, default=0, help="GPU device ID (default: 0)")
+    parser.add_argument("--gpu", type=str, default="0", help="GPU device ID(s), comma-separated (default: 0)")
     parser.add_argument("--output-dir", default=None, help="Output directory for results")
 
     args = parser.parse_args()
@@ -191,6 +266,8 @@ def main():
             args.commandment = meta.get("commandment")
         if not args.baseline_metrics:
             args.baseline_metrics = meta.get("baseline_metrics")
+        if not args.codebase_context:
+            args.codebase_context = meta.get("codebase_context")
 
     if not args.kernel_path:
         parser.error("--kernel-path is required (or provide --from-task)")

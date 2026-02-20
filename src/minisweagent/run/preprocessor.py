@@ -1,8 +1,8 @@
 """Preprocessor: sequential pipeline of existing modules.
 
-Runs resolve-kernel-url -> test-discovery -> kernel-profile ->
-baseline-metrics -> commandment in order and returns a context dict
-for the orchestrator.
+Runs resolve-kernel-url -> codebase-context -> test-discovery ->
+kernel-profile -> baseline-metrics -> commandment in order and returns
+a context dict for the orchestrator.
 
 Each step calls the *same* Python function that the corresponding CLI
 uses, so behaviour is identical whether invoked from here or from the
@@ -89,9 +89,9 @@ def run_preprocessor(
     Returns
     -------
     dict with keys:
-        resolved, discovery, profiling, baseline_metrics,
-        commandment, test_command, kernel_path, repo_root,
-        harness_path
+        resolved, codebase_context_path, discovery, profiling,
+        baseline_metrics, commandment, test_command, kernel_path,
+        repo_root, harness_path
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -106,9 +106,9 @@ def run_preprocessor(
 
     # ── 1. resolve-kernel-url ────────────────────────────────────────
     _print(
-        "[bold cyan]--- Step 1/5: Resolve kernel URL ---[/bold cyan]"
+        "[bold cyan]--- Step 1/6: Resolve kernel URL ---[/bold cyan]"
         if console
-        else "--- Step 1/5: Resolve kernel URL ---"
+        else "--- Step 1/6: Resolve kernel URL ---"
     )
 
     from minisweagent.tools.resolve_kernel_url_impl import resolve_kernel_url
@@ -126,8 +126,25 @@ def run_preprocessor(
     (output_dir / "resolved.json").write_text(json.dumps(resolved, indent=2, default=str))
     _print(f"  Kernel: {kernel_path}")
 
-    # ── 2. test-discovery (automated_test_discovery MCP) ────────────
-    _print("[bold cyan]--- Step 2/5: Test discovery ---[/bold cyan]" if console else "--- Step 2/5: Test discovery ---")
+    # ── 2. codebase context ──────────────────────────────────────────
+    _print(
+        "[bold cyan]--- Step 2/6: Codebase context ---[/bold cyan]"
+        if console
+        else "--- Step 2/6: Codebase context ---"
+    )
+
+    from minisweagent.run.codebase_context import generate_codebase_context
+
+    codebase_context_path = generate_codebase_context(
+        repo_root=Path(repo_root),
+        kernel_path=Path(kernel_path),
+        output_dir=output_dir,
+    )
+    ctx["codebase_context_path"] = str(codebase_context_path)
+    _print(f"  CODEBASE_CONTEXT.md written ({codebase_context_path.stat().st_size} bytes)")
+
+    # ── 3. test-discovery (automated_test_discovery MCP) ────────────
+    _print("[bold cyan]--- Step 3/6: Test discovery ---[/bold cyan]" if console else "--- Step 3/6: Test discovery ---")
 
     _ensure_mcp_importable()
     from automated_test_discovery.server import discover as atd_discover
@@ -143,7 +160,7 @@ def run_preprocessor(
     tests = disc_dict.get("tests", [])
     _print(f"  Tests found: {len(tests)}")
 
-    # ── 2b. UnitTestAgent: create a proper test harness ──────────────
+    # ── 3b. UnitTestAgent: create a proper test harness ─────────────
     # The MCP discovery finds test files but doesn't create a validated
     # harness with --correctness/--profile modes. The UnitTestAgent is a
     # full LLM agent that can read the kernel, read existing tests, run
@@ -152,9 +169,9 @@ def run_preprocessor(
     _uta_model = model or (model_factory() if model_factory else None)
     if _uta_model and repo_root:
         _print(
-            "[bold cyan]--- Step 2b: UnitTestAgent (harness creation) ---[/bold cyan]"
+            "[bold cyan]--- Step 3b: UnitTestAgent (harness creation) ---[/bold cyan]"
             if console
-            else "--- Step 2b: UnitTestAgent (harness creation) ---"
+            else "--- Step 3b: UnitTestAgent (harness creation) ---"
         )
         try:
             from minisweagent.agents.unit_test_agent import (
@@ -168,6 +185,10 @@ def run_preprocessor(
             pipeline = DiscoveryPipeline(workspace_path=workspace)
             disc_result = pipeline.run(kernel_path=Path(kernel_path), interactive=False)
             discovery_context = format_discovery_for_agent(disc_result)
+
+            # Prepend codebase context so the agent has repo layout awareness
+            if codebase_context_path.exists():
+                discovery_context = codebase_context_path.read_text() + "\n\n" + discovery_context
 
             kernel_name = Path(kernel_path).stem
             discovery_context += (
@@ -200,9 +221,9 @@ def run_preprocessor(
     if test_command:
         _print(f"  Test command: {test_command}")
 
-    # ── 3. kernel-profile (via profiler-mcp) ─────────────────────────
+    # ── 4. kernel-profile (via profiler-mcp) ─────────────────────────
     _print(
-        "[bold cyan]--- Step 3/5: Kernel profiling ---[/bold cyan]" if console else "--- Step 3/5: Kernel profiling ---"
+        "[bold cyan]--- Step 4/6: Kernel profiling ---[/bold cyan]" if console else "--- Step 4/6: Kernel profiling ---"
     )
 
     profiling: dict[str, Any] | None = None
@@ -233,9 +254,9 @@ def run_preprocessor(
         (output_dir / "profile.json").write_text(json.dumps(profiling, indent=2, default=str))
         _print("  Profiling complete")
 
-    # ── 4. baseline-metrics ──────────────────────────────────────────
+    # ── 5. baseline-metrics ──────────────────────────────────────────
     _print(
-        "[bold cyan]--- Step 4/5: Baseline metrics ---[/bold cyan]" if console else "--- Step 4/5: Baseline metrics ---"
+        "[bold cyan]--- Step 5/6: Baseline metrics ---[/bold cyan]" if console else "--- Step 5/6: Baseline metrics ---"
     )
 
     baseline_metrics: dict[str, Any] | None = None
@@ -259,8 +280,8 @@ def run_preprocessor(
     if baseline_metrics:
         (output_dir / "baseline_metrics.json").write_text(json.dumps(baseline_metrics, indent=2, default=str))
 
-    # ── 5. commandment ───────────────────────────────────────────────
-    _print("[bold cyan]--- Step 5/5: Commandment ---[/bold cyan]" if console else "--- Step 5/5: Commandment ---")
+    # ── 6. commandment ───────────────────────────────────────────────
+    _print("[bold cyan]--- Step 6/6: Commandment ---[/bold cyan]" if console else "--- Step 6/6: Commandment ---")
 
     commandment: str | None = None
     if test_command:
@@ -297,7 +318,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="GEAK preprocessor: resolve → discover → profile → baseline → commandment",
+        description="GEAK preprocessor: resolve → context → discover → profile → baseline → commandment",
     )
     parser.add_argument("url", help="GitHub URL or local path to the kernel")
     parser.add_argument(

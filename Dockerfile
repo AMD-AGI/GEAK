@@ -43,7 +43,6 @@ RUN python3 -c "from metrix import Metrix; print('✅ Metrix installed')" || ech
 COPY entrypoint.sh /workspace/entrypoint.sh
 RUN chmod +x /workspace/entrypoint.sh
 
-ENV HIP_VISIBLE_DEVICES=0
 ENV GEAK_OE_ROOT=/opt/geak-oe
 ENTRYPOINT ["/workspace/entrypoint.sh"]
 CMD ["tail", "-f", "/dev/null"]

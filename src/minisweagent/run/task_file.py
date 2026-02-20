@@ -24,7 +24,7 @@ import yaml
 # ============================================================================
 
 # Path keys in frontmatter that should be stored as relative and resolved on read
-_PATH_KEYS = ("kernel_path", "repo_root", "commandment", "baseline_metrics", "profiling")
+_PATH_KEYS = ("kernel_path", "repo_root", "commandment", "baseline_metrics", "profiling", "codebase_context")
 
 
 def write_task_file(

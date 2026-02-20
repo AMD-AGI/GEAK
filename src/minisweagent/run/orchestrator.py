@@ -76,6 +76,9 @@ Test command: {test_command}
 Available GPUs: {gpu_ids}
 Output directory: {output_dir}
 
+### Codebase Context (repo structure and key files)
+{codebase_context}
+
 ### Baseline Metrics
 {baseline_metrics_summary}
 
@@ -162,6 +165,7 @@ def _tool_generate_tasks(
         "base_task_context": "",
         "agent_class": ctx["agent_class"],
         "model": ctx["model"],
+        "num_gpus": len(ctx.get("gpu_ids", [0])),
     }
 
     pp_dir = Path(ctx["preprocess_dir"])
@@ -177,6 +181,9 @@ def _tool_generate_tasks(
     discovery_path = pp_dir / "discovery.json"
     if discovery_path.exists():
         kwargs["discovery_path"] = discovery_path
+    codebase_ctx_path = pp_dir / "CODEBASE_CONTEXT.md"
+    if codebase_ctx_path.exists():
+        kwargs["codebase_context_path"] = codebase_ctx_path
     if previous_results_dir:
         kwargs["previous_results_dir"] = Path(previous_results_dir)
 
@@ -185,7 +192,10 @@ def _tool_generate_tasks(
     if not tasks:
         return json.dumps({"tasks": [], "message": "No tasks generated – converged."})
 
+    from minisweagent.agents.agent_spec import _agent_class_to_type
     from minisweagent.run.task_file import write_task_file
+
+    _AGENT_CLASS_TO_TYPE = _agent_class_to_type()
 
     task_files: list[str] = []
     for i, t in enumerate(tasks):
@@ -195,7 +205,7 @@ def _tool_generate_tasks(
         metadata = {
             "label": t.label,
             "priority": t.priority,
-            "agent_type": t.config.get("agent_type", "strategy_agent"),
+            "agent_type": _AGENT_CLASS_TO_TYPE.get(t.agent_class, "strategy_agent"),
             "kernel_language": t.kernel_language,
             "kernel_path": ctx.get("kernel_path"),
             "repo_root": ctx.get("repo_root"),
@@ -203,6 +213,8 @@ def _tool_generate_tasks(
             "commandment": str(pp_dir / "COMMANDMENT.md"),
             "baseline_metrics": str(pp_dir / "baseline_metrics.json"),
             "profiling": str(pp_dir / "profile.json"),
+            "codebase_context": str(pp_dir / "CODEBASE_CONTEXT.md"),
+            "num_gpus": t.num_gpus,
             "round": round_num,
         }
         write_task_file(fpath, metadata, t.task)
@@ -564,6 +576,11 @@ def run_orchestrator(
     cmd = preprocess_ctx.get("commandment") or ""
     cmd_excerpt = cmd[:1500] + ("..." if len(cmd) > 1500 else "") if cmd else "Not available"
 
+    codebase_ctx = ""
+    _codebase_ctx_path = preprocess_dir / "CODEBASE_CONTEXT.md"
+    if _codebase_ctx_path.exists():
+        codebase_ctx = _codebase_ctx_path.read_text().strip()
+
     # Build messages
     instance_msg = _INSTANCE_TEMPLATE.format(
         kernel_path=str(preprocess_ctx.get("kernel_path", "N/A")),
@@ -571,6 +588,7 @@ def run_orchestrator(
         test_command=str(preprocess_ctx.get("test_command", "N/A")),
         gpu_ids=str(gpu_ids),
         output_dir=str(_out),
+        codebase_context=codebase_ctx or "Not available",
         baseline_metrics_summary=bm_summary,
         profiling_summary=prof_summary,
         commandment_excerpt=cmd_excerpt,

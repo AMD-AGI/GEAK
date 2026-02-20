@@ -4,6 +4,9 @@
 
 set -e
 
+# Don't restrict GPUs at container level -- let geak --gpu-ids handle isolation
+unset HIP_VISIBLE_DEVICES
+
 echo "🚀 GEAK-agent container initializing..."
 echo ""
 

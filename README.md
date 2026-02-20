@@ -33,6 +33,7 @@ Output is written to `geak_output/` with independently verifiable stages:
 ```
 geak_output/
 ├── resolved.json               # Preprocessor: resolved kernel URL
+├── CODEBASE_CONTEXT.md         # Preprocessor: repo structure and key files
 ├── discovery.json              # Preprocessor: discovered tests/benchmarks
 ├── profile.json                # Preprocessor: GPU profiling results
 ├── baseline_metrics.json       # Preprocessor: baseline performance
@@ -92,6 +93,22 @@ select-patch --patch-dir results/round_1/<label>/
 | `validate-commandment <path>` | Validate a COMMANDMENT.md file |
 | `openevolve-worker --from-task <task.md>` | Run an OpenEvolve optimization task |
 | `select-patch --patch-dir <dir>` | LLM-driven patch selection from parallel runs |
+
+## GPU Isolation
+
+Every tool an agent uses (bash, profile_kernel, openevolve) inherits the agent's `HIP_VISIBLE_DEVICES` so parallel tasks never contend on the same GPU.
+
+| Entry point | How GPUs are isolated |
+|---|---|
+| `geak --kernel-url <url> --gpu-ids 0,1,2,3` | Orchestrator dispatches tasks via `ParallelAgent._run_pool()`. Each task acquires N GPU slots from a queue; `HIP_VISIBLE_DEVICES` is set in the agent's environment and propagated to bash, MCP tools, and subprocesses. |
+| `geak --from-task <task.md> --gpu-ids 2` | Single-agent mode sets `env.config.env["HIP_VISIBLE_DEVICES"]` before creating the agent. `DefaultAgent.__init__` calls `toolruntime.set_env()` to propagate to all tools. |
+| `geak-orchestrate --gpu-ids 0,1,2,3` | Same as full pipeline -- dispatches through `ParallelAgent._run_pool()`. |
+| `openevolve-worker --gpu 0,1` | Sets `os.environ["HIP_VISIBLE_DEVICES"]` before spawning the optimizer subprocess. Accepts comma-separated IDs for multi-GPU runs. |
+| `task-generator --num-gpus 8` | No GPU compute, but `--num-gpus` tells the LLM planner how many GPUs are available so it generates enough tasks to fill them. |
+
+Multi-GPU tasks (e.g. OpenEvolve with `num_gpus: 3`) acquire multiple GPU slots from the pool and receive a comma-separated `HIP_VISIBLE_DEVICES` (e.g. `"2,5,7"`). Slots are returned when the task finishes.
+
+For implementation details, invariants, and how to add new GPU-aware tools, see [docs/gpu-isolation.md](docs/gpu-isolation.md).
 
 ## Configuration
 

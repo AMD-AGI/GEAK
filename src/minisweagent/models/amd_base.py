@@ -114,6 +114,10 @@ class AmdLlmModelBase:
     # Public API
     # ------------------------------------------------------------------
 
+    def set_tools(self, tools: list[dict]) -> None:
+        """Replace the tool schemas visible to the LLM."""
+        self.tools = tools
+
     def query(self, messages: list[dict], **kwargs) -> dict:
         """Query the model and return a standardised response dict."""
         response = self._query_api(messages, **kwargs)

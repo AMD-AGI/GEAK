@@ -17,8 +17,7 @@ from typing import Any
 
 def _build_tasks_from_dir(task_dir: Path) -> list[Any]:
     """Read all .md task files and build AgentTask objects."""
-    from minisweagent.agents.agent_spec import AgentTask
-    from minisweagent.agents.openevolve_worker import OpenEvolveWorker
+    from minisweagent.agents.agent_spec import AgentTask, _agent_type_to_class
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
     from minisweagent.run.task_file import read_task_file
 
@@ -26,6 +25,8 @@ def _build_tasks_from_dir(task_dir: Path) -> list[Any]:
     if not task_files:
         print(f"ERROR: no .md task files found in {task_dir}", file=sys.stderr)
         sys.exit(1)
+
+    _AGENT_TYPE_TO_CLASS = _agent_type_to_class()
 
     tasks: list[AgentTask] = []
     for tf in task_files:
@@ -36,34 +37,36 @@ def _build_tasks_from_dir(task_dir: Path) -> list[Any]:
         priority = int(meta.get("priority", 10))
         kernel_language = meta.get("kernel_language", "python")
 
+        agent_class = _AGENT_TYPE_TO_CLASS.get(agent_type, StrategyInteractiveAgent)
+
+        cfg: dict[str, Any] = {}
         if agent_type == "openevolve":
-            oe_config: dict[str, Any] = {}
             if meta.get("kernel_path"):
-                oe_config["kernel_path"] = meta["kernel_path"]
+                cfg["kernel_path"] = meta["kernel_path"]
             if meta.get("commandment"):
-                oe_config["commandment_path"] = meta["commandment"]
+                cfg["commandment_path"] = meta["commandment"]
             if meta.get("baseline_metrics"):
-                oe_config["baseline_metrics_path"] = meta["baseline_metrics"]
-            tasks.append(
-                AgentTask(
-                    agent_class=OpenEvolveWorker,
-                    task=body,
-                    label=label,
-                    priority=priority,
-                    kernel_language=kernel_language,
-                    config=oe_config,
-                )
+                cfg["baseline_metrics_path"] = meta["baseline_metrics"]
+
+        if meta.get("test_command"):
+            cfg["test_command"] = meta["test_command"]
+        elif meta.get("commandment"):
+            from minisweagent.run.dispatch import _derive_test_command_from_commandment
+
+            derived = _derive_test_command_from_commandment(meta["commandment"])
+            if derived:
+                cfg["test_command"] = derived
+
+        tasks.append(
+            AgentTask(
+                agent_class=agent_class,
+                task=body,
+                label=label,
+                priority=priority,
+                kernel_language=kernel_language,
+                config=cfg,
             )
-        else:
-            tasks.append(
-                AgentTask(
-                    agent_class=StrategyInteractiveAgent,
-                    task=body,
-                    label=label,
-                    priority=priority,
-                    kernel_language=kernel_language,
-                )
-            )
+        )
 
     return tasks
 
@@ -184,8 +187,6 @@ def main():
     agent_config: dict[str, Any] = {
         "patch_output_dir": str(output_dir),
         "save_patch": True,
-        "mode": "yolo",
-        "confirm_exit": False,
     }
 
     # Load test_command from first task file if available

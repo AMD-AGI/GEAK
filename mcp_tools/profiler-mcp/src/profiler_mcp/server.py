@@ -10,6 +10,7 @@ Usage:
 """
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,15 @@ def _profile_with_rocprof(
         from minisweagent.kernel_profile import _build_rocprof_result
         from minisweagent.tools.profiling_tools import ProfilingAnalyzer
 
+    # Empty HIP_VISIBLE_DEVICES hides all GPUs from ROCm.  We need to
+    # remove it for the profiling subprocess.  profiler-mcp runs as a
+    # dedicated single-threaded MCP server process (not inside the
+    # multi-threaded parallel agent), so a save/restore of os.environ
+    # is safe here -- no concurrent threads can observe the temporary gap.
+    _hip_removed: str | None = None
+    if os.environ.get("HIP_VISIBLE_DEVICES") == "":
+        _hip_removed = os.environ.pop("HIP_VISIBLE_DEVICES")
+
     analyzer = ProfilingAnalyzer(profiling_type=profiling_type)
     try:
         raw = analyzer.profile_structured(
@@ -112,6 +122,8 @@ def _profile_with_rocprof(
         )
     finally:
         analyzer.cleanup()
+        if _hip_removed is not None:
+            os.environ["HIP_VISIBLE_DEVICES"] = _hip_removed
 
     if not raw.get("success"):
         return {

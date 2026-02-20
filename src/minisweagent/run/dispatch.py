@@ -9,10 +9,59 @@ calls this; so does the ``run-tasks`` CLI indirectly.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _derive_test_command_from_commandment(commandment_path: str) -> str | None:
+    """Extract a test command from the COMMANDMENT's CORRECTNESS section.
+
+    Supports two formats:
+      1. Inline:  ``## CORRECTNESS\\n<command>``
+      2. Fenced:  ``## CORRECTNESS\\n```\\n<command>\\n`````
+
+    The command may be wrapped by ``${GEAK_WORK_DIR}/run.sh``; we strip
+    that wrapper and reconstruct a standalone ``python <script> ...`` call.
+    """
+    try:
+        text = Path(commandment_path).read_text()
+    except OSError:
+        logger.debug("Could not read commandment at %s", commandment_path)
+        return None
+
+    # Try fenced code block first (more structured)
+    fenced = re.search(
+        r"## CORRECTNESS\s*\n```[^\n]*\n(.+?)```",
+        text,
+        re.DOTALL,
+    )
+    if fenced:
+        line = fenced.group(1).strip().splitlines()[0].strip()
+    else:
+        inline = re.search(r"## CORRECTNESS\s*\n(.+)", text)
+        if not inline:
+            return None
+        line = inline.group(1).strip()
+
+    if not line:
+        return None
+
+    # Strip the run.sh wrapper: ${GEAK_WORK_DIR}/run.sh <script> [args]
+    script_match = re.search(r"run\.sh\s+(\S+\.py(?:\s+\S+)*)", line)
+    if script_match:
+        derived = f"python {script_match.group(1)}"
+        logger.debug("Derived test command from COMMANDMENT: %s", derived)
+        return derived
+
+    # Fallback: if the line itself looks like a runnable command, return it
+    if line.endswith(".py") or ".py " in line:
+        logger.debug("Using raw CORRECTNESS line as test command: %s", line)
+        return line
+
+    return None
 
 
 def _task_file_to_agent_task(task_file: Path):
@@ -22,19 +71,42 @@ def _task_file_to_agent_task(task_file: Path):
 
     meta, body = read_task_file(task_file)
 
+    from minisweagent.agents.agent_spec import _agent_type_to_class
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 
-    agent_class = StrategyInteractiveAgent
+    agent_type = meta.get("agent_type", "strategy_agent")
+    agent_class = _agent_type_to_class().get(agent_type, StrategyInteractiveAgent)
 
-    cfg: dict = {
-        "save_patch": True,
-        "step_limit": 0,
-        "cost_limit": 0.0,
-        "mode": "yolo",
-    }
+    if agent_type == "openevolve":
+        # OpenEvolveWorker extends DefaultAgent (not InteractiveAgent),
+        # so it does not accept 'mode' or 'use_strategy_manager'.
+        cfg: dict = {
+            "save_patch": True,
+            "step_limit": 0,
+            "cost_limit": 0.0,
+        }
+        if meta.get("kernel_path"):
+            cfg["kernel_path"] = meta["kernel_path"]
+        if meta.get("commandment"):
+            cfg["commandment_path"] = meta["commandment"]
+        if meta.get("baseline_metrics"):
+            cfg["baseline_metrics_path"] = meta["baseline_metrics"]
+    else:
+        cfg = {
+            "save_patch": True,
+            "step_limit": 0,
+            "cost_limit": 0.0,
+            "mode": "yolo",
+            "use_strategy_manager": True,
+        }
 
     if meta.get("test_command"):
         cfg["test_command"] = meta["test_command"]
+    elif meta.get("commandment"):
+        derived = _derive_test_command_from_commandment(meta["commandment"])
+        if derived:
+            cfg["test_command"] = derived
+            logger.info("Derived test_command from COMMANDMENT: %s", derived)
 
     # Prepend pipeline context so the sub-agent has all necessary information.
     # IMPORTANT: Paths from metadata use the ORIGINAL repo root.  The parallel
@@ -51,8 +123,8 @@ def _task_file_to_agent_task(task_file: Path):
         context_lines.append(f"KERNEL FILE TO EDIT: {meta['kernel_path']}")
     if meta.get("repo_root"):
         context_lines.append(f"REPO ROOT: {meta['repo_root']}")
-    if meta.get("test_command"):
-        context_lines.append(f"TEST COMMAND: {meta['test_command']}")
+    if cfg.get("test_command"):
+        context_lines.append(f"TEST COMMAND: {cfg['test_command']}")
     context_lines.append("")
 
     context_lines.append(
@@ -94,6 +166,17 @@ def _task_file_to_agent_task(task_file: Path):
         context_lines.append("(Read this file for detailed per-kernel profiling metrics)")
         context_lines.append("")
 
+    codebase_ctx_path = meta.get("codebase_context")
+    codebase_ctx_text: str | None = None
+    if codebase_ctx_path and Path(codebase_ctx_path).exists():
+        codebase_ctx_text = Path(codebase_ctx_path).read_text().strip()
+        context_lines.append("## Codebase Context (repo structure and key files)")
+        context_lines.append(codebase_ctx_text)
+        context_lines.append("")
+
+    if codebase_ctx_text:
+        cfg["codebase_context"] = codebase_ctx_text
+
     body = "\n".join(context_lines) + "\n" + body
 
     return AgentTask(
@@ -103,6 +186,7 @@ def _task_file_to_agent_task(task_file: Path):
         priority=int(meta.get("priority", 10)),
         kernel_language=meta.get("kernel_language", "python"),
         config=cfg,
+        num_gpus=int(meta.get("num_gpus", 1)),
     )
 
 
@@ -156,7 +240,6 @@ def run_task_batch(
 
     agent_config: dict[str, Any] = {
         "save_patch": True,
-        "mode": "yolo",
     }
 
     def env_factory():
