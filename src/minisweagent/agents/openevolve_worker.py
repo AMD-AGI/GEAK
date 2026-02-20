@@ -167,8 +167,8 @@ class OpenEvolveWorker(DefaultAgent):
             (result_dir / "openevolve_result.json").write_text(
                 json.dumps(data, indent=2, default=str), encoding="utf-8"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[OpenEvolveWorker] Failed to write openevolve_result.json: %s", e)
 
         # 2. Save a test-output-like summary so the scanner picks up speedup
         speedup = data.get("speedup", data.get("metrics", {}).get("speedup", "unknown"))
@@ -184,8 +184,8 @@ class OpenEvolveWorker(DefaultAgent):
         )
         try:
             (result_dir / "patch_openevolve_test.txt").write_text(summary, encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[OpenEvolveWorker] Failed to write patch_openevolve_test.txt: %s", e)
 
         # 3. Generate a unified diff patch if best_kernel_path is available
         best_kernel_path = data.get("best_kernel_path", "")

@@ -192,11 +192,10 @@ def _tool_generate_tasks(
     if not tasks:
         return json.dumps({"tasks": [], "message": "No tasks generated – converged."})
 
-    from minisweagent.agents.openevolve_worker import OpenEvolveWorker
-    from minisweagent.agents.swe_agent import SweAgent
+    from minisweagent.agents.agent_spec import _agent_class_to_type
     from minisweagent.run.task_file import write_task_file
 
-    _AGENT_CLASS_TO_TYPE = {OpenEvolveWorker: "openevolve", SweAgent: "swe_agent"}
+    _AGENT_CLASS_TO_TYPE = _agent_class_to_type()
 
     task_files: list[str] = []
     for i, t in enumerate(tasks):

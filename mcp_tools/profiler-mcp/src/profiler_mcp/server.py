@@ -105,11 +105,16 @@ def _profile_with_rocprof(
         from minisweagent.kernel_profile import _build_rocprof_result
         from minisweagent.tools.profiling_tools import ProfilingAnalyzer
 
-    # Empty HIP_VISIBLE_DEVICES hides all GPUs -- remove so ROCm sees them
+    # Empty HIP_VISIBLE_DEVICES hides all GPUs -- strip it from the env
+    # passed to the profiling subprocess instead of mutating os.environ
+    # (library code must never mutate os.environ; see docs/gpu-isolation.md).
+    clean_env: dict[str, str] | None = None
     if os.environ.get("HIP_VISIBLE_DEVICES") == "":
-        del os.environ["HIP_VISIBLE_DEVICES"]
+        clean_env = {k: v for k, v in os.environ.items() if k != "HIP_VISIBLE_DEVICES"}
 
     analyzer = ProfilingAnalyzer(profiling_type=profiling_type)
+    if clean_env is not None:
+        analyzer._env_override = clean_env
     try:
         raw = analyzer.profile_structured(
             profiling_workdir=workdir or str(Path.cwd()),

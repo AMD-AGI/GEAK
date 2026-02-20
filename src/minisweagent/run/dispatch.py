@@ -19,24 +19,47 @@ logger = logging.getLogger(__name__)
 def _derive_test_command_from_commandment(commandment_path: str) -> str | None:
     """Extract a test command from the COMMANDMENT's CORRECTNESS section.
 
-    The CORRECTNESS section has the form:
-        ${GEAK_WORK_DIR}/run.sh /path/to/test.py --correctness
-    We extract the python script path and reconstruct a standalone command.
+    Supports two formats:
+      1. Inline:  ``## CORRECTNESS\\n<command>``
+      2. Fenced:  ``## CORRECTNESS\\n```\\n<command>\\n`````
+
+    The command may be wrapped by ``${GEAK_WORK_DIR}/run.sh``; we strip
+    that wrapper and reconstruct a standalone ``python <script> ...`` call.
     """
     try:
         text = Path(commandment_path).read_text()
     except OSError:
+        logger.debug("Could not read commandment at %s", commandment_path)
         return None
 
-    m = re.search(r"## CORRECTNESS\s*\n(.+)", text)
-    if not m:
+    # Try fenced code block first (more structured)
+    fenced = re.search(
+        r"## CORRECTNESS\s*\n```[^\n]*\n(.+?)```",
+        text,
+        re.DOTALL,
+    )
+    if fenced:
+        line = fenced.group(1).strip().splitlines()[0].strip()
+    else:
+        inline = re.search(r"## CORRECTNESS\s*\n(.+)", text)
+        if not inline:
+            return None
+        line = inline.group(1).strip()
+
+    if not line:
         return None
 
-    line = m.group(1).strip()
     # Strip the run.sh wrapper: ${GEAK_WORK_DIR}/run.sh <script> [args]
     script_match = re.search(r"run\.sh\s+(\S+\.py(?:\s+\S+)*)", line)
     if script_match:
-        return f"python {script_match.group(1)}"
+        derived = f"python {script_match.group(1)}"
+        logger.debug("Derived test command from COMMANDMENT: %s", derived)
+        return derived
+
+    # Fallback: if the line itself looks like a runnable command, return it
+    if line.endswith(".py") or ".py " in line:
+        logger.debug("Using raw CORRECTNESS line as test command: %s", line)
+        return line
 
     return None
 
@@ -48,16 +71,11 @@ def _task_file_to_agent_task(task_file: Path):
 
     meta, body = read_task_file(task_file)
 
-    from minisweagent.agents.openevolve_worker import OpenEvolveWorker
+    from minisweagent.agents.agent_spec import _agent_type_to_class
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
-    from minisweagent.agents.swe_agent import SweAgent
 
     agent_type = meta.get("agent_type", "strategy_agent")
-    _AGENT_TYPE_TO_CLASS = {
-        "openevolve": OpenEvolveWorker,
-        "swe_agent": SweAgent,
-    }
-    agent_class = _AGENT_TYPE_TO_CLASS.get(agent_type, StrategyInteractiveAgent)
+    agent_class = _agent_type_to_class().get(agent_type, StrategyInteractiveAgent)
 
     if agent_type == "openevolve":
         # OpenEvolveWorker extends DefaultAgent (not InteractiveAgent),
@@ -74,7 +92,7 @@ def _task_file_to_agent_task(task_file: Path):
         if meta.get("baseline_metrics"):
             cfg["baseline_metrics_path"] = meta["baseline_metrics"]
     else:
-        cfg: dict = {
+        cfg = {
             "save_patch": True,
             "step_limit": 0,
             "cost_limit": 0.0,

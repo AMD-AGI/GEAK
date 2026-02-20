@@ -396,9 +396,13 @@ def _run_task_agent(
     workspace = discovery_result.workspace_path or kernel.file_path.parent
 
     read_only_tools = [t for t in get_tools_list() if t["name"] in ("str_replace_editor", "submit")]
-    model_impl = getattr(model, "_impl", model)
-    original_tools = list(model_impl.tools) if hasattr(model_impl, "tools") else None
-    model_impl.tools = read_only_tools
+    # Save and override tools via the public API when available
+    _model_target = model if hasattr(model, "set_tools") else getattr(model, "_impl", model)
+    original_tools = list(_model_target.tools) if hasattr(_model_target, "tools") else None
+    if hasattr(model, "set_tools"):
+        model.set_tools(read_only_tools)
+    else:
+        _model_target.tools = read_only_tools
 
     tmp_files: list[Path] = []
     try:
@@ -462,7 +466,10 @@ def _run_task_agent(
         raise RuntimeError(f"Task-generation agent did not submit results (exit: {exit_type}): {exit_msg[:500]}")
     finally:
         if original_tools is not None:
-            model_impl.tools = original_tools
+            if hasattr(model, "set_tools"):
+                model.set_tools(original_tools)
+            else:
+                _model_target.tools = original_tools
         for f in tmp_files:
             try:
                 f.unlink(missing_ok=True)
@@ -498,8 +505,9 @@ def _parse_llm_response(
     if not isinstance(raw_tasks, list):
         raise TypeError(f"Expected JSON array, got {type(raw_tasks).__name__}")
 
-    from minisweagent.agents.openevolve_worker import OpenEvolveWorker
-    from minisweagent.agents.swe_agent import SweAgent
+    from minisweagent.agents.agent_spec import _agent_type_to_class
+
+    type_to_class = _agent_type_to_class()
 
     tasks: list[AgentTask] = []
     for item in raw_tasks:
@@ -517,47 +525,28 @@ def _parse_llm_response(
         if not task_prompt:
             continue
 
+        resolved_class = type_to_class.get(agent_type, agent_class)
+
+        cfg: dict[str, Any] = {}
         if agent_type == "openevolve":
-            oe_config: dict[str, Any] = {}
             if kernel_path:
-                oe_config["kernel_path"] = kernel_path
+                cfg["kernel_path"] = kernel_path
             if commandment_path:
-                oe_config["commandment_path"] = commandment_path
+                cfg["commandment_path"] = commandment_path
             if baseline_metrics_path:
-                oe_config["baseline_metrics_path"] = baseline_metrics_path
-            tasks.append(
-                AgentTask(
-                    agent_class=OpenEvolveWorker,
-                    task=task_prompt,
-                    label=label,
-                    priority=priority,
-                    kernel_language=kernel_language,
-                    config=oe_config,
-                    num_gpus=task_num_gpus,
-                )
+                cfg["baseline_metrics_path"] = baseline_metrics_path
+
+        tasks.append(
+            AgentTask(
+                agent_class=resolved_class,
+                task=task_prompt,
+                label=label,
+                priority=priority,
+                kernel_language=kernel_language,
+                config=cfg,
+                num_gpus=task_num_gpus,
             )
-        elif agent_type == "swe_agent":
-            tasks.append(
-                AgentTask(
-                    agent_class=SweAgent,
-                    task=task_prompt,
-                    label=label,
-                    priority=priority,
-                    kernel_language=kernel_language,
-                    num_gpus=task_num_gpus,
-                )
-            )
-        else:
-            tasks.append(
-                AgentTask(
-                    agent_class=agent_class,
-                    task=task_prompt,
-                    label=label,
-                    priority=priority,
-                    kernel_language=kernel_language,
-                    num_gpus=task_num_gpus,
-                )
-            )
+        )
 
     if not tasks:
         raise ValueError("LLM response contained no valid tasks")
@@ -869,10 +858,9 @@ def main():
         out_dir = Path(args.output)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        from minisweagent.agents.openevolve_worker import OpenEvolveWorker as _OEW
-        from minisweagent.agents.swe_agent import SweAgent as _SWE
+        from minisweagent.agents.agent_spec import _agent_class_to_type
 
-        _AGENT_CLASS_TO_TYPE = {_OEW: "openevolve", _SWE: "swe_agent"}
+        _AGENT_CLASS_TO_TYPE = _agent_class_to_type()
 
         manifest = []
         for i, t in enumerate(tasks):

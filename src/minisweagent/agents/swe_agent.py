@@ -39,5 +39,8 @@ class SweAgent(InteractiveAgent):
         self._setup_test_perf_context()
 
         # Override model tools so the LLM only sees dispatchable tools
-        model_impl = getattr(self.model, "_impl", self.model)
-        model_impl.tools = self.toolruntime.get_tools_schema()
+        if hasattr(self.model, "set_tools"):
+            self.model.set_tools(self.toolruntime.get_tools_schema())
+        else:
+            model_impl = getattr(self.model, "_impl", self.model)
+            model_impl.tools = self.toolruntime.get_tools_schema()

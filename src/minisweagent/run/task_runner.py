@@ -17,10 +17,8 @@ from typing import Any
 
 def _build_tasks_from_dir(task_dir: Path) -> list[Any]:
     """Read all .md task files and build AgentTask objects."""
-    from minisweagent.agents.agent_spec import AgentTask
-    from minisweagent.agents.openevolve_worker import OpenEvolveWorker
+    from minisweagent.agents.agent_spec import AgentTask, _agent_type_to_class
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
-    from minisweagent.agents.swe_agent import SweAgent
     from minisweagent.run.task_file import read_task_file
 
     task_files = sorted(task_dir.glob("*.md"))
@@ -28,10 +26,7 @@ def _build_tasks_from_dir(task_dir: Path) -> list[Any]:
         print(f"ERROR: no .md task files found in {task_dir}", file=sys.stderr)
         sys.exit(1)
 
-    _AGENT_TYPE_TO_CLASS = {
-        "openevolve": OpenEvolveWorker,
-        "swe_agent": SweAgent,
-    }
+    _AGENT_TYPE_TO_CLASS = _agent_type_to_class()
 
     tasks: list[AgentTask] = []
     for tf in task_files:
