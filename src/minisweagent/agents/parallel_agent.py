@@ -387,9 +387,12 @@ class ParallelAgent(DefaultAgent):
             # Create a NEW dict to avoid shared-reference race across threads
             new_env = dict(env_config_dict.get("env") or {})
             new_env[repo_path_str] = worktree_path_str
+            new_env["GEAK_WORK_DIR"] = worktree_path_str
+            new_env["GEAK_REPO_ROOT"] = repo_path_str
             if gpu_ids and agent_id < len(gpu_ids):
                 gpu_id = gpu_ids[agent_id]
                 new_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+                new_env["GEAK_GPU_DEVICE"] = str(gpu_id)
                 if console:
                     # Use lock to ensure console output completes before stdout redirection
                     with _stdout_lock:
@@ -535,7 +538,13 @@ class ParallelAgent(DefaultAgent):
             env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
             env_config_dict["cwd"] = worktree_path_str
             # Create a NEW dict to avoid shared-reference race across threads
-            env_config_dict["env"] = {**(env_config_dict.get("env") or {}), "HIP_VISIBLE_DEVICES": spec.hip_visible_devices}
+            env_config_dict["env"] = {
+                **(env_config_dict.get("env") or {}),
+                "HIP_VISIBLE_DEVICES": spec.hip_visible_devices,
+                "GEAK_WORK_DIR": worktree_path_str,
+                "GEAK_REPO_ROOT": str(repo_path.resolve()),
+                "GEAK_GPU_DEVICE": spec.hip_visible_devices,
+            }
 
             parallel_env = type(base_env)(**env_config_dict)
 
@@ -707,7 +716,13 @@ class ParallelAgent(DefaultAgent):
                 env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
                 env_config_dict["cwd"] = wt_path_str
                 # Create a NEW dict to avoid shared-reference race across threads
-                env_config_dict["env"] = {**(env_config_dict.get("env") or {}), "HIP_VISIBLE_DEVICES": hip_devices}
+                env_config_dict["env"] = {
+                    **(env_config_dict.get("env") or {}),
+                    "HIP_VISIBLE_DEVICES": hip_devices,
+                    "GEAK_WORK_DIR": wt_path_str,
+                    "GEAK_REPO_ROOT": str(repo_path.resolve()),
+                    "GEAK_GPU_DEVICE": hip_devices,
+                }
                 parallel_env = type(base_env)(**env_config_dict)
 
                 parallel_output = None

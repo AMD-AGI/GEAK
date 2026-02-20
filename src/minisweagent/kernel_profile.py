@@ -287,28 +287,6 @@ def _profile_with_metrix(command: str, gpu_devices, replays: int, quick: bool) -
 
 
 # ---------------------------------------------------------------------------
-# rocprof-compute backend
-# ---------------------------------------------------------------------------
-
-
-def _profile_with_rocprof(command: str, workdir: str, profiling_type: str, gpu_device: str) -> dict:
-    """Profile using rocprof-compute and return backend-neutral JSON."""
-    from minisweagent.tools.profiling_tools import ProfilingAnalyzer
-
-    analyzer = ProfilingAnalyzer(profiling_type=profiling_type)
-    try:
-        raw = analyzer.profile_structured(profiling_workdir=workdir, profiling_cmd=command)
-    finally:
-        analyzer.cleanup()
-
-    if not raw.get("success"):
-        print(f"ERROR: rocprof-compute profiling failed: {raw.get('error')}", file=sys.stderr)
-        sys.exit(1)
-
-    return _build_rocprof_result(raw, gpu_device=gpu_device)
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 

@@ -86,8 +86,7 @@ def format_discovery_for_agent(result) -> str:
     Includes kernel analysis, language-specific testing guidance, discovered
     tests/benchmarks with confidence scores, and extracted test patterns.
 
-    This replaces the old ``run_discovery_pipeline()`` which ran a second
-    discovery pass.  Now we just format the already-available result.
+    Formats an already-available ``DiscoveryResult`` for agent consumption.
     """
     if result is None:
         return ""
@@ -181,28 +180,6 @@ def format_discovery_for_agent(result) -> str:
 
     return "\n".join(lines)
 
-
-# Keep backward-compatible alias so existing call sites don't break
-def run_discovery_pipeline(kernel_path: Path, repo: Path) -> str:
-    """Run discovery and format results.  Prefer ``format_discovery_for_agent``
-    with a pre-existing ``DiscoveryResult`` to avoid a redundant scan."""
-    try:
-        from minisweagent.tools.discovery import DiscoveryPipeline
-        from minisweagent.tools.resolve_kernel_url_impl import find_resolved_clone_root
-    except ImportError:
-        return ""
-
-    try:
-        workspace = repo
-        clone_root = find_resolved_clone_root(kernel_path)
-        if clone_root is not None:
-            workspace = clone_root
-        pipeline = DiscoveryPipeline(workspace_path=workspace)
-        result = pipeline.run(kernel_path=kernel_path, interactive=False)
-    except Exception:
-        return ""
-
-    return format_discovery_for_agent(result)
 
 
 def run_unit_test_agent(

@@ -138,3 +138,50 @@ def test_codebase_context_cli_calls_generate():
 
     source = inspect.getsource(main)
     assert "generate_codebase_context" in source
+
+
+# ── COMMANDMENT validator and verbatim execution ─────────────────────
+
+
+def test_validator_requires_pythonpath_in_setup():
+    """COMMANDMENT validator errors if SETUP doesn't set PYTHONPATH."""
+    from minisweagent.tools.validate_commandment import validate_commandment
+
+    bad = "## SETUP\necho hello\n\n## CORRECTNESS\npython test.py\n\n## PROFILE\nkernel-profile test.py\n"
+    result = validate_commandment(bad)
+    assert not result["valid"]
+    assert any("PYTHONPATH" in e for e in result["errors"])
+
+    good = (
+        "## SETUP\n"
+        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:/repo:${PYTHONPATH}\\n' > run.sh\n\n"
+        "## CORRECTNESS\nrun.sh test.py --correctness\n\n"
+        "## PROFILE\nkernel-profile run.sh test.py --profile\n"
+    )
+    result = validate_commandment(good)
+    assert result["valid"], result["errors"]
+
+
+def test_commandment_test_command_is_verbatim(tmp_path):
+    """dispatch._commandment_test_command reads sections verbatim -- no parsing."""
+    from minisweagent.run.dispatch import _commandment_test_command
+
+    cmd_file = tmp_path / "COMMANDMENT.md"
+    cmd_file.write_text(
+        "## SETUP\n"
+        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:/repo:${PYTHONPATH}\\n' "
+        "\"${GEAK_WORK_DIR}\" > ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh\n\n"
+        "## CORRECTNESS\n"
+        "${GEAK_WORK_DIR}/run.sh /path/to/harness.py --correctness\n\n"
+        "## PROFILE\n"
+        "kernel-profile ${GEAK_WORK_DIR}/run.sh /path/to/harness.py --profile\n"
+    )
+
+    result = _commandment_test_command(str(cmd_file))
+    assert result is not None
+    # SETUP command must appear verbatim (no stripping of run.sh)
+    assert "${GEAK_WORK_DIR}/run.sh" in result
+    # CORRECTNESS command must appear verbatim
+    assert "--correctness" in result
+    # Must NOT contain bare "python" (that would mean we stripped the wrapper)
+    assert not result.startswith("python ")

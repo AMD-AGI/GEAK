@@ -79,7 +79,7 @@ def display_config_with_sources(merged_config: dict, console):
     """Display configuration with sources and conflicts."""
     lines = [
         "\n" + "=" * 80,
-        "Configuration (Priority: Prompt > CLI > YAML):",
+        "Configuration (Priority: CLI > Prompt > YAML):",
         "=" * 80,
     ]
 
@@ -123,7 +123,7 @@ def interactive_config_edit_with_sources(merged_config: dict, console) -> tuple[
     conflicts = merged_config.get("_conflicts", {})
     if conflicts:
         console.print("\n[bold yellow]⚠ Configuration conflicts detected (see above).[/bold yellow]")
-        console.print("[dim]Prompt-detected values will be used by default (highest priority).[/dim]")
+        console.print("[dim]CLI values take priority; prompt fills gaps only.[/dim]")
 
     current_config = {k: v for k, v in merged_config.items() if not k.startswith("_")}
     current_patch_dir = merged_config["_patch_output_dir"]
@@ -227,8 +227,8 @@ def load_and_merge_configs(
     """Load and merge configurations from multiple sources.
 
     Configuration priority (highest to lowest):
-    1. Prompt auto-detect (from task description)
-    2. CLI arguments (--repo, --test-command, etc.)
+    1. CLI arguments (--repo, --test-command, etc.)
+    2. Prompt auto-detect (fills gaps not covered by CLI/YAML)
     3. YAML parallel_config
 
     When conflicts exist, user is prompted for confirmation.
@@ -318,16 +318,18 @@ def load_and_merge_configs(
             )
             parsed_config = parse_task_info(task_content, model)
 
-            # Source 3: Prompt auto-detect (highest priority)
-            if parsed_config.get("repo"):
+            # Source 3: Prompt auto-detect -- only fill gaps not already
+            # covered by CLI or YAML.  An explicit CLI flag (e.g.
+            # --gpu-ids) must never be overridden by an LLM guess.
+            if "repo" in missing_in_cli_yaml and parsed_config.get("repo"):
                 config_sources["repo"]["prompt"] = Path(parsed_config["repo"])
-            if parsed_config.get("test_command"):
+            if "test_command" in missing_in_cli_yaml and parsed_config.get("test_command"):
                 config_sources["test_command"]["prompt"] = parsed_config["test_command"]
-            if parsed_config.get("metric"):
+            if "metric" in missing_in_cli_yaml and parsed_config.get("metric"):
                 config_sources["metric"]["prompt"] = parsed_config["metric"]
-            if parsed_config.get("num_parallel") is not None:
+            if "num_parallel" in missing_in_cli_yaml and parsed_config.get("num_parallel") is not None:
                 config_sources["num_parallel"]["prompt"] = parsed_config["num_parallel"]
-            if parsed_config.get("gpu_ids"):
+            if "gpu_ids" in missing_in_cli_yaml and parsed_config.get("gpu_ids"):
                 config_sources["gpu_ids"]["prompt"] = parsed_config["gpu_ids"]
             if parsed_config.get("kernel_name"):
                 kernel_name = parsed_config["kernel_name"]
@@ -336,10 +338,10 @@ def load_and_merge_configs(
     # Apply highest priority source for each field
     def get_highest_priority(field_sources: dict[str, Any]) -> tuple[Any, str | None]:
         """Get value from highest priority source. Returns (value, source)"""
-        if "prompt" in field_sources:
-            return field_sources["prompt"], "prompt"
-        elif "cli" in field_sources:
+        if "cli" in field_sources:
             return field_sources["cli"], "cli"
+        elif "prompt" in field_sources:
+            return field_sources["prompt"], "prompt"
         elif "yaml" in field_sources:
             return field_sources["yaml"], "yaml"
         return None, None

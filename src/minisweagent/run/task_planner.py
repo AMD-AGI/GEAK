@@ -18,9 +18,7 @@ Priority scheme (lower = higher priority, runs first):
 from __future__ import annotations
 
 from minisweagent.agents.agent_spec import AgentTask
-from minisweagent.tools.discovery import (
-    DiscoveryResult,
-)
+from minisweagent.tools.discovery_types import DiscoveryResult
 
 # Rules injected into EVERY task prompt to prevent common agent mistakes.
 _GPU_AND_PROFILER_RULES = """

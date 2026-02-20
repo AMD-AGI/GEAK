@@ -98,28 +98,6 @@
     }
   },
   {
-    "name": "profiling",
-    "type": "function",
-    "description": "Profile code with rocprof to identify kernel bottlenecks. After test, run profiling to get bottlenecks for further optimization.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "profiling_workdir": {
-          "type": "string",
-          "description": "Absolute path to directory, used to as working directory to running profiling command."
-        },
-        "profiling_cmd": {
-          "type": "string",
-          "description": "The command to execute the kernel during profiling, e.g. execution command using in performance test."
-        }
-      },
-      "required": [
-        "profiling_workdir",
-        "profiling_cmd"
-      ]
-    }
-  },
-  {
     "name": "strategy_manager",
     "type": "function",
     "description": "Manage optimization strategies. Commands: create (initialize strategy list), show (view strategies), next (get next pending strategy), mark (update status), add (add new strategy), remove (skip/delete strategy), update (modify strategy), note (add note), summary (show statistics).",

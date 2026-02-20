@@ -17,13 +17,6 @@ MCP_SERVERS = {
         "tools": ["optimize_kernel"],
         "description": "OpenEvolve optimizer - LLM-guided kernel evolution",
     },
-    "kernel-profiler": {
-        "command": ["python3", "-m", "kernel_profiler.server"],
-        "cwd": str(MSA_ROOT / "mcp_tools" / "kernel-profiler"),
-        "env": {"PYTHONPATH": str(MSA_ROOT / "mcp_tools" / "kernel-profiler" / "src")},
-        "tools": ["profile_kernel", "profile_kernel_with_rocprof"],
-        "description": "GPU kernel profiler using rocprof-compute",
-    },
     "kernel-evolve": {
         "command": ["python3", "-m", "kernel_evolve.server"],
         "cwd": str(MSA_ROOT / "mcp_tools" / "kernel-evolve"),

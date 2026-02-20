@@ -308,12 +308,15 @@ class MetrixTool:
 
     def _extract_all_metrics(self, kernel) -> dict[str, float]:
         """Extract all metrics from kernel object, including duration."""
-        metrics = {}
+        metrics: dict[str, float] = {}
 
-        # Add duration as a core metric
-        metrics["duration_us"] = kernel.duration_us.avg
+        dur = kernel.duration_us
+        metrics["duration_us"] = dur.avg
+        for stat_name in ("min", "max", "median"):
+            val = getattr(dur, stat_name, None)
+            if val is not None:
+                metrics[f"duration_us_{stat_name}"] = float(val)
 
-        # Extract profiler metrics (metrix returns Statistics objects with aggregate_by_kernel=True)
         kernel_metrics = kernel.metrics if hasattr(kernel, "metrics") else {}
         for name, value in kernel_metrics.items():
             metrics[name] = float(value.avg)

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from minisweagent.run.task_generator import _parse_llm_response, generate_tasks
-from minisweagent.tools.discovery import DiscoveryResult, KernelInfo
+from minisweagent.tools.discovery_types import DiscoveryResult, KernelInfo
 
 
 class FakeAgentClass:

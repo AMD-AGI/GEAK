@@ -27,14 +27,83 @@ REQUIRED_SECTIONS = {"SETUP", "CORRECTNESS", "PROFILE"}
 SHELL_BUILTINS = {"cd", "source", "export", "alias", "ulimit", "pushd", "popd"}
 
 
-def validate_commandment(content: str) -> dict:
+def _extract_section_text(content: str, section: str) -> str | None:
+    """Return the raw text of a ``## <section>`` block, or *None* if absent."""
+    lines: list[str] = []
+    in_section = False
+    for raw_line in content.splitlines():
+        header = re.match(r"^##\s+(\w+)", raw_line.strip())
+        if header:
+            if header.group(1) == section:
+                in_section = True
+                continue
+            elif in_section:
+                break
+            continue
+        if in_section:
+            lines.append(raw_line)
+    if not lines:
+        return None
+    return "\n".join(lines)
+
+
+_REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness")
+
+
+def _validate_harness_flags(harness_path: str) -> list[str]:
+    """Check that a harness script defines the required CLI flags.
+
+    Returns a (possibly empty) list of warning strings.  This is a
+    secondary safety net; the primary validation lives in the preprocessor
+    where the harness can be re-generated via the UnitTestAgent retry loop.
+    """
+    from pathlib import Path as _Path
+
+    harness = _Path(harness_path)
+    warnings: list[str] = []
+    if not harness.is_file():
+        warnings.append(f"Harness file not found: {harness}")
+        return warnings
+
+    source = harness.read_text()
+    has_parser = (
+        "argparse" in source
+        or "ArgumentParser" in source
+        or "click" in source
+        or "typer" in source
+    )
+    if not has_parser:
+        warnings.append(
+            f"Harness '{harness.name}' does not use argparse/click/typer -- "
+            "CLI flags referenced in COMMANDMENT will be silently ignored"
+        )
+    for flag in _REQUIRED_HARNESS_FLAGS:
+        if flag not in source:
+            warnings.append(
+                f"Harness '{harness.name}' does not define '{flag}' flag "
+                "but COMMANDMENT references it"
+            )
+    return warnings
+
+
+def validate_commandment(content: str, *, harness_path: str | None = None) -> dict:
     """Validate a COMMANDMENT.md file's content.
 
-    Returns:
-        dict with keys:
-          - valid (bool): True if no errors found
-          - errors (list[str]): Critical issues that will cause OpenEvolve failure
-          - warnings (list[str]): Non-critical issues worth noting
+    Parameters
+    ----------
+    content:
+        The raw COMMANDMENT.md text.
+    harness_path:
+        Optional path to the test harness script.  When provided the
+        validator performs additional static checks to ensure the harness
+        supports the CLI flags used in CORRECTNESS / PROFILE sections.
+
+    Returns
+    -------
+    dict with keys:
+      - valid (bool): True if no errors found
+      - errors (list[str]): Critical issues that will cause OpenEvolve failure
+      - warnings (list[str]): Non-critical issues worth noting
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -111,6 +180,17 @@ def validate_commandment(content: str) -> dict:
                 f'use: bash -c "{stripped}"'
             )
 
+    # --- Check that SETUP configures PYTHONPATH ---
+    setup_text = _extract_section_text(content, "SETUP")
+    if setup_text is not None and "PYTHONPATH" not in setup_text:
+        errors.append(
+            "## SETUP does not configure PYTHONPATH. "
+            "The COMMANDMENT's SETUP section MUST set PYTHONPATH so that "
+            "test harnesses can import the package under optimization. "
+            "All agents execute COMMANDMENT commands verbatim; without "
+            "PYTHONPATH the imports will fail."
+        )
+
     # --- Check for common mistakes ---
     if "HIP_VISIBLE_DEVICES" in content and not re.search(r"\$\{?HIP_VISIBLE_DEVICES", content):
         warnings.append(
@@ -136,6 +216,10 @@ def validate_commandment(content: str) -> dict:
                 f"Section ## {section} exists but contains no commands. "
                 f"Each section must have at least one executable command."
             )
+
+    # --- Validate harness supports the flags used in COMMANDMENT ---
+    if harness_path:
+        warnings.extend(_validate_harness_flags(harness_path))
 
     return {
         "valid": len(errors) == 0,

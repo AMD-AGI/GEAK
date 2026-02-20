@@ -42,7 +42,7 @@ from typing import Any
 
 from minisweagent.agents.agent_spec import AgentTask
 from minisweagent.run.task_planner import _GPU_AND_PROFILER_RULES
-from minisweagent.tools.discovery import DiscoveryResult
+from minisweagent.tools.discovery_types import DiscoveryResult
 
 logger = logging.getLogger(__name__)
 
@@ -726,23 +726,12 @@ def main():
         default=1,
         help="Number of available GPUs (guides task count and GPU allocation, default: 1)",
     )
-    parser.add_argument(
-        "--allowed-agents",
-        default=None,
-        help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS.",
-    )
-    parser.add_argument(
-        "--excluded-agents",
-        default=None,
-        help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS.",
-    )
+    from minisweagent.run.pipeline_helpers import add_agent_filter_args, apply_agent_filter_env
+
+    add_agent_filter_args(parser)
 
     args = parser.parse_args()
-
-    if args.allowed_agents:
-        os.environ["GEAK_ALLOWED_AGENTS"] = args.allowed_agents
-    if args.excluded_agents:
-        os.environ["GEAK_EXCLUDED_AGENTS"] = args.excluded_agents
+    apply_agent_filter_env(args)
 
     # Populate from discovery JSON if provided (explicit flags override)
     disc_json = None
@@ -776,84 +765,34 @@ def main():
         print(f"ERROR: kernel path not found: {args.kernel_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Build DiscoveryResult -- from pre-computed JSON if available, else run pipeline
-    from minisweagent.tools.discovery import (
-        BenchmarkInfo,
-        DiscoveryResult,
-        KernelInfo,
-        TestInfo,
-    )
-
-    if disc_json:
-        print(f"[task-generator] Loading discovery from {args.from_discovery}...", file=sys.stderr)
-        kernel_info = disc_json.get("kernel") or {}
-        kernels = []
-        if kernel_info.get("file"):
-            kernels.append(
-                KernelInfo(
-                    file_path=Path(kernel_info["file"]),
-                    kernel_name=kernel_info.get("name", kernel_path.stem),
-                    kernel_type=kernel_info.get("type", "unknown"),
-                    kernel_language="python" if kernel_path.suffix == ".py" else "cpp",
-                    function_names=kernel_info.get("functions", []),
-                )
-            )
-        tests = [
-            TestInfo(
-                file_path=Path(t["file"]),
-                test_type=t.get("type", "script"),
-                command=t.get("command", ""),
-                confidence=t.get("confidence", 0.5),
-            )
-            for t in (disc_json.get("tests") or [])
-        ]
-        benchmarks = [
-            BenchmarkInfo(
-                file_path=Path(b["file"]),
-                bench_type=b.get("type", "script"),
-                command=b.get("command", ""),
-                confidence=b.get("confidence", 0.5),
-            )
-            for b in (disc_json.get("benchmarks") or [])
-        ]
-        workspace = Path(disc_json.get("workspace", kernel_path.parent))
-        discovery_result = DiscoveryResult(
-            kernels=kernels,
-            tests=tests,
-            benchmarks=benchmarks,
-            workspace_path=workspace,
-        )
-    else:
+    if not disc_json:
+        # No pre-computed discovery JSON -- run automated-test-discovery
         print(f"[task-generator] Running discovery on {kernel_path}...", file=sys.stderr)
         try:
-            from minisweagent.tools.discovery import DiscoveryPipeline
+            from automated_test_discovery.server import discover as atd_discover
 
-            repo_root = Path(args.repo_root).resolve() if args.repo_root else None
-            workspace = repo_root or kernel_path.parent
-            pipeline = DiscoveryPipeline(workspace_path=workspace)
-            discovery_result = pipeline.run(kernel_path=kernel_path)
+            _discover_fn = getattr(atd_discover, "fn", atd_discover)
+            disc_json = _discover_fn(
+                kernel_path=str(kernel_path),
+                output_dir=str(kernel_path.parent),
+            )
         except Exception as e:
             print(f"ERROR: discovery failed: {e}", file=sys.stderr)
             sys.exit(1)
+    else:
+        print(f"[task-generator] Loading discovery from {args.from_discovery}...", file=sys.stderr)
+
+    discovery_result = DiscoveryResult.from_dict(disc_json, kernel_path)
 
     if not discovery_result.kernels:
         print("ERROR: no kernels found by discovery", file=sys.stderr)
         sys.exit(1)
 
     # Create model (REQUIRED)
-    model_name = args.model or os.environ.get("GEAK_MODEL")
     try:
-        from minisweagent.config import get_config_path
-        from minisweagent.models import get_model
+        from minisweagent.run.pipeline_helpers import load_geak_model
 
-        geak_cfg = get_config_path("geak")
-        model_config = {}
-        if geak_cfg.exists():
-            import yaml
-
-            full_cfg = yaml.safe_load(geak_cfg.read_text()) or {}
-            model_config = full_cfg.get("model", {})
-        model = get_model(model_name, config=model_config)
+        model = load_geak_model(args.model or os.environ.get("GEAK_MODEL"))
         print(f"[task-generator] Using model: {model.config.model_name}", file=sys.stderr)
     except Exception as e:
         print(

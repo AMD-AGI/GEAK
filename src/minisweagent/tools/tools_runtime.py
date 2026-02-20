@@ -43,8 +43,6 @@ tools_list = _all_tools
 class ToolRuntime:
     def __init__(
         self,
-        profiling_type: str = None,
-        llm_model=None,
         use_strategy_manager: bool = False,
         strategy_file: str = ".optimization_strategies.md",
         on_strategy_change=None,
@@ -76,12 +74,6 @@ class ToolRuntime:
             self._sub_agent_tool = None
         else:
             # Full mode: register everything (existing behavior)
-            if profiling_type in ["roofline", "profiling", "profiler_analyzer"]:
-                from minisweagent.tools.profiling_tools import ProfilingAnalyzer
-                self._tool_table["profiling"] = ProfilingAnalyzer(
-                    profiling_type=profiling_type,
-                    llm_model=llm_model,
-                )
             if use_strategy_manager:
                 self._tool_table["strategy_manager"] = StrategyManagerTool(
                     filepath=strategy_file, on_change_callback=on_strategy_change
@@ -148,9 +140,6 @@ class ToolRuntime:
         bash = self._tool_table.get("bash")
         if bash is not None:
             bash._env_override = env
-        profiling = self._tool_table.get("profiling")
-        if profiling is not None:
-            profiling._env_override = env
         for bridge in self._mcp_bridges:
             bridge.set_env(env)
 

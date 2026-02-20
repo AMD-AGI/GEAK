@@ -22,7 +22,7 @@ from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.agents.interactive_textual import TextualAgent
 from minisweagent.agents.parallel_agent import ParallelAgent
 from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
-from minisweagent.agents.unit_test_agent import format_discovery_for_agent, run_discovery_pipeline, run_unit_test_agent
+from minisweagent.agents.unit_test_agent import format_discovery_for_agent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
@@ -41,12 +41,10 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tu
         stashed on the function object as ``_run_discovery._last_result`` so the
         caller can pass it to the task planner without a second discovery pass.
     """
-    repo_root = Path(__file__).resolve().parent.parent.parent.parent
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
     try:
-        from minisweagent.tools.discovery import discover
-        from minisweagent.tools.resolve_kernel_url_impl import find_resolved_clone_root
+        from automated_test_discovery.server import discover as atd_discover
+
+        from minisweagent.tools.discovery_types import DiscoveryResult
     except ImportError:
         return ""
 
@@ -56,24 +54,15 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tu
         console.print(f"[dim]Kernel function: {kernel_name}[/dim]")
     try:
         kp = Path(kernel_path)
-        # If the kernel lives inside a resolved clone, scope discovery to
-        # that clone root so we don't accidentally scan the whole workspace.
-        clone_root = find_resolved_clone_root(kp)
-        if clone_root is not None:
-            ws = clone_root
-        else:
-            # When kp is a directory (repo root), check it first before
-            # walking up — kp.parents does not include kp itself.
-            if kp.is_dir() and (kp / ".git").exists():
-                ws = kp
-            else:
-                ws = kp.parent
-                for p in kp.parents:
-                    if (p / ".git").exists():
-                        ws = p
-                        break
-        result = discover(workspace=ws, kernel_path=kp, interactive=False)
-        _run_discovery._last_result = result  # stash for task planner
+        _discover_fn = getattr(atd_discover, "fn", atd_discover)
+        disc_dict = _discover_fn(
+            kernel_path=str(kp),
+            output_dir=str(kp.parent),
+        )
+
+        result = DiscoveryResult.from_dict(disc_dict, kp)
+        _run_discovery._last_result = result
+
         lines = []
         kernel_stem = kp.stem.lower()
         match_terms = [kernel_stem]
@@ -103,82 +92,23 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tu
                 console.print(f"  [green]+[/green] {b.file_path} [dim](confidence: {b.confidence:.1f})[/dim]")
                 lines.append(f"  - Benchmark: {b.file_path} (confidence: {b.confidence:.1f})")
         console.print("[bold cyan]---------------------[/bold cyan]\n")
-        # Include dependency graph and kernel info if available
-        dep_graph_lines = []
-        if result.kernels:
-            k = result.kernels[0]
-            dep_graph_lines.append("\n--- Kernel Analysis ---")
-            dep_graph_lines.append(f"Type: {k.kernel_type} | Language: {k.kernel_language}")
-            if k.inner_kernel_path:
-                dep_graph_lines.append(f"Inner kernel: {k.inner_kernel_path} ({k.inner_kernel_language or 'unknown'})")
-            if k.fusion_opportunities:
-                dep_graph_lines.append(f"Fusion opportunities: {len(k.fusion_opportunities)}")
-                for opp in k.fusion_opportunities[:3]:
-                    dep_graph_lines.append(f"  - {opp}")
 
-        dep_graph = result.dependency_graphs.get(result.kernels[0].kernel_name) if result.kernels else None
-        if dep_graph:
-            dep_graph_lines.append(f"\n{dep_graph.summary()}")
-
-        dep_block = "\n".join(dep_graph_lines) + "\n---\n" if dep_graph_lines else ""
-
-        if lines or dep_block:
+        if lines:
             return (
                 "\n--- Discovered Tests ---\n"
                 + "\n".join(lines)
                 + "\nRead these test files and reuse their reference implementations, input patterns, and tolerances.\n---\n"
-                + dep_block
             )
     except Exception as e:
         console.print(f"[yellow]Discovery failed: {e}[/yellow]")
     return ""
 
 
-def _run_baseline_profile(test_command: str, gpu_id: int = 0, console=None) -> dict:
-    """Run kernel-profile on the test harness and return the raw profiling dict.
-
-    This is a lightweight wrapper that calls MetrixTool.profile() directly,
-    replicating what the ``kernel-profile`` CLI does but returning the dict
-    instead of printing to stdout.
-    """
-    repo_root = Path(__file__).resolve().parent.parent.parent.parent
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-    from metrix_mcp.core import MetrixTool
-
-    profile_cmd = _extract_harness_path(test_command) + " --profile"
-    if console:
-        console.print(f"[dim]Profiling: {profile_cmd} on GPU {gpu_id}[/dim]")
-
-    tool = MetrixTool(gpu_devices=str(gpu_id))
-    return tool.profile(command=f"python3 {profile_cmd}", num_replays=3, quick=True)
-
-
-def _extract_harness_path(test_command: str) -> str:
-    """Extract the harness script path from a test command string.
-
-    Handles patterns like:
-        'pytest /path/to/test.py -v'  -> '/path/to/test.py'
-        'python /path/to/harness.py --correctness' -> '/path/to/harness.py'
-        '/path/to/harness.py' -> '/path/to/harness.py'
-    """
-    import shlex
-
-    try:
-        tokens = shlex.split(test_command)
-    except ValueError:
-        tokens = test_command.split()
-
-    for token in tokens:
-        if token.endswith(".py") and "/" in token:
-            return token
-
-    # Fallback: return first token that looks like a path
-    for token in tokens:
-        if "/" in token:
-            return token
-
-    return test_command
+from minisweagent.run.pipeline_helpers import (
+    create_validated_harness,
+    extract_harness_path,
+    run_baseline_profile,
+)
 
 
 def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -> tuple[str, str | None]:
@@ -304,10 +234,18 @@ def main(
     docker_image: str | None = typer.Option(None, "--docker-image", help="Docker image to use when --runtime=docker.", rich_help_panel="Advanced"),
     workspace: Path | None = typer.Option(None, "--workspace", help="Workspace directory to mount in Docker.", rich_help_panel="Advanced"),
     kernel_url: str | None = typer.Option(None, "--kernel-url", help="Kernel as URL (e.g. https://github.com/.../file.py#L106). Resolved path/line/kernel name are injected into the task.", rich_help_panel="Kernel"),
+    max_rounds: int | None = typer.Option(None, "--max-rounds", help="Maximum optimisation rounds for the orchestrator (default: GEAK_MAX_ROUNDS env or 5).", rich_help_panel="Advanced"),
+    allowed_agents: str | None = typer.Option(None, "--allowed-agents", help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS.", rich_help_panel="Advanced"),
+    excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS.", rich_help_panel="Advanced"),
     from_task: Path | None = typer.Option(None, "--from-task", help="Path to a task .md file (YAML frontmatter). Populates --task, --repo, and other settings. Implies --yolo.", rich_help_panel="Task File"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
+
+    if allowed_agents:
+        os.environ["GEAK_ALLOWED_AGENTS"] = allowed_agents
+    if excluded_agents:
+        os.environ["GEAK_EXCLUDED_AGENTS"] = excluded_agents
 
     # --from-task: populate CLI parameters from the task file, unless explicitly set
     _task_worktree: Path | None = None
@@ -407,9 +345,10 @@ def main(
             if _top:
                 _skip_lines.append("Top kernels by duration:")
                 for _k in _top[:5]:
+                    _bn_tag = f" [{_k['bottleneck']}]" if _k.get("bottleneck") else ""
                     _skip_lines.append(
                         f"  - {_k.get('name', '?')}: {_k.get('duration_us', '?')} us "
-                        f"({_k.get('pct_of_total', '?')}%)"
+                        f"({_k.get('pct_of_total', '?')}%){_bn_tag}"
                     )
 
         _prof_path = _tf_meta.get("profiling")
@@ -619,6 +558,7 @@ def main(
             model=model,
             model_factory=lambda: get_model(model_name_resolved, model_cfg),
             output_dir=_pipeline_output,
+            max_rounds=max_rounds,
             console=console,
         )
 
@@ -653,9 +593,8 @@ def main(
                     pass
             if _kernel_path or repo:
                 console.print("[bold cyan]Running content-based test discovery...[/bold cyan]")
-                discovery_context = run_discovery_pipeline(
-                    kernel_path=_kernel_path or repo,
-                    repo=repo,
+                discovery_context = _run_discovery(
+                    kernel_path=str(_kernel_path or repo),
                 )
 
         if discovery_context:
@@ -663,11 +602,11 @@ def main(
         else:
             console.print("[dim]No discovery results — UnitTestAgent will search/create from scratch.[/dim]")
 
-        # Step 0b: Run UnitTestAgent to create the fixed test harness
+        # Step 0b: Run UnitTestAgent with harness validation + retry
         console.print(
             "[bold yellow]Running UnitTestAgent to create test harness...[/bold yellow]"
         )
-        test_command = run_unit_test_agent(
+        test_command = create_validated_harness(
             model=get_model(model_name, config.get("model", {})),
             repo=repo,
             kernel_name=kernel_name or "unknown",
@@ -687,8 +626,8 @@ def main(
         # -- Baseline profiling --
         try:
             console.print("[bold cyan]--- Pre-agent Baseline Profiling ---[/bold cyan]")
-            _pre_agent_profiling = _run_baseline_profile(
-                test_command, gpu_id=parsed_gpu_ids[0], console=console,
+            _pre_agent_profiling = run_baseline_profile(
+                test_command, gpu_id=parsed_gpu_ids[0],
             )
         except Exception as e:
             console.print(f"[yellow]Pre-agent profiling failed ({e}); tasks will use discovery only[/yellow]")
@@ -710,7 +649,7 @@ def main(
         if _resolved_kernel_path:
             try:
                 from minisweagent.tools.commandment import generate_commandment
-                _harness_path = _extract_harness_path(test_command)
+                _harness_path = extract_harness_path(test_command)
                 _pre_agent_commandment = generate_commandment(
                     kernel_path=_resolved_kernel_path,
                     harness_path=_harness_path,
@@ -787,7 +726,9 @@ def main(
         discovery_result = getattr(_run_discovery, "_last_result", None)
         if discovery_result and discovery_result.kernels and model:
             try:
+                from minisweagent.run.pipeline_helpers import inject_pipeline_context
                 from minisweagent.run.task_generator import generate_tasks_from_content
+
                 tasks = generate_tasks_from_content(
                     discovery_result=discovery_result,
                     base_task_context=task_content,
@@ -798,6 +739,17 @@ def main(
                     baseline_metrics=_pre_agent_baseline_metrics,
                 )
                 if tasks:
+                    for t in tasks:
+                        t.task, t.config = inject_pipeline_context(
+                            t.task,
+                            t.config,
+                            commandment_text=_pre_agent_commandment,
+                            baseline_metrics=_pre_agent_baseline_metrics,
+                            kernel_path=_resolved_kernel_path,
+                            repo_root=str(repo) if repo else None,
+                            test_command=test_command,
+                            codebase_context=_codebase_ctx_text,
+                        )
                     agent_config["tasks"] = tasks
                     console.print(f"[bold cyan]Task generator: {len(tasks)} optimization tasks (pool mode)[/bold cyan]")
                     for t in tasks[:6]:

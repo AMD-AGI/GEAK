@@ -40,7 +40,6 @@ def main():
     filtering.
     """
     import argparse
-    import copy
 
     parser = argparse.ArgumentParser(
         description="Run optimization tasks from a directory in parallel across GPUs",
@@ -65,23 +64,12 @@ def main():
         default=None,
         help="Output directory for patches and results (default: <task-dir>/../results)",
     )
-    parser.add_argument(
-        "--allowed-agents",
-        default=None,
-        help="Comma-separated list of allowed agent types. Sets GEAK_ALLOWED_AGENTS.",
-    )
-    parser.add_argument(
-        "--excluded-agents",
-        default=None,
-        help="Comma-separated list of excluded agent types. Sets GEAK_EXCLUDED_AGENTS.",
-    )
+    from minisweagent.run.pipeline_helpers import add_agent_filter_args, apply_agent_filter_env
+
+    add_agent_filter_args(parser)
 
     args = parser.parse_args()
-
-    if args.allowed_agents:
-        os.environ["GEAK_ALLOWED_AGENTS"] = args.allowed_agents
-    if args.excluded_agents:
-        os.environ["GEAK_EXCLUDED_AGENTS"] = args.excluded_agents
+    apply_agent_filter_env(args)
 
     task_dir = Path(args.task_dir).resolve()
     if not task_dir.is_dir():
@@ -114,20 +102,9 @@ def main():
     # Create model
     model_name = args.model or os.environ.get("GEAK_MODEL")
     try:
-        from minisweagent.config import get_config_path
-        from minisweagent.models import get_model
+        from minisweagent.run.pipeline_helpers import geak_model_factory
 
-        geak_cfg = get_config_path("geak")
-        model_config: dict[str, Any] = {}
-        if geak_cfg.exists():
-            import yaml
-
-            full_cfg = yaml.safe_load(geak_cfg.read_text()) or {}
-            model_config = full_cfg.get("model", {})
-
-        def model_factory():
-            return get_model(model_name, config=copy.deepcopy(model_config))
-
+        model_factory = geak_model_factory(model_name)
         print(f"[run-tasks] Using model: {model_factory().config.model_name}", file=sys.stderr)
     except Exception as e:
         print(

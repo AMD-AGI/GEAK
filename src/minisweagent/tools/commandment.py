@@ -59,7 +59,7 @@ def generate_commandment(
     *,
     inner_kernel: bool = False,
     inner_kernel_relpath: str | None = None,
-    warmup_runs: int = 1,
+    warmup_runs: int = 2,
     profile_replays: int = 5,
 ) -> str:
     """Generate a valid COMMANDMENT.md and return its content.
@@ -76,7 +76,9 @@ def generate_commandment(
         inner_kernel_relpath: Relative path from *repo_root* to the inner
             kernel file (e.g. ``aiter/ops/triton/_triton_kernels/rope/rope.py``).
             Required when *inner_kernel* is True.
-        warmup_runs: Number of warm-up invocations before profiling.
+        warmup_runs: Number of warm-up invocations before profiling.  Kept
+            in sync with profiler-mcp's default so that agent-side and
+            preprocessor-side profiling see identical warm-up conditions.
         profile_replays: Number of replay passes for ``kernel-profile``.
 
     Returns:
@@ -117,7 +119,7 @@ def generate_commandment(
             profile_replays=profile_replays,
         )
 
-    return _validate_and_fix(content)
+    return _validate_and_fix(content, harness_path=str(harness_path))
 
 
 def _warmup_block(command: str, warmup_runs: int) -> str:
@@ -140,22 +142,31 @@ def _generate_simple(
     warmup_runs: int,
     profile_replays: int,
 ) -> str:
-    """Generate COMMANDMENT for a simple (non-inner) kernel."""
+    """Generate COMMANDMENT for a simple (non-inner) kernel.
+
+    All paths are expressed via environment variables so that the
+    COMMANDMENT can be executed verbatim in any worktree:
+
+      * ``GEAK_WORK_DIR``  -- the agent's working copy / worktree root
+      * ``GEAK_REPO_ROOT`` -- the original repository root
+      * ``GEAK_GPU_DEVICE`` -- GPU device ID
+      * ``GEAK_HARNESS``   -- absolute path to the test harness script
+    """
     warmup_block = _warmup_block(
-        f"${{GEAK_WORK_DIR}}/run.sh {harness_path} --profile > /dev/null 2>&1 || true",
+        "${GEAK_WORK_DIR}/run.sh ${GEAK_HARNESS} --profile > /dev/null 2>&1 || true",
         warmup_runs,
     )
 
     return f"""\
 ## SETUP
-printf '#!/bin/bash\\nexport PYTHONPATH=%s:{repo_root}:${{PYTHONPATH}}\\nexport HIP_VISIBLE_DEVICES=%s\\nexec python3 "$@"\\n' "${{GEAK_WORK_DIR}}" "${{GEAK_GPU_DEVICE}}" > ${{GEAK_WORK_DIR}}/run.sh && chmod +x ${{GEAK_WORK_DIR}}/run.sh
+printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${{PYTHONPATH}}\\nexport HIP_VISIBLE_DEVICES=%s\\nexec python3 "$@"\\n' "${{GEAK_WORK_DIR}}" "${{GEAK_REPO_ROOT}}" "${{GEAK_GPU_DEVICE}}" > ${{GEAK_WORK_DIR}}/run.sh && chmod +x ${{GEAK_WORK_DIR}}/run.sh
 
 ## CORRECTNESS
-${{GEAK_WORK_DIR}}/run.sh {harness_path} --correctness
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --correctness
 
 ## PROFILE
 {warmup_block}
-kernel-profile "${{GEAK_WORK_DIR}}/run.sh {harness_path} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
+kernel-profile "${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
 """
 
 
@@ -203,10 +214,10 @@ def _generate_inner_kernel(
         setup_lines.append(f"touch {init_touch}")
 
     setup_lines.append(
-        f"printf '#!/bin/bash\\nexport PYTHONPATH=%s:{repo_root}:${{PYTHONPATH}}\\n"
-        f'export HIP_VISIBLE_DEVICES=%s\\nexec python3 {harness_path} "$@"\\n\' '
-        f'"${{GEAK_WORK_DIR}}" "${{GEAK_GPU_DEVICE}}" > ${{GEAK_WORK_DIR}}/run_harness.sh '
-        f"&& chmod +x ${{GEAK_WORK_DIR}}/run_harness.sh"
+        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+        'export HIP_VISIBLE_DEVICES=%s\\nexec python3 ${GEAK_HARNESS} "$@"\\n\' '
+        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" > ${GEAK_WORK_DIR}/run_harness.sh '
+        "&& chmod +x ${GEAK_WORK_DIR}/run_harness.sh"
     )
 
     setup_block = "\n".join(setup_lines)
@@ -224,13 +235,13 @@ kernel-profile "${{GEAK_WORK_DIR}}/run_harness.sh --profile" --gpu-devices ${{GE
 """
 
 
-def _validate_and_fix(content: str) -> str:
+def _validate_and_fix(content: str, *, harness_path: str | None = None) -> str:
     """Validate content and attempt to auto-fix known issues.
 
     Raises ValueError if the content cannot be made valid after retries.
     """
     for attempt in range(_MAX_FIX_RETRIES + 1):
-        result = validate_commandment(content)
+        result = validate_commandment(content, harness_path=harness_path)
         if result["valid"]:
             return content
 
@@ -239,7 +250,7 @@ def _validate_and_fix(content: str) -> str:
 
         content = _auto_fix(content, result["errors"])
 
-    msg = format_validation_message(validate_commandment(content))
+    msg = format_validation_message(validate_commandment(content, harness_path=harness_path))
     raise ValueError(f"COMMANDMENT.md generation failed validation after {_MAX_FIX_RETRIES} retries:\n{msg}")
 
 
@@ -308,7 +319,7 @@ def main():
     )
     parser.add_argument("--inner-kernel", action="store_true", help="Kernel is an inner file imported by a wrapper")
     parser.add_argument("--inner-kernel-relpath", default=None, help="Relative path from repo-root to inner kernel")
-    parser.add_argument("--warmup-runs", type=int, default=1, help="Warm-up runs before profiling (default: 1)")
+    parser.add_argument("--warmup-runs", type=int, default=2, help="Warm-up runs before profiling (default: 2)")
     parser.add_argument("--profile-replays", type=int, default=5, help="Profiling replay count (default: 5)")
     parser.add_argument("-o", "--output", default=None, help="Output file path (default: stdout)")
 

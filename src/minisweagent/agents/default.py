@@ -120,8 +120,6 @@ class DefaultAgent:
         # Initialize tool runtime with strategy manager settings
         # Subclasses (like StrategyAgent) can override _get_strategy_callback() for UI notifications
         self.toolruntime = ToolRuntime(
-            profiling_type=self.config.profiling_type,
-            llm_model=self.model,
             use_strategy_manager=self.config.use_strategy_manager,
             strategy_file=self._get_strategy_file()
             if self.config.use_strategy_manager

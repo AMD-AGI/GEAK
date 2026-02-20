@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 # Metrics where summation is the correct aggregation (total cost).
-_SUM_METRICS = {"duration_us"}
+_SUM_METRICS = {"duration_us", "duration_us_min", "duration_us_max", "duration_us_median"}
 # All other numeric metrics use duration-weighted averaging.
 
 
@@ -190,13 +190,27 @@ def _format_baseline(selected: list[dict]) -> dict:
                 seen.add(obs)
                 observations.append(obs)
 
+    canonical_dur = aggregated.get("duration_us_min", aggregated.get("duration_us", 0))
+
+    total_dur = aggregated.get("duration_us", 0) or 1  # avoid div-by-zero
+    top_kernels = []
+    for k in selected:
+        k_dur = k.get("duration_us", k.get("metrics", {}).get("duration_us", 0))
+        top_kernels.append({
+            "name": k["name"],
+            "duration_us": round(k_dur, 3),
+            "pct_of_total": round(100.0 * k_dur / total_dur, 1),
+            "bottleneck": k.get("bottleneck", "unknown"),
+        })
+
     result = {
-        "duration_us": aggregated.get("duration_us", 0),
+        "duration_us": canonical_dur,
         "kernel_name": kernel_name,
         "kernel_names": [k["name"] for k in selected],
         "metrics": aggregated,
         "bottleneck": dominant.get("bottleneck", "unknown"),
         "observations": observations,
+        "top_kernels": top_kernels,
     }
     # Sanitize NaN/inf values to ensure valid JSON output
     return _sanitize_value(result)

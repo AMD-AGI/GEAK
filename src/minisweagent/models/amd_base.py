@@ -63,8 +63,6 @@ class AmdLlmModelBase:
         self.n_calls = 0
         # Load tools list
         self.tools = get_tools_list(use_strategy_manager=self.config.use_strategy_manager)
-        if not self.config.profiling:
-            self.tools = [tool for tool in self.tools if tool["name"] != "profiling"]
         if not self.config.bash_tool:
             self.tools = [tool for tool in self.tools if tool["name"] != "bash"]
         self._init_client()

@@ -37,18 +37,21 @@ You have been given the results of a preprocessing pipeline:
 * Baseline metrics (duration, throughput, bottleneck classification)
 * A COMMANDMENT.md that specifies the rules every sub-agent must follow
 
-Your job is to drive an iterative optimisation loop:
+You also have access to **bash** (execute shell commands),
+**str_replace_editor** (view / edit files), **profile_kernel** (GPU
+profiling), and **strategy_manager**.  Use these only when you need to
+inspect artefacts, debug a failure, or gather information the
+orchestration tools above cannot provide.
 
-1. Call **generate_tasks** to produce a set of optimisation task files.
-   Each task targets a specific strategy (kernel fusion, memory coalescing,
-   vectorisation, OpenEvolve parameter tuning, etc.).
-2. Call **dispatch_tasks** to run those tasks in parallel across available
-   GPUs.  Strategy tasks each use 1 GPU; OpenEvolve tasks may use 2+.
-3. Call **collect_results** to review what each task achieved.
-4. Decide whether to iterate (generate new tasks building on successes,
-   or trying strategies not yet explored) or to finalise.
-5. When no further improvement is possible, call **finalize** with a
-   summary of the best results.
+Within each round you MUST call these tools in order:
+1. **generate_tasks** – produce optimisation task files for this round.
+2. **dispatch_tasks** – run those tasks in parallel across available GPUs.
+3. **collect_results** – review what each task achieved.
+
+After collecting results, respond with your evaluation.  If the system
+tells you there are more rounds, start the next round.  When all rounds
+are done (or no further improvement is possible), call **finalize** with
+a summary.
 
 Rules:
 - Do NOT modify preprocessor artefacts (test harness, test command,
@@ -63,8 +66,6 @@ Rules:
   3. Did it violate the COMMANDMENT?  Reject if so.
   4. Did the correctness tests pass?  Reject if tests failed.
   Mark rejected results as "rejected" and explain why.
-- When the last round showed no improvement, finalise with a summary
-  that lists each task, its result status, and measurable gains.
 """
 
 _INSTANCE_TEMPLATE = """\
@@ -90,60 +91,13 @@ Output directory: {output_dir}
 
 ---
 
-Use the tools below to optimise the kernel.  Start by generating tasks.
+Begin by reading the kernel source and profiling data to understand the
+optimisation landscape.  Then follow the round instructions.
 """
 
 
 # ── Helper: build DiscoveryResult from discovery dict ────────────────
-
-
-def _build_discovery_result(disc_dict: dict, kernel_path: str):
-    """Convert an automated_test_discovery JSON dict into a DiscoveryResult."""
-    from minisweagent.tools.discovery import (
-        BenchmarkInfo,
-        DiscoveryResult,
-        KernelInfo,
-        TestInfo,
-    )
-
-    kp = Path(kernel_path)
-    kernel_info = disc_dict.get("kernel") or {}
-    kernels = []
-    if kernel_info.get("file"):
-        kernels.append(
-            KernelInfo(
-                file_path=Path(kernel_info["file"]),
-                kernel_name=kernel_info.get("name", kp.stem),
-                kernel_type=kernel_info.get("type", "unknown"),
-                kernel_language="python" if kp.suffix == ".py" else "cpp",
-                function_names=kernel_info.get("functions", []),
-            )
-        )
-    tests = [
-        TestInfo(
-            file_path=Path(t["file"]),
-            test_type=t.get("type", "script"),
-            command=t.get("command", ""),
-            confidence=t.get("confidence", 0.5),
-        )
-        for t in (disc_dict.get("tests") or [])
-    ]
-    benchmarks = [
-        BenchmarkInfo(
-            file_path=Path(b["file"]),
-            bench_type=b.get("type", "script"),
-            command=b.get("command", ""),
-            confidence=b.get("confidence", 0.5),
-        )
-        for b in (disc_dict.get("benchmarks") or [])
-    ]
-    workspace = Path(disc_dict.get("workspace", kp.parent))
-    return DiscoveryResult(
-        kernels=kernels,
-        tests=tests,
-        benchmarks=benchmarks,
-        workspace_path=workspace,
-    )
+# Uses the canonical DiscoveryResult.from_dict() classmethod.
 
 
 # ── Tool implementations ─────────────────────────────────────────────
@@ -211,6 +165,7 @@ def _tool_generate_tasks(
             "kernel_path": ctx.get("kernel_path"),
             "repo_root": ctx.get("repo_root"),
             "test_command": ctx.get("test_command"),
+            "harness_path": ctx.get("harness_path"),
             "commandment": str(pp_dir / "COMMANDMENT.md"),
             "baseline_metrics": str(pp_dir / "baseline_metrics.json"),
             "profiling": str(pp_dir / "profile.json"),
@@ -218,7 +173,7 @@ def _tool_generate_tasks(
             "num_gpus": t.num_gpus,
             "round": round_num,
         }
-        write_task_file(fpath, metadata, t.task)
+        write_task_file(fpath, metadata, t.task, relative_to=fpath.parent)
         task_files.append(str(fpath))
 
     return json.dumps({"tasks": task_files, "count": len(task_files)})
@@ -229,7 +184,13 @@ def _tool_dispatch_tasks(
     task_files: list[str] | str,
     **_extra,
 ) -> str:
-    """Dispatch task files to GPUs for parallel execution."""
+    """Dispatch task files to GPUs for parallel execution.
+
+    The LLM may truncate the ``task_files`` list when there are many tasks.
+    To guard against this, after parsing the provided list we scan the
+    round directory for any ``.md`` task files that were not included and
+    append them automatically.
+    """
     from minisweagent.run.dispatch import run_task_batch
 
     if isinstance(task_files, str):
@@ -238,12 +199,22 @@ def _tool_dispatch_tasks(
     gpu_ids = ctx.get("gpu_ids", [0])
     base_dir = Path(ctx["output_dir"])
 
-    # Derive round from the task file path (e.g. .../tasks/round_1/00_foo.md)
+    # Derive round directory from the first task file path
     round_dir = "round_1"
+    task_dir: Path | None = None
     if task_files:
-        parent_name = Path(task_files[0]).parent.name
-        if parent_name.startswith("round_"):
-            round_dir = parent_name
+        first_parent = Path(task_files[0]).parent
+        if first_parent.name.startswith("round_"):
+            round_dir = first_parent.name
+            task_dir = first_parent
+
+    # Auto-discover any task files the LLM may have omitted
+    if task_dir and task_dir.is_dir():
+        provided = {str(Path(f).resolve()) for f in task_files}
+        for md in sorted(task_dir.glob("*.md")):
+            if str(md.resolve()) not in provided:
+                task_files.append(str(md))
+                logger.info("Auto-included missing task file: %s", md.name)
 
     results_dir = base_dir / "results" / round_dir
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -293,6 +264,7 @@ def _tool_finalize(
     report_path.write_text(json.dumps(report, indent=2))
 
     return json.dumps(report)
+
 
 
 def _auto_finalize(
@@ -379,92 +351,101 @@ def _auto_finalize(
 # ── Orchestrator runner ──────────────────────────────────────────────
 
 
-def _build_tools_schema() -> list[dict]:
-    """Return the JSON-schema tool descriptors for the orchestrator LLM."""
-    return [
-        {
-            "name": "generate_tasks",
-            "description": (
-                "Generate optimisation task files for a round.  Returns a JSON "
-                "object with a 'tasks' list of file paths.  An empty list means "
-                "convergence – no more optimisations to try."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "round_num": {
-                        "type": "integer",
-                        "description": "Round number (1-based).",
-                    },
-                    "previous_results_dir": {
-                        "type": "string",
-                        "description": "Path to previous round's results directory (optional for round 1).",
-                    },
+_ORCHESTRATOR_SWE_TOOLS = {"bash", "str_replace_editor", "profile_kernel", "strategy_manager"}
+
+_ORCHESTRATOR_ONLY_TOOLS: list[dict] = [
+    {
+        "name": "generate_tasks",
+        "description": (
+            "Generate optimisation task files for a round.  Returns a JSON "
+            "object with a 'tasks' list of file paths.  An empty list means "
+            "convergence – no more optimisations to try."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "round_num": {
+                    "type": "integer",
+                    "description": "Round number (1-based).",
                 },
-                "required": ["round_num"],
-            },
-        },
-        {
-            "name": "dispatch_tasks",
-            "description": (
-                "Dispatch a list of task files to available GPUs for parallel "
-                "execution.  Returns a JSON summary of results."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_files": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of task file paths to dispatch.",
-                    },
+                "previous_results_dir": {
+                    "type": "string",
+                    "description": "Path to previous round's results directory (optional for round 1).",
                 },
-                "required": ["task_files"],
             },
+            "required": ["round_num"],
         },
-        {
-            "name": "collect_results",
-            "description": (
-                "Read results from a completed round's output directory.  "
-                "Returns a Markdown summary of patches, test outputs, and logs."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "results_dir": {
-                        "type": "string",
-                        "description": "Path to the results directory to scan.",
-                    },
+    },
+    {
+        "name": "dispatch_tasks",
+        "description": (
+            "Dispatch a list of task files to available GPUs for parallel "
+            "execution.  Returns a JSON summary of results."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of task file paths to dispatch.",
                 },
-                "required": ["results_dir"],
             },
+            "required": ["task_files"],
         },
-        {
-            "name": "finalize",
-            "description": (
-                "Signal that optimisation is complete.  Provide a summary of "
-                "what was achieved, the best patch, and total speedup."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "Human-readable summary of the optimisation.",
-                    },
-                    "best_patch": {
-                        "type": "string",
-                        "description": "Path or identifier of the best patch.",
-                    },
-                    "total_speedup": {
-                        "type": "string",
-                        "description": "Total speedup achieved (e.g. '15%').",
-                    },
+    },
+    {
+        "name": "collect_results",
+        "description": (
+            "Read results from a completed round's output directory.  "
+            "Returns a Markdown summary of patches, test outputs, and logs."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "results_dir": {
+                    "type": "string",
+                    "description": "Path to the results directory to scan.",
                 },
-                "required": ["summary"],
             },
+            "required": ["results_dir"],
         },
+    },
+    {
+        "name": "finalize",
+        "description": (
+            "Signal that optimisation is complete.  Provide a summary of "
+            "what was achieved, the best patch, and total speedup."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Human-readable summary of the optimisation.",
+                },
+                "best_patch": {
+                    "type": "string",
+                    "description": "Path or identifier of the best patch.",
+                },
+                "total_speedup": {
+                    "type": "string",
+                    "description": "Total speedup achieved (e.g. '15%').",
+                },
+            },
+            "required": ["summary"],
+        },
+    },
+]
+
+
+def _build_tools_schema(toolruntime) -> list[dict]:
+    """Merge ToolRuntime schemas (allowlisted) with orchestrator-specific tools."""
+    swe_tools = [
+        t for t in toolruntime.get_tools_schema()
+        if t["name"] in _ORCHESTRATOR_SWE_TOOLS
     ]
+    return swe_tools + _ORCHESTRATOR_ONLY_TOOLS
 
 
 def _dispatch_tool_call(
@@ -486,7 +467,9 @@ def _dispatch_tool_call(
             return _tool_collect_results(ctx, **tool_args)
         if tool_name == "finalize":
             return _tool_finalize(ctx, **tool_args)
-        return json.dumps({"error": f"Unknown tool: {tool_name}"})
+        # Delegate to ToolRuntime (bash, str_replace_editor, profile_kernel, ...)
+        result = ctx["toolruntime"].dispatch({"name": tool_name, "arguments": tool_args})
+        return json.dumps(result, default=str) if isinstance(result, dict) else str(result)
     except Exception as exc:
         from minisweagent.utils.log import logger
 
@@ -519,7 +502,8 @@ def run_orchestrator(
     output_dir:
         Override output directory (defaults to preprocess_ctx source).
     max_rounds:
-        Max orchestrator steps (default: from GEAK_MAX_STEPS env or 30).
+        Maximum optimisation rounds (default: from GEAK_MAX_ROUNDS env or 5).
+        Each round = generate_tasks → dispatch_tasks → collect_results.
     console:
         Optional Rich console for progress messages.
     """
@@ -529,7 +513,7 @@ def run_orchestrator(
     _out = Path(_out)
     _out.mkdir(parents=True, exist_ok=True)
 
-    max_steps = max_rounds or int(os.getenv("GEAK_MAX_STEPS", "30"))
+    max_rounds = max_rounds or int(os.getenv("GEAK_MAX_ROUNDS", "5"))
 
     def _print(msg: str) -> None:
         if console:
@@ -538,9 +522,11 @@ def run_orchestrator(
             print(msg, file=sys.stderr)
 
     # Build DiscoveryResult from preprocessor's discovery dict
+    from minisweagent.tools.discovery_types import DiscoveryResult
+
     disc_dict = preprocess_ctx.get("discovery") or {}
     kernel_path = preprocess_ctx.get("kernel_path", "")
-    discovery_result = _build_discovery_result(disc_dict, kernel_path)
+    discovery_result = DiscoveryResult.from_dict(disc_dict, kernel_path)
 
     # Determine the preprocessor artefacts directory
     preprocess_dir = _out
@@ -552,6 +538,10 @@ def run_orchestrator(
     else:
         preprocess_dir = _out
 
+    from minisweagent.tools.tools_runtime import ToolRuntime
+
+    toolruntime = ToolRuntime(tool_profile="full", use_strategy_manager=True)
+
     # Build orchestrator context shared across tool calls
     ctx: dict[str, Any] = {
         **preprocess_ctx,
@@ -562,12 +552,13 @@ def run_orchestrator(
         "model": model,
         "model_factory": model_factory,
         "agent_class": StrategyInteractiveAgent,
+        "toolruntime": toolruntime,
     }
 
     # Set the orchestrator's tools on the model so it can use tool calling.
     # Copy the original tools so nested callers (e.g. task_generator) that also
     # mutate model_impl.tools don't corrupt our saved reference.
-    tools_schema = _build_tools_schema()
+    tools_schema = _build_tools_schema(toolruntime)
     model_impl = getattr(model, "_impl", model)
     _orig = getattr(model_impl, "tools", None)
     original_tools = list(_orig) if isinstance(_orig, list) else _orig
@@ -602,9 +593,9 @@ def run_orchestrator(
     )
 
     _print(
-        f"[bold cyan]--- Orchestrator starting (max {max_steps} steps, {len(gpu_ids)} GPUs) ---[/bold cyan]"
+        f"[bold cyan]--- Orchestrator starting ({max_rounds} rounds, {len(gpu_ids)} GPUs) ---[/bold cyan]"
         if console
-        else f"--- Orchestrator starting (max {max_steps} steps, {len(gpu_ids)} GPUs) ---"
+        else f"--- Orchestrator starting ({max_rounds} rounds, {len(gpu_ids)} GPUs) ---"
     )
 
     messages: list[dict] = [
@@ -612,86 +603,149 @@ def run_orchestrator(
         {"role": "user", "content": instance_msg},
     ]
 
-    final_report: dict[str, Any] = {}
-
     try:
-        for step in range(1, max_steps + 1):
+        # Phase 1: Exploration -- let the LLM read files and understand the kernel
+        _print(
+            "[bold cyan]--- Exploration phase ---[/bold cyan]"
+            if console
+            else "--- Exploration phase ---"
+        )
+        finalize_result = _run_llm_steps(
+            model, messages, ctx, _print, console, phase="explore",
+        )
+        if finalize_result is not None:
+            return finalize_result
+
+        # Phase 2: Round loop
+        for round_num in range(1, max_rounds + 1):
+            is_last = round_num == max_rounds
+            round_header = (
+                f"--- Round {round_num}/{max_rounds}"
+                f"{' (final round)' if is_last else ''} ---"
+            )
             _print(
-                f"[dim]Orchestrator step {step}/{max_steps}[/dim]"
+                f"[bold cyan]{round_header}[/bold cyan]"
                 if console
-                else f"Orchestrator step {step}/{max_steps}"
+                else round_header
             )
 
-            response = model.query(messages)
-
-            # AMD model returns {"content": "...", "tools": {...}, "extra": {...}}
-            content_text = response.get("content", "") if isinstance(response, dict) else ""
-            tool_call = response.get("tools") if isinstance(response, dict) else None
-
-            if not tool_call:
-                if content_text:
-                    _print(f"  Orchestrator: {content_text[:300]}")
-                messages.append({"role": "assistant", "content": content_text})
-                break
-
-            tool_name = tool_call.get("function", {}).get("name", "")
-            tool_args = tool_call.get("function", {}).get("arguments", {})
-            tool_id = tool_call.get("id", f"call_{step}")
-
-            if isinstance(tool_args, str):
-                try:
-                    tool_args = json.loads(tool_args)
-                except json.JSONDecodeError:
-                    tool_args = {}
-
-            _print(f"  Tool: {tool_name}({json.dumps(tool_args)[:200]})")
-
-            # Add assistant message with tool_calls for the model's message history
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": content_text,
-                    "tool_calls": tool_call,
-                }
-            )
-
-            result_str = _dispatch_tool_call(ctx, tool_name, tool_args)
-
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_id,
-                    "content": result_str,
-                }
-            )
-
-            _print(f"  Result: {result_str[:300]}")
-
-            if tool_name == "finalize":
-                try:
-                    final_report = json.loads(result_str)
-                except json.JSONDecodeError:
-                    final_report = {"summary": result_str}
-                _print(
-                    "[bold green]Orchestrator: Optimisation finalised.[/bold green]"
-                    if console
-                    else "Orchestrator: Optimisation finalised."
+            # Inject a user-level instruction for this round
+            if is_last:
+                round_instruction = (
+                    f"Begin round {round_num} (FINAL round). "
+                    "Call generate_tasks, dispatch_tasks, collect_results, "
+                    "then call **finalize** with a full summary of the best "
+                    "results across all rounds."
                 )
-                return final_report
+            else:
+                round_instruction = (
+                    f"Begin round {round_num}/{max_rounds}. "
+                    "Call generate_tasks, dispatch_tasks, collect_results. "
+                    "Then evaluate the results and respond with your analysis. "
+                    "Focus on strategies not yet tried or that build on "
+                    "previous successes."
+                )
+            messages.append({"role": "user", "content": round_instruction})
+
+            finalize_result = _run_llm_steps(
+                model, messages, ctx, _print, console,
+                phase=f"round_{round_num}",
+            )
+            if finalize_result is not None:
+                return finalize_result
     finally:
-        # Restore the model's original tools
         if original_tools is not None:
             model_impl.tools = original_tools
         elif hasattr(model_impl, "tools"):
             model_impl.tools = []
 
     _print(
-        "[yellow]Orchestrator reached step limit without finalising – auto-selecting best result...[/yellow]"
+        "[yellow]Orchestrator completed all rounds without calling finalize – auto-selecting best result...[/yellow]"
         if console
-        else "Orchestrator reached step limit without finalising – auto-selecting best result..."
+        else "Orchestrator completed all rounds without calling finalize – auto-selecting best result..."
     )
 
     return _auto_finalize(ctx, _print)
+
+
+def _run_llm_steps(
+    model,
+    messages: list[dict],
+    ctx: dict[str, Any],
+    _print,
+    console,
+    *,
+    phase: str,
+) -> dict[str, Any] | None:
+    """Run LLM tool-call steps until the LLM responds with text or calls ``finalize``.
+
+    Returns a finalize report dict if the LLM called ``finalize``,
+    otherwise ``None`` (the LLM responded with text, signalling it is
+    ready for the next phase).
+    """
+    step = 0
+    while True:
+        step += 1
+        _print(
+            f"[dim]{phase} step {step}[/dim]"
+            if console
+            else f"{phase} step {step}"
+        )
+
+        response = model.query(messages)
+
+        content_text = response.get("content", "") if isinstance(response, dict) else ""
+        tool_call = response.get("tools") if isinstance(response, dict) else None
+
+        if not tool_call:
+            if content_text:
+                _print(f"  Orchestrator: {content_text[:300]}")
+            messages.append({"role": "assistant", "content": content_text})
+            return None
+
+        tool_name = tool_call.get("function", {}).get("name", "")
+        tool_args = tool_call.get("function", {}).get("arguments", {})
+        tool_id = tool_call.get("id", f"call_{phase}_{step}")
+
+        if isinstance(tool_args, str):
+            try:
+                tool_args = json.loads(tool_args)
+            except json.JSONDecodeError:
+                tool_args = {}
+
+        _print(f"  Tool: {tool_name}({json.dumps(tool_args)[:200]})")
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": content_text,
+                "tool_calls": tool_call,
+            }
+        )
+
+        result_str = _dispatch_tool_call(ctx, tool_name, tool_args)
+
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_id,
+                "content": result_str,
+            }
+        )
+
+        _print(f"  Result: {result_str[:300]}")
+
+        if tool_name == "finalize":
+            try:
+                report = json.loads(result_str)
+            except json.JSONDecodeError:
+                report = {"summary": result_str}
+            _print(
+                "[bold green]Orchestrator: Optimisation finalised.[/bold green]"
+                if console
+                else "Orchestrator: Optimisation finalised."
+            )
+            return report
 
 
 # ── CLI entry point ──────────────────────────────────────────────────
@@ -701,7 +755,6 @@ def main() -> None:
     """CLI: ``geak-orchestrate --preprocess-dir <dir> [--gpu-ids 0,1] [--max-rounds 3]``."""
     import argparse
 
-    import yaml
 
     parser = argparse.ArgumentParser(
         description="GEAK orchestrator: LLM-driven task generation, dispatch, and iteration loop",
@@ -720,29 +773,18 @@ def main() -> None:
         "--max-rounds",
         type=int,
         default=None,
-        help="Maximum orchestrator steps (default: GEAK_MAX_STEPS env or 30)",
+        help="Maximum optimisation rounds (default: GEAK_MAX_ROUNDS env or 5)",
     )
     parser.add_argument(
         "--model",
         default=None,
         help="Model name (default: from GEAK_MODEL env or geak.yaml)",
     )
-    parser.add_argument(
-        "--allowed-agents",
-        default=None,
-        help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS.",
-    )
-    parser.add_argument(
-        "--excluded-agents",
-        default=None,
-        help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS.",
-    )
-    args = parser.parse_args()
+    from minisweagent.run.pipeline_helpers import add_agent_filter_args, apply_agent_filter_env
 
-    if args.allowed_agents:
-        os.environ["GEAK_ALLOWED_AGENTS"] = args.allowed_agents
-    if args.excluded_agents:
-        os.environ["GEAK_EXCLUDED_AGENTS"] = args.excluded_agents
+    add_agent_filter_args(parser)
+    args = parser.parse_args()
+    apply_agent_filter_env(args)
 
     pp_dir = Path(args.preprocess_dir).resolve()
     if not pp_dir.is_dir():
@@ -768,6 +810,8 @@ def main() -> None:
         else:
             tests = ctx["discovery"].get("tests", [])
             ctx["test_command"] = tests[0]["command"] if tests else None
+        if focused.get("focused_test_file"):
+            ctx["harness_path"] = focused["focused_test_file"]
 
     prof_path = pp_dir / "profile.json"
     if prof_path.exists():
@@ -782,16 +826,10 @@ def main() -> None:
         ctx["commandment"] = cmd_path.read_text()
 
     # Create model
-    from minisweagent.config import get_config_path
-    from minisweagent.models import get_model
+    from minisweagent.run.pipeline_helpers import geak_model_factory, load_geak_model
 
-    geak_cfg = get_config_path("geak")
-    model_config: dict[str, Any] = {}
-    if geak_cfg.exists():
-        full_cfg = yaml.safe_load(geak_cfg.read_text()) or {}
-        model_config = full_cfg.get("model", {})
-
-    model = get_model(args.model, config=model_config)
+    model = load_geak_model(args.model)
+    _model_factory = geak_model_factory(args.model)
     gpu_ids = [int(g.strip()) for g in args.gpu_ids.split(",")]
 
     try:
@@ -805,7 +843,7 @@ def main() -> None:
         preprocess_ctx=ctx,
         gpu_ids=gpu_ids,
         model=model,
-        model_factory=lambda: get_model(args.model, config=model_config),
+        model_factory=_model_factory,
         output_dir=pp_dir,
         max_rounds=args.max_rounds,
         console=console,

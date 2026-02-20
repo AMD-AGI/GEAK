@@ -4,7 +4,7 @@
 block-beta
     columns 5
 
-    geak["<b>geak</b>\nFull pipeline or single-task mode\n--gpu-ids 0,1,2,3"]:5
+    geak["<b>geak</b>\nFull pipeline or single-task mode\n--gpu-ids 0,1,2,3\n--allowed-agents / --excluded-agents"]:5
 
     space:5
 
@@ -51,6 +51,10 @@ block-beta
     space
     geak_task["geak --from-task\nSingle task sub-agent\n(strategy / swe)\n--gpu-ids N"]:2
 
+    space:5
+
+    shared["<b>pipeline_helpers.py</b>\nShared module used by all tools above:\nload_geak_model, inject_pipeline_context,\nvalidate_harness, create_validated_harness,\nrun_baseline_profile, agent filter helpers,\nDiscoveryResult.from_dict()"]:5
+
     geak --> geak_preprocess
     geak --> geak_orchestrate
     geak_preprocess --> resolve
@@ -65,23 +69,8 @@ block-beta
     run_tasks --> strategy
     run_tasks --> swe
     run_tasks --> openevolve
-
-    style geak fill:#60a5fa,color:#000,stroke:#93c5fd
-    style geak_preprocess fill:#a78bfa,color:#000,stroke:#c4b5fd
-    style geak_orchestrate fill:#a78bfa,color:#000,stroke:#c4b5fd
-    style standalone fill:#94a3b8,color:#000,stroke:#cbd5e1
-    style geak_task fill:#34d399,color:#000,stroke:#6ee7b7
-    style resolve fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style context fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style discover fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style profile fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style baseline fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style commandment fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style task_gen fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style run_tasks fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style select_patch fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style strategy fill:#164e63,color:#a5f3fc,stroke:#22d3ee
-    style swe fill:#164e63,color:#a5f3fc,stroke:#22d3ee
-    style openevolve fill:#164e63,color:#a5f3fc,stroke:#22d3ee
-    style validate fill:#1e293b,color:#e2e8f0,stroke:#475569
+    geak_preprocess --> shared
+    geak_orchestrate --> shared
+    run_tasks --> shared
+    task_gen --> shared
 ```

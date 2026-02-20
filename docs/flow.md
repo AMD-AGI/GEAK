@@ -9,10 +9,11 @@ flowchart TB
         P1["resolve-kernel-url\n→ resolved.json"]
         P1b["codebase-context\n→ CODEBASE_CONTEXT.md"]
         P2["test-discovery (MCP)\n→ discovery.json"]
-        P3["kernel-profile (MCP)\n→ profile.json"]
+        P2b["create-validated-harness\n(UnitTestAgent + retry loop)\n→ test_command\n<i>via pipeline_helpers.py</i>"]
+        P3["kernel-profile (MCP)\n→ profile.json\n<i>with warmup</i>"]
         P4["baseline-metrics\n→ baseline_metrics.json"]
         P5["commandment\n→ COMMANDMENT.md"]
-        P1 --> P1b --> P2 --> P3 --> P4 --> P5
+        P1 --> P1b --> P2 --> P2b --> P3 --> P4 --> P5
     end
 
     P5 --> ORCH_START
@@ -21,7 +22,7 @@ flowchart TB
         direction TB
         ORCH_START["Orchestrator LLM Agent\n<i>reads preprocessor artefacts +\nCODEBASE_CONTEXT.md</i>"]
         GEN["<b>generate_tasks</b>\nLLM creates task .md files\nwith num_gpus per task\n(fusion, vectorisation, coalescing, OpenEvolve …)"]
-        DISPATCH["<b>dispatch_tasks</b>\nParallelAgent pool mode\nassigns tasks → GPU(s) via worktrees\n<i>multi-GPU tasks get comma-sep HIP_VISIBLE_DEVICES</i>"]
+        DISPATCH["<b>dispatch_tasks</b>\nParallelAgent pool mode\nassigns tasks → GPU(s) via worktrees\n<i>inject_pipeline_context()\nensures all agents get identical context</i>"]
         ORCH_START --> GEN --> DISPATCH
 
         DISPATCH --> GPU0["GPU 0\n<i>Strategy Agent</i>"]
@@ -39,25 +40,4 @@ flowchart TB
     end
 
     FINAL --> RESULT(["<b>Output:</b> Best patch + report\ngeak_output/"])
-
-    style START fill:#fbbf24,color:#000,stroke:#fcd34d
-    style RESULT fill:#34d399,color:#000,stroke:#6ee7b7
-    style PREPROCESS fill:#1e1b4b,stroke:#a78bfa,color:#e2e8f0
-    style ORCH fill:#0c1a3d,stroke:#60a5fa,color:#e2e8f0
-    style DECIDE fill:#fbbf24,color:#000,stroke:#fcd34d
-    style P1 fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style P1b fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style P2 fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style P3 fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style P4 fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style P5 fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style ORCH_START fill:#1e293b,color:#e2e8f0,stroke:#60a5fa
-    style GEN fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style DISPATCH fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style GPU0 fill:#164e63,color:#a5f3fc,stroke:#22d3ee
-    style GPU1 fill:#164e63,color:#a5f3fc,stroke:#22d3ee
-    style GPU23 fill:#4a1d6a,color:#e9d5ff,stroke:#c084fc
-    style GPU4 fill:#164e63,color:#a5f3fc,stroke:#22d3ee
-    style COLLECT fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style FINAL fill:#1e293b,color:#e2e8f0,stroke:#60a5fa
 ```

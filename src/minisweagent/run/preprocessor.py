@@ -34,28 +34,11 @@ def _ensure_mcp_importable() -> None:
             sys.path.insert(0, p)
 
 
-# ── helpers ──────────────────────────────────────────────────────────
-
-
-def _extract_harness_path(test_command: str) -> str:
-    """Extract the harness script path from a test command string."""
-    import shlex
-
-    try:
-        tokens = shlex.split(test_command)
-    except ValueError:
-        tokens = test_command.split()
-
-    for token in tokens:
-        if token.endswith(".py") and "/" in token:
-            return token
-
-    for token in tokens:
-        if token.endswith(".py"):
-            return token
-
-    return tokens[-1] if tokens else test_command
-
+from minisweagent.run.pipeline_helpers import (
+    create_validated_harness,
+    extract_harness_path,
+    run_baseline_profile,
+)
 
 # ── main entry point ─────────────────────────────────────────────────
 
@@ -165,6 +148,10 @@ def run_preprocessor(
     # harness with --correctness/--profile modes. The UnitTestAgent is a
     # full LLM agent that can read the kernel, read existing tests, run
     # them, see errors, and iterate until the harness works.
+    #
+    # After the agent produces a harness we statically validate that it
+    # supports the required CLI flags (--profile, --correctness).  If
+    # validation fails we feed the errors back to the agent and retry.
     test_command = None
     _uta_model = model or (model_factory() if model_factory else None)
     if _uta_model and repo_root:
@@ -174,19 +161,12 @@ def run_preprocessor(
             else "--- Step 3b: UnitTestAgent (harness creation) ---"
         )
         try:
-            from minisweagent.agents.unit_test_agent import (
-                format_discovery_for_agent,
-                run_unit_test_agent,
-            )
-            from minisweagent.tools.discovery import DiscoveryPipeline
+            from minisweagent.agents.unit_test_agent import format_discovery_for_agent
+            from minisweagent.tools.discovery_types import DiscoveryResult
 
-            # Build DiscoveryResult for the agent's context
-            workspace = Path(repo_root)
-            pipeline = DiscoveryPipeline(workspace_path=workspace)
-            disc_result = pipeline.run(kernel_path=Path(kernel_path), interactive=False)
+            disc_result = DiscoveryResult.from_dict(disc_dict, kernel_path)
             discovery_context = format_discovery_for_agent(disc_result)
 
-            # Prepend codebase context so the agent has repo layout awareness
             if codebase_context_path.exists():
                 discovery_context = codebase_context_path.read_text() + "\n\n" + discovery_context
 
@@ -196,7 +176,8 @@ def run_preprocessor(
                 "to the test script (e.g., `python /absolute/path/to/test_harness.py --correctness`). "
                 "Do NOT use `cd` in the command. The profiler cannot handle compound shell commands."
             )
-            test_command = run_unit_test_agent(
+
+            test_command = create_validated_harness(
                 model=_uta_model,
                 repo=Path(repo_root),
                 kernel_name=kernel_name,
@@ -204,6 +185,7 @@ def run_preprocessor(
                 discovery_context=discovery_context,
             )
             _print(f"  UnitTestAgent test_command: {test_command}")
+            _print("  Harness validation: OK")
         except Exception as exc:
             _print(
                 f"  [yellow]UnitTestAgent failed ({exc}), falling back to discovery[/yellow]"
@@ -211,6 +193,7 @@ def run_preprocessor(
                 else f"  UnitTestAgent failed ({exc}), falling back to discovery"
             )
             logger.warning("UnitTestAgent failed: %s", exc, exc_info=True)
+            test_command = None
 
     # Fall back to discovery results if UnitTestAgent didn't produce one.
     # Prefer the focused test (which targets the specific kernel) over
@@ -237,21 +220,10 @@ def run_preprocessor(
 
     profiling: dict[str, Any] | None = None
     if test_command:
-        from profiler_mcp.server import profile_kernel
-
-        harness = _extract_harness_path(test_command)
-        ctx["harness_path"] = harness
-        profile_cmd = f"python {harness} --profile"
+        ctx["harness_path"] = extract_harness_path(test_command)
 
         try:
-            _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
-            profiling = _profile_fn(
-                command=profile_cmd,
-                backend="metrix",
-                num_replays=3,
-                quick=True,
-                gpu_devices=str(gpu_id),
-            )
+            profiling = run_baseline_profile(test_command, gpu_id=gpu_id)
         except Exception as exc:
             _print(f"  [yellow]Profiling failed: {exc}[/yellow]" if console else f"  Profiling failed: {exc}")
             logger.warning("Profiling failed: %s", exc, exc_info=True)
@@ -297,7 +269,7 @@ def run_preprocessor(
         try:
             from minisweagent.tools.commandment import generate_commandment
 
-            harness = ctx.get("harness_path") or _extract_harness_path(test_command)
+            harness = ctx.get("harness_path") or extract_harness_path(test_command)
             commandment = generate_commandment(
                 kernel_path=kernel_path,
                 harness_path=harness,
@@ -357,19 +329,9 @@ def main() -> None:
     except ImportError:
         console = None
 
-    import yaml
+    from minisweagent.run.pipeline_helpers import geak_model_factory
 
-    from minisweagent.config import get_config_path
-    from minisweagent.models import get_model
-
-    geak_cfg = get_config_path("geak")
-    model_config: dict = {}
-    if geak_cfg.exists():
-        full_cfg = yaml.safe_load(geak_cfg.read_text()) or {}
-        model_config = full_cfg.get("model", {})
-
-    def _model_factory():
-        return get_model(args.model, config=model_config)
+    _model_factory = geak_model_factory(args.model)
 
     ctx = run_preprocessor(
         args.url,

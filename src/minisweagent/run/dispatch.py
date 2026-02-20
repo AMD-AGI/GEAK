@@ -16,15 +16,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _derive_test_command_from_commandment(commandment_path: str) -> str | None:
-    """Extract a test command from the COMMANDMENT's CORRECTNESS section.
+def _read_commandment_section(commandment_path: str, section: str) -> str | None:
+    """Read a section from a COMMANDMENT.md file verbatim.
 
-    Supports two formats:
-      1. Inline:  ``## CORRECTNESS\\n<command>``
-      2. Fenced:  ``## CORRECTNESS\\n```\\n<command>\\n`````
-
-    The command may be wrapped by ``${GEAK_WORK_DIR}/run.sh``; we strip
-    that wrapper and reconstruct a standalone ``python <script> ...`` call.
+    Returns the raw command lines for the given section (e.g. ``"SETUP"``,
+    ``"CORRECTNESS"``, ``"PROFILE"``), exactly as written.  No parsing,
+    no extraction, no transformation.
     """
     try:
         text = Path(commandment_path).read_text()
@@ -32,36 +29,54 @@ def _derive_test_command_from_commandment(commandment_path: str) -> str | None:
         logger.debug("Could not read commandment at %s", commandment_path)
         return None
 
-    # Try fenced code block first (more structured)
-    fenced = re.search(
-        r"## CORRECTNESS\s*\n```[^\n]*\n(.+?)```",
-        text,
-        re.DOTALL,
-    )
-    if fenced:
-        line = fenced.group(1).strip().splitlines()[0].strip()
-    else:
-        inline = re.search(r"## CORRECTNESS\s*\n(.+)", text)
-        if not inline:
-            return None
-        line = inline.group(1).strip()
+    lines: list[str] = []
+    in_section = False
+    for raw_line in text.splitlines():
+        header = re.match(r"^##\s+(\w+)", raw_line.strip())
+        if header:
+            if header.group(1) == section:
+                in_section = True
+                continue
+            elif in_section:
+                break
+            continue
+        if in_section and raw_line.strip():
+            lines.append(raw_line.strip())
 
-    if not line:
+    return "\n".join(lines) if lines else None
+
+
+def _commandment_test_command(commandment_path: str) -> str | None:
+    """Build a test command that executes SETUP then CORRECTNESS verbatim.
+
+    The COMMANDMENT is the single source of truth.  Commands are executed
+    *as-is* -- no parsing, no unwrapping, no modification.  The runtime
+    must set ``GEAK_WORK_DIR`` and ``GEAK_GPU_DEVICE`` so that variable
+    references in the commands resolve correctly.
+
+    We write a temporary shell script instead of ``bash -c '...'`` because
+    COMMANDMENT sections often contain single-quoted strings (e.g.
+    ``printf '...'``) that cannot be nested inside a single-quoted
+    ``bash -c`` wrapper.
+    """
+    setup = _read_commandment_section(commandment_path, "SETUP")
+    correctness = _read_commandment_section(commandment_path, "CORRECTNESS")
+
+    if not correctness:
         return None
 
-    # Strip the run.sh wrapper: ${GEAK_WORK_DIR}/run.sh <script> [args]
-    script_match = re.search(r"run\.sh\s+(\S+\.py(?:\s+\S+)*)", line)
-    if script_match:
-        derived = f"python {script_match.group(1)}"
-        logger.debug("Derived test command from COMMANDMENT: %s", derived)
-        return derived
+    lines = ["#!/usr/bin/env bash", "set -euo pipefail"]
+    if setup:
+        lines.append(setup)
+    lines.append(correctness)
+    script_body = "\n".join(lines) + "\n"
 
-    # Fallback: if the line itself looks like a runnable command, return it
-    if line.endswith(".py") or ".py " in line:
-        logger.debug("Using raw CORRECTNESS line as test command: %s", line)
-        return line
+    cmd_dir = Path(commandment_path).parent
+    script_path = cmd_dir / "_geak_test_cmd.sh"
+    script_path.write_text(script_body)
+    script_path.chmod(0o755)
 
-    return None
+    return str(script_path)
 
 
 def task_file_to_agent_task(task_file: Path):
@@ -109,84 +124,54 @@ def task_file_to_agent_task(task_file: Path):
             "use_strategy_manager": True,
         }
 
-    if meta.get("test_command"):
-        cfg["test_command"] = meta["test_command"]
-    elif meta.get("commandment"):
-        derived = _derive_test_command_from_commandment(meta["commandment"])
+    # COMMANDMENT is the single source of truth for test commands.
+    # Its SETUP + CORRECTNESS sections are executed verbatim.
+    if meta.get("commandment") and Path(meta["commandment"]).exists():
+        derived = _commandment_test_command(meta["commandment"])
         if derived:
             cfg["test_command"] = derived
-            logger.info("Derived test_command from COMMANDMENT: %s", derived)
+            logger.info("test_command from COMMANDMENT (verbatim): %s", derived)
+    if not cfg.get("test_command") and meta.get("test_command"):
+        cfg["test_command"] = meta["test_command"]
+        logger.warning(
+            "No COMMANDMENT available; falling back to raw test_command: %s",
+            meta["test_command"],
+        )
 
     # Prepend pipeline context so the sub-agent has all necessary information.
     # IMPORTANT: Paths from metadata use the ORIGINAL repo root.  The parallel
     # agent's _replace_paths() rewrites them to the worktree path before the
     # agent sees the task text.  We must include these paths verbatim here.
-    context_lines: list[str] = [
-        "## Pipeline Context (auto-injected from task metadata)",
-        "",
-    ]
+    from minisweagent.run.pipeline_helpers import inject_pipeline_context
 
-    # Critical: include kernel_path and repo_root so the agent knows where to
-    # edit and so _replace_paths can rewrite them to the worktree.
-    if meta.get("kernel_path"):
-        context_lines.append(f"KERNEL FILE TO EDIT: {meta['kernel_path']}")
-    if meta.get("repo_root"):
-        context_lines.append(f"REPO ROOT: {meta['repo_root']}")
-    if cfg.get("test_command"):
-        context_lines.append(f"TEST COMMAND: {cfg['test_command']}")
-    context_lines.append("")
+    commandment_text: str | None = None
+    _cmd_path = meta.get("commandment")
+    if _cmd_path and Path(_cmd_path).exists():
+        commandment_text = Path(_cmd_path).read_text().strip()
 
-    context_lines.append(
-        "IMPORTANT: Only edit files within your REPO ROOT directory. "
-        "Do NOT search or modify files outside of it. "
-        "The KERNEL FILE TO EDIT path above is the exact file you should optimize."
-    )
-    context_lines.append("")
-
-    commandment_path = meta.get("commandment")
-    if commandment_path and Path(commandment_path).exists():
-        cmd_text = Path(commandment_path).read_text().strip()
-        context_lines.append("## COMMANDMENT (evaluation contract -- you MUST follow these rules)")
-        context_lines.append(cmd_text)
-        context_lines.append("")
-
-    baseline_path = meta.get("baseline_metrics")
-    if baseline_path and Path(baseline_path).exists():
+    baseline_metrics: dict | None = None
+    _bm_path = meta.get("baseline_metrics")
+    if _bm_path and Path(_bm_path).exists():
         import json as _json
 
-        bm = _json.loads(Path(baseline_path).read_text())
-        dur = bm.get("duration_us", "unknown")
-        bn = bm.get("bottleneck", "unknown")
-        context_lines.append("## Baseline Performance (your optimization must improve on these)")
-        context_lines.append(f"Total duration: {dur} us")
-        context_lines.append(f"Bottleneck: {bn}")
-        top = bm.get("top_kernels", [])
-        if top:
-            context_lines.append("Top kernels by duration:")
-            for k in top[:5]:
-                context_lines.append(
-                    f"  - {k.get('name', '?')}: {k.get('duration_us', '?')} us ({k.get('pct_of_total', '?')}%)"
-                )
-        context_lines.append("")
+        baseline_metrics = _json.loads(Path(_bm_path).read_text())
 
-    prof_path = meta.get("profiling")
-    if prof_path and Path(prof_path).exists():
-        context_lines.append(f"PROFILING DATA: {prof_path}")
-        context_lines.append("(Read this file for detailed per-kernel profiling metrics)")
-        context_lines.append("")
-
-    codebase_ctx_path = meta.get("codebase_context")
     codebase_ctx_text: str | None = None
-    if codebase_ctx_path and Path(codebase_ctx_path).exists():
-        codebase_ctx_text = Path(codebase_ctx_path).read_text().strip()
-        context_lines.append("## Codebase Context (repo structure and key files)")
-        context_lines.append(codebase_ctx_text)
-        context_lines.append("")
+    _cb_path = meta.get("codebase_context")
+    if _cb_path and Path(_cb_path).exists():
+        codebase_ctx_text = Path(_cb_path).read_text().strip()
 
-    if codebase_ctx_text:
-        cfg["codebase_context"] = codebase_ctx_text
-
-    body = "\n".join(context_lines) + "\n" + body
+    body, cfg = inject_pipeline_context(
+        body,
+        cfg,
+        commandment_text=commandment_text,
+        baseline_metrics=baseline_metrics,
+        profiling_path=meta.get("profiling"),
+        kernel_path=meta.get("kernel_path"),
+        repo_root=meta.get("repo_root"),
+        test_command=cfg.get("test_command"),
+        codebase_context=codebase_ctx_text,
+    )
 
     return AgentTask(
         agent_class=agent_class,
@@ -235,10 +220,11 @@ def run_task_batch(
 
     tasks = [task_file_to_agent_task(f) for f in task_files]
 
-    # Determine repo_path from first task's metadata
+    # Determine repo_path and harness_path from first task's metadata
     meta_0, _ = read_task_file(task_files[0])
     repo_root = meta_0.get("repo_root")
     repo_path = Path(repo_root).resolve() if repo_root else Path.cwd()
+    harness_path = meta_0.get("harness_path", "")
 
     is_git = False
     if repo_path.is_dir():
@@ -251,8 +237,18 @@ def run_task_batch(
         "save_patch": True,
     }
 
+    # Pre-seed GEAK_REPO_ROOT and GEAK_HARNESS so COMMANDMENT commands
+    # can reference them as variables (no hardcoded paths).
+    base_env_vars: dict[str, str] = {
+        "GEAK_REPO_ROOT": str(repo_path.resolve()),
+    }
+    if harness_path:
+        base_env_vars["GEAK_HARNESS"] = harness_path
+
     def env_factory():
-        return LocalEnvironment(**{"cwd": str(repo_path.resolve()), "timeout": 3600})
+        return LocalEnvironment(
+            **{"cwd": str(repo_path.resolve()), "timeout": 3600, "env": base_env_vars}
+        )
 
     try:
         raw_results = ParallelAgent.run_parallel(
