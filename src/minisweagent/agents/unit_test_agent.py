@@ -144,7 +144,7 @@ def format_discovery_for_agent(result) -> str:
         if p.tolerances:
             lines.append(f"  Tolerances: {', '.join(p.tolerances)}")
         if p.input_shapes:
-            lines.append(f"  Input shapes: {', '.join(p.input_shapes[:5])}")
+            lines.append(f"  Input shapes: {', '.join(p.input_shapes)}")
         if p.dtypes:
             lines.append(f"  Dtypes: {', '.join(p.dtypes)}")
         if p.reference_impls:
