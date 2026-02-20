@@ -129,6 +129,10 @@ class DefaultAgent:
             on_strategy_change=self._get_strategy_callback(),
             patch_output_dir=self.config.patch_output_dir,
         )
+        # Propagate agent's env vars (HIP_VISIBLE_DEVICES etc.) to tools
+        agent_env = getattr(self.env.config, "env", None)
+        if agent_env:
+            self.toolruntime.set_env(agent_env)
         # Setup test_perf tool context
         self._setup_test_perf_context()
         # Wire sub_agent context (needs model + env for recursive agent calls)

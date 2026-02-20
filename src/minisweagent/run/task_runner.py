@@ -53,6 +53,15 @@ def _build_tasks_from_dir(task_dir: Path) -> list[Any]:
             if meta.get("baseline_metrics"):
                 cfg["baseline_metrics_path"] = meta["baseline_metrics"]
 
+        if meta.get("test_command"):
+            cfg["test_command"] = meta["test_command"]
+        elif meta.get("commandment"):
+            from minisweagent.run.dispatch import _derive_test_command_from_commandment
+
+            derived = _derive_test_command_from_commandment(meta["commandment"])
+            if derived:
+                cfg["test_command"] = derived
+
         tasks.append(
             AgentTask(
                 agent_class=agent_class,

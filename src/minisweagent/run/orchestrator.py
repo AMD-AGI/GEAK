@@ -165,6 +165,7 @@ def _tool_generate_tasks(
         "base_task_context": "",
         "agent_class": ctx["agent_class"],
         "model": ctx["model"],
+        "num_gpus": len(ctx.get("gpu_ids", [0])),
     }
 
     pp_dir = Path(ctx["preprocess_dir"])
@@ -214,6 +215,7 @@ def _tool_generate_tasks(
             "baseline_metrics": str(pp_dir / "baseline_metrics.json"),
             "profiling": str(pp_dir / "profile.json"),
             "codebase_context": str(pp_dir / "CODEBASE_CONTEXT.md"),
+            "num_gpus": t.num_gpus,
             "round": round_num,
         }
         write_task_file(fpath, metadata, t.task)

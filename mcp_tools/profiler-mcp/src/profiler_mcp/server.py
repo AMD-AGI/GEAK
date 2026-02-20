@@ -10,6 +10,7 @@ Usage:
 """
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -103,6 +104,10 @@ def _profile_with_rocprof(
             sys.path.insert(0, str(_src))
         from minisweagent.kernel_profile import _build_rocprof_result
         from minisweagent.tools.profiling_tools import ProfilingAnalyzer
+
+    # Empty HIP_VISIBLE_DEVICES hides all GPUs -- remove so ROCm sees them
+    if os.environ.get("HIP_VISIBLE_DEVICES") == "":
+        del os.environ["HIP_VISIBLE_DEVICES"]
 
     analyzer = ProfilingAnalyzer(profiling_type=profiling_type)
     try:

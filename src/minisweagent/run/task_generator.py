@@ -137,6 +137,9 @@ parameter containing a JSON array of task objects. Each task has:
 - "priority": integer 0-15
 - "agent_type": "strategy_agent", "swe_agent", or "openevolve"
 - "kernel_language": "python", "cpp", or "asm"
+- "num_gpus": integer (default 1). How many GPUs this task needs.
+  OpenEvolve tasks benefit from 2-4 GPUs for parallel candidate evaluation.
+  strategy_agent and swe_agent tasks should use 1 GPU.
 - "task_prompt": detailed instructions for the sub-agent (specific
   optimization focus, which tools to use, what to measure). This is
   the FULL prompt the agent will see.
@@ -203,6 +206,11 @@ Generate optimization tasks for the kernel at {{ kernel_path }}.
 {% endif %}{% if deep_search_path %}- **Deep search findings**: {{ deep_search_path }}
 {% endif %}{% if previous_results_path %}- **Prior round results**: {{ previous_results_path }}
 {% endif %}
+{% if num_gpus > 1 %}## GPU Budget
+Available GPUs: {{ num_gpus }}
+Generate enough tasks so the total num_gpus across all tasks is close to {{ num_gpus }}.
+OpenEvolve tasks can use 2-4 GPUs each; strategy_agent and swe_agent tasks use 1 GPU each.
+{% endif %}
 ## Instructions
 
 Read the profiling file first to understand the sub-kernel landscape, then
@@ -231,6 +239,7 @@ def generate_tasks(
     previous_results_dir: Path | None = None,
     discovery_path: Path | None = None,
     codebase_context_path: Path | None = None,
+    num_gpus: int = 1,
 ) -> list[AgentTask]:
     """Generate optimization tasks using an LLM planning agent.
 
@@ -267,6 +276,7 @@ def generate_tasks(
         previous_results_dir=previous_results_dir,
         discovery_path=discovery_path,
         codebase_context_path=codebase_context_path,
+        num_gpus=num_gpus,
     )
 
     kernel = discovery_result.kernels[0]
@@ -292,6 +302,7 @@ def generate_tasks_from_content(
     previous_results_dir: Path | None = None,
     discovery_path: Path | None = None,
     codebase_context_path: Path | None = None,
+    num_gpus: int = 1,
 ) -> list[AgentTask]:
     """Convenience wrapper that materializes in-memory content to temp files.
 
@@ -331,6 +342,7 @@ def generate_tasks_from_content(
             previous_results_dir=previous_results_dir,
             discovery_path=discovery_path,
             codebase_context_path=codebase_context_path,
+            num_gpus=num_gpus,
         )
     finally:
         for f in tmp_files:
@@ -373,6 +385,7 @@ def _run_task_agent(
     previous_results_dir: Path | None,
     discovery_path: Path | None,
     codebase_context_path: Path | None = None,
+    num_gpus: int = 1,
 ) -> str:
     """Run a read-only planning agent and return the submitted JSON text."""
     from minisweagent.agents.default import DefaultAgent
@@ -417,6 +430,7 @@ def _run_task_agent(
             "deep_search_path": str(deep_search_path) if deep_search_path else "",
             "previous_results_path": str(prev_results_path) if prev_results_path else "",
             "base_task_context": base_task_context,
+            "num_gpus": num_gpus,
         }
 
         tg_step_limit = int(os.getenv("GEAK_TASKGEN_STEP_LIMIT", "75"))
@@ -498,6 +512,7 @@ def _parse_llm_response(
         agent_type = str(item.get("agent_type", "strategy_agent"))
         kernel_language = str(item.get("kernel_language", "python"))
         task_prompt = str(item.get("task_prompt", ""))
+        task_num_gpus = max(1, int(item.get("num_gpus", 1)))
 
         if not task_prompt:
             continue
@@ -518,6 +533,7 @@ def _parse_llm_response(
                     priority=priority,
                     kernel_language=kernel_language,
                     config=oe_config,
+                    num_gpus=task_num_gpus,
                 )
             )
         elif agent_type == "swe_agent":
@@ -528,6 +544,7 @@ def _parse_llm_response(
                     label=label,
                     priority=priority,
                     kernel_language=kernel_language,
+                    num_gpus=task_num_gpus,
                 )
             )
         else:
@@ -538,6 +555,7 @@ def _parse_llm_response(
                     label=label,
                     priority=priority,
                     kernel_language=kernel_language,
+                    num_gpus=task_num_gpus,
                 )
             )
 
@@ -679,6 +697,12 @@ def main():
         type=int,
         default=1,
         help="Round number for task file frontmatter (default: 1)",
+    )
+    parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=1,
+        help="Number of available GPUs (guides task count and GPU allocation, default: 1)",
     )
 
     args = parser.parse_args()
@@ -830,6 +854,7 @@ def main():
         previous_results_dir=previous_results_dir,
         discovery_path=discovery_path,
         codebase_context_path=codebase_context_path,
+        num_gpus=args.num_gpus,
     )
 
     # Print summary to stderr
@@ -865,6 +890,7 @@ def main():
                 "baseline_metrics": args.baseline_metrics,
                 "profiling": args.profiling,
                 "codebase_context": args.codebase_context,
+                "num_gpus": t.num_gpus,
                 "test_command": test_command,
                 "round": args.round,
             }

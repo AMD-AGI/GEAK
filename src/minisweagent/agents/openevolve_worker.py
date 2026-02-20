@@ -84,9 +84,9 @@ class OpenEvolveWorker(DefaultAgent):
         if self.config.baseline_metrics_path:
             mcp_args["baseline_metrics_path"] = self.config.baseline_metrics_path
 
-        # Get GPU from env
+        # Pass the full HIP_VISIBLE_DEVICES value so OpenEvolve can use all assigned GPUs
         gpu = self.env.config.env.get("HIP_VISIBLE_DEVICES", "0") if hasattr(self.env, "config") else "0"
-        mcp_args["gpu"] = int(gpu.split(",")[0]) if gpu else 0
+        mcp_args["gpu"] = gpu if gpu else "0"
 
         # Call openevolve via ToolRuntime (uses MCPToolBridge)
         try:
@@ -250,7 +250,7 @@ def main():
     parser.add_argument("--baseline-metrics", default=None, help="Path to baseline_metrics.json")
     parser.add_argument("--codebase-context", default=None, help="Path to CODEBASE_CONTEXT.md")
     parser.add_argument("--iterations", type=int, default=10, help="Max iterations (default: 10)")
-    parser.add_argument("--gpu", type=int, default=0, help="GPU device ID (default: 0)")
+    parser.add_argument("--gpu", type=str, default="0", help="GPU device ID(s), comma-separated (default: 0)")
     parser.add_argument("--output-dir", default=None, help="Output directory for results")
 
     args = parser.parse_args()

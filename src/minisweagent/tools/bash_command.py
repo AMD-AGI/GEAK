@@ -1,3 +1,4 @@
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -19,6 +20,7 @@ _COMMANDMENT_WRITE_RE = re.compile(
 
 class BashCommand:
     def __init__(self):
+        self._env_override: dict[str, str] = {}
         self.blocklist: list[str] = [
             "vim",
             "vi",
@@ -68,7 +70,8 @@ class BashCommand:
                 "returncode": 1,
             }
         else:
-            result = subprocess.run(command, shell=True, capture_output=True, text=True)
+            env = os.environ | self._env_override if self._env_override else None
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, env=env)
             output_text = result.stdout.strip() or result.stderr.strip()
 
             # Auto-validate COMMANDMENT.md if the command wrote one

@@ -41,6 +41,7 @@ class AgentTask:
     config: dict[str, Any] = field(default_factory=dict)
     step_limit: int = 0
     cost_limit: float = 0.0
+    num_gpus: int = 1
 
 
 @dataclass

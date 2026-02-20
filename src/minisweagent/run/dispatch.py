@@ -9,10 +9,36 @@ calls this; so does the ``run-tasks`` CLI indirectly.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _derive_test_command_from_commandment(commandment_path: str) -> str | None:
+    """Extract a test command from the COMMANDMENT's CORRECTNESS section.
+
+    The CORRECTNESS section has the form:
+        ${GEAK_WORK_DIR}/run.sh /path/to/test.py --correctness
+    We extract the python script path and reconstruct a standalone command.
+    """
+    try:
+        text = Path(commandment_path).read_text()
+    except OSError:
+        return None
+
+    m = re.search(r"## CORRECTNESS\s*\n(.+)", text)
+    if not m:
+        return None
+
+    line = m.group(1).strip()
+    # Strip the run.sh wrapper: ${GEAK_WORK_DIR}/run.sh <script> [args]
+    script_match = re.search(r"run\.sh\s+(\S+\.py(?:\s+\S+)*)", line)
+    if script_match:
+        return f"python {script_match.group(1)}"
+
+    return None
 
 
 def _task_file_to_agent_task(task_file: Path):
@@ -58,6 +84,11 @@ def _task_file_to_agent_task(task_file: Path):
 
     if meta.get("test_command"):
         cfg["test_command"] = meta["test_command"]
+    elif meta.get("commandment"):
+        derived = _derive_test_command_from_commandment(meta["commandment"])
+        if derived:
+            cfg["test_command"] = derived
+            logger.info("Derived test_command from COMMANDMENT: %s", derived)
 
     # Prepend pipeline context so the sub-agent has all necessary information.
     # IMPORTANT: Paths from metadata use the ORIGINAL repo root.  The parallel
@@ -74,8 +105,8 @@ def _task_file_to_agent_task(task_file: Path):
         context_lines.append(f"KERNEL FILE TO EDIT: {meta['kernel_path']}")
     if meta.get("repo_root"):
         context_lines.append(f"REPO ROOT: {meta['repo_root']}")
-    if meta.get("test_command"):
-        context_lines.append(f"TEST COMMAND: {meta['test_command']}")
+    if cfg.get("test_command"):
+        context_lines.append(f"TEST COMMAND: {cfg['test_command']}")
     context_lines.append("")
 
     context_lines.append(
@@ -137,6 +168,7 @@ def _task_file_to_agent_task(task_file: Path):
         priority=int(meta.get("priority", 10)),
         kernel_language=meta.get("kernel_language", "python"),
         config=cfg,
+        num_gpus=int(meta.get("num_gpus", 1)),
     )
 
 

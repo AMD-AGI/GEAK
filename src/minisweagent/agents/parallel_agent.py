@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from minisweagent import Environment, Model
-from minisweagent.agents.default import AgentConfig, DefaultAgent
+from minisweagent.agents.default import AgentConfig, DefaultAgent, TerminatingException
 from minisweagent.agents.select_patch_agent import run_select_patch
 
 
@@ -384,10 +384,12 @@ class ParallelAgent(DefaultAgent):
             base_env = env_factory()
             env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
             env_config_dict["cwd"] = worktree_path_str
-            env_config_dict.setdefault("env", {})[repo_path_str] = worktree_path_str
+            # Create a NEW dict to avoid shared-reference race across threads
+            new_env = dict(env_config_dict.get("env") or {})
+            new_env[repo_path_str] = worktree_path_str
             if gpu_ids and agent_id < len(gpu_ids):
                 gpu_id = gpu_ids[agent_id]
-                env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+                new_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
                 if console:
                     # Use lock to ensure console output completes before stdout redirection
                     with _stdout_lock:
@@ -395,6 +397,7 @@ class ParallelAgent(DefaultAgent):
                         # Force flush to ensure output is written before redirection
                         if hasattr(sys.stdout, "flush"):
                             sys.stdout.flush()
+            env_config_dict["env"] = new_env
             parallel_env = type(base_env)(**env_config_dict)
 
             parallel_output = None
@@ -531,7 +534,8 @@ class ParallelAgent(DefaultAgent):
             base_env = env_factory()
             env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
             env_config_dict["cwd"] = worktree_path_str
-            env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = spec.hip_visible_devices
+            # Create a NEW dict to avoid shared-reference race across threads
+            env_config_dict["env"] = {**(env_config_dict.get("env") or {}), "HIP_VISIBLE_DEVICES": spec.hip_visible_devices}
 
             parallel_env = type(base_env)(**env_config_dict)
 
@@ -642,9 +646,14 @@ class ParallelAgent(DefaultAgent):
         sorted_tasks = sorted(enumerate(tasks), key=lambda t: t[1].priority)
 
         def execute_task(task_id: int, task) -> tuple[int, Any, Any, Any]:
-            """Execute a single task on a dynamically-assigned GPU."""
-            gpu_id = gpu_queue.get()  # blocks until a GPU is free
+            """Execute a single task on dynamically-assigned GPU(s)."""
+            needed = getattr(task, "num_gpus", 1) or 1
+            acquired_gpus: list[int] = []
+            for _ in range(needed):
+                acquired_gpus.append(gpu_queue.get())  # blocks until a GPU is free
+            gpu_id = acquired_gpus[0]
             slot_idx = gpu_to_slot[gpu_id]
+            hip_devices = ",".join(str(g) for g in acquired_gpus)
 
             try:
                 label = task.label or task.agent_class.__name__
@@ -652,7 +661,7 @@ class ParallelAgent(DefaultAgent):
                     with _stdout_lock:
                         console.print(
                             f"[bold green]Task {task_id} ({label}): "
-                            f"assigned to GPU {gpu_id} (slot {slot_idx})[/bold green]"
+                            f"assigned to GPU(s) {hip_devices} (slot {slot_idx})[/bold green]"
                         )
 
                 # Create or reset worktree for this slot
@@ -697,7 +706,8 @@ class ParallelAgent(DefaultAgent):
                 base_env = env_factory()
                 env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
                 env_config_dict["cwd"] = wt_path_str
-                env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+                # Create a NEW dict to avoid shared-reference race across threads
+                env_config_dict["env"] = {**(env_config_dict.get("env") or {}), "HIP_VISIBLE_DEVICES": hip_devices}
                 parallel_env = type(base_env)(**env_config_dict)
 
                 parallel_output = None
@@ -712,13 +722,17 @@ class ParallelAgent(DefaultAgent):
 
                 with open(log_file, "w", encoding="utf-8") as f:
                     f.write(f"Task {task_id} ({label}) Conversation Log\n")
-                    f.write(f"GPU: {gpu_id} | Priority: {task.priority} | Language: {task.kernel_language}\n")
+                    f.write(f"GPU: {hip_devices} | Priority: {task.priority} | Language: {task.kernel_language}\n")
                     f.write("=" * 60 + "\n\n")
 
                 exit_status, result, extra_info = None, None, None
                 with redirect_output_fn(log_file):
                     try:
                         exit_status, result = agent.run(agent_task, _is_parallel_mode=True)
+                    except TerminatingException as e:
+                        exit_status, result = type(e).__name__, str(e)
+                        with open(log_file, "a", encoding="utf-8") as f:
+                            f.write(f"\n\n{exit_status}: {result}\n")
                     except Exception as e:
                         exit_status, result = type(e).__name__, str(e)
                         extra_info = {"traceback": traceback.format_exc()}
@@ -733,12 +747,13 @@ class ParallelAgent(DefaultAgent):
 
                 if console:
                     with _stdout_lock:
-                        console.print(f"[bold blue]Task {task_id} ({label}): completed on GPU {gpu_id}[/bold blue]")
+                        console.print(f"[bold blue]Task {task_id} ({label}): completed on GPU(s) {hip_devices}[/bold blue]")
 
                 return task_id, agent, exit_status, result
 
             finally:
-                gpu_queue.put(gpu_id)  # return GPU to pool
+                for g in acquired_gpus:
+                    gpu_queue.put(g)
 
         # Submit ALL M tasks; ThreadPoolExecutor(max_workers=N) queues overflow
         results = []

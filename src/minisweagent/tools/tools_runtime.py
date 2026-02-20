@@ -52,6 +52,7 @@ class ToolRuntime:
         tool_profile: str = "full",
     ):
         self._tool_profile = tool_profile
+        self._mcp_bridges: list = []
         allowed = _TOOL_PROFILES.get(tool_profile)
 
         self._tool_table = {
@@ -110,6 +111,7 @@ class ToolRuntime:
         except ImportError:
             return
         profiler = MCPToolBridge("profiler-mcp", timeout=600)
+        self._mcp_bridges.append(profiler)
         self._tool_table["profile_kernel"] = profiler.tool("profile_kernel")
 
     def _register_mcp_tools(self):
@@ -124,17 +126,33 @@ class ToolRuntime:
             return  # mcp_bridge not available (e.g., minimal install)
 
         profiler = MCPToolBridge("profiler-mcp", timeout=600)
+        self._mcp_bridges.append(profiler)
         self._tool_table["profile_kernel"] = profiler.tool("profile_kernel")
 
         evolve = MCPToolBridge("kernel-evolve", timeout=300)
+        self._mcp_bridges.append(evolve)
         self._tool_table["generate_optimization"] = evolve.tool("generate_optimization")
 
         ercs = MCPToolBridge("kernel-ercs", timeout=300)
+        self._mcp_bridges.append(ercs)
         self._tool_table["evaluate_kernel_quality"] = ercs.tool("evaluate_kernel_quality")
         self._tool_table["reflect_on_kernel_result"] = ercs.tool("reflect_on_kernel_result")
 
         openevolve = MCPToolBridge("openevolve-mcp", timeout=7200)
+        self._mcp_bridges.append(openevolve)
         self._tool_table["openevolve"] = openevolve.tool("optimize_kernel")
+
+    def set_env(self, env: dict[str, str]) -> None:
+        """Propagate environment overrides (e.g. HIP_VISIBLE_DEVICES) to tools."""
+        env = dict(env)  # defensive copy to avoid shared-reference mutation
+        bash = self._tool_table.get("bash")
+        if bash is not None:
+            bash._env_override = env
+        profiling = self._tool_table.get("profiling")
+        if profiling is not None:
+            profiling._env_override = env
+        for bridge in self._mcp_bridges:
+            bridge.set_env(env)
 
     def set_codebase_context(self, context: str | None) -> None:
         """Store codebase context and propagate to SubAgentTool if present."""

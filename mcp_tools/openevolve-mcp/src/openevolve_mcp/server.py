@@ -73,7 +73,7 @@ def _find_run_openevolve() -> str:
 def optimize_kernel(
     kernel_path: str,
     max_iterations: int = 10,
-    gpu: int = 0,
+    gpu: str | int = 0,
     output_dir: str | None = None,
     commandment_path: str | None = None,
     baseline_metrics_path: str | None = None,
@@ -87,7 +87,7 @@ def optimize_kernel(
     Args:
         kernel_path: Path to kernel file (.py) or directory containing kernel files.
         max_iterations: Max evolution iterations (default: 10).
-        gpu: Primary GPU device ID for baseline profiling (default: 0).
+        gpu: GPU device ID(s) -- single int or comma-separated string (e.g. "0,1,2").
         output_dir: Output directory for results. Defaults to <kernel_dir>/optimization_output.
         commandment_path: Optional path to pre-built COMMANDMENT.md (skips auto-build).
         baseline_metrics_path: Optional path to pre-computed baseline metrics JSON.
@@ -132,6 +132,8 @@ def optimize_kernel(
         logger.info(f"Output directory: {output_dir}")
 
         # Build command
+        # --gpu 0 always: physical GPU selection is handled via HIP_VISIBLE_DEVICES
+        # in the subprocess env (set below). The script sees device 0 = first visible GPU.
         cmd = [
             "python3",
             script,
@@ -139,7 +141,7 @@ def optimize_kernel(
             "--iterations",
             str(max_iterations),
             "--gpu",
-            str(gpu),
+            "0",
             "--output",
             output_dir,
         ]
@@ -155,6 +157,12 @@ def optimize_kernel(
         env = os.environ.copy()
         if GEAK_OE_ROOT:
             env["GEAK_OE_ROOT"] = GEAK_OE_ROOT
+        gpu_str = str(gpu)
+        env["HIP_VISIBLE_DEVICES"] = gpu_str
+        # Pre-set GEAK_GPU_IDS so run_openevolve.py's evaluator pool uses
+        # exactly the GPUs we assigned, not all physical GPUs via rocm-smi.
+        env["GEAK_GPU_IDS"] = gpu_str
+
         # Ensure PYTHONPATH includes OpenEvolve
         oe_root = env.get("GEAK_OE_ROOT", GEAK_OE_ROOT)
         if oe_root:
