@@ -64,17 +64,26 @@ def _derive_test_command_from_commandment(commandment_path: str) -> str | None:
     return None
 
 
-def _task_file_to_agent_task(task_file: Path):
-    """Read a task markdown file and convert it to an AgentTask."""
+def task_file_to_agent_task(task_file: Path):
+    """Read a task markdown file and convert it to an AgentTask.
+
+    This is the canonical task-construction path used by both the
+    orchestrator (``run_task_batch``) and the standalone ``run-tasks``
+    CLI.  It:
+      - Applies agent-type filtering (``filter_agent_type``)
+      - Sets per-agent-type config (mode, strategy_manager, etc.)
+      - Injects full pipeline context (COMMANDMENT, baseline metrics,
+        profiling data, codebase context) into the task body
+    """
     from minisweagent.agents.agent_spec import AgentTask
     from minisweagent.run.task_file import read_task_file
 
     meta, body = read_task_file(task_file)
 
-    from minisweagent.agents.agent_spec import _agent_type_to_class
+    from minisweagent.agents.agent_spec import _agent_type_to_class, filter_agent_type
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 
-    agent_type = meta.get("agent_type", "strategy_agent")
+    agent_type = filter_agent_type(meta.get("agent_type", "strategy_agent"))
     agent_class = _agent_type_to_class().get(agent_type, StrategyInteractiveAgent)
 
     if agent_type == "openevolve":
@@ -224,7 +233,7 @@ def run_task_batch(
     if not task_files:
         return {"completed": 0, "failed": 0, "results": []}
 
-    tasks = [_task_file_to_agent_task(f) for f in task_files]
+    tasks = [task_file_to_agent_task(f) for f in task_files]
 
     # Determine repo_path from first task's metadata
     meta_0, _ = read_task_file(task_files[0])

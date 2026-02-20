@@ -212,10 +212,19 @@ def run_preprocessor(
             )
             logger.warning("UnitTestAgent failed: %s", exc, exc_info=True)
 
-    # Fall back to MCP discovery test command if UnitTestAgent didn't produce one
-    if not test_command and tests:
-        test_command = tests[0]["command"]
-        _print(f"  Falling back to discovery test: {test_command}")
+    # Fall back to discovery results if UnitTestAgent didn't produce one.
+    # Prefer the focused test (which targets the specific kernel) over
+    # the generic test commands (which may be pytest suites without
+    # --correctness/--profile support).
+    if not test_command:
+        focused = disc_dict.get("focused_test") or {}
+        focused_cmd = focused.get("focused_command")
+        if focused_cmd:
+            test_command = focused_cmd
+            _print(f"  Falling back to discovery focused test: {test_command}")
+        elif tests:
+            test_command = tests[0]["command"]
+            _print(f"  Falling back to discovery test: {test_command}")
 
     ctx["test_command"] = test_command
     if test_command:
@@ -333,6 +342,12 @@ def main() -> None:
         default=0,
         help="GPU device ID for profiling (default: 0)",
     )
+    parser.add_argument(
+        "-m",
+        "--model",
+        default=None,
+        help="Model name for UnitTestAgent harness creation (uses default if omitted)",
+    )
     args = parser.parse_args()
 
     try:
@@ -342,7 +357,27 @@ def main() -> None:
     except ImportError:
         console = None
 
-    ctx = run_preprocessor(args.url, Path(args.output), gpu_id=args.gpu, console=console)
+    import yaml
+
+    from minisweagent.config import get_config_path
+    from minisweagent.models import get_model
+
+    geak_cfg = get_config_path("geak")
+    model_config: dict = {}
+    if geak_cfg.exists():
+        full_cfg = yaml.safe_load(geak_cfg.read_text()) or {}
+        model_config = full_cfg.get("model", {})
+
+    def _model_factory():
+        return get_model(args.model, config=model_config)
+
+    ctx = run_preprocessor(
+        args.url,
+        Path(args.output),
+        gpu_id=args.gpu,
+        model_factory=_model_factory,
+        console=console,
+    )
 
     print(json.dumps(ctx, indent=2, default=str))
 

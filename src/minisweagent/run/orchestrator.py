@@ -153,6 +153,7 @@ def _tool_generate_tasks(
     ctx: dict[str, Any],
     round_num: int = 1,
     previous_results_dir: str | None = None,
+    **_extra,
 ) -> str:
     """Generate optimisation tasks for a given round."""
     from minisweagent.run.task_generator import generate_tasks as _gen
@@ -225,10 +226,14 @@ def _tool_generate_tasks(
 
 def _tool_dispatch_tasks(
     ctx: dict[str, Any],
-    task_files: list[str],
+    task_files: list[str] | str,
+    **_extra,
 ) -> str:
     """Dispatch task files to GPUs for parallel execution."""
     from minisweagent.run.dispatch import run_task_batch
+
+    if isinstance(task_files, str):
+        task_files = json.loads(task_files)
 
     gpu_ids = ctx.get("gpu_ids", [0])
     base_dir = Path(ctx["output_dir"])
@@ -256,6 +261,7 @@ def _tool_dispatch_tasks(
 def _tool_collect_results(
     ctx: dict[str, Any],
     results_dir: str,
+    **_extra,
 ) -> str:
     """Read results from a completed round and return a summary."""
     from minisweagent.run.task_generator import _scan_previous_results
@@ -273,6 +279,7 @@ def _tool_finalize(
     summary: str,
     best_patch: str | None = None,
     total_speedup: str | None = None,
+    **_extra,
 ) -> str:
     """Signal optimisation is complete.  Write final report."""
     report = {
@@ -720,7 +727,22 @@ def main() -> None:
         default=None,
         help="Model name (default: from GEAK_MODEL env or geak.yaml)",
     )
+    parser.add_argument(
+        "--allowed-agents",
+        default=None,
+        help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS.",
+    )
+    parser.add_argument(
+        "--excluded-agents",
+        default=None,
+        help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS.",
+    )
     args = parser.parse_args()
+
+    if args.allowed_agents:
+        os.environ["GEAK_ALLOWED_AGENTS"] = args.allowed_agents
+    if args.excluded_agents:
+        os.environ["GEAK_EXCLUDED_AGENTS"] = args.excluded_agents
 
     pp_dir = Path(args.preprocess_dir).resolve()
     if not pp_dir.is_dir():

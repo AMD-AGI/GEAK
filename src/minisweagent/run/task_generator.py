@@ -184,6 +184,37 @@ Submit ONLY the JSON array via the submit tool. No markdown fences, no explanati
 """).format(gpu_rules=_GPU_AND_PROFILER_RULES.strip())
 
 
+def _build_agent_restriction_addendum() -> str:
+    """Return a prompt paragraph describing agent restrictions, or empty string."""
+    from minisweagent.agents.agent_spec import ALL_AGENT_TYPES, get_allowed_agent_types
+
+    allowed = get_allowed_agent_types()
+    if allowed is None:
+        return ""
+
+    excluded_raw = os.environ.get("GEAK_EXCLUDED_AGENTS", "").strip()
+    allowed_raw = os.environ.get("GEAK_ALLOWED_AGENTS", "").strip()
+
+    if allowed_raw:
+        agent_list = ", ".join(sorted(allowed))
+        return (
+            f"\n\n**Agent restriction**: Only the following agents are available "
+            f"for this run: {agent_list}. You MUST NOT assign tasks to any other "
+            f"agent type. Use only these agent types in the `agent_type` field.\n"
+        )
+
+    if excluded_raw:
+        excluded = ALL_AGENT_TYPES - allowed
+        excluded_list = ", ".join(sorted(excluded))
+        return (
+            f"\n\n**Agent restriction**: The following agents are NOT available "
+            f"for this run: {excluded_list}. You MUST NOT assign tasks to these "
+            f"agent types. Choose from the remaining available agents instead.\n"
+        )
+
+    return ""
+
+
 _INSTANCE_TEMPLATE = textwrap.dedent("""\
 Generate optimization tasks for the kernel at {{ kernel_path }}.
 
@@ -440,10 +471,12 @@ def _run_task_agent(
         tg_step_limit = int(os.getenv("GEAK_TASKGEN_STEP_LIMIT", "75"))
         tg_cost_limit = float(os.getenv("GEAK_TASKGEN_COST_LIMIT", "10.0"))
 
+        system_prompt = _SYSTEM_PROMPT + _build_agent_restriction_addendum()
+
         agent = DefaultAgent(
             model,
             env,
-            system_template=_SYSTEM_PROMPT,
+            system_template=system_prompt,
             instance_template=_INSTANCE_TEMPLATE,
             step_limit=tg_step_limit,
             cost_limit=tg_cost_limit,
@@ -505,7 +538,7 @@ def _parse_llm_response(
     if not isinstance(raw_tasks, list):
         raise TypeError(f"Expected JSON array, got {type(raw_tasks).__name__}")
 
-    from minisweagent.agents.agent_spec import _agent_type_to_class
+    from minisweagent.agents.agent_spec import _agent_type_to_class, filter_agent_type
 
     type_to_class = _agent_type_to_class()
 
@@ -517,7 +550,7 @@ def _parse_llm_response(
         label = str(item.get("label", "unknown"))
         priority = int(item.get("priority", 10))
         priority = max(0, min(15, priority))
-        agent_type = str(item.get("agent_type", "strategy_agent"))
+        agent_type = filter_agent_type(str(item.get("agent_type", "strategy_agent")))
         kernel_language = str(item.get("kernel_language", "python"))
         task_prompt = str(item.get("task_prompt", ""))
         task_num_gpus = max(1, int(item.get("num_gpus", 1)))
@@ -693,8 +726,23 @@ def main():
         default=1,
         help="Number of available GPUs (guides task count and GPU allocation, default: 1)",
     )
+    parser.add_argument(
+        "--allowed-agents",
+        default=None,
+        help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS.",
+    )
+    parser.add_argument(
+        "--excluded-agents",
+        default=None,
+        help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS.",
+    )
 
     args = parser.parse_args()
+
+    if args.allowed_agents:
+        os.environ["GEAK_ALLOWED_AGENTS"] = args.allowed_agents
+    if args.excluded_agents:
+        os.environ["GEAK_EXCLUDED_AGENTS"] = args.excluded_agents
 
     # Populate from discovery JSON if provided (explicit flags override)
     disc_json = None

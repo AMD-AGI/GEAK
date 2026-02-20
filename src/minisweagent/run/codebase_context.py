@@ -362,3 +362,43 @@ def generate_codebase_context(
     logger.info("Wrote codebase context to %s (%d bytes)", out_path, len(content))
 
     return out_path
+
+
+# ── CLI entry point ───────────────────────────────────────────────────
+
+
+def main() -> None:
+    """CLI: ``codebase-context --repo-root <dir> --kernel-path <file> -o <dir>``."""
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="Generate CODEBASE_CONTEXT.md from repo layout and kernel file",
+    )
+    parser.add_argument("--repo-root", required=True, help="Root directory of the repository")
+    parser.add_argument("--kernel-path", required=True, help="Path to the target kernel file")
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=".",
+        help="Output directory for CODEBASE_CONTEXT.md (default: cwd)",
+    )
+    args = parser.parse_args()
+
+    repo_root = Path(args.repo_root).resolve()
+    kernel_path = Path(args.kernel_path).resolve()
+    output_dir = Path(args.output).resolve()
+
+    if not repo_root.is_dir():
+        print(f"ERROR: repo root not found: {repo_root}", file=sys.stderr)
+        sys.exit(1)
+    if not kernel_path.is_file():
+        print(f"ERROR: kernel file not found: {kernel_path}", file=sys.stderr)
+        sys.exit(1)
+
+    out_path = generate_codebase_context(repo_root, kernel_path, output_dir)
+    print(f"Wrote {out_path} ({out_path.stat().st_size} bytes)", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

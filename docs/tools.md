@@ -30,9 +30,16 @@ block-beta
 
     space
     task_gen["task-generator\nLLM-driven task creation\n--num-gpus N"]
-    run_tasks["run-tasks\nBatch task execution\n(ParallelAgent pool)"]
+    run_tasks["run-tasks\nBatch task execution\n(ParallelAgent pool)"]:2
     select_patch["select-patch\nLLM-based\nbest patch selection"]
-    openevolve["openevolve-worker\nOpenEvolve\noptimisation task"]
+
+    space:5
+
+    space
+    strategy["strategy_agent\nLLM + kernel-evolve\nMCP tools"]
+    swe["swe_agent\nManual edits,\nautotune configs"]
+    openevolve["openevolve-worker\nOpenEvolve\noptimisation"]
+    space
 
     space:5
 
@@ -40,10 +47,9 @@ block-beta
 
     space:5
 
-    validate["validate-commandment\nValidate COMMANDMENT.md"]:1
+    validate["validate-commandment\nValidate COMMANDMENT.md"]:2
     space
-    geak_task["geak --from-task\nSingle task sub-agent\n--gpu-ids N"]:1
-    space:2
+    geak_task["geak --from-task\nSingle task sub-agent\n(strategy / swe)\n--gpu-ids N"]:2
 
     geak --> geak_preprocess
     geak --> geak_orchestrate
@@ -56,7 +62,9 @@ block-beta
     geak_orchestrate --> task_gen
     geak_orchestrate --> run_tasks
     geak_orchestrate --> select_patch
-    geak_orchestrate --> openevolve
+    run_tasks --> strategy
+    run_tasks --> swe
+    run_tasks --> openevolve
 
     style geak fill:#60a5fa,color:#000,stroke:#93c5fd
     style geak_preprocess fill:#a78bfa,color:#000,stroke:#c4b5fd
@@ -72,6 +80,8 @@ block-beta
     style task_gen fill:#1e293b,color:#e2e8f0,stroke:#475569
     style run_tasks fill:#1e293b,color:#e2e8f0,stroke:#475569
     style select_patch fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style openevolve fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style strategy fill:#164e63,color:#a5f3fc,stroke:#22d3ee
+    style swe fill:#164e63,color:#a5f3fc,stroke:#22d3ee
+    style openevolve fill:#164e63,color:#a5f3fc,stroke:#22d3ee
     style validate fill:#1e293b,color:#e2e8f0,stroke:#475569
 ```

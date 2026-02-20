@@ -9,9 +9,13 @@ Used by ParallelAgent.run_parallel() to spawn agents.
 
 from __future__ import annotations
 
+import logging
+import os
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _agent_type_to_class() -> dict[str, type]:
@@ -31,6 +35,59 @@ def _agent_type_to_class() -> dict[str, type]:
 def _agent_class_to_type() -> dict[type, str]:
     """Reverse mapping: agent class -> agent_type string."""
     return {cls: name for name, cls in _agent_type_to_class().items()}
+
+
+ALL_AGENT_TYPES: frozenset[str] = frozenset({"strategy_agent", "swe_agent", "openevolve"})
+
+_DEFAULT_FALLBACK_AGENT = "swe_agent"
+
+
+def get_allowed_agent_types() -> set[str] | None:
+    """Return the effective set of allowed agent types, or *None* if unrestricted.
+
+    Reads ``GEAK_ALLOWED_AGENTS`` (allowlist) and ``GEAK_EXCLUDED_AGENTS``
+    (blocklist) from the environment.  When *both* are set the allowlist
+    wins and the blocklist is ignored (a warning is logged).
+    """
+    allowed_raw = os.environ.get("GEAK_ALLOWED_AGENTS", "").strip()
+    excluded_raw = os.environ.get("GEAK_EXCLUDED_AGENTS", "").strip()
+
+    if not allowed_raw and not excluded_raw:
+        return None
+
+    if allowed_raw:
+        if excluded_raw:
+            logger.warning(
+                "Both GEAK_ALLOWED_AGENTS and GEAK_EXCLUDED_AGENTS are set; "
+                "GEAK_ALLOWED_AGENTS takes precedence."
+            )
+        allowed = {t.strip() for t in allowed_raw.split(",") if t.strip()}
+        return allowed & ALL_AGENT_TYPES
+
+    excluded = {t.strip() for t in excluded_raw.split(",") if t.strip()}
+    return ALL_AGENT_TYPES - excluded
+
+
+def filter_agent_type(agent_type: str) -> str:
+    """Safety-net filter: remap *agent_type* to the fallback if it is not allowed.
+
+    When no filtering env vars are set this is a no-op.
+    """
+    allowed = get_allowed_agent_types()
+    if allowed is None:
+        return agent_type
+
+    if agent_type in allowed:
+        return agent_type
+
+    fallback = os.environ.get("GEAK_FALLBACK_AGENT", "").strip() or _DEFAULT_FALLBACK_AGENT
+    logger.warning(
+        "Agent type %r is not allowed (allowed=%s); remapping to %r",
+        agent_type,
+        sorted(allowed),
+        fallback,
+    )
+    return fallback
 
 
 @dataclass

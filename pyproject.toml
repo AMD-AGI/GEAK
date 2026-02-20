@@ -87,6 +87,8 @@ task-generator = "minisweagent.run.task_generator:main"
 commandment = "minisweagent.tools.commandment:main"
 validate-commandment = "minisweagent.tools.validate_commandment:main"
 baseline-metrics = "minisweagent.baseline_metrics:main"
+codebase-context = "minisweagent.run.codebase_context:main"
+# test-discovery is provided by mcp_tools/automated-test-discovery (separate installable)
 openevolve-worker = "minisweagent.agents.openevolve_worker:main"
 run-tasks = "minisweagent.run.task_runner:main"
 select-patch = "minisweagent.agents.select_patch_agent:main"
