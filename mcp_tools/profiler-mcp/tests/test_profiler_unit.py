@@ -198,6 +198,16 @@ class TestNormalizeCommand:
         result = _normalize_command(cmd)
         assert result.startswith("bash -c ")
 
+    def test_inline_env_var_wrapped(self):
+        cmd = "HIP_VISIBLE_DEVICES=4 python3 kernel.py --profile"
+        result = _normalize_command(cmd)
+        assert result.startswith("bash -c ")
+
+    def test_inline_env_var_multiple_wrapped(self):
+        cmd = "CUDA_VISIBLE_DEVICES=0 HIP_VISIBLE_DEVICES=0 python3 kernel.py"
+        result = _normalize_command(cmd)
+        assert result.startswith("bash -c ")
+
 
 class TestRocprofProfilingTypes:
     @pytest.mark.parametrize("profiling_type", ["profiling", "roofline", "profiler_analyzer"])

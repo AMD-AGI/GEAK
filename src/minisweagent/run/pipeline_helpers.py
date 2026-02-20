@@ -12,6 +12,7 @@ import argparse
 import copy
 import logging
 import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -153,13 +154,20 @@ def extract_harness_path(test_command: str) -> str:
 # ── harness validation ───────────────────────────────────────────────
 
 
+_GPU_ALLOC_IN_PROFILE_RE = re.compile(
+    r"""torch\.(?:randn?|empty|zeros|ones|full)\s*\("""
+    r"""[^)]*device\s*=\s*["']cuda["']""",
+)
+
+
 def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
     """Static-analyse a harness script to verify it supports required CLI flags.
 
     Checks that the harness uses an argument-parsing library (argparse, click,
-    or typer) and defines ``--profile`` and ``--correctness`` flags.  This is a
-    fast, no-GPU, no-runtime check that catches the exact class of LLM
-    compliance bug where the harness ignores CLI flags.
+    or typer) and defines ``--profile`` and ``--correctness`` flags.  Also
+    checks that the ``run_profile`` function (if present) does not allocate
+    tensors directly on CUDA, which would pollute the profiler trace with
+    GPU RNG / memset kernels.
 
     Returns ``(valid, errors)`` where *errors* is empty when *valid* is True.
     """
@@ -186,6 +194,26 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
     for flag in REQUIRED_HARNESS_FLAGS:
         if flag not in source:
             errors.append(f"Harness source does not define '{flag}' flag")
+
+    # Check for GPU-side tensor allocation inside the profile function.
+    # rocprofv3 captures ALL GPU kernels, so torch.randn(..., device='cuda')
+    # inside run_profile pollutes the trace with RNG kernels.
+    _in_profile_fn = False
+    for lineno, line in enumerate(source.splitlines(), 1):
+        stripped = line.lstrip()
+        if stripped.startswith("def ") and "profile" in stripped:
+            _in_profile_fn = True
+            continue
+        if _in_profile_fn and stripped.startswith("def "):
+            _in_profile_fn = False
+        if _in_profile_fn and _GPU_ALLOC_IN_PROFILE_RE.search(line):
+            errors.append(
+                f"Line {lineno}: GPU tensor allocation inside profile function "
+                f"(device='cuda'). Use device='cpu' then .to('cuda') to avoid "
+                f"polluting the profiler trace with RNG/memset kernels. "
+                f"See INSTRUCTIONS.md point 8."
+            )
+            break  # one warning is enough
 
     return len(errors) == 0, errors
 

@@ -42,22 +42,27 @@ mcp = FastMCP(
 
 _SHELL_META = re.compile(r'[&|;$`(){}<>!\\]|&&|\|\||<<|>>|\bcd\b|\bsource\b|\bexport\b')
 
+# Detects inline env-var assignment: "VAR=value command ..."
+# rocprofv3 treats "VAR=value" as the executable name and crashes.
+_INLINE_ENV = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=\S+\s')
+
 
 def _normalize_command(command: str) -> str:
     """Wrap *command* in ``bash -c`` if it contains shell constructs.
 
     ``rocprofv3`` uses ``os.execvpe`` to launch the profiled command, which
     bypasses the shell entirely.  This means shell builtins (``cd``),
-    environment variable expansion (``$VAR``), and compound operators
-    (``&&``, ``|``) will fail.  Wrapping in ``bash -c`` ensures the command
-    is interpreted by a real shell.
+    environment variable expansion (``$VAR``), compound operators
+    (``&&``, ``|``), and inline env-var assignments
+    (``HIP_VISIBLE_DEVICES=0 python3 ...``) will all fail.  Wrapping in
+    ``bash -c`` ensures the command is interpreted by a real shell.
 
     Simple commands (e.g. ``python3 kernel.py --profile``) are left as-is
     so that ``execvpe`` can launch them directly without the extra process.
     """
     if command.startswith("bash -c ") or command.startswith("bash -c'"):
         return command
-    if _SHELL_META.search(command):
+    if _SHELL_META.search(command) or _INLINE_ENV.match(command):
         logger.info(f"Command contains shell constructs, wrapping in bash -c: {command[:120]}")
         return f"bash -c {shlex.quote(command)}"
     return command
