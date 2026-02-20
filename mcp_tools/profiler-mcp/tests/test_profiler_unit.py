@@ -4,6 +4,7 @@ These tests run anywhere without a GPU. They verify dispatch logic,
 error handling, and schema correctness.
 """
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
@@ -12,14 +13,21 @@ import pytest
 # Import the server module (conftest.py sets up sys.path)
 # ---------------------------------------------------------------------------
 from profiler_mcp.server import (
+    _normalize_command,
     mcp,
     profile_kernel,
 )
 
 
-# Helper to call the wrapped MCP tool function
 def _call(**kwargs):
-    return profile_kernel.fn(**kwargs)
+    """Call the profile_kernel function directly (it's a plain function after @mcp.tool())."""
+    return profile_kernel(**kwargs)
+
+
+def _get_tool_schema():
+    """Retrieve the FunctionTool object for profile_kernel from the MCP server."""
+    tools = asyncio.run(mcp.list_tools())
+    return next(t for t in tools if t.name == "profile_kernel")
 
 
 # ---------------------------------------------------------------------------
@@ -121,11 +129,11 @@ class TestRocprofErrorHandling:
 
 class TestSchemaParams:
     def test_command_is_required(self):
-        tool = mcp._tool_manager._tools["profile_kernel"]
+        tool = _get_tool_schema()
         assert "command" in tool.parameters.get("required", [])
 
     def test_has_all_expected_params(self):
-        tool = mcp._tool_manager._tools["profile_kernel"]
+        tool = _get_tool_schema()
         props = set(tool.parameters.get("properties", {}).keys())
         expected = {
             "command",
@@ -141,7 +149,7 @@ class TestSchemaParams:
         assert expected.issubset(props), f"Missing params: {expected - props}"
 
     def test_backend_not_required(self):
-        tool = mcp._tool_manager._tools["profile_kernel"]
+        tool = _get_tool_schema()
         required = tool.parameters.get("required", [])
         assert "backend" not in required
 
@@ -153,6 +161,42 @@ class TestDefaultBackend:
         result = _call(command="python3 kernel.py")
         mock_metrix.assert_called_once()
         assert result["backend"] == "metrix"
+
+
+class TestNormalizeCommand:
+    """_normalize_command wraps shell-style commands in bash -c."""
+
+    def test_simple_command_unchanged(self):
+        assert _normalize_command("python3 kernel.py --profile") == "python3 kernel.py --profile"
+
+    def test_cd_wrapped(self):
+        cmd = "cd /workspace && python3 kernel.py"
+        result = _normalize_command(cmd)
+        assert result.startswith("bash -c ")
+
+    def test_env_var_expansion_wrapped(self):
+        cmd = "${GEAK_WORK_DIR}/run.sh harness.py --profile"
+        result = _normalize_command(cmd)
+        assert result.startswith("bash -c ")
+
+    def test_pipe_wrapped(self):
+        cmd = "python3 kernel.py | tail -5"
+        result = _normalize_command(cmd)
+        assert result.startswith("bash -c ")
+
+    def test_semicolon_wrapped(self):
+        cmd = "echo hello; python3 kernel.py"
+        result = _normalize_command(cmd)
+        assert result.startswith("bash -c ")
+
+    def test_already_wrapped_unchanged(self):
+        cmd = "bash -c 'cd /tmp && python3 kernel.py'"
+        assert _normalize_command(cmd) == cmd
+
+    def test_export_wrapped(self):
+        cmd = "export HIP_VISIBLE_DEVICES=0 && python3 kernel.py"
+        result = _normalize_command(cmd)
+        assert result.startswith("bash -c ")
 
 
 class TestRocprofProfilingTypes:

@@ -11,6 +11,8 @@ Usage:
 
 import logging
 import os
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +34,33 @@ mcp = FastMCP(
         "roofline and instruction-level analysis."
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# Command normalisation
+# ---------------------------------------------------------------------------
+
+_SHELL_META = re.compile(r'[&|;$`(){}<>!\\]|&&|\|\||<<|>>|\bcd\b|\bsource\b|\bexport\b')
+
+
+def _normalize_command(command: str) -> str:
+    """Wrap *command* in ``bash -c`` if it contains shell constructs.
+
+    ``rocprofv3`` uses ``os.execvpe`` to launch the profiled command, which
+    bypasses the shell entirely.  This means shell builtins (``cd``),
+    environment variable expansion (``$VAR``), and compound operators
+    (``&&``, ``|``) will fail.  Wrapping in ``bash -c`` ensures the command
+    is interpreted by a real shell.
+
+    Simple commands (e.g. ``python3 kernel.py --profile``) are left as-is
+    so that ``execvpe`` can launch them directly without the extra process.
+    """
+    if command.startswith("bash -c ") or command.startswith("bash -c'"):
+        return command
+    if _SHELL_META.search(command):
+        logger.info(f"Command contains shell constructs, wrapping in bash -c: {command[:120]}")
+        return f"bash -c {shlex.quote(command)}"
+    return command
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +242,8 @@ def profile_kernel(
     logger.info("=" * 60)
     logger.info(f"Profiler MCP: backend={backend}, command={command}")
     logger.info("=" * 60)
+
+    command = _normalize_command(command)
 
     _warmup(command, warmup_runs)
 
