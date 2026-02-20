@@ -66,6 +66,23 @@ agent:
        - For (B) fused tasks: the harness must test BOTH unfused and fused paths.
        - Keep the harness file outside the kernel directory (e.g. in repo root or a `tests/` dir).
 
+    CRITICAL - Shape extraction and usage rules:
+       You MUST read the top discovered test file(s) and extract ALL input
+       shapes / dimensions they use (look for size lists, dimension variables,
+       parametrize decorators, loops over m/n/k, EVAL_CONFIGS, etc.).
+       From the full set of discovered shapes, build two lists sorted small
+       to large and uniformly spread across the range:
+       - **HARNESS_SHAPES** (20-25 shapes): for `--correctness` and
+         `--benchmark` modes. Cover the full range from smallest to largest.
+       - **PROFILE_SHAPES** (exactly 5 shapes): for `--profile` mode ONLY.
+         Pick 5 evenly-spaced sizes from smallest to largest.
+         This small set prevents OOM errors during GPU profiling.
+       Define both lists as Python lists at the top of the harness script.
+       Select the appropriate list based on the CLI mode (`--profile` uses
+       PROFILE_SHAPES, everything else uses HARNESS_SHAPES).
+       Do NOT invent shapes that are not in the discovered test files.
+       Do NOT use HARNESS_SHAPES in `--profile` mode.
+
     Output constraints
     - Your response must contain exactly ONE bash code block (```bash ... ```).
     - The bash block must contain exactly ONE shell command.

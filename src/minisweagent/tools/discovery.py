@@ -200,6 +200,58 @@ class TestPatterns:
     import_patterns: list[str] = field(default_factory=list)  # e.g. ["from aiter.ops import rope_fwd"]
 
 
+def _parse_shape_size(shape_str: str) -> int | None:
+    """Parse a shape string like '(1024, 1024)' and return the product of its dimensions."""
+    nums = re.findall(r"\d+", shape_str)
+    if not nums:
+        return None
+    size = 1
+    for n in nums:
+        size *= int(n)
+    return size
+
+
+def select_shapes_uniform(shapes: list[str], count: int) -> list[str]:
+    """Select *count* shapes uniformly spread from smallest to largest.
+
+    Deduplicates, sorts by total element count (product of dimensions),
+    then picks evenly-spaced indices so the result spans the full
+    small-to-large range.  Returns up to *count* shapes (fewer if the
+    input list is shorter).
+    """
+    # Deduplicate while preserving order, then attach sizes
+    seen: set[str] = set()
+    sized: list[tuple[int, str]] = []
+    for s in shapes:
+        if s in seen:
+            continue
+        seen.add(s)
+        sz = _parse_shape_size(s)
+        if sz is not None:
+            sized.append((sz, s))
+
+    if not sized:
+        return []
+
+    sized.sort(key=lambda t: t[0])
+
+    n = len(sized)
+    if n <= count:
+        return [s for _, s in sized]
+
+    # Pick evenly-spaced indices including first and last
+    indices = [round(i * (n - 1) / (count - 1)) for i in range(count)]
+    # Deduplicate indices (can happen with small n)
+    seen_idx: set[int] = set()
+    unique_indices: list[int] = []
+    for idx in indices:
+        if idx not in seen_idx:
+            seen_idx.add(idx)
+            unique_indices.append(idx)
+
+    return [sized[i][1] for i in unique_indices]
+
+
 @dataclass
 class TestInfo:
     """Information about a discovered test."""
