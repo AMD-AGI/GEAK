@@ -235,6 +235,11 @@ def select_shapes_uniform(shapes: list[str], count: int) -> list[str]:
 
     sized.sort(key=lambda t: t[0])
 
+    if count <= 0:
+        return []
+    if count == 1:
+        return [sized[len(sized) // 2][1]]
+
     n = len(sized)
     if n <= count:
         return [s for _, s in sized]
