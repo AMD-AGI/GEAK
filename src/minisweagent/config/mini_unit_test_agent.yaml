@@ -53,10 +53,11 @@ agent:
 
     Part 2: Creating a new test harness
     (Only if no suitable existing test can be adapted.)
-    The test harness must be a Python script with exactly three CLI modes:
+    The test harness must be a Python script with exactly four CLI modes:
        - `--correctness`: validates kernel output against a trusted reference (torch reference, or non-fused path when applicable). Must exit non-zero on failure.
        - `--profile`: runs the kernel ONCE with minimal setup (for profiling tools like rocprof). Fast, no correctness check.
-       - `--benchmark`: runs the kernel with at least 20 iterations; prints a stable timing metric (median latency).
+       - `--benchmark`: runs the kernel with at least 20 iterations on HARNESS_SHAPES (sampled subset); prints a stable timing metric (median latency).
+       - `--full-benchmark`: like --benchmark but runs ALL discovered shapes. Used only at the start and end of optimization to get a complete picture.
     Requirements:
        - Import the kernel via its package path (do NOT use `importlib.util`).
        - Use `torch.testing.assert_close` for correctness (Python/Triton) or host-side validation (C++/HIP).
@@ -70,18 +71,23 @@ agent:
        You MUST read the top discovered test file(s) and extract ALL input
        shapes / dimensions they use (look for size lists, dimension variables,
        parametrize decorators, loops over m/n/k, EVAL_CONFIGS, etc.).
-       From the full set of discovered shapes, build two lists sorted small
-       to large and uniformly spread across the range:
-       - **HARNESS_SHAPES** (20-25 shapes): for `--correctness` and
-         `--benchmark` modes. Cover the full range from smallest to largest.
-       - **PROFILE_SHAPES** (exactly 5 shapes): for `--profile` mode ONLY.
-         Pick 5 evenly-spaced sizes from smallest to largest.
-         This small set prevents OOM errors during GPU profiling.
-       Define both lists as Python lists at the top of the harness script.
-       Select the appropriate list based on the CLI mode (`--profile` uses
-       PROFILE_SHAPES, everything else uses HARNESS_SHAPES).
+       Collect every discovered shape into an ALL_SHAPES list, sorted small
+       to large. Then build three lists from it:
+       - **ALL_SHAPES**: every unique shape from the test files, sorted by
+         total element count. Used by `--full-benchmark`.
+       - **HARNESS_SHAPES** (20-25 shapes): uniformly sampled from ALL_SHAPES
+         covering smallest to largest. Used by `--correctness` and `--benchmark`.
+         If ALL_SHAPES has 25 or fewer entries, HARNESS_SHAPES = ALL_SHAPES.
+       - **PROFILE_SHAPES** (exactly 5 shapes): 5 evenly-spaced sizes from
+         ALL_SHAPES. Used by `--profile` mode ONLY to prevent OOM.
+       Define all three lists as Python lists at the top of the harness script.
+       Shape routing by mode:
+         --profile        → PROFILE_SHAPES
+         --benchmark      → HARNESS_SHAPES
+         --correctness    → HARNESS_SHAPES
+         --full-benchmark → ALL_SHAPES
        Do NOT invent shapes that are not in the discovered test files.
-       Do NOT use HARNESS_SHAPES in `--profile` mode.
+       Do NOT use ALL_SHAPES or HARNESS_SHAPES in `--profile` mode.
 
     Output constraints
     - Your response must contain exactly ONE bash code block (```bash ... ```).

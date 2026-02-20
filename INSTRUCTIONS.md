@@ -112,7 +112,7 @@ When no pre-built harness exists, no suitable existing tests are found, or
 the kernel file does NOT have a built-in `--profile` flag or standard
 `triton_op`/`torch_op` interface, create a **test harness** — a small Python
 script that imports the kernel, creates test inputs, and provides
-`--correctness`, `--profile`, and `--benchmark` modes.
+`--correctness`, `--profile`, `--benchmark`, and `--full-benchmark` modes.
 
 **If discovery found existing test files**, read them first and reuse:
 - Their reference implementations for correctness checking
@@ -148,14 +148,25 @@ script that imports the kernel, creates test inputs, and provides
 3. **Use a fixed random seed** (`torch.manual_seed(42)`) so that correctness
    checks compare deterministic outputs.
 
-4. **Use these FIXED tensor sizes for all tests and profiling.**
-   The baseline and every OpenEvolve evaluation MUST use identical input
-   dimensions, otherwise speedup numbers are meaningless.  Use these
+4. **Extract shapes from discovered test files, not hardcoded defaults.**
+   The harness must define three shape lists at the top of the script:
+   - `ALL_SHAPES`: every unique shape from the discovered test files,
+     sorted by total element count.
+   - `HARNESS_SHAPES` (20-25): uniformly sampled from ALL_SHAPES. If
+     ALL_SHAPES has ≤25 entries, HARNESS_SHAPES = ALL_SHAPES.
+   - `PROFILE_SHAPES` (5): evenly-spaced from ALL_SHAPES, prevents OOM.
+
+   Shape routing by CLI mode:
+   - `--profile`        → PROFILE_SHAPES (5 shapes)
+   - `--benchmark`      → HARNESS_SHAPES (20-25 shapes)
+   - `--correctness`    → HARNESS_SHAPES
+   - `--full-benchmark` → ALL_SHAPES (every discovered shape)
+
+   If the kernel does NOT have discovered test files, fall back to these
    standard sizes (large enough to saturate the GPU):
    - **Attention/RoPE kernels:** `S=2048, B=4, H=32, D=128` (fp16)
    - **GEMM kernels:** `M=1024, N=1024, K=1024` (fp16)
    - **Elementwise/pointwise:** at least 16M elements
-   Hardcode these in the test harness — do NOT let them vary between runs.
 
 5. **Use `torch.testing.assert_close`** for correctness, NOT manual
    `torch.allclose` with always-pass fallbacks.
@@ -163,6 +174,8 @@ script that imports the kernel, creates test inputs, and provides
 6. **The `--profile` mode should run the kernel once** (with minimal setup)
    so that `kernel-profile` / `rocprofv3` captures exactly the kernel(s)
    you care about.  Avoid running benchmarks or loops in profile mode.
+   **CRITICAL: `--profile` must use ONLY PROFILE_SHAPES (5 shapes) to
+   prevent OOM.**
 
 7. **Keep the harness file OUTSIDE the kernel directory** or in a fixed
    location that won't be overwritten by OpenEvolve's candidate files.
