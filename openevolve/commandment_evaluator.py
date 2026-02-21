@@ -516,8 +516,9 @@ class CommandmentEvaluator:
             metrics["duration_us"] = val_ms * 1000.0
             return metrics
 
-        # 2. "Overall median latency: <float> ms"
-        m = re.search(r"overall\s+median\s+latency:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms", stdout, re.IGNORECASE)
+        # 2. "Median latency across all shapes: <float> ms" or
+        #    "Overall median latency: <float> ms" or similar
+        m = re.search(r"median\s+latency[\w\s]*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms", stdout, re.IGNORECASE)
         if m:
             val_ms = float(m.group(1))
             metrics["benchmark_ms"] = val_ms
