@@ -254,8 +254,16 @@ class CommandmentEvaluator:
                 benchmark_stderr = stderr
                 if ok:
                     metrics = self._parse_benchmark_output(stdout)
+                    if not metrics.get("benchmark_ms"):
+                        logger.debug(
+                            "BENCHMARK stdout (first 500 chars): %s",
+                            stdout[:500],
+                        )
                 else:
-                    logger.warning(f"BENCHMARK section failed for {program_id}")
+                    logger.warning(
+                        "BENCHMARK section failed for %s; stderr: %s",
+                        program_id, stderr[:300],
+                    )
                     metrics = {}
             elif "PROFILE" in self.sections:
                 # Fallback for old-style COMMANDMENTs that only have PROFILE
@@ -335,6 +343,16 @@ class CommandmentEvaluator:
         env = os.environ.copy()
         env["GEAK_KERNEL_DIR"] = self.kernel_dir or work_dir
         env["GEAK_WORK_DIR"] = work_dir
+
+        # Ensure GEAK_HARNESS and GEAK_REPO_ROOT are set -- COMMANDMENT
+        # commands reference them as ${GEAK_HARNESS} / ${GEAK_REPO_ROOT}.
+        if "GEAK_HARNESS" not in env:
+            pp_dir = os.path.dirname(self.commandment_path)
+            hp_file = os.path.join(pp_dir, "harness_path.txt")
+            if os.path.isfile(hp_file):
+                env["GEAK_HARNESS"] = open(hp_file).read().strip()
+        if "GEAK_REPO_ROOT" not in env:
+            env.setdefault("GEAK_REPO_ROOT", env.get("GEAK_KERNEL_DIR", work_dir))
 
         # On ROCm/HIP, remove PYTORCH_CUDA_ALLOC_CONF if it contains
         # expandable_segments -- this option is unsupported on ROCm and
