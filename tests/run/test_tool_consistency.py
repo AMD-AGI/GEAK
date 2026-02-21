@@ -147,7 +147,13 @@ def test_validator_requires_pythonpath_in_setup():
     """COMMANDMENT validator errors if SETUP doesn't set PYTHONPATH."""
     from minisweagent.tools.validate_commandment import validate_commandment
 
-    bad = "## SETUP\necho hello\n\n## CORRECTNESS\npython test.py\n\n## PROFILE\nkernel-profile test.py\n"
+    bad = (
+        "## SETUP\necho hello\n\n"
+        "## CORRECTNESS\npython test.py\n\n"
+        "## PROFILE\nkernel-profile test.py\n\n"
+        "## BENCHMARK\npython bench.py --benchmark\n\n"
+        "## FULL_BENCHMARK\npython bench.py --full-benchmark\n"
+    )
     result = validate_commandment(bad)
     assert not result["valid"]
     assert any("PYTHONPATH" in e for e in result["errors"])
@@ -156,7 +162,9 @@ def test_validator_requires_pythonpath_in_setup():
         "## SETUP\n"
         "printf '#!/bin/bash\\nexport PYTHONPATH=%s:/repo:${PYTHONPATH}\\n' > run.sh\n\n"
         "## CORRECTNESS\nrun.sh test.py --correctness\n\n"
-        "## PROFILE\nkernel-profile run.sh test.py --profile\n"
+        "## PROFILE\nkernel-profile run.sh test.py --profile\n\n"
+        "## BENCHMARK\nrun.sh test.py --benchmark\n\n"
+        "## FULL_BENCHMARK\nrun.sh test.py --full-benchmark\n"
     )
     result = validate_commandment(good)
     assert result["valid"], result["errors"]
@@ -174,14 +182,22 @@ def test_commandment_test_command_is_verbatim(tmp_path):
         "## CORRECTNESS\n"
         "${GEAK_WORK_DIR}/run.sh /path/to/harness.py --correctness\n\n"
         "## PROFILE\n"
-        "kernel-profile ${GEAK_WORK_DIR}/run.sh /path/to/harness.py --profile\n"
+        "kernel-profile ${GEAK_WORK_DIR}/run.sh /path/to/harness.py --profile\n\n"
+        "## BENCHMARK\n"
+        "${GEAK_WORK_DIR}/run.sh /path/to/harness.py --benchmark\n\n"
+        "## FULL_BENCHMARK\n"
+        "${GEAK_WORK_DIR}/run.sh /path/to/harness.py --full-benchmark\n"
     )
 
     result = _commandment_test_command(str(cmd_file))
     assert result is not None
+    from pathlib import Path as _P
+    script_content = _P(result).read_text()
     # SETUP command must appear verbatim (no stripping of run.sh)
-    assert "${GEAK_WORK_DIR}/run.sh" in result
+    assert "${GEAK_WORK_DIR}/run.sh" in script_content
     # CORRECTNESS command must appear verbatim
-    assert "--correctness" in result
+    assert "--correctness" in script_content
+    # BENCHMARK command must appear after CORRECTNESS
+    assert "--benchmark" in script_content
     # Must NOT contain bare "python" (that would mean we stripped the wrapper)
-    assert not result.startswith("python ")
+    assert not script_content.startswith("python ")

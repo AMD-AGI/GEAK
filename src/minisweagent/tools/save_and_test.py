@@ -1,4 +1,4 @@
-"""Test performance tool for saving patches and running performance tests."""
+"""Save-and-test tool: saves patches and runs correctness + benchmark tests."""
 
 import os
 import subprocess
@@ -10,8 +10,8 @@ from typing import Any
 
 
 @dataclass
-class TestPerfContext:
-    """Context required for test_perf tool execution."""
+class SaveAndTestContext:
+    """Context required for save_and_test tool execution."""
 
     cwd: str
     test_command: str | None
@@ -23,41 +23,41 @@ class TestPerfContext:
     patch_counter: int = 0
 
 
-class TestPerfTool:
+class SaveAndTestTool:
     """Tool to save patch and run performance test."""
 
     def __init__(self):
-        self.context: TestPerfContext | None = None
+        self.context: SaveAndTestContext | None = None
 
-    def set_context(self, context: TestPerfContext):
+    def set_context(self, context: SaveAndTestContext):
         """Set execution context from agent."""
         self.context = context
 
     def __call__(self, *, description: str = "", **kwargs) -> dict[str, Any]:
         if not self.context:
-            return {"output": "TestPerfTool: context not configured", "returncode": 1}
+            return {"output": "SaveAndTestTool: context not configured", "returncode": 1}
 
         ctx = self.context
         patch_name = f"patch_{ctx.patch_counter}"
         ctx.patch_counter += 1
 
         desc_str = f" ({description})" if description else ""
-        self._log(f"\n[TestPerf] Saving patch and running test{desc_str}...")
+        self._log(f"\n[SaveAndTest] Saving patch and running test{desc_str}...")
 
         try:
             # Get patch content
             patch_content = self._get_patch_content()
 
             if not patch_content.strip():
-                self._log("[TestPerf] No changes detected, baseline running.")
+                self._log("[SaveAndTest] No changes detected, baseline running.")
             else:
-                self._log(f"[TestPerf] Patch {patch_name} captured, running test...")
+                self._log(f"[SaveAndTest] Patch {patch_name} captured, running test...")
 
             # Run test
             test_output, test_passed, test_returncode = self._run_test()
 
             status = "✓ PASSED" if test_passed else "✗ FAILED"
-            self._log(f"[TestPerf] Test result for {patch_name}: {status}")
+            self._log(f"[SaveAndTest] Test result for {patch_name}: {status}")
 
             # Save files
             if ctx.patch_output_dir:
@@ -122,7 +122,7 @@ class TestPerfTool:
         ctx = self.context
 
         if not ctx.test_command:
-            error_msg = "[TestPerf] ERROR: test_command is not configured."
+            error_msg = "[SaveAndTest] ERROR: test_command is not configured."
             self._log(error_msg)
             return error_msg, False, -1
 
@@ -139,7 +139,7 @@ class TestPerfTool:
             repo_root = str(ctx.base_repo_path)
             if repo_root in test_command and ctx.cwd not in test_command:
                 test_command = test_command.replace(repo_root, ctx.cwd)
-        self._log(f"[TestPerf] Running: {test_command}")
+        self._log(f"[SaveAndTest] Running: {test_command}")
 
         with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".txt") as tmp:
             tmp_file = tmp.name
@@ -211,7 +211,7 @@ class TestPerfTool:
     def _handle_error(self, patch_name: str, patch_content: str, error_msg: str, status: str) -> dict:
         ctx = self.context
 
-        self._log(f"[TestPerf] Test for {patch_name}: ✗ {status}")
+        self._log(f"[SaveAndTest] Test for {patch_name}: ✗ {status}")
 
         if ctx.patch_output_dir:
             self._save_patch_file(patch_name, patch_content)

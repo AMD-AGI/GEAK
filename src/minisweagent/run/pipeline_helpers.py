@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
-REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness")
+REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
 
 MAX_HARNESS_RETRIES = 2
 
@@ -164,10 +164,11 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
     """Static-analyse a harness script to verify it supports required CLI flags.
 
     Checks that the harness uses an argument-parsing library (argparse, click,
-    or typer) and defines ``--profile`` and ``--correctness`` flags.  Also
-    checks that the ``run_profile`` function (if present) does not allocate
-    tensors directly on CUDA, which would pollute the profiler trace with
-    GPU RNG / memset kernels.
+    or typer) and defines all four required flags: ``--correctness``,
+    ``--profile``, ``--benchmark``, and ``--full-benchmark``.  Also checks
+    that the ``run_profile`` function (if present) does not allocate tensors
+    directly on CUDA, which would pollute the profiler trace with GPU RNG /
+    memset kernels.
 
     Returns ``(valid, errors)`` where *errors* is empty when *valid* is True.
     """
@@ -218,6 +219,45 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
     return len(errors) == 0, errors
 
 
+# ── harness runtime execution ─────────────────────────────────────────
+
+
+def execute_harness_validation(
+    harness_path: str,
+    repo_root: str | None = None,
+    gpu_id: int = 0,
+) -> tuple[bool, list[str], list[dict]]:
+    """Run the harness across all modes and return ``(ok, errors, results)``.
+
+    Delegates to :func:`minisweagent.tools.run_harness.run_harness` with
+    ``mode="all"`` which executes correctness -> profile -> benchmark ->
+    full-benchmark in sequence, short-circuiting on first failure.
+
+    Returns
+    -------
+    ok : bool
+        True if every mode passed.
+    errors : list[str]
+        Human-readable error descriptions for failed modes (empty on success).
+    results : list[dict]
+        Per-mode result dicts from :func:`run_harness`.
+    """
+    from minisweagent.tools.run_harness import results_errors, run_harness
+
+    results = run_harness(
+        harness_path,
+        mode="all",
+        repo_root=repo_root,
+        gpu_id=gpu_id,
+    )
+    if not isinstance(results, list):
+        results = [results]
+
+    ok = all(r["success"] for r in results)
+    errors = results_errors(results) if not ok else []
+    return ok, errors, results
+
+
 # ── validated harness creation (UnitTestAgent + retry) ───────────────
 
 
@@ -229,15 +269,22 @@ def create_validated_harness(
     log_dir: Path | None,
     discovery_context: str,
     max_retries: int = MAX_HARNESS_RETRIES,
-) -> str:
-    """Run UnitTestAgent with harness validation and retry loop.
+    gpu_id: int = 0,
+) -> tuple[str, list[dict]]:
+    """Run UnitTestAgent with static + runtime validation and retry loop.
 
-    After the agent produces a harness, :func:`validate_harness` checks that
-    it actually defines ``--profile`` and ``--correctness``.  If validation
-    fails the errors are fed back into the discovery context and the agent is
-    re-invoked, up to *max_retries* additional attempts.
+    After the agent produces a harness:
+      1. :func:`validate_harness` performs static analysis (argparse,
+         ``--profile``, ``--correctness`` flags, GPU allocation patterns).
+      2. :func:`execute_harness_validation` actually runs the harness in
+         all four modes (correctness, profile, benchmark, full-benchmark)
+         to catch import errors, shape mismatches, OOM, etc.
 
-    Returns the ``test_command`` string on success.
+    If either step fails the errors are fed back into the discovery context
+    and the agent is re-invoked, up to *max_retries* additional attempts.
+
+    Returns ``(test_command, harness_results)`` on success where
+    *harness_results* is the list of per-mode result dicts.
 
     Raises
     ------
@@ -255,7 +302,8 @@ def create_validated_harness(
             ctx += (
                 f"\n\nHARNESS VALIDATION FAILED (attempt {attempt}/{max_attempts}):\n"
                 + "\n".join(f"- {e}" for e in harness_errors)
-                + "\n\nYou MUST add argparse with --profile and --correctness modes. "
+                + "\n\nYou MUST fix the harness so that ALL modes work: "
+                "--correctness, --profile, --benchmark, --full-benchmark. "
                 "See INSTRUCTIONS.md sections 1a and 1b."
             )
 
@@ -269,22 +317,46 @@ def create_validated_harness(
         logger.info("UnitTestAgent test_command (attempt %d): %s", attempt, test_command)
 
         harness = extract_harness_path(test_command)
-        valid, harness_errors = validate_harness(harness)
-        if valid:
-            logger.info("Harness validation: OK")
-            return test_command
 
+        # Phase 1: static analysis
+        valid, harness_errors = validate_harness(harness)
+        if not valid:
+            logger.warning(
+                "Harness static validation failed (attempt %d/%d): %s",
+                attempt,
+                max_attempts,
+                harness_errors,
+            )
+            if attempt == max_attempts:
+                raise RuntimeError(
+                    f"Harness validation failed after {max_attempts} attempts: "
+                    + "; ".join(harness_errors)
+                )
+            continue
+
+        logger.info("Harness static validation: OK")
+
+        # Phase 2: runtime execution of all modes
+        repo_root = str(repo) if repo else None
+        exec_ok, exec_errors, harness_results = execute_harness_validation(
+            harness, repo_root=repo_root, gpu_id=gpu_id,
+        )
+        if exec_ok:
+            logger.info("Harness runtime validation: ALL MODES PASSED")
+            return test_command, harness_results
+
+        harness_errors = exec_errors
         logger.warning(
-            "Harness validation failed (attempt %d/%d): %s",
+            "Harness runtime validation failed (attempt %d/%d): %s",
             attempt,
             max_attempts,
-            harness_errors,
+            [e.splitlines()[0] for e in exec_errors],
         )
 
         if attempt == max_attempts:
             raise RuntimeError(
-                f"Harness validation failed after {max_attempts} attempts: "
-                + "; ".join(harness_errors)
+                f"Harness runtime validation failed after {max_attempts} attempts: "
+                + "; ".join(e.splitlines()[0] for e in exec_errors)
             )
 
     raise AssertionError("unreachable")  # pragma: no cover
@@ -304,6 +376,7 @@ def inject_pipeline_context(
     repo_root: str | None = None,
     test_command: str | None = None,
     codebase_context: str | None = None,
+    benchmark_baseline: str | None = None,
 ) -> tuple[str, dict]:
     """Prepend pipeline context to *task_body* and augment *config*.
 
@@ -361,6 +434,13 @@ def inject_pipeline_context(
     if profiling_path and Path(profiling_path).exists():
         ctx.append(f"PROFILING DATA: {profiling_path}")
         ctx.append("(Read this file for detailed per-kernel profiling metrics)")
+        ctx.append("")
+
+    if benchmark_baseline:
+        ctx.append("## Benchmark Baseline (compare your save_and_test output against this)")
+        ctx.append("This is the original kernel's --benchmark output on HARNESS_SHAPES (20-25 shapes).")
+        ctx.append("Your save_and_test output includes benchmark results -- compare against these numbers.")
+        ctx.append(f"```\n{benchmark_baseline.strip()}\n```")
         ctx.append("")
 
     if codebase_context:

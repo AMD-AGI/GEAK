@@ -1,8 +1,8 @@
 """Preprocessor: sequential pipeline of existing modules.
 
 Runs resolve-kernel-url -> codebase-context -> test-discovery ->
-kernel-profile -> baseline-metrics -> commandment in order and returns
-a context dict for the orchestrator.
+harness-execution -> kernel-profile -> baseline-metrics -> commandment
+in order and returns a context dict for the orchestrator.
 
 Each step calls the *same* Python function that the corresponding CLI
 uses, so behaviour is identical whether invoked from here or from the
@@ -72,9 +72,9 @@ def run_preprocessor(
     Returns
     -------
     dict with keys:
-        resolved, codebase_context_path, discovery, profiling,
-        baseline_metrics, commandment, test_command, kernel_path,
-        repo_root, harness_path
+        resolved, codebase_context_path, discovery, harness_results,
+        profiling, baseline_metrics, commandment, test_command,
+        kernel_path, repo_root, harness_path
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -89,9 +89,9 @@ def run_preprocessor(
 
     # ── 1. resolve-kernel-url ────────────────────────────────────────
     _print(
-        "[bold cyan]--- Step 1/6: Resolve kernel URL ---[/bold cyan]"
+        "[bold cyan]--- Step 1/7: Resolve kernel URL ---[/bold cyan]"
         if console
-        else "--- Step 1/6: Resolve kernel URL ---"
+        else "--- Step 1/7: Resolve kernel URL ---"
     )
 
     from minisweagent.tools.resolve_kernel_url_impl import resolve_kernel_url
@@ -111,9 +111,9 @@ def run_preprocessor(
 
     # ── 2. codebase context ──────────────────────────────────────────
     _print(
-        "[bold cyan]--- Step 2/6: Codebase context ---[/bold cyan]"
+        "[bold cyan]--- Step 2/7: Codebase context ---[/bold cyan]"
         if console
-        else "--- Step 2/6: Codebase context ---"
+        else "--- Step 2/7: Codebase context ---"
     )
 
     from minisweagent.run.codebase_context import generate_codebase_context
@@ -127,7 +127,7 @@ def run_preprocessor(
     _print(f"  CODEBASE_CONTEXT.md written ({codebase_context_path.stat().st_size} bytes)")
 
     # ── 3. test-discovery (automated_test_discovery MCP) ────────────
-    _print("[bold cyan]--- Step 3/6: Test discovery ---[/bold cyan]" if console else "--- Step 3/6: Test discovery ---")
+    _print("[bold cyan]--- Step 3/7: Test discovery ---[/bold cyan]" if console else "--- Step 3/7: Test discovery ---")
 
     _ensure_mcp_importable()
     from automated_test_discovery.server import discover as atd_discover
@@ -149,16 +149,19 @@ def run_preprocessor(
     # full LLM agent that can read the kernel, read existing tests, run
     # them, see errors, and iterate until the harness works.
     #
-    # After the agent produces a harness we statically validate that it
-    # supports the required CLI flags (--profile, --correctness).  If
-    # validation fails we feed the errors back to the agent and retry.
+    # After the agent produces a harness we:
+    #   1. Statically validate it (argparse, --profile, --correctness)
+    #   2. Run it in ALL modes (correctness, profile, benchmark,
+    #      full-benchmark) to catch runtime errors early
+    # If either step fails we feed errors back to the agent and retry.
     test_command = None
+    harness_results: list[dict] | None = None
     _uta_model = model or (model_factory() if model_factory else None)
     if _uta_model and repo_root:
         _print(
-            "[bold cyan]--- Step 3b: UnitTestAgent (harness creation) ---[/bold cyan]"
+            "[bold cyan]--- Step 3b/3c: UnitTestAgent (harness creation + execution) ---[/bold cyan]"
             if console
-            else "--- Step 3b: UnitTestAgent (harness creation) ---"
+            else "--- Step 3b/3c: UnitTestAgent (harness creation + execution) ---"
         )
         try:
             from minisweagent.agents.unit_test_agent import format_discovery_for_agent
@@ -177,15 +180,20 @@ def run_preprocessor(
                 "Do NOT use `cd` in the command. The profiler cannot handle compound shell commands."
             )
 
-            test_command = create_validated_harness(
+            test_command, harness_results = create_validated_harness(
                 model=_uta_model,
                 repo=Path(repo_root),
                 kernel_name=kernel_name,
                 log_dir=output_dir,
                 discovery_context=discovery_context,
+                gpu_id=gpu_id,
             )
             _print(f"  UnitTestAgent test_command: {test_command}")
-            _print("  Harness validation: OK")
+            _print("  Harness static validation: OK")
+            for r in harness_results:
+                status = "PASS" if r["success"] else "FAIL"
+                _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
+            _print("  Harness execution: ALL MODES PASSED")
         except Exception as exc:
             _print(
                 f"  [yellow]UnitTestAgent failed ({exc}), falling back to discovery[/yellow]"
@@ -194,6 +202,7 @@ def run_preprocessor(
             )
             logger.warning("UnitTestAgent failed: %s", exc, exc_info=True)
             test_command = None
+            harness_results = None
 
     # Fall back to discovery results if UnitTestAgent didn't produce one.
     # Prefer the focused test (which targets the specific kernel) over
@@ -210,12 +219,33 @@ def run_preprocessor(
             _print(f"  Falling back to discovery test: {test_command}")
 
     ctx["test_command"] = test_command
+    ctx["harness_results"] = harness_results
+    if harness_results:
+        (output_dir / "harness_results.json").write_text(
+            json.dumps(harness_results, indent=2, default=str)
+        )
+
+    benchmark_baseline: str | None = None
+    full_benchmark_baseline: str | None = None
+    if harness_results:
+        for r in harness_results:
+            if r["mode"] == "benchmark" and r["success"]:
+                benchmark_baseline = r["stdout"]
+                (output_dir / "benchmark_baseline.txt").write_text(r["stdout"])
+            if r["mode"] == "full-benchmark" and r["success"]:
+                full_benchmark_baseline = r["stdout"]
+                (output_dir / "full_benchmark_baseline.txt").write_text(r["stdout"])
+    ctx["benchmark_baseline"] = benchmark_baseline
+    ctx["full_benchmark_baseline"] = full_benchmark_baseline
+
     if test_command:
         _print(f"  Test command: {test_command}")
 
-    # ── 4. kernel-profile (via profiler-mcp) ─────────────────────────
+    # ── 5. kernel-profile (via profiler-mcp) ─────────────────────────
     _print(
-        "[bold cyan]--- Step 4/6: Kernel profiling ---[/bold cyan]" if console else "--- Step 4/6: Kernel profiling ---"
+        "[bold cyan]--- Step 5/7: Kernel profiling (Metrix instrumented) ---[/bold cyan]"
+        if console
+        else "--- Step 5/7: Kernel profiling (Metrix instrumented) ---"
     )
 
     profiling: dict[str, Any] | None = None
@@ -235,9 +265,9 @@ def run_preprocessor(
         (output_dir / "profile.json").write_text(json.dumps(profiling, indent=2, default=str))
         _print("  Profiling complete")
 
-    # ── 5. baseline-metrics ──────────────────────────────────────────
+    # ── 6. baseline-metrics ──────────────────────────────────────────
     _print(
-        "[bold cyan]--- Step 5/6: Baseline metrics ---[/bold cyan]" if console else "--- Step 5/6: Baseline metrics ---"
+        "[bold cyan]--- Step 6/7: Baseline metrics ---[/bold cyan]" if console else "--- Step 6/7: Baseline metrics ---"
     )
 
     baseline_metrics: dict[str, Any] | None = None
@@ -261,8 +291,8 @@ def run_preprocessor(
     if baseline_metrics:
         (output_dir / "baseline_metrics.json").write_text(json.dumps(baseline_metrics, indent=2, default=str))
 
-    # ── 6. commandment ───────────────────────────────────────────────
-    _print("[bold cyan]--- Step 6/6: Commandment ---[/bold cyan]" if console else "--- Step 6/6: Commandment ---")
+    # ── 7. commandment ───────────────────────────────────────────────
+    _print("[bold cyan]--- Step 7/7: Commandment ---[/bold cyan]" if console else "--- Step 7/7: Commandment ---")
 
     commandment: str | None = None
     if test_command:
@@ -299,7 +329,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="GEAK preprocessor: resolve → context → discover → profile → baseline → commandment",
+        description="GEAK preprocessor: resolve → context → discover → harness-exec → profile → baseline → commandment",
     )
     parser.add_argument("url", help="GitHub URL or local path to the kernel")
     parser.add_argument(

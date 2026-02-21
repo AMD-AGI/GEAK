@@ -86,6 +86,7 @@ task-generator = "minisweagent.run.task_generator:main"
 # Modular pipeline steps
 commandment = "minisweagent.tools.commandment:main"
 validate-commandment = "minisweagent.tools.validate_commandment:main"
+run-harness = "minisweagent.tools.run_harness:main"
 baseline-metrics = "minisweagent.baseline_metrics:main"
 codebase-context = "minisweagent.run.codebase_context:main"
 # test-discovery is provided by mcp_tools/automated-test-discovery (separate installable)

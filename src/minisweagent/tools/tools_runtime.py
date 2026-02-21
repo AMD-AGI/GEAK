@@ -3,10 +3,10 @@ from pathlib import Path
 from typing import Any
 
 from minisweagent.tools.bash_command import BashCommand
+from minisweagent.tools.save_and_test import SaveAndTestTool
 from minisweagent.tools.str_replace_editor import str_replace_editor
 from minisweagent.tools.strategy_manager import StrategyManagerTool
 from minisweagent.tools.submit import SubmitTool
-from minisweagent.tools.test_perf import TestPerfTool
 
 current_dir = Path(__file__).resolve().parent
 json_path = current_dir / "tools.json"
@@ -16,7 +16,7 @@ with open(json_path, encoding="utf-8") as f:
 _TOOL_PROFILES: dict[str, set[str] | None] = {
     "full": None,  # None = register all tools (existing behavior)
     "swe": {
-        "bash", "str_replace_editor", "test_perf", "submit",
+        "bash", "str_replace_editor", "save_and_test", "submit",
         "profile_kernel", "baseline_metrics", "strategy_manager",
     },
 }
@@ -56,7 +56,7 @@ class ToolRuntime:
         self._tool_table = {
             "bash": BashCommand(),
             "str_replace_editor": str_replace_editor(),
-            "test_perf": TestPerfTool(),
+            "save_and_test": SaveAndTestTool(),
             "submit": SubmitTool(),
         }
 

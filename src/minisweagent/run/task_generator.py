@@ -71,7 +71,7 @@ optimization approach, then submit your task list as JSON via the
    LLM-generated mutations and quality evaluation help: kernel fusion,
    advanced tuning, multi-step refactoring.
 
-2. **swe_agent** -- An LLM-guided agent with bash, editor, test_perf,
+2. **swe_agent** -- An LLM-guided agent with bash, editor, save_and_test,
    submit, profile_kernel, baseline_metrics, and strategy_manager. It codes
    manually -- reads code, reasons about bottlenecks, makes edits, then
    tests and profiles. NO access to kernel-evolve or kernel-ercs MCP tools.
@@ -173,7 +173,7 @@ COMMANDMENT must be rejected by the sub-agent itself.
 **Verification for strategy_agent and swe_agent tasks**: Each task_prompt
 for strategy_agent or swe_agent tasks MUST include instructions to:
 1. Read the COMMANDMENT and follow its constraints
-2. Verify correctness after making changes (use the `test_perf` tool)
+2. Verify correctness after making changes (use the `save_and_test` tool)
 3. Profile the result to measure improvement (use the `profile_kernel` tool)
 4. Compare results against baseline metrics and report before/after numbers
 5. If correctness tests fail, revert changes and report failure
@@ -715,6 +715,12 @@ def main():
         help="Path to CODEBASE_CONTEXT.md (auto-detected from --from-discovery directory if not set)",
     )
     parser.add_argument(
+        "--benchmark-baseline",
+        default=None,
+        metavar="FILE",
+        help="Path to benchmark_baseline.txt (raw --benchmark output from preprocessing)",
+    )
+    parser.add_argument(
         "--round",
         type=int,
         default=1,
@@ -865,6 +871,7 @@ def main():
                 "baseline_metrics": args.baseline_metrics,
                 "profiling": args.profiling,
                 "codebase_context": args.codebase_context,
+                "benchmark_baseline": args.benchmark_baseline,
                 "num_gpus": t.num_gpus,
                 "test_command": test_command,
                 "round": args.round,

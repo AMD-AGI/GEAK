@@ -131,8 +131,8 @@ class DefaultAgent:
         agent_env = getattr(self.env.config, "env", None)
         if agent_env:
             self.toolruntime.set_env(agent_env)
-        # Setup test_perf tool context
-        self._setup_test_perf_context()
+        # Setup save_and_test tool context
+        self._setup_save_and_test_context()
         # Wire sub_agent context (needs model + env for recursive agent calls)
         if getattr(self.toolruntime, "_sub_agent_tool", None):
             self.toolruntime._sub_agent_tool.set_context(
@@ -160,13 +160,13 @@ class DefaultAgent:
         """Get the callback for strategy changes. Override in subclasses for UI notifications."""
         return
 
-    def _setup_test_perf_context(self):
-        """Setup context for test_perf tool."""
-        from minisweagent.tools.test_perf import TestPerfContext
+    def _setup_save_and_test_context(self):
+        """Setup context for save_and_test tool."""
+        from minisweagent.tools.save_and_test import SaveAndTestContext
 
         cwd = getattr(self.env.config, "cwd", None) or os.getcwd()
 
-        context = TestPerfContext(
+        context = SaveAndTestContext(
             cwd=cwd,
             test_command=self.config.test_command,
             timeout=getattr(self.env.config, "timeout", 3600),
@@ -177,11 +177,10 @@ class DefaultAgent:
             patch_counter=self.patch_counter,
         )
 
-        test_perf_tool = self.toolruntime._tool_table.get("test_perf")
-        if test_perf_tool:
-            test_perf_tool.set_context(context)
-            # Keep reference to sync state
-            self._test_perf_context = context
+        save_and_test_tool = self.toolruntime._tool_table.get("save_and_test")
+        if save_and_test_tool:
+            save_and_test_tool.set_context(context)
+            self._save_and_test_context = context
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
@@ -382,10 +381,9 @@ class DefaultAgent:
         raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
 
     def _handle_tool_result(self, result: dict) -> dict:
-        """Handle tool results. Submit tool raises Submitted, test_perf handles itself."""
-        # Sync test_perf context state back to agent
-        if hasattr(self, "_test_perf_context"):
-            self.patch_counter = self._test_perf_context.patch_counter
+        """Handle tool results. Submit tool raises Submitted, save_and_test handles itself."""
+        if hasattr(self, "_save_and_test_context"):
+            self.patch_counter = self._save_and_test_context.patch_counter
         return result
 
     def _run_select_patch_agent(self) -> None:

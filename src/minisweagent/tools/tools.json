@@ -17,9 +17,9 @@
     }
   },
   {
-    "name": "test_perf",
+    "name": "save_and_test",
     "type": "function",
-    "description": "Save current changes as patch and run performance test. Use this after implementing optimizations to measure performance impact. The system will automatically save your changes, run the configured test command, and report results.",
+    "description": "Save current changes as patch and run correctness + benchmark tests. Use this after implementing optimizations to verify correctness and measure performance. The system will automatically save your changes, run the configured test command (SETUP + CORRECTNESS + BENCHMARK), and report results.",
     "parameters": {
       "type": "object",
       "properties": {

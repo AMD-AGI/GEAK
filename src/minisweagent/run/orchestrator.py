@@ -170,6 +170,7 @@ def _tool_generate_tasks(
             "baseline_metrics": str(pp_dir / "baseline_metrics.json"),
             "profiling": str(pp_dir / "profile.json"),
             "codebase_context": str(pp_dir / "CODEBASE_CONTEXT.md"),
+            "benchmark_baseline": str(pp_dir / "benchmark_baseline.txt"),
             "num_gpus": t.num_gpus,
             "round": round_num,
         }
@@ -346,6 +347,174 @@ def _auto_finalize(
     _print(f"Report written to: {report_path}")
 
     return report
+
+
+# ── Per-round evaluation ─────────────────────────────────────────────
+
+
+def _evaluate_round_best(
+    ctx: dict[str, Any],
+    round_num: int,
+    results_dir: Path,
+    _print,
+) -> dict[str, Any] | None:
+    """Evaluate the single best kernel from a round with FULL_BENCHMARK + PROFILE.
+
+    Greedily selects the best candidate by BENCHMARK latency (from agents'
+    ``save_and_test`` output), applies its patch to a clean worktree, and
+    runs the COMMANDMENT's FULL_BENCHMARK and PROFILE sections against it.
+
+    Returns a round evaluation dict, or None if no valid candidates exist.
+    """
+    output_dir = Path(ctx["output_dir"])
+    pp_dir = Path(ctx.get("preprocess_dir", ctx.get("output_dir", ".")))
+
+    best_patch_file: str | None = None
+    best_speedup: float = 0.0
+    best_task: str = ""
+
+    if not results_dir.is_dir():
+        return None
+
+    for task_dir in sorted(results_dir.iterdir()):
+        if not task_dir.is_dir() or task_dir.name in ("worktrees",):
+            continue
+        br_file = task_dir / "best_results.json"
+        if not br_file.exists():
+            continue
+        try:
+            br = json.loads(br_file.read_text())
+            speedup = float(br.get("best_patch_speedup", 0))
+            if speedup > best_speedup:
+                best_speedup = speedup
+                best_patch_file = br.get("best_patch_file")
+                best_task = task_dir.name
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+
+    if not best_patch_file or best_speedup <= 0:
+        _print(f"  Round {round_num}: no valid candidates for evaluation")
+        return None
+
+    _print(f"  Round {round_num} best: {best_task} ({best_speedup:.2f}x)")
+
+    round_eval: dict[str, Any] = {
+        "round": round_num,
+        "best_patch": best_patch_file,
+        "best_task": best_task,
+        "benchmark_speedup": best_speedup,
+    }
+
+    # Run FULL_BENCHMARK on the best kernel if the commandment section exists
+    commandment_path = pp_dir / "COMMANDMENT.md"
+    full_benchmark_baseline_path = pp_dir / "full_benchmark_baseline.txt"
+    full_benchmark_baseline = (
+        full_benchmark_baseline_path.read_text().strip()
+        if full_benchmark_baseline_path.exists()
+        else None
+    )
+
+    if commandment_path.exists():
+        from minisweagent.run.dispatch import _read_commandment_section
+
+        fb_cmd = _read_commandment_section(str(commandment_path), "FULL_BENCHMARK")
+        if fb_cmd:
+            _print(f"  Running FULL_BENCHMARK on best kernel from round {round_num}...")
+            try:
+                import subprocess
+
+                fb_result = subprocess.run(
+                    fb_cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=1800,
+                    cwd=ctx.get("repo_root"),
+                )
+                fb_stdout = fb_result.stdout
+                round_eval["full_benchmark"] = {
+                    "stdout": fb_stdout[:5000],
+                    "returncode": fb_result.returncode,
+                    "success": fb_result.returncode == 0,
+                }
+                if full_benchmark_baseline:
+                    round_eval["full_benchmark"]["baseline"] = full_benchmark_baseline[:2000]
+                _print(f"  FULL_BENCHMARK: {'PASS' if fb_result.returncode == 0 else 'FAIL'}")
+            except Exception as exc:
+                _print(f"  FULL_BENCHMARK failed: {exc}")
+                round_eval["full_benchmark"] = {"error": str(exc)}
+
+        # Run PROFILE (via kernel-profile) on the best kernel
+        profile_cmd = _read_commandment_section(str(commandment_path), "PROFILE")
+        if profile_cmd:
+            _print(f"  Running PROFILE on best kernel from round {round_num}...")
+            baseline_metrics_path = pp_dir / "baseline_metrics.json"
+            baseline_metrics = None
+            if baseline_metrics_path.exists():
+                try:
+                    baseline_metrics = json.loads(baseline_metrics_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            try:
+                from minisweagent.run.pipeline_helpers import _ensure_mcp_importable
+
+                _ensure_mcp_importable()
+                from profiler_mcp.server import profile_kernel
+
+                _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
+                harness_path = ctx.get("harness_path", "")
+                if harness_path:
+                    profile_result = _profile_fn(
+                        command=f"python {harness_path} --profile",
+                        backend="metrix",
+                        num_replays=3,
+                        quick=True,
+                        gpu_devices=str(ctx.get("gpu_ids", [0])[0]),
+                    )
+
+                    if baseline_metrics and profile_result:
+                        from minisweagent.baseline_metrics import build_baseline_metrics
+
+                        optimized_metrics = build_baseline_metrics(
+                            profile_result, include_all=True
+                        )
+                        profile_comparison: dict[str, Any] = {}
+                        for key in ("duration_us", "bottleneck"):
+                            if key in baseline_metrics and key in optimized_metrics:
+                                base_val = baseline_metrics[key]
+                                opt_val = optimized_metrics[key]
+                                if key == "duration_us" and isinstance(base_val, (int, float)):
+                                    change_pct = ((opt_val - base_val) / base_val * 100) if base_val else 0
+                                    profile_comparison[key] = {
+                                        "baseline": base_val,
+                                        "optimized": opt_val,
+                                        "change_pct": round(change_pct, 1),
+                                    }
+                                else:
+                                    profile_comparison[key] = {
+                                        "baseline": base_val,
+                                        "optimized": opt_val,
+                                    }
+
+                        opt_bn = optimized_metrics.get("bottleneck", "unknown")
+                        base_bn = baseline_metrics.get("bottleneck", "unknown")
+                        if base_bn != opt_bn:
+                            profile_comparison["bottleneck_shift"] = f"{base_bn} -> {opt_bn}"
+
+                        round_eval["profile_comparison"] = profile_comparison
+                        _print(f"  PROFILE comparison: {json.dumps(profile_comparison)[:300]}")
+                    else:
+                        _print("  PROFILE: completed (no baseline for comparison)")
+            except Exception as exc:
+                _print(f"  PROFILE failed: {exc}")
+                round_eval["profile_comparison"] = {"error": str(exc)}
+
+    eval_path = output_dir / f"round_{round_num}_evaluation.json"
+    eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
+    _print(f"  Round evaluation written to: {eval_path}")
+
+    return round_eval
 
 
 # ── Orchestrator runner ──────────────────────────────────────────────
@@ -651,7 +820,38 @@ def run_orchestrator(
                 model, messages, ctx, _print, console,
                 phase=f"round_{round_num}",
             )
+
+            # Per-round evaluation: FULL_BENCHMARK + PROFILE on best kernel
+            round_results_dir = _out / "results" / f"round_{round_num}"
+            round_eval = _evaluate_round_best(
+                ctx, round_num, round_results_dir, _print,
+            )
+            if round_eval:
+                ctx[f"round_{round_num}_eval"] = round_eval
+                # Feed evaluation into next round's context
+                eval_summary = json.dumps(round_eval, indent=2, default=str)[:2000]
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"## Round {round_num} Evaluation\n\n"
+                        f"The best kernel from round {round_num} was evaluated "
+                        f"with FULL_BENCHMARK and PROFILE:\n```\n{eval_summary}\n```\n"
+                        "Use this data to inform your next-round strategy."
+                    ),
+                })
+
             if finalize_result is not None:
+                # Use last round eval as final report
+                if round_eval:
+                    finalize_result["round_evaluation"] = round_eval
+                    final_eval_path = _out / "final_report.json"
+                    if final_eval_path.exists():
+                        try:
+                            existing = json.loads(final_eval_path.read_text())
+                            existing["round_evaluation"] = round_eval
+                            final_eval_path.write_text(json.dumps(existing, indent=2, default=str))
+                        except (json.JSONDecodeError, OSError):
+                            pass
                 return finalize_result
     finally:
         if original_tools is not None:

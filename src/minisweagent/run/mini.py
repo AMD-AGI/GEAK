@@ -523,7 +523,7 @@ def main(
         repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name = result
 
     # Set the agent's working directory to the repo/worktree so bash commands
-    # and test_perf run in the correct location (not the container root).
+    # and save_and_test run in the correct location (not the container root).
     if repo:
         env.config.cwd = str(Path(repo).resolve())
 
@@ -606,14 +606,18 @@ def main(
         console.print(
             "[bold yellow]Running UnitTestAgent to create test harness...[/bold yellow]"
         )
-        test_command = create_validated_harness(
+        test_command, _harness_results = create_validated_harness(
             model=get_model(model_name, config.get("model", {})),
             repo=repo,
             kernel_name=kernel_name or "unknown",
             log_dir=patch_output,
             discovery_context=discovery_context,
+            gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
         )
         console.print(f"[bold green]Using UnitTestAgent test_command:[/bold green] {test_command}")
+        for _hr in (_harness_results or []):
+            _s = "PASS" if _hr["success"] else "FAIL"
+            console.print(f"  [dim]--{_hr['mode']}: {_s} ({_hr['duration_s']}s)[/dim]")
 
     # ============ Step 0c: Pre-agent baseline profiling + commandment generation ============
     # These run once up front so the task generator has richer context.

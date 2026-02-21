@@ -20,8 +20,9 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
     """Read a section from a COMMANDMENT.md file verbatim.
 
     Returns the raw command lines for the given section (e.g. ``"SETUP"``,
-    ``"CORRECTNESS"``, ``"PROFILE"``), exactly as written.  No parsing,
-    no extraction, no transformation.
+    ``"CORRECTNESS"``, ``"PROFILE"``, ``"BENCHMARK"``,
+    ``"FULL_BENCHMARK"``), exactly as written.  No parsing, no extraction,
+    no transformation.
     """
     try:
         text = Path(commandment_path).read_text()
@@ -47,7 +48,7 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
 
 
 def _commandment_test_command(commandment_path: str) -> str | None:
-    """Build a test command that executes SETUP then CORRECTNESS verbatim.
+    """Build a test command that executes SETUP then CORRECTNESS then BENCHMARK.
 
     The COMMANDMENT is the single source of truth.  Commands are executed
     *as-is* -- no parsing, no unwrapping, no modification.  The runtime
@@ -58,9 +59,14 @@ def _commandment_test_command(commandment_path: str) -> str | None:
     COMMANDMENT sections often contain single-quoted strings (e.g.
     ``printf '...'``) that cannot be nested inside a single-quoted
     ``bash -c`` wrapper.
+
+    Note: This script is an internal implementation detail for agent tools
+    (save_and_test).  OpenEvolve reads COMMANDMENT.md directly and does
+    not use this script.
     """
     setup = _read_commandment_section(commandment_path, "SETUP")
     correctness = _read_commandment_section(commandment_path, "CORRECTNESS")
+    benchmark = _read_commandment_section(commandment_path, "BENCHMARK")
 
     if not correctness:
         return None
@@ -69,6 +75,8 @@ def _commandment_test_command(commandment_path: str) -> str | None:
     if setup:
         lines.append(setup)
     lines.append(correctness)
+    if benchmark:
+        lines.append(benchmark)
     script_body = "\n".join(lines) + "\n"
 
     cmd_dir = Path(commandment_path).parent
@@ -125,7 +133,7 @@ def task_file_to_agent_task(task_file: Path):
         }
 
     # COMMANDMENT is the single source of truth for test commands.
-    # Its SETUP + CORRECTNESS sections are executed verbatim.
+    # Its SETUP + CORRECTNESS + BENCHMARK sections are executed verbatim.
     if meta.get("commandment") and Path(meta["commandment"]).exists():
         derived = _commandment_test_command(meta["commandment"])
         if derived:
@@ -161,6 +169,11 @@ def task_file_to_agent_task(task_file: Path):
     if _cb_path and Path(_cb_path).exists():
         codebase_ctx_text = Path(_cb_path).read_text().strip()
 
+    benchmark_baseline_text: str | None = None
+    _bb_path = meta.get("benchmark_baseline")
+    if _bb_path and Path(_bb_path).exists():
+        benchmark_baseline_text = Path(_bb_path).read_text().strip()
+
     body, cfg = inject_pipeline_context(
         body,
         cfg,
@@ -171,6 +184,7 @@ def task_file_to_agent_task(task_file: Path):
         repo_root=meta.get("repo_root"),
         test_command=cfg.get("test_command"),
         codebase_context=codebase_ctx_text,
+        benchmark_baseline=benchmark_baseline_text,
     )
 
     return AgentTask(

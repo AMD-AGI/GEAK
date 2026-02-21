@@ -1,14 +1,17 @@
 """Generate and validate COMMANDMENT.md files for OpenEvolve.
 
 A COMMANDMENT.md is the evaluation contract between the agent and OpenEvolve.
-It has exactly three sections:
-  ## SETUP        -- prepare the evaluation environment
-  ## CORRECTNESS  -- verify the optimized kernel is correct
-  ## PROFILE      -- benchmark the optimized kernel
+It has exactly five sections:
+  ## SETUP          -- prepare the evaluation environment
+  ## CORRECTNESS    -- verify the optimized kernel is correct
+  ## PROFILE        -- deep hardware analysis (Metrix, 5 PROFILE_SHAPES)
+  ## BENCHMARK      -- wall-clock latency (20-25 HARNESS_SHAPES, iterative feedback)
+  ## FULL_BENCHMARK -- wall-clock latency (all discovered shapes, final evaluation)
 
 This module generates a valid COMMANDMENT.md deterministically from:
   - kernel_path: the kernel file to optimize
-  - harness_path: the test harness (must support --correctness and --profile)
+  - harness_path: the test harness (must support --correctness, --profile,
+    --benchmark, and --full-benchmark)
   - repo_root: the repository root (for PYTHONPATH)
   - inner_kernel: whether the kernel is an inner kernel imported by a wrapper
 
@@ -67,7 +70,8 @@ def generate_commandment(
     Args:
         kernel_path: Absolute path to the kernel file being optimized.
         harness_path: Absolute path to the test harness script.  Must accept
-            ``--correctness`` and ``--profile`` flags.
+            ``--correctness``, ``--profile``, ``--benchmark``, and
+            ``--full-benchmark`` flags.
         repo_root: Repository root for PYTHONPATH.  If *None*, uses the
             parent of *kernel_path*.
         inner_kernel: If *True*, the kernel is an inner file imported by a
@@ -167,6 +171,12 @@ ${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --correctness
 ## PROFILE
 {warmup_block}
 kernel-profile "${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
+
+## BENCHMARK
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --benchmark
+
+## FULL_BENCHMARK
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --full-benchmark
 """
 
 
@@ -232,6 +242,12 @@ ${{GEAK_WORK_DIR}}/run_harness.sh --correctness
 ## PROFILE
 {warmup_block}
 kernel-profile "${{GEAK_WORK_DIR}}/run_harness.sh --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
+
+## BENCHMARK
+${{GEAK_WORK_DIR}}/run_harness.sh --benchmark
+
+## FULL_BENCHMARK
+${{GEAK_WORK_DIR}}/run_harness.sh --full-benchmark
 """
 
 

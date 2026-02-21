@@ -15,7 +15,7 @@ flowchart TD
     SET_ENV --> BASH["BashCommand._env_override"]
     SET_ENV --> MCP["MCPToolBridge.server_config.env"]
     SET_ENV --> PROF["ProfilingAnalyzer._env_override"]
-    ENV -->|"_setup_test_perf_context()\nreads env.config.env"| TP["TestPerfTool.context.env_vars"]
+    ENV -->|"_setup_save_and_test_context()\nreads env.config.env"| TP["SaveAndTestTool.context.env_vars"]
 
     BASH -->|"os.environ | _env_override"| SUB1["subprocess.run(env=...)"]
     MCP -->|"MCP server inherits env"| SUB2["MCP subprocess"]

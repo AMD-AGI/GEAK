@@ -305,12 +305,11 @@ class TestEvaluateReflectChain:
     other tools produce.
     """
 
-    def test_reflect_input_from_test_perf_and_profiler(self):
+    def test_reflect_input_from_save_and_test_and_profiler(self):
         """Simulate assembling reflect_on_kernel_result arguments from
-        test_perf output + profile_kernel output + agent history.
+        save_and_test output + profile_kernel output + agent history.
         """
-        # test_perf returns {output, returncode}
-        test_perf_output = "PASSED: correctness check\nLatency: 8.5 us\nSpeedup: 1.2x"
+        save_and_test_output = "PASSED: correctness check\nLatency: 8.5 us\nSpeedup: 1.2x"
 
         # profile_kernel returns {output, returncode} with JSON inside
         profiler_json = json.dumps(_profiler_result([ADD_KERNEL]))
@@ -318,7 +317,7 @@ class TestEvaluateReflectChain:
         # The agent assembles these into reflect arguments
         reflect_args = {
             "kernel_code": "@triton.jit\ndef add(x, y, out, n, B: tl.constexpr):\n    pass",
-            "test_output": test_perf_output,
+            "test_output": save_and_test_output,
             "speedup": 1.2,
             "correctness_status": "passed",
             "history": f"Step 1: profiled kernel.\n{profiler_json[:200]}...",
