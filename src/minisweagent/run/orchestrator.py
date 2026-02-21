@@ -1013,6 +1013,12 @@ def main() -> None:
         if focused.get("focused_test_file"):
             ctx["harness_path"] = focused["focused_test_file"]
 
+    # Prefer the UnitTestAgent's generated harness over the discovery
+    # focused test -- the generated harness supports --benchmark etc.
+    harness_txt = pp_dir / "harness_path.txt"
+    if harness_txt.exists():
+        ctx["harness_path"] = harness_txt.read_text().strip()
+
     prof_path = pp_dir / "profile.json"
     if prof_path.exists():
         ctx["profiling"] = json.loads(prof_path.read_text())

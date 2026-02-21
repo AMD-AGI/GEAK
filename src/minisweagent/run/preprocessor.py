@@ -251,6 +251,7 @@ def run_preprocessor(
     profiling: dict[str, Any] | None = None
     if test_command:
         ctx["harness_path"] = extract_harness_path(test_command)
+        (output_dir / "harness_path.txt").write_text(ctx["harness_path"])
 
         try:
             profiling = run_baseline_profile(test_command, gpu_id=gpu_id)
