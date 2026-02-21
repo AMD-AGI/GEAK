@@ -2,24 +2,26 @@
 
 """
 Bridge evaluator: connects OpenEvolve to deterministic COMMANDMENT-based
-evaluation using Metrix hardware profiler.
+evaluation using wall-clock benchmark latency.
 
 This evaluator is called by OpenEvolve's standard 10-parameter evaluate()
 interface.  For each candidate program it:
   1. Writes candidate file(s) to a working directory
   2. Runs CORRECTNESS commands from COMMANDMENT.md
-  3. Runs PROFILE commands from COMMANDMENT.md
-  4. Parses hardware metrics (duration_us, bandwidth, etc.) from Metrix
-  5. Calculates speedup = baseline_latency_us / candidate_latency_us
+  3. Runs BENCHMARK commands from COMMANDMENT.md
+  4. Parses wall-clock median latency from benchmark output
+  5. Calculates speedup = baseline_latency / candidate_latency
 
 IMPORTANT: This evaluator does NOT know or care what the CORRECTNESS and
-PROFILE commands actually are.  They could invoke correctness_check.py (for
+BENCHMARK commands actually are.  They could invoke correctness_check.py (for
 AIG-Eval Triton kernels), a custom pytest script, a CK verification binary,
 or anything else.  The COMMANDMENT.md is the only contract -- the evaluator
 just executes whatever commands are in it.
 
-NO Python time.perf_counter() is used for scoring -- all benchmarking
-is done through the Metrix hardware profiler via COMMANDMENT shell commands.
+All benchmarking is done through the test harness's ``--benchmark`` mode
+which prints wall-clock median latency to stdout.  Metrix hardware
+profiling (PROFILE section) is NOT run per-iteration; it is reserved for
+the orchestrator's per-round deep analysis.
 """
 
 from __future__ import annotations
@@ -98,9 +100,8 @@ def evaluate(
 
     This is the bridge: it takes the standard 10-parameter OpenEvolve
     signature and delegates to the CommandmentEvaluator, which runs
-    shell commands for correctness checking (correctness_check.py) and
-    hardware profiling (Metrix / kernel-profile) as specified in
-    COMMANDMENT.md.
+    shell commands for correctness checking and wall-clock benchmarking
+    as specified in COMMANDMENT.md.
 
     Args:
         test_suite_path: Not used directly
@@ -188,25 +189,22 @@ def evaluate(
         # Extract speedup from COMMANDMENT metrics
         speedup = result.speedup
         duration_us = result.metrics.get("duration_us", 0)
+        benchmark_ms = result.metrics.get("benchmark_ms", 0)
         baseline_dur = cmd_eval.baseline_metrics.get("duration_us", 0)
 
-        # If Metrix produced duration_us, use it for speedup
+        # Use benchmark latency for speedup (wall-clock, not Metrix)
         if duration_us > 0 and baseline_dur > 0:
             speedup = baseline_dur / duration_us
 
         summary_parts = [
             f"CORRECTNESS: PASS",
-            f"Metrix duration_us: {duration_us:.2f}" if duration_us > 0 else "Metrix: N/A",
-            f"Baseline duration_us: {baseline_dur:.2f}" if baseline_dur > 0 else "",
+            f"Benchmark: {benchmark_ms:.4f} ms" if benchmark_ms > 0 else (
+                f"duration_us: {duration_us:.2f}" if duration_us > 0 else "Benchmark: N/A"
+            ),
+            f"Baseline: {baseline_dur / 1000:.4f} ms" if baseline_dur > 0 else "",
             f"Speedup: {speedup:.4f}x",
             f"Eval time: {elapsed:.1f}s",
         ]
-        # Add extra metrics
-        for key in ["memory.hbm_bandwidth_utilization", "memory.coalescing_efficiency",
-                     "memory.l2_hit_rate", "bottleneck"]:
-            val = result.metrics.get(key)
-            if val is not None:
-                summary_parts.append(f"{key}: {val}")
 
         summary = "\n".join(p for p in summary_parts if p)
         print(summary)
@@ -217,6 +215,7 @@ def evaluate(
             "final_score": speedup,
             "correctness_score": 1.0,
             "performance_metrics": speedup,
+            "benchmark_ms": benchmark_ms,
             "duration_us": duration_us,
             "baseline_duration_us": baseline_dur,
             "speedup": speedup,

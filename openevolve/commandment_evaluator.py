@@ -7,12 +7,18 @@ COMMANDMENT.md is the UNIVERSAL CONTRACT between the orchestrator (agent)
 and OpenEvolve.  It specifies exact shell commands for:
   - SETUP: environment preparation, directory creation, GPU warmup
   - CORRECTNESS: any verification commands (exit 0 = pass, non-zero = fail)
-  - PROFILE: Metrix / rocprofv3 commands for hardware-level profiling
+  - PROFILE: Metrix / rocprofv3 commands for deep hardware analysis
+  - BENCHMARK: wall-clock latency on HARNESS_SHAPES (iterative fitness)
+  - FULL_BENCHMARK: wall-clock latency on all shapes (final evaluation)
 
 This evaluator does NOT know or care what language the kernel is written in
 (Triton, CK, HIP, ASM, etc.), how many files it spans, or how correctness
 is checked.  It just executes the commands in COMMANDMENT.md and parses the
-profiling output for metrics.
+output for metrics.
+
+For per-iteration fitness, the evaluator runs CORRECTNESS then BENCHMARK.
+PROFILE is NOT run per-iteration (too expensive); it is available for the
+orchestrator's per-round deep analysis.
 
 The COMMANDMENT.md is created by the caller (mini-SWE-agent, run.sh, etc.)
 BEFORE OpenEvolve starts, and is FROZEN for the entire evolution.  The
@@ -88,7 +94,7 @@ def _filter_benign_stderr(stderr: str) -> str:
 @dataclass
 class CommandmentSection:
     """A parsed section from COMMANDMENT.md."""
-    name: str  # SETUP, CORRECTNESS, or PROFILE
+    name: str  # SETUP, CORRECTNESS, PROFILE, BENCHMARK, or FULL_BENCHMARK
     commands: List[str] = field(default_factory=list)
     description: str = ""
 
@@ -117,8 +123,12 @@ class CommandmentEvaluator:
       1. Write candidate program files to a working directory
       2. Execute SETUP commands
       3. Execute CORRECTNESS commands (must all pass)
-      4. Execute PROFILE commands (parse metrics from output)
-      5. Compare against baseline metrics to compute speedup
+      4. Execute BENCHMARK commands (parse wall-clock latency from output)
+      5. Compare against baseline latency to compute speedup
+
+    PROFILE commands are NOT run per-iteration (too expensive for Metrix
+    hardware replay).  They remain in COMMANDMENT.md for the orchestrator's
+    per-round deep analysis via ``kernel-profile``.
     """
 
     def __init__(
@@ -231,22 +241,34 @@ class CommandmentEvaluator:
                         stderr=stderr,
                     )
 
-            # Step 4: PROFILE
+            # Step 4: BENCHMARK (wall-clock latency for fitness scoring)
             metrics: Dict[str, Any] = {}
-            profile_stdout = ""
-            profile_stderr = ""
-            if "PROFILE" in self.sections:
+            benchmark_stdout = ""
+            benchmark_stderr = ""
+            if "BENCHMARK" in self.sections:
+                ok, stdout, stderr = self._run_section(
+                    "BENCHMARK", self.sections["BENCHMARK"], work_dir,
+                    gpu_id=gpu_id,
+                )
+                benchmark_stdout = stdout
+                benchmark_stderr = stderr
+                if ok:
+                    metrics = self._parse_benchmark_output(stdout)
+                else:
+                    logger.warning(f"BENCHMARK section failed for {program_id}")
+                    metrics = {}
+            elif "PROFILE" in self.sections:
+                # Fallback for old-style COMMANDMENTs that only have PROFILE
                 ok, stdout, stderr = self._run_section(
                     "PROFILE", self.sections["PROFILE"], work_dir,
                     gpu_id=gpu_id,
                 )
-                profile_stdout = stdout
-                profile_stderr = stderr
+                benchmark_stdout = stdout
+                benchmark_stderr = stderr
                 if ok:
                     metrics = self._parse_profiling_output(stdout + "\n" + stderr)
                 else:
                     logger.warning(f"PROFILE section failed for {program_id}")
-                    # Still continue - profiling failure is not fatal
                     metrics = {}
 
             # Step 5: Calculate speedup
@@ -258,8 +280,8 @@ class CommandmentEvaluator:
                 correctness_passed=correctness_passed,
                 metrics=metrics,
                 speedup=speedup,
-                stdout=correctness_stdout + "\n" + profile_stdout,
-                stderr=correctness_stderr + "\n" + profile_stderr,
+                stdout=correctness_stdout + "\n" + benchmark_stdout,
+                stderr=correctness_stderr + "\n" + benchmark_stderr,
             )
 
         except Exception as e:
@@ -384,8 +406,8 @@ class CommandmentEvaluator:
         for line in content.split("\n"):
             stripped = line.strip()
 
-            # Detect section headers: ## SETUP, ## CORRECTNESS, ## PROFILE
-            section_match = re.match(r"^##\s+(SETUP|CORRECTNESS|PROFILE)", stripped)
+            # Detect section headers
+            section_match = re.match(r"^##\s+(SETUP|CORRECTNESS|PROFILE|BENCHMARK|FULL_BENCHMARK)", stripped)
             if section_match:
                 section_name = section_match.group(1)
                 current_section = CommandmentSection(name=section_name)
@@ -469,6 +491,63 @@ class CommandmentEvaluator:
                 pass
 
         return metrics
+
+    def _parse_benchmark_output(self, stdout: str) -> Dict[str, Any]:
+        """Parse wall-clock benchmark output from the test harness.
+
+        The harness ``--benchmark`` mode prints per-shape latencies and a
+        summary.  Recognised formats (case-insensitive):
+
+        * ``BENCHMARK_RESULT: <float>``  -- explicit result tag (preferred)
+        * ``Overall median latency: <float> ms``
+        * ``median_latency_ms: <float>``
+
+        The parsed value is stored as ``benchmark_ms`` (milliseconds) and
+        also converted to ``duration_us`` for compatibility with the
+        speedup calculator.
+        """
+        metrics: Dict[str, Any] = {}
+
+        # 1. Explicit tag: BENCHMARK_RESULT: <float>
+        m = re.search(r"BENCHMARK_RESULT:\s*([\d.]+(?:e[+-]?\d+)?)", stdout, re.IGNORECASE)
+        if m:
+            val_ms = float(m.group(1))
+            metrics["benchmark_ms"] = val_ms
+            metrics["duration_us"] = val_ms * 1000.0
+            return metrics
+
+        # 2. "Overall median latency: <float> ms"
+        m = re.search(r"overall\s+median\s+latency:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms", stdout, re.IGNORECASE)
+        if m:
+            val_ms = float(m.group(1))
+            metrics["benchmark_ms"] = val_ms
+            metrics["duration_us"] = val_ms * 1000.0
+            return metrics
+
+        # 3. Key-value: median_latency_ms: <float>
+        m = re.search(r"median_latency_ms\s*[:=]\s*([\d.]+(?:e[+-]?\d+)?)", stdout, re.IGNORECASE)
+        if m:
+            val_ms = float(m.group(1))
+            metrics["benchmark_ms"] = val_ms
+            metrics["duration_us"] = val_ms * 1000.0
+            return metrics
+
+        # 4. Fallback: collect all per-shape "Shape ...: <float> ms" lines
+        #    and compute the median ourselves
+        shape_times = [
+            float(sm.group(1))
+            for sm in re.finditer(r"Shape\s*\(.*?\):\s*([\d.]+(?:e[+-]?\d+)?)\s*ms", stdout)
+        ]
+        if shape_times:
+            shape_times.sort()
+            median_ms = shape_times[len(shape_times) // 2]
+            metrics["benchmark_ms"] = median_ms
+            metrics["duration_us"] = median_ms * 1000.0
+            return metrics
+
+        # 5. Last resort: fall back to Metrix-style parsing
+        logger.warning("Could not parse benchmark output -- falling back to Metrix parser")
+        return self._parse_profiling_output(stdout)
 
     # Maximum allowed regression factor.  Candidates slower than
     # baseline by more than this factor are flagged as "catastrophic
@@ -562,7 +641,8 @@ class CommandmentGenerator:
     Generates a COMMANDMENT.md file from validated, working commands.
 
     Pipeline flow:
-      1. The caller builds the command lists (setup, correctness, profile)
+      1. The caller builds the command lists (setup, correctness, profile,
+         benchmark, full_benchmark)
       2. The caller validates commands by running them on the baseline kernel
       3. ONLY AFTER validation passes does the caller call this generator
       4. The resulting COMMANDMENT.md is FROZEN and never modified again
@@ -577,6 +657,8 @@ class CommandmentGenerator:
         setup_commands: Optional[List[str]] = None,
         correctness_commands: Optional[List[str]] = None,
         profile_commands: Optional[List[str]] = None,
+        benchmark_commands: Optional[List[str]] = None,
+        full_benchmark_commands: Optional[List[str]] = None,
         profiling_results: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
@@ -586,7 +668,9 @@ class CommandmentGenerator:
             kernel_dir: Path to the kernel directory
             setup_commands: List of setup shell commands
             correctness_commands: List of correctness check commands
-            profile_commands: List of profiling commands
+            profile_commands: List of profiling commands (deep hardware analysis)
+            benchmark_commands: List of benchmark commands (wall-clock latency)
+            full_benchmark_commands: List of full-benchmark commands (all shapes)
             profiling_results: Baseline profiling results dict
 
         Returns:
@@ -638,6 +722,22 @@ class CommandmentGenerator:
             )
         lines.append("")
 
+        # BENCHMARK section
+        if benchmark_commands:
+            lines.append("## BENCHMARK")
+            lines.append("")
+            for cmd in benchmark_commands:
+                lines.append(f"$ {cmd}")
+            lines.append("")
+
+        # FULL_BENCHMARK section
+        if full_benchmark_commands:
+            lines.append("## FULL_BENCHMARK")
+            lines.append("")
+            for cmd in full_benchmark_commands:
+                lines.append(f"$ {cmd}")
+            lines.append("")
+
         # Config hash for integrity
         content_for_hash = "\n".join(lines)
         config_hash = hashlib.md5(content_for_hash.encode()).hexdigest()[:16]
@@ -662,6 +762,8 @@ class CommandmentGenerator:
         setup_commands: Optional[List[str]] = None,
         correctness_commands: Optional[List[str]] = None,
         profile_commands: Optional[List[str]] = None,
+        benchmark_commands: Optional[List[str]] = None,
+        full_benchmark_commands: Optional[List[str]] = None,
         profiling_results: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Generate and save COMMANDMENT.md to disk. Returns the file path."""
@@ -670,6 +772,8 @@ class CommandmentGenerator:
             setup_commands=setup_commands,
             correctness_commands=correctness_commands,
             profile_commands=profile_commands,
+            benchmark_commands=benchmark_commands,
+            full_benchmark_commands=full_benchmark_commands,
             profiling_results=profiling_results,
         )
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)

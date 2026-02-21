@@ -6,12 +6,20 @@ Run OpenEvolve evolutionary optimisation on a GPU kernel.
 
 Architecture:
   COMMANDMENT.md is the ONLY contract between the caller and OpenEvolve.
-  It specifies exact shell commands for SETUP, CORRECTNESS, and PROFILE.
-  OpenEvolve does NOT care what those commands point to -- it just executes
-  them.  The caller (mini-SWE-agent, run.sh, or any other orchestrator) is
+  It specifies exact shell commands for SETUP, CORRECTNESS, PROFILE,
+  BENCHMARK, and FULL_BENCHMARK.  OpenEvolve does NOT care what those
+  commands point to -- it just executes them.
+
+  For per-iteration fitness, the evaluator runs CORRECTNESS + BENCHMARK.
+  PROFILE is NOT run per-iteration (too expensive for Metrix hardware
+  replay); it stays in COMMANDMENT for the orchestrator's per-round
+  deep analysis.
+
+  The caller (mini-SWE-agent, run.sh, or any other orchestrator) is
   responsible for creating:
     - correctness checking scripts (tailored to the specific kernel)
-    - profiling/benchmarking scripts (using Metrix / kernel-profile)
+    - benchmarking scripts (test harness with --benchmark mode)
+    - profiling scripts (Metrix / kernel-profile for deep analysis)
     - the COMMANDMENT.md itself (after validating commands on baseline)
 
   This makes the system generic: it works for Triton, CK, HIP, ASM, or any
