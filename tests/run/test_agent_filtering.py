@@ -149,6 +149,20 @@ class TestParseResponseSafetyNet:
         assert tasks[0].agent_class is OpenEvolveWorker
 
 
+    def test_fallback_not_in_allowed_set(self, monkeypatch):
+        """Test that fallback agent is validated against allowed set (Issue #20)."""
+        monkeypatch.setenv("GEAK_ALLOWED_AGENTS", "strategy_agent")
+        monkeypatch.setenv("GEAK_FALLBACK_AGENT", "openevolve")
+        monkeypatch.delenv("GEAK_EXCLUDED_AGENTS", raising=False)
+        
+        result = filter_agent_type("swe_agent")
+        # The fallback "openevolve" is not in allowed set, so it should
+        # fall back to the first allowed type instead
+        assert result != "openevolve"
+        assert result in get_allowed_agent_types()
+        assert result == "strategy_agent"
+
+
 # ---------------------------------------------------------------------------
 # Prompt injection
 # ---------------------------------------------------------------------------

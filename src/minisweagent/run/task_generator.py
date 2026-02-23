@@ -548,12 +548,18 @@ def _parse_llm_response(
             continue
 
         label = str(item.get("label", "unknown"))
-        priority = int(item.get("priority", 10))
+        try:
+            priority = int(item.get("priority", 10))
+        except (ValueError, TypeError):
+            priority = 10  # Default priority if parsing fails
         priority = max(0, min(15, priority))
         agent_type = filter_agent_type(str(item.get("agent_type", "strategy_agent")))
         kernel_language = str(item.get("kernel_language", "python"))
         task_prompt = str(item.get("task_prompt", ""))
-        task_num_gpus = max(1, int(item.get("num_gpus", 1)))
+        try:
+            task_num_gpus = max(1, int(item.get("num_gpus", 1)))
+        except (ValueError, TypeError):
+            task_num_gpus = 1
 
         if not task_prompt:
             continue

@@ -9,6 +9,7 @@ calls this; so does the ``run-tasks`` CLI indirectly.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
     ``"CORRECTNESS"``, ``"PROFILE"``, ``"BENCHMARK"``,
     ``"FULL_BENCHMARK"``), exactly as written.  No parsing, no extraction,
     no transformation.
+    
+    Fenced code blocks (```bash, ```, etc.) are stripped automatically.
     """
     try:
         text = Path(commandment_path).read_text()
@@ -32,6 +35,9 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
 
     lines: list[str] = []
     in_section = False
+    # Pattern to match fenced code block markers (```bash, ```sh, ```, etc.)
+    fence_pattern = re.compile(r"^```\w*$")
+    
     for raw_line in text.splitlines():
         header = re.match(r"^##\s+(\w+)", raw_line.strip())
         if header:
@@ -41,8 +47,13 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
             elif in_section:
                 break
             continue
-        if in_section and raw_line.strip():
-            lines.append(raw_line.strip())
+        if in_section:
+            stripped = raw_line.strip()
+            # Skip fenced code block markers
+            if fence_pattern.match(stripped):
+                continue
+            if stripped:
+                lines.append(stripped)
 
     return "\n".join(lines) if lines else None
 
@@ -80,7 +91,16 @@ def _commandment_test_command(commandment_path: str) -> str | None:
     script_body = "\n".join(lines) + "\n"
 
     cmd_dir = Path(commandment_path).parent
-    script_path = cmd_dir / "_geak_test_cmd.sh"
+    # Use unique filename to avoid race conditions when multiple agents
+    # run concurrently with the same COMMANDMENT directory
+    import tempfile
+    fd, script_path = tempfile.mkstemp(
+        prefix="_geak_test_cmd_",
+        suffix=".sh",
+        dir=str(cmd_dir),
+    )
+    os.close(fd)
+    script_path = Path(script_path)
     script_path.write_text(script_body)
     script_path.chmod(0o755)
 

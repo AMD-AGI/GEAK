@@ -81,6 +81,11 @@ def filter_agent_type(agent_type: str) -> str:
         return agent_type
 
     fallback = os.environ.get("GEAK_FALLBACK_AGENT", "").strip() or _DEFAULT_FALLBACK_AGENT
+    
+    # Validate fallback is in allowed set; if not, pick first allowed type
+    if fallback not in allowed:
+        fallback = next(iter(sorted(allowed)), _DEFAULT_FALLBACK_AGENT)
+    
     logger.warning(
         "Agent type %r is not allowed (allowed=%s); remapping to %r",
         agent_type,

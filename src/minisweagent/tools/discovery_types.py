@@ -215,7 +215,7 @@ class DiscoveryResult:
     tests: list[TestInfo] = field(default_factory=list)
     benchmarks: list[BenchmarkInfo] = field(default_factory=list)
     dependency_graphs: dict[str, KernelDependencyGraph] = field(default_factory=dict)
-    workspace_path: Path = None
+    workspace_path: Path | None = None
     needs_user_confirmation: bool = True
     user_provided_test: str | None = None
     user_provided_bench: str | None = None

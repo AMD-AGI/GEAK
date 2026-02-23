@@ -133,10 +133,16 @@ def run_preprocessor(
     from automated_test_discovery.server import discover as atd_discover
 
     _discover_fn = getattr(atd_discover, "fn", atd_discover)
-    disc_dict = _discover_fn(
-        kernel_path=kernel_path,
-        output_dir=str(output_dir),
-    )
+    disc_dict = {}  # Initialize to empty dict to avoid NameError if discovery fails
+    try:
+        disc_dict = _discover_fn(
+            kernel_path=kernel_path,
+            output_dir=str(output_dir),
+        )
+    except Exception as exc:
+        logger.warning("Test discovery failed: %s", exc)
+        _print(f"  [yellow]Warning: Test discovery failed: {exc}[/yellow]" if console else f"  Warning: Test discovery failed: {exc}")
+    
     ctx["discovery"] = disc_dict
     (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))
 

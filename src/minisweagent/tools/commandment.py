@@ -281,14 +281,16 @@ def _auto_fix(content: str, errors: list[str]) -> str:
                 content = re.sub(rf"^## {re.escape(name)}\b.*$", "", content, flags=re.MULTILINE)
 
         # Fix: shell built-in as command prefix -> wrap in bash -c
-        m = re.search(r"Command starts with shell built-in '(\w+)': '(.*?)'", error)
+        # Match both single and double quotes (repr() may use either)
+        m = re.search(r"Command starts with shell built-in ['\"](\w+)['\"].*?['\"](.+?)['\"]", error)
         if m:
             original_cmd = m.group(2)
             fixed_cmd = f'bash -c "{original_cmd}"'
             content = content.replace(original_cmd, fixed_cmd)
 
         # Fix: inline env var prefix -> wrap in bash -c
-        m = re.search(r"Command uses inline env var prefix '(\w+=\S+)' .* '(.*?)'", error)
+        # Match both single and double quotes (repr() may use either)
+        m = re.search(r"Command uses inline env var prefix ['\"](\w+=\S+)['\"].*?['\"](.+?)['\"]", error)
         if m:
             original_cmd = m.group(2)
             fixed_cmd = f'bash -c "{original_cmd}"'
