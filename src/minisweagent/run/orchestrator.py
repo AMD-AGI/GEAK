@@ -565,14 +565,27 @@ def _build_eval_env(
     repo_root: str,
     harness_path: str,
     gpu_id: int,
+    *,
+    benchmark_iterations: int | None = None,
 ) -> dict[str, str]:
-    """Build the GEAK_* environment dict for evaluation subprocesses."""
+    """Build the GEAK_* environment dict for evaluation subprocesses.
+
+    ``benchmark_iterations`` overrides the default iteration count used by
+    BENCHMARK / FULL_BENCHMARK commands in the COMMANDMENT.  When ``None``
+    the shared :data:`pipeline_helpers.DEFAULT_EVAL_BENCHMARK_ITERATIONS`
+    is used, which is intentionally higher than the agent-time default (20)
+    to reduce GPU timing noise in the final evaluation.
+    """
+    from minisweagent.run.pipeline_helpers import DEFAULT_EVAL_BENCHMARK_ITERATIONS
+
+    iters = benchmark_iterations or DEFAULT_EVAL_BENCHMARK_ITERATIONS
     env = os.environ.copy()
     env["GEAK_WORK_DIR"] = str(work_dir)
     env["GEAK_REPO_ROOT"] = repo_root
     env["GEAK_HARNESS"] = harness_path
     env["GEAK_GPU_DEVICE"] = str(gpu_id)
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+    env["GEAK_BENCHMARK_EXTRA_ARGS"] = f"--iterations {iters}"
     env["PYTHONPATH"] = f"{work_dir}:{repo_root}:{env.get('PYTHONPATH', '')}"
     alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF", "")
     if "expandable_segments" in alloc_conf:

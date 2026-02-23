@@ -709,7 +709,15 @@ def main(
     agent_config["agent_class"] = base_agent_class
     agent_config["num_parallel"] = num_parallel or 1
     agent_config["gpu_ids"] = parsed_gpu_ids
-    
+
+    # Ensure all agents (single and parallel) use the same benchmark
+    # iteration count as the orchestrator evaluation.
+    from minisweagent.run.pipeline_helpers import DEFAULT_EVAL_BENCHMARK_ITERATIONS
+    _bench_extra = f"--iterations {DEFAULT_EVAL_BENCHMARK_ITERATIONS}"
+    config.setdefault("env", {}).setdefault("env", {}).setdefault(
+        "GEAK_BENCHMARK_EXTRA_ARGS", _bench_extra,
+    )
+
     if num_parallel and num_parallel > 1:
         console.print(f"[bold cyan]Using Parallel Mode: {num_parallel} agents on GPUs {parsed_gpu_ids}[/bold cyan]")
         
@@ -765,9 +773,9 @@ def main(
     else:
         console.print("[bold cyan]Using Single Agent Mode[/bold cyan]")
         console.print(f"[dim]Using GPU: {parsed_gpu_ids[0]}[/dim]")
-        # Set HIP_VISIBLE_DEVICES for single agent GPU isolation
         env.config.env = env.config.env or {}
         env.config.env["HIP_VISIBLE_DEVICES"] = str(parsed_gpu_ids[0])
+        env.config.env.setdefault("GEAK_BENCHMARK_EXTRA_ARGS", _bench_extra)
     
     # Create and run agent
     agent = agent_class(model, env, **agent_config)

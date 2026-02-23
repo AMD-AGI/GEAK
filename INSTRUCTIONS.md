@@ -112,7 +112,8 @@ When no pre-built harness exists, no suitable existing tests are found, or
 the kernel file does NOT have a built-in `--profile` flag or standard
 `triton_op`/`torch_op` interface, create a **test harness** — a small Python
 script that imports the kernel, creates test inputs, and provides
-`--correctness`, `--profile`, `--benchmark`, and `--full-benchmark` modes.
+`--correctness`, `--profile`, `--benchmark`, `--full-benchmark`, and
+`--iterations N` modes.
 
 **If discovery found existing test files**, read them first and reuse:
 - Their reference implementations for correctness checking
@@ -161,6 +162,13 @@ script that imports the kernel, creates test inputs, and provides
    - `--benchmark`      → HARNESS_SHAPES (20-25 shapes)
    - `--correctness`    → HARNESS_SHAPES
    - `--full-benchmark` → ALL_SHAPES (every discovered shape)
+
+   The harness must also accept `--iterations N` (default 20) to override
+   the number of benchmark iterations for both `--benchmark` and
+   `--full-benchmark`.  If the flag is not passed, the harness should read
+   `GEAK_BENCHMARK_ITERATIONS` from the environment as a fallback.
+   The pipeline sets `GEAK_BENCHMARK_EXTRA_ARGS` to `--iterations 50`
+   during evaluation to reduce GPU timing noise.
 
    If the kernel does NOT have discovered test files, fall back to these
    standard sizes (large enough to saturate the GPU):
@@ -608,10 +616,10 @@ ${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --profile > /dev/null 2>&1 ||
 kernel-profile "${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --profile" --gpu-devices ${GEAK_GPU_DEVICE} --replays 5
 
 ## BENCHMARK
-${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --benchmark
+${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --benchmark ${GEAK_BENCHMARK_EXTRA_ARGS:-}
 
 ## FULL_BENCHMARK
-${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --full-benchmark
+${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --full-benchmark ${GEAK_BENCHMARK_EXTRA_ARGS:-}
 ```
 
 **WHY a wrapper script:** All COMMANDMENT commands are run via `os.execvpe()`,
@@ -645,9 +653,37 @@ cat optimization_output/openevolve_result.json
 
 ## 6. Environment Reference
 
+### Variables set automatically by the pipeline
+
+- `HIP_VISIBLE_DEVICES` — GPU selection (set by COMMANDMENT / scheduler)
+- `GEAK_WORK_DIR` — per-evaluation temp directory (candidate kernel lives here)
+- `GEAK_GPU_DEVICE` — GPU device ID for this evaluation
+- `GEAK_REPO_ROOT` — original repository root
+- `GEAK_HARNESS` — absolute path to the test harness script
+- `GEAK_BENCHMARK_EXTRA_ARGS` — extra CLI args appended to `--benchmark` and
+  `--full-benchmark` invocations (default: `--iterations 50`).  Controls the
+  number of benchmark iterations used by preprocessing baselines, agent
+  benchmarks, and orchestrator evaluations to ensure consistency.
+- `GEAK_BENCHMARK_ITERATIONS` — alternative fallback read by the harness
+  itself when `--iterations` is not passed on the command line.
+
+### User-configurable
+
 - `AMD_LLM_API_KEY` — required for LLM calls (already set in container)
-- `HIP_VISIBLE_DEVICES` — GPU selection (set by COMMANDMENT automatically)
 - `GEAK_OE_ROOT` — OpenEvolve root (default: /workspace/geak-oe)
+- `GEAK_MAX_ROUNDS` — maximum orchestration rounds (default: 5)
+- `GEAK_ALLOWED_AGENTS` — comma-separated allowlist of agent types
+- `GEAK_EXCLUDED_AGENTS` — comma-separated blocklist of agent types
+
+### Tool paths
+
 - Correctness checker: `/workspace/geak-oe/examples/geak_eval/correctness_check.py`
 - OpenEvolve runner: `/workspace/geak-oe/examples/geak_eval/run_openevolve.py`
 - kernel-profile: `/opt/venv/bin/kernel-profile`
+
+### Patch exclusions
+
+When generating patches, the following patterns are excluded from `git diff`
+to prevent binary artifacts and build cache from polluting patches:
+`traj.json`, `*.log`, `.rocprofv3/`, `__pycache__/`, `*.pyc`,
+`.pytest_cache/`, `*.egg-info/`, `*.so`, `.geak_resolved/`.

@@ -83,7 +83,7 @@ class SaveAndTestTool:
 
         if self._is_git_repo(Path(cwd)):
             result = subprocess.run(
-                "git add -N . && git diff -- . ':!traj.json' ':!*.log'",
+                "git add -N . && git diff -- . ':!traj.json' ':!*.log' ':!.rocprofv3/' ':!__pycache__/' ':!*.pyc' ':!.pytest_cache/' ':!*.egg-info/' ':!*.so' ':!.geak_resolved/'",
                 cwd=cwd,
                 capture_output=True,
                 text=True,

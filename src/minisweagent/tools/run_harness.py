@@ -81,6 +81,11 @@ def _run_single(
     flag = MODE_TO_FLAG[mode]
     cmd = [sys.executable, harness_path, flag]
 
+    if mode in ("benchmark", "full-benchmark"):
+        extra = env.get("GEAK_BENCHMARK_EXTRA_ARGS", "").strip()
+        if extra:
+            cmd.extend(extra.split())
+
     t0 = time.monotonic()
     try:
         proc = subprocess.run(

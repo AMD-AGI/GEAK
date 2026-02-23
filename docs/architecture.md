@@ -38,7 +38,7 @@ graph TB
     end
 
     subgraph SHARED ["Shared Pipeline Helpers (src/minisweagent/run/)"]
-        PH["<b>pipeline_helpers.py</b>\nload_geak_model\nadd_agent_filter_args\ninject_pipeline_context\nvalidate_harness\ncreate_validated_harness\nrun_baseline_profile"]
+        PH["<b>pipeline_helpers.py</b>\nload_geak_model\nadd_agent_filter_args\ninject_pipeline_context\nvalidate_harness\ncreate_validated_harness\nrun_baseline_profile\nDEFAULT_EVAL_BENCHMARK_ITERATIONS"]
         DT["<b>discovery_types.py</b>\nDiscoveryResult.from_dict()"]
     end
 

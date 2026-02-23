@@ -53,7 +53,7 @@ block-beta
 
     space:5
 
-    shared["<b>pipeline_helpers.py</b>\nShared module used by all tools above:\nload_geak_model, inject_pipeline_context,\nvalidate_harness, create_validated_harness,\nrun_baseline_profile, agent filter helpers,\nDiscoveryResult.from_dict()"]:5
+    shared["<b>pipeline_helpers.py</b>\nShared module used by all tools above:\nload_geak_model, inject_pipeline_context,\nvalidate_harness, create_validated_harness,\nrun_baseline_profile, agent filter helpers,\nDiscoveryResult.from_dict(),\nDEFAULT_EVAL_BENCHMARK_ITERATIONS"]:5
 
     geak --> geak_preprocess
     geak --> geak_orchestrate

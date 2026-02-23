@@ -26,6 +26,8 @@ REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-b
 
 MAX_HARNESS_RETRIES = 2
 
+DEFAULT_EVAL_BENCHMARK_ITERATIONS = 50
+
 
 # ── agent filtering ──────────────────────────────────────────────────
 
@@ -226,12 +228,21 @@ def execute_harness_validation(
     harness_path: str,
     repo_root: str | None = None,
     gpu_id: int = 0,
+    benchmark_extra_args: str | None = None,
 ) -> tuple[bool, list[str], list[dict]]:
     """Run the harness across all modes and return ``(ok, errors, results)``.
 
     Delegates to :func:`minisweagent.tools.run_harness.run_harness` with
     ``mode="all"`` which executes correctness -> profile -> benchmark ->
     full-benchmark in sequence, short-circuiting on first failure.
+
+    Parameters
+    ----------
+    benchmark_extra_args:
+        Extra CLI args appended to benchmark/full-benchmark invocations
+        (e.g. ``"--iterations 50"``).  Passed via the
+        ``GEAK_BENCHMARK_EXTRA_ARGS`` env var so both direct invocations
+        and COMMANDMENT-based scripts use the same settings.
 
     Returns
     -------
@@ -244,11 +255,16 @@ def execute_harness_validation(
     """
     from minisweagent.tools.run_harness import results_errors, run_harness
 
+    env_overrides: dict[str, str] | None = None
+    if benchmark_extra_args:
+        env_overrides = {"GEAK_BENCHMARK_EXTRA_ARGS": benchmark_extra_args}
+
     results = run_harness(
         harness_path,
         mode="all",
         repo_root=repo_root,
         gpu_id=gpu_id,
+        env_overrides=env_overrides,
     )
     if not isinstance(results, list):
         results = [results]

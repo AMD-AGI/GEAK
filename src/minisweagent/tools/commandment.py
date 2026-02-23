@@ -173,10 +173,10 @@ ${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --correctness
 kernel-profile "${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
 
 ## BENCHMARK
-${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --benchmark
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
 
 ## FULL_BENCHMARK
-${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --full-benchmark
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
 """
 
 
@@ -244,10 +244,10 @@ ${{GEAK_WORK_DIR}}/run_harness.sh --correctness
 kernel-profile "${{GEAK_WORK_DIR}}/run_harness.sh --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
 
 ## BENCHMARK
-${{GEAK_WORK_DIR}}/run_harness.sh --benchmark
+${{GEAK_WORK_DIR}}/run_harness.sh --benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
 
 ## FULL_BENCHMARK
-${{GEAK_WORK_DIR}}/run_harness.sh --full-benchmark
+${{GEAK_WORK_DIR}}/run_harness.sh --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
 """
 
 

@@ -13,10 +13,11 @@ flowchart TB
         P3["kernel-profile (MCP)\n→ profile.json\n<i>with warmup</i>"]
         P4["baseline-metrics\n→ baseline_metrics.json"]
         P5["commandment\n→ COMMANDMENT.md"]
-        P1 --> P1b --> P2 --> P2b --> P3 --> P4 --> P5
+        P6["baseline benchmarks\n<i>re-run with --iterations 50</i>\n→ benchmark_baseline.txt\n→ full_benchmark_baseline.txt"]
+        P1 --> P1b --> P2 --> P2b --> P3 --> P4 --> P5 --> P6
     end
 
-    P5 --> ORCH_START
+    P6 --> ORCH_START
 
     subgraph ORCH ["Phase 2 — Orchestration Loop (geak-orchestrate)"]
         direction TB

@@ -273,8 +273,11 @@ def run_task_batch(
 
     # Pre-seed GEAK_REPO_ROOT and GEAK_HARNESS so COMMANDMENT commands
     # can reference them as variables (no hardcoded paths).
+    from minisweagent.run.pipeline_helpers import DEFAULT_EVAL_BENCHMARK_ITERATIONS
+
     base_env_vars: dict[str, str] = {
         "GEAK_REPO_ROOT": str(repo_path.resolve()),
+        "GEAK_BENCHMARK_EXTRA_ARGS": f"--iterations {DEFAULT_EVAL_BENCHMARK_ITERATIONS}",
     }
     if harness_path:
         base_env_vars["GEAK_HARNESS"] = harness_path

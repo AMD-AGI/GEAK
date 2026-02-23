@@ -35,7 +35,9 @@ def _ensure_mcp_importable() -> None:
 
 
 from minisweagent.run.pipeline_helpers import (
+    DEFAULT_EVAL_BENCHMARK_ITERATIONS,
     create_validated_harness,
+    execute_harness_validation,
     extract_harness_path,
     run_baseline_profile,
 )
@@ -231,9 +233,39 @@ def run_preprocessor(
             json.dumps(harness_results, indent=2, default=str)
         )
 
+    # Collect baselines using the same iteration count the orchestrator
+    # evaluation will use, so that speedup comparisons are apples-to-apples.
     benchmark_baseline: str | None = None
     full_benchmark_baseline: str | None = None
-    if harness_results:
+
+    eval_iters = DEFAULT_EVAL_BENCHMARK_ITERATIONS
+    harness_path_for_baseline = ctx.get("harness_path") or (
+        extract_harness_path(test_command) if test_command else None
+    )
+    if harness_path_for_baseline and harness_results:
+        extra = f"--iterations {eval_iters}"
+        _print(
+            f"  Re-running all modes with {extra} for baselines..."
+        )
+        bl_ok, bl_errors, baseline_results = execute_harness_validation(
+            harness_path_for_baseline,
+            repo_root=repo_root,
+            gpu_id=gpu_id,
+            benchmark_extra_args=extra,
+        )
+        for r in baseline_results:
+            status = "PASS" if r["success"] else "FAIL"
+            _print(f"    --{r['mode']}: {status} ({r['duration_s']}s)")
+        if not bl_ok:
+            _print(f"  WARNING: baseline re-run had failures: {bl_errors}")
+        for r in baseline_results:
+            if r["mode"] == "benchmark" and r["success"]:
+                benchmark_baseline = r["stdout"]
+                (output_dir / "benchmark_baseline.txt").write_text(r["stdout"])
+            if r["mode"] == "full-benchmark" and r["success"]:
+                full_benchmark_baseline = r["stdout"]
+                (output_dir / "full_benchmark_baseline.txt").write_text(r["stdout"])
+    elif harness_results:
         for r in harness_results:
             if r["mode"] == "benchmark" and r["success"]:
                 benchmark_baseline = r["stdout"]
@@ -241,6 +273,7 @@ def run_preprocessor(
             if r["mode"] == "full-benchmark" and r["success"]:
                 full_benchmark_baseline = r["stdout"]
                 (output_dir / "full_benchmark_baseline.txt").write_text(r["stdout"])
+
     ctx["benchmark_baseline"] = benchmark_baseline
     ctx["full_benchmark_baseline"] = full_benchmark_baseline
 
