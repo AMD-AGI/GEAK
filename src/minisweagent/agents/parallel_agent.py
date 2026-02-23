@@ -657,6 +657,7 @@ class ParallelAgent(DefaultAgent):
         def execute_task(task_id: int, task) -> tuple[int, Any, Any, Any]:
             """Execute a single task on dynamically-assigned GPU(s)."""
             needed = getattr(task, "num_gpus", 1) or 1
+            needed = min(needed, n_slots)
             acquired_gpus: list[int] = []
             for _ in range(needed):
                 acquired_gpus.append(gpu_queue.get())  # blocks until a GPU is free
