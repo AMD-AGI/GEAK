@@ -19,11 +19,30 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_median_latency_ms(output: str) -> float | None:
+    """Extract median latency (ms) from harness benchmark output."""
+    m = re.search(
+        r"median\s+latency[\w\s]*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms",
+        output,
+        re.IGNORECASE,
+    )
+    return float(m.group(1)) if m else None
+
+
+def _parse_shape_count(output: str) -> int | None:
+    """Extract shape count from harness benchmark output."""
+    m = re.search(r"(\d+)\s+shapes", output, re.IGNORECASE)
+    return int(m.group(1)) if m else None
 
 
 # ── System prompt for the orchestrator LLM ───────────────────────────
@@ -109,7 +128,11 @@ def _tool_generate_tasks(
     previous_results_dir: str | None = None,
     **_extra,
 ) -> str:
-    """Generate optimisation tasks for a given round."""
+    """Generate optimisation tasks for a given round.
+
+    If the task-generation sub-agent hits its step/cost limit, we treat
+    that as convergence (no more tasks) rather than propagating the error.
+    """
     from minisweagent.run.task_generator import generate_tasks as _gen
 
     output_dir = Path(ctx["output_dir"]) / "tasks" / f"round_{round_num}"
@@ -142,7 +165,20 @@ def _tool_generate_tasks(
     if previous_results_dir:
         kwargs["previous_results_dir"] = Path(previous_results_dir)
 
-    tasks = _gen(**kwargs)
+    try:
+        tasks = _gen(**kwargs)
+    except RuntimeError as exc:
+        if "LimitsExceeded" in str(exc):
+            logger.warning(
+                "Task generator hit limits (round %d), treating as convergence: %s",
+                round_num,
+                str(exc)[:200],
+            )
+            return json.dumps({
+                "tasks": [],
+                "message": "Task generator hit step/cost limit – treating as convergence.",
+            })
+        raise
 
     if not tasks:
         return json.dumps({"tasks": [], "message": "No tasks generated – converged."})
@@ -182,7 +218,7 @@ def _tool_generate_tasks(
 
 def _tool_dispatch_tasks(
     ctx: dict[str, Any],
-    task_files: list[str] | str,
+    task_files: list[str] | str | None = None,
     **_extra,
 ) -> str:
     """Dispatch task files to GPUs for parallel execution.
@@ -191,14 +227,36 @@ def _tool_dispatch_tasks(
     To guard against this, after parsing the provided list we scan the
     round directory for any ``.md`` task files that were not included and
     append them automatically.
+
+    If ``task_files`` is omitted entirely, auto-discover from the most
+    recent round's task directory.
     """
     from minisweagent.run.dispatch import run_task_batch
 
     if isinstance(task_files, str):
         task_files = json.loads(task_files)
+    if task_files is None:
+        task_files = []
 
     gpu_ids = ctx.get("gpu_ids", [0])
     base_dir = Path(ctx["output_dir"])
+
+    # If no task files provided, auto-discover from the latest round dir
+    if not task_files:
+        tasks_base = base_dir / "tasks"
+        if tasks_base.is_dir():
+            round_dirs = sorted(
+                (d for d in tasks_base.iterdir() if d.is_dir() and d.name.startswith("round_")),
+                key=lambda d: d.name,
+            )
+            if round_dirs:
+                task_files = sorted(str(f) for f in round_dirs[-1].glob("*.md"))
+                logger.info(
+                    "Auto-discovered %d task files from %s",
+                    len(task_files), round_dirs[-1].name,
+                )
+        if not task_files:
+            return json.dumps({"error": "No task files provided and none auto-discovered."})
 
     # Derive round directory from the first task file path
     round_dir = "round_1"
@@ -232,11 +290,28 @@ def _tool_dispatch_tasks(
 
 def _tool_collect_results(
     ctx: dict[str, Any],
-    results_dir: str,
+    results_dir: str | None = None,
     **_extra,
 ) -> str:
-    """Read results from a completed round and return a summary."""
+    """Read results from a completed round and return a summary.
+
+    If ``results_dir`` is omitted, auto-derive from the most recent
+    round's results directory.
+    """
     from minisweagent.run.task_generator import _scan_previous_results
+
+    if not results_dir:
+        base = Path(ctx["output_dir"]) / "results"
+        if base.is_dir():
+            round_dirs = sorted(
+                (d for d in base.iterdir() if d.is_dir() and d.name.startswith("round_")),
+                key=lambda d: d.name,
+            )
+            if round_dirs:
+                results_dir = str(round_dirs[-1])
+                logger.info("Auto-discovered results dir: %s", results_dir)
+        if not results_dir:
+            return json.dumps({"error": "No results_dir provided and none auto-discovered."})
 
     results_path = Path(results_dir)
     if not results_path.is_dir():
@@ -352,6 +427,110 @@ def _auto_finalize(
 # ── Per-round evaluation ─────────────────────────────────────────────
 
 
+def _setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Path:
+    """Create a temporary worktree and apply the best patch.
+
+    Returns the worktree path.  The caller is responsible for cleanup
+    via ``_cleanup_eval_worktree``.
+    """
+    eval_dir = output_dir / "_eval_worktree"
+    if eval_dir.exists():
+        shutil.rmtree(eval_dir, ignore_errors=True)
+
+    repo = Path(repo_root).resolve()
+    is_git = (repo / ".git").exists() or (repo / ".git").is_file()
+
+    if is_git:
+        wt_name = f"eval_{os.getpid()}"
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(eval_dir)],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    else:
+        shutil.copytree(str(repo), str(eval_dir), dirs_exist_ok=True)
+
+    patch_path = Path(patch_file)
+    if patch_path.exists() and patch_path.stat().st_size > 0:
+        apply_result = subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", str(patch_path)],
+            cwd=str(eval_dir),
+            capture_output=True,
+            text=True,
+        )
+        if apply_result.returncode != 0:
+            logger.warning(
+                "git apply failed (rc=%d): %s",
+                apply_result.returncode,
+                apply_result.stderr[:500],
+            )
+    return eval_dir
+
+
+def _cleanup_eval_worktree(repo_root: str, eval_dir: Path) -> None:
+    """Remove the temporary evaluation worktree."""
+    repo = Path(repo_root).resolve()
+    is_git = (repo / ".git").exists() or (repo / ".git").is_file()
+    if is_git:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(eval_dir)],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+        )
+    if eval_dir.exists():
+        shutil.rmtree(eval_dir, ignore_errors=True)
+
+
+def _build_eval_env(
+    work_dir: Path,
+    repo_root: str,
+    harness_path: str,
+    gpu_id: int,
+) -> dict[str, str]:
+    """Build the GEAK_* environment dict for evaluation subprocesses."""
+    env = os.environ.copy()
+    env["GEAK_WORK_DIR"] = str(work_dir)
+    env["GEAK_REPO_ROOT"] = repo_root
+    env["GEAK_HARNESS"] = harness_path
+    env["GEAK_GPU_DEVICE"] = str(gpu_id)
+    env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+    env["PYTHONPATH"] = f"{work_dir}:{repo_root}:{env.get('PYTHONPATH', '')}"
+    alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    if "expandable_segments" in alloc_conf:
+        env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+    return env
+
+
+def _build_eval_script(
+    commandment_path: str,
+    sections: list[str],
+) -> str | None:
+    """Build a shell script from one or more COMMANDMENT sections.
+
+    Returns the path to the written script, or None if no commands.
+    """
+    from minisweagent.run.dispatch import _read_commandment_section
+
+    lines = ["#!/usr/bin/env bash", "set -euo pipefail"]
+    has_commands = False
+    for sec in sections:
+        body = _read_commandment_section(commandment_path, sec)
+        if body:
+            lines.append(f"# --- {sec} ---")
+            lines.append(body)
+            has_commands = True
+    if not has_commands:
+        return None
+    script_dir = Path(commandment_path).parent
+    script_path = script_dir / "_geak_eval_cmd.sh"
+    script_path.write_text("\n".join(lines) + "\n")
+    script_path.chmod(0o755)
+    return str(script_path)
+
+
 def _evaluate_round_best(
     ctx: dict[str, Any],
     round_num: int,
@@ -360,9 +539,9 @@ def _evaluate_round_best(
 ) -> dict[str, Any] | None:
     """Evaluate the single best kernel from a round with FULL_BENCHMARK + PROFILE.
 
-    Greedily selects the best candidate by BENCHMARK latency (from agents'
-    ``save_and_test`` output), applies its patch to a clean worktree, and
-    runs the COMMANDMENT's FULL_BENCHMARK and PROFILE sections against it.
+    Creates a temporary worktree, applies the best patch, sets all GEAK_*
+    env vars, runs SETUP + FULL_BENCHMARK, then profiles with PYTHONPATH
+    pointing at the patched worktree.
 
     Returns a round evaluation dict, or None if no valid candidates exist.
     """
@@ -405,31 +584,49 @@ def _evaluate_round_best(
         "benchmark_speedup": best_speedup,
     }
 
-    # Run FULL_BENCHMARK on the best kernel if the commandment section exists
     commandment_path = pp_dir / "COMMANDMENT.md"
-    full_benchmark_baseline_path = pp_dir / "full_benchmark_baseline.txt"
-    full_benchmark_baseline = (
-        full_benchmark_baseline_path.read_text().strip()
-        if full_benchmark_baseline_path.exists()
-        else None
-    )
+    if not commandment_path.exists():
+        eval_path = output_dir / f"round_{round_num}_evaluation.json"
+        eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
+        return round_eval
 
-    if commandment_path.exists():
-        from minisweagent.run.dispatch import _read_commandment_section
+    repo_root = ctx.get("repo_root", "")
+    harness_path = ctx.get("harness_path", "")
+    gpu_id = ctx.get("gpu_ids", [0])[0]
 
-        fb_cmd = _read_commandment_section(str(commandment_path), "FULL_BENCHMARK")
-        if fb_cmd:
+    eval_worktree: Path | None = None
+    try:
+        # Create worktree and apply patch
+        eval_worktree = _setup_eval_worktree(repo_root, best_patch_file, output_dir)
+        eval_env = _build_eval_env(eval_worktree, repo_root, harness_path, gpu_id)
+        _print(f"  Eval worktree: {eval_worktree}")
+
+        # Load baselines for comparison
+        full_benchmark_baseline_path = pp_dir / "full_benchmark_baseline.txt"
+        full_benchmark_baseline = (
+            full_benchmark_baseline_path.read_text().strip()
+            if full_benchmark_baseline_path.exists()
+            else None
+        )
+        benchmark_baseline_path = pp_dir / "benchmark_baseline.txt"
+        benchmark_baseline = (
+            benchmark_baseline_path.read_text().strip()
+            if benchmark_baseline_path.exists()
+            else None
+        )
+
+        # --- FULL_BENCHMARK ---
+        fb_script = _build_eval_script(str(commandment_path), ["SETUP", "FULL_BENCHMARK"])
+        if fb_script:
             _print(f"  Running FULL_BENCHMARK on best kernel from round {round_num}...")
             try:
-                import subprocess
-
                 fb_result = subprocess.run(
-                    fb_cmd,
-                    shell=True,
+                    ["bash", fb_script],
                     capture_output=True,
                     text=True,
                     timeout=1800,
-                    cwd=ctx.get("repo_root"),
+                    cwd=str(eval_worktree),
+                    env=eval_env,
                 )
                 fb_stdout = fb_result.stdout
                 round_eval["full_benchmark"] = {
@@ -439,76 +636,105 @@ def _evaluate_round_best(
                 }
                 if full_benchmark_baseline:
                     round_eval["full_benchmark"]["baseline"] = full_benchmark_baseline[:2000]
+
+                # Programmatic speedup verification
+                if fb_result.returncode == 0:
+                    candidate_ms = _parse_median_latency_ms(fb_stdout)
+                    baseline_ref = full_benchmark_baseline or benchmark_baseline
+                    baseline_ms = _parse_median_latency_ms(baseline_ref) if baseline_ref else None
+                    if candidate_ms and baseline_ms and baseline_ms > 0:
+                        verified_speedup = baseline_ms / candidate_ms
+                        round_eval["full_benchmark"]["verified_speedup"] = round(verified_speedup, 4)
+                        round_eval["full_benchmark"]["candidate_ms"] = candidate_ms
+                        round_eval["full_benchmark"]["baseline_ms"] = baseline_ms
+                        _print(
+                            f"  FULL_BENCHMARK verified speedup: {verified_speedup:.4f}x "
+                            f"({baseline_ms:.4f} ms -> {candidate_ms:.4f} ms)"
+                        )
+                    # Shape count validation
+                    candidate_shapes = _parse_shape_count(fb_stdout)
+                    baseline_shapes = _parse_shape_count(baseline_ref) if baseline_ref else None
+                    if candidate_shapes and baseline_shapes and candidate_shapes != baseline_shapes:
+                        logger.warning(
+                            "Shape count mismatch: baseline=%d, candidate=%d",
+                            baseline_shapes, candidate_shapes,
+                        )
+                        round_eval["full_benchmark"]["shape_count_warning"] = (
+                            f"baseline={baseline_shapes}, candidate={candidate_shapes}"
+                        )
+
                 _print(f"  FULL_BENCHMARK: {'PASS' if fb_result.returncode == 0 else 'FAIL'}")
             except Exception as exc:
                 _print(f"  FULL_BENCHMARK failed: {exc}")
                 round_eval["full_benchmark"] = {"error": str(exc)}
 
-        # Run PROFILE (via kernel-profile) on the best kernel
-        profile_cmd = _read_commandment_section(str(commandment_path), "PROFILE")
-        if profile_cmd:
-            _print(f"  Running PROFILE on best kernel from round {round_num}...")
-            baseline_metrics_path = pp_dir / "baseline_metrics.json"
-            baseline_metrics = None
-            if baseline_metrics_path.exists():
-                try:
-                    baseline_metrics = json.loads(baseline_metrics_path.read_text())
-                except (json.JSONDecodeError, OSError):
-                    pass
-
+        # --- PROFILE ---
+        _print(f"  Running PROFILE on best kernel from round {round_num}...")
+        baseline_metrics_path = pp_dir / "baseline_metrics.json"
+        baseline_metrics = None
+        if baseline_metrics_path.exists():
             try:
-                from minisweagent.run.pipeline_helpers import _ensure_mcp_importable
+                baseline_metrics = json.loads(baseline_metrics_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
 
-                _ensure_mcp_importable()
-                from profiler_mcp.server import profile_kernel
+        try:
+            from minisweagent.run.pipeline_helpers import _ensure_mcp_importable
 
-                _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
-                harness_path = ctx.get("harness_path", "")
-                if harness_path:
-                    profile_result = _profile_fn(
-                        command=f"python {harness_path} --profile",
-                        backend="metrix",
-                        num_replays=3,
-                        quick=True,
-                        gpu_devices=str(ctx.get("gpu_ids", [0])[0]),
+            _ensure_mcp_importable()
+            from profiler_mcp.server import profile_kernel
+
+            _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
+            if harness_path:
+                profile_result = _profile_fn(
+                    command=f"python {harness_path} --profile",
+                    backend="metrix",
+                    num_replays=3,
+                    quick=True,
+                    gpu_devices=str(gpu_id),
+                    env={"PYTHONPATH": f"{eval_worktree}:{repo_root}"},
+                )
+
+                if baseline_metrics and profile_result:
+                    from minisweagent.baseline_metrics import build_baseline_metrics
+
+                    optimized_metrics = build_baseline_metrics(
+                        profile_result, include_all=True
                     )
+                    profile_comparison: dict[str, Any] = {}
+                    for key in ("duration_us", "bottleneck"):
+                        if key in baseline_metrics and key in optimized_metrics:
+                            base_val = baseline_metrics[key]
+                            opt_val = optimized_metrics[key]
+                            if key == "duration_us" and isinstance(base_val, (int, float)):
+                                change_pct = ((opt_val - base_val) / base_val * 100) if base_val else 0
+                                profile_comparison[key] = {
+                                    "baseline": base_val,
+                                    "optimized": opt_val,
+                                    "change_pct": round(change_pct, 1),
+                                }
+                            else:
+                                profile_comparison[key] = {
+                                    "baseline": base_val,
+                                    "optimized": opt_val,
+                                }
 
-                    if baseline_metrics and profile_result:
-                        from minisweagent.baseline_metrics import build_baseline_metrics
+                    opt_bn = optimized_metrics.get("bottleneck", "unknown")
+                    base_bn = baseline_metrics.get("bottleneck", "unknown")
+                    if base_bn != opt_bn:
+                        profile_comparison["bottleneck_shift"] = f"{base_bn} -> {opt_bn}"
 
-                        optimized_metrics = build_baseline_metrics(
-                            profile_result, include_all=True
-                        )
-                        profile_comparison: dict[str, Any] = {}
-                        for key in ("duration_us", "bottleneck"):
-                            if key in baseline_metrics and key in optimized_metrics:
-                                base_val = baseline_metrics[key]
-                                opt_val = optimized_metrics[key]
-                                if key == "duration_us" and isinstance(base_val, (int, float)):
-                                    change_pct = ((opt_val - base_val) / base_val * 100) if base_val else 0
-                                    profile_comparison[key] = {
-                                        "baseline": base_val,
-                                        "optimized": opt_val,
-                                        "change_pct": round(change_pct, 1),
-                                    }
-                                else:
-                                    profile_comparison[key] = {
-                                        "baseline": base_val,
-                                        "optimized": opt_val,
-                                    }
+                    round_eval["profile_comparison"] = profile_comparison
+                    _print(f"  PROFILE comparison: {json.dumps(profile_comparison)[:300]}")
+                else:
+                    _print("  PROFILE: completed (no baseline for comparison)")
+        except Exception as exc:
+            _print(f"  PROFILE failed: {exc}")
+            round_eval["profile_comparison"] = {"error": str(exc)}
 
-                        opt_bn = optimized_metrics.get("bottleneck", "unknown")
-                        base_bn = baseline_metrics.get("bottleneck", "unknown")
-                        if base_bn != opt_bn:
-                            profile_comparison["bottleneck_shift"] = f"{base_bn} -> {opt_bn}"
-
-                        round_eval["profile_comparison"] = profile_comparison
-                        _print(f"  PROFILE comparison: {json.dumps(profile_comparison)[:300]}")
-                    else:
-                        _print("  PROFILE: completed (no baseline for comparison)")
-            except Exception as exc:
-                _print(f"  PROFILE failed: {exc}")
-                round_eval["profile_comparison"] = {"error": str(exc)}
+    finally:
+        if eval_worktree:
+            _cleanup_eval_worktree(repo_root, eval_worktree)
 
     eval_path = output_dir / f"round_{round_num}_evaluation.json"
     eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
@@ -549,7 +775,8 @@ _ORCHESTRATOR_ONLY_TOOLS: list[dict] = [
         "name": "dispatch_tasks",
         "description": (
             "Dispatch a list of task files to available GPUs for parallel "
-            "execution.  Returns a JSON summary of results."
+            "execution.  Returns a JSON summary of results.  If task_files "
+            "is omitted, auto-discovers from the latest round's task directory."
         ),
         "parameters": {
             "type": "object",
@@ -557,27 +784,28 @@ _ORCHESTRATOR_ONLY_TOOLS: list[dict] = [
                 "task_files": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of task file paths to dispatch.",
+                    "description": "List of task file paths to dispatch (auto-discovered if omitted).",
                 },
             },
-            "required": ["task_files"],
+            "required": [],
         },
     },
     {
         "name": "collect_results",
         "description": (
             "Read results from a completed round's output directory.  "
-            "Returns a Markdown summary of patches, test outputs, and logs."
+            "Returns a Markdown summary of patches, test outputs, and logs.  "
+            "If results_dir is omitted, auto-discovers the latest round."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "results_dir": {
                     "type": "string",
-                    "description": "Path to the results directory to scan.",
+                    "description": "Path to the results directory to scan (auto-discovered if omitted).",
                 },
             },
-            "required": ["results_dir"],
+            "required": [],
         },
     },
     {
@@ -883,8 +1111,9 @@ def _run_llm_steps(
     otherwise ``None`` (the LLM responded with text, signalling it is
     ready for the next phase).
     """
+    max_steps = int(os.getenv("GEAK_ORCHESTRATOR_STEP_LIMIT", "200"))
     step = 0
-    while True:
+    while step < max_steps:
         step += 1
         _print(
             f"[dim]{phase} step {step}[/dim]"
@@ -946,6 +1175,14 @@ def _run_llm_steps(
                 else "Orchestrator: Optimisation finalised."
             )
             return report
+
+    logger.warning(
+        "Orchestrator hit step limit (%d) for phase %s -- proceeding to next phase",
+        max_steps,
+        phase,
+    )
+    _print(f"  Step limit ({max_steps}) reached for {phase}, moving on...")
+    return None
 
 
 # ── CLI entry point ──────────────────────────────────────────────────

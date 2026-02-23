@@ -468,8 +468,8 @@ def _run_task_agent(
             "num_gpus": num_gpus,
         }
 
-        tg_step_limit = int(os.getenv("GEAK_TASKGEN_STEP_LIMIT", "75"))
-        tg_cost_limit = float(os.getenv("GEAK_TASKGEN_COST_LIMIT", "10.0"))
+        tg_step_limit = int(os.getenv("GEAK_TASKGEN_STEP_LIMIT", "200"))
+        tg_cost_limit = float(os.getenv("GEAK_TASKGEN_COST_LIMIT", "50.0"))
 
         system_prompt = _SYSTEM_PROMPT + _build_agent_restriction_addendum()
 

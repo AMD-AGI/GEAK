@@ -289,6 +289,29 @@ def run_preprocessor(
         _print("  Skipping baseline metrics (no profiling data)")
 
     ctx["baseline_metrics"] = baseline_metrics
+
+    # Enrich baseline_metrics with wall-clock benchmark data so that all
+    # consumers (OpenEvolve, orchestrator) compare benchmark-vs-benchmark
+    # instead of mixing Metrix profile durations with wall-clock latencies.
+    if baseline_metrics is None:
+        baseline_metrics = {}
+    bb_path = output_dir / "benchmark_baseline.txt"
+    if bb_path.exists():
+        import re as _re
+
+        bb_text = bb_path.read_text()
+        _m = _re.search(
+            r"median\s+latency[\w\s]*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms",
+            bb_text,
+            _re.IGNORECASE,
+        )
+        if _m:
+            baseline_metrics["benchmark_duration_us"] = float(_m.group(1)) * 1000.0
+        _sm = _re.search(r"(\d+)\s+shapes", bb_text, _re.IGNORECASE)
+        if _sm:
+            baseline_metrics["benchmark_shape_count"] = int(_sm.group(1))
+        ctx["baseline_metrics"] = baseline_metrics
+
     if baseline_metrics:
         (output_dir / "baseline_metrics.json").write_text(json.dumps(baseline_metrics, indent=2, default=str))
 
