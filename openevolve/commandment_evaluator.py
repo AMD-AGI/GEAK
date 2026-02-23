@@ -521,35 +521,32 @@ class CommandmentEvaluator:
         * ``median_latency_ms: <float>``
 
         The parsed value is stored as ``benchmark_ms`` (milliseconds) and
-        also converted to ``duration_us`` for compatibility with the
-        speedup calculator.
+        also converted to ``duration_us`` and ``benchmark_duration_us``
+        for compatibility with the speedup calculator.
         """
         metrics: Dict[str, Any] = {}
+
+        def _store(val_ms: float) -> Dict[str, Any]:
+            metrics["benchmark_ms"] = val_ms
+            metrics["duration_us"] = val_ms * 1000.0
+            metrics["benchmark_duration_us"] = val_ms * 1000.0
+            return metrics
 
         # 1. Explicit tag: BENCHMARK_RESULT: <float>
         m = re.search(r"BENCHMARK_RESULT:\s*([\d.]+(?:e[+-]?\d+)?)", stdout, re.IGNORECASE)
         if m:
-            val_ms = float(m.group(1))
-            metrics["benchmark_ms"] = val_ms
-            metrics["duration_us"] = val_ms * 1000.0
-            return metrics
+            return _store(float(m.group(1)))
 
         # 2. "Median latency across all shapes: <float> ms" or
         #    "Overall median latency: <float> ms" or similar
         m = re.search(r"median\s+latency[\w\s]*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms", stdout, re.IGNORECASE)
         if m:
-            val_ms = float(m.group(1))
-            metrics["benchmark_ms"] = val_ms
-            metrics["duration_us"] = val_ms * 1000.0
-            return metrics
+            return _store(float(m.group(1)))
 
         # 3. Key-value: median_latency_ms: <float>
         m = re.search(r"median_latency_ms\s*[:=]\s*([\d.]+(?:e[+-]?\d+)?)", stdout, re.IGNORECASE)
         if m:
-            val_ms = float(m.group(1))
-            metrics["benchmark_ms"] = val_ms
-            metrics["duration_us"] = val_ms * 1000.0
-            return metrics
+            return _store(float(m.group(1)))
 
         # 4. Fallback: collect all per-shape "Shape ...: <float> ms" lines
         #    and compute the median ourselves
@@ -560,9 +557,7 @@ class CommandmentEvaluator:
         if shape_times:
             shape_times.sort()
             median_ms = shape_times[len(shape_times) // 2]
-            metrics["benchmark_ms"] = median_ms
-            metrics["duration_us"] = median_ms * 1000.0
-            return metrics
+            return _store(median_ms)
 
         # 5. Last resort: fall back to Metrix-style parsing
         logger.warning("Could not parse benchmark output -- falling back to Metrix parser")
@@ -580,9 +575,11 @@ class CommandmentEvaluator:
     def _calculate_speedup(self, metrics: Dict[str, Any]) -> float:
         """Calculate speedup vs baseline metrics.
 
-        Checks multiple latency key names (duration_us, latency_us,
-        latency_avg_us) because Metrix may report under any of these.
-        Falls back to throughput-based if latency is unavailable.
+        Prefers ``benchmark_duration_us`` (wall-clock from ``--benchmark``)
+        when available in both baseline and candidate, ensuring
+        apples-to-apples comparison.  Falls back to Metrix latency keys
+        (``duration_us``, ``latency_us``, ``latency_avg_us``), then
+        throughput-based if latency is unavailable.
 
         **Regression guard**: if the candidate is more than
         ``_MAX_REGRESSION_FACTOR`` times slower than baseline, the
@@ -594,22 +591,30 @@ class CommandmentEvaluator:
         if not self.baseline_metrics:
             return 1.0
 
-        # Try latency-based speedup -- check several common key names
-        latency_keys = ("duration_us", "latency_us", "latency_avg_us")
+        # Prefer benchmark_duration_us for apples-to-apples comparison
+        bdu_key = "benchmark_duration_us"
+        bdu_baseline = self.baseline_metrics.get(bdu_key, 0.0)
+        bdu_target = metrics.get(bdu_key, 0.0)
+        if bdu_baseline and float(bdu_baseline) > 0 and bdu_target and float(bdu_target) > 0:
+            baseline_latency = float(bdu_baseline)
+            target_latency = float(bdu_target)
+        else:
+            # Fall back to Metrix latency keys
+            latency_keys = ("duration_us", "latency_us", "latency_avg_us")
 
-        baseline_latency = 0.0
-        for key in latency_keys:
-            val = self.baseline_metrics.get(key, 0.0)
-            if val and float(val) > 0:
-                baseline_latency = float(val)
-                break
+            baseline_latency = 0.0
+            for key in latency_keys:
+                val = self.baseline_metrics.get(key, 0.0)
+                if val and float(val) > 0:
+                    baseline_latency = float(val)
+                    break
 
-        target_latency = 0.0
-        for key in latency_keys:
-            val = metrics.get(key, 0.0)
-            if val and float(val) > 0:
-                target_latency = float(val)
-                break
+            target_latency = 0.0
+            for key in latency_keys:
+                val = metrics.get(key, 0.0)
+                if val and float(val) > 0:
+                    target_latency = float(val)
+                    break
 
         if baseline_latency > 0 and target_latency > 0:
             raw_speedup = baseline_latency / target_latency

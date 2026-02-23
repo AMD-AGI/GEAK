@@ -186,15 +186,16 @@ def evaluate(
                 error_msg = f"CORRECTNESS failed: {error_msg}"
             return _failure_result(error_msg)
 
-        # Extract speedup from COMMANDMENT metrics
+        # Extract speedup from COMMANDMENT metrics.
+        # _calculate_speedup already prefers benchmark_duration_us for
+        # apples-to-apples wall-clock comparison; do NOT override it here.
         speedup = result.speedup
         duration_us = result.metrics.get("duration_us", 0)
         benchmark_ms = result.metrics.get("benchmark_ms", 0)
-        baseline_dur = cmd_eval.baseline_metrics.get("duration_us", 0)
-
-        # Use benchmark latency for speedup (wall-clock, not Metrix)
-        if duration_us > 0 and baseline_dur > 0:
-            speedup = baseline_dur / duration_us
+        baseline_dur = cmd_eval.baseline_metrics.get(
+            "benchmark_duration_us",
+            cmd_eval.baseline_metrics.get("duration_us", 0),
+        )
 
         summary_parts = [
             f"CORRECTNESS: PASS",
