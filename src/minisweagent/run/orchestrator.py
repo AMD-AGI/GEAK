@@ -62,20 +62,45 @@ profiling), and **strategy_manager**.  Use these only when you need to
 inspect artefacts, debug a failure, or gather information the
 orchestration tools above cannot provide.
 
+## IMPORTANT: Phased Execution
+
+The orchestration runs in TWO phases:
+
+### Phase 1: Exploration (current phase)
+During exploration, you should ONLY:
+- Read and understand the kernel source code
+- Review profiling data and baseline metrics
+- Analyze the COMMANDMENT.md
+- Plan your optimization strategy
+
+Do NOT call generate_tasks, dispatch_tasks, collect_results, or finalize
+during exploration. Simply respond with "Ready to begin optimization rounds"
+when you have finished exploring.
+
+### Phase 2: Round Loop
+The system will explicitly tell you "Begin round N" to start each round.
+WAIT for this instruction before calling any orchestration tools.
+
 Within each round you MUST call these tools in order:
 1. **generate_tasks** – produce optimisation task files for this round.
 2. **dispatch_tasks** – run those tasks in parallel across available GPUs.
 3. **collect_results** – review what each task achieved.
 
-After collecting results, respond with your evaluation.  If the system
-tells you there are more rounds, start the next round.  When all rounds
-are done (or no further improvement is possible), call **finalize** with
-a summary.
+After collect_results, respond with your evaluation and WAIT for the next
+round instruction. The system will automatically run validation (FULL_BENCHMARK
+and PROFILE) on the best kernel from each round.
+
+Only call **finalize** when the system tells you it is the FINAL round.
+The finalize call should include:
+- summary: A comprehensive summary of optimizations achieved
+- best_patch: Path to the best patch file
+- total_speedup: The verified speedup (e.g., "1.06x" or "6%")
 
 Rules:
 - Do NOT modify preprocessor artefacts (test harness, test command,
   discovery, profiling, COMMANDMENT.md).
 - Do NOT run tasks yourself; always dispatch via **dispatch_tasks**.
+- Do NOT call finalize until explicitly told it is the FINAL round.
 - After **collect_results**, review each sub-agent's output against
   its original task intent:
   1. Did it actually optimise the *kernel*, or did it modify something
@@ -328,7 +353,42 @@ def _tool_finalize(
     total_speedup: str | None = None,
     **_extra,
 ) -> str:
-    """Signal optimisation is complete.  Write final report."""
+    """Signal optimisation is complete.  Write final report.
+    
+    If best_patch or total_speedup are not provided, attempts to auto-detect
+    them from the results directory.
+    """
+    output_dir = Path(ctx["output_dir"])
+    
+    # Auto-detect best patch and speedup if not provided
+    if best_patch is None or total_speedup is None:
+        best_speedup_val = 0.0
+        best_patch_file = None
+        
+        results_dir = output_dir / "results"
+        if results_dir.is_dir():
+            for round_dir in sorted(results_dir.iterdir()):
+                if not round_dir.is_dir() or not round_dir.name.startswith("round_"):
+                    continue
+                for task_dir in sorted(round_dir.iterdir()):
+                    if not task_dir.is_dir() or task_dir.name == "worktrees":
+                        continue
+                    br_file = task_dir / "best_results.json"
+                    if br_file.exists():
+                        try:
+                            br = json.loads(br_file.read_text())
+                            speedup = float(br.get("best_patch_speedup", 0))
+                            if speedup > best_speedup_val:
+                                best_speedup_val = speedup
+                                best_patch_file = br.get("best_patch_file")
+                        except (json.JSONDecodeError, ValueError, TypeError):
+                            continue
+        
+        if best_patch is None and best_patch_file:
+            best_patch = best_patch_file
+        if total_speedup is None and best_speedup_val > 0:
+            total_speedup = f"{best_speedup_val:.4f}x"
+    
     report = {
         "status": "complete",
         "summary": summary,
@@ -336,7 +396,7 @@ def _tool_finalize(
         "total_speedup": total_speedup,
     }
 
-    report_path = Path(ctx["output_dir"]) / "final_report.json"
+    report_path = output_dir / "final_report.json"
     report_path.write_text(json.dumps(report, indent=2))
 
     return json.dumps(report)
@@ -441,7 +501,6 @@ def _setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> P
     is_git = (repo / ".git").exists() or (repo / ".git").is_file()
 
     if is_git:
-        wt_name = f"eval_{os.getpid()}"
         subprocess.run(
             ["git", "worktree", "add", "--detach", str(eval_dir)],
             cwd=str(repo),
@@ -849,12 +908,23 @@ def _dispatch_tool_call(
     ctx: dict[str, Any],
     tool_name: str,
     tool_args: dict[str, Any],
+    *,
+    phase: str = "",
 ) -> str:
     """Route a tool call to the appropriate implementation.
 
     Exceptions are caught and returned as JSON error payloads so the
     orchestrator LLM can decide how to proceed (retry, skip, or finalize).
     """
+    # Block orchestration tools during exploration phase
+    ORCHESTRATION_TOOLS = {"generate_tasks", "dispatch_tasks", "collect_results", "finalize"}
+    if phase == "explore" and tool_name in ORCHESTRATION_TOOLS:
+        return json.dumps({
+            "error": f"Cannot call {tool_name} during exploration phase. "
+            "Please read and understand the kernel first, then respond with "
+            "'Ready to begin optimization rounds' to proceed to the round loop."
+        })
+
     try:
         if tool_name == "generate_tasks":
             return _tool_generate_tasks(ctx, **tool_args)
@@ -1152,7 +1222,7 @@ def _run_llm_steps(
             }
         )
 
-        result_str = _dispatch_tool_call(ctx, tool_name, tool_args)
+        result_str = _dispatch_tool_call(ctx, tool_name, tool_args, phase=phase)
 
         messages.append(
             {
