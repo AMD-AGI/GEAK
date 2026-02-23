@@ -39,6 +39,15 @@ def _parse_median_latency_ms(output: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
+def _parse_total_kernel_time_ms(output: str) -> float | None:
+    """Extract TOTAL_KERNEL_TIME_MS from harness benchmark output."""
+    m = re.search(
+        r"TOTAL_KERNEL_TIME_MS:\s*([\d.]+(?:e[+-]?\d+)?)",
+        output,
+    )
+    return float(m.group(1)) if m else None
+
+
 def _parse_shape_count(output: str) -> int | None:
     """Extract shape count from harness benchmark output."""
     m = re.search(r"(\d+)\s+shapes", output, re.IGNORECASE)
@@ -487,13 +496,21 @@ def _auto_finalize(
 # ── Per-round evaluation ─────────────────────────────────────────────
 
 
+class PatchApplyError(Exception):
+    """Raised when a patch fails to apply to the evaluation worktree."""
+    pass
+
+
 def _setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Path:
     """Create a temporary worktree and apply the best patch.
 
     Returns the worktree path.  The caller is responsible for cleanup
     via ``_cleanup_eval_worktree``.
+    
+    Raises:
+        PatchApplyError: If the patch fails to apply.
     """
-    eval_dir = output_dir / "_eval_worktree"
+    eval_dir = (output_dir / "_eval_worktree").resolve()
     if eval_dir.exists():
         shutil.rmtree(eval_dir, ignore_errors=True)
 
@@ -520,11 +537,11 @@ def _setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> P
             text=True,
         )
         if apply_result.returncode != 0:
-            logger.warning(
-                "git apply failed (rc=%d): %s",
-                apply_result.returncode,
-                apply_result.stderr[:500],
-            )
+            error_msg = f"git apply failed (rc={apply_result.returncode}): {apply_result.stderr[:500]}"
+            logger.warning(error_msg)
+            # Clean up the worktree since the patch failed
+            _cleanup_eval_worktree(repo_root, eval_dir)
+            raise PatchApplyError(error_msg)
     return eval_dir
 
 
@@ -610,10 +627,15 @@ def _evaluate_round_best(
     best_patch_file: str | None = None
     best_speedup: float = 0.0
     best_task: str = ""
+    best_kernel_time: float = float("inf")
 
     if not results_dir.is_dir():
         return None
 
+    # Collect candidates: prefer absolute kernel time comparison over
+    # self-reported speedup, since each agent may compute speedup against
+    # its own re-run baseline (which varies due to GPU noise).
+    candidates: list[dict[str, Any]] = []
     for task_dir in sorted(results_dir.iterdir()):
         if not task_dir.is_dir() or task_dir.name in ("worktrees",):
             continue
@@ -623,18 +645,62 @@ def _evaluate_round_best(
         try:
             br = json.loads(br_file.read_text())
             speedup = float(br.get("best_patch_speedup", 0))
-            if speedup > best_speedup:
-                best_speedup = speedup
-                best_patch_file = br.get("best_patch_file")
-                best_task = task_dir.name
+            patch_file = br.get("best_patch_file")
+            if not patch_file or speedup <= 0:
+                continue
+
+            # Try to get absolute kernel time from the test output
+            kernel_time: float | None = None
+            test_output_path = br.get("best_patch_test_output", "")
+            if test_output_path:
+                test_path = Path(test_output_path)
+                if test_path.exists():
+                    kernel_time = _parse_total_kernel_time_ms(
+                        test_path.read_text()
+                    )
+
+            candidates.append({
+                "task": task_dir.name,
+                "patch_file": patch_file,
+                "speedup": speedup,
+                "kernel_time_ms": kernel_time,
+            })
         except (json.JSONDecodeError, ValueError, TypeError):
             continue
 
-    if not best_patch_file or best_speedup <= 0:
+    if not candidates:
         _print(f"  Round {round_num}: no valid candidates for evaluation")
         return None
 
-    _print(f"  Round {round_num} best: {best_task} ({best_speedup:.2f}x)")
+    # Pick the best candidate: use absolute kernel time if available for
+    # all candidates, otherwise fall back to self-reported speedup.
+    all_have_kernel_time = all(
+        c["kernel_time_ms"] is not None for c in candidates
+    )
+
+    if all_have_kernel_time:
+        best = min(candidates, key=lambda c: c["kernel_time_ms"])  # type: ignore[arg-type]
+        best_task = best["task"]
+        best_patch_file = best["patch_file"]
+        best_speedup = best["speedup"]
+        best_kernel_time = best["kernel_time_ms"]  # type: ignore[assignment]
+    else:
+        best = max(candidates, key=lambda c: c["speedup"])
+        best_task = best["task"]
+        best_patch_file = best["patch_file"]
+        best_speedup = best["speedup"]
+        if best["kernel_time_ms"] is not None:
+            best_kernel_time = best["kernel_time_ms"]
+
+    selection_method = "kernel_time" if all_have_kernel_time else "speedup"
+    if best_kernel_time < float("inf"):
+        _print(
+            f"  Round {round_num} best: {best_task} "
+            f"({best_speedup:.2f}x, {best_kernel_time:.4f}ms, "
+            f"selected by {selection_method})"
+        )
+    else:
+        _print(f"  Round {round_num} best: {best_task} ({best_speedup:.2f}x)")
 
     round_eval: dict[str, Any] = {
         "round": round_num,
@@ -656,7 +722,16 @@ def _evaluate_round_best(
     eval_worktree: Path | None = None
     try:
         # Create worktree and apply patch
-        eval_worktree = _setup_eval_worktree(repo_root, best_patch_file, output_dir)
+        try:
+            eval_worktree = _setup_eval_worktree(repo_root, best_patch_file, output_dir)
+        except PatchApplyError as exc:
+            _print(f"  Patch apply failed: {exc}")
+            round_eval["patch_apply_error"] = str(exc)
+            round_eval["status"] = "patch_failed"
+            eval_path = output_dir / f"round_{round_num}_evaluation.json"
+            eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
+            return round_eval
+        
         eval_env = _build_eval_env(eval_worktree, repo_root, harness_path, gpu_id)
         _print(f"  Eval worktree: {eval_worktree}")
 
@@ -745,14 +820,21 @@ def _evaluate_round_best(
 
             _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
             if harness_path:
-                profile_result = _profile_fn(
-                    command=f"python {harness_path} --profile",
-                    backend="metrix",
-                    num_replays=3,
-                    quick=True,
-                    gpu_devices=str(gpu_id),
-                    env={"PYTHONPATH": f"{eval_worktree}:{repo_root}"},
-                )
+                prev_pythonpath = os.environ.get("PYTHONPATH", "")
+                os.environ["PYTHONPATH"] = f"{eval_worktree}:{repo_root}:{prev_pythonpath}"
+                try:
+                    profile_result = _profile_fn(
+                        command=f"python {harness_path} --profile",
+                        backend="metrix",
+                        num_replays=3,
+                        quick=True,
+                        gpu_devices=str(gpu_id),
+                    )
+                finally:
+                    if prev_pythonpath:
+                        os.environ["PYTHONPATH"] = prev_pythonpath
+                    else:
+                        os.environ.pop("PYTHONPATH", None)
 
                 if baseline_metrics and profile_result:
                     from minisweagent.baseline_metrics import build_baseline_metrics
@@ -952,6 +1034,7 @@ def run_orchestrator(
     *,
     output_dir: Path | None = None,
     max_rounds: int | None = None,
+    start_round: int = 1,
     console=None,
 ) -> dict[str, Any]:
     """Run the orchestrator agent loop.
@@ -971,6 +1054,10 @@ def run_orchestrator(
     max_rounds:
         Maximum optimisation rounds (default: from GEAK_MAX_ROUNDS env or 5).
         Each round = generate_tasks → dispatch_tasks → collect_results.
+    start_round:
+        Round number to start from (1-based, default 1).  When > 1 the
+        exploration phase is skipped and prior round evaluations are loaded
+        from ``round_<N>_evaluation.json`` files on disk.
     console:
         Optional Rich console for progress messages.
     """
@@ -1059,10 +1146,14 @@ def run_orchestrator(
         commandment_excerpt=cmd_excerpt,
     )
 
+    start_label = (
+        f"rounds {start_round}-{max_rounds}" if start_round > 1
+        else f"{max_rounds} rounds"
+    )
     _print(
-        f"[bold cyan]--- Orchestrator starting ({max_rounds} rounds, {len(gpu_ids)} GPUs) ---[/bold cyan]"
+        f"[bold cyan]--- Orchestrator starting ({start_label}, {len(gpu_ids)} GPUs) ---[/bold cyan]"
         if console
-        else f"--- Orchestrator starting ({max_rounds} rounds, {len(gpu_ids)} GPUs) ---"
+        else f"--- Orchestrator starting ({start_label}, {len(gpu_ids)} GPUs) ---"
     )
 
     messages: list[dict] = [
@@ -1070,21 +1161,45 @@ def run_orchestrator(
         {"role": "user", "content": instance_msg},
     ]
 
+    # When resuming from a later round, load prior round evaluations
+    # into ctx and messages so the LLM has full context.
+    if start_round > 1:
+        for prev_round in range(1, start_round):
+            eval_path = _out / f"round_{prev_round}_evaluation.json"
+            if eval_path.exists():
+                try:
+                    round_eval = json.loads(eval_path.read_text())
+                    ctx[f"round_{prev_round}_eval"] = round_eval
+                    eval_summary = json.dumps(round_eval, indent=2, default=str)[:2000]
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"## Round {prev_round} Evaluation (prior run)\n\n"
+                            f"The best kernel from round {prev_round} was evaluated "
+                            f"with FULL_BENCHMARK and PROFILE:\n```\n{eval_summary}\n```\n"
+                            "Use this data to inform your strategy."
+                        ),
+                    })
+                    _print(f"  Loaded prior evaluation: {eval_path.name}")
+                except (json.JSONDecodeError, OSError) as exc:
+                    _print(f"  Warning: could not load {eval_path.name}: {exc}")
+
     try:
-        # Phase 1: Exploration -- let the LLM read files and understand the kernel
-        _print(
-            "[bold cyan]--- Exploration phase ---[/bold cyan]"
-            if console
-            else "--- Exploration phase ---"
-        )
-        finalize_result = _run_llm_steps(
-            model, messages, ctx, _print, console, phase="explore",
-        )
-        if finalize_result is not None:
-            return finalize_result
+        if start_round <= 1:
+            # Phase 1: Exploration -- let the LLM read files and understand the kernel
+            _print(
+                "[bold cyan]--- Exploration phase ---[/bold cyan]"
+                if console
+                else "--- Exploration phase ---"
+            )
+            finalize_result = _run_llm_steps(
+                model, messages, ctx, _print, console, phase="explore",
+            )
+            if finalize_result is not None:
+                return finalize_result
 
         # Phase 2: Round loop
-        for round_num in range(1, max_rounds + 1):
+        for round_num in range(start_round, max_rounds + 1):
             is_last = round_num == max_rounds
             round_header = (
                 f"--- Round {round_num}/{max_rounds}"
@@ -1283,6 +1398,13 @@ def main() -> None:
         help="Maximum optimisation rounds (default: GEAK_MAX_ROUNDS env or 5)",
     )
     parser.add_argument(
+        "--start-round",
+        type=int,
+        default=1,
+        help="Round to resume from (1-based, default: 1). "
+             "Skips exploration and loads prior round evaluations from disk.",
+    )
+    parser.add_argument(
         "--model",
         default=None,
         help="Model name (default: from GEAK_MODEL env or geak.yaml)",
@@ -1359,6 +1481,7 @@ def main() -> None:
         model_factory=_model_factory,
         output_dir=pp_dir,
         max_rounds=args.max_rounds,
+        start_round=args.start_round,
         console=console,
     )
 
