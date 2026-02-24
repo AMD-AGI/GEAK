@@ -52,22 +52,17 @@ The system forms a closed-loop optimization engine capable of continuous perform
 
 ## Core Architecture
 
-GEAK v3 is built around three tightly integrated capability layers.
-
 ### End-to-End Optimization Engine
 
 At its core, GEAK runs a fully autonomous optimization loop:
 
-Test Detection → Baseline → Profiling → Strategy Planning → (Patch Generation → Validation) × N → Best-performing Kernel
-
+**Test Detection → Baseline → Profiling → Strategy Planning → (Patch Generation → Validation) × N → Best-performing Kernel**
 
 Each optimization step is:
 
 - Correctness-verified
 - Performance-measured
 - Version-tracked
-
-This ensures every performance improvement is reproducible, measurable, and regression-safe.
 
 ### Tool-Augmented Intelligence Layer
 
@@ -81,10 +76,6 @@ The system integrates:
 - **Optimization Strategy Management** for tracking explored techniques, marking successful/failed strategies, and prioritizing high-impact directions
 
 - **Version & Patch Management** for automatic diff tracking, benchmarking history, regression detection, and best-patch selection
-
-These tools transform the agent from a generic code generator into a structured performance engineering system.
-
-Optimization decisions are data-driven and strategically guided rather than heuristic or random.
 
 ### Parallel Exploration & Scaling
 
@@ -238,8 +229,6 @@ After parallel runs finish, GEAK runs a selection agent that:
 
 ## Summary
 
-GEAK v3 is a closed-loop optimization framework for GPU kernel repositories. It integrates profiling, strategy management, automated validation, and parallel exploration into a structured performance engineering workflow. 
-
-GEAK v3 enables reproducible, measurable, and scalable optimization at repository scale — beyond isolated manual tuning.
+GEAK v3 enables reproducible, measurable, and scalable optimization at repository scale — beyond isolated manual tuning. It integrates profiling, strategy management, automated validation, and parallel exploration into a structured performance engineering workflow. 
 
 Contributions, experiments, and feedback are welcome.
