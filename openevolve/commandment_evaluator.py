@@ -537,9 +537,15 @@ class CommandmentEvaluator:
         if m:
             return _store(float(m.group(1)))
 
+        # 1b. BENCHMARK_LATENCY_MS: <float>  (common harness output format)
+        m = re.search(r"BENCHMARK_LATENCY_MS:\s*([\d.]+(?:e[+-]?\d+)?)", stdout, re.IGNORECASE)
+        if m:
+            return _store(float(m.group(1)))
+
         # 2. "Median latency across all shapes: <float> ms" or
-        #    "Overall median latency: <float> ms" or similar
-        m = re.search(r"median\s+latency[\w\s]*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms", stdout, re.IGNORECASE)
+        #    "Overall median latency: <float> ms" or
+        #    "Total median time: <float> ms" or similar
+        m = re.search(r"median\s+(?:latency|time)[\w\s]*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms", stdout, re.IGNORECASE)
         if m:
             return _store(float(m.group(1)))
 
@@ -559,9 +565,18 @@ class CommandmentEvaluator:
             median_ms = shape_times[len(shape_times) // 2]
             return _store(median_ms)
 
-        # 5. Last resort: fall back to Metrix-style parsing
+        # 5. Last resort: fall back to Metrix-style parsing and normalize
+        #    well-known alternate keys into the canonical metrics
         logger.warning("Could not parse benchmark output -- falling back to Metrix parser")
-        return self._parse_profiling_output(stdout)
+        fallback = self._parse_profiling_output(stdout)
+
+        if "benchmark_latency_ms" in fallback and not fallback.get("benchmark_ms"):
+            val_ms = float(fallback["benchmark_latency_ms"])
+            fallback["benchmark_ms"] = val_ms
+            fallback["duration_us"] = val_ms * 1000.0
+            fallback["benchmark_duration_us"] = val_ms * 1000.0
+
+        return fallback
 
     # Maximum allowed regression factor.  Candidates slower than
     # baseline by more than this factor are flagged as "catastrophic
@@ -598,8 +613,20 @@ class CommandmentEvaluator:
         if bdu_baseline and float(bdu_baseline) > 0 and bdu_target and float(bdu_target) > 0:
             baseline_latency = float(bdu_baseline)
             target_latency = float(bdu_target)
+        elif bdu_target and float(bdu_target) > 0 and not (bdu_baseline and float(bdu_baseline) > 0):
+            # Candidate has benchmark data but baseline does not (e.g.
+            # baseline_metrics.json only had Metrix profile data).  Store
+            # the first candidate's benchmark as the baseline reference so
+            # subsequent comparisons are apples-to-apples.
+            self.baseline_metrics[bdu_key] = float(bdu_target)
+            logger.info(
+                "Bootstrapping baseline benchmark_duration_us from first "
+                "candidate: %.2f us", float(bdu_target),
+            )
+            return 1.0
         else:
-            # Fall back to Metrix latency keys
+            # Fall back to Metrix latency keys -- only used when NEITHER
+            # side has benchmark data (both from profiling).
             latency_keys = ("duration_us", "latency_us", "latency_avg_us")
 
             baseline_latency = 0.0
