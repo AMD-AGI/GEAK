@@ -177,12 +177,29 @@ This means you can configure tools and parallel defaults directly in `geak.yaml`
 
 All config files are located in `src/minisweagent/config/`. Use `mini -c <config_name>` to select one.
 
-| File | Purpose | Mode |
-|------|---------|------|
-| `mini.yaml` | Default config for `mini` | yolo |
-| `default.yaml` | DefaultAgent base config | confirm |
-| `github_issue.yaml` | Auto-solve GitHub Issues | — |
-| `rag_config.yaml` | RAG retrieval pipeline config | — |
+#### Agent Configs
+
+| File | Purpose | Model | Mode | Notes |
+|------|---------|-------|------|-------|
+| `mini.yaml` | Default config for `mini` | AMD LLM Gateway claude-opus-4.5 | yolo | Primary config for daily use. temperature=0.0, output truncation at 20000 chars, timeout 3600s |
+| `default.yaml` | DefaultAgent base config | Not bound to a specific model | confirm | Generic base config. temperature=0.0, output truncation at 10000 chars (5000 head + 5000 tail) |
+| `mini_no_temp.yaml` | No-temperature variant | Not bound to a specific model | confirm | Nearly identical to default.yaml but without temperature setting. cost_limit=3 |
+| `mini_reverse_kl.yaml` | GPU kernel optimization analysis | AMD LLM Gateway claude-opus-4.5 | confirm | Analyzes kernel optimization history in a repo and generates reports. Long prompt |
+| `github_issue.yaml` | Auto-solve GitHub Issues | Not bound to a specific model | — | Runs inside Docker (python:3.11, working dir /testbed) |
+
+#### RAG Config
+
+File: `rag_config.yaml` — controls the RAG retrieval pipeline:
+
+| Parameter | Description |
+|-----------|-------------|
+| `retrieval.embed_top_k` / `bm25_top_k` | Number of candidates from Embedding / BM25 retrieval |
+| `retrieval.enable_bm25` | Whether to enable BM25 dual-path recall |
+| `retrieval.mcp_top_k` | Number of final results returned |
+| `reranker.enable_reranker` | Whether to enable re-ranking |
+| `fusion.semantic_weight` / `bm25_weight` | Fusion weights for Embedding and BM25 |
+| `summary.enable_rag_subagent` | Whether to enable LLM summarization |
+| `debug.verbose` | Whether to print verbose MCP tool logs |
 
 ### Output & Artifacts
 
@@ -307,7 +324,22 @@ knowledge-base/
 └── INDEX.md
 ```
 
-To add new documents, place `.md` files with required YAML frontmatter (`tags`, `priority`, `source_url`, `rocm_version`, `last_updated`) and rebuild the index.
+### Adding New Documents
+
+1. **Location**: Place the file under the appropriate subdirectory (e.g., `layer-6-extended/optimize-guides/*.md`)
+2. **Format**: Every `.md` file must include a YAML frontmatter:
+   ```yaml
+   ---
+   tags: ["category1", "category2"]   # Required
+   priority: "L1-important"           # Required
+   source_url: "https://..."          # Required
+   rocm_version: "6.0+"              # Required
+   last_updated: 2026-01-14           # Required
+   ---
+   ```
+3. **Filename**: Use English, make it descriptive (e.g., `bf16-vector-load-store.md`)
+4. **Quality**: 800–1200 words, with at least 2 syntactically correct code examples
+5. **Rebuild index after adding**: `python scripts/build_index.py --force`
 
 ---
 
