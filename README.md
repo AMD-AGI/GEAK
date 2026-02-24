@@ -240,6 +240,6 @@ After parallel runs finish, GEAK runs a selection agent that:
 
 GEAK v3 is a closed-loop optimization framework for GPU kernel repositories. It integrates profiling, strategy management, automated validation, and parallel exploration into a structured performance engineering workflow. 
 
-GEAK enables reproducible, measurable, and scalable optimization at repository scale — beyond isolated manual tuning.
+GEAK v3 enables reproducible, measurable, and scalable optimization at repository scale — beyond isolated manual tuning.
 
 Contributions, experiments, and feedback are welcome.
