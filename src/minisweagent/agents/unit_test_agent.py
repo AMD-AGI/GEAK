@@ -54,7 +54,9 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- A build step is REQUIRED before running tests.\n"
         "- Use the project's build system (CMake/Makefile) or compile with `hipcc` directly.\n"
         "- Use host-side validation (compare GPU output against CPU reference).\n"
-        "- Use `hipEventElapsedTime` or `torch.cuda.Event` for benchmarking."
+        "- Use `hipEventElapsedTime` or `torch.cuda.Event` for benchmarking.\n"
+        "- NEVER use `sys.path.insert(0, '/absolute/path/...')`. "
+        "Rely on PYTHONPATH set by the COMMANDMENT SETUP section."
     ),
     "cuda": (
         "This is a CUDA kernel (C++ compiled with nvcc).\n"
@@ -68,7 +70,9 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- A build step is REQUIRED. Needs CK headers and hipcc.\n"
         "- Template parameters (tile sizes, vector widths) are compile-time; test multiple configs.\n"
         "- Use host-side validation against a reference GEMM/convolution.\n"
-        "- Use `hipEventElapsedTime` for benchmarking."
+        "- Use `hipEventElapsedTime` for benchmarking.\n"
+        "- NEVER use `sys.path.insert(0, '/absolute/path/...')`. "
+        "Rely on PYTHONPATH set by the COMMANDMENT SETUP section."
     ),
     "asm": (
         "This is a precompiled HSACO assembly kernel.\n"
@@ -76,6 +80,11 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- Test ONLY via the Python wrapper that loads and launches it.\n"
         "- Use `torch.testing.assert_close` for correctness against a torch reference.\n"
         "- Benchmark the wrapper launch, not the assembly directly."
+    ),
+    "unknown": (
+        "Kernel type could not be determined automatically.\n"
+        "- Inspect the source file to determine if it is Triton, HIP, CUDA, or CK.\n"
+        "- Apply the appropriate testing strategy based on your analysis."
     ),
 }
 

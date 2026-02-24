@@ -287,6 +287,25 @@ def _hip_tasks(
             agent_class=agent_class,
             task=(
                 f"{ctx}\n\n{build_ctx}\n\n"
+                f"## OpenEvolve on HIP Kernel\n"
+                f"Run OpenEvolve on the HIP kernel at {target}.\n"
+                f"Follow the INSTRUCTIONS.md workflow: create COMMANDMENT.md "
+                f"and baseline_metrics.json, then run OpenEvolve.\n"
+                f"Wrapper file: {wrapper}\n\n"
+                f"Use ${{GEAK_WORK_DIR}} and ${{GEAK_GPU_DEVICE}} variables.\n"
+                f"Create a wrapper shell script in SETUP that sets env vars."
+            ),
+            label="openevolve-hip",
+            priority=0,
+            kernel_language="cpp",
+        )
+    )
+
+    tasks.append(
+        AgentTask(
+            agent_class=agent_class,
+            task=(
+                f"{ctx}\n\n{build_ctx}\n\n"
                 f"## HIP Launch Configuration\n"
                 f"Optimize the HIP kernel launch configuration for {target}: "
                 f"block size, grid size, shared memory allocation. "
@@ -325,6 +344,24 @@ def _ck_tasks(
     wrapper,
 ) -> list[AgentTask]:
     tasks = []
+
+    tasks.append(
+        AgentTask(
+            agent_class=agent_class,
+            task=(
+                f"{ctx}\n\n{build_ctx}\n\n"
+                f"## OpenEvolve on CK Kernel\n"
+                f"Run OpenEvolve on the Composable Kernel at {wrapper}.\n"
+                f"Follow the INSTRUCTIONS.md workflow: create COMMANDMENT.md "
+                f"and baseline_metrics.json, then run OpenEvolve.\n\n"
+                f"Use ${{GEAK_WORK_DIR}} and ${{GEAK_GPU_DEVICE}} variables.\n"
+                f"Create a wrapper shell script in SETUP that sets env vars."
+            ),
+            label="openevolve-ck",
+            priority=0,
+            kernel_language="cpp",
+        )
+    )
 
     tasks.append(
         AgentTask(

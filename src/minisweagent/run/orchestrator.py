@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 def _parse_median_latency_ms(output: str) -> float | None:
     """Extract median latency (ms) from harness benchmark output."""
     m = re.search(
-        r"median\s+latency[\w\s]*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms",
+        r"(?:median\s+(?:latency|time)[\w\s]*|total\s+median\s+time)\s*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms",
         output,
         re.IGNORECASE,
     )
@@ -40,9 +40,9 @@ def _parse_median_latency_ms(output: str) -> float | None:
 
 
 def _parse_total_kernel_time_ms(output: str) -> float | None:
-    """Extract TOTAL_KERNEL_TIME_MS from harness benchmark output."""
+    """Extract TOTAL_KERNEL_TIME_MS or BENCHMARK_LATENCY_MS from harness benchmark output."""
     m = re.search(
-        r"TOTAL_KERNEL_TIME_MS:\s*([\d.]+(?:e[+-]?\d+)?)",
+        r"(?:TOTAL_KERNEL_TIME_MS|BENCHMARK_LATENCY_MS):\s*([\d.]+(?:e[+-]?\d+)?)",
         output,
     )
     return float(m.group(1)) if m else None

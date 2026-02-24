@@ -653,11 +653,14 @@ def main(
         if _resolved_kernel_path:
             try:
                 from minisweagent.tools.commandment import generate_commandment
+                from minisweagent.tools.discovery_types import _infer_kernel_language
                 _harness_path = extract_harness_path(test_command)
+                _kl = _infer_kernel_language(Path(_resolved_kernel_path), "")
                 _pre_agent_commandment = generate_commandment(
                     kernel_path=_resolved_kernel_path,
                     harness_path=_harness_path,
                     repo_root=repo,
+                    kernel_language=_kl,
                 )
                 console.print("[bold green]COMMANDMENT.md generated (pre-agent)[/bold green]")
             except Exception as e:

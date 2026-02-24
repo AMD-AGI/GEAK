@@ -339,13 +339,23 @@ def run_preprocessor(
         import re as _re
 
         bb_text = bb_path.read_text()
-        _m = _re.search(
-            r"median\s+latency[\w\s]*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms",
-            bb_text,
-            _re.IGNORECASE,
-        )
+        _bm_val: float | None = None
+        # Try BENCHMARK_LATENCY_MS: <float> (common harness format)
+        _blms_re = r"BENCHMARK_LATENCY_MS:\s*([\d.]+(?:e[+-]?\d+)?)"
+        _m = _re.search(_blms_re, bb_text, _re.IGNORECASE)
         if _m:
-            baseline_metrics["benchmark_duration_us"] = float(_m.group(1)) * 1000.0
+            _bm_val = float(_m.group(1))
+        if _bm_val is None:
+            # Try "median latency" or "median time" variants
+            _m = _re.search(
+                r"median\s+(?:latency|time)[\w\s]*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms",
+                bb_text,
+                _re.IGNORECASE,
+            )
+            if _m:
+                _bm_val = float(_m.group(1))
+        if _bm_val is not None:
+            baseline_metrics["benchmark_duration_us"] = _bm_val * 1000.0
         _sm = _re.search(r"(\d+)\s+shapes", bb_text, _re.IGNORECASE)
         if _sm:
             baseline_metrics["benchmark_shape_count"] = int(_sm.group(1))
@@ -362,11 +372,16 @@ def run_preprocessor(
         try:
             from minisweagent.tools.commandment import generate_commandment
 
+            from minisweagent.tools.discovery_types import _infer_kernel_language
+
             harness = ctx.get("harness_path") or extract_harness_path(test_command)
+            _ktype = (disc_dict.get("kernel") or {}).get("type", "")
+            _kl = _infer_kernel_language(Path(kernel_path), _ktype)
             commandment = generate_commandment(
                 kernel_path=kernel_path,
                 harness_path=harness,
                 repo_root=repo_root,
+                kernel_language=_kl,
             )
             _print("  COMMANDMENT.md generated")
         except Exception as exc:

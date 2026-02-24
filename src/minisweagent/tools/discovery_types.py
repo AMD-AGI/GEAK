@@ -232,13 +232,31 @@ class DiscoveryResult:
         kernels: list[KernelInfo] = []
         if kernel_info.get("file"):
             ktype = kernel_info.get("type", "unknown")
+            klang = _infer_kernel_language(kp, ktype)
+
+            _build_info: BuildInfo | None = None
+            if klang == "cpp":
+                _repo = kp.parent
+                while _repo != _repo.parent:
+                    if (_repo / "setup.py").exists():
+                        _build_info = BuildInfo(compiler="hipcc", build_system="setup.py", build_dir=_repo)
+                        break
+                    if (_repo / "CMakeLists.txt").exists():
+                        _build_info = BuildInfo(compiler="hipcc", build_system="CMakeLists.txt", build_dir=_repo)
+                        break
+                    if (_repo / "Makefile").exists():
+                        _build_info = BuildInfo(compiler="hipcc", build_system="Makefile", build_dir=_repo)
+                        break
+                    _repo = _repo.parent
+
             kernels.append(
                 KernelInfo(
                     file_path=Path(kernel_info["file"]),
                     kernel_name=kernel_info.get("name", kp.stem),
                     kernel_type=ktype,
-                    kernel_language=_infer_kernel_language(kp, ktype),
+                    kernel_language=klang,
                     function_names=kernel_info.get("functions", []),
+                    build_info=_build_info,
                 )
             )
         tests = [
