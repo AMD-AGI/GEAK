@@ -67,12 +67,10 @@ agent:
       * launch configuration assumptions
       * datatype sensitivity
 
-    Phase 3: Baseline Establishment
-    - **ALWAYS use `save_and_test` tool with description "baseline" to establish baseline.**
-    - **DO NOT construct manual test commands or benchmarks.**
-    - `save_and_test` runs SETUP + CORRECTNESS + BENCHMARK from the COMMANDMENT.
-    - Its output includes both correctness pass/fail AND benchmark latency on HARNESS_SHAPES.
-    - Compare the benchmark numbers against the "Benchmark Baseline" section in your context.
+    Phase 3: Review Provided Baselines
+    - The baseline performance is already established and provided in your context above.
+    - Compare the Benchmark Baseline numbers against any profiling data.
+    - Do NOT call `save_and_test` for a baseline run. Proceed directly to strategy formulation.
     - NOTE: `profile_kernel` (Metrix) is for deep hardware analysis, NOT for latency comparison.
 
     Phase 4: Strategy Formulation

@@ -143,6 +143,12 @@ class ToolRuntime:
         for bridge in self._mcp_bridges:
             bridge.set_env(env)
 
+    def set_cwd(self, cwd: str | None) -> None:
+        """Propagate working directory to the bash tool so commands run in the correct worktree."""
+        bash = self._tool_table.get("bash")
+        if bash is not None:
+            bash._cwd = cwd
+
     def set_codebase_context(self, context: str | None) -> None:
         """Store codebase context and propagate to SubAgentTool if present."""
         self._codebase_context = context

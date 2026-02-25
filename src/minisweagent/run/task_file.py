@@ -24,7 +24,7 @@ import yaml
 # ============================================================================
 
 # Path keys in frontmatter that should be stored as relative and resolved on read
-_PATH_KEYS = ("kernel_path", "repo_root", "commandment", "baseline_metrics", "profiling", "codebase_context")
+_PATH_KEYS = ("kernel_path", "repo_root", "commandment", "baseline_metrics", "profiling", "codebase_context", "starting_patch")
 
 
 def write_task_file(
@@ -264,6 +264,31 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
     _ensure_safe_directory(worktree_path)
     _copy_untracked_files(repo_path, worktree_path)
     return worktree_path
+
+
+def create_worktree_with_patch(
+    repo_path: Path, worktree_path: Path, patch_file: str | Path,
+) -> Path:
+    """Create a git worktree and apply a starting patch.
+
+    Used to make round N+1 agents start from round N's best kernel.
+    """
+    wt = create_worktree(repo_path, worktree_path)
+    patch_path = Path(patch_file)
+    if not patch_path.exists() or patch_path.stat().st_size == 0:
+        return wt
+    result = subprocess.run(
+        ["git", "apply", "--whitespace=nowarn", str(patch_path)],
+        cwd=str(wt),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to apply starting patch %s: %s", patch_file, result.stderr[:500],
+        )
+    return wt
 
 
 def replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:

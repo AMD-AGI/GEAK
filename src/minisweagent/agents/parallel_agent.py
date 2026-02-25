@@ -155,6 +155,17 @@ class ParallelAgent(DefaultAgent):
         model = model_factory()
         _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
 
+        # Override with deterministic benchmark parsing when possible
+        from minisweagent.benchmark_parsing import rewrite_best_results
+        det_result = rewrite_best_results(base_patch_dir)
+        if det_result:
+            best_patch_id = det_result.get("best_patch_id", best_patch_id)
+            print(
+                f"[ParallelAgent] Deterministic override: {best_patch_id} "
+                f"({det_result.get('best_patch_speedup', '?')}x)",
+                flush=True,
+            )
+
         if not best_patch_id:
             print("[ParallelAgent] SelectPatchAgent did not produce best_results.json", flush=True)
             return None
@@ -677,7 +688,12 @@ class ParallelAgent(DefaultAgent):
                 # Create or reset worktree for this slot
                 wt_path = worktree_base / f"slot_{slot_idx}"
                 if is_git_repo:
-                    cls._create_worktree(repo_path, wt_path)
+                    starting_patch = task.config.get("starting_patch")
+                    if starting_patch:
+                        from minisweagent.run.task_file import create_worktree_with_patch
+                        create_worktree_with_patch(repo_path, wt_path, starting_patch)
+                    else:
+                        cls._create_worktree(repo_path, wt_path)
                 else:
                     cls._create_copy_workdir(repo_path, wt_path)
                 wt_path_str = str(wt_path.resolve())

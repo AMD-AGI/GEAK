@@ -75,15 +75,11 @@ agent:
        - Understand the current implementation and its context
        - For complex tasks: Use `strategy_manager` tool to create `.optimization_strategies.md` with 3-5 potential optimization strategies
 
-    3. **Establish Baseline Performance** 
-       - **CRITICAL**: Measure original implementation performance BEFORE any optimization
-       - **MANDATORY**: Call the `save_and_test` tool with description: "baseline"
-       - **NEVER use bash to run benchmarks.** Bash benchmarks do NOT save patches or results.
-       - The `save_and_test` tool will automatically run tests, save the patch, and report results
-       - Record key metrics summary in your strategy file (bandwidth, throughput, latency, occupancy, etc.)
-       - Include reference to the detailed log file
-       - This baseline is your reference point - all strategy results will be compared against it
-       
+    3. **Review Provided Baselines**
+       - The baseline performance is already established and provided in your context above.
+       - Compare the Benchmark Baseline numbers against any profiling data.
+       - Do NOT call `save_and_test` for a baseline run. Proceed directly to strategy formulation.
+
     4. **ALWAYS** use the `profiling` tool before listing strategies to identify the bottleneck of the current kernel:
        - Call the `profiling` tool with the appropriate working directory and command used during performance testing.
 

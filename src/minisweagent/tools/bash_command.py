@@ -21,6 +21,7 @@ _COMMANDMENT_WRITE_RE = re.compile(
 class BashCommand:
     def __init__(self):
         self._env_override: dict[str, str] = {}
+        self._cwd: str | None = None
         self.blocklist: list[str] = [
             "vim",
             "vi",
@@ -71,7 +72,8 @@ class BashCommand:
             }
         else:
             env = os.environ | self._env_override if self._env_override else None
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, env=env)
+            cwd = self._cwd if self._cwd and os.path.isdir(self._cwd) else None
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, env=env, cwd=cwd)
             output_text = result.stdout.strip() or result.stderr.strip()
 
             # Auto-validate COMMANDMENT.md if the command wrote one

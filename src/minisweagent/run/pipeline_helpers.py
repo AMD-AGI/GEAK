@@ -28,6 +28,8 @@ MAX_HARNESS_RETRIES = 2
 
 DEFAULT_EVAL_BENCHMARK_ITERATIONS = 50
 
+DEFAULT_AGENT_BENCHMARK_ITERATIONS = int(os.getenv("GEAK_AGENT_BENCHMARK_ITERATIONS", "10"))
+
 
 # ── agent filtering ──────────────────────────────────────────────────
 
@@ -464,6 +466,13 @@ def inject_pipeline_context(
         ctx.append(codebase_context.strip())
         ctx.append("")
         cfg["codebase_context"] = codebase_context.strip()
+
+    ctx.append(
+        "IMPORTANT: Baseline profiling and performance metrics are already "
+        "established and provided above. Do NOT run save_and_test for a "
+        "baseline run. Start optimizing immediately."
+    )
+    ctx.append("")
 
     enriched = "\n".join(ctx) + "\n" + task_body
     return enriched, cfg

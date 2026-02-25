@@ -131,6 +131,10 @@ class DefaultAgent:
         agent_env = getattr(self.env.config, "env", None)
         if agent_env:
             self.toolruntime.set_env(agent_env)
+        # Propagate working directory so bash tool commands run in the correct worktree
+        agent_cwd = getattr(self.env.config, "cwd", None)
+        if agent_cwd:
+            self.toolruntime.set_cwd(agent_cwd)
         # Setup save_and_test tool context
         self._setup_save_and_test_context()
         # Wire sub_agent context (needs model + env for recursive agent calls)
@@ -387,7 +391,6 @@ class DefaultAgent:
         return result
 
     def _run_select_patch_agent(self) -> None:
-        # Always try to run select patch agent if patch_output_dir is configured
         if not self.config.patch_output_dir:
             return
 
@@ -395,6 +398,13 @@ class DefaultAgent:
         if not base_patch_dir.exists():
             return
 
+        # Try deterministic benchmark parsing first -- avoids LLM cost
+        from minisweagent.benchmark_parsing import rewrite_best_results
+        det_result = rewrite_best_results(base_patch_dir)
+        if det_result:
+            return
+
+        # Fall back to LLM-based selection only if deterministic parsing failed
         try:
             from minisweagent.agents.select_patch_agent import SelectPatchAgent
             from minisweagent.config import load_agent_config
@@ -418,8 +428,10 @@ class DefaultAgent:
             task = select_agent.setup_selection_task(base_patch_dir, num_parallel, self.config.metric)
             if task:
                 select_agent.run(task, _skip_select_patch=True)
+
+            # Final deterministic override as safety net
+            rewrite_best_results(base_patch_dir)
         except Exception:
-            # Best-effort: selection should not block returning the agent's final output.
             return
 
     def execute_action(self, action: dict) -> dict:

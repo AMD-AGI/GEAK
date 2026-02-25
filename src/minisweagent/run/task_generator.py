@@ -126,8 +126,10 @@ optimization approach, then submit your task list as JSON via the
    - Expected impact
 7. Consider: OpenEvolve for parameter tuning, kernel fusion for reducing
    launch overhead, elimination of unnecessary framework kernels.
-8. If prior round results are provided, do NOT re-generate tasks for
-   strategies that already succeeded. Focus on what failed or was not tried.
+8. If prior round results or tasks are provided, do NOT re-generate tasks
+   for strategies that already appeared in prior rounds, regardless of
+   whether they succeeded or failed. Focus on genuinely new approaches or
+   strategies that build on what worked.
 
 ## Output format
 
@@ -235,7 +237,9 @@ Generate optimization tasks for the kernel at {{ kernel_path }}.
 {% endif %}{% if commandment_path %}- **COMMANDMENT.md** (evaluation contract): {{ commandment_path }}
 {% endif %}{% if knowledge_base_path %}- **Knowledge base** (optimization strategies): {{ knowledge_base_path }}
 {% endif %}{% if deep_search_path %}- **Deep search findings**: {{ deep_search_path }}
-{% endif %}{% if previous_results_path %}- **Prior round results**: {{ previous_results_path }}
+{% endif %}{% if previous_results_path %}- **Prior round results** (what actually happened): {{ previous_results_path }}
+{% endif %}{% if previous_tasks_path %}- **Prior tasks planned** (avoid repeating): {{ previous_tasks_path }}
+{% endif %}{% if round_evaluations_path %}- **Round evaluations** (orchestrator-verified results): {{ round_evaluations_path }}
 {% endif %}
 {% if num_gpus > 1 %}## GPU Budget
 Available GPUs: {{ num_gpus }}
@@ -270,6 +274,9 @@ def generate_tasks(
     previous_results_dir: Path | None = None,
     discovery_path: Path | None = None,
     codebase_context_path: Path | None = None,
+    previous_tasks_dir: Path | None = None,
+    round_evaluations: list[dict[str, Any]] | None = None,
+    current_round: int = 1,
     num_gpus: int = 1,
 ) -> list[AgentTask]:
     """Generate optimization tasks using an LLM planning agent.
@@ -286,6 +293,9 @@ def generate_tasks(
         previous_results_dir: Path to previous round results directory.
         discovery_path: Path to the discovery.json file.
         codebase_context_path: Path to CODEBASE_CONTEXT.md file.
+        previous_tasks_dir: Path to the parent tasks/ directory.
+        round_evaluations: List of orchestrator round evaluation dicts.
+        current_round: Current round number (for scanning prior tasks).
 
     Returns:
         List of AgentTask sorted by priority.
@@ -307,6 +317,9 @@ def generate_tasks(
         previous_results_dir=previous_results_dir,
         discovery_path=discovery_path,
         codebase_context_path=codebase_context_path,
+        previous_tasks_dir=previous_tasks_dir,
+        round_evaluations=round_evaluations,
+        current_round=current_round,
         num_gpus=num_gpus,
     )
 
@@ -416,6 +429,9 @@ def _run_task_agent(
     previous_results_dir: Path | None,
     discovery_path: Path | None,
     codebase_context_path: Path | None = None,
+    previous_tasks_dir: Path | None = None,
+    round_evaluations: list[dict[str, Any]] | None = None,
+    current_round: int = 1,
     num_gpus: int = 1,
 ) -> str:
     """Run a read-only planning agent and return the submitted JSON text."""
@@ -447,6 +463,32 @@ def _run_task_agent(
                 prev_results_path = _write_temp(summary, "_prev_results.md")
                 tmp_files.append(prev_results_path)
 
+        prev_tasks_path: Path | None = None
+        if previous_tasks_dir and Path(previous_tasks_dir).is_dir() and current_round > 1:
+            tasks_summary = _scan_previous_tasks(Path(previous_tasks_dir), current_round)
+            if tasks_summary:
+                prev_tasks_path = _write_temp(tasks_summary, "_prev_tasks.md")
+                tmp_files.append(prev_tasks_path)
+
+        round_evals_path: Path | None = None
+        if round_evaluations:
+            evals_text = "## Orchestrator Round Evaluations\n\n"
+            for rev in round_evaluations:
+                r_num = rev.get("round", "?")
+                evals_text += f"### Round {r_num}\n"
+                evals_text += f"- Best task: {rev.get('best_task', 'N/A')}\n"
+                evals_text += f"- Benchmark speedup (agent-reported): {rev.get('benchmark_speedup', 'N/A')}x\n"
+                fb = rev.get("full_benchmark", {})
+                if fb:
+                    evals_text += f"- Verified speedup (FULL_BENCHMARK): {fb.get('verified_speedup', 'N/A')}x\n"
+                    evals_text += f"- Verified kernel time: {fb.get('kernel_time_ms', 'N/A')}ms\n"
+                profile = rev.get("profile", {})
+                if profile:
+                    evals_text += f"- Profile comparison: {json.dumps(profile, default=str)[:500]}\n"
+                evals_text += f"- Best patch: {rev.get('best_patch', 'N/A')}\n\n"
+            round_evals_path = _write_temp(evals_text, "_round_evals.md")
+            tmp_files.append(round_evals_path)
+
         template_vars = {
             "kernel_path": str(kernel.file_path),
             "kernel_name": kernel.kernel_name,
@@ -464,6 +506,8 @@ def _run_task_agent(
             "knowledge_base_path": str(kb_path) if kb_path else "",
             "deep_search_path": str(deep_search_path) if deep_search_path else "",
             "previous_results_path": str(prev_results_path) if prev_results_path else "",
+            "previous_tasks_path": str(prev_tasks_path) if prev_tasks_path else "",
+            "round_evaluations_path": str(round_evals_path) if round_evals_path else "",
             "base_task_context": base_task_context,
             "num_gpus": num_gpus,
         }
@@ -598,22 +642,16 @@ def _parse_llm_response(
 # ============================================================================
 
 
-def _scan_previous_results(results_dir: Path) -> str:
-    """Scan a previous round's results directory and build a summary.
-
-    Reads task_*/patch_*_test.txt and task_*/*.log to understand what
-    each task achieved. Returns a Markdown summary for the LLM prompt.
-    """
+def _scan_single_round_results(results_dir: Path) -> list[str]:
+    """Scan a single round's results directory and return section strings."""
     import re as _re
 
     sections: list[str] = []
-    # Scan all subdirectories that contain results (task labels or task_N).
-    # Skip 'worktrees' and hidden directories.
     task_dirs = sorted(
         d for d in results_dir.iterdir() if d.is_dir() and d.name not in ("worktrees",) and not d.name.startswith(".")
     )
     if not task_dirs:
-        return ""
+        return sections
 
     for td in task_dirs:
         label = td.name
@@ -640,7 +678,6 @@ def _scan_previous_results(results_dir: Path) -> str:
             except Exception:
                 section.append(f"- {tf.name}: (unreadable)")
 
-        # OpenEvolve-specific result file (richer than patch_*_test.txt)
         oe_result = td / "openevolve_result.json"
         if oe_result.is_file():
             try:
@@ -667,7 +704,87 @@ def _scan_previous_results(results_dir: Path) -> str:
 
         sections.append("\n".join(section))
 
-    return "## Previous Round Results\n\n" + "\n\n".join(sections) + "\n"
+    return sections
+
+
+def _scan_previous_results(results_dir: Path) -> str:
+    """Scan previous round results and build a combined summary.
+
+    Accepts either a single round directory (e.g. results/round_1) or
+    the parent results/ directory containing multiple round_N subdirs.
+    Returns a Markdown summary covering ALL prior rounds.
+    """
+    sections: list[str] = []
+
+    round_subdirs = sorted(
+        d for d in results_dir.iterdir()
+        if d.is_dir() and d.name.startswith("round_")
+    ) if results_dir.is_dir() else []
+
+    if round_subdirs:
+        for rd in round_subdirs:
+            round_sections = _scan_single_round_results(rd)
+            if round_sections:
+                sections.append(f"## {rd.name.replace('_', ' ').title()} Results\n")
+                sections.extend(round_sections)
+    else:
+        single_sections = _scan_single_round_results(results_dir)
+        if single_sections:
+            sections.append("## Previous Round Results\n")
+            sections.extend(single_sections)
+
+    if not sections:
+        return ""
+
+    return "\n\n".join(sections) + "\n"
+
+
+def _scan_previous_tasks(tasks_dir: Path, current_round: int) -> str:
+    """Scan prior rounds' task directories and summarize what was planned.
+
+    Reads YAML frontmatter (label, agent_type, priority) and the first
+    ~200 chars of the task body from each .md task file under
+    tasks/round_1 through tasks/round_{current_round - 1}.
+    """
+    import re as _re
+
+    sections: list[str] = []
+    for r in range(1, current_round):
+        round_dir = tasks_dir / f"round_{r}"
+        if not round_dir.is_dir():
+            continue
+        task_files = sorted(round_dir.glob("*.md"))
+        if not task_files:
+            continue
+        round_items: list[str] = []
+        for tf in task_files:
+            try:
+                text = tf.read_text(errors="replace")
+                parts = _re.split(r"^---\s*$", text, maxsplit=2, flags=_re.MULTILINE)
+                if len(parts) >= 3:
+                    import yaml as _yaml
+                    fm = _yaml.safe_load(parts[1]) or {}
+                    body_preview = parts[2].strip()[:200]
+                else:
+                    fm = {}
+                    body_preview = text.strip()[:200]
+                label = fm.get("label", tf.stem)
+                agent_type = fm.get("agent_type", "unknown")
+                priority = fm.get("priority", "?")
+                round_items.append(
+                    f"- **{label}** (agent={agent_type}, priority={priority}): "
+                    f"{body_preview}{'...' if len(body_preview) >= 200 else ''}"
+                )
+            except Exception:
+                round_items.append(f"- {tf.name}: (unreadable)")
+
+        if round_items:
+            sections.append(f"## Round {r} Planned Tasks\n\n" + "\n".join(round_items))
+
+    if not sections:
+        return ""
+
+    return "\n\n".join(sections) + "\n"
 
 
 # ============================================================================
