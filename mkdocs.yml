@@ -64,6 +64,7 @@ nav:
     - "Quick start": quickstart.md
     - "Command line usage":
       - "<code>mini</code>": usage/mini.md
+      - "<code>mini -v</code>": usage/mini_v.md
       - "Config": usage/config.md
       - "SWE-bench": usage/swebench.md
       - "Inspector": usage/inspector.md
@@ -88,10 +89,12 @@ nav:
     - Agents:
       - "DefaultAgent": "reference/agents/default.md"
       - "InteractiveAgent": "reference/agents/interactive.md"
+      - "TextualAgent": "reference/agents/textual.md"
     - Models:
       - "Overview": "reference/models/overview.md"
       - "LitellmModel": "reference/models/litellm.md"
       - "LitellmResponseModel": "reference/models/litellm_response_toolcall.md"
+      - "AnthropicModel": "reference/models/anthropic.md"
       - "OpenRouterModel": "reference/models/openrouter.md"
       - "RequestyModel": "reference/models/requesty.md"
       - "DeterministicModel": "reference/models/test_models.md"
@@ -109,6 +112,7 @@ nav:
       - "mini-extra": "reference/run/mini_extra.md"
       - "Config": "reference/run/config.md"
       - "Inspector": "reference/run/inspector.md"
+      - "GitHub Issue": "reference/run/github_issue.md"
       - "SWE-bench (batch)": "reference/run/swebench.md"
       - "SWE-bench (single)": "reference/run/swebench_single.md"
   - Blog: https://www.swebench.com/blog.html

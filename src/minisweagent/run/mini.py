@@ -5,9 +5,28 @@
 
 import copy
 import os
+import sys
 import traceback
+from io import StringIO
 from pathlib import Path
 from typing import Any
+
+
+class TeeOutput:
+    """Capture stdout/stderr to buffer while keeping terminal output."""
+    def __init__(self, original):
+        self.terminal = original
+        self.buffer = StringIO()
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.buffer.write(message)
+
+    def flush(self):
+        self.terminal.flush()
+
+    def getvalue(self):
+        return self.buffer.getvalue()
 
 import typer
 import yaml
@@ -17,7 +36,7 @@ from prompt_toolkit.shortcuts import PromptSession
 from rich.console import Console
 
 from minisweagent import global_config_dir
-from minisweagent.agents.interactive import InteractiveAgent
+from minisweagent.agents.interactive import InteractiveAgent, InteractiveAgentConfig
 from minisweagent.agents.interactive_textual import TextualAgent
 from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 from minisweagent.agents.parallel_agent import ParallelAgent
@@ -56,6 +75,11 @@ There are two different user interfaces:
 [bold green]mini[/bold green] Simple REPL-style interface
 [bold green]mini -v[/bold green] Pager-style interface (Textual)
 
+MCP integration (AMD AI DevTool):
+
+[bold green]mini --mcp[/bold green] Enable MCP integration
+[bold green]mini --mcp -d[/bold green] Enable MCP integration with debug output
+
 More information about the usage: [bold green]https://mini-swe-agent.com/latest/usage/mini/[/bold green]
 [/not dim]
 """
@@ -90,8 +114,15 @@ def main(
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents to run (only effective with --save-patch). If not specified, reads from config file."),
     repo: Path | None = typer.Option(None, "--repo", help="Repository path for parallel execution. Required when num_parallel > 1. Each agent will get an isolated workdir using git worktree."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs for agents (e.g., '0,1,2,3'). For single agent, uses first GPU. Defaults to '0'."),
+    # MCP integration
+    mcp: bool = typer.Option(False, "--mcp", help="Enable MCP integration (AMD AI DevTool)"),
+    debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --mcp)"),
 ) -> Any:
     # fmt: on
+    # Capture all print output to trajectory
+    tee_out, tee_err = TeeOutput(sys.stdout), TeeOutput(sys.stderr)
+    sys.stdout, sys.stderr = tee_out, tee_err
+
     configure_if_first_time()
     
     # 1. Load base config (mini.yaml - always loaded as foundation)
@@ -178,7 +209,38 @@ def main(
     # Set use_strategy_manager in model config based on enable_strategies flag
     config.setdefault("model", {})["use_strategy_manager"] = enable_strategies
     model = get_model(model_name, config.get("model", {}))
-    env = LocalEnvironment(**config.get("env", {}))
+
+    # Print model info
+    _model_name = getattr(model.config, "model_name", "unknown")
+    _api_key = getattr(model.config, "api_key", None)
+    if not _api_key:
+        _api_key = os.getenv("AMD_LLM_API_KEY") or os.getenv("LLM_GATEWAY_KEY") or os.getenv("ANTHROPIC_API_KEY")
+    _api_key_display = f"{_api_key[:8]}..." if _api_key and len(_api_key) > 8 else _api_key or "Not set"
+    console.print(f"\\[mini-swe-agent] Using model: [bold cyan]{_model_name}[/bold cyan], API key: [bold cyan]{_api_key_display}[/bold cyan]")
+
+    # ============ Environment setup: MCP or Local ============
+    _env_kwargs = config.get("env", {})
+    if mcp:
+        try:
+            from minisweagent.mcp_integration.mcp_environment import MCPEnabledEnvironment
+            from minisweagent.mcp_integration.prompts import INSTANCE_TEMPLATE, SYSTEM_TEMPLATE
+            from minisweagent.mcp_integration.run_agent import DebugMCPEnvironment
+        except ImportError as e:
+            console.print("[red]Error: MCP integration requires langchain dependencies. Run: pip install -e '.[langchain]'[/red]")
+            console.print(f"[red]Import error: {e}[/red]")
+            raise typer.Exit(1)
+
+        if debug:
+            env = DebugMCPEnvironment(**_env_kwargs)
+            console.print("[bold yellow]🐛 Debug mode enabled[/bold yellow]")
+        else:
+            env = MCPEnabledEnvironment(**_env_kwargs)
+
+        config.setdefault("agent", {})["system_template"] = SYSTEM_TEMPLATE
+        config.setdefault("agent", {})["instance_template"] = INSTANCE_TEMPLATE
+        console.print("[bold green]🔌 MCP integration enabled[/bold green]")
+    else:
+        env = LocalEnvironment(**_env_kwargs)
 
     # Load and merge configurations: Command-line > extra_config from yaml > auto-detect
     result = load_and_merge_configs(
@@ -285,7 +347,7 @@ def main(
             save_traj_fn=save_traj,
             console=console,
             model_factory=lambda: get_model(model_name, config.get("model", {})),
-            env_factory=lambda: LocalEnvironment(**copy.deepcopy(config.get("env", {}))),
+            env_factory=lambda: (MCPEnabledEnvironment if mcp else LocalEnvironment)(**copy.deepcopy(_env_kwargs)),
         )
     except Exception as e:
         logger.error(f"Error running agent: {e}", exc_info=True)
