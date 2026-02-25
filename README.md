@@ -1,12 +1,8 @@
 # GEAK-v3
 
-English | [中文](README_zh.md)
-
 GEAK is an AI-powered framework for automated GPU kernel optimization, built on top of mini-SWE-agent.
 
 It enables systematic, profiling-driven, and scalable optimization of GPU kernels — evolving from single-kernel tuning (v1/v2) to full repository-level autonomous optimization (v3).
-
-**v3 also integrates AMD AI DevTool (MCP) for hybrid knowledge base retrieval**, bringing built-in AMD/NVIDIA GPU knowledge directly into the agent's context.
 
 ## Table of Contents
 
@@ -84,7 +80,7 @@ The system integrates:
 
 - **Version & Patch Management** for automatic diff tracking, benchmarking history, regression detection, and best-patch selection
 
-- **MCP RAG Retrieval** for on-demand AMD/NVIDIA GPU knowledge retrieval during optimization
+- **Knowledge Retrieval** for on-demand AMD/NVIDIA GPU knowledge retrieval during optimization
 
 ### Parallel Exploration & Scaling
 
@@ -106,7 +102,7 @@ cd GEAK
 git switch -c dev origin/dev
 pip install -e .
 
-# To use the MCP RAG feature, also install the langchain dependencies
+# To use the Knowledge feature, also install the langchain dependencies
 pip install -e '.[langchain]'
 
 # Set LLM API key
@@ -115,7 +111,7 @@ export AMD_LLM_API_KEY="YOUR_KEY"
 
 ### Usage
 
-#### Interactive REPL (mini-swe-agent mode)
+#### Basic (single-agent) GPU kernel optimization
 
 ```bash
 # Interactive REPL
@@ -129,13 +125,8 @@ mini --yolo
 
 # Enable MCP knowledge retrieval
 mini --mcp
-```
 
-#### Basic (single-agent) GPU kernel optimization
-
-Add `--yolo` to run end-to-end without interactive confirmation.
-
-```bash
+# Use specific config.yaml
 mini --config geak.yaml \
   --task "Optimize the kernel in src/kernel.cpp" \
   --yolo
@@ -167,6 +158,7 @@ mini --config geak.yaml \
 
 ### Configuration
 
+#### Loading Configurations
 `mini` loads configs in layers:
 
 1. base config: `mini.yaml`
@@ -175,19 +167,7 @@ mini --config geak.yaml \
 
 This means you can configure tools and parallel defaults directly in `geak.yaml`.
 
-All config files are located in `src/minisweagent/config/`. Use `mini -c <config_name>` to select one.
-
-#### Agent Configs
-
-| File | Purpose | Model | Mode | Notes |
-|------|---------|-------|------|-------|
-| `mini.yaml` | Default config for `mini` | AMD LLM Gateway claude-opus-4.5 | yolo | Primary config for daily use. temperature=0.0, output truncation at 20000 chars, timeout 3600s |
-| `default.yaml` | DefaultAgent base config | Not bound to a specific model | confirm | Generic base config. temperature=0.0, output truncation at 10000 chars (5000 head + 5000 tail) |
-| `mini_no_temp.yaml` | No-temperature variant | Not bound to a specific model | confirm | Nearly identical to default.yaml but without temperature setting. cost_limit=3 |
-| `mini_reverse_kl.yaml` | GPU kernel optimization analysis | AMD LLM Gateway claude-opus-4.5 | confirm | Analyzes kernel optimization history in a repo and generates reports. Long prompt |
-| `github_issue.yaml` | Auto-solve GitHub Issues | Not bound to a specific model | — | Runs inside Docker (python:3.11, working dir /testbed) |
-
-#### RAG Config
+#### RAG Configuration
 
 File: `rag_config.yaml` — controls the RAG retrieval pipeline:
 
@@ -225,61 +205,6 @@ optimization_logs/<kernel>_<timestamp>/
 
 ---
 
-## MCP Integration (AMD AI DevTool)
-
-Integrates AMD AI DevTool for hybrid knowledge base retrieval (BGE Embedding + BM25 + Reranking), with built-in AMD GPU and NVIDIA GPU knowledge bases.
-
-### 1. Pre-download ROCm Library Source (Recommended)
-
-```bash
-git clone --depth 1 https://github.com/ROCm/rocm-libraries.git ~/.cache/rocm-libraries
-```
-
-### 2. Build Semantic Index (Required for First Use)
-
-```bash
-# Build index for all documents under knowledge-base/
-python scripts/build_index.py --force
-```
-
-Index saved to `~/.cache/amd-ai-devtool/semantic-index/` by default:
-- `index.faiss` + `index.pkl` — FAISS semantic search index
-- `bm25_index.pkl` — BM25 keyword search index
-
-Rebuild when: knowledge base documents are added/modified, or indexing logic changes.
-
-### 3. Test Retrieval
-
-```bash
-python scripts/test_embedding_search.py      # Test FAISS semantic search
-python scripts/test_hybrid_retrieval.py      # Test hybrid retrieval (Embedding + BM25 + Reranker)
-python scripts/test_rrf_fusion.py            # Test RRF fusion algorithm
-```
-
-### 4. Enable MCP
-
-```bash
-mini --mcp        # Enable MCP
-mini --mcp -d     # Enable MCP with debug output
-```
-
-Inside the agent, use `@amd:your query` to invoke retrieval.
-
-### 5. RAG Retrieval Architecture
-
-```
-Semantic + BM25 → RRF Fusion → BGE Reranker → Top K
-```
-
-- **Embedding**: BAAI/bge-large-en-v1.5 (semantic recall)
-- **BM25**: Keyword-based recall
-- **Fusion**: RRF (Reciprocal Rank Fusion)
-- **Reranker**: BAAI/bge-reranker-large
-
-Config: `src/minisweagent/config/rag_config.yaml`
-
----
-
 ## Features
 
 ### Unit test discovery
@@ -305,10 +230,11 @@ mini --config geak.yaml \
 
 After parallel runs finish, GEAK runs a selection agent that reads all test logs, extracts metrics, and writes `best_results.json` + `select_agent.log`.
 
----
+### Knowledge Base Retrieval
 
-## Knowledge Base
+Integrates AMD AI DevTool for hybrid knowledge base retrieval (BGE Embedding + BM25 + Reranking), with built-in AMD GPU and NVIDIA GPU knowledge bases.
 
+**Knowledge Base Structure**
 ```
 knowledge-base/
 ├── amd-knowledge-base/
@@ -324,7 +250,39 @@ knowledge-base/
 └── INDEX.md
 ```
 
-### Adding New Documents
+**Knowledge Retrieval Architecture**
+
+```
+Semantic + BM25 → RRF Fusion → BGE Reranker → Top K
+```
+
+- **Embedding**: BAAI/bge-large-en-v1.5 (semantic recall)
+- **BM25**: Keyword-based recall
+- **Fusion**: RRF (Reciprocal Rank Fusion)
+- **Reranker**: BAAI/bge-reranker-large
+
+**Usage**
+
+**1. Pre-download ROCm Library Source (Recommended)**
+
+```bash
+git clone --depth 1 https://github.com/ROCm/rocm-libraries.git ~/.cache/rocm-libraries
+```
+
+**2. Build Semantic Index (Required for First Use)**
+
+```bash
+# Build index for all documents under knowledge-base/
+python scripts/build_index.py --force
+```
+
+Index saved to `~/.cache/amd-ai-devtool/semantic-index/` by default:
+- `index.faiss` + `index.pkl` — FAISS semantic search index
+- `bm25_index.pkl` — BM25 keyword search index
+
+**Rebuild** when: knowledge base documents are added/modified, or indexing logic changes.
+
+**Adding New Documents**
 
 1. **Location**: Place the file under the appropriate subdirectory (e.g., `layer-6-extended/optimize-guides/*.md`)
 2. **Format**: Every `.md` file must include a YAML frontmatter:
@@ -341,47 +299,22 @@ knowledge-base/
 4. **Quality**: 800–1200 words, with at least 2 syntactically correct code examples
 5. **Rebuild index after adding**: `python scripts/build_index.py --force`
 
----
+**3. Test Retrieval**
 
-## Project Structure
-
-```
-src/minisweagent/
-├── agents/                    # Agent implementations
-│   ├── default.py             #   Core agent
-│   ├── interactive.py         #   Human-in-the-loop agent
-│   ├── parallel_agent.py      #   Parallel multi-agent
-│   ├── strategy_interactive.py#   Strategy-guided agent
-│   └── unit_test_agent.py     #   Unit test discovery agent
-├── models/                    # LLM model interfaces
-│   ├── amd_llm.py             #   AMD LLM Gateway (router)
-│   ├── amd_base.py            #   AMD base model
-│   ├── amd_claude.py          #   Claude via AMD gateway
-│   └── litellm_model.py       #   LiteLLM (multi-provider)
-├── mcp_integration/           # MCP (AMD AI DevTool) integration
-│   ├── mcp_environment.py     #   MCP environment wrapper
-│   ├── langchain_retrieval.py #   Hybrid retrieval
-│   └── prompts.py             #   MCP-specific prompts
-├── tools/                     # Tool implementations
-│   ├── tools.json             #   Tool schema definitions
-│   ├── tools_runtime.py       #   Tool runtime
-│   ├── editor_tool.py         #   File editor
-│   ├── profiling_tools.py     #   GPU profiling
-│   └── strategy_manager.py    #   Strategy tracker
-├── config/                    # YAML config files
-│   ├── mini.yaml
-│   ├── default.yaml
-│   ├── github_issue.yaml
-│   └── rag_config.yaml
-└── run/                       # Entry points
-    ├── mini.py                #   Main CLI (`mini` command)
-    └── utils/
+```bash
+python scripts/test_embedding_search.py      # Test FAISS semantic search
+python scripts/test_hybrid_retrieval.py      # Test hybrid retrieval (Embedding + BM25 + Reranker)
+python scripts/test_rrf_fusion.py            # Test RRF fusion algorithm
 ```
 
-Other top-level directories:
-- `scripts/` — Index building and retrieval test scripts
-- `knowledge-base/` — RAG knowledge base (AMD / NVIDIA)
-- `examples/` — HIP kernel examples and subagent examples
+**4. Enable Knowledge Retrieval**
+
+```bash
+mini --mcp        # Enable MCP
+mini --mcp -d     # Enable MCP with debug output
+```
+
+Inside the agent, use `@amd:your query` to invoke retrieval.
 
 ---
 
@@ -390,6 +323,6 @@ Other top-level directories:
 GEAK v3 enables reproducible, measurable, and scalable GPU kernel optimization at repository scale. It integrates:
 
 - **Profiling** + **Strategy Management** + **Parallel Exploration** for autonomous optimization
-- **MCP RAG Retrieval** with AMD/NVIDIA knowledge bases for informed decision-making
+- **Knowledge Retrieval** with AMD/NVIDIA knowledge bases for informed decision-making
 
 Contributions, experiments, and feedback are welcome.
