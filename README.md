@@ -7,30 +7,20 @@ It enables systematic, profiling-driven, and scalable optimization of GPU kernel
 ## Table of Contents
 
 - [Evolution: From Kernel-Level to Repo-Level Automation](#evolution-from-kernel-level-to-repo-level-automation)
-  - [GEAK v1 / v2 — Single Kernel Optimization](#geak-v1--v2--single-kernel-optimization)
-  - [GEAK v3 — Autonomous Repo-Level Optimization](#geak-v3--autonomous-repo-level-optimization)
-
 - [Core Architecture](#core-architecture)
   - [End-to-End Optimization Engine](#end-to-end-optimization-engine)
   - [Tool-Augmented Intelligence Layer](#tool-augmented-intelligence-layer)
   - [Parallel Exploration & Scaling](#parallel-exploration--scaling)
-
 - [Getting Started](#getting-started)
   - [Installation](#installation)
   - [Usage](#usage)
-    - [Basic (Single-Agent)](#basic-single-agent-gpu-kernel-optimization)
-    - [Parallel Optimization](#parallel-optimization-multiple-agents--best-patch-selection)
   - [Configuration](#configuration)
-    - [Loading Configurations](#loading-configurations)
-    - [RAG Configuration](#rag-configuration)
   - [Output & Artifacts](#output--artifacts)
-
 - [Features](#features)
   - [Unit Test Discovery](#unit-test-discovery)
   - [System Tools (Built-in)](#system-tools-built-in)
   - [Best Patch Selection](#best-patch-selection)
   - [Knowledge Base Retrieval](#knowledge-base-retrieval)
-
 - [Summary](#summary)
 
 ---
