@@ -218,58 +218,29 @@ def main(
     _api_key_display = f"{_api_key[:8]}..." if _api_key and len(_api_key) > 8 else _api_key or "Not set"
     console.print(f"\\[mini-swe-agent] Using model: [bold cyan]{_model_name}[/bold cyan], API key: [bold cyan]{_api_key_display}[/bold cyan]")
 
+    # ============ Environment setup: MCP or Local ============
+    _env_kwargs = config.get("env", {})
     if mcp:
-        # MCP integration path
         try:
-            from dataclasses import dataclass
             from minisweagent.mcp_integration.mcp_environment import MCPEnabledEnvironment
             from minisweagent.mcp_integration.prompts import INSTANCE_TEMPLATE, SYSTEM_TEMPLATE
             from minisweagent.mcp_integration.run_agent import DebugMCPEnvironment
         except ImportError as e:
-            console.print("[red]Error: MCP integration requires 'amd-ai-devtool'. Please install it first.[/red]")
+            console.print("[red]Error: MCP integration requires langchain dependencies. Run: pip install -e '.[langchain]'[/red]")
             console.print(f"[red]Import error: {e}[/red]")
             raise typer.Exit(1)
 
-        @dataclass
-        class MCPInteractiveAgentConfig(InteractiveAgentConfig):
-            system_template: str = SYSTEM_TEMPLATE
-            instance_template: str = INSTANCE_TEMPLATE
-
         if debug:
-            env = DebugMCPEnvironment(**config.get("env", {}))
+            env = DebugMCPEnvironment(**_env_kwargs)
             console.print("[bold yellow]🐛 Debug mode enabled[/bold yellow]")
         else:
-            env = MCPEnabledEnvironment(**config.get("env", {}))
+            env = MCPEnabledEnvironment(**_env_kwargs)
 
-        # Remove yaml prompts so MCP prompts take effect
-        mcp_agent_config = config.get("agent", {}).copy()
-        mcp_agent_config.pop("system_template", None)
-        mcp_agent_config.pop("instance_template", None)
+        config.setdefault("agent", {})["system_template"] = SYSTEM_TEMPLATE
+        config.setdefault("agent", {})["instance_template"] = INSTANCE_TEMPLATE
         console.print("[bold green]🔌 MCP integration enabled[/bold green]")
-
-        agent_class = InteractiveAgent
-        if visual == (os.getenv("MSWEA_VISUAL_MODE_DEFAULT", "false") == "false"):
-            agent_class = TextualAgent
-            console.print("[yellow]Warning: MCP integration with -v (Textual UI) is not fully supported yet.[/yellow]")
-
-        agent = agent_class(model, env, **mcp_agent_config, config_class=MCPInteractiveAgentConfig)
-        exit_status, run_result, extra_info = None, None, None
-        try:
-            exit_status, run_result = agent.run(task_content)  # type: ignore[arg-type]
-        except Exception as e:
-            logger.error(f"Error running agent: {e}", exc_info=True)
-            exit_status, run_result = type(e).__name__, str(e)
-            extra_info = {"traceback": traceback.format_exc()}
-        finally:
-            if output:
-                console_logs = tee_out.getvalue() + tee_err.getvalue()
-                if console_logs:
-                    extra_info = extra_info or {}
-                    extra_info["console_logs"] = console_logs
-                save_traj(agent, output, exit_status=exit_status, result=run_result, extra_info=extra_info)  # type: ignore[arg-type]
-        return agent
-
-    env = LocalEnvironment(**config.get("env", {}))
+    else:
+        env = LocalEnvironment(**_env_kwargs)
 
     # Load and merge configurations: Command-line > extra_config from yaml > auto-detect
     result = load_and_merge_configs(
@@ -376,7 +347,7 @@ def main(
             save_traj_fn=save_traj,
             console=console,
             model_factory=lambda: get_model(model_name, config.get("model", {})),
-            env_factory=lambda: LocalEnvironment(**copy.deepcopy(config.get("env", {}))),
+            env_factory=lambda: (MCPEnabledEnvironment if mcp else LocalEnvironment)(**copy.deepcopy(_env_kwargs)),
         )
     except Exception as e:
         logger.error(f"Error running agent: {e}", exc_info=True)
