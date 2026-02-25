@@ -346,6 +346,9 @@ def generate_tasks_from_content(
     previous_results_dir: Path | None = None,
     discovery_path: Path | None = None,
     codebase_context_path: Path | None = None,
+    previous_tasks_dir: Path | None = None,
+    round_evaluations: list[dict[str, Any]] | None = None,
+    current_round: int = 1,
     num_gpus: int = 1,
 ) -> list[AgentTask]:
     """Convenience wrapper that materializes in-memory content to temp files.
@@ -386,6 +389,9 @@ def generate_tasks_from_content(
             previous_results_dir=previous_results_dir,
             discovery_path=discovery_path,
             codebase_context_path=codebase_context_path,
+            previous_tasks_dir=previous_tasks_dir,
+            round_evaluations=round_evaluations,
+            current_round=current_round,
             num_gpus=num_gpus,
         )
     finally:
