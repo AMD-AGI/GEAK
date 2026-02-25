@@ -124,8 +124,8 @@ mini -t "fix the bug in main.py"
 # Auto-execute mode (no confirmation needed)
 mini --yolo
 
-# Enable MCP knowledge retrieval
-mini --mcp
+# Enable RAG knowledge retrieval
+mini --rag
 
 # Use specific config.yaml
 mini --config geak.yaml \
@@ -311,8 +311,8 @@ python scripts/test_rrf_fusion.py            # Test RRF fusion algorithm
 **4. Enable Knowledge Retrieval**
 
 ```bash
-mini --mcp        # Enable MCP
-mini --mcp -d     # Enable MCP with debug output
+mini --rag        # Enable RAG knowledge retrieval
+mini --rag -d     # Enable RAG with debug output
 ```
 
 Inside the agent, use `@amd:your query` to invoke retrieval.

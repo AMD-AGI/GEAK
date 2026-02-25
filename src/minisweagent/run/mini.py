@@ -75,10 +75,10 @@ There are two different user interfaces:
 [bold green]mini[/bold green] Simple REPL-style interface
 [bold green]mini -v[/bold green] Pager-style interface (Textual)
 
-MCP integration (AMD AI DevTool):
+RAG knowledge retrieval:
 
-[bold green]mini --mcp[/bold green] Enable MCP integration
-[bold green]mini --mcp -d[/bold green] Enable MCP integration with debug output
+[bold green]mini --rag[/bold green] Enable RAG retrieval from AMD/NVIDIA knowledge base
+[bold green]mini --rag -d[/bold green] Enable RAG retrieval with debug output
 
 More information about the usage: [bold green]https://mini-swe-agent.com/latest/usage/mini/[/bold green]
 [/not dim]
@@ -114,9 +114,9 @@ def main(
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents to run (only effective with --save-patch). If not specified, reads from config file."),
     repo: Path | None = typer.Option(None, "--repo", help="Repository path for parallel execution. Required when num_parallel > 1. Each agent will get an isolated workdir using git worktree."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs for agents (e.g., '0,1,2,3'). For single agent, uses first GPU. Defaults to '0'."),
-    # MCP integration
-    mcp: bool = typer.Option(False, "--mcp", help="Enable MCP integration (AMD AI DevTool)"),
-    debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --mcp)"),
+    # RAG knowledge retrieval
+    rag: bool = typer.Option(False, "--rag", help="Enable RAG retrieval from AMD/NVIDIA knowledge base"),
+    debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --rag)"),
 ) -> Any:
     # fmt: on
     # Capture all print output to trajectory
@@ -220,13 +220,13 @@ def main(
 
     # ============ Environment setup: MCP or Local ============
     _env_kwargs = config.get("env", {})
-    if mcp:
+    if rag:
         try:
             from minisweagent.mcp_integration.mcp_environment import MCPEnabledEnvironment
             from minisweagent.mcp_integration.prompts import INSTANCE_TEMPLATE, SYSTEM_TEMPLATE
             from minisweagent.mcp_integration.run_agent import DebugMCPEnvironment
         except ImportError as e:
-            console.print("[red]Error: MCP integration requires langchain dependencies. Run: pip install -e '.[langchain]'[/red]")
+            console.print("[red]Error: RAG retrieval requires langchain dependencies. Run: pip install -e '.[langchain]'[/red]")
             console.print(f"[red]Import error: {e}[/red]")
             raise typer.Exit(1)
 
@@ -238,7 +238,7 @@ def main(
 
         config.setdefault("agent", {})["system_template"] = SYSTEM_TEMPLATE
         config.setdefault("agent", {})["instance_template"] = INSTANCE_TEMPLATE
-        console.print("[bold green]🔌 MCP integration enabled[/bold green]")
+        console.print("[bold green]🔌 RAG knowledge retrieval enabled[/bold green]")
     else:
         env = LocalEnvironment(**_env_kwargs)
 
@@ -347,7 +347,7 @@ def main(
             save_traj_fn=save_traj,
             console=console,
             model_factory=lambda: get_model(model_name, config.get("model", {})),
-            env_factory=lambda: (MCPEnabledEnvironment if mcp else LocalEnvironment)(**copy.deepcopy(_env_kwargs)),
+            env_factory=lambda: (MCPEnabledEnvironment if rag else LocalEnvironment)(**copy.deepcopy(_env_kwargs)),
         )
     except Exception as e:
         logger.error(f"Error running agent: {e}", exc_info=True)
