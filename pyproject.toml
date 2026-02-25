@@ -51,8 +51,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# LangChain hybrid retrieval for AMD GPU knowledge base (embedding + BM25 + reranker)
+langchain = [
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
+    "langchain-huggingface>=0.1.0",
+    "langchain-text-splitters>=0.3.0",
+    "sentence-transformers>=2.2.0",
+    "faiss-cpu>=1.7.4",
+    "rank_bm25>=0.2.2",
+    "numpy>=1.24.0",
+]
+
 full = [
     "mini-swe-agent[dev]",
+    "mini-swe-agent[langchain]",
     "swe-rex>=1.4.0",
 ]
 
