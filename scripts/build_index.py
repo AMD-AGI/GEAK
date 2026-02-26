@@ -25,6 +25,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
+import yaml
+
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -40,6 +42,30 @@ from rank_bm25 import BM25Okapi
 DEFAULT_KB_PATH = Path(__file__).parent.parent / "knowledge-base"
 DEFAULT_OUTPUT_PATH = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
 DEFAULT_MODEL = "BAAI/bge-large-en-v1.5"
+DEFAULT_RAG_CONFIG = Path(__file__).parent.parent / "src" / "minisweagent" / "config" / "rag_config.yaml"
+
+
+def load_chunking_config(config_path: Path | None = None) -> dict:
+    """Load chunking section from rag_config.yaml, returns empty dict on failure."""
+    config_path = config_path or DEFAULT_RAG_CONFIG
+    if config_path.exists():
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        return cfg.get("chunking", {})
+    return {}
+
+
+def _resolve_embedding_device(device: str) -> str:
+    """Resolve embedding device: 'auto' -> cuda if available else cpu; otherwise use as-is."""
+    if device != "auto":
+        return device
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+    except ImportError:
+        pass
+    return "cpu"
 
 
 # =============================================================================
@@ -63,6 +89,7 @@ class SplitterConfig:
     chunk_size: int = 1000
     chunk_overlap: int = 200
     min_chunk_size: int = 200
+    enable_header_split: bool = True
 
 
 # File extension to document type mapping
@@ -131,6 +158,14 @@ def get_markdown_splitter(config: SplitterConfig) -> Callable[[Document], list[D
     
     def split_markdown(doc: Document) -> list[Document]:
         """Split markdown document preserving structure."""
+        if not config.enable_header_split:
+            chunks = text_splitter.split_text(doc.page_content)
+            return [
+                Document(page_content=chunk, metadata={**doc.metadata, "chunk_idx": i})
+                for i, chunk in enumerate(chunks)
+                if len(chunk) >= config.min_chunk_size
+            ]
+
         header_splits = markdown_splitter.split_text(doc.page_content)
         
         chunks = []
@@ -504,9 +539,10 @@ def chunk_documents(
     documents: list[Document],
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
+    enable_header_split: bool = True,
 ) -> list[Document]:
     """Chunk documents using LangChain text splitter (legacy, uses markdown splitter)."""
-    config = SplitterConfig(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    config = SplitterConfig(chunk_size=chunk_size, chunk_overlap=chunk_overlap, enable_header_split=enable_header_split)
     splitter = get_markdown_splitter(config)
     
     all_chunks = []
@@ -554,15 +590,20 @@ def build_index(
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
     min_chunk_size: int = 200,
+    enable_header_split: bool = True,
     exclude_patterns: list[str] | None = None,
+    device: str = "auto",
 ):
     """Build semantic search index from knowledge base using LangChain."""
+    embedding_device = _resolve_embedding_device(device)
     
     print("\n🔍 LangChain Semantic Index Builder\n")
     print(f"Knowledge base: {kb_path}")
     print(f"Output path: {output_path}")
     print(f"Embedding model: {model_name}")
+    print(f"Embedding device: {embedding_device}")
     print(f"Chunk config: size={chunk_size}, overlap={chunk_overlap}, min={min_chunk_size}")
+    print(f"Markdown header split: {'enabled' if enable_header_split else 'disabled'}")
     if exclude_patterns:
         print(f"Exclude patterns: {exclude_patterns}")
     print()
@@ -578,6 +619,7 @@ def build_index(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         min_chunk_size=min_chunk_size,
+        enable_header_split=enable_header_split,
     )
     
     # Step 1: Load all files with type detection
@@ -601,13 +643,13 @@ def build_index(
         print(f"    Layer {layer}: {layer_counts[layer]} chunks")
     
     # Step 3: Initialize embeddings
-    print(f"\nStep 3: Initializing embeddings ({model_name})...")
+    print(f"\nStep 3: Initializing embeddings ({model_name}) on {embedding_device}...")
     embeddings = HuggingFaceEmbeddings(
         model_name=model_name,
-        model_kwargs={"device": "cpu"},
+        model_kwargs={"device": embedding_device},
         encode_kwargs={"normalize_embeddings": True},
     )
-    print("  ✓ Embeddings model loaded")
+    print(f"  ✓ Embeddings model loaded on {embedding_device}")
     
     # Step 4: Build FAISS index
     print("\nStep 4: Building FAISS index...")
@@ -672,6 +714,9 @@ def build_index(
 
 
 def main():
+    # Load yaml config as defaults (CLI args override)
+    yaml_cfg = load_chunking_config()
+
     parser = argparse.ArgumentParser(description="Build semantic search index using LangChain")
     parser.add_argument(
         "--kb-path",
@@ -699,20 +744,26 @@ def main():
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=1000,
-        help="Maximum chunk size in characters (default: 1000)",
+        default=yaml_cfg.get("chunk_size", 1000),
+        help="Maximum chunk size in characters (default: from rag_config.yaml or 1000)",
     )
     parser.add_argument(
         "--chunk-overlap",
         type=int,
-        default=200,
-        help="Overlap between chunks in characters (default: 200)",
+        default=yaml_cfg.get("chunk_overlap", 200),
+        help="Overlap between chunks in characters (default: from rag_config.yaml or 200)",
     )
     parser.add_argument(
         "--min-chunk-size",
         type=int,
-        default=200,
-        help="Minimum chunk size to keep (default: 200)",
+        default=yaml_cfg.get("min_chunk_size", 200),
+        help="Minimum chunk size to keep (default: from rag_config.yaml or 200)",
+    )
+    parser.add_argument(
+        "--no-header-split",
+        action="store_true",
+        default=not yaml_cfg.get("enable_header_split", True),
+        help="Disable Stage 1 markdown header splitting (default: from rag_config.yaml)",
     )
     parser.add_argument(
         "--exclude",
@@ -720,6 +771,13 @@ def main():
         nargs="+",
         default=None,
         help="Patterns to exclude from indexing (e.g., --exclude nvidia-knowledge-base test)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=("auto", "cuda", "cpu"),
+        help="Device for embedding model: auto (use GPU if available), cuda, or cpu (default: auto)",
     )
     
     args = parser.parse_args()
@@ -732,7 +790,9 @@ def main():
         chunk_size=args.chunk_size,
         chunk_overlap=args.chunk_overlap,
         min_chunk_size=args.min_chunk_size,
+        enable_header_split=not args.no_header_split,
         exclude_patterns=args.exclude,
+        device=args.device,
     )
 
 

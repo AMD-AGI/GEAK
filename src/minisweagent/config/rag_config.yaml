@@ -19,5 +19,11 @@ summary:
   enable_rag_subagent: true           # 是否启用 LLM 总结
   rag_subagent_model: "claude-opus-4.5"
 
+chunking:
+  chunk_size: 1000           # 最大 chunk 字符数
+  chunk_overlap: 200         # chunk 之间的重叠字符数
+  min_chunk_size: 200        # 低于此长度的 chunk 会被丢弃
+  enable_header_split: true  # 是否启用 Markdown 阶段1 header 切分
+
 debug:
   verbose: false           # 是否打印 MCP 工具详细日志
