@@ -44,9 +44,6 @@ def parse_task_info(task_content: str, model) -> dict:
     """
     prompt = f"""Analyze the following optimization task and extract configuration information.
 
-Task:
-{task_content}
-
 Extract the following information (return null if not found):
 1. kernel_name: The name of the kernel/function being optimized (e.g., "gemm", "matmul", "conv2d")
 2. repo: The repository path mentioned in the task (absolute path or relative path)
@@ -66,11 +63,15 @@ Return ONLY a valid JSON object with these keys. Example:
 }}
 
 If any field cannot be determined from the task, set it to null.
+
+Here is the task content:
+{task_content}
+
 """
     
     try:
         response = model.query([
-            {"role": "system", "content": "You are a helpful assistant that extracts structured configuration from optimization tasks. Always respond with valid JSON."},
+            {"role": "system", "content": "You are a helpful assistant that extracts structured configuration from task content. Always respond with valid JSON. Don't use tools, you must return the JSON results in one query."},
             {"role": "user", "content": prompt}
         ])
         content = response.get("content", "").strip()
