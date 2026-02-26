@@ -348,14 +348,14 @@ class HybridRetriever:
         if not merged_with_rrf:
             return []
         
-        # Stage 3: Rerank (可选)
+        # Stage 3: Rerank (optional)
         if self.enable_reranker:
             # Convert to format expected by _rerank: (doc, source, orig_score)
             merged = [(doc, source, orig_score) for doc, source, orig_score, _ in merged_with_rrf]
             reranked = self._rerank(query, merged, len(merged))
             print(f"  [Rerank] Enabled, reranked {len(reranked)} candidates", file=sys.stderr)
         else:
-            # 跳过精排，直接使用 RRF 分数排序
+            # Skip reranking, use RRF scores directly
             reranked = [(doc, rrf_score, source, orig_score) 
                         for doc, source, orig_score, rrf_score in merged_with_rrf]
             print(f"  [Rerank] DISABLED, using RRF scores for {len(reranked)} candidates", file=sys.stderr)
@@ -423,7 +423,7 @@ LangChainRetriever = HybridRetriever
 
 
 class KnowledgeTools:
-    """Tool implementations for MCP-style queries using HybridRetriever."""
+    """Tool implementations for RAG-style queries using HybridRetriever."""
 
     def __init__(self, retriever: HybridRetriever | None = None):
         self._retriever = retriever

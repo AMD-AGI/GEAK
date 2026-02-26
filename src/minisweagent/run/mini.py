@@ -215,7 +215,7 @@ def main(
     _api_key_display = f"{_api_key[:8]}..." if _api_key and len(_api_key) > 8 else _api_key or "Not set"
     console.print(f"\\[mini-swe-agent] Using model: [bold cyan]{_model_name}[/bold cyan], API key: [bold cyan]{_api_key_display}[/bold cyan]")
 
-    # ============ Environment setup: MCP or Local ============
+    # ============ Environment setup: RAG or Local ============
     _env_kwargs = config.get("env", {})
     if rag:
         try:

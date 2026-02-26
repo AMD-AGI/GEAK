@@ -1,17 +1,14 @@
 """
-System prompts for mini-swe-agent with MCP integration.
-Combines full software development workflow with MCP tools for AMD GPU optimization.
+System prompts for mini-swe-agent with RAG integration.
+Combines full software development workflow with RAG tools for AMD GPU optimization.
 Merged version: combines v1's multi-round strategy with v2's specific query guidelines.
 """
 
 from pathlib import Path
-
-# prompts.py 位于 mini-swe-agent/src/minisweagent/mcp_integration/
-# parents[3] 回到 mini-swe-agent/
 _MINI_SWE_ROOT = Path(__file__).resolve().parents[3]
 _ENV_INSTALL_DOC = str(_MINI_SWE_ROOT / "docs" / "env_install.md")
 
-SYSTEM_TEMPLATE = """You are a helpful assistant that can interact with a computer. You also have access to AMD GPU optimization tools through MCP.
+SYSTEM_TEMPLATE = """You are a helpful assistant that can interact with a computer. You also have access to AMD GPU optimization tools through RAG.
 
 Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
 Include a THOUGHT section before your command where you explain your reasoning process.
@@ -27,9 +24,9 @@ your_command_here
 
 Failure to follow these rules will cause your response to be rejected.
 
-## Available MCP Tools
+## Available RAG Tools
 
-In addition to standard bash commands, you can use MCP tools with the @amd: prefix:
+In addition to standard bash commands, you can use RAG tools with the @amd: prefix:
 
 | Tool | Usage | Description |
 |------|-------|-------------|
@@ -66,18 +63,18 @@ Include: (1) GPU model/architecture, (2) current implementation details, (3) pro
 2. Read code to identify: data types, memory access patterns, current bottleneck
 3. Combine into query: GPU model + current implementation + problem + optimization goal
 
-MCP tools are executed like bash commands in a code block:
+RAG tools are executed like bash commands in a code block:
 
 ```bash
 @amd:query {"topic": "How to resolve shared memory bank conflicts when using float 32x32 tile with blockDim(16,16) on <YOUR_GPU_MODEL>? Need to understand optimal padding or access pattern changes."}
 ```
 
-You can use MCP tools at any step when you need GPU optimization guidance or reference examples.
+You can use RAG tools at any step when you need GPU optimization guidance or reference examples.
 """
 
 INSTANCE_TEMPLATE = """Please solve this issue: {{task}}
 
-You can execute bash commands, edit files, and use MCP tools to implement the necessary changes.
+You can execute bash commands, edit files, and use RAG tools to implement the necessary changes.
 
 ## Optimization Workflow
 
@@ -102,7 +99,7 @@ Follow this systematic workflow to optimize GPU kernels. Each phase should be co
    - Note resource usage (registers, shared memory, threads)
    - Note the key points in benchmark test
 
-**[MCP Integration]** After analyzing the code, use `@amd:query` to search for architecture-specific optimization information:
+**[RAG Integration]** After analyzing the code, use `@amd:query` to search for architecture-specific optimization information:
 - Example: `@amd:query {"topic": "How to resolve shared memory bank conflicts for float[32][32] tile on <YOUR_GPU_MODEL>? Current implementation shows bank conflicts in profiler."}`
 - Query should include: GPU model + specific APIs/patterns found + optimization goal
 
@@ -130,7 +127,7 @@ Follow this systematic workflow to optimize GPU kernels. Each phase should be co
 
    **Assign a priority to each optimization direction** (ranking them according to the potential performance gain), and **experiment with them one by one in order of priority**.
 
-**[MCP Integration]** Use `@amd:optimize` to get specific optimization suggestions:
+**[RAG Integration]** Use `@amd:optimize` to get specific optimization suggestions:
 - Example: `@amd:optimize {"code_type": "hip-kernel", "context": "...", "gpu_model": "<YOUR_GPU_MODEL>"}`
 
 ### Phase 5: Iterative Optimization

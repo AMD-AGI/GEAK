@@ -1,9 +1,9 @@
 """
-MCPEnabledEnvironment - Extended LocalEnvironment with MCP tool support.
+MCPEnabledEnvironment - Extended LocalEnvironment with RAG tool support.
 
 This module provides an Environment class that can execute both:
 1. Regular bash commands (passed to subprocess)
-2. MCP tool calls (routed to LangChain retrieval)
+2. RAG tool calls (routed to LangChain retrieval)
 
 LangChain Retrieval Configuration:
 - Chunks source: aig_eval_6.4.3_1007_ai_dev_knowledge_bge_subagent (2077 chunks)
@@ -11,7 +11,7 @@ LangChain Retrieval Configuration:
 - BM25 keyword search: DISABLED (top_k=0)
 - BGE reranker: Final ranking
 
-MCP tool syntax: @amd:<tool_name> <json_args>
+RAG tool syntax: @amd:<tool_name> <json_args>
 Example: @amd:query {"topic": "HIP optimization"}
 """
 
@@ -30,14 +30,14 @@ import yaml
 
 from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
 from minisweagent.mcp_integration.langchain_retrieval import HybridRetriever, KnowledgeTools
-from minisweagent.utils.subagent import RAGFilterSubAgent, SubAgentConfig
+from minisweagent.mcp_integration.subagent import RAGFilterSubAgent, SubAgentConfig
 
 
 logger = logging.getLogger(__name__)
 
 
 def load_rag_config(config_path: Path | None = None) -> dict:
-    """加载 RAG 配置，支持默认值回退"""
+    """Load RAG config with default fallback."""
     default_config = Path(__file__).parent.parent / "config" / "rag_config.yaml"
     config_path = config_path or default_config
     
@@ -58,7 +58,7 @@ def load_rag_config(config_path: Path | None = None) -> dict:
 SEMANTIC_INDEX_PATH = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
 @dataclass
 class MCPEnvironmentConfig(LocalEnvironmentConfig):
-    """Configuration for MCP-enabled environment."""
+    """Configuration for RAG-enabled environment."""
     mcp_prefix: str = "@amd:"
     rag_subagent_api_key: str | None = None  # Read from AMD_LLM_API_KEY env var
 
@@ -66,7 +66,7 @@ class MCPEnvironmentConfig(LocalEnvironmentConfig):
 
 class MCPEnabledEnvironment(LocalEnvironment):
     """
-    Extended LocalEnvironment with MCP tool support.
+    Extended LocalEnvironment with RAG tool support.
     
     Intercepts commands starting with '@amd:' and routes them to
     LangChain hybrid retrieval, while passing other commands to
@@ -82,10 +82,10 @@ class MCPEnabledEnvironment(LocalEnvironment):
         rag_subagent_api_key: str | None = None,  # Read from AMD_LLM_API_KEY env var
         **kwargs
     ):
-        # 加载 RAG 配置
+        # Load RAG config
         cfg = load_rag_config(rag_config_path)
         
-        # 从配置读取，保留原默认值作为 fallback
+        # Read from config, keep original defaults as fallback
         retrieval = cfg.get("retrieval", {})
         reranker = cfg.get("reranker", {})
         fusion = cfg.get("fusion", {})
@@ -108,8 +108,8 @@ class MCPEnabledEnvironment(LocalEnvironment):
         
         self._verbose = debug.get("verbose", False)
         
-        # 打印配置参数到 stderr（与其他日志一致）
-        print(f"[RAG Config] Retrieval: embed_top_k={self._embed_top_k}, bm25_top_k={self._bm25_top_k} (enable_bm25={enable_bm25}), mcp_top_k={self._mcp_top_k}", file=sys.stderr)
+        # Print config to stderr (consistent with other logs)
+        print(f"[RAG Config] Retrieval: embed_top_k={self._embed_top_k}, bm25_top_k={self._bm25_top_k} (enable_bm25={enable_bm25}), rag_top_k={self._mcp_top_k}", file=sys.stderr)
         print(f"[RAG Config] Reranker: enable_reranker={self._enable_reranker}", file=sys.stderr)
         print(f"[RAG Config] Fusion: rrf_k={self._rrf_k}, semantic_weight={self._semantic_weight}, bm25_weight={self._bm25_weight}", file=sys.stderr)
         print(f"[RAG Config] Summary: enable_rag_subagent={self._enable_rag_subagent}, model={self._rag_subagent_model}", file=sys.stderr)
@@ -220,10 +220,10 @@ class MCPEnabledEnvironment(LocalEnvironment):
         timeout: int | None = None
     ) -> Dict[str, Any]:
         """
-        Execute a command - either MCP tool or bash command.
+        Execute a command - either RAG tool or bash command.
         
         Args:
-            command: Command to execute. If starts with '@amd:', routes to MCP.
+            command: Command to execute. If starts with '@amd:', routes to RAG.
             cwd: Working directory for bash commands.
             timeout: Timeout for bash commands.
         
@@ -240,15 +240,15 @@ class MCPEnabledEnvironment(LocalEnvironment):
             print(command)
             print(f"{'='*60}")
         
-        # Check if this is an MCP tool call
+        # Check if this is a RAG tool call
         prefix = self.config.mcp_prefix
         if command.startswith(prefix):
             if self._verbose:
-                print(f"✅ [ENV] This is an MCP command! Will route to MCP server.")
+                print(f"✅ [ENV] This is a RAG command! Will route to RAG retrieval.")
             result = self._execute_mcp(command[len(prefix):])
         else:
             if self._verbose:
-                print(f"⚠️  [ENV] This is a BASH command, not MCP.")
+                print(f"⚠️  [ENV] This is a BASH command, not RAG.")
             result = super().execute(command, cwd, timeout=timeout)
         
         # Verbose: print result after execution
@@ -263,7 +263,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
     
     def _execute_mcp(self, command: str) -> Dict[str, Any]:
         """
-        Execute an MCP tool call.
+        Execute a RAG tool call.
         
         Args:
             command: Tool call without prefix, e.g., 'query {"topic": "HIP"}'
@@ -276,10 +276,10 @@ class MCPEnabledEnvironment(LocalEnvironment):
             tool_name, args = self._parse_mcp_command(command)
             
             if self._verbose:
-                print(f"[MCP] Calling tool: {tool_name}")
-                print(f"[MCP] Arguments: {args}")
+                print(f"[RAG] Calling tool: {tool_name}")
+                print(f"[RAG] Arguments: {args}")
             
-            # Output stats to stderr for MCP tools
+            # Output stats to stderr for RAG tools
             self._print_mcp_stats(tool_name, args)
             
             # Execute the tool
@@ -292,18 +292,18 @@ class MCPEnabledEnvironment(LocalEnvironment):
             
         except json.JSONDecodeError as e:
             return {
-                "output": f"MCP Error: Invalid JSON arguments - {e}",
+                "output": f"RAG Error: Invalid JSON arguments - {e}",
                 "returncode": 1
             }
         except KeyError as e:
             available = ", ".join(sorted(self._tool_map.keys()))
             return {
-                "output": f"MCP Error: Unknown tool {e}. Available: {available}",
+                "output": f"RAG Error: Unknown tool {e}. Available: {available}",
                 "returncode": 1
             }
         except Exception as e:
             return {
-                "output": f"MCP Error: {type(e).__name__}: {str(e)}",
+                "output": f"RAG Error: {type(e).__name__}: {str(e)}",
                 "returncode": 1
             }
     
@@ -316,9 +316,9 @@ class MCPEnabledEnvironment(LocalEnvironment):
         return preview
 
     def _print_mcp_stats(self, tool_name: str, args: Dict[str, Any]) -> None:
-        """Output MCP tool stats to stderr for logging with query results, retrieval method, and content."""
-        print(f"[MCP-STATS] Calling {tool_name} with LangChain retrieval (embed_top_k={self._embed_top_k}, bm25_top_k={self._bm25_top_k})", file=sys.stderr)
-        print(f"[MCP-STATS] Args: {args}", file=sys.stderr)
+        """Output RAG tool stats to stderr for logging with query results, retrieval method, and content."""
+        print(f"[RAG-STATS] Calling {tool_name} with LangChain retrieval (embed_top_k={self._embed_top_k}, bm25_top_k={self._bm25_top_k})", file=sys.stderr)
+        print(f"[RAG-STATS] Args: {args}", file=sys.stderr)
         
         top_k = self._mcp_top_k
         
@@ -339,7 +339,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
                 embed_count = sum(1 for r in results if r[2] == "embedding")
                 bm25_count = sum(1 for r in results if r[2] == "bm25")
                 
-                print(f"[MCP-STATS] query 返回 {len(results)} 条结果 (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}", file=sys.stderr)
+                print(f"[RAG-STATS] query returned {len(results)} results (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}", file=sys.stderr)
                 for i, (doc, score, source, orig_score) in enumerate(results, 1):
                     title = doc.metadata.get('section', doc.metadata.get('title', 'Unknown'))[:40]
                     content_len = len(doc.page_content)
@@ -359,7 +359,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
                 embed_count = sum(1 for r in results if r[2] == "embedding")
                 bm25_count = sum(1 for r in results if r[2] == "bm25")
                 
-                print(f"[MCP-STATS] example 返回 {len(results)} 条结果 (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}", file=sys.stderr)
+                print(f"[RAG-STATS] example returned {len(results)} results (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}", file=sys.stderr)
                 for i, (doc, score, source, orig_score) in enumerate(results, 1):
                     title = doc.metadata.get('section', doc.metadata.get('title', 'Unknown'))[:40]
                     content_len = len(doc.page_content)
@@ -379,7 +379,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
                 embed_count = sum(1 for r in results if r[2] == "embedding")
                 bm25_count = sum(1 for r in results if r[2] == "bm25")
                 
-                print(f"[MCP-STATS] optimize 返回 {len(results)} 条结果 (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}", file=sys.stderr)
+                print(f"[RAG-STATS] optimize returned {len(results)} results (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}", file=sys.stderr)
                 for i, (doc, score, source, orig_score) in enumerate(results, 1):
                     title = doc.metadata.get('section', doc.metadata.get('title', 'Unknown'))[:40]
                     content_len = len(doc.page_content)
@@ -398,7 +398,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
                 embed_count = sum(1 for r in results if r[2] == "embedding")
                 bm25_count = sum(1 for r in results if r[2] == "bm25")
                 
-                print(f"[MCP-STATS] troubleshoot 返回 {len(results)} 条结果 (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}", file=sys.stderr)
+                print(f"[RAG-STATS] troubleshoot returned {len(results)} results (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}", file=sys.stderr)
                 for i, (doc, score, source, orig_score) in enumerate(results, 1):
                     content_len = len(doc.page_content)
                     method_tag = "[EMB]" if source == "embedding" else "[BM25]"
@@ -408,17 +408,17 @@ class MCPEnabledEnvironment(LocalEnvironment):
             
             elif tool_name in ("compat", "check_compatibility"):
                 # For compatibility check, just log the call
-                print(f"[MCP-STATS] compat check for ROCm {args.get('rocm_version', 'unknown')}", file=sys.stderr)
+                print(f"[RAG-STATS] compat check for ROCm {args.get('rocm_version', 'unknown')}", file=sys.stderr)
             
             elif tool_name in ("docs", "get_documentation_urls"):
-                print(f"[MCP-STATS] docs 返回文档 URL 列表", file=sys.stderr)
+                print(f"[RAG-STATS] docs returned document URL list", file=sys.stderr)
         
         except Exception as e:
-            print(f"[MCP-STATS] Error getting stats: {e}", file=sys.stderr)
+            print(f"[RAG-STATS] Error getting stats: {e}", file=sys.stderr)
 
     def _parse_mcp_command(self, command: str) -> tuple[str, Dict[str, Any]]:
         """
-        Parse MCP command into tool name and arguments.
+        Parse RAG command into tool name and arguments.
         
         Args:
             command: e.g., 'query {"topic": "HIP"}' or 'query_knowledge {...}'
@@ -430,7 +430,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
         match = re.match(r'(\w+)\s*(.*)', command.strip())
         
         if not match:
-            raise ValueError(f"Invalid MCP command format: {command}")
+            raise ValueError(f"Invalid RAG command format: {command}")
         
         tool_name = match.group(1)
         args_str = match.group(2).strip()
@@ -449,7 +449,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
         args: Dict[str, Any]
     ) -> str:
         """
-        Asynchronously call an MCP tool using LangChain retrieval.
+        Asynchronously call a RAG tool using LangChain retrieval.
         
         Args:
             tool_name: Name of the tool to call.
@@ -474,7 +474,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
         
         # Handle None result
         if result is None:
-            logger.warning(f"MCP tool {tool_name} returned None")
+            logger.warning(f"RAG tool {tool_name} returned None")
             result = ""
         
         # Process result with RAG filter sub-agent for query/example/optimize tools
@@ -489,7 +489,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
         return result
     
     def get_template_vars(self) -> Dict[str, Any]:
-        """Get template variables including MCP info."""
+        """Get template variables including RAG info."""
         base_vars = super().get_template_vars()
         base_vars["mcp_available"] = True
         base_vars["mcp_prefix"] = self.config.mcp_prefix
@@ -498,5 +498,5 @@ class MCPEnabledEnvironment(LocalEnvironment):
 
 # Convenience function for quick setup
 def create_mcp_environment(**kwargs) -> MCPEnabledEnvironment:
-    """Create an MCP-enabled environment with sensible defaults."""
+    """Create a RAG-enabled environment with sensible defaults."""
     return MCPEnabledEnvironment(**kwargs)

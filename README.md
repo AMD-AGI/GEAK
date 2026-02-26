@@ -180,7 +180,7 @@ File: `rag_config.yaml` — controls the RAG retrieval pipeline:
 | `reranker.enable_reranker` | Whether to enable re-ranking |
 | `fusion.semantic_weight` / `bm25_weight` | Fusion weights for Embedding and BM25 |
 | `summary.enable_rag_subagent` | Whether to enable LLM summarization |
-| `debug.verbose` | Whether to print verbose MCP tool logs |
+| `debug.verbose` | Whether to print verbose RAG tool logs |
 
 ### Output & Artifacts
 
