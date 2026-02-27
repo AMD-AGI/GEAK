@@ -934,13 +934,14 @@ def _run_homogeneous_orchestrator(
     start_round: int,
     _print,
     console,
+    model_factory=None,
 ) -> dict[str, Any]:
     """Run the orchestrator in homogeneous mode.
 
-    Each round writes a single task file and dispatches it via
-    ``geak --task <file> --num-parallel N``, so all agents work on the
-    same optimization task.  Per-round evaluation and early stopping
-    are reused from the heterogeneous path.
+    Each round writes a single task file and dispatches it in-process
+    via ``run_task_batch``, so all agents work on the same optimization
+    task.  Per-round evaluation and early stopping are reused from the
+    heterogeneous path.
     """
     from minisweagent.run.task_file import write_task_file
 
@@ -1004,27 +1005,20 @@ def _run_homogeneous_orchestrator(
         results_dir = output_dir / "results" / f"round_{round_num}"
         results_dir.mkdir(parents=True, exist_ok=True)
 
-        gpu_str = ",".join(str(g) for g in gpu_ids)
-        cmd = [
-            sys.executable, "-m", "minisweagent.run.mini",
-            "--task", str(task_file),
-            "--num-parallel", str(len(gpu_ids)),
-            "--gpu-ids", gpu_str,
-            "--patch-output", str(results_dir / "00_optimize"),
-            "--yolo",
-            "--exit-immediately",
-        ]
-
-        _print(f"  Dispatching: geak --task {task_file.name} --num-parallel {len(gpu_ids)}")
+        n_agents = len(gpu_ids)
+        _print(f"  Dispatching: run_task_batch({task_file.name}, {n_agents} agents on {n_agents} GPUs)")
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=7200,
+            from minisweagent.run.dispatch import run_task_batch
+
+            run_task_batch(
+                task_files=[task_file] * n_agents,
+                gpu_ids=gpu_ids,
+                output_dir=results_dir,
+                model_factory=model_factory,
+                console=console,
             )
-            _print(f"  geak exited with code {proc.returncode}")
-            if proc.returncode != 0 and proc.stderr:
-                _print(f"  stderr (last 500 chars): {proc.stderr[-500:]}")
-        except subprocess.TimeoutExpired:
-            _print(f"  [yellow]Round {round_num} timed out after 7200s[/yellow]")
+        except Exception as exc:
+            _print(f"  [yellow]Round {round_num} dispatch failed: {exc}[/yellow]")
 
         round_eval = _evaluate_round_best(
             ctx, round_num, results_dir, _print,
@@ -1265,6 +1259,7 @@ def run_orchestrator(
     if not heterogeneous:
         return _run_homogeneous_orchestrator(
             preprocess_ctx, gpu_ids, _out, max_rounds, start_round, _print, console,
+            model_factory=model_factory,
         )
 
     # Build DiscoveryResult from preprocessor's discovery dict

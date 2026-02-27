@@ -210,7 +210,7 @@ def main(
     yolo: bool = typer.Option(False, "-y", "--yolo", help="Run without confirmation"),
     cost_limit: float | None = typer.Option(None, "-l", "--cost-limit", help="Cost limit. Set to 0 to disable."),
     config_spec: Path | None = typer.Option(None, "-c", "--config", help="Path to config file (overrides template selection)"),
-    output: Path | None = typer.Option(DEFAULT_OUTPUT, "-o", "--output", help="Output trajectory file"),
+    output: Path | None = typer.Option(DEFAULT_OUTPUT, "--traj-output", "--output", help="Output trajectory file (legacy; trajectories are also saved inside --patch-output)"),
     exit_immediately: bool = typer.Option( False, "--exit-immediately", help="Exit immediately when the agent wants to finish instead of prompting.", rich_help_panel="Advanced"),
     # Strategy mode configuration
     enable_strategies: bool = typer.Option(True, "--enable-strategies/--no-enable-strategies", help="Enable optimization strategy management (optool command). Auto-selects appropriate template.", rich_help_panel="Advanced"),
@@ -224,7 +224,7 @@ def main(
         help="Auto-create/search unit tests and infer test_command when missing (or to override it).",
         rich_help_panel="Advanced",
     ),
-    patch_output: Path | None = typer.Option(None, "--patch-output", help="Output directory for patch files and test results"),
+    patch_output: Path | None = typer.Option(None, "-o", "--patch-output", help="Output directory for pipeline results, patches, and test artifacts"),
     metric: str | None = typer.Option(None, "--metric", help="Metric extraction task description for LLM"),
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents to run (only effective with --save-patch). If not specified, reads from config file."),
     repo: Path | None = typer.Option(None, "--repo", help="Repository path for parallel execution. Required when num_parallel > 1. Each agent will get an isolated workdir using git worktree."),
