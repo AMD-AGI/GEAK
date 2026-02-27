@@ -1,4 +1,5 @@
 import re
+import shutil
 from unittest.mock import patch
 
 import pytest
@@ -69,6 +70,10 @@ def test_configure_if_first_time_called():
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(
+    not shutil.which("docker"),
+    reason="Docker CLI not available in this environment",
+)
 def test_github_issue_end_to_end(github_test_data):
     """Test the complete flow from CLI to final result using real environment but deterministic model"""
 

@@ -294,6 +294,7 @@ class TestStartRound:
         run_orchestrator(
             ctx, [0], mock_model, mock_model_factory,
             output_dir=out, max_rounds=1, start_round=1,
+            heterogeneous=True,
         )
 
         phases = [c.kwargs.get("phase") or c[1].get("phase", "")
@@ -316,6 +317,7 @@ class TestStartRound:
         run_orchestrator(
             ctx, [0], mock_model, mock_model_factory,
             output_dir=out, max_rounds=2, start_round=2,
+            heterogeneous=True,
         )
 
         phases = [c.kwargs.get("phase") or c[1].get("phase", "")
@@ -346,6 +348,7 @@ class TestStartRound:
         run_orchestrator(
             pctx, [0], mock_model, mock_model_factory,
             output_dir=out, max_rounds=3, start_round=2,
+            heterogeneous=True,
         )
 
         # _evaluate_round_best receives the internal ctx as its first arg
@@ -375,6 +378,7 @@ class TestStartRound:
         run_orchestrator(
             ctx, [0], mock_model, mock_model_factory,
             output_dir=out, max_rounds=3, start_round=2,
+            heterogeneous=True,
         )
 
         first_call_messages = mock_llm.call_args_list[0][0][1]
@@ -399,6 +403,7 @@ class TestStartRound:
         run_orchestrator(
             ctx, [0], mock_model, mock_model_factory,
             output_dir=out, max_rounds=2, start_round=2,
+            heterogeneous=True,
         )
 
         assert "round_1_eval" not in ctx

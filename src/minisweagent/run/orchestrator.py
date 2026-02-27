@@ -2,8 +2,14 @@
 optimisation tasks across available GPUs.
 
 The orchestrator sits between the preprocessor (which produces profiling
-artefacts) and the per-task sub-agents (``geak --from-task``).  It is
-itself an LLM agent whose tools are:
+artefacts) and the per-task sub-agents (``geak --task``).
+
+By default it runs in **homogeneous** mode: each round dispatches a
+single task to ``geak --task <file> --num-parallel N``, so all agents
+work on the same optimization task.
+
+With ``--heterogeneous``, it runs in **heterogeneous** mode as an LLM
+agent whose tools are:
 
 * **generate_tasks** – invoke the task-generator to create task files
 * **dispatch_tasks** – run tasks in parallel via ``ParallelAgent`` pool
@@ -29,10 +35,13 @@ logger = logging.getLogger(__name__)
 
 from minisweagent.benchmark_parsing import (
     parse_median_latency_ms as _parse_median_latency_ms,
+)
+from minisweagent.benchmark_parsing import (
     parse_shape_count as _parse_shape_count,
+)
+from minisweagent.benchmark_parsing import (
     parse_total_kernel_time_ms as _parse_total_kernel_time_ms,
 )
-
 
 # ── System prompt for the orchestrator LLM ───────────────────────────
 
@@ -914,7 +923,151 @@ def _evaluate_round_best(
     return round_eval
 
 
-# ── Orchestrator runner ──────────────────────────────────────────────
+# ── Homogeneous orchestrator ─────────────────────────────────────────
+
+
+def _run_homogeneous_orchestrator(
+    preprocess_ctx: dict[str, Any],
+    gpu_ids: list[int],
+    output_dir: Path,
+    max_rounds: int,
+    start_round: int,
+    _print,
+    console,
+) -> dict[str, Any]:
+    """Run the orchestrator in homogeneous mode.
+
+    Each round writes a single task file and dispatches it via
+    ``geak --task <file> --num-parallel N``, so all agents work on the
+    same optimization task.  Per-round evaluation and early stopping
+    are reused from the heterogeneous path.
+    """
+    from minisweagent.run.task_file import write_task_file
+
+    pp_dir = output_dir
+    starting_patch = preprocess_ctx.get("starting_patch")
+
+    start_label = (
+        f"rounds {start_round}-{max_rounds}" if start_round > 1
+        else f"{max_rounds} rounds"
+    )
+    _print(
+        f"[bold cyan]--- Orchestrator (homogeneous) starting ({start_label}, {len(gpu_ids)} GPUs) ---[/bold cyan]"
+        if console
+        else f"--- Orchestrator (homogeneous) starting ({start_label}, {len(gpu_ids)} GPUs) ---"
+    )
+
+    ctx: dict[str, Any] = {**preprocess_ctx, "output_dir": str(output_dir)}
+
+    for round_num in range(start_round, max_rounds + 1):
+        is_last = round_num == max_rounds
+        round_header = (
+            f"--- Homogeneous round {round_num}/{max_rounds}"
+            f"{' (final)' if is_last else ''} ---"
+        )
+        _print(
+            f"[bold cyan]{round_header}[/bold cyan]"
+            if console else round_header
+        )
+
+        task_dir = output_dir / "tasks" / f"round_{round_num}"
+        task_dir.mkdir(parents=True, exist_ok=True)
+
+        task_file = task_dir / "00_optimize.md"
+        metadata: dict[str, Any] = {
+            "label": "kernel_optimization",
+            "priority": 10,
+            "agent_type": "strategy_agent",
+            "kernel_path": preprocess_ctx.get("kernel_path"),
+            "repo_root": preprocess_ctx.get("repo_root"),
+            "test_command": preprocess_ctx.get("test_command"),
+            "harness_path": preprocess_ctx.get("harness_path"),
+            "commandment": str(pp_dir / "COMMANDMENT.md"),
+            "baseline_metrics": str(pp_dir / "baseline_metrics.json"),
+            "profiling": str(pp_dir / "profile.json"),
+            "codebase_context": str(pp_dir / "CODEBASE_CONTEXT.md"),
+            "benchmark_baseline": str(pp_dir / "benchmark_baseline.txt"),
+            "round": round_num,
+            "starting_patch": starting_patch,
+        }
+
+        task_body = (
+            "Optimize this GPU kernel for maximum performance.\n\n"
+            "Follow the workflow described in the pipeline instructions.\n"
+            "Use the discovered tests and benchmarks for correctness and performance validation.\n"
+            "Report final speedup when done."
+        )
+
+        write_task_file(task_file, metadata, task_body, relative_to=task_file.parent)
+        _print(f"  Task file: {task_file}")
+
+        results_dir = output_dir / "results" / f"round_{round_num}"
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        gpu_str = ",".join(str(g) for g in gpu_ids)
+        cmd = [
+            sys.executable, "-m", "minisweagent.run.mini",
+            "--task", str(task_file),
+            "--num-parallel", str(len(gpu_ids)),
+            "--gpu-ids", gpu_str,
+            "--patch-output", str(results_dir / "00_optimize"),
+            "--yolo",
+            "--exit-immediately",
+        ]
+
+        _print(f"  Dispatching: geak --task {task_file.name} --num-parallel {len(gpu_ids)}")
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=7200,
+            )
+            _print(f"  geak exited with code {proc.returncode}")
+            if proc.returncode != 0 and proc.stderr:
+                _print(f"  stderr (last 500 chars): {proc.stderr[-500:]}")
+        except subprocess.TimeoutExpired:
+            _print(f"  [yellow]Round {round_num} timed out after 7200s[/yellow]")
+
+        round_eval = _evaluate_round_best(
+            ctx, round_num, results_dir, _print,
+        )
+        if round_eval:
+            ctx[f"round_{round_num}_eval"] = round_eval
+            if round_eval.get("best_patch"):
+                current_speedup_val = (
+                    round_eval.get("full_benchmark", {}).get("verified_speedup")
+                    or round_eval.get("benchmark_speedup", 0)
+                )
+                best_global_speedup = ctx.get("_best_global_speedup", 0)
+                if current_speedup_val >= best_global_speedup:
+                    starting_patch = round_eval["best_patch"]
+                    ctx["starting_patch"] = starting_patch
+                    ctx["_best_global_speedup"] = current_speedup_val
+
+        early_stop_threshold = float(os.getenv("GEAK_EARLY_STOP_THRESHOLD", "0.005"))
+        if round_eval and round_num >= 2:
+            current_speedup = (
+                round_eval.get("full_benchmark", {}).get("verified_speedup")
+                or round_eval.get("benchmark_speedup", 1.0)
+            )
+            prior_speedups = []
+            for r in range(1, round_num):
+                rev = ctx.get(f"round_{r}_eval", {})
+                s = (
+                    rev.get("full_benchmark", {}).get("verified_speedup")
+                    or rev.get("benchmark_speedup", 1.0)
+                )
+                prior_speedups.append(s)
+            best_prior = max(prior_speedups) if prior_speedups else 1.0
+            if current_speedup <= best_prior * (1 + early_stop_threshold):
+                _print(
+                    f"  Early stopping: round {round_num} ({current_speedup:.4f}x) "
+                    f"did not improve over prior best ({best_prior:.4f}x)"
+                )
+                break
+
+    return _auto_finalize(ctx, _print)
+
+
+# ── Orchestrator runner (heterogeneous) ──────────────────────────────
 
 
 _ORCHESTRATOR_SWE_TOOLS = {"bash", "str_replace_editor", "profile_kernel", "strategy_manager"}
@@ -1065,6 +1218,7 @@ def run_orchestrator(
     output_dir: Path | None = None,
     max_rounds: int | None = None,
     start_round: int = 1,
+    heterogeneous: bool = False,
     console=None,
 ) -> dict[str, Any]:
     """Run the orchestrator agent loop.
@@ -1088,6 +1242,9 @@ def run_orchestrator(
         Round number to start from (1-based, default 1).  When > 1 the
         exploration phase is skipped and prior round evaluations are loaded
         from ``round_<N>_evaluation.json`` files on disk.
+    heterogeneous:
+        If True, use LLM-generated diverse tasks per round (original behavior).
+        If False (default), use homogeneous mode where all agents get the same task.
     console:
         Optional Rich console for progress messages.
     """
@@ -1104,6 +1261,11 @@ def run_orchestrator(
             console.print(msg)
         else:
             print(msg, file=sys.stderr)
+
+    if not heterogeneous:
+        return _run_homogeneous_orchestrator(
+            preprocess_ctx, gpu_ids, _out, max_rounds, start_round, _print, console,
+        )
 
     # Build DiscoveryResult from preprocessor's discovery dict
     from minisweagent.tools.discovery_types import DiscoveryResult
@@ -1469,6 +1631,12 @@ def main() -> None:
              "Skips exploration and loads prior round evaluations from disk.",
     )
     parser.add_argument(
+        "--heterogeneous",
+        action="store_true",
+        default=False,
+        help="Use LLM-generated diverse tasks per round. Default: homogeneous (all agents get the same task).",
+    )
+    parser.add_argument(
         "--model",
         default=None,
         help="Model name (default: from GEAK_MODEL env or geak.yaml)",
@@ -1546,6 +1714,7 @@ def main() -> None:
         output_dir=pp_dir,
         max_rounds=args.max_rounds,
         start_round=args.start_round,
+        heterogeneous=args.heterogeneous,
         console=console,
     )
 
