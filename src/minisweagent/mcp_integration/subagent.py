@@ -106,6 +106,7 @@ Instructions:
                 api_key=self.config.api_key,
                 model_kwargs=self.config.model_kwargs,
             )
+            self._model._impl.tools = []
         return self._model
     
     def process(self, rag_result: str, query: str = "") -> str:
