@@ -27,7 +27,7 @@ agent:
     - **bash**: Execute shell commands
     - **str_replace_editor**: File editor (commands: view, create, str_replace, insert)
     - **profiling**: Profile GPU kernel with rocprof to identify bottlenecks
-    - **test_perf**: Save patch and run performance test
+    - **save_and_test**: Save patch and run performance test
     - **submit**: Submit final result and complete task
     </AVAILABLE_TOOLS>
 
@@ -67,10 +67,11 @@ agent:
       * launch configuration assumptions
       * datatype sensitivity
 
-    Phase 3: Baseline Establishment
-    - **ALWAYS use `test_perf` tool with description "baseline" to establish baseline.**
-    - **DO NOT construct manual test commands or benchmarks.**
-    - Baseline defines the ONLY comparison reference.
+    Phase 3: Review Provided Baselines
+    - The baseline performance is already established and provided in your context above.
+    - Compare the Benchmark Baseline numbers against any profiling data.
+    - Do NOT call `save_and_test` for a baseline run. Proceed directly to strategy formulation.
+    - NOTE: `profile_kernel` (Metrix) is for deep hardware analysis, NOT for latency comparison.
 
     Phase 4: Strategy Formulation
     - **ALWAYS** use the `profiling` tool before formulating strategies to identify the bottleneck of the current kernel:
@@ -97,7 +98,7 @@ agent:
     Phase 5: Controlled Experimentation
     - Select ONE optimization direction according to the priority rank list.
     - Implement minimal change.
-    - **ALWAYS use `test_perf` tool to test performance after implementation.**
+    - **ALWAYS use `save_and_test` tool to test performance after implementation.**
     - **DO NOT construct manual test commands, benchmarks, or compile commands.**
     - **RECOMMENDED**: Use the `profiling` tool to profile the kernel after implementation to identify the bottleneck of the current kernel:
       - Call the `profiling` tool with the appropriate working directory and command used during performance testing.
@@ -147,13 +148,13 @@ agent:
     - **bash**: Execute shell commands
     - **str_replace_editor**: File editor (commands: view, create, str_replace, insert)
     - **profiling**: Profile GPU kernel with rocprof to identify bottlenecks
-    - **test_perf**: Save patch and run performance test
+    - **save_and_test**: Save patch and run performance test
     - **submit**: Submit final result and complete task
     </available_tools>
     <example>
     THOUGHT:
     - I need to save the patch and test the current code.
-    - Call the test_perf tool with description: "baseline"
+    - Call the save_and_test tool with description: "baseline"
     </example>
   step_limit: 0
   cost_limit: 0

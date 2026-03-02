@@ -187,5 +187,14 @@ rocPRIM_*/
 *txt
 optimization_logs/*
 .optimization_strategies.md
+
+
+# Profiler data
+.rocprofv3/
+
+# OpenEvolve intermediate outputs
+optimization_output/
+
+# IDE
 .cursor/
 .vscode/

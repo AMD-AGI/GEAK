@@ -6,8 +6,10 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from jinja2 import StrictUndefined, Template
 from pathlib import Path
+
+from jinja2 import StrictUndefined, Template
+
 from minisweagent import Environment, Model
 from minisweagent.tools.tools_runtime import ToolRuntime
 
@@ -29,6 +31,12 @@ class AgentConfig:
     action_observation_template: str = "Observation: {{output}}"
     step_limit: int = 0
     cost_limit: float = 3.0
+    summary_on_cost_limit: bool = False
+    """When True, on LimitsExceeded allow one extra step (e.g. to write a summary)."""
+    summary_on_limit_prompt: str = (
+        "The cost limit has been reached. Before stopping, run exactly one command to document "
+        "what you did so far (e.g. create a summary file or add to your final output)."
+    )
     # Save patch configuration (always enabled)
     save_patch: bool = True
     test_command: str | None = None
@@ -38,6 +46,10 @@ class AgentConfig:
     use_strategy_manager: bool = False
     strategy_file_path: str = ".optimization_strategies.md"
     profiling_type: str | None = None
+    codebase_context: str | None = None
+    starting_patch: str | None = None
+    # Interactive/exit behaviour (set by --exit-immediately)
+    confirm_exit: bool = True
 
 
 # Unified observation truncation for both bash output and tool call results (head + tail).
@@ -99,6 +111,7 @@ class DefaultAgent:
         self.model = model
         self.env = env
         self.extra_template_vars = {}
+        self._allow_one_summary_step = False
         # Initialize save_patch related attributes
         self.patch_counter = 0
         self.log_file: Path | None = None
@@ -108,8 +121,6 @@ class DefaultAgent:
         # Initialize tool runtime with strategy manager settings
         # Subclasses (like StrategyAgent) can override _get_strategy_callback() for UI notifications
         self.toolruntime = ToolRuntime(
-            profiling_type=self.config.profiling_type,
-            llm_model=self.model,
             use_strategy_manager=self.config.use_strategy_manager,
             strategy_file=self._get_strategy_file()
             if self.config.use_strategy_manager
@@ -117,42 +128,64 @@ class DefaultAgent:
             on_strategy_change=self._get_strategy_callback(),
             patch_output_dir=self.config.patch_output_dir,
         )
-        # Setup test_perf tool context
-        self._setup_test_perf_context()
-    
+        # Propagate agent's env vars (HIP_VISIBLE_DEVICES etc.) to tools
+        agent_env = getattr(self.env.config, "env", None)
+        if agent_env:
+            self.toolruntime.set_env(agent_env)
+        # Propagate working directory so bash tool commands run in the correct worktree
+        agent_cwd = getattr(self.env.config, "cwd", None)
+        if agent_cwd:
+            self.toolruntime.set_cwd(agent_cwd)
+        # Setup save_and_test tool context
+        self._setup_save_and_test_context()
+        # Wire sub_agent context (needs model + env for recursive agent calls)
+        if getattr(self.toolruntime, "_sub_agent_tool", None):
+            self.toolruntime._sub_agent_tool.set_context(
+                self.model, self.env, codebase_context=self.config.codebase_context,
+            )
+        if self.config.codebase_context:
+            self.toolruntime.set_codebase_context(self.config.codebase_context)
+
     def _get_strategy_file(self) -> str:
-        """Get the strategy file path. Override in subclasses to customize."""
-        cwd = Path(getattr(self.env.config, "cwd", None) or Path.cwd())
+        """Get the strategy file path.
+
+        Prefers ``patch_output_dir`` (unique per dispatched task) so that
+        parallel agents on different GPUs don't clobber each other's
+        strategy files.  Falls back to ``cwd`` for standalone ``mini`` runs.
+        """
+        if getattr(self.config, "patch_output_dir", None):
+            base = Path(self.config.patch_output_dir)
+        else:
+            base = Path(getattr(self.env.config, "cwd", None) or Path.cwd())
         strategy_file_path = self.config.strategy_file_path or ".optimization_strategies.md"
         strategy_path = Path(strategy_file_path)
-        return str(strategy_path if strategy_path.is_absolute() else cwd / strategy_path)
-    
+        return str(strategy_path if strategy_path.is_absolute() else base / strategy_path)
+
     def _get_strategy_callback(self):
         """Get the callback for strategy changes. Override in subclasses for UI notifications."""
-        return None
-    
-    def _setup_test_perf_context(self):
-        """Setup context for test_perf tool."""
-        from minisweagent.tools.test_perf import TestPerfContext
-        
-        cwd = getattr(self.env.config, 'cwd', None) or os.getcwd()
-        
-        context = TestPerfContext(
+        return
+
+    def _setup_save_and_test_context(self):
+        """Setup context for save_and_test tool."""
+        from minisweagent.tools.save_and_test import SaveAndTestContext
+
+        cwd = getattr(self.env.config, "cwd", None) or os.getcwd()
+
+        context = SaveAndTestContext(
             cwd=cwd,
             test_command=self.config.test_command,
-            timeout=getattr(self.env.config, 'timeout', 3600),
+            timeout=getattr(self.env.config, "timeout", 3600),
             patch_output_dir=self.config.patch_output_dir,
-            env_vars=getattr(self.env.config, 'env', None),
+            env_vars=getattr(self.env.config, "env", None),
             base_repo_path=self.base_repo_path,
             log_fn=self._log_message,
             patch_counter=self.patch_counter,
         )
-        
-        test_perf_tool = self.toolruntime._tool_table.get("test_perf")
-        if test_perf_tool:
-            test_perf_tool.set_context(context)
-            # Keep reference to sync state
-            self._test_perf_context = context
+
+        save_and_test_tool = self.toolruntime._tool_table.get("save_and_test")
+        if save_and_test_tool:
+            save_and_test_tool.set_context(context)
+            self._save_and_test_context = context
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
@@ -220,12 +253,23 @@ class DefaultAgent:
             except NonTerminatingException as e:
                 self.add_message("user", str(e))
             except TerminatingException as e:
-                self.add_message("user", str(e))
+                e_type = type(e)
+                e_msg = str(e)
+                self.add_message("user", e_msg)
+                if e_type is LimitsExceeded and getattr(self.config, "summary_on_cost_limit", False):
+                    self.add_message("user", self.config.summary_on_limit_prompt)
+                    self._allow_one_summary_step = True
+                    try:
+                        self.step()
+                    except (TerminatingException, NonTerminatingException):
+                        pass
+                    finally:
+                        self._allow_one_summary_step = False
                 self._run_select_patch_agent()
-                return type(e).__name__, str(e)
+                return e_type.__name__, e_msg
             finally:
                 self._save_traj()
-    
+
     def _save_traj(self):
         """Incrementally append new messages to `traj.json` (JSONL style).
 
@@ -269,8 +313,12 @@ class DefaultAgent:
 
     def query(self) -> dict:
         """Query the model and return the response."""
-        if 0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost:
+        if not self._allow_one_summary_step and (
+            0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost
+        ):
             raise LimitsExceeded()
+        if self._allow_one_summary_step:
+            self._allow_one_summary_step = False
         response = self.model.query(self.messages)
         output = response["content"]
         # Include tool_calls in assistant message when the model requests a tool call
@@ -296,7 +344,8 @@ class DefaultAgent:
             result_content = json.dumps(output) if isinstance(output, dict) else str(output)
             result_content = truncate_observation(result_content)
             self.add_message(
-                "tool", result_content,
+                "tool",
+                result_content,
                 tool_call_id=tool_info.get("id", ""),
                 name=tool_info["function"]["name"],
             )
@@ -306,9 +355,7 @@ class DefaultAgent:
                 **output,
                 "output": truncate_observation(output.get("output", "")),
             }
-            observation = self.render_template(
-                self.config.action_observation_template, output=output_for_render
-            )
+            observation = self.render_template(self.config.action_observation_template, output=output_for_render)
             self.add_message("user", observation)
         return output
 
@@ -328,25 +375,23 @@ class DefaultAgent:
             return self.execute_action({"action": actions[0].strip(), **response})
         if response.get("tools"):
             from minisweagent.tools.submit import Submitted as ToolSubmitted
+
             try:
                 result = self.toolruntime.dispatch(tool_call=response["tools"]["function"])
                 self.has_finished(result)
             except ToolSubmitted as e:
                 raise Submitted(str(e))
             # Handle tool results (sync state, etc.)
-            result = self._handle_tool_result(result)
-            return result
+            return self._handle_tool_result(result)
         raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
-    
+
     def _handle_tool_result(self, result: dict) -> dict:
-        """Handle tool results. Submit tool raises Submitted, test_perf handles itself."""
-        # Sync test_perf context state back to agent
-        if hasattr(self, '_test_perf_context'):
-            self.patch_counter = self._test_perf_context.patch_counter
+        """Handle tool results. Submit tool raises Submitted, save_and_test handles itself."""
+        if hasattr(self, "_save_and_test_context"):
+            self.patch_counter = self._save_and_test_context.patch_counter
         return result
 
     def _run_select_patch_agent(self) -> None:
-        # Always try to run select patch agent if patch_output_dir is configured
         if not self.config.patch_output_dir:
             return
 
@@ -354,11 +399,17 @@ class DefaultAgent:
         if not base_patch_dir.exists():
             return
 
+        # Try deterministic benchmark parsing first -- avoids LLM cost
+        from minisweagent.benchmark_parsing import rewrite_best_results
+        det_result = rewrite_best_results(base_patch_dir)
+        if det_result:
+            return
+
+        # Fall back to LLM-based selection only if deterministic parsing failed
         try:
-            import yaml
-            from minisweagent.config import get_config_path
-            from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
             from minisweagent.agents.select_patch_agent import SelectPatchAgent
+            from minisweagent.config import load_agent_config
+            from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
 
             parallel_ids: list[int] = []
             for d in base_patch_dir.glob("parallel_*"):
@@ -368,9 +419,7 @@ class DefaultAgent:
                         parallel_ids.append(int(m.group(1)))
             num_parallel = (max(parallel_ids) + 1) if parallel_ids else 1
 
-            config_path = get_config_path("mini_select_patch")
-            config = yaml.safe_load(config_path.read_text())
-            agent_config = config.get("agent", {})
+            agent_config, _ = load_agent_config("mini_select_patch")
 
             env_config = LocalEnvironmentConfig(cwd=str(base_patch_dir))
             env = LocalEnvironment(**env_config.__dict__)
@@ -380,8 +429,10 @@ class DefaultAgent:
             task = select_agent.setup_selection_task(base_patch_dir, num_parallel, self.config.metric)
             if task:
                 select_agent.run(task, _skip_select_patch=True)
+
+            # Final deterministic override as safety net
+            rewrite_best_results(base_patch_dir)
         except Exception:
-            # Best-effort: selection should not block returning the agent's final output.
             return
 
     def execute_action(self, action: dict) -> dict:
@@ -395,7 +446,7 @@ class DefaultAgent:
         except TimeoutError:
             raise ExecutionTimeoutError(self.render_template(self.config.timeout_template, action=action, output=""))
         self.has_finished(output)
-        
+
         return output
 
     def has_finished(self, output: dict[str, str]):
@@ -404,9 +455,9 @@ class DefaultAgent:
         lines = output.get("output", "").lstrip().splitlines(keepends=True)
         if lines and lines[0].strip() in ["MINI_SWE_AGENT_FINAL_OUTPUT", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]:
             raise Submitted("".join(lines[1:]))
-    
+
     # ============ Logging ============
-    
+
     def _log_message(self, message: str):
         """Log a message to log file or console."""
         if self.log_file:

@@ -24,3 +24,17 @@ model:
     # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
     text:
       verbosity: low
+
+# Tool configuration for GEAK
+# All tools are enabled; MCP tools use MCPToolBridge (lazy start)
+tools:
+  profiling: false
+  profiling_type: profiling
+  strategy_manager: true
+  # MCP tools (registered via MCPToolBridge in ToolRuntime)
+  # profile_kernel: unified profiler (metrix + rocprof-compute)
+  # generate_optimization: kernel-evolve MCP
+  # evaluate_kernel_quality: kernel-ercs MCP
+  # reflect_on_kernel_result: kernel-ercs MCP
+  # Native tools (always registered)
+  # resolve_kernel_url, baseline_metrics, check_kernel_compatibility, sub_agent

@@ -1,0 +1,55 @@
+---
+description: Python coding standards enforced by ruff. Run ruff check --fix before committing.
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Python Standards (ruff)
+
+This project uses ruff for linting and formatting. Config is in `pyproject.toml` under `[tool.ruff]`.
+
+## Before committing Python files
+
+Always run:
+```bash
+ruff check --fix <changed_files>
+ruff format <changed_files>
+```
+
+## Key rules enforced
+
+- **Python 3.10+ syntax**: Use `X | None` not `Optional[X]`, use `list` not `List`, use `dict` not `Dict`
+- **Imports**: Use `isort`-style ordering (stdlib, third-party, local). Remove unused imports.
+- **Paths**: Prefer `pathlib.Path` over `os.path` functions
+- **f-strings**: No nested quotes matching the outer quote (Python 3.10 compat). Use single quotes inside f-string braces when the f-string uses double quotes.
+
+```python
+# BAD (breaks Python 3.10)
+f"value: {data["key"]}"
+
+# GOOD
+f"value: {data['key']}"
+```
+
+- **Type annotations**: Use modern syntax
+
+```python
+# BAD
+from typing import Dict, List, Optional, Union
+def foo(x: Optional[Union[str, List[str]]]) -> Dict[str, Any]: ...
+
+# GOOD
+from typing import Any
+def foo(x: str | list[str] | None = None) -> dict[str, Any]: ...
+```
+
+## Testing in container
+
+The project runs on Python 3.10 inside Docker (`geak-agent-sdubagun`). Git operations run outside Docker, scripts/tests run inside:
+```bash
+# Outside docker: git, ruff
+ruff check --fix src/ mcp_tools/
+
+# Inside docker: pytest, scripts
+docker exec geak-agent-sdubagun python3 -m pytest tests/ -v
+```
