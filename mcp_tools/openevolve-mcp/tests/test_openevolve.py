@@ -21,9 +21,19 @@ def _list_tool_names():
 
 class TestOpenEvolveMCPServer:
     def test_server_has_optimize_kernel(self):
+<<<<<<< HEAD
         assert "optimize_kernel" in _list_tool_names()
 
     def test_server_has_expected_tools(self):
         tool_names = _list_tool_names()
+=======
+        tools = asyncio.run(mcp.list_tools())
+        tool_names = [t.name for t in tools]
+        assert "optimize_kernel" in tool_names
+
+    def test_server_has_expected_tools(self):
+        tools = asyncio.run(mcp.list_tools())
+        tool_names = [t.name for t in tools]
+>>>>>>> d93af5f (wip: Update kernel-evolve and openevolve mcp tool tests)
         assert len(tool_names) >= 1
         assert "optimize_kernel" in tool_names

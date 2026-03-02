@@ -23,7 +23,12 @@ def _list_tool_names():
 
 class TestKernelEvolveServer:
     def test_server_has_expected_tools(self):
+<<<<<<< HEAD
         tool_names = _list_tool_names()
+=======
+        tools = asyncio.run(mcp.list_tools())
+        tool_names = [t.name for t in tools]
+>>>>>>> d93af5f (wip: Update kernel-evolve and openevolve mcp tool tests)
         expected = ["generate_optimization", "mutate_kernel", "crossover_kernels", "get_optimization_strategies"]
         for name in expected:
             assert name in tool_names, f"Missing tool: {name}"
@@ -37,4 +42,8 @@ class TestKernelEvolveServer:
 
     def test_get_strategies_invalid_type(self):
         result = get_optimization_strategies(bottleneck="invalid_type")
+<<<<<<< HEAD
+=======
+        # Should still return something (possibly empty or default)
+>>>>>>> d93af5f (wip: Update kernel-evolve and openevolve mcp tool tests)
         assert isinstance(result, dict)
