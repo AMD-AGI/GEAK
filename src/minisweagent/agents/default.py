@@ -47,6 +47,7 @@ class AgentConfig:
     strategy_file_path: str = ".optimization_strategies.md"
     profiling_type: str | None = None
     codebase_context: str | None = None
+    starting_patch: str | None = None
     # Interactive/exit behaviour (set by --exit-immediately)
     confirm_exit: bool = True
 
