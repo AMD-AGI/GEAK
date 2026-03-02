@@ -8,6 +8,7 @@ calls this; so does the ``run-tasks`` CLI indirectly.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 import re
@@ -15,6 +16,49 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# ── model ensemble support ───────────────────────────────────────────
+
+def _build_ensemble_factory(base_factory):
+    """Wrap *base_factory* to rotate through models in GEAK_MODEL_ENSEMBLE.
+
+    When ``GEAK_MODEL_ENSEMBLE`` is set (comma-separated model names), each
+    call to the returned factory creates an entirely new model instance with
+    the next name in the round-robin list.  Because ``AmdLlmModel`` selects
+    its vendor backend (OpenAI / Claude / Gemini) at construction time based
+    on the model name, we must create a fresh instance per call rather than
+    mutating an existing one.
+
+    If the env var is unset or empty, returns *base_factory* unchanged.
+    """
+    ensemble_str = os.environ.get("GEAK_MODEL_ENSEMBLE", "").strip()
+    if not ensemble_str:
+        return base_factory
+
+    model_names = [n.strip() for n in ensemble_str.split(",") if n.strip()]
+    if len(model_names) < 2:
+        return base_factory
+
+    logger.info("Model ensemble enabled: %s", model_names)
+    name_cycle = itertools.cycle(model_names)
+
+    def _ensemble_factory():
+        next_name = next(name_cycle)
+        try:
+            from minisweagent.models.amd_llm import AmdLlmModel
+            model = AmdLlmModel(model_name=next_name)
+            logger.info("Ensemble: created AmdLlmModel(%s)", next_name)
+            return model
+        except Exception:
+            logger.warning(
+                "Ensemble: failed to create model %s, falling back to base",
+                next_name,
+                exc_info=True,
+            )
+            return base_factory()
+
+    return _ensemble_factory
 
 
 def _read_commandment_section(commandment_path: str, section: str) -> str | None:
@@ -290,6 +334,8 @@ def run_task_batch(
             **{"cwd": str(repo_path.resolve()), "timeout": 3600, "env": base_env_vars}
         )
 
+    effective_model_factory = _build_ensemble_factory(model_factory)
+
     try:
         raw_results = ParallelAgent.run_parallel(
             num_parallel=len(gpu_ids),
@@ -298,7 +344,7 @@ def run_task_batch(
             task_content="",
             agent_class=tasks[0].agent_class if tasks else type(None),
             agent_config=agent_config,
-            model_factory=model_factory,
+            model_factory=effective_model_factory,
             env_factory=env_factory,
             base_patch_dir=results_dir,
             output=None,

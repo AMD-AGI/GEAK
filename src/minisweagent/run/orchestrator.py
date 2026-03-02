@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -131,6 +132,8 @@ Output directory: {output_dir}
 ### COMMANDMENT (rules for sub-agents)
 {commandment_excerpt}
 
+{memory_context}
+
 ---
 
 Begin by reading the kernel source and profiling data to understand the
@@ -188,32 +191,6 @@ def _tool_generate_tasks(
     if previous_results_dir:
         kwargs["previous_results_dir"] = Path(previous_results_dir)
 
-    # Auto-inject full round context when round_num > 1
-    if round_num > 1:
-        output_base = Path(ctx["output_dir"])
-
-        # a) ALL prior rounds' results
-        if not previous_results_dir:
-            results_base = output_base / "results"
-            if results_base.is_dir():
-                kwargs["previous_results_dir"] = results_base
-
-        # b) ALL prior rounds' tasks (what was planned)
-        tasks_base = output_base / "tasks"
-        if tasks_base.is_dir():
-            kwargs["previous_tasks_dir"] = tasks_base
-
-        # c) Orchestrator round evaluations (verified verdicts)
-        round_evals = []
-        for r in range(1, round_num):
-            rev = ctx.get(f"round_{r}_eval")
-            if rev:
-                round_evals.append(rev)
-        if round_evals:
-            kwargs["round_evaluations"] = round_evals
-
-        kwargs["current_round"] = round_num
-
     try:
         tasks = _gen(**kwargs)
     except RuntimeError as exc:
@@ -258,7 +235,6 @@ def _tool_generate_tasks(
             "benchmark_baseline": str(pp_dir / "benchmark_baseline.txt"),
             "num_gpus": t.num_gpus,
             "round": round_num,
-            "starting_patch": ctx.get("starting_patch"),
         }
         write_task_file(fpath, metadata, t.task, relative_to=fpath.parent)
         task_files.append(str(fpath))
@@ -403,12 +379,9 @@ def _tool_finalize(
                         try:
                             br = json.loads(br_file.read_text())
                             speedup = float(br.get("best_patch_speedup", 0))
-                            pf = br.get("best_patch_file")
-                            if pf and Path(pf).exists() and Path(pf).stat().st_size == 0:
-                                continue
                             if speedup > best_speedup_val:
                                 best_speedup_val = speedup
-                                best_patch_file = pf
+                                best_patch_file = br.get("best_patch_file")
                         except (json.JSONDecodeError, ValueError, TypeError):
                             continue
         
@@ -426,6 +399,29 @@ def _tool_finalize(
 
     report_path = output_dir / "final_report.json"
     report_path.write_text(json.dumps(report, indent=2))
+
+    try:
+        from minisweagent.memory.integration import record_optimization_outcome
+        from minisweagent.memory.cross_session_memory import classify_kernel_category
+        speedup_val = 1.0
+        if total_speedup:
+            _sp_match = re.search(r"([\d.]+)", str(total_speedup))
+            if _sp_match:
+                speedup_val = float(_sp_match.group(1))
+        _bm = ctx.get("baseline_metrics") or {}
+        _kpath = ctx.get("kernel_path", "")
+        _kcat = classify_kernel_category(_kpath) if _kpath else "unknown"
+        record_optimization_outcome(
+            kernel_path=_kpath,
+            kernel_category=_kcat,
+            bottleneck_type=_bm.get("bottleneck", "unknown"),
+            strategy_name=summary[:100] if summary else "",
+            speedup_achieved=speedup_val,
+            success=speedup_val > 1.0,
+            failure_reason=None if speedup_val > 1.0 else "no_improvement",
+        )
+    except Exception as _rec_exc:
+        logger.debug("Memory outcome recording failed: %s", _rec_exc)
 
     return json.dumps(report)
 
@@ -469,9 +465,6 @@ def _auto_finalize(
                 try:
                     br = json.loads(br_file.read_text())
                     speedup = float(br.get("best_patch_speedup", 0))
-                    pf = br.get("best_patch_file")
-                    if pf and Path(pf).exists() and Path(pf).stat().st_size == 0:
-                        continue
                     if speedup > best_speedup:
                         best_speedup = speedup
                         best_overall = br
@@ -496,13 +489,23 @@ def _auto_finalize(
     else:
         summary_text = "No results found across any round."
 
+    _patch_file = best_overall.get("best_patch_file") if best_overall else None
+    _patch_sz = -1
+    if _patch_file and Path(_patch_file).is_file():
+        _patch_sz = Path(_patch_file).stat().st_size
+        if _patch_sz == 0:
+            best_speedup = 1.0
+            logger.warning("Auto-finalize: empty patch (0 bytes), clamping speedup to 1.0")
+
     report = {
         "status": "auto_finalized",
         "summary": summary_text,
         "best_round": best_round,
         "best_task": best_task,
         "best_speedup": best_speedup,
-        "best_patch": best_overall.get("best_patch_file") if best_overall else None,
+        "best_speedup_verified": best_speedup,
+        "best_patch": _patch_file,
+        "best_patch_size_bytes": _patch_sz,
         "best_patch_analysis": best_overall.get("llm_selection_analysis") if best_overall else None,
         "round_summaries": round_summaries,
     }
@@ -511,6 +514,28 @@ def _auto_finalize(
     report_path.write_text(json.dumps(report, indent=2))
     _print(f"Auto-finalized: {summary_text}")
     _print(f"Report written to: {report_path}")
+
+    try:
+        from minisweagent.memory.integration import record_optimization_outcome
+        from minisweagent.memory.cross_session_memory import classify_kernel_category
+        _kpath = ctx.get("kernel_path", "")
+        _kcat = classify_kernel_category(_kpath) if _kpath else "unknown"
+        _bm = ctx.get("baseline_metrics") or {}
+        record_optimization_outcome(
+            kernel_path=_kpath,
+            kernel_category=_kcat,
+            bottleneck_type=_bm.get("bottleneck", "unknown"),
+            strategy_name=summary_text[:100],
+            speedup_achieved=best_speedup,
+            success=best_speedup > 1.0,
+            failure_reason=None if best_speedup > 1.0 else "no_improvement",
+            optimization_technique=summary_text[:200],
+            kernel_language=_bm.get("kernel_language", ""),
+            patch_size_bytes=_patch_sz,
+            profiling_metrics=_bm,
+        )
+    except Exception as _rec_exc:
+        logger.debug("Auto-finalize memory recording failed: %s", _rec_exc)
 
     return report
 
@@ -682,10 +707,6 @@ def _evaluate_round_best(
             speedup = float(br.get("best_patch_speedup", 0))
             patch_file = br.get("best_patch_file")
             if not patch_file or speedup <= 0:
-                continue
-
-            patch_path = Path(patch_file)
-            if patch_path.exists() and patch_path.stat().st_size == 0:
                 continue
 
             # Try to get absolute kernel time from the test output
@@ -1230,7 +1251,7 @@ def run_orchestrator(
     output_dir:
         Override output directory (defaults to preprocess_ctx source).
     max_rounds:
-        Maximum optimisation rounds (default: from GEAK_MAX_ROUNDS env or 2).
+        Maximum optimisation rounds (default: from GEAK_MAX_ROUNDS env or 5).
         Each round = generate_tasks → dispatch_tasks → collect_results.
     start_round:
         Round number to start from (1-based, default 1).  When > 1 the
@@ -1248,7 +1269,7 @@ def run_orchestrator(
     _out = Path(_out)
     _out.mkdir(parents=True, exist_ok=True)
 
-    max_rounds = max_rounds or int(os.getenv("GEAK_MAX_ROUNDS", "2"))
+    max_rounds = max_rounds or int(os.getenv("GEAK_MAX_ROUNDS", "5"))
 
     def _print(msg: str) -> None:
         if console:
@@ -1320,6 +1341,20 @@ def run_orchestrator(
     if _codebase_ctx_path.exists():
         codebase_ctx = _codebase_ctx_path.read_text().strip()
 
+    _memory_context = ""
+    try:
+        from minisweagent.memory.integration import assemble_memory_context
+        _bm = preprocess_ctx.get("baseline_metrics") or {}
+        _memory_context = assemble_memory_context(
+            kernel_path=str(preprocess_ctx.get("kernel_path", "")),
+            bottleneck_type=_bm.get("bottleneck"),
+            profiling_metrics=_bm,
+        )
+        if _memory_context:
+            _memory_context = "### Optimization Memory (from past runs)\n" + _memory_context
+    except Exception as _mem_exc:
+        logger.debug("Memory context assembly failed: %s", _mem_exc)
+
     # Build messages
     instance_msg = _INSTANCE_TEMPLATE.format(
         kernel_path=str(preprocess_ctx.get("kernel_path", "N/A")),
@@ -1331,6 +1366,7 @@ def run_orchestrator(
         baseline_metrics_summary=bm_summary,
         profiling_summary=prof_summary,
         commandment_excerpt=cmd_excerpt,
+        memory_context=_memory_context,
     )
 
     start_label = (
@@ -1428,16 +1464,6 @@ def run_orchestrator(
             )
             if round_eval:
                 ctx[f"round_{round_num}_eval"] = round_eval
-                # Track globally best patch across all rounds
-                if round_eval.get("best_patch"):
-                    current_speedup_val = (
-                        round_eval.get("full_benchmark", {}).get("verified_speedup")
-                        or round_eval.get("benchmark_speedup", 0)
-                    )
-                    best_global_speedup = ctx.get("_best_global_speedup", 0)
-                    if current_speedup_val >= best_global_speedup:
-                        ctx["starting_patch"] = round_eval["best_patch"]
-                        ctx["_best_global_speedup"] = current_speedup_val
                 # Feed evaluation into next round's context
                 eval_summary = json.dumps(round_eval, indent=2, default=str)[:2000]
                 messages.append({
@@ -1449,30 +1475,6 @@ def run_orchestrator(
                         "Use this data to inform your next-round strategy."
                     ),
                 })
-
-            # Early stopping: if this round didn't improve over prior best
-            early_stop_threshold = float(os.getenv("GEAK_EARLY_STOP_THRESHOLD", "0.005"))
-            if round_eval and round_num >= 2:
-                current_speedup = (
-                    round_eval.get("full_benchmark", {}).get("verified_speedup")
-                    or round_eval.get("benchmark_speedup", 1.0)
-                )
-                prior_speedups = []
-                for r in range(1, round_num):
-                    rev = ctx.get(f"round_{r}_eval", {})
-                    s = (
-                        rev.get("full_benchmark", {}).get("verified_speedup")
-                        or rev.get("benchmark_speedup", 1.0)
-                    )
-                    prior_speedups.append(s)
-                best_prior = max(prior_speedups) if prior_speedups else 1.0
-                if current_speedup <= best_prior * (1 + early_stop_threshold):
-                    _print(
-                        f"  Early stopping: round {round_num} ({current_speedup:.4f}x) "
-                        f"did not improve over prior best ({best_prior:.4f}x) "
-                        f"by threshold {early_stop_threshold}"
-                    )
-                    break
 
             if finalize_result is not None:
                 # Use last round eval as final report
@@ -1616,7 +1618,7 @@ def main() -> None:
         "--max-rounds",
         type=int,
         default=None,
-        help="Maximum optimisation rounds (default: GEAK_MAX_ROUNDS env or 2)",
+        help="Maximum optimisation rounds (default: GEAK_MAX_ROUNDS env or 5)",
     )
     parser.add_argument(
         "--start-round",

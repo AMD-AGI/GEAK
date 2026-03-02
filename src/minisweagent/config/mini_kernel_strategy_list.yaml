@@ -13,6 +13,28 @@ agent:
     - Always validate correctness with tests before and after optimization
     - Measure performance with appropriate benchmarks
 
+    <kernel_first_rule>
+    KERNEL-FIRST RULE: You MUST modify the actual GPU kernel code -- the
+    `@triton.jit` decorated function, the HIP `__device__`/`__global__`
+    function, or the CK/ASM kernel body.  Changes that ONLY affect Python
+    wrappers, launch configurations, or PyTorch dispatch (e.g. changing
+    `num_warps`, swapping `matmul` for `mm`, changing `repeat_interleave`
+    to `expand`) are LOW VALUE.  Focus on:
+    - Different algorithms for the same computation (different reduction
+      tree, different scan, split-K, multi-pass, etc.)
+    - Memory access pattern changes INSIDE the kernel (coalesced loads,
+      vectorized float4/float2, LDS staging, register blocking)
+    - Computation restructuring INSIDE the kernel (loop reordering,
+      operation fusion, software pipelining, predication removal)
+    - Register pressure optimization (recompute vs store tradeoffs,
+      reducing live variable count)
+    These kernels may already be well-optimized by humans.  Your job is to
+    find improvements anyway.  Try genuinely novel approaches -- the agent
+    exists specifically to explore optimizations humans have not tried.  Do
+    NOT give up after a few failed attempts; keep trying different
+    algorithmic directions.
+    </kernel_first_rule>
+
     <mandatory_rules>
     MANDATORY: You MUST use the `save_and_test` tool (not bash) to measure performance after EVERY optimization attempt.
     - `save_and_test` is the ONLY way to save patches and record results. If you benchmark with bash instead, your results will NOT be saved, patches will NOT be recorded, and the final evaluation will have nothing to compare.
@@ -32,7 +54,17 @@ agent:
     
     RECOMMENDED for complex optimizations:
     1. Establish baseline performance first (measure before optimizing)
-    2. Identify 3-5 potential optimization strategies (e.g., memory coalescing, vectorization, shared memory, loop unrolling)
+    2. Identify 3-5 potential optimization strategies that target the
+       GPU KERNEL BODY (the @triton.jit function, HIP __global__
+       function, or CK template).  Examples of kernel-body strategies:
+       - Restructure the reduction to use a different tree shape
+       - Add vectorized float4 loads to increase memory throughput
+       - Stage data through LDS to improve coalescing
+       - Fuse adjacent elementwise ops into the main kernel loop
+       - Reorder the K-dimension loop for better software pipelining
+       - Use tl.constexpr aggressively to enable compile-time optimizations
+       Do NOT list wrapper-only strategies (num_warps, BLOCK_SIZE,
+       mm vs matmul) as your primary approaches.
     3. Use `strategy_manager` tool with command "next" to get the next recommended strategy (automatically prioritizes HIGH PRIORITY ones)
     4. Try strategies one at a time, measure impact. 
     5. Keep successful optimizations, revert failures

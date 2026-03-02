@@ -99,12 +99,34 @@ optimization approach, then submit your task list as JSON via the
    AMD compatibility), `specs` (AMD MI350X specs). Instruct the
    strategy_agent to use kernel-ercs for quality assessment and reflection.
 
+## PRIORITY DIRECTIVE -- KERNEL ALGORITHMIC IMPROVEMENT IS THE PRIMARY GOAL
+
+Your PRIMARY goal is **algorithmic improvement of the GPU kernel body** --
+the `@triton.jit` functions, HIP `__global__` / `__device__` kernels, CK
+template bodies, or ASM routines.  This means changing *how the computation
+is performed*: different tiling strategies, different reduction algorithms,
+fused operations, restructured memory access patterns, alternative scan /
+sort / attention algorithms -- all **inside** the kernel body itself.
+
+**Wrapper changes are LOW priority**: Launch config tuning (`num_warps`,
+`BLOCK_SIZE`), Python dispatch changes (`matmul` -> `mm`), import routing
+changes (`aiter` bypass), and `repeat_interleave` -> `expand` style wrapper
+fixes are acceptable ONLY after exhausting kernel-body approaches.  Assign
+wrapper-only tasks priority 15.
+
+**Do NOT give up**: Even if the kernel looks well-optimized by human experts,
+you MUST attempt novel algorithmic improvements.  The entire purpose of this
+agent is to discover improvements that humans missed.  Generate at least 3-5
+genuinely different *algorithmic* approaches per kernel -- not 3-5 variations
+of launch config parameters.
+
 ## Task priority scheme (lower number = higher priority = runs first)
 
 - 0: OpenEvolve on inner kernel (highest impact, automated)
-- 5: Kernel fusion, advanced language-specific tuning
-- 10: Targeted optimizations (autotune, memory, launch config)
-- 15: Profile-guided generic optimization (fallback)
+- 3: Novel algorithmic kernel rewrites (different algorithm, fused ops, different tiling)
+- 5: Kernel-body memory access restructuring, computation reordering, LDS optimization
+- 10: Autotune configs, parameter search (kernel-level but not algorithmic)
+- 15: Wrapper/launch-config/dispatch-only changes (lowest priority)
 
 ## Your analysis process
 
@@ -124,8 +146,10 @@ optimization approach, then submit your task list as JSON via the
    - Concrete strategies from the knowledge base
    - Which agent/tool to use (and specific tool commands if applicable)
    - Expected impact
-7. Consider: OpenEvolve for parameter tuning, kernel fusion for reducing
-   launch overhead, elimination of unnecessary framework kernels.
+7. Prioritize tasks that modify the GPU kernel body code.  Wrapper-only
+   changes (Python-level dispatch, launch config, PyTorch API swaps) must
+   be assigned priority 15 and should only appear after at least 3
+   kernel-body algorithmic tasks have been generated.
 8. If prior round results or tasks are provided, do NOT re-generate tasks
    for strategies that already appeared in prior rounds, regardless of
    whether they succeeded or failed. Focus on genuinely new approaches or
@@ -154,7 +178,12 @@ parameter containing a JSON array of task objects. Each task has:
 test file, or test command. The test harness is the evaluation contract --
 it defines correctness and must remain unchanged. Tasks like "test harness
 optimization", "test improvement", or "benchmark refactoring" are INVALID.
-Only generate tasks that optimize the *kernel* code itself.
+
+**REQUIRED focus**: Tasks MUST target the GPU kernel body -- the `@triton.jit`
+function, the HIP `__global__` kernel, the CK template, or the ASM routine.
+The agent should change the *algorithm* or *implementation* inside the kernel.
+Wrapper-level changes (Python dispatch, launch config knobs, PyTorch API
+swaps) are low-value and must not dominate the task list.
 
 **Path deduplication**: The task file metadata already stores kernel_path,
 commandment, baseline_metrics, and profiling paths. Do NOT repeat these

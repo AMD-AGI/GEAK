@@ -26,9 +26,9 @@ REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-b
 
 MAX_HARNESS_RETRIES = 2
 
-DEFAULT_EVAL_BENCHMARK_ITERATIONS = 50
-
 DEFAULT_AGENT_BENCHMARK_ITERATIONS = int(os.getenv("GEAK_AGENT_BENCHMARK_ITERATIONS", "10"))
+
+DEFAULT_EVAL_BENCHMARK_ITERATIONS = DEFAULT_AGENT_BENCHMARK_ITERATIONS
 
 
 # ── agent filtering ──────────────────────────────────────────────────
@@ -380,6 +380,136 @@ def create_validated_harness(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+# ── bottleneck-specific optimization guidance ────────────────────────
+
+_BOTTLENECK_GUIDANCE: dict[str, str] = {
+    "balanced": (
+        "## Optimization Guidance (bottleneck: balanced)\n"
+        '"Balanced" means no single resource is saturated. Actionable kernel-body approaches:\n'
+        "1. INCREASE ARITHMETIC INTENSITY: Fuse adjacent operations into the kernel loop "
+        "so more compute happens per memory access.\n"
+        "2. REDUCE MEMORY TRAFFIC: Cache intermediate results in registers or LDS "
+        "instead of reading/writing global memory.\n"
+        "3. IMPROVE PARALLELISM: Restructure loops to expose more independent work per "
+        "wavefront; consider split-K or multi-pass approaches.\n"
+        "4. ALTERNATIVE ALGORITHMS: Try a fundamentally different algorithm for the same "
+        "computation (different reduction tree, different scan, tiled vs non-tiled, etc.).\n"
+        "5. COMPILER GUIDANCE: Restructure Triton/HIP code to help the compiler generate "
+        "better ISA -- avoid tl.where in hot loops, use tl.constexpr aggressively, "
+        "minimize live variables across tl.dot calls.\n"
+    ),
+    "memory-bound": (
+        "## Optimization Guidance (bottleneck: memory-bound)\n"
+        "The kernel is limited by memory bandwidth. Focus on kernel-body changes:\n"
+        "1. VECTORIZED LOADS: Use float4/float2 vector loads to maximize HBM throughput.\n"
+        "2. COALESCED ACCESS: Ensure adjacent threads access adjacent memory addresses.\n"
+        "3. LDS STAGING: Stage global memory reads through LDS to improve access patterns.\n"
+        "4. REDUCE DATA MOVEMENT: Recompute values instead of storing and reloading them.\n"
+        "5. OPERATION FUSION: Fuse the memory-bound kernel with adjacent elementwise ops "
+        "to amortize memory access cost over more computation.\n"
+        "6. TILING / BLOCKING: Increase tile sizes to improve data reuse from L2 cache.\n"
+    ),
+    "compute-bound": (
+        "## Optimization Guidance (bottleneck: compute-bound)\n"
+        "The kernel is limited by arithmetic throughput. Focus on kernel-body changes:\n"
+        "1. REDUCE INSTRUCTION COUNT: Simplify expressions, use hardware intrinsics "
+        "(tl.math.rsqrt, fma), eliminate redundant computations.\n"
+        "2. USE MFMA INSTRUCTIONS: On AMD GPUs, restructure computation to use Matrix "
+        "Fused Multiply-Add for dense linear algebra.\n"
+        "3. STRENGTH REDUCTION: Replace expensive ops (div, mod, pow) with cheaper "
+        "equivalents (shifts, masks, lookup tables).\n"
+        "4. LOOP UNROLLING: Manually unroll inner loops to help the compiler schedule "
+        "instructions more aggressively.\n"
+        "5. ALGORITHM CHANGE: Switch to an algorithm with lower computational complexity "
+        "(e.g., O(n log n) vs O(n^2), approximate methods).\n"
+    ),
+    "latency-bound": (
+        "## Optimization Guidance (bottleneck: latency-bound)\n"
+        "The kernel is too short to saturate any resource. Focus on kernel-body changes:\n"
+        "1. INCREASE WORK PER KERNEL: Process more elements per thread or per block "
+        "to amortize kernel launch overhead.\n"
+        "2. FUSE KERNELS: Merge this kernel with adjacent ones to eliminate launch gaps.\n"
+        "3. PERSISTENT KERNEL: Convert to a persistent kernel pattern that stays resident "
+        "and processes multiple tiles without relaunching.\n"
+        "4. INCREASE BLOCK SIZE: Use larger thread blocks to improve GPU occupancy for "
+        "this short-running kernel.\n"
+    ),
+    "lds-bound": (
+        "## Optimization Guidance (bottleneck: lds-bound)\n"
+        "The kernel is limited by LDS (Local Data Share) bandwidth or capacity.\n"
+        "1. REDUCE LDS BANK CONFLICTS: Pad shared memory arrays to avoid stride-32 "
+        "access patterns (on AMD: 32 banks, 4 bytes each).\n"
+        "2. REDUCE LDS USAGE: Move data from LDS to registers where possible to free "
+        "LDS capacity and improve occupancy.\n"
+        "3. OPTIMIZE LDS ACCESS PATTERN: Restructure loops so that LDS reads/writes "
+        "are coalesced within each wavefront.\n"
+        "4. SPLIT COMPUTATION: Break the kernel into phases that use LDS at different "
+        "times to reduce peak LDS pressure.\n"
+    ),
+}
+
+
+def _bottleneck_guidance(bottleneck: str, metrics: dict) -> list[str]:
+    """Return actionable optimization guidance lines based on bottleneck type."""
+    bn_lower = bottleneck.lower().strip()
+    for key, text in _BOTTLENECK_GUIDANCE.items():
+        if key in bn_lower:
+            lines = text.strip().splitlines()
+            lines.append("")
+            return lines
+
+    lines = _BOTTLENECK_GUIDANCE["balanced"].strip().splitlines()
+    lines.append("")
+    return lines
+
+
+# ── GPU architecture context from profiling data ─────────────────────
+
+def _gpu_arch_context(profiling_path: str) -> list[str]:
+    """Extract GPU architecture info from profile.json and format it."""
+    import json as _json
+
+    try:
+        data = _json.loads(Path(profiling_path).read_text())
+    except Exception:
+        return []
+
+    results = data.get("results", [])
+    if not results:
+        return []
+
+    gpu_info = results[0].get("gpu_info", {}) if isinstance(results[0], dict) else {}
+    if not gpu_info:
+        for r in results:
+            if isinstance(r, dict) and r.get("gpu_info"):
+                gpu_info = r["gpu_info"]
+                break
+
+    if not gpu_info:
+        return []
+
+    arch = gpu_info.get("architecture", gpu_info.get("gfx_version", "unknown"))
+    name = gpu_info.get("name", gpu_info.get("model", "AMD GPU"))
+    cus = gpu_info.get("compute_units", "?")
+    hbm_bw = gpu_info.get("peak_hbm_bandwidth_gbps", gpu_info.get("hbm_bandwidth", "?"))
+    lds_per_cu = gpu_info.get("lds_per_cu_kb", 64)
+    vgprs = gpu_info.get("vgprs_per_cu", 512)
+
+    lines = [
+        f"## GPU Architecture: {name} ({arch})",
+        f"- Architecture: {arch}",
+        f"- Compute Units: {cus}",
+        f"- Peak HBM bandwidth: {hbm_bw} GB/s",
+        f"- LDS per CU: {lds_per_cu} KB (32 banks on gfx9xx)",
+        f"- VGPRs per CU: {vgprs}",
+        "- Wavefront size: 64 (AMD default), some kernels can use 32",
+        "- MFMA (Matrix Fused Multiply-Add) instructions available for dense math",
+        f"- Use these specs to guide your kernel optimizations (tile sizes, occupancy, LDS usage).",
+        "",
+    ]
+    return lines
+
+
 # ── pipeline context injection ───────────────────────────────────────
 
 
@@ -449,10 +579,14 @@ def inject_pipeline_context(
                 )
         ctx.append("")
 
+        ctx.extend(_bottleneck_guidance(str(bn), baseline_metrics))
+
     if profiling_path and Path(profiling_path).exists():
         ctx.append(f"PROFILING DATA: {profiling_path}")
         ctx.append("(Read this file for detailed per-kernel profiling metrics)")
         ctx.append("")
+
+        ctx.extend(_gpu_arch_context(profiling_path))
 
     if benchmark_baseline:
         ctx.append("## Benchmark Baseline (compare your save_and_test output against this)")
