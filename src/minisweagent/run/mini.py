@@ -239,8 +239,8 @@ def main(
     excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS.", rich_help_panel="Advanced"),
     heterogeneous: bool = typer.Option(False, "--heterogeneous", help="Use LLM-generated diverse optimization tasks (requires preprocessing/discovery). Default: homogeneous.", rich_help_panel="Advanced"),
     from_task: Path | None = typer.Option(None, "--from-task", help="Deprecated: use --task with a YAML-frontmatter .md file instead.", hidden=True),
-    mcp: bool = typer.Option(False, "--mcp", help="Enable MCP integration (AMD AI DevTool)"),
-    debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --mcp)"),
+    rag: bool = typer.Option(False, "--rag", help="Enable RAG retrieval from AMD/NVIDIA knowledge base"),
+    debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --rag)"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
@@ -505,13 +505,13 @@ def main(
     model = get_model(model_name, config.get("model", {}))
 
     _env_kwargs = config.get("env", {})
-    if mcp:
+    if rag:
         try:
             from minisweagent.mcp_integration.mcp_environment import MCPEnabledEnvironment
             from minisweagent.mcp_integration.prompts import INSTANCE_TEMPLATE, SYSTEM_TEMPLATE
             from minisweagent.mcp_integration.run_agent import DebugMCPEnvironment
         except ImportError as e:
-            console.print("[red]Error: MCP integration requires langchain dependencies. Run: pip install -e '.[langchain]'[/red]")
+            console.print("[red]Error: RAG retrieval requires langchain dependencies. Run: pip install -e '.[langchain]'[/red]")
             console.print(f"[red]Import error: {e}[/red]")
             raise typer.Exit(1)
 
@@ -523,7 +523,7 @@ def main(
 
         config.setdefault("agent", {})["system_template"] = SYSTEM_TEMPLATE
         config.setdefault("agent", {})["instance_template"] = INSTANCE_TEMPLATE
-        console.print("[bold green]MCP integration enabled[/bold green]")
+        console.print("[bold green]RAG knowledge retrieval enabled[/bold green]")
     else:
         env = LocalEnvironment(**_env_kwargs)
 
@@ -830,7 +830,7 @@ def main(
             save_traj_fn=save_traj,
             console=console,
             model_factory=lambda: get_model(model_name, config.get("model", {})),
-            env_factory=lambda _repo=repo: (MCPEnabledEnvironment if mcp else LocalEnvironment)(
+            env_factory=lambda _repo=repo: (MCPEnabledEnvironment if rag else LocalEnvironment)(
                 **{**copy.deepcopy(_env_kwargs), **({"cwd": str(Path(_repo).resolve())} if _repo else {})}
             ),
         )

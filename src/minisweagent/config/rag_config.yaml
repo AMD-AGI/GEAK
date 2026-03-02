@@ -1,23 +1,23 @@
 # RAG Pipeline Configuration
-# 用于消融实验的参数配置
+# Configuration for ablation experiments
 
 retrieval:
-  embed_top_k: 25          # Embedding 检索候选数
-  bm25_top_k: 25           # BM25 检索候选数
-  enable_bm25: true        # 是否启用 BM25 双路召回
-  mcp_top_k: 8             # 最终返回结果数
+  embed_top_k: 25          # Number of embedding retrieval candidates
+  bm25_top_k: 25           # Number of BM25 retrieval candidates
+  enable_bm25: true        # Enable BM25 dual-path recall
+  mcp_top_k: 8             # Number of final results returned
 
 reranker:
-  enable_reranker: true    # 是否启用精排
+  enable_reranker: true    # Enable reranker
 
 fusion:
-  rrf_k: 60                # RRF 融合常数
-  semantic_weight: 0.7     # Embedding 权重
-  bm25_weight: 0.3         # BM25 权重
+  rrf_k: 60                # RRF fusion constant
+  semantic_weight: 0.7     # Embedding weight
+  bm25_weight: 0.3         # BM25 weight
 
 summary:
-  enable_rag_subagent: true           # 是否启用 LLM 总结
+  enable_rag_subagent: true           # Enable LLM summarization
   rag_subagent_model: "claude-opus-4.5"
 
 debug:
-  verbose: false           # 是否打印 MCP 工具详细日志
+  verbose: false           # Print verbose RAG tool logs

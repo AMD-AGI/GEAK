@@ -1,5 +1,5 @@
 """
-Run mini-swe-agent with MCP integration.
+Run mini-swe-agent with RAG integration.
 Reads configuration from mini.yaml automatically.
 DEBUG VERSION - prints detailed info at each step.
 """
@@ -24,13 +24,13 @@ CONFIG_PATH = Path(__file__).parent.parent / "config" / "mini.yaml"
 
 @dataclass
 class MCPAgentConfig(AgentConfig):
-    """Agent configuration with MCP-aware prompts."""
+    """Agent configuration with RAG-aware prompts."""
     system_template: str = SYSTEM_TEMPLATE
     instance_template: str = INSTANCE_TEMPLATE
 
 
 class DebugMCPEnvironment(MCPEnabledEnvironment):
-    """MCP Environment with debug output."""
+    """RAG Environment with debug output."""
     
     def execute(self, command: str, cwd: str = "", *, timeout: int | None = None):
         print(f"\n{'='*60}")
@@ -39,11 +39,11 @@ class DebugMCPEnvironment(MCPEnabledEnvironment):
         print(command)
         print(f"{'='*60}")
         
-        # Check if it's MCP or bash
+        # Check if it's RAG or bash
         if command.strip().startswith(self.config.mcp_prefix):
-            print(f"✅ [ENV] This is an MCP command! Will route to MCP server.")
+            print(f"✅ [ENV] This is a RAG command! Will route to RAG retrieval.")
         else:
-            print(f"⚠️  [ENV] This is a BASH command, not MCP.")
+            print(f"⚠️  [ENV] This is a BASH command, not RAG.")
         
         result = super().execute(command, cwd, timeout=timeout)
         
@@ -107,7 +107,7 @@ def create_agent(
     config_path: Path = CONFIG_PATH,
     debug: bool = False,
 ) -> DefaultAgent:
-    """Create an MCP-enabled agent using mini.yaml configuration."""
+    """Create a RAG-enabled agent using mini.yaml configuration."""
     config = load_config(config_path)
     model_config = config.get("model", {})
     
@@ -125,7 +125,7 @@ def create_agent(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run mini-swe-agent with AMD AI DevTool MCP integration"
+        description="Run mini-swe-agent with AMD AI DevTool RAG integration"
     )
     parser.add_argument(
         "task",
@@ -193,7 +193,7 @@ def main():
         print(f"{'-'*60}")
     
     if args.interactive:
-        print("\n🚀 MCP-enabled mini-swe-agent (interactive mode)")
+        print("\n🚀 RAG-enabled mini-swe-agent (interactive mode)")
         if args.debug:
             print("🐛 DEBUG MODE ENABLED")
         print("Type 'quit' to exit\n")

@@ -42,6 +42,19 @@ DEFAULT_OUTPUT_PATH = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-inde
 DEFAULT_MODEL = "BAAI/bge-large-en-v1.5"
 
 
+def _resolve_embedding_device(device: str) -> str:
+    """Resolve embedding device: 'auto' -> cuda if available else cpu; otherwise use as-is."""
+    if device != "auto":
+        return device
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+    except ImportError:
+        pass
+    return "cpu"
+
+
 # =============================================================================
 # Document Type Detection & Splitter Configuration
 # =============================================================================
@@ -119,7 +132,7 @@ def get_markdown_splitter(config: SplitterConfig) -> Callable[[Document], list[D
     
     markdown_splitter = MarkdownHeaderTextSplitter(
         headers_to_split_on=headers_to_split_on,
-        strip_headers=True,  # 不保留 header，后续统一添加完整 header 链
+        strip_headers=True,  # Strip headers; full header chain is prepended later
     )
     
     # Secondary splitter for large sections
@@ -137,7 +150,7 @@ def get_markdown_splitter(config: SplitterConfig) -> Callable[[Document], list[D
         for split in header_splits:
             chunk_metadata = {**doc.metadata}
             
-            # 构建完整的 header 层级链
+            # Build full header hierarchy chain
             header_prefix = ""
             for level in ["header_1", "header_2", "header_3", "header_4"]:
                 if level in split.metadata:
@@ -145,19 +158,19 @@ def get_markdown_splitter(config: SplitterConfig) -> Callable[[Document], list[D
                     header_prefix += f"{prefix_marker} {split.metadata[level]}\n"
                     chunk_metadata["section"] = split.metadata[level]
             
-            # 判断是否需要二次切分
+            # Check if secondary splitting is needed
             if len(split.page_content) > config.chunk_size:
                 sub_chunks = text_splitter.split_text(split.page_content)
                 for i, sub_chunk in enumerate(sub_chunks):
                     if len(sub_chunk) >= config.min_chunk_size:
-                        # 统一添加完整 header 前缀
+                        # Prepend full header prefix
                         content = header_prefix + sub_chunk
                         chunks.append(Document(
                             page_content=content,
                             metadata={**chunk_metadata, "sub_chunk": i}
                         ))
             elif len(split.page_content) >= config.min_chunk_size:
-                # 统一添加完整 header 前缀
+                # Prepend full header prefix
                 content = header_prefix + split.page_content
                 chunks.append(Document(
                     page_content=content,
@@ -555,13 +568,16 @@ def build_index(
     chunk_overlap: int = 200,
     min_chunk_size: int = 200,
     exclude_patterns: list[str] | None = None,
+    device: str = "auto",
 ):
     """Build semantic search index from knowledge base using LangChain."""
-    
+    embedding_device = _resolve_embedding_device(device)
+
     print("\n🔍 LangChain Semantic Index Builder\n")
     print(f"Knowledge base: {kb_path}")
     print(f"Output path: {output_path}")
     print(f"Embedding model: {model_name}")
+    print(f"Embedding device: {embedding_device}")
     print(f"Chunk config: size={chunk_size}, overlap={chunk_overlap}, min={min_chunk_size}")
     if exclude_patterns:
         print(f"Exclude patterns: {exclude_patterns}")
@@ -601,13 +617,13 @@ def build_index(
         print(f"    Layer {layer}: {layer_counts[layer]} chunks")
     
     # Step 3: Initialize embeddings
-    print(f"\nStep 3: Initializing embeddings ({model_name})...")
+    print(f"\nStep 3: Initializing embeddings ({model_name}) on {embedding_device}...")
     embeddings = HuggingFaceEmbeddings(
         model_name=model_name,
-        model_kwargs={"device": "cpu"},
+        model_kwargs={"device": embedding_device},
         encode_kwargs={"normalize_embeddings": True},
     )
-    print("  ✓ Embeddings model loaded")
+    print(f"  ✓ Embeddings model loaded on {embedding_device}")
     
     # Step 4: Build FAISS index
     print("\nStep 4: Building FAISS index...")
@@ -721,6 +737,13 @@ def main():
         default=None,
         help="Patterns to exclude from indexing (e.g., --exclude nvidia-knowledge-base test)",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=("auto", "cuda", "cpu"),
+        help="Device for embedding model: auto (use GPU if available), cuda, or cpu (default: auto)",
+    )
     
     args = parser.parse_args()
     
@@ -733,6 +756,7 @@ def main():
         chunk_overlap=args.chunk_overlap,
         min_chunk_size=args.min_chunk_size,
         exclude_patterns=args.exclude,
+        device=args.device,
     )
 
 
