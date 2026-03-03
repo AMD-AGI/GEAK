@@ -29,13 +29,26 @@ agent:
     - One command:
       - Output exactly one command line.
       - **Start with `cd <ABSOLUTE_PATH> &&`** so the command runs in the correct repo/worktree root (absolute path; do not use relative or unspecified cwd).
-      - **Include a build step** if needed (C++/HIP/CK kernels): e.g. `mkdir -p build && cd build && cmake ... && make && cd ..`. Triton/Python kernels do not need a build step.
+      - **Include a build step** if needed (C++/HIP/CK kernels). Prefer incremental builds:
+        - If `build/` exists: `cmake --build build --target <target> -j$(nproc)`
+        - If `build/` missing: `mkdir -p build && cd build && cmake -G Ninja .. && ninja <target>` (or `cmake .. && make -j$(nproc) <target>` if ninja unavailable)
+        - Use `-G Ninja` when available (faster dependency resolution than make)
+        - Triton/Python kernels do not need a build step.
       - Order: cd → build (if needed) → correctness test → benchmark. Chain with `&&`.
       - Correctness must gate benchmark execution (use `CORRECTNESS_CMD && BENCHMARK_CMD`).
       - Build or correctness failure must produce non-zero exit.
+      - **NEVER delete the build directory** (`rm -rf build`, `rm -r build/`, etc.). Build artifacts should be reused. If the build is corrupt, reconfigure rather than delete.
 
 
     Workflow (required)
+
+    Efficiency rules (required)
+    - **Minimize exploration steps**: If discovery context is provided, USE IT - do not re-scan directories or re-read files already summarized.
+    - When existing tests are found, verify ONE then proceed - do not exhaustively check all variants.
+    - If tests pass on first run, output the final TEST_COMMAND immediately - do not re-verify multiple times.
+    - Avoid reading files that are not directly related to the kernel being tested.
+    - Maximum exploration budget: ~20 steps for discovery, ~10 steps for verification.
+
     Part 1: Review discovery results and read INSTRUCTIONS.md
     (Mandatory first steps — do NOT skip.)
     1) Your task context contains **pre-scanned discovery results** from an automated scan.
@@ -52,6 +65,13 @@ agent:
        - If it needs minor adaptation (e.g. adding `--profile` mode), adapt it.
        - Prefer reusing existing tests over creating new ones.
     5) Do NOT use interactive terminal programs (`view`, `less`, `vi`, `vim`, etc.).
+
+    Large CMake Projects (ComposableKernel, ROCm libraries, etc.)
+    - Prefer **ninja** over make when available: `cmake -G Ninja ...` or use existing CMakePresets.
+    - If a build directory already exists with valid configuration, DO NOT reconfigure from scratch.
+    - For incremental builds, run `cmake --build build --target <target> -j$(nproc)` instead of `make -C build <target>`.
+    - When cmake configuration takes >60s, note this and avoid triggering it unnecessarily.
+    - Check for existing presets: `cmake --list-presets` or read `CMakePresets.json`.
 
     Part 2: Creating a new test harness
     (Only if no suitable existing test can be adapted.)
@@ -166,6 +186,13 @@ agent:
   cost_limit: 0.0
   instance_template: |
     Your task is: {{task}}
+
+    {% if "Pre-Discovery Results" in task or "Discovered" in task or "Kernel Analysis" in task %}
+    ## IMPORTANT: Pre-Discovery Results Are Provided
+    Use the discovery results above as your starting point. DO NOT re-scan directories
+    or read files that are already summarized. Proceed directly to validation of the
+    discovered tests/benchmarks.
+    {% endif %}
     
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
