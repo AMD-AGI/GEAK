@@ -34,25 +34,54 @@ class str_replace_editor:
             with NamedTemporaryFile("w", delete=False) as f_old:
                 f_old.write(new_str)
                 new_file = f_old.name
-        make_cmd = [f"python {str(self.tool_py)} {command} {path} --file_text {file_text} --view_range {view_range} --old_str {old_file} --new_str {new_file} --insert_line {insert_line}"]
+        make_cmd = [
+            f"python {str(self.tool_py)} {command} {path} --file_text {file_text} --view_range {view_range} --old_str {old_file} --new_str {new_file} --insert_line {insert_line}"
+        ]
         result = subprocess.run(make_cmd, shell=True, capture_output=True, text=True, timeout=3600)
-        if old_file and os.path.exists(old_file):
+        if old_file and Path(old_file).exists():
             os.remove(old_file)
-        if new_file and os.path.exists(new_file):
+        if new_file and Path(new_file).exists():
             os.remove(new_file)
+
+        output_text = result.stdout.strip() or result.stderr.strip()
+
+        # Auto-validate COMMANDMENT.md files after create/edit
+        if path.endswith("COMMANDMENT.md") and command in ("create", "str_replace", "insert"):
+            output_text = self._validate_commandment_file(path, output_text)
+
         return {
-            "output": result.stdout.strip() or result.stderr.strip(),
+            "output": output_text,
             "returncode": result.returncode,
         }
-    
+
+    @staticmethod
+    def _validate_commandment_file(path: str, output_text: str) -> str:
+        """Run COMMANDMENT validation and append results to editor output."""
+        try:
+            from minisweagent.tools.validate_commandment import (
+                format_validation_message,
+                validate_commandment,
+            )
+
+            content = Path(path).read_text()
+            result = validate_commandment(content)
+            msg = format_validation_message(result)
+            if msg:
+                output_text += f"\n\n{msg}"
+        except Exception:
+            pass  # Don't break the editor if validation fails
+        return output_text
+
 
 if __name__ == "__main__":
-    command= "str_replace" # str_replace insert veiw
-    path= "/mcp/rocPRIM_device_binary_search/benchmark/benchmark_device_binary_search.cpp"
+    command = "str_replace"  # str_replace insert veiw
+    path = "/mcp/rocPRIM_device_binary_search/benchmark/benchmark_device_binary_search.cpp"
     insert_line = 10
     old_str = "in the Software without restriction, including without limitation the rights"
     new_str = "sssssssssssss"
     view_range = [10, 200]
     edit_tool = str_replace_editor()
-    response = edit_tool(command=command, path=path, view_range=view_range, insert_line=insert_line, new_str=new_str, old_str=old_str)
+    response = edit_tool(
+        command=command, path=path, view_range=view_range, insert_line=insert_line, new_str=new_str, old_str=old_str
+    )
     print(response["output"])

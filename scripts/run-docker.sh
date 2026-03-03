@@ -1,5 +1,34 @@
 #!/bin/bash
-# Simple script to build and run GEAK-agent Docker container
+# Build and run GEAK-agent Docker container.
+#
+# Usage:
+#   scripts/run-docker.sh                          # Interactive bash shell
+#   scripts/run-docker.sh --rebuild                # Rebuild image, then bash
+#   scripts/run-docker.sh -- test-discovery /path  # Run a command inside container
+#   scripts/run-docker.sh --rebuild -- geak --help # Rebuild, then run command
+#
+# Modular pipeline commands (chainable via intermediate files):
+#   resolve-kernel-url <url> --json -o resolved.json
+#   test-discovery --from-resolved resolved.json -o discovery.json
+#   kernel-profile --from-discovery discovery.json --json -o profile.json
+#   baseline-metrics build --from-profile profile.json --all -o baseline_metrics.json
+#   commandment --from-discovery discovery.json -o COMMANDMENT.md
+#   task-generator --from-discovery discovery.json --profiling profile.json \
+#       --commandment COMMANDMENT.md --baseline-metrics baseline_metrics.json \
+#       -o tasks/round_1/
+#
+# Iterative refinement (round 2+):
+#   task-generator ... --from-results results/round_1/ --round 2 -o tasks/round_2/
+#
+# Run individual tasks:
+#   openevolve-worker --from-task tasks/round_1/00_openevolve-inner.md --gpu 0
+#   geak --from-task tasks/round_1/10_triton-autotune.md --gpu-ids 2
+#
+# Other tools:
+#   validate-commandment <path>              Validate a COMMANDMENT.md
+#   openevolve-worker --kernel-path <p> ...  Run OpenEvolve optimizer (manual)
+#   select-patch --patch-dir <dir> ...       Select best patch from runs
+#   geak <github_url>                        Full optimization pipeline
 
 set -e
 
@@ -13,6 +42,7 @@ PARENT_DIR="${HOME}"
 HOST_CODE_DIR="${HOME}"
 
 REBUILD=false
+EXEC_CMD=()  # Command to run inside the container (empty = bash)
 
 #######################################
 # Parse options
@@ -23,18 +53,47 @@ while [[ $# -gt 0 ]]; do
             REBUILD=true
             shift
             ;;
+        --)
+            shift
+            EXEC_CMD=("$@")
+            break
+            ;;
         -h|--help)
-            echo "Usage: $0 [OPTIONS]"
+            echo "Usage: $0 [OPTIONS] [-- COMMAND [ARGS...]]"
             echo ""
             echo "Options:"
             echo "  --rebuild     Stop/remove container if present, then rebuild image (no cache)"
             echo "  -h, --help    Show this help"
             echo ""
+            echo "If COMMAND is provided after --, it runs inside the container instead of bash."
+            echo ""
+            echo "Pipeline commands (chainable via --from-* flags, run after --):"
+            echo "  resolve-kernel-url <url> --json -o resolved.json"
+            echo "  test-discovery --from-resolved resolved.json -o discovery.json"
+            echo "  kernel-profile --from-discovery discovery.json --json -o profile.json"
+            echo "  baseline-metrics build --from-profile profile.json --all -o baseline_metrics.json"
+            echo "  commandment --from-discovery discovery.json -o COMMANDMENT.md"
+            echo "  task-generator --from-discovery discovery.json --profiling profile.json \\"
+            echo "      --commandment COMMANDMENT.md --baseline-metrics baseline_metrics.json -o tasks/round_1/"
+            echo ""
+            echo "Iterative refinement (round 2+):"
+            echo "  task-generator ... --from-results results/round_1/ --round 2 -o tasks/round_2/"
+            echo ""
+            echo "Run individual tasks:"
+            echo "  openevolve-worker --from-task tasks/round_1/00_openevolve-inner.md --gpu 0"
+            echo "  geak --from-task tasks/round_1/10_triton-autotune.md --gpu-ids 2"
+            echo ""
+            echo "Other tools:"
+            echo "  validate-commandment <path>            Validate COMMANDMENT.md"
+            echo "  openevolve-worker --kernel-path <p> ...  Run OpenEvolve optimizer (manual)"
+            echo "  select-patch --patch-dir <dir> ...     Select best patch from runs"
+            echo "  geak <github_url>                      Full optimization pipeline"
+            echo ""
             echo "Requires: AMD_LLM_API_KEY environment variable"
             exit 0
             ;;
         *)
-            echo "Unknown option: $1"
+            echo "Unknown option: $1 (use -- before commands)"
             exit 1
             ;;
     esac
@@ -57,15 +116,25 @@ if [ "$REBUILD" = true ]; then
     echo ""
 fi
 
-# If container already exists (running or stopped), just use it — no pre-flight needed
+# Helper: exec into the container with the chosen command (or bash)
+_exec_into_container() {
+    if [[ ${#EXEC_CMD[@]} -gt 0 ]]; then
+        echo "Running: ${EXEC_CMD[*]}"
+        exec docker exec -it ${CONTAINER_NAME} "${EXEC_CMD[@]}"
+    else
+        exec docker exec -it ${CONTAINER_NAME} bash
+    fi
+}
+
+# If container already exists (running or stopped), just use it -- no pre-flight needed
 if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    echo "Container ${CONTAINER_NAME} is already running. Executing bash..."
-    exec docker exec -it ${CONTAINER_NAME} bash
+    echo "Container ${CONTAINER_NAME} is already running."
+    _exec_into_container
 fi
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo "Container ${CONTAINER_NAME} exists but is stopped. Restarting..."
     docker start ${CONTAINER_NAME}
-    exec docker exec -it ${CONTAINER_NAME} bash
+    _exec_into_container
 fi
 
 #######################################
@@ -142,4 +211,4 @@ docker run -d \
 
 # Now exec into the running container
 echo "Entering container ${CONTAINER_NAME}..."
-exec docker exec -it ${CONTAINER_NAME} bash
+_exec_into_container

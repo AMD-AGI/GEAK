@@ -57,7 +57,16 @@ class BaselineMetricsTool:
         if output_path:
             try:
                 from pathlib import Path
-                Path(output_path).write_text(result_json)
+
+                out = Path(output_path)
+                out.write_text(result_json)
+                # Post-write roundtrip validation: ensure the file is valid JSON
+                json.loads(out.read_text())
+            except json.JSONDecodeError as e:
+                return {
+                    "output": f"CRITICAL: Wrote {output_path} but it contains invalid JSON: {e}\n{result_json}",
+                    "returncode": 1,
+                }
             except Exception as e:
                 return {"output": f"Built metrics but failed to write: {e}\n{result_json}", "returncode": 1}
 

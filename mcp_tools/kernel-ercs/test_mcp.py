@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """Test the kernel-ercs MCP server tools."""
 
-from kernel_ercs.server import mcp
+from kernel_ercs.server import (
+    check_kernel_compatibility,
+    get_amd_gpu_specs,
+)
 
 
 def main():
-    tools = mcp._tool_manager._tools
-    
     # Test 1: check_kernel_compatibility with bad kernel
     print("=" * 50)
     print("Test 1: check_kernel_compatibility (bad kernel)")
     print("=" * 50)
-    
+
     bad_kernel = """
 @triton.jit
 def bad_kernel(x_ptr):
     result = tl.libdevice.sin(tl.load(x_ptr))
 """
-    result = tools["check_kernel_compatibility"].fn(kernel_code=bad_kernel)
+    result = check_kernel_compatibility(kernel_code=bad_kernel)
     print("Compatible:", result["compatible"])
     print("Issues:", result["issues"])
     print()
@@ -26,7 +27,7 @@ def bad_kernel(x_ptr):
     print("=" * 50)
     print("Test 2: check_kernel_compatibility (good kernel)")
     print("=" * 50)
-    
+
     good_kernel = """
 @triton.jit
 def good_kernel(x_ptr, BLOCK_SIZE: tl.constexpr):
@@ -35,7 +36,7 @@ def good_kernel(x_ptr, BLOCK_SIZE: tl.constexpr):
     x = tl.load(x_ptr + offs)
     tl.store(x_ptr + offs, x * 2)
 """
-    result = tools["check_kernel_compatibility"].fn(kernel_code=good_kernel)
+    result = check_kernel_compatibility(kernel_code=good_kernel)
     print("Compatible:", result["compatible"])
     print("Issues:", result["issues"])
     print("Warnings:", result["warnings"])
@@ -45,7 +46,7 @@ def good_kernel(x_ptr, BLOCK_SIZE: tl.constexpr):
     print("=" * 50)
     print("Test 3: get_amd_gpu_specs")
     print("=" * 50)
-    specs = tools["get_amd_gpu_specs"].fn()
+    specs = get_amd_gpu_specs()
     print("GPU:", specs["gpu"]["name"])
     print("Architecture:", specs["gpu"]["architecture"])
     print("Compute Units:", specs["gpu"]["compute_units"])
@@ -56,6 +57,7 @@ def good_kernel(x_ptr, BLOCK_SIZE: tl.constexpr):
     print("=" * 50)
     print("All tests passed! MCP Server is ready.")
     print("=" * 50)
+
 
 if __name__ == "__main__":
     main()

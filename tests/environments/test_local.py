@@ -124,6 +124,7 @@ def test_local_environment_stderr_capture():
 def test_local_environment_timeout():
     """Test that commands time out correctly."""
     import subprocess
+
     env = LocalEnvironment(timeout=1)
 
     with pytest.raises(subprocess.TimeoutExpired):

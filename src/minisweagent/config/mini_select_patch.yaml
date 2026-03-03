@@ -16,7 +16,9 @@ agent:
       - the baseline test log, and
       - the selected patch's test log (prefer the log inside the patch's own `parallel_*` folder).
     - If the same patch exists in multiple parallel folders, prefer `parallel_1`'s test log for the final speedup calculation.
-    - Some runs may store patch files directly under the work directory (no `parallel_*` folders). In that case, treat those files as belonging to agent id 0.
+    - Some runs may store patch files directly under the work directory (no `parallel_*` or `task_*` folders). In that case, treat those files as belonging to agent id 0.
+    - Tasks may be in `task_*/` directories (from the GPU pool scheduler) OR `parallel_*/` directories (legacy mode). ALWAYS scan for BOTH patterns.
+    - When comparing performance, prefer **per-kernel latency** (from `save_and_test` output or profiler metrics) over total test-suite wall-clock time. The test log may contain a line like `kernel_latency_us: <float>` or `duration_us: <float>` — use that.
     - When parsing logs to compute the user metric, you MUST follow the user provided metric exactly:
     - You MUST only consider aligned points by benchmark entry (same benchmark line / same test name), and enforce equal counts:
       - The number of extracted metric points MUST match between baseline and patch (e.g. both have 20 values).
@@ -72,9 +74,10 @@ agent:
     ## Inputs
     - Work directory (absolute): {{base_patch_dir}}
     - Expected parallel runs (hint): {{num_parallel}}
-    - Baseline test log (you must locate it): `{{base_patch_dir}}/parallel_*/patch_0_test.txt` or `{{base_patch_dir}}/patch_0_test.txt`
-    - Patch files: `{{base_patch_dir}}/parallel_*/patch_*.patch` or `{{base_patch_dir}}/patch_*.patch`
-    - Patch test logs: `{{base_patch_dir}}/parallel_*/patch_*_test.txt` or `{{base_patch_dir}}/patch_*_test.txt`
+    - Baseline test log (you must locate it): search in `{{base_patch_dir}}/task_*/`, `{{base_patch_dir}}/parallel_*/`, or `{{base_patch_dir}}/` for `patch_0_test.txt`
+    - Patch files: `{{base_patch_dir}}/task_*/patch_*.patch` or `{{base_patch_dir}}/parallel_*/patch_*.patch` or `{{base_patch_dir}}/patch_*.patch`
+    - Patch test logs: same directories, `patch_*_test.txt`
+    - First list ALL task_* and parallel_* directories to find every completed run.
   
   format_error_template: |
     Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.

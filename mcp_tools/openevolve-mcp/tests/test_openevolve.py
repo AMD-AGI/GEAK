@@ -1,5 +1,6 @@
 """Tests for openevolve-mcp server."""
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -11,13 +12,16 @@ if _src not in sys.path:
 from openevolve_mcp.server import mcp
 
 
+def _list_tool_names():
+    tools = asyncio.run(mcp.list_tools())
+    return [t.name for t in tools]
+
+
 class TestOpenEvolveMCPServer:
     def test_server_has_optimize_kernel(self):
-        tools = mcp._tool_manager._tools
-        assert "optimize_kernel" in tools
+        assert "optimize_kernel" in _list_tool_names()
 
     def test_server_has_expected_tools(self):
-        tools = mcp._tool_manager._tools
-        tool_names = list(tools.keys())
+        tool_names = _list_tool_names()
         assert len(tool_names) >= 1
         assert "optimize_kernel" in tool_names

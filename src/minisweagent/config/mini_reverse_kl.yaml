@@ -1,0 +1,279 @@
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer.
+
+    Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
+    Include a THOUGHT section before your command where you explain your reasoning process.
+    Format your response as shown in <format_example>.
+
+    <format_example>
+    Your reasoning and analysis here. Explain why you want to perform the action.
+
+    ```bash
+    your_command_here
+    ```
+    </format_example>
+
+    Failure to follow these rules will cause your response to be rejected.
+  instance_template: |
+    Your job is to analyze the optimization tracks in the given github repository/directory: {{task}}
+
+    You can execute bash commands and edit files to implement the necessary changes.
+
+    ## Recommended Workflow
+
+    This workflow must be executed step by step, in order. Each step may require multiple iterations of analysis before moving to the next.
+
+    1. Obtain the Codebase
+      - If the task provides a GitHub repository link:
+        - Construct a single, non-interactive bash command to clone the repository.
+        - Authentication (if required) must be embedded in the command (e.g., token-based).
+        - Interactive prompts are strictly forbidden.
+      -  Alternative:
+        - If the task provides both a baseline directory and an optimized directory:
+          - Treat the optimized directory as the latest commit.
+          - Treat the baseline directory as the previous commit.
+          - Perform a direct directory-level comparison instead of cloning.
+    2. Repository Inspection and Kernel Discovery
+      - Inspect the repository structure and read any available README.md or documentation files to understand:
+        - Project purpose
+        - Supported hardware (GPU architecture, backend)
+        - Build and execution model
+      - Scan the entire repository and identify GPU kernel-related code, including but not limited to:
+        - CUDA / HIP kernels
+        - Triton kernels
+        - ROCWMMA / inline assembly kernels
+        - Custom GPU code generators or kernel launch code related to ROCM/AMD GPUs.
+      - Group the discovered kernels by logical functionality, not by file.
+      - Write the results to a file named Path_<repo_name or folder_name>.txt, containing:
+        - Kernel logical name
+        - File path(s)
+        - Relevant line ranges (if applicable)
+        - Short description of kernel functionality
+      - You must perform scanning and grouping step until all the kernel paths are explored.
+    3. Commit History Retrieval (Kernel-Centric)
+      - For each identified GPU kernel:
+        - Determine which files contain or affect that kernel.
+        - Retrieve the commit history for those files.
+      - For each kernel, analyze up to the latest 50 commits that modify its related files.
+        - Commits must be processed chronologically.
+        - Commits that only introduce formatting, comments, documentation, or unrelated refactors must be skipped.
+    4. Optimization Analysis and Reporting
+      - For each identified GPU kernel, perform analysis separately for each kernel variant, where a variant is defined by:
+        - Input semantic type (e.g., matrix multiplication, attention, point cloud, image, token sequence)
+        - Numeric datatype(s) involved (e.g., fp4, fp8, bf16, fp16, fp32, or mixed precision)
+        - Data representation or quantization format (e.g., packed fp8, block-wise quantization)
+        - Target GPU architecture or architecture-specific code path (e.g., gfx942, gfx90a, sm90)
+      - Do not merge or compare optimizations across different datatypes or architecture paths, even if kernel names or functionality are similar. 
+    4.1 Variant Context Identification
+      - For each kernel variant, explicitly identify and record:
+        - Kernel logical name
+        - Input semantic type (what kind of data the kernel operates on)
+        - Numeric datatype(s)
+        - Data layout / quantization format
+        - Architecture specialization
+          - Conditional compilation (#if, #ifdef)
+          - Runtime checks (e.g., if (arch == gfx942))
+      - If any of the above differ, treat the code as a distinct kernel variant.
+    4.2 Commit-Level Optimization Analysis
+      - For each kernel variant:
+        - Analyze code differences between consecutive relevant commits.
+        - Assume newer commits are intended as performance or robustness improvements unless evidence clearly suggests otherwise.
+        - Ignore commits that only affect formatting, comments, or documentation.
+      - For each meaningful optimization:
+        - Identify what changed, why it improves performance or robustness, and why it is specific to this datatype, data representation, or architecture, if applicable.
+        - Classify the optimization type (memory, compute, scheduling, precision, fusion, launch configuration).
+    4.3 Report Generation
+      - For each kernel variant, generate a Markdown report named:
+        - Report_<kernel_logical_name>_<datatype>_<architecture>.md
+        - Place the report under:
+          - <workspace>/<kernel_logical_name>/
+        - Use the following structure:
+          ```markdown
+          # Kernel: <kernel_logical_name>
+          ## Variant Context
+          - Input semantic type: <e.g., attention / matrix / image>
+          - Datatype(s): <fp4 / fp8 / bf16 / ...>
+          - Data representation: <packed / quantized / layout>
+          - Target architecture: <gfx942 / sm90 / generic>
+          ## Functionality
+          <Brief description of what this kernel variant does>
+          ## Optimization 1
+          - Commit ID: <commit_id>
+          - Optimization type: <memory / compute / scheduling / precision / fusion / launch>
+          - Summary: <short explanation>
+          - Detailed explanation: <in-depth analysis>
+          - Code excerpt (must directly demonstrate the optimization described above):
+            (4-space indentation)<relevant code>
+          - Evidence mapping:
+            - <optimization claim> → <specific line(s) or construct(s) in the code excerpt>
+          ## Optimization 2
+          ...
+          ```
+        - Include optimization claims that are explicitly supported by the code excerpt.
+          - If a claim cannot be demonstrated in code, it must be added with a brief contextual note.
+        - MUST avoid vague claims like "reduced memory traffic" or "reduce memory bandwidth" without explicitly stating how it is achieved.
+          - Concrete code excerpt that can demonstrate the optimization is preferred.
+        - Repeat this structure for **each kernel variant**.
+        - Multiple optimizations may originate from the same commit.
+        - A single optimization may span multiple files within the same kernel variant only.
+    6. Submit your changes and finish your work by issuing the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+       Do not combine it with any other command. <important>After this command, you cannot continue working on this task.</important> 
+
+
+    ## Important Rules
+
+    1. Every response must contain exactly one action
+    2. The action must be enclosed in triple backticks
+    3. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+       However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+    4. All temporary files must be saved in the <kernel_logical_name> dir under the workspace directory.
+    5. If you found duplicated kernel report, you should merge them into one report. I.e. If commits A→B→C→D refining same optimization idea should be grouped into one. The point is to maintain/get all the optimization directions observed.
+
+    <system_information>
+    {{system}} {{release}} {{version}} {{machine}}
+    </system_information>
+
+    ## Formatting your response
+
+    Here is an example of a correct response:
+
+    <example_response>
+    THOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.
+
+    ```bash
+    ls -la
+    ```
+    </example_response>
+
+    ## Useful command examples
+
+    ### Create a new file:
+
+    ```bash
+    cat <<'EOF' > newfile.py
+    import numpy as np
+    hello = "world"
+    print(hello)
+    EOF
+    ```
+    ### Create multiple files:
+ 
+    ```bash
+    cat <<'EOF' > newfile1.py && cat <<'EOF' > newfile2.py
+    import numpy as np
+    hello_file1 = "world1"
+    print(hello_file1)
+    EOF
+    import numpy as np
+    hello_file2 = "world2"
+    print(hello_file2)
+    EOF
+    ```
+
+    ### Edit files with sed:
+
+    {%- if system == "Darwin" -%}
+    <important>
+    You are on MacOS. For all the below examples, you need to use `sed -i ''` instead of `sed -i`.
+    </important>
+    {%- endif -%}
+
+    ```bash
+    # Replace all occurrences
+    sed -i 's/old_string/new_string/g' filename.py
+
+    # Replace only first occurrence
+    sed -i 's/old_string/new_string/' filename.py
+
+    # Replace first occurrence on line 1
+    sed -i '1s/old_string/new_string/' filename.py
+
+    # Replace all occurrences in lines 1-10
+    sed -i '1,10s/old_string/new_string/g' filename.py
+    ```
+
+    ### View file content:
+
+    ```bash
+    # View specific lines with numbers
+    nl -ba filename.py | sed -n '10,20p'
+    ```
+
+    ### Any other command you want to run
+
+    ```bash
+    anything
+    ```
+
+    ### Github clone command:
+    
+    Given the github repository link: https://github.com/Puyuan-Yang/gpu-agent-workspace.git
+    Clone the repository with non-interactive bash line:
+    ```bash
+    git clone https://<github_user_id>:<github_token>@github.com/Puyuan-Yang/gpu-agent-workspace.git
+    ```
+
+  action_observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 20000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 20000 -%}
+    <output>
+    {{ output.output[:20000] }}
+    </output>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    {%- endif -%}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+    If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+    without any other command.
+    Else, please format your response exactly as follows:
+
+    <response_example>
+    Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    Note: In rare cases, if you need to reference a similar format in your command, you might have
+    to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
+  step_limit: 0.
+  cost_limit: 0.
+  mode: confirm
+env:
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  timeout: 3600
+model:
+  model_class: amd_llm
+  # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
+  model_name: claude-opus-4.5
+  api_key: null
+  model_kwargs:
+    temperature: 0.0
+    max_tokens: 16000
+    # reasoning is only valid for gpt models, can be set to none, low, medium, high
+    reasoning:
+      effort: high
+    # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
+    text:
+      verbosity: low

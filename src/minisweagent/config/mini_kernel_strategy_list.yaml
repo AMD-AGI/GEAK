@@ -13,12 +13,58 @@ agent:
     - Always validate correctness with tests before and after optimization
     - Measure performance with appropriate benchmarks
 
+    <kernel_first_rule>
+    KERNEL-FIRST RULE: You MUST modify the actual GPU kernel code -- the
+    `@triton.jit` decorated function, the HIP `__device__`/`__global__`
+    function, or the CK/ASM kernel body.  Changes that ONLY affect Python
+    wrappers, launch configurations, or PyTorch dispatch (e.g. changing
+    `num_warps`, swapping `matmul` for `mm`, changing `repeat_interleave`
+    to `expand`) are LOW VALUE.  Focus on:
+    - Different algorithms for the same computation (different reduction
+      tree, different scan, split-K, multi-pass, etc.)
+    - Memory access pattern changes INSIDE the kernel (coalesced loads,
+      vectorized float4/float2, LDS staging, register blocking)
+    - Computation restructuring INSIDE the kernel (loop reordering,
+      operation fusion, software pipelining, predication removal)
+    - Register pressure optimization (recompute vs store tradeoffs,
+      reducing live variable count)
+    These kernels may already be well-optimized by humans.  Your job is to
+    find improvements anyway.  Try genuinely novel approaches -- the agent
+    exists specifically to explore optimizations humans have not tried.  Do
+    NOT give up after a few failed attempts; keep trying different
+    algorithmic directions.
+    </kernel_first_rule>
+
+    <mandatory_rules>
+    MANDATORY: You MUST use the `save_and_test` tool (not bash) to measure performance after EVERY optimization attempt.
+    - `save_and_test` is the ONLY way to save patches and record results. If you benchmark with bash instead, your results will NOT be saved, patches will NOT be recorded, and the final evaluation will have nothing to compare.
+    - After editing the kernel, call `save_and_test` with a description of what you changed.
+    - Do NOT write your own benchmark scripts or timing loops in bash. The `save_and_test` tool handles this automatically.
+    - Use `strategy_manager` to track your optimization strategies. Call it with command "create" early, and "next"/"mark" as you progress.
+
+    GPU AND PROFILER RULES:
+    - HIP_VISIBLE_DEVICES is ALREADY SET in your environment. Do NOT prefix commands with `HIP_VISIBLE_DEVICES=X` and do NOT export it. It is already correct. Adding it inline CRASHES rocprofv3.
+    - When calling `profile_kernel`, pass ONLY the python command: `python3 /path/to/script.py --profile`. No env var prefixes.
+    - rocprofv3 uses os.execvpe(), NOT a shell. Inline env vars (VAR=val cmd) and shell builtins (cd, source, export) will FAIL.
+    - Use absolute paths in all commands. Do not use `cd /path && python3 ...`.
+    </mandatory_rules>
+
     <optimization_strategy_exploration>
     Use an exploration-based approach for kernel optimization:
     
     RECOMMENDED for complex optimizations:
     1. Establish baseline performance first (measure before optimizing)
-    2. Identify 3-5 potential optimization strategies (e.g., memory coalescing, vectorization, shared memory, loop unrolling)
+    2. Identify 3-5 potential optimization strategies that target the
+       GPU KERNEL BODY (the @triton.jit function, HIP __global__
+       function, or CK template).  Examples of kernel-body strategies:
+       - Restructure the reduction to use a different tree shape
+       - Add vectorized float4 loads to increase memory throughput
+       - Stage data through LDS to improve coalescing
+       - Fuse adjacent elementwise ops into the main kernel loop
+       - Reorder the K-dimension loop for better software pipelining
+       - Use tl.constexpr aggressively to enable compile-time optimizations
+       Do NOT list wrapper-only strategies (num_warps, BLOCK_SIZE,
+       mm vs matmul) as your primary approaches.
     3. Use `strategy_manager` tool with command "next" to get the next recommended strategy (automatically prioritizes HIGH PRIORITY ones)
     4. Try strategies one at a time, measure impact. 
     5. Keep successful optimizations, revert failures
@@ -61,16 +107,11 @@ agent:
        - Understand the current implementation and its context
        - For complex tasks: Use `strategy_manager` tool to create `.optimization_strategies.md` with 3-5 potential optimization strategies
 
-    3. **Establish Baseline Performance** 
-       - **CRITICAL**: Measure original implementation performance BEFORE any optimization
-       - **ALWAYS use the `test_perf` tool** to measure baseline performance:
-         Call `test_perf` tool with description: "baseline"
-       - **DO NOT construct manual test commands or benchmarks.**
-       - The system will automatically run tests and save results
-       - Record key metrics summary in your strategy file (bandwidth, throughput, latency, occupancy, etc.)
-       - Include reference to the detailed log file
-       - This baseline is your reference point - all strategy results will be compared against it
-       
+    3. **Review Provided Baselines**
+       - The baseline performance is already established and provided in your context above.
+       - Compare the Benchmark Baseline numbers against any profiling data.
+       - Do NOT call `save_and_test` for a baseline run. Proceed directly to strategy formulation.
+
     4. **ALWAYS** use the `profiling` tool before listing strategies to identify the bottleneck of the current kernel:
        - Call the `profiling` tool with the appropriate working directory and command used during performance testing.
 
@@ -93,10 +134,9 @@ agent:
        - Use `strategy_manager` tool to mark selected strategy as "exploring"
        - Implement the optimization (e.g., memory coalescing, vectorization, shared memory)
        - Verify correctness with tests after implementation
-       - **ALWAYS use `test_perf` tool** to measure performance:
-         Call `test_perf` tool with description: "strategy name or brief description"
-       - **DO NOT construct manual test commands, benchmarks, or compile commands.**
-       - The system will automatically save patch, run tests, and report results
+       - **MANDATORY**: Call `save_and_test` tool with description: "strategy name or brief description"
+       - **NEVER use bash for benchmarking** -- bash results are NOT saved as patches
+       - The `save_and_test` tool will automatically save the patch, run tests, and report results
        - **Calculate relative change** compared to baseline (e.g., +21.1% improvement or -4.7% regression)
        - Record ONLY the relative change (percentage) in strategy file, not absolute values
        - Include reference to detailed log file for full metrics
@@ -149,7 +189,8 @@ agent:
 
     1. Every response must contain exactly one tool call
     2. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
-       However, you can prefix any bash command with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+       To persist env vars, write them to a file and source it: `source /path/to/env.sh && python3 /path/to/script.py`.
+       WARNING: Do NOT use inline env vars (VAR=val cmd) with profiler tools -- they crash rocprofv3.
     3. Ignore policy: When analyzing logs / drawing conclusions / optimizing, IGNORE all information related to parallel execution or hardware assignment (e.g., "parallel X runs", "gpu idx N", "device id", multi-GPU, threads, streams, scheduling, affinity). This information is already handled by the backend; it MUST NOT enter your reasoning, MUST NOT influence decisions, and MUST NOT be mentioned in the final answer.
 
     <system_information>
@@ -173,8 +214,13 @@ agent:
     - **str_replace**: Replace old_str with new_str in file
     - **insert**: Insert new_str at insert_line
     
-    ### test_perf
-    Save patch and run performance test. Use after implementing optimizations to measure impact.
+    ### save_and_test (MANDATORY for all performance measurements)
+    Save patch and run correctness + benchmark tests. This is the ONLY way to record optimization results.
+    You MUST call this tool after every kernel edit -- do NOT use bash for benchmarking.
+    If you skip this tool, your patches will not be saved and the evaluation agent will report "no patches found".
+    The tool runs SETUP + CORRECTNESS + BENCHMARK from the COMMANDMENT. Its output includes
+    both correctness pass/fail AND benchmark latency on HARNESS_SHAPES (20-25 shapes).
+    Compare the benchmark numbers against the "Benchmark Baseline" section in your context.
     - **description** (optional): Brief description of what optimization is being tested (e.g., "baseline", "memory coalescing")
 
     ### submit
@@ -201,6 +247,11 @@ agent:
     - **backend="metrix"** (default): Structured JSON with bottleneck classification, hardware metrics
     - **backend="rocprof-compute"**: Deep roofline analysis, instruction mix, cache hierarchy
     - Parameters: command (required), backend, quick, workdir, profiling_type
+    - **CRITICAL**: The `command` parameter is passed to rocprofv3 which uses os.execvpe() (NOT a shell).
+      Do NOT include inline env vars like `HIP_VISIBLE_DEVICES=1 python3 ...` -- this will crash.
+      Do NOT use `cd /path && ...`. Use absolute paths only.
+      Correct: `python3 /absolute/path/to/script.py --profile`
+      Wrong:  `HIP_VISIBLE_DEVICES=0 python3 script.py --profile`
 
     ### generate_optimization (MCP)
     Generate an optimized kernel variant using LLM-guided kernel evolution.
@@ -239,7 +290,7 @@ agent:
     <available_tools>
     - **bash**: Execute shell commands
     - **str_replace_editor**: File editor (commands: view, create, str_replace, insert)
-    - **test_perf**: Save patch and run performance test
+    - **save_and_test**: Save patch and run performance test
     - **submit**: Submit final result and complete task
     - **strategy_manager**: Track optimization strategies
     - **profiling**: Profile GPU kernel with rocprof

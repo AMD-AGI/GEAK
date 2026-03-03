@@ -10,6 +10,31 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+# Canonical name of the directory used to cache cloned repos.
+# Other modules (discovery, mini.py) import this constant to detect
+# whether a kernel path lives inside a resolved clone.
+RESOLVED_DIR_NAME = ".geak_resolved"
+
+
+def find_resolved_clone_root(file_path: str | Path) -> Path | None:
+    """Return the clone-root directory if *file_path* lives inside a resolved clone.
+
+    For example, given ``/workspace/.geak_resolved/owner_repo/sub/kernel.py``,
+    this returns ``Path('/workspace/.geak_resolved/owner_repo')``.
+
+    Returns ``None`` when the path is not inside a resolved clone.
+    """
+    path = Path(file_path).resolve()
+    parts = path.parts
+    try:
+        idx = parts.index(RESOLVED_DIR_NAME)
+    except ValueError:
+        return None
+    # The clone root is the directory immediately after RESOLVED_DIR_NAME
+    if idx + 1 < len(parts):
+        return Path(*parts[: idx + 2])
+    return None
+
 
 def is_weblink(s: str) -> bool:
     """Return True if s looks like an http(s) URL."""
@@ -65,7 +90,7 @@ def _parse_github_blob(url: str) -> tuple[str, str, str, str] | None:
 def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
     """
     If spec is a web link (e.g. GitHub file URL), clone the repo to a temp dir
-    (or into clone_into/.geak_resolved/<repo> if clone_into is set) and return local paths.
+    (or into clone_into/{RESOLVED_DIR_NAME}/<repo> if clone_into is set) and return local paths.
     Otherwise return the spec as a local path.
 
     Returns dict with: is_weblink, local_repo_path (or None), local_file_path,
@@ -104,10 +129,10 @@ def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
         if clone_into is not None:
             base = Path(clone_into)
             base.mkdir(parents=True, exist_ok=True)
-            tmpdir_path = base / ".geak_resolved" / f"{owner}_{repo}"
+            tmpdir_path = base / RESOLVED_DIR_NAME / f"{owner}_{repo}"
             # If the target file already exists from a previous clone, reuse it
             if tmpdir_path.exists() and (tmpdir_path / file_path).exists():
-                out["local_repo_path"] = str(tmpdir_path)
+                out["local_repo_path"] = str(tmpdir_path.resolve())
                 out["local_file_path"] = str((tmpdir_path / file_path).resolve())
                 out["line_number"] = line_start
                 out["line_end"] = line_end
@@ -131,7 +156,7 @@ def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
         if not local_file.exists():
             out["error"] = f"File not found in repo: {file_path}"
             return out
-        out["local_repo_path"] = tmpdir
+        out["local_repo_path"] = str(Path(tmpdir).resolve())
         out["local_file_path"] = str(local_file.resolve())
         out["line_number"] = line_start
         out["line_end"] = line_end
@@ -189,3 +214,67 @@ def cleanup_resolved_path(local_repo_path: str | None) -> None:
             shutil.rmtree(path, ignore_errors=True)
         except OSError:
             pass
+
+
+# ============================================================================
+# CLI
+# ============================================================================
+
+
+def main():
+    """Resolve a GitHub kernel URL to a local file path."""
+    import argparse
+    import json
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="Clone a GitHub repo and resolve a kernel URL to a local path",
+    )
+    parser.add_argument("url", help="GitHub file URL (blob link)")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="output_json",
+        help="Output result as JSON (for piping to test-discovery --from-resolved)",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Write output to file instead of stdout (implies --json)",
+    )
+    args = parser.parse_args()
+
+    use_json = args.output_json or args.output is not None
+
+    print(f"Resolving: {args.url}", file=sys.stderr)
+    result = resolve_kernel_url(args.url)
+
+    if result.get("error"):
+        print(f"ERROR: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    if use_json:
+        output_text = json.dumps(result, indent=2)
+        if args.output:
+            Path(args.output).write_text(output_text + "\n")
+            print(f"Wrote {args.output}", file=sys.stderr)
+        else:
+            print(output_text)
+    else:
+        local_path = result["local_file_path"]
+        line = result.get("line_number")
+        repo_root = result.get("local_repo_path")
+
+        print(f"Local path:  {local_path}")
+        if repo_root:
+            print(f"Repo root:   {repo_root}")
+        if line:
+            print(f"Line number: {line}")
+            name = get_kernel_name_at_line(local_path, line)
+            if name:
+                print(f"Kernel name: {name}")
+
+
+if __name__ == "__main__":
+    main()

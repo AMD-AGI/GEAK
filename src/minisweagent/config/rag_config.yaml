@@ -1,0 +1,23 @@
+# RAG Pipeline Configuration
+# Configuration for ablation experiments
+
+retrieval:
+  embed_top_k: 25          # Number of embedding retrieval candidates
+  bm25_top_k: 25           # Number of BM25 retrieval candidates
+  enable_bm25: true        # Enable BM25 dual-path recall
+  mcp_top_k: 8             # Number of final results returned
+
+reranker:
+  enable_reranker: true    # Enable reranker
+
+fusion:
+  rrf_k: 60                # RRF fusion constant
+  semantic_weight: 0.7     # Embedding weight
+  bm25_weight: 0.3         # BM25 weight
+
+summary:
+  enable_rag_subagent: true           # Enable LLM summarization
+  rag_subagent_model: "claude-opus-4.5"
+
+debug:
+  verbose: false           # Print verbose RAG tool logs

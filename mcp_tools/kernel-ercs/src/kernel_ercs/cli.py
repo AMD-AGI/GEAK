@@ -24,7 +24,7 @@ from .server import (
 
 def _call_tool(tool, *args, **kwargs):
     """Call MCP tool, unwrapping FunctionTool if needed."""
-    if hasattr(tool, 'fn'):
+    if hasattr(tool, "fn"):
         return tool.fn(*args, **kwargs)
     else:
         return tool(*args, **kwargs)
@@ -32,8 +32,7 @@ def _call_tool(tool, *args, **kwargs):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="kernel-ercs",
-        description="Kernel ERCS: Evaluation, Reflection, Compatibility, Specs"
+        prog="kernel-ercs", description="Kernel ERCS: Evaluation, Reflection, Compatibility, Specs"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -47,8 +46,9 @@ def main():
     ref_parser.add_argument("kernel_file", help="Path to kernel file")
     ref_parser.add_argument("--output", "-o", required=True, help="Test output (string or @file)")
     ref_parser.add_argument("--speedup", "-s", type=float, default=0.0, help="Measured speedup")
-    ref_parser.add_argument("--status", default="unknown", choices=["passed", "failed", "unknown"],
-                            help="Correctness status")
+    ref_parser.add_argument(
+        "--status", default="unknown", choices=["passed", "failed", "unknown"], help="Correctness status"
+    )
     ref_parser.add_argument("--history", help="Optimization history summary")
     ref_parser.add_argument("--tried", help="Comma-separated list of tried strategies")
     ref_parser.add_argument("--model", "-m", default="claude-sonnet-4.5", help="LLM model")
@@ -72,14 +72,15 @@ def main():
             test_output = Path(args.output[1:]).read_text()
         else:
             test_output = args.output
-        result = _call_tool(reflect_on_kernel_result,
+        result = _call_tool(
+            reflect_on_kernel_result,
             kernel_code=kernel_code,
             test_output=test_output,
             speedup=args.speedup,
             correctness_status=args.status,
             history=args.history or "",
             tried_strategies=args.tried or "",
-            model=args.model
+            model=args.model,
         )
     elif args.command == "specs":
         result = _call_tool(get_amd_gpu_specs)

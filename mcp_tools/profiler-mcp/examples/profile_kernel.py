@@ -41,10 +41,11 @@ def print_metrix_result(result):
     """Pretty-print metrix backend results."""
     for device in result.get("results", []):
         gpu_info = device.get("gpu_info", {})
-        print(f"\nGPU {device['device_id']}: {gpu_info.get('model', 'unknown')} "
-              f"({gpu_info.get('architecture', '?')})")
-        print(f"  CUs: {gpu_info.get('compute_units', '?')}, "
-              f"Peak HBM BW: {gpu_info.get('peak_hbm_bandwidth_gbs', '?')} GB/s")
+        print(f"\nGPU {device['device_id']}: {gpu_info.get('model', 'unknown')} ({gpu_info.get('architecture', '?')})")
+        print(
+            f"  CUs: {gpu_info.get('compute_units', '?')}, "
+            f"Peak HBM BW: {gpu_info.get('peak_hbm_bandwidth_gbs', '?')} GB/s"
+        )
         print()
 
         kernels = device.get("kernels", [])
@@ -54,7 +55,7 @@ def print_metrix_result(result):
 
         # Table header
         print(f"  {'Kernel':<50} {'Duration (us)':>14} {'Bottleneck':<15}")
-        print(f"  {'-'*50} {'-'*14} {'-'*15}")
+        print(f"  {'-' * 50} {'-' * 14} {'-' * 15}")
 
         for k in kernels:
             name = k["name"][:50]
@@ -81,9 +82,7 @@ def print_rocprof_result(result):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Profile a GPU kernel using the unified profiler MCP."
-    )
+    parser = argparse.ArgumentParser(description="Profile a GPU kernel using the unified profiler MCP.")
     parser.add_argument("command", help="Command to profile (e.g. 'python3 kernel.py --profile')")
     parser.add_argument(
         "--backend",

@@ -79,15 +79,7 @@ class TestStripFragment:
 class TestGetKernelNameAtLine:
     def test_returns_function_containing_line(self, tmp_path):
         f = tmp_path / "k.py"
-        f.write_text(
-            "def foo():\n"
-            "    pass\n"
-            "def bar():\n"
-            "    x = 1\n"
-            "    y = 2\n"
-            "def baz():\n"
-            "    pass\n"
-        )
+        f.write_text("def foo():\n    pass\ndef bar():\n    x = 1\n    y = 2\ndef baz():\n    pass\n")
         assert get_kernel_name_at_line(f, 1) == "foo"
         assert get_kernel_name_at_line(f, 2) == "foo"
         assert get_kernel_name_at_line(f, 3) == "bar"
@@ -143,10 +135,13 @@ class TestResolveKernelUrl:
         assert out["error"] == "Only GitHub blob or raw URLs are supported"
         assert out["local_repo_path"] is None
 
-    @pytest.mark.parametrize("url", [
-        "https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/moe/moe_op_gelu.py",
-        "https://raw.githubusercontent.com/ROCm/aiter/main/aiter/ops/triton/moe/moe_op_gelu.py",
-    ])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/moe/moe_op_gelu.py",
+            "https://raw.githubusercontent.com/ROCm/aiter/main/aiter/ops/triton/moe/moe_op_gelu.py",
+        ],
+    )
     def test_github_url_clone_success(self, url):
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = "aiter/ops/triton/moe/moe_op_gelu.py"
@@ -175,11 +170,15 @@ class TestResolveKernelUrl:
                 patch("minisweagent.tools.resolve_kernel_url_impl.tempfile.mkdtemp", return_value=tmpdir),
                 patch("minisweagent.tools.resolve_kernel_url_impl.subprocess.run") as mock_run,
             ):
-                mock_run.return_value = type("R", (), {
-                    "returncode": 1,
-                    "stderr": "fatal: repository not found",
-                    "stdout": "",
-                })()
+                mock_run.return_value = type(
+                    "R",
+                    (),
+                    {
+                        "returncode": 1,
+                        "stderr": "fatal: repository not found",
+                        "stdout": "",
+                    },
+                )()
 
                 out = resolve_kernel_url(url)
 

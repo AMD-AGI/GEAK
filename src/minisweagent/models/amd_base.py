@@ -63,8 +63,6 @@ class AmdLlmModelBase:
         self.n_calls = 0
         # Load tools list
         self.tools = get_tools_list(use_strategy_manager=self.config.use_strategy_manager)
-        if not self.config.profiling:
-            self.tools = [tool for tool in self.tools if tool["name"] != "profiling"]
         if not self.config.bash_tool:
             self.tools = [tool for tool in self.tools if tool["name"] != "bash"]
         self._init_client()
@@ -114,6 +112,10 @@ class AmdLlmModelBase:
     # Public API
     # ------------------------------------------------------------------
 
+    def set_tools(self, tools: list[dict]) -> None:
+        """Replace the tool schemas visible to the LLM."""
+        self.tools = tools
+
     def query(self, messages: list[dict], **kwargs) -> dict:
         """Query the model and return a standardised response dict."""
         response = self._query_api(messages, **kwargs)
@@ -123,10 +125,9 @@ class AmdLlmModelBase:
         usage = getattr(response, "usage", None)
         if usage:
             try:
-                cost = (
-                    (usage.input_tokens / 1000) * self.config.cost_per_1k_input_tokens
-                    + (usage.output_tokens / 1000) * self.config.cost_per_1k_output_tokens
-                )
+                cost = (usage.input_tokens / 1000) * self.config.cost_per_1k_input_tokens + (
+                    usage.output_tokens / 1000
+                ) * self.config.cost_per_1k_output_tokens
             except (AttributeError, TypeError):
                 logger.debug("Usage information available but format unexpected")
                 cost = 0.0

@@ -40,7 +40,7 @@ class TestBaselineMetricsTool:
     def test_kernel_names_parsing(self, mock_build):
         mock_build.return_value = {}
         tool = BaselineMetricsTool()
-        tool(profiler_output='{}', kernel_names="rope_fwd, rope_bwd")
+        tool(profiler_output="{}", kernel_names="rope_fwd, rope_bwd")
         call_kwargs = mock_build.call_args[1]
         assert call_kwargs["kernel_names"] == ["rope_fwd", "rope_bwd"]
 
@@ -48,6 +48,6 @@ class TestBaselineMetricsTool:
     def test_kernel_indices_parsing(self, mock_build):
         mock_build.return_value = {}
         tool = BaselineMetricsTool()
-        tool(profiler_output='{}', kernel_indices="0, 2, 5")
+        tool(profiler_output="{}", kernel_indices="0, 2, 5")
         call_kwargs = mock_build.call_args[1]
         assert call_kwargs["kernel_indices"] == [0, 2, 5]

@@ -2,6 +2,7 @@
 .venv
 .git
 .pytest_cache
+.ruff_cache
 *.pyc
 __pycache__
 .rocprofv3

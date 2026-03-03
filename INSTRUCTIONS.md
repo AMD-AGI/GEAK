@@ -61,57 +61,59 @@ Read `kernel.py` and identify:
 - Whether `--profile` flag is supported
 - Supported activations, data types, etc.
 
-### 1a. DISCOVER: Run Test Discovery (MANDATORY)
+### 1a. DISCOVER: Review Pre-Scanned Discovery Results
 
-**ALWAYS run test discovery before creating any test harness.** The repo
-likely has existing tests that you should reuse.  The discovery tool scans
-the entire repo for test files that match the kernel, ranked by confidence.
+**Test discovery was already run by the pre-agent pipeline.** The results
+are included in your task context (look for "Discovered Tests" and "Kernel
+Analysis" sections).  You do NOT need to re-run discovery manually.
 
-```bash
-PYTHONPATH=/workspace:/workspace/src:$PYTHONPATH python3 -c "
-from geak_agent.mcp_tools.discovery import discover
-from pathlib import Path
-result = discover(workspace='KERNEL_DIR', kernel_path=Path('KERNEL_DIR/kernel.py'), interactive=False)
-print(f'Kernels: {len(result.kernels)}')
-print(f'Tests: {len(result.tests)}')
-print(f'Benchmarks: {len(result.benchmarks)}')
-for t in result.tests[:5]:
-    print(f'  Test: {t.file_path} (confidence: {t.confidence:.1f})')
-    print(f'    Command: {t.command}')
-for b in result.benchmarks[:3]:
-    print(f'  Bench: {b.file_path} (confidence: {b.confidence:.1f})')
-"
-```
+The pre-scan found:
+- Kernel type, language, and build info
+- Existing test files ranked by confidence with suggested commands
+- Existing benchmark files
+- Extracted test patterns (tolerances, input shapes, dtypes, import patterns)
 
-**IMPORTANT:**
-- Replace `KERNEL_DIR/kernel.py` with the actual kernel file path (e.g.,
-  `KERNEL_DIR/rope.py`).  Passing `kernel_path` makes discovery prioritise
-  tests that match the kernel name — without it, results are generic.
-- The `PYTHONPATH=/workspace:/workspace/src:$PYTHONPATH` prefix is required
-  because `geak_agent` is installed at `/workspace`.
-
-If discovery finds existing tests (confidence > 0.5):
-1. **Read the test file** to understand what it tests and how
-2. **Use the existing tests** as the basis for your test harness — import
-   the same functions, use the same test patterns, reuse reference impls
-3. **Add `--profile` mode** if the existing test doesn't have one
-4. Look in the test file for: input shapes, dtypes, reference implementations,
-   tolerance values, edge cases — use all of these
-
-If discovery finds no tests, proceed to section 1b to create one from scratch.
+**Review the discovery results in your task context:**
+1. If a **test harness was already created** by the pre-agent pipeline,
+   use it as-is.  Do NOT recreate it.  The path will be noted in your task.
+2. If discovery found high-confidence existing tests (confidence > 0.5),
+   **read the test file** and reuse its reference implementations, input
+   patterns, tolerances, and import patterns.
+3. If no pre-built harness exists and discovery found nothing, proceed to
+   section 1b to create one from scratch.
 
 Also run the kernel evaluation to verify correctness:
 ```bash
 cd KERNEL_DIR && python3 kernel.py
 ```
 
+**If you need to re-run discovery manually** (e.g., the pre-scan results are
+missing or the kernel path changed), use:
+```bash
+PYTHONPATH=/workspace:/workspace/src:$PYTHONPATH python3 -c "
+from minisweagent.tools.discovery import discover
+from pathlib import Path
+result = discover(workspace='KERNEL_DIR', kernel_path=Path('KERNEL_DIR/kernel.py'), interactive=False)
+print(f'Kernels: {len(result.kernels)}')
+print(f'Tests: {len(result.tests)}')
+for t in result.tests[:5]:
+    print(f'  Test: {t.file_path} (confidence: {t.confidence:.1f})')
+    print(f'    Command: {t.command}')
+"
+```
+
 ### 1b. DISCOVER: Build a Test Harness (for non-standard kernels)
 
-When no suitable existing tests are found, or the kernel file does NOT have
-a built-in `--profile` flag or standard `triton_op`/`torch_op` interface,
-create a **test harness** — a small Python script that imports the kernel,
-creates test inputs, and provides `--correctness`, `--profile`, and
-`--benchmark` modes.
+**Check first:** If the pre-agent pipeline (UnitTestAgent) already created a
+test harness, use it as-is.  The harness is an immutable evaluation contract
+— do NOT modify it.  Skip to section 1c.
+
+When no pre-built harness exists, no suitable existing tests are found, or
+the kernel file does NOT have a built-in `--profile` flag or standard
+`triton_op`/`torch_op` interface, create a **test harness** — a small Python
+script that imports the kernel, creates test inputs, and provides
+`--correctness`, `--profile`, `--benchmark`, `--full-benchmark`, and
+`--iterations N` modes.
 
 **If discovery found existing test files**, read them first and reuse:
 - Their reference implementations for correctness checking
@@ -147,14 +149,32 @@ creates test inputs, and provides `--correctness`, `--profile`, and
 3. **Use a fixed random seed** (`torch.manual_seed(42)`) so that correctness
    checks compare deterministic outputs.
 
-4. **Use these FIXED tensor sizes for all tests and profiling.**
-   The baseline and every OpenEvolve evaluation MUST use identical input
-   dimensions, otherwise speedup numbers are meaningless.  Use these
+4. **Extract shapes from discovered test files, not hardcoded defaults.**
+   The harness must define three shape lists at the top of the script:
+   - `ALL_SHAPES`: every unique shape from the discovered test files,
+     sorted by total element count.
+   - `HARNESS_SHAPES` (20-25): uniformly sampled from ALL_SHAPES. If
+     ALL_SHAPES has ≤25 entries, HARNESS_SHAPES = ALL_SHAPES.
+   - `PROFILE_SHAPES` (5): evenly-spaced from ALL_SHAPES, prevents OOM.
+
+   Shape routing by CLI mode:
+   - `--profile`        → PROFILE_SHAPES (5 shapes)
+   - `--benchmark`      → HARNESS_SHAPES (20-25 shapes)
+   - `--correctness`    → HARNESS_SHAPES
+   - `--full-benchmark` → ALL_SHAPES (every discovered shape)
+
+   The harness must also accept `--iterations N` (default 20) to override
+   the number of benchmark iterations for both `--benchmark` and
+   `--full-benchmark`.  If the flag is not passed, the harness should read
+   `GEAK_BENCHMARK_ITERATIONS` from the environment as a fallback.
+   The pipeline sets `GEAK_BENCHMARK_EXTRA_ARGS` to `--iterations 50`
+   during evaluation to reduce GPU timing noise.
+
+   If the kernel does NOT have discovered test files, fall back to these
    standard sizes (large enough to saturate the GPU):
    - **Attention/RoPE kernels:** `S=2048, B=4, H=32, D=128` (fp16)
    - **GEMM kernels:** `M=1024, N=1024, K=1024` (fp16)
    - **Elementwise/pointwise:** at least 16M elements
-   Hardcode these in the test harness — do NOT let them vary between runs.
 
 5. **Use `torch.testing.assert_close`** for correctness, NOT manual
    `torch.allclose` with always-pass fallbacks.
@@ -162,6 +182,8 @@ creates test inputs, and provides `--correctness`, `--profile`, and
 6. **The `--profile` mode should run the kernel once** (with minimal setup)
    so that `kernel-profile` / `rocprofv3` captures exactly the kernel(s)
    you care about.  Avoid running benchmarks or loops in profile mode.
+   **CRITICAL: `--profile` must use ONLY PROFILE_SHAPES (5 shapes) to
+   prevent OOM.**
 
 7. **Keep the harness file OUTSIDE the kernel directory** or in a fixed
    location that won't be overwritten by OpenEvolve's candidate files.
@@ -176,6 +198,24 @@ creates test inputs, and provides `--correctness`, `--profile`, and
    # CORRECT — RNG on CPU, only the target kernel appears in profiler
    x = torch.randn(S, B, H, D, dtype=torch.float16, device='cpu').to('cuda')
    ```
+
+**Language-specific test harness notes:**
+
+When the kernel is NOT a Python/Triton kernel, the test harness approach varies:
+
+- **HIP/CUDA kernels (.cu, .hip, .cpp):** The test harness should still be a
+  Python script that calls the kernel via its pybind11 binding (e.g.,
+  `torch.ops.aiter.my_kernel(...)`) or via ctypes. If no Python binding exists,
+  create a C++ test that compiles with `hipcc` and outputs timing to stdout.
+  Use `--correctness` and `--profile` flags.
+
+- **Composable Kernel (CK):** CK kernels are template-heavy C++. After editing
+  template parameters, rebuild with `hipcc` or `cmake`. The test harness should
+  import the rebuilt module and call the kernel.
+
+- **Assembly (HSACO):** HSACO binaries are precompiled. You cannot edit the
+  assembly. The test harness should test the Python wrapper's launch config
+  (grid dims, block dims, shared memory size).
 
 ### 1c. DISCOVER: Identify the optimisation target file
 
@@ -211,6 +251,20 @@ Focus on the inner kernel for the biggest gains:
 - Use `tl.trans()` to transpose data in registers
 - Vectorise loads/stores for better bandwidth
 - Change the loop structure for better pipelining
+
+**CRITICAL — COMMANDMENT.md rules (violating these causes silent failure):**
+
+> 1. MUST use EXACTLY these section headers: `## SETUP`, `## CORRECTNESS`, `## PROFILE`,
+>    `## BENCHMARK`, `## FULL_BENCHMARK`.
+>    Any other header will be flagged as an error by `validate_commandment`.
+> 2. Commands must NOT start with shell built-ins (`cd`, `source`, `export`).
+>    `rocprofv3` uses `os.execvpe()`, not a shell. Use absolute paths or `bash -c "..."`.
+> 3. Commands must NOT use inline env var prefixes like `HIP_VISIBLE_DEVICES=1 python3 ...`.
+>    `rocprofv3` treats `HIP_VISIBLE_DEVICES=1` as the executable name and crashes with
+>    `FileNotFoundError`. Set env vars in a wrapper script created in `## SETUP`.
+> 4. Do NOT set or export `HIP_VISIBLE_DEVICES` — it is ALREADY SET in the environment
+>    by the scheduler. Use `${GEAK_GPU_DEVICE}` if you need the GPU ID.
+> 5. Each section must contain at least one executable command.
 
 **What to do — OpenEvolve mode:**
 
@@ -324,7 +378,7 @@ python3 KERNEL_DIR/kernel.py --profile > /dev/null 2>&1 || true
 
 # Step 1: Profile and save the raw profiler output (kernel is now warm)
 python3 -c "
-from geak_agent.mcp_tools.metrix import MetrixTool
+from metrix_mcp.core import MetrixTool
 from minisweagent.baseline_metrics import list_kernels
 import json
 
@@ -377,6 +431,43 @@ kernel-profile "python3 KERNEL_DIR/optimization_output/best_kernel.py --profile"
 ```
 Compare with the baseline to confirm the speedup is real and not an artefact.
 
+### Apples-to-apples speedup comparison (CRITICAL)
+
+The test harness has two benchmark modes that use **different** shape sets:
+- `--benchmark` uses HARNESS_SHAPES (20-25 sampled shapes)
+- `--full-benchmark` uses ALL_SHAPES (every discovered shape)
+
+**You MUST compare matching modes.** Comparing `--full-benchmark` baseline
+against `--benchmark` iteration results (or vice versa) produces meaningless
+speedup numbers because the shape mix is different.
+
+**Baseline setup:** Run BOTH modes on the unmodified kernel and record both
+results separately:
+```bash
+# Reduced baseline (for comparing during iterations)
+python3 test_harness.py --benchmark > baseline_benchmark.txt
+# Full baseline (for start/end comparison)
+python3 test_harness.py --full-benchmark > baseline_full_benchmark.txt
+```
+
+**During optimization iterations:** Use `--benchmark` (reduced) and compare
+against the **reduced baseline** only.
+
+**At the end of optimization:** Run `--full-benchmark` on the best kernel
+and compare against the **full baseline** to report the final speedup.
+
+**Summary table:**
+
+| When                     | Run mode           | Compare against          |
+|--------------------------|--------------------|--------------------------|
+| Baseline (start)         | --benchmark AND --full-benchmark | (record both)  |
+| Each iteration           | --benchmark        | baseline --benchmark     |
+| Final result             | --full-benchmark   | baseline --full-benchmark|
+
+Never mix modes in a comparison. If you only have a `--full-benchmark`
+baseline, re-run `--benchmark` on the original kernel before comparing
+with iteration results.
+
 ---
 
 ## 3. OPTIMIZATION: Run OpenEvolve
@@ -426,14 +517,19 @@ cd KERNEL_DIR && python3 /workspace/geak-oe/examples/geak_eval/run_openevolve.py
   --baseline-metrics optimization_output/baseline_metrics.json
 ```
 
-### OpenEvolve's profiling freedom
+### OpenEvolve's evaluation sections
 
-OpenEvolve invokes `kernel-profile` during every candidate evaluation via the
-COMMANDMENT PROFILE section.  This is how it scores each candidate against the
-baseline.  Do NOT restrict OpenEvolve's ability to profile — the COMMANDMENT
-PROFILE section must always include the full profiling command.  OpenEvolve
-decides when and how often to profile; the baseline_metrics.json is only the
-starting reference point.
+OpenEvolve reads the `## BENCHMARK` section from COMMANDMENT.md for per-iteration
+fitness evaluation.  This runs the harness with `--benchmark` (wall-clock latency
+on 20-25 HARNESS_SHAPES) and produces a speedup ratio against the baseline.
+
+The `## PROFILE` section (deep hardware analysis via Metrix) is NOT run per-iteration
+by OpenEvolve.  It remains in COMMANDMENT for the orchestrator's per-round evaluation
+and for on-demand `profile_kernel` calls by agents.
+
+**geak-oe repo change required**: In `run_openevolve.py`, the evaluator must read
+`## BENCHMARK` (not `## PROFILE`) from COMMANDMENT.md and parse wall-clock median
+latency from stdout for the fitness function (`baseline_latency / candidate_latency`).
 
 ### Monitoring OpenEvolve in Real-Time
 
@@ -495,8 +591,8 @@ These are available in every command — do NOT set them yourself:
 - `${GEAK_KERNEL_DIR}` — the original kernel directory
 
 ### CRITICAL RULES
-1. Only three section headers are recognized: `## SETUP`, `## CORRECTNESS`, `## PROFILE`
-2. Any other `##` header ends the current section (content after it is ignored)
+1. Five section headers are recognized: `## SETUP`, `## CORRECTNESS`, `## PROFILE`, `## BENCHMARK`, `## FULL_BENCHMARK`
+2. Any other `##` header is flagged as an error by `validate_commandment`
 3. **NEVER copy the candidate INTO `${GEAK_WORK_DIR}` in SETUP** — OpenEvolve writes kernel.py there automatically.  However, you SHOULD use `cp` to place the candidate at the correct import path when optimising an inner kernel file (see Section 1c).
 4. Always use `${GEAK_WORK_DIR}/kernel.py` to reference the candidate kernel
 5. Always use `${GEAK_GPU_DEVICE}` instead of hardcoded GPU IDs
@@ -509,25 +605,38 @@ These are available in every command — do NOT set them yourself:
 
 ```
 ## SETUP
-export HIP_VISIBLE_DEVICES=${GEAK_GPU_DEVICE}
-export PYTHONPATH=${GEAK_WORK_DIR}:${PYTHONPATH}
+printf '#!/bin/bash\nexport HIP_VISIBLE_DEVICES=%s\nexport PYTHONPATH=%s:${PYTHONPATH}\nexec python3 "$@"\n' "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" > ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh
 
 ## CORRECTNESS
-python3 /workspace/geak-oe/examples/geak_eval/correctness_check.py --baseline KERNEL_DIR/kernel.py --generated ${GEAK_WORK_DIR}/kernel.py
+${GEAK_WORK_DIR}/run.sh /workspace/geak-oe/examples/geak_eval/correctness_check.py --baseline KERNEL_DIR/kernel.py --generated ${GEAK_WORK_DIR}/kernel.py
 
 ## PROFILE
-python3 ${GEAK_WORK_DIR}/kernel.py --profile > /dev/null 2>&1 || true
-python3 ${GEAK_WORK_DIR}/kernel.py --profile > /dev/null 2>&1 || true
-kernel-profile "python3 ${GEAK_WORK_DIR}/kernel.py --profile" --gpu-devices ${GEAK_GPU_DEVICE} --replays 5
+${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --profile > /dev/null 2>&1 || true
+${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --profile > /dev/null 2>&1 || true
+kernel-profile "${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --profile" --gpu-devices ${GEAK_GPU_DEVICE} --replays 5
+
+## BENCHMARK
+${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --benchmark ${GEAK_BENCHMARK_EXTRA_ARGS:-}
+
+## FULL_BENCHMARK
+${GEAK_WORK_DIR}/run.sh ${GEAK_WORK_DIR}/kernel.py --full-benchmark ${GEAK_BENCHMARK_EXTRA_ARGS:-}
 ```
+
+**WHY a wrapper script:** All COMMANDMENT commands are run via `os.execvpe()`,
+not a shell.  Shell built-ins (`export`, `cd`, `source`) and inline env var
+prefixes (`VAR=val cmd`) crash with `FileNotFoundError`.  A wrapper script
+sets the environment inside the same process that runs python3.
 
 ### Common Mistakes to Avoid
 - Adding `cp $GEAK_CANDIDATE_PATH ...` in SETUP — this variable does not exist
 - Hardcoding GPU IDs (use `${GEAK_GPU_DEVICE}`)
 - Referencing `${GEAK_WORK_DIR}` as the optimization_output dir — it's actually a per-eval temp dir
 - Wrapping commands in markdown code fences inside the COMMANDMENT file
-- Adding sections like `## SCORING` or `## BASELINE METRICS` — they end the PROFILE section
+- Adding unrecognized sections like `## SCORING` or `## BASELINE METRICS`
 - Using `--output-dir` instead of `--output` for run_openevolve.py
+- Using inline env vars: `HIP_VISIBLE_DEVICES=1 python3 ...` — crashes `rocprofv3`
+- Using bare `export`, `cd`, or `source` as command prefixes — use a wrapper script
+- Setting `HIP_VISIBLE_DEVICES` at all — it is already set by the scheduler
 
 ---
 
@@ -544,9 +653,37 @@ cat optimization_output/openevolve_result.json
 
 ## 6. Environment Reference
 
+### Variables set automatically by the pipeline
+
+- `HIP_VISIBLE_DEVICES` — GPU selection (set by COMMANDMENT / scheduler)
+- `GEAK_WORK_DIR` — per-evaluation temp directory (candidate kernel lives here)
+- `GEAK_GPU_DEVICE` — GPU device ID for this evaluation
+- `GEAK_REPO_ROOT` — original repository root
+- `GEAK_HARNESS` — absolute path to the test harness script
+- `GEAK_BENCHMARK_EXTRA_ARGS` — extra CLI args appended to `--benchmark` and
+  `--full-benchmark` invocations (default: `--iterations 50`).  Controls the
+  number of benchmark iterations used by preprocessing baselines, agent
+  benchmarks, and orchestrator evaluations to ensure consistency.
+- `GEAK_BENCHMARK_ITERATIONS` — alternative fallback read by the harness
+  itself when `--iterations` is not passed on the command line.
+
+### User-configurable
+
 - `AMD_LLM_API_KEY` — required for LLM calls (already set in container)
-- `HIP_VISIBLE_DEVICES` — GPU selection (set by COMMANDMENT automatically)
 - `GEAK_OE_ROOT` — OpenEvolve root (default: /workspace/geak-oe)
+- `GEAK_MAX_ROUNDS` — maximum orchestration rounds (default: 5)
+- `GEAK_ALLOWED_AGENTS` — comma-separated allowlist of agent types
+- `GEAK_EXCLUDED_AGENTS` — comma-separated blocklist of agent types
+
+### Tool paths
+
 - Correctness checker: `/workspace/geak-oe/examples/geak_eval/correctness_check.py`
 - OpenEvolve runner: `/workspace/geak-oe/examples/geak_eval/run_openevolve.py`
 - kernel-profile: `/opt/venv/bin/kernel-profile`
+
+### Patch exclusions
+
+When generating patches, the following patterns are excluded from `git diff`
+to prevent binary artifacts and build cache from polluting patches:
+`traj.json`, `*.log`, `.rocprofv3/`, `__pycache__/`, `*.pyc`,
+`.pytest_cache/`, `*.egg-info/`, `*.so`, `.geak_resolved/`.
