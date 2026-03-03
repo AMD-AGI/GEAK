@@ -79,6 +79,7 @@ def optimize_kernel(
     output_dir: str | None = None,
     commandment_path: str | None = None,
     baseline_metrics_path: str | None = None,
+    config_path: str | None = None,
 ) -> dict:
     """
     Optimize a GPU kernel using OpenEvolve LLM-guided evolution.
@@ -93,6 +94,8 @@ def optimize_kernel(
         output_dir: Output directory for results. Defaults to <kernel_dir>/optimization_output.
         commandment_path: Optional path to pre-built COMMANDMENT.md (skips auto-build).
         baseline_metrics_path: Optional path to pre-computed baseline metrics JSON.
+        config_path: Optional path to OpenEvolve config.yaml (overrides bundled config).
+                     Use this to change the LLM model, population size, etc.
 
     Returns:
         {
@@ -148,6 +151,12 @@ def optimize_kernel(
             output_dir,
         ]
 
+        if config_path:
+            resolved = str(Path(config_path).resolve())
+            if not Path(resolved).is_file():
+                return {"success": False, "error": f"Config not found: {resolved}"}
+            cmd.extend(["--config", resolved])
+            logger.info(f"Using custom config: {resolved}")
         if commandment_path:
             cmd.extend(["--commandment", str(Path(commandment_path).resolve())])
         if baseline_metrics_path:
