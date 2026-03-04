@@ -1,35 +1,15 @@
-# mini-swe-agent Index Building and Test Scripts
+# Scripts
 
-## Install Dependencies
+## run-docker.sh
 
-```bash
-pip install -r requirements.txt
-```
+Build and run the GEAK-agent Docker container. Run tests and examples **inside** the container. The repo is mounted at `/workspace`, so edits on the host are visible without rebuilding.
 
-## Build Index
+Requires `AMD_LLM_API_KEY`.
 
 ```bash
-# Build or rebuild index
-python build_index.py --force
-
-# Index output location: ~/.cache/amd-ai-devtool/semantic-index/
+./scripts/run-docker.sh          # build if needed, start container, exec into bash
+./scripts/run-docker.sh --rebuild # rebuild image (no cache) and start
 ```
 
-## Test Search
+Inside the container you land in `/workspace`. Run e.g. `pytest tests/ -v` or `python examples/resolve_kernel_url/resolve_kernel_url.py <spec>`.
 
-```bash
-# Test FAISS semantic search
-python test_embedding_search.py
-
-# Test hybrid retrieval (Embedding + BM25 + Reranker)
-python test_hybrid_retrieval.py
-```
-
-## File Descriptions
-
-| File | Purpose |
-|------|---------|
-| `build_index.py` | Build FAISS + BM25 index |
-| `test_embedding_search.py` | Test semantic search |
-| `test_hybrid_retrieval.py` | Test hybrid retrieval |
-| `requirements.txt` | Python dependencies |

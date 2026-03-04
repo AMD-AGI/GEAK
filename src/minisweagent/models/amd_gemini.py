@@ -5,6 +5,9 @@ import logging
 import os
 import uuid
 
+from google import genai
+from google.genai import types
+from google.genai.types import HttpOptions
 from tenacity import (
     before_sleep_log,
     retry,
@@ -13,12 +16,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from google import genai
-from google.genai import types
-from google.genai.types import HttpOptions
-
 from minisweagent.models.amd_base import AmdLlmModelBase, logger
-
 
 
 def convert_openai_tools_to_gemini(tools: list[dict]) -> list[dict]:
@@ -94,10 +92,12 @@ class AmdGeminiModel(AmdLlmModelBase):
                     name=msg.get("name", ""),
                     response={"result": content},
                 )
-                contents.append(types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=fr)],
-                ))
+                contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(function_response=fr)],
+                    )
+                )
             elif role == "assistant" and (msg.get("tool_calls") or msg.get("tools")):
                 # Model Content with FunctionCall part
                 # Accept both "tool_calls" and "tools" keys for robustness.
@@ -129,16 +129,19 @@ class AmdGeminiModel(AmdLlmModelBase):
                     part_kwargs["thought_signature"] = thought_sig
                     logger.debug(
                         "Attaching thought_signature (len=%d) to Part for FunctionCall '%s'",
-                        len(thought_sig), fc_kwargs["name"],
+                        len(thought_sig),
+                        fc_kwargs["name"],
                     )
                 parts.append(types.Part(**part_kwargs))
                 contents.append(types.Content(role="model", parts=parts))
             else:
                 gemini_role = "model" if role == "assistant" else "user"
-                contents.append(types.Content(
-                    role=gemini_role,
-                    parts=[types.Part(text=content)],
-                ))
+                contents.append(
+                    types.Content(
+                        role=gemini_role,
+                        parts=[types.Part(text=content)],
+                    )
+                )
 
         return system_message, contents
 
@@ -155,8 +158,14 @@ class AmdGeminiModel(AmdLlmModelBase):
     def _query_api(self, messages: list[dict], **kwargs):
         # Google genai API supported parameters
         supported_params = {
-            "temperature", "max_output_tokens", "top_p", "top_k",
-            "stop_sequences", "candidate_count", "safety_settings", "config",
+            "temperature",
+            "max_output_tokens",
+            "top_p",
+            "top_k",
+            "stop_sequences",
+            "candidate_count",
+            "safety_settings",
+            "config",
         }
 
         all_kwargs = self.config.model_kwargs | kwargs
@@ -169,8 +178,15 @@ class AmdGeminiModel(AmdLlmModelBase):
 
         # Build GenerateContentConfig with generation params
         config_params: dict = {}
-        for key in ("temperature", "top_p", "top_k", "max_output_tokens",
-                     "stop_sequences", "candidate_count", "safety_settings"):
+        for key in (
+            "temperature",
+            "top_p",
+            "top_k",
+            "max_output_tokens",
+            "stop_sequences",
+            "candidate_count",
+            "safety_settings",
+        ):
             if key in filtered_kwargs:
                 config_params[key] = filtered_kwargs.pop(key)
 
@@ -180,13 +196,11 @@ class AmdGeminiModel(AmdLlmModelBase):
             **config_params,
         )
 
-        response = self.client.models.generate_content(
+        return self.client.models.generate_content(
             model=self.config.model_name,
             contents=contents,
             **filtered_kwargs,
         )
-
-        return response
 
     # ------------------------------------------------------------------
     # Response parsing
@@ -200,9 +214,7 @@ class AmdGeminiModel(AmdLlmModelBase):
                 candidate = response.candidates[0]
                 parts = (
                     candidate.content.parts
-                    if hasattr(candidate, "content")
-                    and hasattr(candidate.content, "parts")
-                    and candidate.content.parts
+                    if hasattr(candidate, "content") and hasattr(candidate.content, "parts") and candidate.content.parts
                     else []
                 )
 

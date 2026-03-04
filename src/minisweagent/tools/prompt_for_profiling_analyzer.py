@@ -1,4 +1,4 @@
-profiler_prompt ="""Analyze this AMD GPU profiler output (rocprof-compute) to identify performance optimization opportunities for kernel latency reduction.
+profiler_prompt = """Analyze this AMD GPU profiler output (rocprof-compute) to identify performance optimization opportunities for kernel latency reduction.
 
 ANALYSIS GUIDELINES:
 1. Focus on high-signal sections with actual data:

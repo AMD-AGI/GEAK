@@ -49,23 +49,27 @@ class AmdOpenAIModel(AmdLlmModelBase):
 
             if role == "tool":
                 # Tool result → function_call_output
-                formatted.append({
-                    "type": "function_call_output",
-                    "call_id": msg.get("tool_call_id", ""),
-                    "output": content,
-                })
+                formatted.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": msg.get("tool_call_id", ""),
+                        "output": content,
+                    }
+                )
             elif role == "assistant" and msg.get("tool_calls"):
                 # Assistant with tool call
                 if content:
                     formatted.append({"role": "assistant", "content": content})
                 tool_info = msg["tool_calls"]
                 args = tool_info["function"]["arguments"]
-                formatted.append({
-                    "type": "function_call",
-                    "call_id": tool_info.get("id", ""),
-                    "name": tool_info["function"]["name"],
-                    "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
-                })
+                formatted.append(
+                    {
+                        "type": "function_call",
+                        "call_id": tool_info.get("id", ""),
+                        "name": tool_info["function"]["name"],
+                        "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
+                    }
+                )
             else:
                 formatted.append({"role": role, "content": content})
 
@@ -84,10 +88,18 @@ class AmdOpenAIModel(AmdLlmModelBase):
     def _query_api(self, messages: list[dict], **kwargs):
         # AMD Responses API supported parameters
         supported_params = {
-            "top_p", "frequency_penalty",
-            "presence_penalty", "stop", "stream", "n",
-            "seed", "response_format", "tools", "tool_choice",
-            "reasoning", "text",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "stop",
+            "stream",
+            "n",
+            "seed",
+            "response_format",
+            "tools",
+            "tool_choice",
+            "reasoning",
+            "text",
         }
 
         all_kwargs = self.config.model_kwargs | kwargs
@@ -101,13 +113,11 @@ class AmdOpenAIModel(AmdLlmModelBase):
         formatted_messages = self.format_messages(messages)
 
         logger.debug("OpenAI formatted messages: %s", formatted_messages)
-        response = self.client.responses.create(
+        return self.client.responses.create(
             model=self.config.model_name,
             input=formatted_messages,
             **filtered_kwargs,
         )
-
-        return response
 
     # ------------------------------------------------------------------
     # Response parsing

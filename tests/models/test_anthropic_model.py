@@ -1,7 +1,7 @@
 import os
 from unittest.mock import patch
 
-from minisweagent.models.anthropic import AnthropicModel
+from minisweagent.models.anthropic_model import AnthropicModel
 from minisweagent.models.utils.key_per_thread import get_key_per_thread
 
 

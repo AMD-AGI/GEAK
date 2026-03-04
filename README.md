@@ -1,329 +1,187 @@
-# GEAK-v3
+# GEAK — GPU Evolutionary Agent for Kernels
 
-GEAK is an AI-powered framework for automated GPU kernel optimization, built on top of mini-SWE-agent.
+GEAK is an AI-powered framework for automated GPU kernel optimization. It profiles kernels, identifies bottlenecks, generates optimization strategies, and applies them via an LLM-driven orchestrator.
 
-It enables systematic, profiling-driven, and scalable optimization of GPU kernels — evolving from single-kernel tuning (v1/v2) to full repository-level autonomous optimization (v3).
+## Quick Start
 
-## Table of Contents
+### Prerequisites
 
-- [Evolution: From Kernel-Level to Repo-Level Automation](#evolution-from-kernel-level-to-repo-level-automation)
-- [Core Architecture](#core-architecture)
-  - [End-to-End Optimization Engine](#end-to-end-optimization-engine)
-  - [Tool-Augmented Intelligence Layer](#tool-augmented-intelligence-layer)
-  - [Parallel Exploration & Scaling](#parallel-exploration--scaling)
-- [Getting Started](#getting-started)
-  - [Installation](#installation)
-  - [Usage](#usage)
-  - [Configuration](#configuration)
-  - [Output & Artifacts](#output--artifacts)
-- [Features](#features)
-  - [Unit Test Discovery](#unit-test-discovery)
-  - [System Tools (Built-in)](#system-tools-built-in)
-  - [Best Patch Selection](#best-patch-selection)
-  - [Knowledge Base Retrieval](#knowledge-base-retrieval)
-- [Summary](#summary)
+- Docker with AMD GPU access (`/dev/kfd`, `/dev/dri`)
+- `AMD_LLM_API_KEY` environment variable set
 
----
-
-## Evolution: From Kernel-Level to Repo-Level Automation
-
-### GEAK v1 / v2 — Single Kernel Optimization
-
-Earlier versions focused on optimizing individual GPU kernels through iterative patch generation and performance validation.
-
-They demonstrated that LLM-based agents can:
-
-- Analyze kernel structure
-- Propose optimization strategies
-- Generate performance-improving patches
-
-### GEAK v3 — Autonomous Repo-Level Optimization
-
-GEAK v3 upgrades the system into a full lifecycle GPU optimization framework.
-
-It operates at repository scale and automates:
-
-- 🔍 Test discovery and generation
-- 📊 Baseline performance measurement
-- 🧠 Profiling-guided bottleneck diagnosis
-- 🎯 Strategy planning and execution
-- ✅ Patch validation and regression testing
-- 🔁 Multi-round iterative improvement
-
-The system forms a closed-loop optimization engine capable of continuous performance evolution with minimal human intervention.
-
----
-
-## Core Architecture
-
-### End-to-End Optimization Engine
-
-At its core, GEAK runs a fully autonomous optimization loop:
-
-**Test Detection → Baseline → Profiling → Strategy Planning → (Patch Generation → Validation) × N → Best-performing Kernel**
-
-Each optimization step is:
-
-- Correctness-verified
-- Performance-measured
-- Version-tracked
-
-### Tool-Augmented Intelligence Layer
-
-GEAK v3 introduces a structured tool ecosystem that enhances agent reasoning and execution quality.
-
-The system integrates:
-
-- **Profiling** for quantitative bottleneck identification
-  (memory bandwidth, occupancy, register pressure, execution stalls)
-
-- **Optimization Strategy Management** for tracking explored techniques, marking successful/failed strategies, and prioritizing high-impact directions
-
-- **Version & Patch Management** for automatic diff tracking, benchmarking history, regression detection, and best-patch selection
-
-- **Knowledge Retrieval** for on-demand AMD/NVIDIA GPU knowledge retrieval during optimization
-
-### Parallel Exploration & Scaling
-
-GEAK v3 supports parallel optimization agents. This parallel scaling:
-
-- Raises the optimization ceiling
-- Increases robustness of exploration
-- Reduces dependence on single optimization trajectories
-
----
-
-## Getting Started
-
-### Installation
+### Enter the container
 
 ```bash
-git clone https://github.com/AMD-AGI/GEAK
-cd GEAK
-git switch -c dev origin/dev
-pip install -e .
-
-# To use the Knowledge feature, also install the langchain dependencies
-pip install -e '.[langchain]'
-
-# Set LLM API key
-export AMD_LLM_API_KEY="YOUR_KEY"
+export AMD_LLM_API_KEY=your-key-here
+scripts/run-docker.sh              # interactive shell
+scripts/run-docker.sh --rebuild    # rebuild image first
 ```
 
-### Usage
-
-#### Basic (single-agent) GPU kernel optimization
+### Full pipeline (recommended)
 
 ```bash
-# Interactive REPL
-mini
-
-# Run with a specific task
-mini -t "fix the bug in main.py"
-
-# Auto-execute mode (no confirmation needed)
-mini --yolo
-
-# Enable RAG knowledge retrieval
-mini --rag
-
-# Use specific config.yaml
-mini --config geak.yaml \
-  --task "Optimize the kernel in src/kernel.cpp" \
-  --yolo
+geak --kernel-url <github_url>                    # single GPU
+geak --kernel-url <github_url> --gpu-ids 0,1,2,3  # multi-GPU parallel
 ```
 
-#### Parallel optimization (multiple agents + best patch selection)
+This runs the three-layer architecture automatically:
+1. **Preprocessor**: resolve URL, discover tests, profile, build baselines, generate commandments
+2. **Orchestrator**: LLM agent that generates tasks, dispatches to GPUs, iterates until converged or step limit reached
+3. **Sub-agents**: `geak --from-task` executes individual optimisation tasks
 
-- Each agent works in an isolated git workspace
-- Patches and test results are saved separately
-- After all runs finish, GEAK automatically selects the best patch based on the specified metric
+Output is written to `geak_output/` with independently verifiable stages:
+```
+geak_output/
+├── resolved.json               # Preprocessor: resolved kernel URL
+├── CODEBASE_CONTEXT.md         # Preprocessor: repo structure and key files
+├── discovery.json              # Preprocessor: discovered tests/benchmarks
+├── profile.json                # Preprocessor: GPU profiling results
+├── baseline_metrics.json       # Preprocessor: baseline performance
+├── COMMANDMENT.md              # Preprocessor: correctness/profiling contract
+├── tasks/round_N/*.md          # Orchestrator: generated task files per round
+├── results/round_N/<label>/    # Sub-agents: patches, test outputs, logs
+└── final_report.json           # Orchestrator: best result summary
+```
+
+## High-Level Commands
+
+| Command | Description |
+|---------|-------------|
+| `geak --kernel-url <url>` | Full pipeline: preprocess + orchestrate + optimize |
+| `geak --from-task <task.md>` | Run a single optimization task on one GPU |
+| `geak-preprocess <url> -o dir/` | Run only the preprocessor stage |
+| `geak-orchestrate --preprocess-dir dir/ --gpu-ids 0,1` | Run only the orchestrator on existing preprocessor output |
+
+## Low-Level Pipeline Commands
+
+Each step reads the previous step's output via `--from-*` flags and can be run independently:
 
 ```bash
-mini --config geak.yaml \
-  --num-parallel 4 \
-  --repo /path/to/kernel/repo \
-  --task "Optimize block_reduce kernel" \
-  --gpu-ids 0,1,2,3 \
-  --metric "Extract Bandwidth in GB/s (higher is better)" \
-  --yolo
+# 1. Resolve a GitHub kernel URL to a local checkout
+resolve-kernel-url <url> --json -o resolved.json
+
+# 2. Discover tests and benchmarks for the kernel
+#    (uses the automated-test-discovery MCP tool internally)
+
+# 3. Profile the kernel on GPU
+kernel-profile --from-discovery discovery.json --json -o profile.json
+
+# 4. Extract baseline performance metrics
+baseline-metrics build --from-profile profile.json --all -o baseline_metrics.json
+
+# 5. Generate the correctness/profiling contract
+commandment --from-discovery discovery.json -o COMMANDMENT.md
+
+# 6. Generate optimization tasks (LLM-driven)
+task-generator --from-discovery discovery.json \
+    --profiling profile.json \
+    --commandment COMMANDMENT.md \
+    --baseline-metrics baseline_metrics.json \
+    -o tasks/round_1/
+
+# 7. Run tasks in parallel across GPUs
+run-tasks --task-dir tasks/round_1/ --gpu-ids 0,1,2,3
+
+# 8. Select the best patch from results
+select-patch --patch-dir results/round_1/<label>/
 ```
 
-**Notes:**
+## Other Tools
 
-- `--num-parallel`: number of optimization agents
-- `--repo`: required when `--num-parallel > 1` (each agent uses an isolated git worktree)
-- `--gpu-ids`: comma-separated GPU IDs for agents
-- `--metric`: natural-language instruction for extracting/comparing metrics from test logs
-- `--yolo`: run end-to-end without interactive confirmation
+| Command | Description |
+|---------|-------------|
+| `validate-commandment <path>` | Validate a COMMANDMENT.md file |
+| `openevolve-worker --from-task <task.md>` | Run an OpenEvolve optimization task |
+| `select-patch --patch-dir <dir>` | LLM-driven patch selection from parallel runs |
 
-### Configuration
+## GPU Isolation
 
-#### Loading Configurations
-`mini` loads configs in layers:
+Every tool an agent uses (bash, profile_kernel, openevolve) inherits the agent's `HIP_VISIBLE_DEVICES` so parallel tasks never contend on the same GPU.
 
-1. base config: `mini.yaml`
-2. template: `mini_kernel_strategy_list.yaml` (default)
-3. user override: `--config geak.yaml` (**final override**)
+| Entry point | How GPUs are isolated |
+|---|---|
+| `geak --kernel-url <url> --gpu-ids 0,1,2,3` | Orchestrator dispatches tasks via `ParallelAgent._run_pool()`. Each task acquires N GPU slots from a queue; `HIP_VISIBLE_DEVICES` is set in the agent's environment and propagated to bash, MCP tools, and subprocesses. |
+| `geak --from-task <task.md> --gpu-ids 2` | Single-agent mode sets `env.config.env["HIP_VISIBLE_DEVICES"]` before creating the agent. `DefaultAgent.__init__` calls `toolruntime.set_env()` to propagate to all tools. |
+| `geak-orchestrate --gpu-ids 0,1,2,3` | Same as full pipeline -- dispatches through `ParallelAgent._run_pool()`. |
+| `openevolve-worker --gpu 0,1` | Sets `os.environ["HIP_VISIBLE_DEVICES"]` before spawning the optimizer subprocess. Accepts comma-separated IDs for multi-GPU runs. |
+| `task-generator --num-gpus 8` | No GPU compute, but `--num-gpus` tells the LLM planner how many GPUs are available so it generates enough tasks to fill them. |
 
-This means you can configure tools and parallel defaults directly in `geak.yaml`.
+Multi-GPU tasks (e.g. OpenEvolve with `num_gpus: 3`) acquire multiple GPU slots from the pool and receive a comma-separated `HIP_VISIBLE_DEVICES` (e.g. `"2,5,7"`). Slots are returned when the task finishes.
 
-#### RAG Configuration
+For implementation details, invariants, and how to add new GPU-aware tools, see [docs/gpu-isolation.md](docs/gpu-isolation.md).
 
-File: `rag_config.yaml` — controls the RAG retrieval pipeline:
+## Configuration
 
-| Parameter | Description |
-|-----------|-------------|
-| `retrieval.embed_top_k` / `bm25_top_k` | Number of candidates from Embedding / BM25 retrieval |
-| `retrieval.enable_bm25` | Whether to enable BM25 dual-path recall |
-| `retrieval.mcp_top_k` | Number of final results returned |
-| `reranker.enable_reranker` | Whether to enable re-ranking |
-| `fusion.semantic_weight` / `bm25_weight` | Fusion weights for Embedding and BM25 |
-| `summary.enable_rag_subagent` | Whether to enable LLM summarization |
-| `debug.verbose` | Whether to print verbose RAG tool logs |
+YAML configuration files live in `src/minisweagent/config/`. Key files:
 
-### Output & Artifacts
+| File | Purpose |
+|------|---------|
+| `geak.yaml` | Base GEAK agent config (model, environment) |
+| `mini_kernel_strategy_list.yaml` | Strategy-based optimization with profiling |
+| `mini_unit_test_agent.yaml` | Test/benchmark discovery agent |
+| `mini_select_patch.yaml` | Best-patch selection from parallel runs |
 
-GEAK saves patches + test logs so results are reproducible.
+## MCP Tool Servers
 
-- **Default output base**: `optimization_logs/`
-- **Auto-generated run directory**: `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`
-- **Parallel runs**: subfolders `parallel_0/`, `parallel_1/`, ...
+Standalone MCP servers for specialized tasks:
 
-Typical structure (parallel run):
+| Server | Purpose |
+|--------|---------|
+| `automated-test-discovery` | Content-based test/benchmark discovery |
+| `kernel-profiler` | GPU profiling via Metrix and rocprof-compute |
+| `kernel-evolve` | LLM-guided kernel optimization |
+| `kernel-ercs` | Kernel evaluation, reflection, compatibility checks |
+| `openevolve-mcp` | OpenEvolve evolutionary optimizer |
+| `mcp-client` | JSON-RPC 2.0 client for MCP communication |
 
-```bash
-optimization_logs/<kernel>_<timestamp>/
-├── parallel_0/
-│   ├── patch_0.patch
-│   ├── patch_0_test.txt
-│   └── agent_0.log
-├── parallel_1/
-│   └── ...
-├── best_results.json
-└── select_agent.log
-```
+Install individually: `pip install -e mcp_tools/<server-name>/`
 
----
-
-## Features
-
-### Unit test discovery
-
-If you pass `--create-test`, or you **do not** provide `--test-command`, GEAK will run a **UnitTestAgent** that tries to discover or create tests:
-
-```bash
-mini --config geak.yaml \
-  --repo /path/to/kernel/repo \
-  --create-test \
-  --task "Optimize device_batch_memcpy kernel"
-```
-
-### System Tools (built-in)
-
-| Tool | Purpose | Key outputs |
-| --- | --- | --- |
-| `profiling` | Profile workload to identify bottlenecks | rocprofiler-compute summary |
-| `strategy_manager` | Track optimization strategies | `.optimization_strategies.md` |
-| `test_perf` | Save patch and run test_command | `patch_N.patch`, `patch_N_test.txt` |
-
-### Best patch selection
-
-After parallel runs finish, GEAK runs a selection agent that reads all test logs, extracts metrics, and writes `best_results.json` + `select_agent.log`.
-
-### Knowledge Base Retrieval
-
-Integrates AMD AI DevTool for hybrid knowledge base retrieval (BGE Embedding + BM25 + Reranking), with built-in AMD GPU and NVIDIA GPU knowledge bases.
-
-**Knowledge Base Structure**
-```
-knowledge-base/
-├── amd-knowledge-base/
-│   ├── layer-1-hardware/         # Hardware architecture
-│   ├── layer-2-compute-stack/    # HIP, ROCm
-│   ├── layer-3-libraries/        # rocBLAS, MIOpen, etc.
-│   ├── layer-4-frameworks/       # PyTorch, TensorFlow
-│   ├── layer-5-llm/              # LLM related
-│   ├── layer-6-extended/         # Optimization guides
-│   └── best-practices/
-├── nvidia-knowledge-base/
-├── comparisons/
-└── INDEX.md
-```
-
-**Knowledge Retrieval Architecture**
+## Architecture
 
 ```
-Semantic + BM25 → RRF Fusion → BGE Reranker → Top K
+geak <url> --gpu-ids 0,1,2,3
+  │
+  ├─ Preprocessor (sequential, no LLM)
+  │    resolve_kernel_url → discover → profile_kernel → baseline_metrics → commandment → baseline_benchmarks
+  │
+  ├─ Orchestrator (LLM agent with tools)
+  │    generate_tasks → dispatch_tasks → collect_results → [iterate or finalize]
+  │    Auto-finalizes with best result if step limit reached
+  │
+  └─ Sub-agents (per task, per GPU, isolated worktrees)
+       geak --from-task (kernel-ercs, kernel-evolve, openevolve, minisweagent)
 ```
 
-- **Embedding**: BAAI/bge-large-en-v1.5 (semantic recall)
-- **BM25**: Keyword-based recall
-- **Fusion**: RRF (Reciprocal Rank Fusion)
-- **Reranker**: BAAI/bge-reranker-large
-
-**Usage**
-
-**1. Pre-download ROCm Library Source (Recommended)**
-
-```bash
-git clone --depth 1 https://github.com/ROCm/rocm-libraries.git ~/.cache/rocm-libraries
+```
+src/minisweagent/
+├── run/
+│   ├── mini.py              # geak entry point: routes to preprocessor+orchestrator or --from-task
+│   ├── preprocessor.py      # Sequential pipeline calling existing Python APIs
+│   ├── orchestrator.py      # LLM orchestrator agent with tools + auto-finalization
+│   ├── dispatch.py          # Task dispatch via ParallelAgent pool mode
+│   ├── task_generator.py    # LLM-driven task generation (agent-based, no rule fallbacks)
+│   ├── task_runner.py       # Batch task execution CLI
+│   └── task_file.py         # Task file I/O (YAML frontmatter + Markdown)
+├── agents/                  # Agent types (default, parallel, strategy, openevolve, select_patch)
+├── tools/                   # Built-in tools (bash, editor, profiling, discovery, commandment)
+├── models/                  # LLM backends (amd_llm, anthropic, litellm, etc.)
+├── kernel_profile.py        # Dual-backend GPU profiling CLI (Metrix + rocprof-compute)
+└── baseline_metrics.py      # Format profiler output for downstream tools
+mcp_tools/                   # Standalone MCP servers (profiler, kernel-evolve, kernel-ercs, etc.)
 ```
 
-**2. Build Semantic Index (Required for First Use)**
+## Key Environment Variables
 
-```bash
-# Build index for all documents under knowledge-base/
-python scripts/build_index.py --force
-```
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AMD_LLM_API_KEY` | (required) | LLM API key |
+| `GEAK_MAX_ROUNDS` | `5` | Max orchestration rounds |
+| `GEAK_BENCHMARK_EXTRA_ARGS` | `--iterations 50` | Extra args for benchmark commands (set by pipeline) |
+| `GEAK_ALLOWED_AGENTS` | (all) | Comma-separated agent type allowlist |
+| `GEAK_EXCLUDED_AGENTS` | (none) | Comma-separated agent type blocklist |
 
-Index saved to `~/.cache/amd-ai-devtool/semantic-index/` by default:
-- `index.faiss` + `index.pkl` — FAISS semantic search index
-- `bm25_index.pkl` — BM25 keyword search index
+See `INSTRUCTIONS.md` Section 6 for the full reference.
 
-**Rebuild** when: knowledge base documents are added/modified, or indexing logic changes.
+## License
 
-**Adding New Documents**
-
-1. **Location**: Place the file under the appropriate subdirectory (e.g., `layer-6-extended/optimize-guides/*.md`)
-2. **Format**: Every `.md` file must include a YAML frontmatter:
-   ```yaml
-   ---
-   tags: ["category1", "category2"]   # Required
-   priority: "L1-important"           # Required
-   source_url: "https://..."          # Required
-   rocm_version: "6.0+"              # Required
-   last_updated: 2026-01-14           # Required
-   ---
-   ```
-3. **Filename**: Use English, make it descriptive (e.g., `bf16-vector-load-store.md`)
-4. **Quality**: 800–1200 words, with at least 2 syntactically correct code examples
-5. **Rebuild index after adding**: `python scripts/build_index.py --force`
-
-**3. Test Retrieval**
-
-```bash
-python scripts/test_embedding_search.py      # Test FAISS semantic search
-python scripts/test_hybrid_retrieval.py      # Test hybrid retrieval (Embedding + BM25 + Reranker)
-python scripts/test_rrf_fusion.py            # Test RRF fusion algorithm
-```
-
-**4. Enable Knowledge Retrieval**
-
-```bash
-mini --rag        # Enable RAG knowledge retrieval
-mini --rag -d     # Enable RAG with debug output
-```
-
-Inside the agent, use `@amd:your query` to invoke retrieval.
-
----
-
-## Summary
-
-GEAK v3 enables reproducible, measurable, and scalable GPU kernel optimization at repository scale. It integrates:
-
-- **Profiling** + **Strategy Management** + **Parallel Exploration** for autonomous optimization
-- **Knowledge Retrieval** with AMD/NVIDIA knowledge bases for informed decision-making
-
-Contributions, experiments, and feedback are welcome.
+MIT License - see LICENSE.md for details

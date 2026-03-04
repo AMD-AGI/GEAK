@@ -14,7 +14,6 @@ from tenacity import (
 
 from minisweagent.models.amd_base import AmdLlmModelBase, logger
 
-
 CACHE_CONTROL_EPHEMERAL = {"type": "ephemeral"}
 
 
@@ -32,11 +31,14 @@ def convert_openai_tools_to_claude(tools: list[dict], *, cache_control: bool = T
         claude_tool = {
             "name": func["name"],
             "description": func.get("description", ""),
-            "input_schema": func.get("parameters", {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            }),
+            "input_schema": func.get(
+                "parameters",
+                {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            ),
         }
         claude_tools.append(claude_tool)
     if cache_control and claude_tools:
@@ -87,26 +89,32 @@ class AmdClaudeModel(AmdLlmModelBase):
                 system_message = content
             elif role == "tool":
                 # Tool result → user message with tool_result content block
-                anthropic_messages.append({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": msg.get("tool_call_id", ""),
-                        "content": content,
-                    }],
-                })
+                anthropic_messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg.get("tool_call_id", ""),
+                                "content": content,
+                            }
+                        ],
+                    }
+                )
             elif role == "assistant" and msg.get("tool_calls"):
                 # Assistant message with tool call → structured content blocks
                 content_blocks: list[dict] = []
                 if content:
                     content_blocks.append({"type": "text", "text": content})
                 tool_info = msg["tool_calls"]
-                content_blocks.append({
-                    "type": "tool_use",
-                    "id": tool_info.get("id", ""),
-                    "name": tool_info["function"]["name"],
-                    "input": tool_info["function"]["arguments"],
-                })
+                content_blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": tool_info.get("id", ""),
+                        "name": tool_info["function"]["name"],
+                        "input": tool_info["function"]["arguments"],
+                    }
+                )
                 anthropic_messages.append({"role": "assistant", "content": content_blocks})
             else:
                 anthropic_role = "assistant" if role == "assistant" else "user"
@@ -127,15 +135,24 @@ class AmdClaudeModel(AmdLlmModelBase):
     def _query_api(self, messages: list[dict], **kwargs):
         # Anthropic API supported parameters
         supported_params = {
-            "temperature", "max_tokens", "top_p", "top_k",
-            "stop_sequences", "stream", "metadata", "system", "tools",
+            "temperature",
+            "max_tokens",
+            "top_p",
+            "top_k",
+            "stop_sequences",
+            "stream",
+            "metadata",
+            "system",
+            "tools",
         }
 
         all_kwargs = self.config.model_kwargs | kwargs
         filtered_kwargs = {k: v for k, v in all_kwargs.items() if k in supported_params}
-        filtered_kwargs["tools"] = convert_openai_tools_to_claude(
-            self.tools, cache_control=True,
-        )
+        if self.tools:
+            filtered_kwargs["tools"] = convert_openai_tools_to_claude(
+                self.tools,
+                cache_control=True,
+            )
 
         system_message, anthropic_messages = self.format_messages(messages)
 
@@ -174,13 +191,11 @@ class AmdClaudeModel(AmdLlmModelBase):
             if system_message and "system" not in filtered_kwargs:
                 filtered_kwargs["system"] = system_message
 
-        response = self.client.messages.create(
+        return self.client.messages.create(
             model=self.config.model_name,
             messages=anthropic_messages,
             **filtered_kwargs,
         )
-
-        return response
 
     # ------------------------------------------------------------------
     # Response parsing
