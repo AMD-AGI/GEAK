@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "compiler", "device-libs", "llvm", "reference"]
 priority: "L0-core"
 source_url: "https://github.com/ROCm/llvm-project/tree/amd-staging/amd/device-libs"

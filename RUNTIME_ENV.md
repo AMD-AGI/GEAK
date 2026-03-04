@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # Runtime Environment Configuration
 
 GEAK Agent now supports automatic runtime environment detection and configuration for GPU kernel operations.

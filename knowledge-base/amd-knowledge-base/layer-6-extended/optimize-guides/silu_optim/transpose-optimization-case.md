@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "transpose", "hip", "silu", "case-study"]
 priority: "L1-important"
 source_url: "derived from HIP performance guidelines"

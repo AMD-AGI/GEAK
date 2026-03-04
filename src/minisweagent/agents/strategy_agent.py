@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Strategy-based agent with optimization tool support.
 
 This agent provides core strategy management functionality that can be used

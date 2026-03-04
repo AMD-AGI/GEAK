@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "performance", "profiling", "rocprofiler", "pc-sampling", "hotspots"]
 priority: "L1-important"
 source_url: "https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/how-to/pc_sampling.html"

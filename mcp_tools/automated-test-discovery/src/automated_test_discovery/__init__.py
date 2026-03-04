@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved.
+
 """
 Automated Test Discovery MCP Server
 

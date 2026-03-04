@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Metrix MCP - GPU kernel profiling with hardware metrics."""
 
 from .core import MetrixTool

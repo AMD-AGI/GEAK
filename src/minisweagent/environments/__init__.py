@@ -1,3 +1,5 @@
+# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
+
 """Environment implementations for mini-SWE-agent."""
 
 import copy

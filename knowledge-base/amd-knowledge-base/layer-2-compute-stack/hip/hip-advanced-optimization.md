@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # Native HIP/ROCm Programming Guide: Advanced GPU Optimization Techniques
 
 This guide covers low-level HIP/ROCm assembly instructions, intrinsics, and patterns for writing high-performance AMD GPU kernels using native primitives directly.

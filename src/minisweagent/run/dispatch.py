@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Dispatch helpers: run task files via ParallelAgent pool mode.
 
 This module provides ``run_task_batch()`` which converts a list of task

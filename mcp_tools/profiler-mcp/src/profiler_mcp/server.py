@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Unified GPU Profiler MCP Server.
 
 Wraps two profiling backends behind a single `profile_kernel` tool:

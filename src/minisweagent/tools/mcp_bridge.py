@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """MCPToolBridge -- expose MCP server tools as sync callables for ToolRuntime.
 
 One bridge instance per MCP server. Each bridge can expose multiple tools

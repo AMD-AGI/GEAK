@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Phase 4: Data format contract tests for pipeline handover points.
 
 Tests verify that the output of one pipeline stage is consumable by the next:

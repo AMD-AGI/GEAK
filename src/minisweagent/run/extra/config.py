@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Utility to manage the global config file.
 
 You can also directly edit the `.env` file in the config directory.

@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Execute a test harness in subprocess and return structured results.
 
 The harness is a Python script created by UnitTestAgent that supports four

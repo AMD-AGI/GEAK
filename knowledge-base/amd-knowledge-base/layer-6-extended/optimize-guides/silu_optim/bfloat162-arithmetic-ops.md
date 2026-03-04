@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "bf16", "hip", "silu", "arithmetic", "bfloat162"]
 priority: "L1-important"
 source_url: "derived from HIP source and ROCm documentation"

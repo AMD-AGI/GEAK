@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "performance", "profiling", "rocprofiler-sdk", "intercept"]
 priority: "L1-important"
 source_url: "https://rocm.docs.amd.com/projects/rocprofiler-sdk/en/latest/api-reference/intercept_table.html"

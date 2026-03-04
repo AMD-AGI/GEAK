@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """CLI wrapper for kernel-evolve MCP tools.
 
 Enables calling MCP tools via bash commands.

@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """SWE-agent: codes manually with bash, editor, test, profiler, and strategy manager.
 
 Unlike StrategyInteractiveAgent which has access to LLM-powered MCP tools

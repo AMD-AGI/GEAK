@@ -1,3 +1,5 @@
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 # GEAK Agent Test Suite
 
 Regression test suite with 10 diverse AITER kernels for measuring agent capabilities.

@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Phase 2: Live smoke tests for MCP servers -- no mocking.
 
 These tests start real MCP server subprocesses via MCPToolBridge and verify:

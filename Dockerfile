@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 FROM lmsysorg/sglang:v0.5.6.post1-rocm700-mi35x
 
 # Install git if not present

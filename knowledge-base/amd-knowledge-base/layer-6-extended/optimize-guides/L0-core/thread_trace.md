@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "performance", "profiling", "thread-trace", "rocprofiler"]
 priority: "L0-core"
 source_url: "https://rocm.docs.amd.com/en/latest/rocprofiler-sdk/api-reference/thread_trace.html"

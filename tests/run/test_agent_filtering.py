@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Tests for agent filtering via GEAK_ALLOWED_AGENTS / GEAK_EXCLUDED_AGENTS."""
 
 from __future__ import annotations

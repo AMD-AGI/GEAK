@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """OpenAI GPT-5.2 model via AMD LLM gateway (Azure Chat Completions API).
 
 GPT-5.2 uses the Azure OpenAI *Chat Completions* API with a deployment-based

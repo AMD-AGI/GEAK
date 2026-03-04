@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # rocWMMA 1.7.0 Documentation Index
 
 **Version**: rocWMMA 1.7.0  

@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Tool: sub_agent -- spawn a child DefaultAgent for focused sub-tasks.
 
 The main agent can delegate specific work (e.g. algorithm rewrite, cross-file

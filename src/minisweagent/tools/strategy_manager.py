@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Strategy list management tool for kernel optimization.
 
 This module provides a structured way to manage optimization strategies,

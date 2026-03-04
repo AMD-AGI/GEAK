@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Detect shell commands that would write to protected files.
 
 Used to enforce read-only baseline files (e.g. kernel.py in optimization tasks).

@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Programmatic validation for COMMANDMENT.md files.
 
 COMMANDMENT.md is the single source of truth for kernel evaluation.  It

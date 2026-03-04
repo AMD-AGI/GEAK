@@ -1,3 +1,5 @@
+# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
+
 """A small generalization of the default agent that puts the user in the loop.
 
 There are three modes:

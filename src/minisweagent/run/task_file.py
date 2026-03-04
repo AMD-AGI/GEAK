@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Task file utilities -- read/write Markdown task files with YAML frontmatter.
 
 Task files are the intermediate format between task-generator and downstream

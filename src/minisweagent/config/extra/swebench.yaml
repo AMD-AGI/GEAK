@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 agent:
   system_template: |
     You are a helpful assistant that can interact multiple times with a computer shell to solve programming tasks.

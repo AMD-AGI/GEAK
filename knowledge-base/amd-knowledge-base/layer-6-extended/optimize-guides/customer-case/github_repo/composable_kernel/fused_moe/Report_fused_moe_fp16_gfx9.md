@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # Kernel: fused_moe (Fused Mixture of Experts)
 
 ## Variant Context

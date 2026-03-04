@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "performance", "rocsparse", "design", "sparse-linear-algebra"]
 priority: "L1-important"
 source_url: "https://rocm.docs.amd.com/projects/rocSPARSE/en/latest/conceptual/rocsparse-design.html"

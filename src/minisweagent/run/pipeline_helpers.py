@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Shared helpers for the GEAK preprocessing and orchestration pipelines.
 
 All CLI entry points (``geak``, ``geak-preprocess``, ``geak-orchestrate``,

@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Tool: check_kernel_compatibility -- scan kernel code for AMD-incompatible patterns.
 
 Regex-based scanner that detects CUDA-only constructs that won't work on AMD GPUs.

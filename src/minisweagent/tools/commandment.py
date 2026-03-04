@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Generate and validate COMMANDMENT.md files for OpenEvolve.
 
 A COMMANDMENT.md is the evaluation contract between the agent and OpenEvolve.

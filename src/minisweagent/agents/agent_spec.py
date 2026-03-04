@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """AgentSpec and AgentTask -- describe sub-agents for parallel execution.
 
 AgentSpec: Legacy fixed-GPU-assignment model (one spec per GPU).

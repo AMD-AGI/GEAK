@@ -1,3 +1,5 @@
+# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
+
 """Basic agent class. See https://mini-swe-agent.com/latest/advanced/control_flow/ for visual explanation."""
 
 import json

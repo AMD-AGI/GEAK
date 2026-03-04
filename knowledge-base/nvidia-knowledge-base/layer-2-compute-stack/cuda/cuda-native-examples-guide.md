@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # NVIDIA CUDA Native Optimization Examples
 
 This directory contains advanced examples demonstrating low-level CUDA optimization techniques for writing high-performance GPU kernels on NVIDIA hardware.

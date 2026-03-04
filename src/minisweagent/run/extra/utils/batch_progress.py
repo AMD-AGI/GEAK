@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """This module contains an auxiliary class for rendering progress of a batch run.
 It's identical to the one used in swe-agent.
 """

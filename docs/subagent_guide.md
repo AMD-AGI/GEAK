@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # RAG Filter Sub-Agent
 
 This module provides a reusable sub-agent pattern for filtering and summarizing RAG (Retrieval-Augmented Generation) database results.

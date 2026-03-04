@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Format kernel-profile output into baseline_metrics.json for OpenEvolve.
 
 Works with both profiling backends (metrix and rocprof-compute).  The input

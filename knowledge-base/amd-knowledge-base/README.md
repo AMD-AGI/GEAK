@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # AMD AI DevTool Knowledge Base
 
 Comprehensive knowledge for GPU programming, ML frameworks, and LLM deployment on AMD hardware.

@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # Other Model Architectures on ROCm
 
 *Comprehensive guide to running diverse AI model architectures on AMD GPUs*

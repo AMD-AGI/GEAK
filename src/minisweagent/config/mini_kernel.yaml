@@ -1,3 +1,5 @@
+# Copyright(C) 2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 agent:
   system_template: |
     You are an expert in high-performance computing and kernel optimization.
