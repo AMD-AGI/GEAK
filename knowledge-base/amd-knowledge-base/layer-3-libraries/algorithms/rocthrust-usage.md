@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # rocThrust Usage Guide
 
 *Comprehensive guide to AMD's parallel algorithms library for GPU computing*

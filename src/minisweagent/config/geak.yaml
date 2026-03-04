@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved.
+
 agent:
   step_limit: 0.
   cost_limit: 0.

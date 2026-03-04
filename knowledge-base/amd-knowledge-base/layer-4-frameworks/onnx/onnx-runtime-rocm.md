@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # ONNX Runtime with ROCm - Getting Started
 
 *Complete guide to running ONNX models on AMD GPUs using ROCm backend*

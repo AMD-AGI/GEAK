@@ -1,3 +1,5 @@
+# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
+
 """
 Extension of the `default.py` agent that uses Textual for an interactive TUI.
 For a simpler version of an interactive UI that does not require threading and more, see `interactive.py`.

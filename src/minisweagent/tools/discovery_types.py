@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Shared dataclasses and constants for kernel/test/benchmark discovery.
 
 These types are used across the GEAK pipeline (orchestrator, task generator,

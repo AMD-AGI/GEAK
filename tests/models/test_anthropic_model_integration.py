@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Test that cache control is actually applied when using anthropic models through get_model()."""
 
 import copy

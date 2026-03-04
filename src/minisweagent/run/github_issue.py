@@ -1,3 +1,5 @@
+# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
+
 #!/usr/bin/env python3
 import os
 from pathlib import Path

@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Codebase context generator -- builds a CODEBASE_CONTEXT.md briefing file.
 
 Runs as Step 2 of the preprocessor pipeline, right after resolve-kernel-url

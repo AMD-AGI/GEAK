@@ -1,3 +1,5 @@
+# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
@@ -75,7 +77,6 @@ dev = [
     "pytest-cov",
     "pytest-asyncio",
     "pytest-xdist",
-    "pre-commit",
     "ruff",
     "fastmcp>=2.0.0",
 ]

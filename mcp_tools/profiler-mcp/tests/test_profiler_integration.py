@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """GPU integration tests for the unified profiler MCP.
 
 These tests require a real AMD GPU. They are skipped automatically

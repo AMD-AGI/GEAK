@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "performance", "profiling", "rocprof-sys", "instrumentation", "binary-rewrite"]
 priority: "L1-important"
 source_url: "https://rocm.docs.amd.com/projects/rocprofiler-systems/en/latest/how-to/instrumenting-rewriting-binary-application.html"

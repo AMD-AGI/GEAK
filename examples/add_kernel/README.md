@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # Add Kernel Optimization
 
 This directory contains a simple vector addition kernel optimized using the GEAK agent framework.

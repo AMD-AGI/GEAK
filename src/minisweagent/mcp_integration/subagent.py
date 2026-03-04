@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """
 Sub-agent utilities for processing RAG results and other intermediate data.
 

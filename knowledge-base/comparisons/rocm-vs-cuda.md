@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 title: "ROCm vs CUDA Platform Comparison"
 last_updated: 2025-11-17
 ---

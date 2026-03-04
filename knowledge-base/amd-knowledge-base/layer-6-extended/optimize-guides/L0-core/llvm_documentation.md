@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "compiler", "llvm"]
 priority: "L0-core"
 source_url: "http://rocm.docs.amd.com/projects/llvm-project/en/latest/LLVM/llvm/html/index.html"

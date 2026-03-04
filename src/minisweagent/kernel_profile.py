@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """kernel-profile: Profile GPU kernels via profiler-mcp.
 
 Thin CLI wrapper around ``profiler_mcp.server.profile_kernel()``.  Supports

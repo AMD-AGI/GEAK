@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "performance", "profiling", "rocprofiler", "examples"]
 priority: "L0-core"
 source_url: "https://rocm.docs.amd.com/en/latest/projects/rocprofiler-compute/tutorial/profiling-by-example.html"

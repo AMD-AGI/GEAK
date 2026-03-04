@@ -1,3 +1,5 @@
+# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
+
 """Configuration files and utilities for mini-SWE-agent."""
 
 import os

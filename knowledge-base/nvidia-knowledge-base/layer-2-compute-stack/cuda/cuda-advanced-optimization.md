@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # Native CUDA Advanced Optimization Techniques
 
 This guide covers advanced GPU optimization techniques using native CUDA for achieving peak performance on NVIDIA GPUs.

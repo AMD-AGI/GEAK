@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # MI300 and MI200 Series Performance Counters and Metrics
 
 *Comprehensive guide to hardware performance counters and derived metrics for AMD Instinct MI300 and MI200 GPUs*

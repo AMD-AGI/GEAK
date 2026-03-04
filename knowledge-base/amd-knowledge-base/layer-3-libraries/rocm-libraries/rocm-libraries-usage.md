@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 layer: "3"
 category: "rocm-libraries"
 subcategory: "monorepo"
@@ -345,30 +349,6 @@ ctest -R axpy_test
 # Run with verbose output
 ctest -V -R axpy_test
 ```
-
-### Pre-commit Hooks
-
-The repository includes pre-commit hooks for code quality:
-
-```bash
-# Install pre-commit
-pip install pre-commit
-
-# Install hooks
-pre-commit install
-
-# Run manually on all files
-pre-commit run --all-files
-
-# Run on staged files (automatic on git commit)
-git commit
-```
-
-**Hooks include**:
-- Code formatting (clang-format, cmake-format)
-- Linting
-- Trailing whitespace removal
-- YAML validation
 
 ## Contributing to rocm-libraries
 

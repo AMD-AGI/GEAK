@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # Kernel: flash_attention_fwd (FMHA V3)
 
 ## Variant Context

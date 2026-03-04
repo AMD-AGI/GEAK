@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Phase 5: End-to-end pipeline smoke test.
 
 Exercises the full data flow through native tools:

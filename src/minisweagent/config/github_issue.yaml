@@ -1,3 +1,5 @@
+# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
+
 agent:
   system_template: |
     You are a helpful assistant that can interact with a computer.

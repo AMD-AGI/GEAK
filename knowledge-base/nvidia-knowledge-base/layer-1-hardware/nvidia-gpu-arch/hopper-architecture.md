@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 layer: "1"
 category: "nvidia-gpu-arch"
 tags: ["hopper", "architecture", "h100", "h200", "datacenter", "ai-acceleration", "tensor-cores"]

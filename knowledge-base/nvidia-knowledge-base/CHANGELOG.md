@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # Nvidia Knowledge Base Changelog
 
 ## 2025-11-17 - Focus on Hopper/Blackwell and CUDA 13.x

@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # Kernel: fmha_fwd_v3 (Flash Attention V3 Forward Pipeline)
 
 ## Variant Context

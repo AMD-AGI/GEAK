@@ -1,3 +1,5 @@
+# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
+
 #!/usr/bin/env python3
 
 """Run mini-SWE-agent in your local environment. This is the default executable `mini`."""

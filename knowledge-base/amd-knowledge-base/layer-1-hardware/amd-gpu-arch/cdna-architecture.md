@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 layer: "1"
 category: "amd-gpu-arch"
 tags: ["cdna", "architecture", "mi-series", "mi200", "mi300", "mi350", "hpc", "ai-acceleration"]

@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """OpenEvolveWorker -- thin agent that runs openevolve-mcp on assigned GPUs.
 
 Unlike strategy agents that run a full LLM optimization loop, this agent

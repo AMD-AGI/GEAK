@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # AMD AI DevTool Knowledge Base Index
 
 *Comprehensive navigation for 94 knowledge files covering the complete AMD GPU AI stack*

@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Unit test subagent.
 
 This agent searches for (or creates) a fixed test harness for a kernel and

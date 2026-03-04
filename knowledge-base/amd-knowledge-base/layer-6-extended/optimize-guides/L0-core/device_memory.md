@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "performance", "hip", "memory", "device"]
 priority: "L0-core"
 source_url: "https://rocm.docs.amd.com/en/latest/how-to/hip_runtime_api/memory_management/device_memory.html"

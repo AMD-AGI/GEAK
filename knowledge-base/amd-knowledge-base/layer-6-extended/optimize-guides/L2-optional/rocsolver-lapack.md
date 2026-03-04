@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "performance", "hip", "kernel"]
 priority: "L2-optional"
 source_url: "https://rocm.docs.amd.com/projects/rocSOLVER/en/latest/reference/lapack.html"

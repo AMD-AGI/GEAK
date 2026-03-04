@@ -1,3 +1,5 @@
+# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
+
 import logging
 import os
 from dataclasses import asdict, dataclass, field

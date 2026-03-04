@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """Tool: baseline_metrics -- format profiler output into OpenEvolve JSON.
 
 Wraps minisweagent.baseline_metrics for use as a ToolRuntime tool.

@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 title: "HIP vs CUDA Programming Comparison"
 category: "comparison"
 tags: ["hip", "cuda", "comparison", "porting", "fundamentals"]

@@ -1,4 +1,8 @@
 ---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
+---
 tags: ["optimization", "performance", "hip", "kernel", "cpp"]
 priority: "L0-core"
 source_url: "https://rocm.docs.amd.com/en/latest/how-to/kernel_language_cpp_support.html"

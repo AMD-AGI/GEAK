@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """
 System prompts for mini-swe-agent with RAG integration.
 Combines full software development workflow with RAG tools for AMD GPU optimization.

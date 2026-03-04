@@ -1,3 +1,5 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+
 """CLI wrapper for automated-test-discovery MCP tool.
 
 Enables calling MCP tools via bash commands.

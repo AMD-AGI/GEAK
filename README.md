@@ -1,3 +1,7 @@
+---
+Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+---
+
 # GEAK — GPU Evolutionary Agent for Kernels
 
 GEAK is an AI-powered framework for automated GPU kernel optimization. It profiles kernels, identifies bottlenecks, generates optimization strategies, and applies them via an LLM-driven orchestrator.
