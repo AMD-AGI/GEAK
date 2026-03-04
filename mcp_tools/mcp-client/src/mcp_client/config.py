@@ -38,6 +38,13 @@ MCP_SERVERS = {
         "tools": ["discover_tests"],
         "description": "Automated test and benchmark discovery for kernels",
     },
+    "rag-mcp": {
+        "command": ["python3", "-m", "rag_mcp.server"],
+        "cwd": str(MSA_ROOT / "mcp_tools" / "rag-mcp"),
+        "env": {"PYTHONPATH": str(MSA_ROOT / "mcp_tools" / "rag-mcp" / "src")},
+        "tools": ["query", "optimize"],
+        "description": "GPU/ROCm/HIP knowledge base retrieval via hybrid search",
+    },
 }
 
 
