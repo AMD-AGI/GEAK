@@ -1,0 +1,16 @@
+# RAG MCP Server Configuration
+# Override with RAG_MCP_CONFIG env var or ~/.config/rag-mcp/config.yaml
+
+retrieval:
+  embed_top_k: 25
+  bm25_top_k: 25
+  enable_bm25: true
+  mcp_top_k: 8
+
+reranker:
+  enable_reranker: true
+
+fusion:
+  rrf_k: 60
+  semantic_weight: 0.7
+  bm25_weight: 0.3
