@@ -956,7 +956,7 @@ def main():
     try:
         from minisweagent.run.pipeline.helpers import load_geak_model
 
-        model = load_geak_model(args.model or os.environ.get("GEAK_MODEL"))
+        model = load_geak_model(args.model)
         print(f"[task-generator] Using model: {model.config.model_name}", file=sys.stderr)
     except Exception as e:
         print(

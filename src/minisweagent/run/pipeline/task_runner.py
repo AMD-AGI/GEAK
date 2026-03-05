@@ -9,7 +9,6 @@ Usage:
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -100,7 +99,7 @@ def main():
     print(f"[run-tasks] Output directory: {output_dir}", file=sys.stderr)
 
     # Create model
-    model_name = args.model or os.environ.get("GEAK_MODEL")
+    model_name = args.model
     try:
         from minisweagent.run.pipeline.helpers import geak_model_factory
 

@@ -412,8 +412,8 @@ def main() -> None:
     parser.add_argument(
         "-o",
         "--output",
-        default="geak_preprocess_output",
-        help="Output directory for intermediate artefacts (default: geak_preprocess_output)",
+        default="geak_output",
+        help="Output directory for intermediate artefacts (default: geak_output)",
     )
     parser.add_argument(
         "--gpu",
