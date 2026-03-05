@@ -6,7 +6,7 @@ from importlib import import_module
 from rich.console import Console
 
 subcommands = [
-    ("minisweagent.run.extra.config", ["config"], "Manage the global config file"),
+    ("minisweagent.run.config.global_config", ["config"], "Manage the global config file"),
     ("minisweagent.run.inspector", ["inspect", "i", "inspector"], "Run inspector (browse trajectories)"),
     ("minisweagent.run.github_issue", ["github-issue", "gh"], "Run on a GitHub issue"),
     ("minisweagent.run.extra.swebench", ["swebench"], "Evaluate on SWE-bench (batch mode)"),

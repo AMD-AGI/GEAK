@@ -668,6 +668,13 @@ class ParallelAgent(DefaultAgent):
         # Sort tasks by priority (lower = runs first)
         sorted_tasks = sorted(enumerate(tasks), key=lambda t: t[1].priority)
 
+        # Disambiguate duplicate labels so each task gets its own patch directory
+        _label_counts: dict[str, int] = {}
+        for _, t in sorted_tasks:
+            _lbl = t.label or ""
+            _label_counts[_lbl] = _label_counts.get(_lbl, 0) + 1
+        _has_dup_labels = any(c > 1 for c in _label_counts.values())
+
         def execute_task(task_id: int, task) -> tuple[int, Any, Any, Any]:
             """Execute a single task on dynamically-assigned GPU(s)."""
             needed = getattr(task, "num_gpus", 1) or 1
@@ -702,7 +709,10 @@ class ParallelAgent(DefaultAgent):
                 wt_path_str = str(wt_path.resolve())
 
                 # Each task gets its own patch dir named by label (persists across worktree resets)
-                dir_name = task.label if task.label else f"task_{task_id}"
+                if _has_dup_labels:
+                    dir_name = f"{task.label}_{task_id}" if task.label else f"task_{task_id}"
+                else:
+                    dir_name = task.label if task.label else f"task_{task_id}"
                 task_patch_dir = (base_patch_dir / dir_name).resolve()
                 task_patch_dir.mkdir(parents=True, exist_ok=True)
 
