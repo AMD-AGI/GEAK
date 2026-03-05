@@ -4,10 +4,8 @@ and start_round resume behaviour."""
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -17,7 +15,6 @@ from minisweagent.run.orchestrator import (
     _setup_eval_worktree,
     run_orchestrator,
 )
-
 
 # ---------------------------------------------------------------------------
 # _parse_total_kernel_time_ms
@@ -69,7 +66,7 @@ class TestSetupEvalWorktree:
         mock_result = MagicMock()
         mock_result.returncode = 0
 
-        with patch("minisweagent.run.orchestrator.subprocess.run", return_value=mock_result) as mock_run:
+        with patch("minisweagent.run.pipeline.orchestrator.subprocess.run", return_value=mock_result) as mock_run:
             result = _setup_eval_worktree(
                 repo_root=str(repo_dir),
                 patch_file="nonexistent.patch",
@@ -93,7 +90,7 @@ class TestSetupEvalWorktree:
         output_dir = tmp_path / "output"
         output_dir.mkdir()
 
-        with patch("minisweagent.run.orchestrator.shutil.copytree") as mock_copy:
+        with patch("minisweagent.run.pipeline.orchestrator.shutil.copytree") as mock_copy:
             result = _setup_eval_worktree(
                 repo_root=str(repo_dir),
                 patch_file="nonexistent.patch",
@@ -278,8 +275,8 @@ class TestStartRound:
     """Verify that start_round > 1 skips exploration, loads prior evals,
     and begins the round loop at the correct number."""
 
-    @patch("minisweagent.run.orchestrator._run_llm_steps", return_value={"status": "done"})
-    @patch("minisweagent.run.orchestrator._evaluate_round_best", return_value=None)
+    @patch("minisweagent.run.pipeline.orchestrator._run_llm_steps", return_value={"status": "done"})
+    @patch("minisweagent.run.pipeline.orchestrator._evaluate_round_best", return_value=None)
     def test_start_round_1_runs_exploration(
         self, mock_eval, mock_llm, tmp_path,
     ):
@@ -301,8 +298,8 @@ class TestStartRound:
                   for c in mock_llm.call_args_list]
         assert "explore" in phases, f"Exploration phase expected, got phases: {phases}"
 
-    @patch("minisweagent.run.orchestrator._run_llm_steps", return_value={"status": "done"})
-    @patch("minisweagent.run.orchestrator._evaluate_round_best", return_value=None)
+    @patch("minisweagent.run.pipeline.orchestrator._run_llm_steps", return_value={"status": "done"})
+    @patch("minisweagent.run.pipeline.orchestrator._evaluate_round_best", return_value=None)
     def test_start_round_2_skips_exploration(
         self, mock_eval, mock_llm, tmp_path,
     ):
@@ -326,8 +323,8 @@ class TestStartRound:
         assert "round_2" in phases, f"Round 2 expected, got phases: {phases}"
         assert "round_1" not in phases, f"Round 1 should be skipped, got phases: {phases}"
 
-    @patch("minisweagent.run.orchestrator._run_llm_steps", return_value=None)
-    @patch("minisweagent.run.orchestrator._evaluate_round_best", return_value=None)
+    @patch("minisweagent.run.pipeline.orchestrator._run_llm_steps", return_value=None)
+    @patch("minisweagent.run.pipeline.orchestrator._evaluate_round_best", return_value=None)
     def test_prior_round_eval_loaded_into_ctx(
         self, mock_eval, mock_llm, tmp_path,
     ):
@@ -357,8 +354,8 @@ class TestStartRound:
         assert "round_1_eval" in internal_ctx
         assert internal_ctx["round_1_eval"]["best_task"] == "agent-a"
 
-    @patch("minisweagent.run.orchestrator._run_llm_steps", return_value=None)
-    @patch("minisweagent.run.orchestrator._evaluate_round_best", return_value=None)
+    @patch("minisweagent.run.pipeline.orchestrator._run_llm_steps", return_value=None)
+    @patch("minisweagent.run.pipeline.orchestrator._evaluate_round_best", return_value=None)
     def test_prior_eval_injected_into_messages(
         self, mock_eval, mock_llm, tmp_path,
     ):
@@ -387,8 +384,8 @@ class TestStartRound:
         assert len(eval_msgs) == 1, f"Expected 1 prior eval message, got {len(eval_msgs)}"
         assert "agent-a" in eval_msgs[0]["content"]
 
-    @patch("minisweagent.run.orchestrator._run_llm_steps", return_value={"status": "done"})
-    @patch("minisweagent.run.orchestrator._evaluate_round_best", return_value=None)
+    @patch("minisweagent.run.pipeline.orchestrator._run_llm_steps", return_value={"status": "done"})
+    @patch("minisweagent.run.pipeline.orchestrator._evaluate_round_best", return_value=None)
     def test_missing_prior_eval_is_tolerated(
         self, mock_eval, mock_llm, tmp_path,
     ):

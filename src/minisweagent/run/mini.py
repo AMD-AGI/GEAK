@@ -6,7 +6,6 @@
 import copy
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -26,165 +25,29 @@ from minisweagent.agents.unit_test_agent import format_discovery_for_agent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
-from minisweagent.run.extra.config import configure_if_first_time
-from minisweagent.run.utils.config_editor import load_and_merge_configs
-from minisweagent.run.utils.save import save_traj
-from minisweagent.run.utils.task_parser import _resolve_path_case
-from minisweagent.utils.log import logger
-
-
-def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tuple[str, object]:
-    """Run test discovery on the resolved kernel and return formatted results for the task prompt.
-
-    Returns:
-        A formatted string for the task prompt.  The raw DiscoveryResult is
-        stashed on the function object as ``_run_discovery._last_result`` so the
-        caller can pass it to the task planner without a second discovery pass.
-    """
-    try:
-        from automated_test_discovery.server import discover as atd_discover
-
-        from minisweagent.tools.discovery_types import DiscoveryResult
-    except ImportError:
-        return ""
-
-    console = Console(highlight=False)
-    console.print("\n[bold cyan]--- Test Discovery ---[/bold cyan]")
-    if kernel_name:
-        console.print(f"[dim]Kernel function: {kernel_name}[/dim]")
-    try:
-        kp = Path(kernel_path)
-        _discover_fn = getattr(atd_discover, "fn", atd_discover)
-        disc_dict = _discover_fn(
-            kernel_path=str(kp),
-            output_dir=str(kp.parent),
-        )
-
-        result = DiscoveryResult.from_dict(disc_dict, kp)
-        _run_discovery._last_result = result
-
-        lines = []
-        kernel_stem = kp.stem.lower()
-        match_terms = [kernel_stem]
-        if kernel_name:
-            match_terms.extend([p for p in kernel_name.lower().split("_") if len(p) > 2])
-
-        def _is_relevant(path_str):
-            return any(term in path_str.lower() for term in match_terms)
-
-        relevant_tests = [t for t in result.tests if _is_relevant(str(t.file_path))]
-        other_tests = [t for t in result.tests if not _is_relevant(str(t.file_path))][:3]
-        all_display = relevant_tests + other_tests
-        if all_display:
-            console.print(
-                f"[bold green]Found {len(result.tests)} test(s) ({len(relevant_tests)} matching '{kernel_stem}'):[/bold green]"
-            )
-            for t in all_display[:5]:
-                marker = "+" if kernel_stem in str(t.file_path).lower() else "-"
-                console.print(f"  [green]{marker}[/green] {t.file_path} [dim](confidence: {t.confidence:.1f})[/dim]")
-                lines.append(f"  - {t.file_path} (confidence: {t.confidence:.1f}, command: {t.command})")
-        else:
-            console.print("[yellow]No existing tests found.[/yellow]")
-        relevant_bench = [b for b in result.benchmarks if kernel_stem in str(b.file_path).lower()]
-        if relevant_bench:
-            console.print(f"[bold green]Found {len(relevant_bench)} matching benchmark(s):[/bold green]")
-            for b in relevant_bench[:3]:
-                console.print(f"  [green]+[/green] {b.file_path} [dim](confidence: {b.confidence:.1f})[/dim]")
-                lines.append(f"  - Benchmark: {b.file_path} (confidence: {b.confidence:.1f})")
-        console.print("[bold cyan]---------------------[/bold cyan]\n")
-
-        if lines:
-            return (
-                "\n--- Discovered Tests ---\n"
-                + "\n".join(lines)
-                + "\nRead these test files and reuse their reference implementations, input patterns, and tolerances.\n---\n"
-            )
-    except Exception as e:
-        console.print(f"[yellow]Discovery failed: {e}[/yellow]")
-    return ""
-
-
-from minisweagent.run.pipeline_helpers import (
+from minisweagent.run.config import deep_merge as _deep_merge
+from minisweagent.run.config.editor import load_and_merge_configs
+from minisweagent.run.config.global_config import configure_if_first_time
+from minisweagent.run.config.task_parser import _resolve_path_case
+from minisweagent.run.pipeline.helpers import (
     create_validated_harness,
     extract_harness_path,
     run_baseline_profile,
 )
+from minisweagent.run.pipeline.helpers import (
+    inject_resolved_kernel as _inject_resolved_kernel,
+)
+from minisweagent.run.pipeline.helpers import (
+    run_discovery as _run_discovery,
+)
+from minisweagent.run.utils.save import save_traj
+from minisweagent.utils.log import logger
 
-
-def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -> tuple[str, str | None]:
-    """Resolve kernel URL to local path/line/kernel name and append to task."""
-    repo_root = Path(__file__).resolve().parent.parent.parent.parent
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-    try:
-        from minisweagent.tools.resolve_kernel_url_impl import get_kernel_name_at_line, resolve_kernel_url
-    except ImportError as e:
-        raise SystemExit(f"Cannot resolve --kernel-url: resolve_kernel_url_impl not found ({e}).") from e
-    clone_into = Path(workspace) if workspace else Path.cwd()
-    resolved = resolve_kernel_url(kernel_url, clone_into=clone_into)
-    if resolved.get("error"):
-        raise SystemExit(f"Kernel URL resolve failed: {resolved['error']}")
-    path = resolved["local_file_path"]
-    line_num = resolved.get("line_number")
-    kernel_name = get_kernel_name_at_line(path, line_num) if line_num else None
-    if line_num:
-        line_info = f" Line: {line_num}"
-        kernel_info = f", kernel name: {kernel_name!r}" if kernel_name else ""
-        profile_hint = "When profiling, all kernels are reported; the agent can choose which to use."
-    else:
-        line_info = ""
-        kernel_info = ""
-        profile_hint = "Line number was not specified; discovery should identify the kernel(s) in the file."
-    kernel_dir = str(Path(path).parent)
-    output_dir = f"{kernel_dir}/optimization_output"
-    oe_script = "${GEAK_OE_ROOT:-/opt/geak-oe}/examples/geak_eval/run_openevolve.py"
-    block = f"""\n
---- Resolved kernel (from --kernel-url) ---
-Kernel path: {path}{(" |" + line_info + kernel_info) if line_info else ""}
----
-
---- Workflow ---
-Follow these steps IN ORDER. Do one step per response.
-
-Step 1 - DISCOVER: Read and analyse the kernel file. Identify the kernel function, its inputs/outputs, dependencies, and any existing tests in the repo.
-
-Step 2 - TEST GEN: Create a standalone test harness that can (a) verify correctness and (b) benchmark performance. Save it next to the kernel (e.g. {kernel_dir}/test_harness.py).
-
-Step 3 - BENCHMARK & COMMANDMENT: Profile the baseline kernel with kernel-profile and create two artifacts:
-  a) baseline_metrics.json -- latency/bandwidth numbers from profiling.
-  b) COMMANDMENT.md -- the evaluation contract for OpenEvolve.
-  {profile_hint}
-  Profile command example: kernel-profile 'python3 {path} --profile'
-
-Step 4 - OPTIMIZE: Do NOT edit the kernel by hand. Run the OpenEvolve optimizer:
-  python3 {oe_script} {path} --iterations 10 --gpu 0 --output {output_dir}
-  If you created COMMANDMENT.md and baseline_metrics.json, add:
-  --commandment <path_to_COMMANDMENT.md> --baseline-metrics <path_to_baseline_metrics.json>
-
-Step 5 - REPORT: Summarise results (speedup, best score, any errors) and submit:
-  echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
----
-"""
-    return task + block, kernel_name
-
-
-DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
 DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
 
 console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich")
 prompt_session = PromptSession(history=FileHistory(global_config_dir / "mini_task_history.txt"))
-
-
-def _deep_merge(base: dict, override: dict) -> dict:
-    """Deep merge two dictionaries, override takes precedence."""
-    result = base.copy()
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
 
 
 _HELP_TEXT = """Run mini-SWE-agent in your local environment.
@@ -330,13 +193,13 @@ def main(
                 raw = task_path.read_text(encoding="utf-8")
                 if raw.lstrip().startswith("---"):
                     # Structured task file with YAML frontmatter
-                    from minisweagent.run.task_file import (
+                    from minisweagent.run.pipeline.task_file import (
                         create_worktree as _create_wt,
                     )
-                    from minisweagent.run.task_file import (
+                    from minisweagent.run.pipeline.task_file import (
                         is_git_repo as _is_git,
                     )
-                    from minisweagent.run.task_file import (
+                    from minisweagent.run.pipeline.task_file import (
                         read_task_file as _read_tf,
                     )
                     _tf_meta, _tf_body = _read_tf(task_path)
@@ -552,8 +415,8 @@ def main(
     # route through the preprocessor -> orchestrator pipeline instead of the
     # legacy monolithic flow.
     if kernel_url and not _tf_meta:
-        from minisweagent.run.orchestrator import run_orchestrator
-        from minisweagent.run.preprocessor import run_preprocessor
+        from minisweagent.run.pipeline.orchestrator import run_orchestrator
+        from minisweagent.run.pipeline.preprocessor import run_preprocessor
 
         _pipeline_output = patch_output or Path("geak_output")
         console.print("[bold cyan]--- GEAK Full Pipeline Mode ---[/bold cyan]")
@@ -736,7 +599,7 @@ def main(
 
     # Ensure all agents (single and parallel) use the same benchmark
     # iteration count as the orchestrator evaluation.
-    from minisweagent.run.pipeline_helpers import DEFAULT_EVAL_BENCHMARK_ITERATIONS
+    from minisweagent.run.pipeline.helpers import DEFAULT_EVAL_BENCHMARK_ITERATIONS
     _bench_extra = f"--iterations {DEFAULT_EVAL_BENCHMARK_ITERATIONS}"
     config.setdefault("env", {}).setdefault("env", {}).setdefault(
         "GEAK_BENCHMARK_EXTRA_ARGS", _bench_extra,
@@ -762,8 +625,8 @@ def main(
         discovery_result = getattr(_run_discovery, "_last_result", None)
         if heterogeneous and discovery_result and discovery_result.kernels and model:
             try:
-                from minisweagent.run.pipeline_helpers import inject_pipeline_context
-                from minisweagent.run.task_generator import generate_tasks_from_content
+                from minisweagent.run.pipeline.helpers import inject_pipeline_context
+                from minisweagent.run.pipeline.task_generator import generate_tasks_from_content
 
                 tasks = generate_tasks_from_content(
                     discovery_result=discovery_result,

@@ -52,7 +52,7 @@ VALID_TASK_JSON = """[
 ]"""
 
 
-@patch("minisweagent.run.task_generator._run_task_agent", return_value=VALID_TASK_JSON)
+@patch("minisweagent.run.pipeline.task_generator._run_task_agent", return_value=VALID_TASK_JSON)
 def test_agent_submits_valid_json(mock_agent):
     dr = _make_discovery("triton")
     model = MagicMock()
@@ -69,7 +69,7 @@ def test_agent_submits_valid_json(mock_agent):
     mock_agent.assert_called_once()
 
 
-@patch("minisweagent.run.task_generator._run_task_agent", return_value=VALID_TASK_JSON)
+@patch("minisweagent.run.pipeline.task_generator._run_task_agent", return_value=VALID_TASK_JSON)
 def test_openevolve_dispatch(mock_agent):
     """openevolve agent_type -> OpenEvolveWorker class + config."""
     from minisweagent.agents.openevolve_worker import OpenEvolveWorker
@@ -100,7 +100,7 @@ def test_openevolve_dispatch(mock_agent):
 
 
 @patch(
-    "minisweagent.run.task_generator._run_task_agent",
+    "minisweagent.run.pipeline.task_generator._run_task_agent",
     side_effect=RuntimeError("agent did not submit"),
 )
 def test_agent_failure_propagates(mock_agent):

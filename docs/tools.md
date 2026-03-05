@@ -10,7 +10,7 @@ block-beta
 
     geak_preprocess["<b>geak-preprocess</b>\nPreprocessing pipeline"]:2
     space
-    geak_orchestrate["<b>geak-orchestrate</b>\nOrchestration loop\n--gpu-ids 0,1,2,3"]:2
+    geak_orchestrate["<b>geak-orchestrate</b>\nOrchestration loop\n--gpu-ids 0,1,2,3\n--heterogeneous\n--start-round N"]:2
 
     space:5
 
@@ -53,7 +53,11 @@ block-beta
 
     space:5
 
-    shared["<b>pipeline_helpers.py</b>\nShared module used by all tools above:\nload_geak_model, inject_pipeline_context,\nvalidate_harness, create_validated_harness,\nrun_baseline_profile, agent filter helpers,\nDiscoveryResult.from_dict(),\nDEFAULT_EVAL_BENCHMARK_ITERATIONS"]:5
+    shared["<b>pipeline_helpers.py</b>\nShared module used by all tools above:\nload_geak_model, geak_model_factory,\ninject_pipeline_context, extract_harness_path,\nvalidate_harness, execute_harness_validation,\ncreate_validated_harness, run_baseline_profile,\nadd_agent_filter_args, apply_agent_filter_env,\nREQUIRED_HARNESS_FLAGS, MAX_HARNESS_RETRIES,\nDEFAULT_AGENT_BENCHMARK_ITERATIONS,\nDEFAULT_EVAL_BENCHMARK_ITERATIONS"]:5
+
+    space:5
+
+    dtypes["<b>discovery_types.py</b> (src/minisweagent/tools/)\nDiscoveryResult.from_dict(), KernelInfo,\nTestInfo, BenchmarkInfo, BuildInfo,\nKernelDependencyGraph, TestPatterns"]:5
 
     geak --> geak_preprocess
     geak --> geak_orchestrate
