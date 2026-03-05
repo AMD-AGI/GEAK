@@ -802,7 +802,11 @@ def main(
         env.config.env = env.config.env or {}
         env.config.env["HIP_VISIBLE_DEVICES"] = str(parsed_gpu_ids[0])
         env.config.env.setdefault("GEAK_BENCHMARK_EXTRA_ARGS", _bench_extra)
-    
+        # Set cwd to repo directory for single agent mode (required for test_perf to work correctly)
+        if repo:
+            env.config.cwd = str(Path(repo).resolve())
+            console.print(f"[dim]Working directory: {env.config.cwd}[/dim]")
+                
     # Create and run agent
     agent = agent_class(model, env, **agent_config)
     agent.log_file = agent_log_file

@@ -424,6 +424,9 @@ class ParallelAgent(DefaultAgent):
                 agent.extra_template_vars[repo_path_str] = worktree_path_str
             if hasattr(agent, "base_repo_path"):
                 agent.base_repo_path = repo_path_resolved
+                # Re-initialize test_perf context with updated base_repo_path
+                if hasattr(agent, '_setup_test_perf_context'):
+                    agent._setup_test_perf_context()
             if hasattr(agent, "log_file"):
                 agent.log_file = log_file
 
