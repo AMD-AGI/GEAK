@@ -79,39 +79,12 @@ agent:
 
     ### Edit files with sed:
 
-    {%- if system == "Darwin" -%}
-    <important>
-    You are on MacOS. For all the below examples, you need to use `sed -i ''` instead of `sed -i`.
-    </important>
-    {%- endif -%}
 
-    ```bash
-    # Replace all occurrences
-    sed -i 's/old_string/new_string/g' filename.py
-
-    # Replace only first occurrence
-    sed -i 's/old_string/new_string/' filename.py
-
-    # Replace first occurrence on line 1
-    sed -i '1s/old_string/new_string/' filename.py
-
-    # Replace all occurrences in lines 1-10
-    sed -i '1,10s/old_string/new_string/g' filename.py
-    ```
-
-    ### View file content:
-
-    ```bash
-    # View specific lines with numbers
-    nl -ba filename.py | sed -n '10,20p'
-    ```
-
-    ### Run OpenEvolve optimizer (for kernel optimization tasks)
-    When the task asks for OPTIMIZATION or OpenEvolve, do NOT edit the kernel by hand. Run the optimizer script:
-    ```bash
-    python3 ${GEAK_OE_ROOT:-/opt/geak-oe}/examples/geak_eval/run_openevolve.py <kernel_path> --iterations 10 --gpu 0 --output <output_dir>
-    ```
-    Use --commandment and --baseline-metrics if you created them in an earlier step.
+    ### Run KernelEvolve optimizer (for kernel optimization tasks)
+    When the task asks for OPTIMIZATION or KernelEvolve, do NOT edit the kernel by hand. Use the KernelEvolve MCP tool:
+    Call the `generate_optimization` tool with kernel_code, bottleneck type, and optional strategy.
+    For iterative evolution, use `mutate_kernel` and `crossover_kernels` tools.
+    Use `get_optimization_strategies` to discover strategies for a given bottleneck.
 
     ### Any other command you want to run
 
@@ -140,7 +113,7 @@ agent:
     Note: In rare cases, if you need to reference a similar format in your command, you might have
     to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
   step_limit: 0.
-  cost_limit: 0.
+  cost_limit: 10.
   mode: confirm
 env:
   env:
@@ -151,9 +124,9 @@ env:
     TQDM_DISABLE: '1'
   timeout: 3600
 model:
-  model_class: amd_llm
+  model_class: anthropic_model
   # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
-  model_name: claude-opus-4.5
+  model_name: claude-sonnet-4-5-20250929
   api_key: ""
   # model_kwargs:
   #   temperature: 0.0

@@ -11,9 +11,9 @@ env:
     TQDM_DISABLE: '1'
   timeout: 3600
 model:
-  model_class: amd_llm
+  model_class: anthropic_model
   # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
-  model_name: claude-opus-4.5
+  model_name: claude-sonnet-4-5-20250929
   api_key: ""
   model_kwargs:
     temperature: 0.0

@@ -41,7 +41,7 @@ options:
   --iterations N, -n N          Max evolution iterations (default: 10)
   --gpu GPU, -g GPU             GPU device ID (default: 0)
   --output OUTPUT, -o OUTPUT    Output directory (default: <kernel_dir>/optimization_output)
-  --config CONFIG, -c CONFIG    Path to OpenEvolve config.yaml
+  --config CONFIG, -c CONFIG    Path to KernelEvolve config.yaml
   --api-key API_KEY             LLM API key (default: from AMD_LLM_API_KEY env)
   --skip-profiling              Skip Metrix baseline profiling
   --commandment COMMANDMENT     Path to pre-built COMMANDMENT.md (skips auto-build)
@@ -148,7 +148,7 @@ creates test inputs, and provides `--correctness`, `--profile`, and
    checks compare deterministic outputs.
 
 4. **Use these FIXED tensor sizes for all tests and profiling.**
-   The baseline and every OpenEvolve evaluation MUST use identical input
+   The baseline and every KernelEvolve evaluation MUST use identical input
    dimensions, otherwise speedup numbers are meaningless.  Use these
    standard sizes (large enough to saturate the GPU):
    - **Attention/RoPE kernels:** `S=2048, B=4, H=32, D=128` (fp16)
@@ -164,7 +164,7 @@ creates test inputs, and provides `--correctness`, `--profile`, and
    you care about.  Avoid running benchmarks or loops in profile mode.
 
 7. **Keep the harness file OUTSIDE the kernel directory** or in a fixed
-   location that won't be overwritten by OpenEvolve's candidate files.
+   location that won't be overwritten by KernelEvolve's candidate files.
 
 8. **Generate tensors on CPU, then move to GPU.**
    In `--profile` mode, `rocprofv3` captures ALL GPU kernels — including
@@ -195,9 +195,9 @@ waves_per_eu) yields limited improvement.  The real optimisation
 opportunities (memory coalescing, vectorisation, shared memory usage,
 algorithmic changes) are in the `@triton.jit` kernel implementation.
 
-**What to do — DIRECT EDITING (no OpenEvolve):**
+**What to do — DIRECT EDITING (no KernelEvolve):**
 
-When directly optimising (not using OpenEvolve), you MUST edit BOTH files:
+When directly optimising (not using KernelEvolve), you MUST edit BOTH files:
 1. The **wrapper file** — for launch parameters (BLOCK_S, num_warps, grid)
 2. The **inner kernel file** — for algorithmic changes (memory access
    patterns, shared memory staging, vectorisation, tl.load/tl.store patterns)
@@ -212,7 +212,7 @@ Focus on the inner kernel for the biggest gains:
 - Vectorise loads/stores for better bandwidth
 - Change the loop structure for better pipelining
 
-**What to do — OpenEvolve mode:**
+**What to do — KernelEvolve mode:**
 
 1. Trace the import chain to find the file containing the `@triton.jit`
    function that matches the kernel name from profiling
@@ -271,7 +271,7 @@ kernel-profile "${GEAK_WORK_DIR}/run_harness.sh --profile" --gpu-devices ${GEAK_
 
 kernel-profile is a hardware profiler.  It can be used at **any stage**:
 baseline measurement, post-optimisation validation, or ad-hoc investigation.
-OpenEvolve also invokes it during evolution via the COMMANDMENT PROFILE section.
+KernelEvolve also invokes it during evolution via the COMMANDMENT PROFILE section.
 
 ### Running the profiler
 
@@ -370,7 +370,7 @@ When multiple kernels are selected:
 
 ### Profiling after optimisation
 
-After OpenEvolve completes, profile the best kernel to verify the improvement:
+After KernelEvolve completes, profile the best kernel to verify the improvement:
 ```bash
 kernel-profile "python3 KERNEL_DIR/optimization_output/best_kernel.py --profile" \
   --gpu-devices 0 --replays 5
@@ -379,7 +379,7 @@ Compare with the baseline to confirm the speedup is real and not an artefact.
 
 ---
 
-## 3. OPTIMIZATION: Run OpenEvolve
+## 3. OPTIMIZATION: Run KernelEvolve
 
 There are two modes. Choose ONE.
 
@@ -402,7 +402,7 @@ What auto-build does for you:
 3. Validates all commands on the baseline kernel first
 4. Writes a frozen COMMANDMENT.md
 5. Profiles baseline with Metrix to get baseline_metrics.json
-6. Runs OpenEvolve evolutionary optimization
+6. Runs KernelEvolve evolutionary optimization
 
 You do NOT need to create COMMANDMENT.md or baseline_metrics.json — it's all automatic.
 
@@ -415,7 +415,7 @@ you need custom correctness checking or profiling commands.
 
 **Step 2:** Write COMMANDMENT.md (see Section 4 below for format rules)
 
-**Step 3:** Run OpenEvolve with pre-built files:
+**Step 3:** Run KernelEvolve with pre-built files:
 ```bash
 cd KERNEL_DIR && python3 /workspace/geak-oe/examples/geak_eval/run_openevolve.py \
   kernel.py \
@@ -426,20 +426,20 @@ cd KERNEL_DIR && python3 /workspace/geak-oe/examples/geak_eval/run_openevolve.py
   --baseline-metrics optimization_output/baseline_metrics.json
 ```
 
-### OpenEvolve's profiling freedom
+### KernelEvolve's profiling freedom
 
-OpenEvolve invokes `kernel-profile` during every candidate evaluation via the
+KernelEvolve invokes `kernel-profile` during every candidate evaluation via the
 COMMANDMENT PROFILE section.  This is how it scores each candidate against the
-baseline.  Do NOT restrict OpenEvolve's ability to profile — the COMMANDMENT
-PROFILE section must always include the full profiling command.  OpenEvolve
+baseline.  Do NOT restrict KernelEvolve's ability to profile — the COMMANDMENT
+PROFILE section must always include the full profiling command.  KernelEvolve
 decides when and how often to profile; the baseline_metrics.json is only the
 starting reference point.
 
-### Monitoring OpenEvolve in Real-Time
+### Monitoring KernelEvolve in Real-Time
 
-OpenEvolve runs as a subprocess and its stdout is buffered until completion.
+KernelEvolve runs as a subprocess and its stdout is buffered until completion.
 To see live progress, **start a background `tail -f` on the progress log
-BEFORE launching OpenEvolve**, then run the optimizer:
+BEFORE launching KernelEvolve**, then run the optimizer:
 
 ```bash
 # Step 1: Start the progress monitor in the background
@@ -448,7 +448,7 @@ mkdir -p ${OUTPUT_DIR}
 tail -f ${OUTPUT_DIR}/progress.log 2>/dev/null &
 TAIL_PID=$!
 
-# Step 2: Run OpenEvolve (stdout will be buffered, but progress.log updates live)
+# Step 2: Run KernelEvolve (stdout will be buffered, but progress.log updates live)
 python3 /workspace/geak-oe/examples/geak_eval/run_openevolve.py \
   KERNEL_DIR/kernel.py \
   --iterations 10 --gpu 0 --output ${OUTPUT_DIR} \
@@ -472,7 +472,7 @@ For detailed logs (LLM calls, per-candidate scores, errors):
 tail -f ${OUTPUT_DIR}/openevolve.log
 ```
 
-### OpenEvolve Output Files
+### KernelEvolve Output Files
 - `optimization_output/best_kernel.py` — the best optimized kernel found
 - `optimization_output/openevolve_result.json` — final results with best score
 - `optimization_output/progress.log` — iteration-by-iteration progress (tail -f friendly)
@@ -484,7 +484,7 @@ tail -f ${OUTPUT_DIR}/openevolve.log
 
 ## 4. COMMANDMENT.md Format (CRITICAL RULES)
 
-COMMANDMENT.md is the contract between the agent and OpenEvolve's evaluator.
+COMMANDMENT.md is the contract between the agent and KernelEvolve's evaluator.
 If you use auto-build mode (Option A), you do NOT need to write this file.
 Only read this section if you are using pre-built mode (Option B).
 
@@ -497,7 +497,7 @@ These are available in every command — do NOT set them yourself:
 ### CRITICAL RULES
 1. Only three section headers are recognized: `## SETUP`, `## CORRECTNESS`, `## PROFILE`
 2. Any other `##` header ends the current section (content after it is ignored)
-3. **NEVER copy the candidate INTO `${GEAK_WORK_DIR}` in SETUP** — OpenEvolve writes kernel.py there automatically.  However, you SHOULD use `cp` to place the candidate at the correct import path when optimising an inner kernel file (see Section 1c).
+3. **NEVER copy the candidate INTO `${GEAK_WORK_DIR}` in SETUP** — KernelEvolve writes kernel.py there automatically.  However, you SHOULD use `cp` to place the candidate at the correct import path when optimising an inner kernel file (see Section 1c).
 4. Always use `${GEAK_WORK_DIR}/kernel.py` to reference the candidate kernel
 5. Always use `${GEAK_GPU_DEVICE}` instead of hardcoded GPU IDs
 6. Include TWO warm-up runs before actual profiling (Triton JIT compilation + GPU power ramp). This MUST match the warm-up used during baseline profiling — otherwise speedup numbers will be inflated.
@@ -533,7 +533,7 @@ kernel-profile "python3 ${GEAK_WORK_DIR}/kernel.py --profile" --gpu-devices ${GE
 
 ## 5. Saving Final Results
 
-After OpenEvolve completes:
+After KernelEvolve completes:
 ```bash
 cd KERNEL_DIR
 cp optimization_output/best_kernel.py kernel_optimized.py
@@ -546,7 +546,7 @@ cat optimization_output/openevolve_result.json
 
 - `AMD_LLM_API_KEY` — required for LLM calls (already set in container)
 - `HIP_VISIBLE_DEVICES` — GPU selection (set by COMMANDMENT automatically)
-- `GEAK_OE_ROOT` — OpenEvolve root (default: /workspace/geak-oe)
+- `GEAK_OE_ROOT` — KernelEvolve root (default: /workspace/geak-oe)
 - Correctness checker: `/workspace/geak-oe/examples/geak_eval/correctness_check.py`
-- OpenEvolve runner: `/workspace/geak-oe/examples/geak_eval/run_openevolve.py`
+- KernelEvolve runner: `/workspace/geak-oe/examples/geak_eval/run_openevolve.py`
 - kernel-profile: `/opt/venv/bin/kernel-profile`

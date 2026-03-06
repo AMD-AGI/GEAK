@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/workspace/GEAK/ck_tile/21_elementwise/build_simple/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

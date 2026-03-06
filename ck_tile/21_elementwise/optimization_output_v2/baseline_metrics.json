@@ -1,0 +1,16 @@
+{
+  "kernel_name": "elementwise_add_kernel",
+  "duration_us": 55.05,
+  "bottleneck": "balanced",
+  "metrics": {
+    "memory.hbm_bandwidth_utilization": 7.81,
+    "memory.coalescing_efficiency": 100.00,
+    "memory.l1_hit_rate": 66.67,
+    "memory.l2_hit_rate": 25.11,
+    "memory.global_load_efficiency": 50.00,
+    "memory.global_store_efficiency": 25.00,
+    "memory.hbm_read_bandwidth": 275.81,
+    "memory.hbm_write_bandwidth": 137.88,
+    "memory.lds_bank_conflicts": 0.00
+  }
+}
