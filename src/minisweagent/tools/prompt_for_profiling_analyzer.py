@@ -1,4 +1,5 @@
 # Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+# SPDX-License-Identifier: Apache-2.0
 
 profiler_prompt = """Analyze this AMD GPU profiler output (rocprof-compute) to identify performance optimization opportunities for kernel latency reduction.
 

@@ -1,4 +1,5 @@
 # Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+# SPDX-License-Identifier: Apache-2.0
 
 """
 [Bubblewrap](https://github.com/containers/bubblewrap) is a low-level, unprivileged sandboxing tool for Linux that enables running applications

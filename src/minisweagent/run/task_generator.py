@@ -1,4 +1,5 @@
 # Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
+# SPDX-License-Identifier: Apache-2.0
 
 """Agent-based task generator -- produces optimization tasks by running a
 read-only planning agent that inspects profiling data and kernel metadata.

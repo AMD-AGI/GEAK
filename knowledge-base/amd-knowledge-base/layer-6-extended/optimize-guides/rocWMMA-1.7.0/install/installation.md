@@ -1,6 +1,5 @@
----
 Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
----
+SPDX-License-Identifier: Apache-2.0
 
 ::: {.meta description="C++ library for accelerating mixed precision matrix multiply-accumulate operations
 leveraging specialized GPU matrix cores on AMD's latest discrete GPUs
