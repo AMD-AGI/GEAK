@@ -1,0 +1,75 @@
+{
+  "name": "GEAK Agent Test Suite",
+  "description": "10 diverse AITER kernels for regression testing",
+  "version": "1.0",
+  "aiter_repo": "https://github.com/ROCm/aiter.git",
+  "kernels": [
+    {
+      "id": "gemm_a16w16",
+      "category": "gemm_basic",
+      "path": "aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16.py",
+      "description": "Basic FP16 GEMM kernel"
+    },
+    {
+      "id": "gemm_a8w8",
+      "category": "gemm_quantized",
+      "path": "aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a8w8.py",
+      "description": "INT8 quantized GEMM kernel"
+    },
+    {
+      "id": "fused_gemm_a8w8_blockscale",
+      "category": "gemm_fused",
+      "path": "aiter/ops/triton/_triton_kernels/gemm/fused/fused_gemm_a8w8_blockscale_mul_add.py",
+      "description": "Fused INT8 GEMM with block scaling and mul-add"
+    },
+    {
+      "id": "mha",
+      "category": "attention",
+      "path": "aiter/ops/triton/_triton_kernels/attention/mha.py",
+      "description": "Multi-head attention kernel"
+    },
+    {
+      "id": "pa_decode",
+      "category": "attention_paged",
+      "path": "aiter/ops/triton/_triton_kernels/attention/pa_decode.py",
+      "description": "Paged attention decode kernel"
+    },
+    {
+      "id": "flash_attn_prefill",
+      "category": "flash_attention",
+      "path": "aiter/ops/triton/_triton_kernels/flash_attn_triton_amd/fwd_prefill.py",
+      "description": "Flash attention forward prefill (AMD optimized)"
+    },
+    {
+      "id": "moe_op",
+      "category": "moe",
+      "path": "aiter/ops/triton/_triton_kernels/moe/moe_op.py",
+      "description": "Mixture of Experts kernel"
+    },
+    {
+      "id": "rmsnorm",
+      "category": "normalization",
+      "path": "aiter/ops/triton/_triton_kernels/normalization/rmsnorm.py",
+      "description": "RMS normalization kernel"
+    },
+    {
+      "id": "activation",
+      "category": "activation",
+      "path": "aiter/ops/triton/_triton_kernels/activation.py",
+      "description": "Activation functions (SiLU, GELU, etc.)"
+    },
+    {
+      "id": "softmax",
+      "category": "softmax",
+      "path": "aiter/ops/triton/_triton_kernels/softmax.py",
+      "description": "Softmax kernel"
+    }
+  ],
+  "metrics": [
+    "discovery_success",
+    "test_generation_success",
+    "benchmark_baseline_created",
+    "optimization_completed",
+    "speedup_ratio"
+  ]
+}
