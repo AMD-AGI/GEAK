@@ -510,6 +510,16 @@ def _auto_finalize(
         "round_summaries": round_summaries,
     }
 
+    # Attach the per-round evaluation (FULL_BENCHMARK + PROFILE) for the
+    # round that produced the best result, matching the hetero finalize path.
+    if best_round:
+        round_eval = ctx.get(f"{best_round}_eval")
+        if round_eval:
+            report["round_evaluation"] = round_eval
+            verified = round_eval.get("full_benchmark", {}).get("verified_speedup")
+            if verified is not None:
+                report["best_speedup_verified"] = verified
+
     report_path = output_dir / "final_report.json"
     report_path.write_text(json.dumps(report, indent=2))
     _print(f"Auto-finalized: {summary_text}")
