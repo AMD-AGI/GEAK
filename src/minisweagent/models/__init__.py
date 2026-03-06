@@ -82,7 +82,7 @@ def get_model_name(input_model_name: str | None = None, config: dict | None = No
 
 
 _MODEL_CLASS_MAPPING = {
-    "anthropic_model": "minisweagent.models.anthropic.AnthropicModel",
+    "anthropic_model": "minisweagent.models.anthropic_model.AnthropicModel",
     "litellm": "minisweagent.models.litellm_model.LitellmModel",
     "openrouter": "minisweagent.models.openrouter_model.OpenRouterModel",
     "portkey": "minisweagent.models.portkey_model.PortkeyModel",
@@ -95,7 +95,7 @@ def get_model_class(model_name: str, model_class: str = "") -> type:
     """Select the best model class.
 
     If a model_class is provided (as shortcut name, or as full import path,
-    e.g., "anthropic" or "minisweagent.models.anthropic.AnthropicModel"),
+    e.g., "anthropic" or "minisweagent.models.anthropic_model.AnthropicModel"),
     it takes precedence over the `model_name`.
     Otherwise, the model_name is used to select the best model class.
     """
