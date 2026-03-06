@@ -2,9 +2,16 @@
 
 This is an LLM-based multi-agent framework, which can generate functional and efficient gpu kernels automatically.
 
-The framework is extendable and flexible. You can easily make you own coding agent and test it on our TritonBench-revised Benchmark and ROCm Benchmark.
+The framework is extendable and flexible. You can easily make you own coding agent and test it on our TritonBench-revised Benchmark and Cambricon MLU Benchmark.
 
 We also provide a baseline agent, GEAK-Agent to let you run directly.
+
+## Profiler and Analyzer Features
+
+If you need hardware-level profiling and performance analysis capabilities, please visit the **Profiler Analyzer branch**:
+- **Branch**: [`profiler-analyzer`](https://github.com/AMD-AGI/GEAK-agent/tree/profiling) 
+- Includes Cambricon MLU profiling tools and analyzer for detailed hardware metrics
+- Provides insights into memory bandwidth, compute unit occupancy, and kernel optimization strategies
 
 ## GEAK-OptimAgent V2
 <img width="443" alt="image" src="img/geakOAv2.png" />
@@ -46,13 +53,6 @@ result_path: "../outputs/optimagent_10.jsonl"
 mem_file: "../outputs/optimagent_mem_10.json"
 start_iter: 11
 ```
-
-## Profiler and Analyzer Features
-
-If you need hardware-level profiling and performance analysis capabilities, please visit the **Profiler Analyzer branch**:
-- **Branch**: [`profiler-analyzer`](https://github.com/AMD-AGI/GEAK-agent/tree/profiling) 
-- Includes ROCm profiling tools and analyzer for detailed hardware metrics
-- Provides insights into memory bandwidth, compute unit occupancy, and kernel optimization strategies
 
 ## Guide: use your own data
 1. create a new file for your own dataloader in dataloaders
@@ -114,4 +114,4 @@ If you need hardware-level profiling and performance analysis capabilities, plea
 
 [`GEAK-V1 for Triton`](https://github.com/AMD-AGI/GEAK-agent/tree/GEAK-v1)
 
-     
+

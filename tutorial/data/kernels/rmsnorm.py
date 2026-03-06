@@ -25,7 +25,7 @@ def rmsnorm_triton(x_ptr, rms_w_ptr, output_ptr,
         offs_n = block_n_start_idx + block_N
         x_ptr_mask = offs_n < N_SIZE
         x = tl.load(x_ptr + offs_m + offs_n * stride_x_k, mask=x_ptr_mask, other=0.0)
-        var += tl.extra.hip.libdevice.pow(x.to(tl.float32), 2)
+        var += tl.extra.mlu.libdevice.pow(x.to(tl.float32), 2)
 
     var = tl.sum(var, axis=0) / N_SIZE
     rstd = tl.math.rsqrt(var + eps)

@@ -121,7 +121,7 @@ class GaAgent(Reflexion_Oneshot):
                 output_dict[mem.ps.filename] = output
             json.dump(output_dict, f)
     
-    def run(self, output_path=None, multi_thread=True, datalen=None, iteration_num=0, temperature=0, ancestor_num=5, descendant_num=1, mutation=False, start_idx=0, gpu_id=0, start_iter=0, descendant_debug=1, target_gpu='MI250', profiling=False):
+    def run(self, output_path=None, multi_thread=True, datalen=None, iteration_num=0, temperature=0, ancestor_num=5, descendant_num=1, mutation=False, start_idx=0, gpu_id=0, start_iter=0, descendant_debug=1, target_mlu='MLU590', profiling=False):
         """
         Args:
             output_path: the folder to store the final result
@@ -239,7 +239,7 @@ class GaAgent(Reflexion_Oneshot):
                             mem.call_candidate = raw_code.code
                             mem.temp_strategy = raw_code.strategy
                             if profiling:
-                                pass_prfiler, stdout_profile, stderr_profile, stdout_analyze = self.dataset.test_kernel_profiling(raw_code.code, mem.ps.filename, tmp_dir, exe_dir=exe_dir, target_gpu=target_gpu, timeout=30*60)
+                                pass_prfiler, stdout_profile, stderr_profile, stdout_analyze = self.dataset.test_kernel_profiling(raw_code.code, mem.ps.filename, tmp_dir, exe_dir=exe_dir, target_mlu=target_mlu, timeout=30*60)
                                 raw_code.profilig = stdout_analyze
                         mem.call_err_msg = raw_code.test_stdout
                         mem.exe_err_msg = raw_code.test_stderr

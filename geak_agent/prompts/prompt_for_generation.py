@@ -2,10 +2,10 @@
 
 
 prompt = """
-You are an expert Python programmer specializing in NVIDIA Triton kernels, specifically targeting **AMD GPUs using the ROCm environment**.
+You are an expert Python programmer specializing in NVIDIA Triton kernels, specifically targeting **Cambricon MLU GPUs using the Cambricon MLU environment**.
 Your task is to generate a Python code snippet containing a Triton kernel based on the following request:
 
-**Target Platform:** AMD GPU (ROCm)
+**Target Platform:** Cambricon MLU GPU
 
 **Request:**
 {instruction}
@@ -15,7 +15,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 **Output Requirements:**
-1.  **AMD Compatibility:** Generate code compatible with AMD GPUs and ROCm. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon MLU Compatibility:** Generate code compatible with Cambricon MLU GPUs and Cambricon MLU. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:
@@ -48,7 +48,7 @@ Before completing, verify:
 3. No functions are called without being defined.
 4. No parameters are missing from your implementations.
 
-**Generated AMD ROCm Compatible Triton Kernel Code:**
+**Generated Cambricon MLU Compatible Triton Kernel Code:**
 """
 
 system_prompt = """\nThink before writing the optimization and no more explanation is required after the thinking. 
@@ -67,11 +67,11 @@ For each criteria you must provide:
 
 **Evaluation Criteria:**
 1. Fusion Intelligence: Does the kernel smartly fuse compatible operations to reduce memory I/O and kernel launches?
-2. Autotuning Coverage: Does it use `@triton.autotune`? Are the tuning ranges meaningful, diverse, and AMD MI250 GPU hardware-appropriate? (Assign 0.0 if no autotuning config is present.)
+2. Autotuning Coverage: Does it use `@triton.autotune`? Are the tuning ranges meaningful, diverse, and AMD MLU590 GPU hardware-appropriate? (Assign 0.0 if no autotuning config is present.)
 3. Memory Access Efficiency: Does it optimize memory layout, coalesced access, and reduce redundant reads/writes?
 4. Algorithmic complexity: Does it fuse multiple for-loops in one smartly? Are there redundant nested for-loops?
-5. Warp/Wavefront Utilization: Does it use thread blocks that fully utilize compute units on the target GPU (e.g., MI250)?
-6. Software pipelining: Does it explore good enough range for num_stages? Valid range for MI250 GPU is [1,16]. For invalid values assign score of 0.0.
+5. Warp/Wavefront Utilization: Does it use thread blocks that fully utilize compute units on the target GPU (e.g., MLU590)?
+6. Software pipelining: Does it explore good enough range for num_stages? Valid range for MLU590 GPU is [1,16]. For invalid values assign score of 0.0.
 7. Numerical Stability: Is it numerically safe for large input ranges (e.g., uses max-subtraction in softmax, clamps, etc.)?
 8. Correctness and Portability: Does the kernel handle edge cases (e.g., sizes not divisible by block size)? Is it portable across Triton-supported devices?
 9. Optimization scope: Is the given kernel missing techniques from well-known optimizations methods? e.g. softmax kernel vs online softmax vs fused softmax. If the kernel is already most optimal then assign a score of 1.0.
@@ -97,10 +97,10 @@ Provide scores and reasoning for each evaluation criteria in the JSON format as 
 """
 
 prompt_rocm = """
-You are an expert Python programmer specializing in NVIDIA Triton kernels, specifically targeting **AMD GPUs using the ROCm environment**.
+You are an expert Python programmer specializing in NVIDIA Triton kernels, specifically targeting **Cambricon MLU GPUs using the Cambricon MLU environment**.
 Your task is to generate a Python code snippet containing a Triton kernel based on the following request:
 
-**Target Platform:** AMD GPU (ROCm)
+**Target Platform:** Cambricon MLU GPU
 
 **Request:**
 {instruction}
@@ -110,7 +110,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 **Output Requirements:**
-1.  **AMD Compatibility:** Generate code compatible with AMD GPUs and ROCm. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon MLU Compatibility:** Generate code compatible with Cambricon MLU GPUs and Cambricon MLU. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:

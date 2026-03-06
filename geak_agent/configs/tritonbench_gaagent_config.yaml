@@ -29,5 +29,5 @@ ancestor_num: 5   #ancestor number of perf_candidates used to generate descendan
 descendant_num: 8 #offspring
 gpu_id: 7
 descendant_debug: 1 # if descendant_debug of descendant pass execution test, then generate descendant_num of new codes.
-target_gpu: "MI200"
+target_mlu: "MLU590"
 profiling: false # use profiling info.

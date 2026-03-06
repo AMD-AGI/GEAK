@@ -18,8 +18,8 @@ parser.add_argument('--k_vals', '-k', type=str, default="1,2,3,5,10,15", help='F
 parser.add_argument('--debug', '-d', type=int, default=0, help='Folder to check')
 args = parser.parse_args()
 
-## check if HIP_VISIBLE_DEVICES environment variable is set
-assert 'HIP_VISIBLE_DEVICES' in os.environ, "HIP_VISIBLE_DEVICES environment variable is not set. Please set it to the GPU you want to use."
+## check if MLU_VISIBLE_DEVICES environment variable is set
+assert 'MLU_VISIBLE_DEVICES' in os.environ, "MLU_VISIBLE_DEVICES environment variable is not set. Please set it to the GPU you want to use."
 
 FAILED_FILES  = [] #["attention_fwd_triton1.py", "attention_llama.py", "block_sparse_attn.py", "chunk_bwd_dqkg.py", "context_attn_fwd.py", "chunk_gated_attention.py", "dequantize_matmul.py", "chunk_gla_simple.py", "decay_cumsum.py", "flash_decode2_llama.py", "index_select_bwd.py", "fused_layernorm_triton.py", "int4_matmul.py", "matmul_dequant_int4.py", "layer_norm_welfold.py", "matmul_dequantize_int4.py", "quantize_copy_kv.py", "fused_recurrent_delta.py", "parallel_attention.py", "softmax_flaggems.py", "mixed_sparse_attention.py", "quantize_kv_copy.py", "rotary_emb_nopad.py", "cross_entropy2.py", "max_reduction.py","chunk_delta_fwd.py","chunk_retention_ops.py","fp4_to_bf16_conversion.py","layer_norm_fwd.py","layer_norm_ops.py","int8_dequant_matmul.py","isfinite_kernel.py","logsumexp_fwd.py","llama_ff_triton.py","ksoftmax_triton.py","chunk_gla_fwd.py","pow_scalar_tensor.py","rbe_triton_transform.py","quantize_global.py","rms_matmul_rbe.py","quant_transpose_kernel.py","token_attn_mistral.py","triton_linear_activation.py","token_attn_llama2.py","masked_select.py","rowwise_quantization_triton.py","token_attn_reduceV.py","rmsnorm_triton.py","rms_rbe_matmul.py","softmax_reducev.py","spinning_lock_reduction.py"]
 

@@ -218,7 +218,7 @@ class TutorialDataloader:
             
             # Run the benchmark
             env = os.environ.copy()
-            env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+            env["MLU_VISIBLE_DEVICES"] = str(gpu_id)
             
             result = subprocess.run(
                 ['python3', perf_script_dst],
@@ -260,7 +260,7 @@ class TutorialDataloader:
             return 0.0
     
     def test_kernel_profiling(self, code, filename, tmp_dir, save_scripts=True, 
-                              exe_dir="pass_exe", target_gpu=None, timeout=20*60):
+                              exe_dir="pass_exe", target_mlu=None, timeout=20*60):
         """Kernel profiling (placeholder for tutorial)"""
         return False, None, None, None
 

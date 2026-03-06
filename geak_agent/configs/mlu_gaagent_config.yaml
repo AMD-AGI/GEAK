@@ -6,9 +6,9 @@ model_id: dvue-aoai-001-gpt-5
 temperature: 1.0
 
 # dataloader
-statis_path: "TB-eval/tb_eval/data/ROCm/data/ROCm_eval_complex_instruct_v1.json"
-py_folder: "TB-eval/tb_eval/data/ROCm/data/ROCm_v1_autotune"
-instruction_path: "TB-eval/tb_eval/data/ROCm/data/ROCm_eval_complex_instruct_v1.json"
+statis_path: "TB-eval/tb_eval/data/MLU/data/MLU_eval_complex_instruct_v1.json"
+py_folder: "TB-eval/tb_eval/data/MLU/data/MLU_v1_autotune"
+instruction_path: "TB-eval/tb_eval/data/MLU/data/MLU_eval_complex_instruct_v1.json"
 corpus_path: "TB-eval/tb_eval/data/TritonBench/data/train_crawl.json"
 py_interpreter: "python"
 
@@ -19,12 +19,12 @@ mem_file: null
 start_iter: 0
 start_idx: 0
 datalen: null
-output_path: "../outputs/20251011_gaagent_rocm_claude4.jsonl"
+output_path: "../outputs/20251011_gaagent_mlu_claude4.jsonl"
 max_iteration: 10
 multi_thread: true
 ancestor_num: 5
 descendant_num: 5
 gpu_id: 5
 descendant_debug: 1
-target_gpu: "MI200"
+target_mlu: "MLU590"
 profiling: false

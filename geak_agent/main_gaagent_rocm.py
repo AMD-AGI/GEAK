@@ -46,7 +46,7 @@ def main():
               ancestor_num=args.ancestor_num,
               descendant_num=args.descendant_num,
               descendant_debug=args.descendant_debug,
-              target_gpu=args.target_gpu,
+              target_mlu=args.target_mlu,
               profiling=args.profiling,
               start_idx=args.start_idx)
 

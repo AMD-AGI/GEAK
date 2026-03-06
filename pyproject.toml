@@ -34,7 +34,7 @@ dependencies = [
 
 [project.scripts]
 geak-gaagent = "geak_agent.main_gaagent:main"
-geak-gaagent-rocm = "geak_agent.main_gaagent_rocm:main"
+geak-gaagent-mlu = "geak_agent.main_gaagent_rocm:main"
 geak-optimagent = "geak_agent.main_optimagent:main"
 geak-reflexion = "geak_agent.main_reflexion_oneshot:main"
 

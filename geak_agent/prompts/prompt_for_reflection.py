@@ -90,7 +90,7 @@ generate reflection in the \"reflection\" field."""
 
 
 prompt_evolve_reflect = """
-You are an expert Python programmer specializing in writing and optimizing Triton kernels for AMD GPUs using the ROCm environment.
+You are an expert Python programmer specializing in writing and optimizing Triton kernels for Cambricon MLU GPUs using the Cambricon MLU environment.
 You are tasked with iteratively improving a codebase.
 Given the original problem, metrics information, a history of previous implementations with their test results and reflections, previous top implementations with their test results and current implementation with its test error message, your job is to analyze the error messages and provide insights on why the solution failed and how it could be fixed. Be specific about the issues found.
 
@@ -102,7 +102,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 ## Requirements:
-1.  **AMD Compatibility:** Generate code compatible with AMD GPUs and ROCm. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon MLU Compatibility:** Generate code compatible with Cambricon MLU GPUs and Cambricon MLU. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:
@@ -348,7 +348,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 """
 
 prompt_evolve_reflect_rocm = """
-You are an expert Python programmer specializing in writing and optimizing Triton kernels for AMD GPUs using the ROCm environment.
+You are an expert Python programmer specializing in writing and optimizing Triton kernels for Cambricon MLU GPUs using the Cambricon MLU environment.
 You are tasked with iteratively improving a codebase.
 Given the original problem, metrics information, a history of previous implementations with their test results and reflections, previous top implementations with their test results and current implementation with its test error message, your job is to analyze the error messages and provide insights on why the solution failed and how it could be fixed. Be specific about the issues found.
 

@@ -5,7 +5,7 @@ numpy==1.26
 openai==1.75.0
 anthropic
 tqdm
---extra-index-url https://download.pytorch.org/whl/rocm6.4
+--extra-index-url https://download.pytorch.org/whl/mlu6.4
 torch
 datasets==3.6.0
 huggingface-hub

@@ -116,9 +116,9 @@ class TritonBench:
 
         return pass_call, pass_exe, speedup, call_stdout, call_stderr
     
-    def test_kernel_profiling(self, code, filename, tmp_dir, save_scripts=True, exe_dir="pass_exe", target_gpu=None, timeout=20*60):
+    def test_kernel_profiling(self, code, filename, tmp_dir, save_scripts=True, exe_dir="pass_exe", target_mlu=None, timeout=20*60):
         os.makedirs(exe_dir, exist_ok=True)
-        profile_status, stdout_profile, stderr_profile, stdout_analyze = code_kernel_profiling(code=code, fname=filename, temp_root=tmp_dir, py_folder=self.py_folder, target_gpu=target_gpu, timeout=timeout)
+        profile_status, stdout_profile, stderr_profile, stdout_analyze = code_kernel_profiling(code=code, fname=filename, temp_root=tmp_dir, py_folder=self.py_folder, target_mlu=target_mlu, timeout=timeout)
         pass_prfiler = False
         if "True" in str(profile_status):
             pass_prfiler=True
