@@ -105,14 +105,14 @@ class Performance_Metrics:
         perf_ref = []
         for input_tensor_ in self.input_tensors:
             try:
-                input_tensor = self.to_cuda(input_tensor_)
+                input_tensor = self.to_mlu(input_tensor_)
                 op = lambda : self.call_op(input_tensor)            
                 op_ref = lambda : self.call_op_ref(input_tensor)
                 
                 # Keep dummy initial calls to converge to optimal triton autotune configs
                 output = self.call_op(input_tensor)
                 output_ref = self.call_op_ref(input_tensor)                
-
+    
                 # The following calls should be using the optimal triton autotune configs
                 output = self.call_op(input_tensor)
                 output_ref = self.call_op_ref(input_tensor)
@@ -120,7 +120,7 @@ class Performance_Metrics:
                 if not self.check_close(output, output_ref, rtol=1e-3, atol=1e-3):
                     print(f"Output mismatch for input size {self.get_num_elements(input_tensor_)}")
                     continue
-
+    
                 # Randomly choose which operation to run first to avoid bias
                 if get_random_choice([0, 1]) == 0:
                     ms = self.get_runtime(op)

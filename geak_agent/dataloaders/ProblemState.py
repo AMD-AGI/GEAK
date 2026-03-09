@@ -14,7 +14,7 @@ class ProblemState:
     speedup: float = 0.0
 
 @dataclass
-class ProblemStateROCm:
+class ProblemStateMLU:
     instruction: str
     label: str
     filename: str

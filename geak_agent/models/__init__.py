@@ -2,15 +2,15 @@
 
 from geak_agent.models.Base import BaseModel
 from geak_agent.models.OpenAI import OpenAIModel, StandardOpenAIModel
-from geak_agent.models.Claude import ClaudeModel, StandardClaudeModel
-from geak_agent.models.Gemini import GeminiModel
+#from geak_agent.models.Claude import ClaudeModel, StandardClaudeModel
+#from geak_agent.models.Gemini import GeminiModel
 
 __all__ = [
     "BaseModel",
     "OpenAIModel",
     "StandardOpenAIModel",
-    "ClaudeModel",
-    "StandardClaudeModel",
-    "GeminiModel",
+    #"ClaudeModel",
+    #"StandardClaudeModel",
+    #"GeminiModel",
 ]
 

@@ -46,26 +46,26 @@ def test_add_kernel():
     results = {}
     
     # Test case 1
-    x1 = torch.randn(16, device='cuda')
-    y1 = torch.randn(16, device='cuda')
+    x1 = torch.randn(16, device='mlu')
+    y1 = torch.randn(16, device='mlu')
     out1 = add_wrapper(x1, y1)
     results['test_case_1'] = out1
 
     # Test case 2: Different size
-    x2 = torch.randn(8, device='cuda')
-    y2 = torch.randn(8, device='cuda')
+    x2 = torch.randn(8, device='mlu')
+    y2 = torch.randn(8, device='mlu')
     out2 = add_wrapper(x2, y2)
     results['test_case_2'] = out2
 
     # Test case 3: Larger size
-    x3 = torch.randn(32, device='cuda')
-    y3 = torch.randn(32, device='cuda')
+    x3 = torch.randn(32, device='mlu')
+    y3 = torch.randn(32, device='mlu')
     out3 = add_wrapper(x3, y3)
     results['test_case_3'] = out3
 
     # Test case 4: Edge case with zero elements
-    x4 = torch.randn(0, device='cuda')
-    y4 = torch.randn(0, device='cuda')
+    x4 = torch.randn(0, device='mlu')
+    y4 = torch.randn(0, device='mlu')
     out4 = add_wrapper(x4, y4)
     results['test_case_4'] = out4
 

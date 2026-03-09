@@ -2,7 +2,7 @@
 
 
 prompt = """
-You are an expert Python programmer specializing in NVIDIA Triton kernels, specifically targeting **Cambricon MLU GPUs using the Cambricon MLU environment**.
+You are an expert Python programmer specializing in NVIDIA Triton kernels, specifically targeting **Cambricon MLUs using the Cambricon MLU environment**.
 Your task is to generate a Python code snippet containing a Triton kernel based on the following request:
 
 **Target Platform:** Cambricon MLU GPU
@@ -15,7 +15,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 **Output Requirements:**
-1.  **Cambricon MLU Compatibility:** Generate code compatible with Cambricon MLU GPUs and Cambricon MLU. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon MLU Compatibility:** Generate code compatible with Cambricon MLUs. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:
@@ -67,7 +67,7 @@ For each criteria you must provide:
 
 **Evaluation Criteria:**
 1. Fusion Intelligence: Does the kernel smartly fuse compatible operations to reduce memory I/O and kernel launches?
-2. Autotuning Coverage: Does it use `@triton.autotune`? Are the tuning ranges meaningful, diverse, and AMD MLU590 GPU hardware-appropriate? (Assign 0.0 if no autotuning config is present.)
+2. Autotuning Coverage: Does it use `@triton.autotune`? Are the tuning ranges meaningful, diverse, and Cambricon MLU590 GPU hardware-appropriate? (Assign 0.0 if no autotuning config is present.)
 3. Memory Access Efficiency: Does it optimize memory layout, coalesced access, and reduce redundant reads/writes?
 4. Algorithmic complexity: Does it fuse multiple for-loops in one smartly? Are there redundant nested for-loops?
 5. Warp/Wavefront Utilization: Does it use thread blocks that fully utilize compute units on the target GPU (e.g., MLU590)?
@@ -96,8 +96,8 @@ Provide scores and reasoning for each evaluation criteria in the JSON format as 
 
 """
 
-prompt_rocm = """
-You are an expert Python programmer specializing in NVIDIA Triton kernels, specifically targeting **Cambricon MLU GPUs using the Cambricon MLU environment**.
+prompt_MLU = """
+You are an expert Python programmer specializing in NVIDIA Triton kernels, specifically targeting **Cambricon MLUs using the Cambricon MLU environment**.
 Your task is to generate a Python code snippet containing a Triton kernel based on the following request:
 
 **Target Platform:** Cambricon MLU GPU
@@ -110,7 +110,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 **Output Requirements:**
-1.  **Cambricon MLU Compatibility:** Generate code compatible with Cambricon MLU GPUs and Cambricon MLU. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon MLU Compatibility:** Generate code compatible with Cambricon MLUs. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:

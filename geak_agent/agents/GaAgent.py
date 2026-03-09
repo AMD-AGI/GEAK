@@ -198,7 +198,10 @@ class GaAgent(Reflexion_Oneshot):
                             continue
                         try:
                             if raw_code.code :
+                                #print("[INFO]*************: ", raw_code.code)
                                 pass_call, pass_exe, speedup, stdout, stderr = self.dataset.test_opt_correctness(raw_code.code, filename=mem.ps.filename, tmp_dir=tmp_dir, exe_dir=exe_dir, gpu_id=gpu_id)
+                                #print("[IFNO]*************stdout: ", stdout)
+                                #print("[INFO]*************stderr: ", stderr)
                             else:
                                 pass_call, pass_exe, speedup, stdout, stderr = False, False, 0.0, "", "Code is empty"
                             
@@ -231,6 +234,9 @@ class GaAgent(Reflexion_Oneshot):
                                 raw_code.profilig = stdout_analyze
                         mem.call_err_msg = raw_code.test_stdout
                         mem.exe_err_msg = raw_code.test_stderr
+                        print("++++++++++++++++++++++++++")
+                        print("[IFNO]*******speedup: ", speedup)
+                        print("[INFO]*******pass_exe: ", pass_exe)
                         if speedup > 0.0 and pass_exe:
                             raw_code.pass_perf = True
                             mem.pass_perf = True
@@ -262,7 +268,11 @@ class GaAgent(Reflexion_Oneshot):
                         mem.history[i].append(raw_code)
                         codes_sorted = sorted(mem.history[i], key=lambda x: x.llm_metric, reverse=True)
                         mem.history[i] = codes_sorted[:5]
+                        print("==========================")
+                        print("[IFNO]*******pass perf: ", raw_code.pass_perf)
+                        print("[INFO]*******strategy: ", raw_code.strategy)
                         if raw_code.pass_perf and raw_code.strategy:
+
                             raw_code.strategy = None
                             self.update_perf_candidates(mem=mem, raw_code=raw_code, ancestor_num=ancestor_num)
                 if len(mem.perf_candidates) > 0:

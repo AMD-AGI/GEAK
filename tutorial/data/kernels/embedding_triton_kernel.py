@@ -81,13 +81,13 @@ def test_embedding():
 
     # 创建测试输入张量
     input_ids = torch.randint(
-        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device='cuda'
+        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device='mlu'
     )
     weight = torch.randn(
-        vocab_size, embedding_dim, dtype=torch.float32, device='cuda'
+        vocab_size, embedding_dim, dtype=torch.float32, device='mlu'
     )
     out = torch.zeros(
-        sequence_length, embedding_dim, dtype=torch.float32, device='cuda'
+        sequence_length, embedding_dim, dtype=torch.float32, device='mlu'
     )
 
     # 调用嵌入函数
@@ -99,7 +99,7 @@ def test_embedding():
 
     # 测试不同的输入
     input_ids = torch.randint(
-        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device='cuda'
+        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device='mlu'
     )
     embedding(input_ids, weight, vob_start_id, vob_end_id, out)
     results['test_case_2'] = out.clone()
@@ -108,7 +108,7 @@ def test_embedding():
     vob_start_id = 0
     vob_end_id = 500
     input_ids = torch.randint(
-        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device='cuda'
+        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device='mlu'
     )
     embedding(input_ids, weight, vob_start_id, vob_end_id, out)
     results['test_case_3'] = out.clone()
@@ -116,10 +116,10 @@ def test_embedding():
     # 测试不同的嵌入维度
     embedding_dim = 256
     weight = torch.randn(
-        vocab_size, embedding_dim, dtype=torch.float32, device='cuda'
+        vocab_size, embedding_dim, dtype=torch.float32, device='mlu'
     )
     out = torch.zeros(
-        sequence_length, embedding_dim, dtype=torch.float32, device='cuda'
+        sequence_length, embedding_dim, dtype=torch.float32, device='mlu'
     )
     embedding(input_ids, weight, vob_start_id, vob_end_id, out)
     results['test_case_4'] = out.clone()

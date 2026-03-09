@@ -41,9 +41,9 @@ class performance_metrics(Performance_Metrics):
             rms_w = torch.rand((K,), dtype=torch.float32)
             self.input_tensors.append((x, rms_w))
 
-    def to_cuda(self, input_tensor):
+    def to_mlu(self, input_tensor):
         x, rms_w = input_tensor
-        return (x.cuda(), rms_w.cuda())
+        return (x.mlu(), rms_w.mlu())
 
     def call_op(self, input_tensor):
         x, rms_w = input_tensor

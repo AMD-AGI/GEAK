@@ -27,10 +27,10 @@ def set_seed(seed: int = 42) -> None:
     np.random.seed(seed)
     # Set seed for PyTorch on CPU
     torch.manual_seed(seed)
-    # Set seed for PyTorch on all GPUs (if available)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+    # Set seed for PyTorch on all MLUs (if available)
+    if torch.mlu.is_available():
+        torch.mlu.manual_seed(seed)
+        torch.mlu.manual_seed_all(seed)
     # Ensure deterministic behavior in PyTorch
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
@@ -147,9 +147,9 @@ def test_correctness(ref_file, gen_file, var_name, atol=1e-3, rtol=1e-3, verbose
     except Exception as e:
         ref_stderr = e
         return gen_call_acc, None, None, ref_stderr
-    # assert (ref_result_golden is not None), f'Reference output is None for file: {ref_file}'
-    # assert (gen_result_golden is not None), f'Generated output is None for file: {gen_file}'
-    # assert type(gen_result_golden) == type(ref_result_golden), f"Reference and Generated output results should be of the same type but generated is: {type(gen_result_golden)}, and reference is: {type(ref_result_golden)}"
+    assert (ref_result_golden is not None), f'Reference output is None for file: {ref_file}'
+    assert (gen_result_golden is not None), f'Generated output is None for file: {gen_file}'
+    assert type(gen_result_golden) == type(ref_result_golden), f"Reference and Generated output results should be of the same type but generated is: {type(gen_result_golden)}, and reference is: {type(ref_result_golden)}"
     if gen_result_golden is None:
         return gen_call_acc, False, None, "Generated output is None"
     if ref_result_golden is None:

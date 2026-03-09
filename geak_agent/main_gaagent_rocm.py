@@ -1,16 +1,16 @@
 # Copyright(C) [2025] Advanced Micro Devices, Inc. All rights reserved.
 
-from geak_agent.agents.GaAgent_ROCm import GaAgent
+from geak_agent.agents.GaAgent_mlu import GaAgent
 from geak_agent.models.OpenAI import OpenAIModel
 from geak_agent.models.Gemini import GeminiModel
 from geak_agent.models.Claude import ClaudeModel
 from geak_agent.dataloaders.TritonBench import TritonBench
 from geak_agent.args_config import load_config
-from geak_agent.dataloaders.ROCm import ROCm
+from geak_agent.dataloaders.mlu import MLU
 import os
 
 def main():
-    args = load_config("configs/rocm_gaagent_config.yaml")
+    args = load_config("configs/MLU_gaagent_config.yaml")
     args.log_root = os.path.abspath(args.output_path).replace(".jsonl", "")
     os.makedirs(args.log_root, exist_ok=True)
     print(args)
@@ -27,7 +27,7 @@ def main():
     #                       perf_ref_folder=args.perf_ref_folder,
     #                       perf_G_path=args.perf_G_path,
     #                       result_path=args.result_path)
-    dataset = ROCm(statis_path=args.statis_path, 
+    dataset = MLU(statis_path=args.statis_path, 
                         py_folder=args.py_folder, 
                         instruction_path=args.instruction_path, 
                         py_interpreter=args.py_interpreter,

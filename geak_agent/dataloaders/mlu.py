@@ -8,12 +8,12 @@ from loguru import logger
 from multiprocessing import Pool, Lock, Value
 
 # Assuming these are in your project structure
-from geak_agent.dataloaders.ProblemState import ProblemStateROCm
+from geak_agent.dataloaders.ProblemState import ProblemStateMLU
 from tb_eval.evaluators.interface import get_evaluators
 from tb_eval.helpers.helper import extract_first_pytest_failure
 from tb_eval.perf.efficiency import get_perf_evaluators
 
-class ROCm:
+class MLU:
     def __init__(self,
                  statis_path,
                  py_folder,
@@ -26,13 +26,13 @@ class ROCm:
         self.py_folder = py_folder
         self.instruction_path = instruction_path
         # This flag is to identify the dataset type in the agent
-        self.rocm_tests = True
+        self.MLU_tests = True
         self.problem_states = self.load_ps()
         self.log_root = log_root
         
         # Initialize correctness and performance evaluators from tb_eval
-        self.evaluator = get_evaluators["rocm"]()
-        self.perf_evaluator = get_perf_evaluators["rocm"]()
+        self.evaluator = get_evaluators["MLU"]()
+        self.perf_evaluator = get_perf_evaluators["MLU"]()
         logger.info("Custom tests path set to: {}".format(self.py_folder))
 
     def load_ps(self,):
@@ -59,7 +59,7 @@ class ROCm:
             test_code = open(path, "r", encoding="utf-8").read().split("#"*146)[-1]
             assert "def test_" in  test_code, ""
 
-            problemstate = ProblemStateROCm(
+            problemstate = ProblemStateMLU(
                 instruction=instruction,
                 label=label, 
                 test_code=test_code, 
@@ -127,7 +127,7 @@ class ROCm:
 
     def run_perf_evaluation(self, exec_folder, gen_perf_folder, gpu_id=0):
         """
-        Runs the performance evaluation for ROCm using the tb_eval module.
+        Runs the performance evaluation for MLU using the tb_eval module.
 
         Args:
             exec_folder (str): The directory containing the correctly executed scripts.
@@ -136,9 +136,9 @@ class ROCm:
         Returns:
             dict: A dictionary containing performance results, mapping filename to metrics.
         """
-        logger.info(f"Starting ROCm performance evaluation for kernels in: {exec_folder}")
+        logger.info(f"Starting MLU performance evaluation for kernels in: {exec_folder}")
         try:
-            # The `evaluate` method from PerformanceEvalROCm handles all the steps:
+            # The `evaluate` method from PerformanceEvalMLU handles all the steps:
             # 1. Runs pytest for each file in exec_folder.
             # 2. Runs the final efficiency script.
             # 3. Parses and returns the results.
@@ -147,8 +147,8 @@ class ROCm:
             except Exception as e:
                 logger.error(f"Performance evaluation failed: {e}")
                 return {}
-            logger.success("ROCm performance evaluation completed successfully.")
+            logger.success("MLU performance evaluation completed successfully.")
             return perf_results
         except Exception as e:
-            logger.error(f"ROCm performance evaluation failed: {e}")
+            logger.error(f"MLU performance evaluation failed: {e}")
             return {}

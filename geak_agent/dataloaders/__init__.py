@@ -3,27 +3,27 @@
 # Lazy imports to avoid loading tb_eval dependency at import time
 __all__ = [
     "ProblemState",
-    "ProblemStateROCm",
+    "ProblemStateMLU",
     "tempCode",
     "TritonBench",
-    "ROCm",
+    "MLU",
 ]
 
 
 def __getattr__(name):
     """Lazy import to avoid loading tb_eval at package import time."""
-    if name in ("ProblemState", "ProblemStateROCm", "tempCode"):
-        from geak_agent.dataloaders.ProblemState import ProblemState, ProblemStateROCm, tempCode
+    if name in ("ProblemState", "ProblemStateMLU", "tempCode"):
+        from geak_agent.dataloaders.ProblemState import ProblemState, ProblemStateMLU, tempCode
         if name == "ProblemState":
             return ProblemState
-        elif name == "ProblemStateROCm":
-            return ProblemStateROCm
+        elif name == "ProblemStateMLU":
+            return ProblemStateMLU
         else:
             return tempCode
     elif name == "TritonBench":
         from geak_agent.dataloaders.TritonBench import TritonBench
         return TritonBench
-    elif name == "ROCm":
-        from geak_agent.dataloaders.ROCm import ROCm
-        return ROCm
+    elif name == "MLU":
+        from geak_agent.dataloaders.mlu import MLU
+        return MLU
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

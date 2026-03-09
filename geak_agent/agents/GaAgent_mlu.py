@@ -12,7 +12,7 @@ from loguru import logger
 from tenacity import RetryError
 from geak_agent.dataloaders.ProblemState import tempCode
 from typing import List, Optional
-from tb_eval.evaluators.interface import get_evaluators
+from geak_eval.evaluators.interface import get_evaluators
 class GaAgent(Reflexion_Oneshot):
     def __init__(self, model, dataset, corpus_path, max_perf_debug_num=5, mem_file=None, descendant_num=1):
         super().__init__(model, dataset, corpus_path, mem_file, descendant_num)
@@ -178,7 +178,7 @@ class GaAgent(Reflexion_Oneshot):
             
             # run scripts
             logger.info(f"\nrun call scripts on gpu")
-            if output_path is None or (hasattr(self.dataset, 'rocm_tests') and self.dataset.rocm_tests):
+            if output_path is None or (hasattr(self.dataset, 'MLU_tests') and self.dataset.MLU_tests):
                 tmp_dir = "tmp"
                 exe_dir = "pass_exe"
                 perf_result_dir = "perf_results"
@@ -198,7 +198,7 @@ class GaAgent(Reflexion_Oneshot):
                         try:
                             if raw_code.code :
                                 opname = mem.ps.opname + f"_{i}" + ".py"
-                                # ref="/home/chaox/kernel_agent/TB-eval/tb_eval/data/ROCm/data/ROCm_v1"
+                                # ref="/home/chaox/kernel_agent/TB-eval/tb_eval/data/MLU/data/MLU_v1"
                                 # tests_sep_line = '#'*146
                                 # ref_file = os.path.join(ref,mem.ps.filename)
                                 # with open(ref_file,'r') as f:
@@ -260,7 +260,7 @@ class GaAgent(Reflexion_Oneshot):
             else:
                 perf_results_dict = {}
 
-                if hasattr(self.dataset, 'rocm_tests') and self.dataset.rocm_tests:
+                if hasattr(self.dataset, 'MLU_tests') and self.dataset.MLU_tests:
                     perf_results_dict = self.dataset.run_perf_evaluation(
                         exec_folder=exe_dir, 
                         gen_perf_folder=perf_result_dir,
@@ -340,7 +340,7 @@ class GaAgent(Reflexion_Oneshot):
 
         tab = "\n"
         fss_text = "".join(f"* {sig}{tab}" for sig in mem.function_signatures)
-        text = prompt_for_generation.prompt_rocm.format(
+        text = prompt_for_generation.prompt_MLU.format(
             instruction=mem.ps.instruction,
             function_signatures=fss_text
         )
@@ -433,7 +433,7 @@ class GaAgent(Reflexion_Oneshot):
 - correctness test: Succeed
 - speedup: {raw_code.latency}
 """                 
-                    reflect_txt = prompt_for_reflection.prompt_evolve_strategy_optimize_rocm.format(
+                    reflect_txt = prompt_for_reflection.prompt_evolve_strategy_optimize_MLU.format(
                         instruction=mem.ps.instruction,
                         function_signatures=fss_text,
                         metrics_info=m_info,
@@ -457,7 +457,7 @@ Error Message: {raw_code.test_stderr}
 Error Message: {raw_code.test_stderr}
 """
 
-                    reflect_txt = prompt_for_reflection.prompt_evolve_reflect_rocm.format(
+                    reflect_txt = prompt_for_reflection.prompt_evolve_reflect_MLU.format(
                         instruction=mem.ps.instruction,
                         function_signatures=fss_text,
                         metrics_info=m_info,

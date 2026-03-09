@@ -13,7 +13,7 @@ class GeminiModel(BaseModel):
         assert api_key is not None, "no api key is provided."
         self.model_id = model_id
         
-        self.SERVER = "https://llm-api.amd.com/vertex/gemini"
+        self.SERVER = "https://llm-api.Cambricon.com/vertex/gemini"
         self.HEADERS = {"Ocp-Apim-Subscription-Key": api_key}
 
     

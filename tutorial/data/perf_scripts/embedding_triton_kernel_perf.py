@@ -8,11 +8,12 @@ import importlib.util
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
+# Import reference kernel from kernels directory using importlib to avoid cache
+KERNELS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'kernels'))
+sys.path.insert(0, KERNELS_DIR)
 # Import generated kernel (will be copied to same dir as this script)
 from embedding_triton_kernel import embedding
 
-# Import reference kernel from kernels directory using importlib to avoid cache
-KERNELS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'kernels'))
 ref_spec = importlib.util.spec_from_file_location(
     "embedding_triton_kernel_ref", 
     os.path.join(KERNELS_DIR, "embedding_triton_kernel.py")
@@ -44,9 +45,9 @@ class performance_metrics(Performance_Metrics):
             vob_end_id = vocab_size
             self.input_tensors.append((input_ids, weight, vob_start_id, vob_end_id, out))
 
-    def to_cuda(self, input_tensor):
+    def to_mlu(self, input_tensor):
         input_ids, weight, vob_start_id, vob_end_id, out = input_tensor
-        return (input_ids.cuda(), weight.cuda(), vob_start_id, vob_end_id, out.cuda())
+        return (input_ids.mlu(), weight.mlu(), vob_start_id, vob_end_id, out.mlu())
 
     def call_op(self, input_tensor):
         input_ids, weight, vob_start_id, vob_end_id, out = input_tensor

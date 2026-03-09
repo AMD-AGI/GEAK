@@ -27,9 +27,9 @@ __all__ = [
     "GeminiModel",
     # Dataloaders
     "TritonBench",
-    "ROCm",
+    "MLU",
     "ProblemState",
-    "ProblemStateROCm",
+    "ProblemStateMLU",
     # Utils
     "load_config",
 ]
@@ -70,12 +70,12 @@ def __getattr__(name):
     elif name == "TritonBench":
         from geak_agent.dataloaders.TritonBench import TritonBench
         return TritonBench
-    elif name == "ROCm":
-        from geak_agent.dataloaders.ROCm import ROCm
-        return ROCm
-    elif name in ("ProblemState", "ProblemStateROCm"):
-        from geak_agent.dataloaders.ProblemState import ProblemState, ProblemStateROCm
-        return ProblemState if name == "ProblemState" else ProblemStateROCm
+    elif name == "MLU":
+        from geak_agent.dataloaders.mlu import MLU
+        return MLU
+    elif name in ("ProblemState", "ProblemStateMLU"):
+        from geak_agent.dataloaders.ProblemState import ProblemState, ProblemStateMLU
+        return ProblemState if name == "ProblemState" else ProblemStateMLU
     elif name == "load_config":
         from geak_agent.args_config import load_config
         return load_config

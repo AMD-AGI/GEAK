@@ -1,7 +1,7 @@
 Third-Party Notices Report for Inventory for GEAK-agent
 
 
-            AMD copyrighted code (Apache-2.0)
+            Cambricon copyrighted code (Apache-2.0)
     
     
         Copyright Statements
@@ -425,7 +425,7 @@ Third-Party Notices Report for Inventory for GEAK-agent
    limitations under the License.
 
     
-                Dependencies on ROCm-triton v-u (MIT)
+                Dependencies on MLU-triton v-u (MIT)
     
     
         Copyright Statements

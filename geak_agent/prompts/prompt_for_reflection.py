@@ -90,7 +90,7 @@ generate reflection in the \"reflection\" field."""
 
 
 prompt_evolve_reflect = """
-You are an expert Python programmer specializing in writing and optimizing Triton kernels for Cambricon MLU GPUs using the Cambricon MLU environment.
+You are an expert Python programmer specializing in writing and optimizing Triton kernels for Cambricon MLU MLUs using the Cambricon MLU environment.
 You are tasked with iteratively improving a codebase.
 Given the original problem, metrics information, a history of previous implementations with their test results and reflections, previous top implementations with their test results and current implementation with its test error message, your job is to analyze the error messages and provide insights on why the solution failed and how it could be fixed. Be specific about the issues found.
 
@@ -102,7 +102,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 ## Requirements:
-1.  **Cambricon MLU Compatibility:** Generate code compatible with Cambricon MLU GPUs and Cambricon MLU. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon MLU Compatibility:** Generate code compatible with Cambricon MLU MLUs and Cambricon MLU. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:
@@ -153,7 +153,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 """
 
 prompt_evolve_strategy_optimize = """
-You are an expert Python programmer specializing in writing and optimizing Triton kernels for AMD GPUs using the ROCm environment.
+You are an expert Python programmer specializing in writing and optimizing Triton kernels for Cambricon MLUs using the MLU environment.
 You are tasked with iteratively improving a codebase.
 You are given the original problem, metrics information, a history of previous implementations with their test results and reflections, previous top implementations with their test results and current implementation with its test error message.
 Your task:
@@ -170,8 +170,8 @@ You are encouraged to draw on the following techniques (as relevant):
 - Kernel occupancy analysis
 - TorchInductor integration with Triton tuning knobs
 - Auto-tunable kernel configurations
-- Environment variable settings (e.g., ROCm tuning flags)
-- Any other performance tuning methods applicable to ROCm and AMD GPUs
+- Environment variable settings (e.g., MLU tuning flags)
+- Any other performance tuning methods applicable to MLUs
 
 # Original Problem:
 {instruction}
@@ -181,7 +181,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 ## Requirements:
-1.  **AMD Compatibility:** Generate code compatible with AMD GPUs and ROCm. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon Compatibility:** Generate code compatible with Cambricon MLUs. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:
@@ -233,7 +233,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 
 
 prompt_extract_strategy_1 = """
-You are an expert Python programmer specializing in writing and optimizing Triton kernels for AMD GPUs using the ROCm environment.
+You are an expert Python programmer specializing in writing and optimizing Triton kernels for Cambricon MLUs using the MLU environment.
 You are given the original problem, metrics information, a history of previous implementations with their test results and reflections, and one additional top implementations with its test result.
 Your task is to:
 1. Analyze the test results and reflections to determine which implementation performs better.
@@ -248,7 +248,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 ## Requirements:
-1.  **AMD Compatibility:** Generate code compatible with AMD GPUs and ROCm. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon Compatibility:** Generate code compatible with Cambricon MLUs. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:
@@ -291,7 +291,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 
 
 prompt_extract_strategy_2 = """
-You are an expert Python programmer specializing in writing and optimizing Triton kernels for AMD GPUs using the ROCm environment.
+You are an expert Python programmer specializing in writing and optimizing Triton kernels for Cambricon MLUs using the MLU environment.
 You are given the original problem, metrics information, two previous implementations with their test results and reflections.
 Your task is to:
 1. Analyze the test results and reflections to determine which implementation performs better.
@@ -306,7 +306,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 ## Requirements:
-1.  **AMD Compatibility:** Generate code compatible with AMD GPUs and ROCm. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon Compatibility:** Generate code compatible with Cambricon MLUs. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:
@@ -347,8 +347,8 @@ Based on analysis, the implementation requires these EXACT function signatures:
 ```"
 """
 
-prompt_evolve_reflect_rocm = """
-You are an expert Python programmer specializing in writing and optimizing Triton kernels for Cambricon MLU GPUs using the Cambricon MLU environment.
+prompt_evolve_reflect_MLU = """
+You are an expert Python programmer specializing in writing and optimizing Triton kernels for Cambricon MLU MLUs using the Cambricon MLU environment.
 You are tasked with iteratively improving a codebase.
 Given the original problem, metrics information, a history of previous implementations with their test results and reflections, previous top implementations with their test results and current implementation with its test error message, your job is to analyze the error messages and provide insights on why the solution failed and how it could be fixed. Be specific about the issues found.
 
@@ -360,7 +360,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 **Output Requirements:**
-1.  **AMD Compatibility:** Generate code compatible with AMD GPUs and ROCm. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon Compatibility:** Generate code compatible with Cambricon MLUs. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:
@@ -450,7 +450,7 @@ pid_n = tl.program_id(1)  # Tries to get ID for a non-existent second dimension
 
 """
 
-prompt_evolve_strategy_optimize_rocm = """
+prompt_evolve_strategy_optimize_MLU = """
 You are an expert in writing Triton operators for efficient GPU programming. 
 Analyze this Triton code and its performance(speedup[vs reference kernel] for e.g. (1.6x) and efficiency in TFLOPS or GB/s), and give a summary about the optimization strategy that the code uses.
 Provide insights on how to generate a new code with better performance. 
@@ -466,8 +466,8 @@ You are encouraged to draw on the following techniques (as relevant):
 - Kernel occupancy analysis
 - TorchInductor integration with Triton tuning knobs
 - Auto-tunable kernel configurations
-- Environment variable settings (e.g., ROCm tuning flags)
-- Any other performance tuning methods applicable to ROCm and AMD GPUs
+- Environment variable settings (e.g., MLU tuning flags)
+- Any other performance tuning methods applicable to MLUs
 
 # Original Problem:
 {instruction}

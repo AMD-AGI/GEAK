@@ -2,7 +2,7 @@
 
 from geak_agent.agents.Base import BaseAgent, SequentialBaseAgent
 from geak_agent.agents.GaAgent import GaAgent
-from geak_agent.agents.GaAgent_ROCm import GaAgent as GaAgentROCm
+from geak_agent.agents.GaAgent_mlu import GaAgent as GaAgentMLU
 from geak_agent.agents.Reflexion import Reflexion
 from geak_agent.agents.reflexion_oneshot import Reflexion_Oneshot
 from geak_agent.agents.OptimAgent import OptimAgent
@@ -12,7 +12,7 @@ __all__ = [
     "BaseAgent",
     "SequentialBaseAgent",
     "GaAgent",
-    "GaAgentROCm",
+    "GaAgentMLU",
     "Reflexion",
     "Reflexion_Oneshot",
     "OptimAgent",

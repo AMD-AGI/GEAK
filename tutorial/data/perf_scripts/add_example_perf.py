@@ -32,8 +32,8 @@ class performance_metrics(Performance_Metrics):
             input_tensor = (torch.rand(size, dtype=torch.float32), torch.rand(size, dtype=torch.float32))
             self.input_tensors.append(input_tensor)
 
-    def to_cuda(self, input_tensor):
-        return (input_tensor[0].cuda(), input_tensor[1].cuda())
+    def to_mlu(self, input_tensor):
+        return (input_tensor[0].mlu(), input_tensor[1].mlu())
 
     def call_op(self, input_tensor):
         return add_wrapper(input_tensor[0], input_tensor[1])

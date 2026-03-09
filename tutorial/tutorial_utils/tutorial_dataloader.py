@@ -143,7 +143,6 @@ class TutorialDataloader:
         # Process and combine generated code with test code
         code = process_code(code)
         full_code = code + '\n\n' + hash_line + '\n' + test_code
-        
         with open(gen_file, 'w') as f:
             f.write(full_code)
         
@@ -158,8 +157,9 @@ class TutorialDataloader:
                 verbose=False
             )
         except Exception as e:
+            print("[IFNO]Correct Check Error: ", e)
             return False, False, 0, None, str(e)
-        
+
         # Calculate speedup if correctness passes
         speedup = 0
         if pass_exe:

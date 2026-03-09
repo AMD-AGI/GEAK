@@ -65,8 +65,8 @@ def test_rmsnorm_triton():
     
     # Case 1
     batch, M, K = 2, 4, 1024
-    x = torch.randn((batch, M, K), dtype=torch.float16, device='cuda')
-    rms_w = torch.randn((K,), dtype=torch.float16, device='cuda')
+    x = torch.randn((batch, M, K), dtype=torch.float16, device='mlu')
+    rms_w = torch.randn((K,), dtype=torch.float16, device='mlu')
     eps = 1e-6
     out = rmsnorm_triton_wrapper(x, rms_w, eps)
     results['test_case_1'] = out
@@ -78,16 +78,16 @@ def test_rmsnorm_triton():
 
     # Case 3: Different batch size
     batch, M, K = 3, 4, 1024
-    x = torch.randn((batch, M, K), dtype=torch.float16, device='cuda')
-    rms_w = torch.randn((K,), dtype=torch.float16, device='cuda')
+    x = torch.randn((batch, M, K), dtype=torch.float16, device='mlu')
+    rms_w = torch.randn((K,), dtype=torch.float16, device='mlu')
     eps = 1e-6
     out = rmsnorm_triton_wrapper(x, rms_w, eps)
     results['test_case_3'] = out
 
     # Case 4: Different M size
     batch, M, K = 2, 5, 1024
-    x = torch.randn((batch, M, K), dtype=torch.float16, device='cuda')
-    rms_w = torch.randn((K,), dtype=torch.float16, device='cuda')
+    x = torch.randn((batch, M, K), dtype=torch.float16, device='mlu')
+    rms_w = torch.randn((K,), dtype=torch.float16, device='mlu')
     eps = 1e-6
     out = rmsnorm_triton_wrapper(x, rms_w, eps)
     results['test_case_4'] = out

@@ -9,7 +9,7 @@ We also provide a baseline agent, GEAK-Agent to let you run directly.
 ## Profiler and Analyzer Features
 
 If you need hardware-level profiling and performance analysis capabilities, please visit the **Profiler Analyzer branch**:
-- **Branch**: [`profiler-analyzer`](https://github.com/AMD-AGI/GEAK-agent/tree/profiling) 
+- **Branch**: [`profiler-analyzer`](https://github.com/Cambricon-AGI/GEAK-agent/tree/profiling) 
 - Includes Cambricon MLU profiling tools and analyzer for detailed hardware metrics
 - Provides insights into memory bandwidth, compute unit occupancy, and kernel optimization strategies
 
@@ -21,14 +21,14 @@ It contains a Generator, a Reflector, an Evaluator and an Optimizer. The actor g
 ## Quick Start: Run the Agent on TritonBench
 1. prepare the Agent environment
    ```
-   git clone https://github.com/AMD-AGI/GEAK-agent.git
+   git clone https://github.com/Cambricon-AGI/GEAK-agent.git
    cd GEAK-agent
    python3 -m pip install -r requirements.txt
    ```
 2. prepare the TritonBench environment
    ```
    cd ..
-   git clone https://github.com/AMD-AGI/GEAK-eval.git
+   git clone https://github.com/Cambricon-AGI/GEAK-eval.git
    cd GEAK-eval
    python3 -m pip install -r requirements.txt
    python3 -m pip install -e .
@@ -108,10 +108,10 @@ start_iter: 11
 
      For our other agents, please look at the corresponding branches in the same repo
 
-[`GEAK-HIP`](https://github.com/AMD-AGI/GEAK-agent/tree/GEAK-HIP)
+[`GEAK-HIP`](https://github.com/Cambricon-AGI/GEAK-agent/tree/GEAK-HIP)
 
-[`GEAK-OpenEvolve for Triton `](https://github.com/AMD-AGI/GEAK-agent/tree/geak-openevolve)
+[`GEAK-OpenEvolve for Triton `](https://github.com/Cambricon-AGI/GEAK-agent/tree/geak-openevolve)
 
-[`GEAK-V1 for Triton`](https://github.com/AMD-AGI/GEAK-agent/tree/GEAK-v1)
+[`GEAK-V1 for Triton`](https://github.com/Cambricon-AGI/GEAK-agent/tree/GEAK-v1)
 
 

@@ -7,7 +7,7 @@ name = "geak-agent"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "AMD AGI"}
+    {name = "Cambricon AGI"}
 ]
 requires-python = ">=3.8"
 dependencies = [
@@ -34,7 +34,7 @@ dependencies = [
 
 [project.scripts]
 geak-gaagent = "geak_agent.main_gaagent:main"
-geak-gaagent-mlu = "geak_agent.main_gaagent_rocm:main"
+geak-gaagent-mlu = "geak_agent.main_gaagent_MLU:main"
 geak-optimagent = "geak_agent.main_optimagent:main"
 geak-reflexion = "geak_agent.main_reflexion_oneshot:main"
 
