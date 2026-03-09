@@ -259,15 +259,6 @@
             "balanced"
           ],
           "description": "The bottleneck type to target"
-        },
-        "language": {
-          "type": "string",
-          "enum": [
-            "triton",
-            "hip",
-            "cuda"
-          ],
-          "description": "Kernel language. Default: triton"
         }
       },
       "required": [
@@ -364,15 +355,6 @@
         "kernel_code": {
           "type": "string",
           "description": "The kernel source code to evaluate"
-        },
-        "language": {
-          "type": "string",
-          "enum": [
-            "triton",
-            "hip",
-            "cuda"
-          ],
-          "description": "Kernel language. Default: triton"
         }
       },
       "required": [
@@ -395,9 +377,21 @@
           "type": "string",
           "description": "Output from running the kernel test/benchmark"
         },
-        "previous_attempts": {
+        "speedup": {
+          "type": "number",
+          "description": "Measured speedup vs baseline (e.g., 1.5 = 50% faster)"
+        },
+        "correctness_status": {
+          "type": "string",
+          "description": "passed, failed, or unknown"
+        },
+        "history": {
           "type": "string",
           "description": "Summary of previous optimization attempts"
+        },
+        "tried_strategies": {
+          "type": "string",
+          "description": "Comma-separated list of strategies already tried"
         }
       },
       "required": [
