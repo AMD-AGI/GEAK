@@ -40,11 +40,31 @@ mcp = FastMCP(
 )
 
 
-def call_llm(messages: list, model: str = "claude-sonnet-4.5", temperature: float = 0.7) -> str:
-    """Call LLM using AMD gateway or litellm."""
-    api_key = os.environ.get("AMD_LLM_API_KEY") or os.environ.get("LLM_GATEWAY_KEY")
+def _extract_system_and_messages(messages: list) -> tuple[str, list]:
+    """Separate system message from user/assistant messages for Anthropic API."""
+    system_content = ""
+    filtered_messages = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_content = msg.get("content", "")
+        else:
+            filtered_messages.append(msg)
+    return system_content, filtered_messages
 
-    if ANTHROPIC_AVAILABLE and api_key:
+
+def call_llm(messages: list, model: str = "claude-sonnet-4.5", temperature: float = 0.7) -> str:
+    """Call LLM using AMD gateway, direct Anthropic API, or litellm.
+
+    Backend selection order:
+      1. AMD LLM Gateway  – if AMD_LLM_API_KEY or LLM_GATEWAY_KEY is set
+      2. Direct Claude API – if ANTHROPIC_API_KEY is set
+      3. litellm fallback  – if litellm is installed
+    """
+    amd_api_key = os.environ.get("AMD_LLM_API_KEY") or os.environ.get("LLM_GATEWAY_KEY")
+    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    # --- 1. AMD LLM Gateway ---------------------------------------------------
+    if ANTHROPIC_AVAILABLE and amd_api_key:
         try:
             user = os.getlogin()
         except OSError:
@@ -54,21 +74,14 @@ def call_llm(messages: list, model: str = "claude-sonnet-4.5", temperature: floa
             api_key="dummy",
             base_url="https://llm-api.amd.com/Anthropic",
             default_headers={
-                "Ocp-Apim-Subscription-Key": api_key,
+                "Ocp-Apim-Subscription-Key": amd_api_key,
                 "user": user,
                 "anthropic-version": "2023-10-16",
             },
         )
 
         model_name = model.removeprefix("amd/")
-
-        system_content = ""
-        filtered_messages = []
-        for msg in messages:
-            if msg.get("role") == "system":
-                system_content = msg.get("content", "")
-            else:
-                filtered_messages.append(msg)
+        system_content, filtered_messages = _extract_system_and_messages(messages)
 
         response = client.messages.create(
             model=model_name,
@@ -80,7 +93,38 @@ def call_llm(messages: list, model: str = "claude-sonnet-4.5", temperature: floa
 
         return response.content[0].text
 
-    elif LITELLM_AVAILABLE:
+    # --- 2. Direct Claude API (api.anthropic.com) ------------------------------
+    if ANTHROPIC_AVAILABLE and anthropic_api_key:
+        client = anthropic.Anthropic(
+            api_key=anthropic_api_key,
+            base_url="https://api.anthropic.com",
+        )
+
+        model_name = model.removeprefix("amd/")
+        system_content, filtered_messages = _extract_system_and_messages(messages)
+
+        try:
+            response = client.messages.create(
+                model=model_name,
+                max_tokens=16000,
+                system=system_content if system_content else anthropic.NOT_GIVEN,
+                messages=filtered_messages,
+                temperature=temperature,
+            )
+        except anthropic.APIStatusError as e:
+            raise ValueError(f"Anthropic API error: {e.status_code} - {e.message}") from e
+        except anthropic.APIConnectionError as e:
+            raise ValueError(f"API connection error: {e}") from e
+        except anthropic.AuthenticationError as e:
+            raise ValueError(f"Authentication error – check ANTHROPIC_API_KEY: {e}") from e
+
+        if not response or not hasattr(response, "content") or len(response.content) == 0:
+            raise ValueError("No response content returned from the Anthropic API.")
+
+        return response.content[0].text
+
+    # --- 3. litellm fallback ---------------------------------------------------
+    if LITELLM_AVAILABLE:
         api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
         response = completion(
             model=model,
@@ -90,8 +134,10 @@ def call_llm(messages: list, model: str = "claude-sonnet-4.5", temperature: floa
         )
         return response.choices[0].message.content
 
-    else:
-        raise RuntimeError("No LLM backend available. Install anthropic or litellm.")
+    raise RuntimeError(
+        "No LLM backend available. Set ANTHROPIC_API_KEY for direct Claude access, "
+        "AMD_LLM_API_KEY for AMD gateway, or install litellm."
+    )
 
 
 # Optimization strategies by bottleneck type

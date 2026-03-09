@@ -1,5 +1,3 @@
-# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
-
 agent:
   system_template: |
     You are a helpful assistant that can interact with a computer.
@@ -81,39 +79,12 @@ agent:
 
     ### Edit files with sed:
 
-    {%- if system == "Darwin" -%}
-    <important>
-    You are on MacOS. For all the below examples, you need to use `sed -i ''` instead of `sed -i`.
-    </important>
-    {%- endif -%}
 
-    ```bash
-    # Replace all occurrences
-    sed -i 's/old_string/new_string/g' filename.py
-
-    # Replace only first occurrence
-    sed -i 's/old_string/new_string/' filename.py
-
-    # Replace first occurrence on line 1
-    sed -i '1s/old_string/new_string/' filename.py
-
-    # Replace all occurrences in lines 1-10
-    sed -i '1,10s/old_string/new_string/g' filename.py
-    ```
-
-    ### View file content:
-
-    ```bash
-    # View specific lines with numbers
-    nl -ba filename.py | sed -n '10,20p'
-    ```
-
-    ### Run OpenEvolve optimizer (for kernel optimization tasks)
-    When the task asks for OPTIMIZATION or OpenEvolve, do NOT edit the kernel by hand. Run the optimizer script:
-    ```bash
-    python3 ${GEAK_OE_ROOT:-/opt/geak-oe}/examples/geak_eval/run_openevolve.py <kernel_path> --iterations 10 --gpu 0 --output <output_dir>
-    ```
-    Use --commandment and --baseline-metrics if you created them in an earlier step.
+    ### Run KernelEvolve optimizer (for kernel optimization tasks)
+    When the task asks for OPTIMIZATION or KernelEvolve, do NOT edit the kernel by hand. Use the KernelEvolve MCP tool:
+    Call the `generate_optimization` tool with kernel_code, bottleneck type, and optional strategy.
+    For iterative evolution, use `mutate_kernel` and `crossover_kernels` tools.
+    Use `get_optimization_strategies` to discover strategies for a given bottleneck.
 
     ### Any other command you want to run
 
@@ -122,26 +93,9 @@ agent:
     ```
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
-    {% if output.output | length < 20000 -%}
     <output>
     {{ output.output -}}
     </output>
-    {%- else -%}
-    <warning>
-    The output of your last command was too long.
-    Please try a different command that produces less output.
-    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
-    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
-    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
-    </warning>
-    {%- set elided_chars = output.output | length - 20000 -%}
-    <output>
-    {{ output.output[:20000] }}
-    </output>
-    <elided_chars>
-    {{ elided_chars }} characters elided
-    </elided_chars>
-    {%- endif -%}
   format_error_template: |
     Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
     If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
@@ -159,8 +113,8 @@ agent:
     Note: In rare cases, if you need to reference a similar format in your command, you might have
     to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
   step_limit: 0.
-  cost_limit: 0.
-  mode: yolo
+  cost_limit: 10.
+  mode: confirm
 env:
   env:
     PAGER: cat
@@ -170,18 +124,16 @@ env:
     TQDM_DISABLE: '1'
   timeout: 3600
 model:
-  model_class: amd_llm
+  model_class: anthropic_model
   # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
-  model_name: claude-opus-4.5
-  # API key is read from AMD_LLM_API_KEY environment variable
-  # Set it in .env file or: export AMD_LLM_API_KEY=your_key_here
-  api_key: null
-  model_kwargs:
-    temperature: 0.0
-    max_tokens: 16000
-    # reasoning is only valid for gpt models, can be set to none, low, medium, high
-    reasoning:
-      effort: high
-    # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
-    text:
-      verbosity: low
+  model_name: claude-sonnet-4-5-20250929
+  api_key: ""
+  # model_kwargs:
+  #   temperature: 0.0
+  #   max_tokens: 16000
+  #   # reasoning is only valid for gpt models, can be set to none, low, medium, high
+  #   reasoning:
+  #     effort: high
+  #   # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
+  #   text:
+  #     verbosity: low
