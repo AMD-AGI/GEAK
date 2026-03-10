@@ -1,9 +1,12 @@
 # Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved. Portions of this file consist of AI-generated content.
 
+import logging
 import os
 import re
 import subprocess
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Regex to extract the path of a COMMANDMENT.md file being written by a bash command.
 # Matches patterns like:
@@ -21,9 +24,12 @@ _COMMANDMENT_WRITE_RE = re.compile(
 
 
 class BashCommand:
+    DEFAULT_TIMEOUT: int = 120
+
     def __init__(self):
         self._env_override: dict[str, str] = {}
         self._cwd: str | None = None
+        self.timeout: int = self.DEFAULT_TIMEOUT
         self.blocklist: list[str] = [
             "vim",
             "vi",
@@ -75,10 +81,22 @@ class BashCommand:
         else:
             env = os.environ | self._env_override if self._env_override else None
             cwd = self._cwd if self._cwd and os.path.isdir(self._cwd) else None
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, env=env, cwd=cwd)
+            try:
+                result = subprocess.run(
+                    command, shell=True, capture_output=True, text=True,
+                    env=env, cwd=cwd, timeout=self.timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stdout = (exc.stdout or b"").decode(errors="replace").strip() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+                stderr = (exc.stderr or b"").decode(errors="replace").strip() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+                partial = stdout or stderr
+                logger.warning("Bash command timed out after %ds: %.120s", self.timeout, command)
+                return {
+                    "output": f"Command timed out after {self.timeout}s.\n{partial}",
+                    "returncode": -1,
+                }
             output_text = result.stdout.strip() or result.stderr.strip()
 
-            # Auto-validate COMMANDMENT.md if the command wrote one
             if "COMMANDMENT.md" in command:
                 output_text = self._maybe_validate_commandment(command, output_text)
 
