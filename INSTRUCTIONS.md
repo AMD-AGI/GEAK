@@ -213,13 +213,142 @@ When the kernel is NOT a Python/Triton kernel, the test harness approach varies:
   create a C++ test that compiles with `hipcc` and outputs timing to stdout.
   Use `--correctness` and `--profile` flags.
 
-- **Composable Kernel (CK):** CK kernels are template-heavy C++. After editing
-  template parameters, rebuild with `hipcc` or `cmake`. The test harness should
-  import the rebuilt module and call the kernel.
+- **Composable Kernel (CK):** CK kernels are template-heavy C++. See the
+  dedicated **"CK (Composable Kernel) Test Harness"** section below for the
+  full build, correctness, and benchmarking workflow.  Do NOT use existing
+  C++ gtest files or try to import CK binaries via pybind.
 
 - **Assembly (HSACO):** HSACO binaries are precompiled. You cannot edit the
   assembly. The test harness should test the Python wrapper's launch config
   (grid dims, block dims, shared memory size).
+
+### CK (Composable Kernel) Test Harness
+
+CK kernels are template-heavy C++ that compile with `hipcc` via CMake.  The
+GEAK pipeline provides specialized support for CK examples: it builds the
+original binary during preprocessing, patches the `.inc` file to support
+tensor output dumping, and generates a Python harness that compares original
+vs. optimized binary outputs element-by-element.
+
+#### CK kernel structure
+
+A typical CK example directory contains:
+
+| File | Purpose |
+|------|---------|
+| `grouped_conv_fwd_xdl_fp16.cpp` | Entry point: data-type aliases, template instance, `main()` |
+| `run_grouped_conv_fwd_example.inc` | Core logic: tensor setup, kernel invocation, verification |
+| `CMakeLists.txt` | Build rules: `add_example_executable(TARGET SOURCE)` |
+| `common.hpp` (optional) | Shared type definitions and descriptor helpers |
+
+The `.cpp` file `#include`s the `.inc` file and defines `main()`.  The `.inc`
+file contains the reusable kernel execution + verification logic.
+
+#### GEAK_DUMP_OUTPUT mechanism
+
+During preprocessing, the pipeline patches each `.inc` file to add tensor
+output dumping gated by the `GEAK_DUMP_OUTPUT` environment variable.  After
+the kernel runs and `FromDevice()` copies results back to host memory, the
+patch calls CK's built-in `Tensor::savetxt()` to write one float per line:
+
+```cpp
+// GEAK: dump output tensor if requested
+{
+    const char* dump_path = std::getenv("GEAK_DUMP_OUTPUT");
+    if(dump_path) { out_device.savetxt(dump_path); }
+}
+```
+
+This is inserted between `FromDevice()` and `check_err()` calls.  It does
+NOT affect kernel compute, timing, or return values.  When `GEAK_DUMP_OUTPUT`
+is not set, there is zero overhead.
+
+#### Build process
+
+```bash
+cd /path/to/example_dir
+mkdir -p build && cd build
+cmake \
+  -DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc \
+  -DCMAKE_PREFIX_PATH="/opt/rocm" \
+  ..
+make -j <target_name>
+# Binary lands in build/bin/<target_name>
+```
+
+The target name comes from `CMakeLists.txt`, e.g.
+`add_example_executable(example_grouped_conv_conv_fwd_xdl_fp16 ...)`.
+
+#### Binary interface
+
+```
+./binary verify(0/1) init_method(0/1/2) time_kernel(0/1) [conv_params...]
+```
+
+- `verify=1`: runs CPU reference and compares (prints errors to stderr)
+- `init_method=1`: deterministic integer initialization (reproducible)
+- `time_kernel=1`: prints `Perf: X ms, Y TFlops, Z GB/s`
+- Some examples accept additional convolution parameters (spatial dims,
+  groups, channels, filter sizes, strides, dilations, padding)
+
+#### Correctness via tensor comparison
+
+The test harness compares tensor outputs from both binaries:
+
+1. Run **original binary** with `GEAK_DUMP_OUTPUT=/tmp/orig.txt`, `verify=0 init=1 time=0`
+2. Run **optimized binary** with `GEAK_DUMP_OUTPUT=/tmp/opt.txt`, same args
+3. Load both files with `numpy.loadtxt` and compare with `numpy.allclose`
+4. Both binaries must also exit with code 0
+
+This is a direct element-by-element comparison of GPU outputs, not a
+transitive check through CPU references.
+
+#### Tolerances for AMD GPUs (FP16)
+
+When comparing original vs. optimized outputs, different tile/block
+configurations change the order of FP16 multiply-accumulate operations.
+This causes small numerical differences even when both implementations
+are mathematically correct.
+
+| Data type | rtol | atol | Rationale |
+|-----------|------|------|-----------|
+| FP16/BF16 | 1e-2 | 1e-2 | Accumulation reordering in MFMA instructions |
+| FP32 | 1e-4 | 1e-5 | Standard single-precision tolerance |
+
+These are relaxed compared to CK's own GPU-vs-CPU checks (which use
+`rtol=1e-3, atol=1.5e-3` for FP16) because original-vs-optimized
+comparison involves two different GPU execution orders.
+
+#### COMMANDMENT template for CK
+
+```
+## SETUP
+cmake --build ${GEAK_WORK_DIR}/build --target <CMAKE_TARGET> -j 2>&1 | tail -5
+cp ${GEAK_WORK_DIR}/original_binary ${GEAK_WORK_DIR}/original_binary_copy
+printf '#!/bin/bash\nexport HIP_VISIBLE_DEVICES=%s\nexec python3 "$@"\n' "${GEAK_GPU_DEVICE}" > ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh
+
+## CORRECTNESS
+${GEAK_WORK_DIR}/run.sh ${GEAK_HARNESS} --correctness
+
+## PROFILE
+${GEAK_WORK_DIR}/run.sh ${GEAK_HARNESS} --profile > /dev/null 2>&1 || true
+${GEAK_WORK_DIR}/run.sh ${GEAK_HARNESS} --profile > /dev/null 2>&1 || true
+kernel-profile "${GEAK_WORK_DIR}/run.sh ${GEAK_HARNESS} --profile" --gpu-devices ${GEAK_GPU_DEVICE} --replays 5
+
+## BENCHMARK
+${GEAK_WORK_DIR}/run.sh ${GEAK_HARNESS} --benchmark ${GEAK_BENCHMARK_EXTRA_ARGS:-}
+
+## FULL_BENCHMARK
+${GEAK_WORK_DIR}/run.sh ${GEAK_HARNESS} --full-benchmark ${GEAK_BENCHMARK_EXTRA_ARGS:-}
+```
+
+#### What NOT to do for CK kernels
+
+- Do NOT use existing C++ gtest files in the `test/` directory as harnesses
+- Do NOT try to import CK binaries via pybind11 or ctypes
+- Do NOT hardcode GPU device IDs -- use `${GEAK_GPU_DEVICE}`
+- Do NOT skip the cmake rebuild step -- template parameter changes require
+  recompilation
 
 ### 1c. DISCOVER: Identify the optimisation target file
 

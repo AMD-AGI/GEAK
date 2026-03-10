@@ -57,6 +57,37 @@ format_validation_message = _vc_mod.format_validation_message
 _MAX_FIX_RETRIES = 3
 
 
+def _is_ck_language(kernel_path: Path, repo_root: Path) -> bool:
+    """Check if the kernel is a Composable Kernel (CK) example."""
+    ck_markers = ('ck::', '#include "ck/', '#include <ck/', 'DeviceMem')
+    kernel_dir = kernel_path if kernel_path.is_dir() else kernel_path.parent
+    for f in kernel_dir.iterdir():
+        if f.suffix in (".cpp", ".hpp", ".inc", ".h"):
+            try:
+                content = f.read_text(errors="replace")
+                if any(m in content for m in ck_markers):
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def _detect_ck_cmake_target(kernel_path: Path) -> str | None:
+    """Parse CMakeLists.txt for the CK example target name."""
+    kernel_dir = kernel_path if kernel_path.is_dir() else kernel_path.parent
+    cmake = kernel_dir / "CMakeLists.txt"
+    if not cmake.exists():
+        return None
+    content = cmake.read_text(errors="replace")
+    m = re.search(r"add_example_executable\s*\(\s*(\S+)", content)
+    if m:
+        return m.group(1)
+    m = re.search(r"add_executable\s*\(\s*(\S+)", content)
+    if m:
+        return m.group(1)
+    return None
+
+
 def generate_commandment(
     kernel_path: str | Path,
     harness_path: str | Path,
@@ -179,7 +210,20 @@ def _generate_simple(
         warmup_runs,
     )
 
-    if kernel_language == "cpp":
+    is_ck = _is_ck_language(kernel_path, repo_root)
+
+    if kernel_language == "cpp" and is_ck:
+        cmake_target = _detect_ck_cmake_target(kernel_path)
+        cmake_target_str = cmake_target or "UNKNOWN_TARGET"
+        setup_section = (
+            f"cmake --build ${{GEAK_WORK_DIR}}/build --target {cmake_target_str} -j 2>&1 | tail -5\n"
+            "cp ${GEAK_WORK_DIR}/original_binary ${GEAK_WORK_DIR}/original_binary_copy 2>/dev/null || true\n"
+            "printf '#!/bin/bash\\nexport HIP_VISIBLE_DEVICES=%s\\n"
+            'exec python3 "$@"\\n\' '
+            '"${GEAK_GPU_DEVICE}" '
+            "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
+        )
+    elif kernel_language == "cpp":
         build_cmd = _detect_build_command(repo_root)
         setup_section = (
             "rm -rf ${GEAK_WORK_DIR}/.aiter_jit\n"

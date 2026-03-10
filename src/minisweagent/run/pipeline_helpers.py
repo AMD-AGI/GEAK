@@ -202,25 +202,34 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
         if flag not in source:
             errors.append(f"Harness source does not define '{flag}' flag")
 
-    # Check for GPU-side tensor allocation inside the profile function.
-    # rocprofv3 captures ALL GPU kernels, so torch.randn(..., device='cuda')
-    # inside run_profile pollutes the trace with RNG kernels.
-    _in_profile_fn = False
-    for lineno, line in enumerate(source.splitlines(), 1):
-        stripped = line.lstrip()
-        if stripped.startswith("def ") and "profile" in stripped:
-            _in_profile_fn = True
-            continue
-        if _in_profile_fn and stripped.startswith("def "):
-            _in_profile_fn = False
-        if _in_profile_fn and _GPU_ALLOC_IN_PROFILE_RE.search(line):
-            errors.append(
-                f"Line {lineno}: GPU tensor allocation inside profile function "
-                f"(device='cuda'). Use device='cpu' then .to('cuda') to avoid "
-                f"polluting the profiler trace with RNG/memset kernels. "
-                f"See INSTRUCTIONS.md point 8."
-            )
-            break  # one warning is enough
+    # CK harnesses use subprocess.run to invoke compiled binaries and numpy
+    # for tensor comparison.  Skip the GPU-allocation check for those.
+    is_ck_harness = (
+        "ORIGINAL_BINARY" in source
+        and "subprocess" in source
+        and "numpy" in source
+    )
+
+    if not is_ck_harness:
+        # Check for GPU-side tensor allocation inside the profile function.
+        # rocprofv3 captures ALL GPU kernels, so torch.randn(..., device='cuda')
+        # inside run_profile pollutes the trace with RNG kernels.
+        _in_profile_fn = False
+        for lineno, line in enumerate(source.splitlines(), 1):
+            stripped = line.lstrip()
+            if stripped.startswith("def ") and "profile" in stripped:
+                _in_profile_fn = True
+                continue
+            if _in_profile_fn and stripped.startswith("def "):
+                _in_profile_fn = False
+            if _in_profile_fn and _GPU_ALLOC_IN_PROFILE_RE.search(line):
+                errors.append(
+                    f"Line {lineno}: GPU tensor allocation inside profile function "
+                    f"(device='cuda'). Use device='cpu' then .to('cuda') to avoid "
+                    f"polluting the profiler trace with RNG/memset kernels. "
+                    f"See INSTRUCTIONS.md point 8."
+                )
+                break  # one warning is enough
 
     return len(errors) == 0, errors
 
@@ -290,6 +299,7 @@ def create_validated_harness(
     discovery_context: str,
     max_retries: int = MAX_HARNESS_RETRIES,
     gpu_id: int = 0,
+    ck_context: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """Run UnitTestAgent with static + runtime validation and retry loop.
 
@@ -302,6 +312,13 @@ def create_validated_harness(
 
     If either step fails the errors are fed back into the discovery context
     and the agent is re-invoked, up to *max_retries* additional attempts.
+
+    Parameters
+    ----------
+    ck_context:
+        Optional dict with CK-specific info (original_binary_path, build_dir,
+        cmake_target, cmake_source_dir, template).  When provided, the
+        harness is expected to be a CK subprocess-based harness.
 
     Returns ``(test_command, harness_results)`` on success where
     *harness_results* is the list of per-mode result dicts.

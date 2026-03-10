@@ -44,6 +44,160 @@ from minisweagent.run.pipeline_helpers import (
     run_baseline_profile,
 )
 
+
+# ── CK (Composable Kernel) helpers ──────────────────────────────────
+
+
+def _is_ck_kernel(kernel_path: Path) -> bool:
+    """Detect whether *kernel_path* points to a CK example directory."""
+    kernel_dir = kernel_path if kernel_path.is_dir() else kernel_path.parent
+    ck_markers = ('ck::', '#include "ck/', '#include <ck/', "DeviceMem")
+    for f in kernel_dir.iterdir():
+        if f.suffix in (".cpp", ".hpp", ".inc", ".h"):
+            try:
+                content = f.read_text(errors="replace")
+                if any(m in content for m in ck_markers):
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def _detect_ck_cmake_target(example_dir: Path) -> str | None:
+    """Parse CMakeLists.txt for the ``add_example_executable`` target name."""
+    import re
+
+    cmake = example_dir / "CMakeLists.txt"
+    if not cmake.exists():
+        return None
+    content = cmake.read_text(errors="replace")
+    m = re.search(r"add_example_executable\s*\(\s*(\S+)", content)
+    if m:
+        return m.group(1)
+    m = re.search(r"add_executable\s*\(\s*(\S+)", content)
+    if m:
+        return m.group(1)
+    return None
+
+
+_GEAK_DUMP_SENTINEL = "// GEAK: dump output tensor if requested"
+
+_GEAK_DUMP_SNIPPET = """\
+    // GEAK: dump output tensor if requested
+    {
+        const char* dump_path = std::getenv("GEAK_DUMP_OUTPUT");
+        if(dump_path) { out_device.savetxt(dump_path); }
+    }
+"""
+
+
+def _patch_ck_dump_output(example_dir: Path) -> list[Path]:
+    """Patch .inc files to add GEAK_DUMP_OUTPUT tensor dumping.
+
+    Inserts a small block after every ``FromDevice(`` call that writes
+    the output tensor to a file when the GEAK_DUMP_OUTPUT env var is set.
+    Returns the list of files that were actually modified.
+    """
+    import re
+
+    modified: list[Path] = []
+    for inc_file in example_dir.glob("*.inc"):
+        content = inc_file.read_text(errors="replace")
+        if _GEAK_DUMP_SENTINEL in content:
+            continue
+
+        # Match lines containing FromDevice(...) — we insert right after
+        lines = content.split("\n")
+        new_lines: list[str] = []
+        inserted = False
+        for line in lines:
+            new_lines.append(line)
+            if re.search(r"\.FromDevice\s*\(", line) and not inserted:
+                new_lines.append("")
+                for snippet_line in _GEAK_DUMP_SNIPPET.rstrip("\n").split("\n"):
+                    new_lines.append(snippet_line)
+                new_lines.append("")
+                inserted = True
+
+        if inserted:
+            # Ensure <cstdlib> is included for std::getenv
+            if "#include <cstdlib>" not in content:
+                header_insert = '#include <cstdlib>  // GEAK: for std::getenv'
+                for i, line in enumerate(new_lines):
+                    if line.startswith("#include"):
+                        new_lines.insert(i, header_insert)
+                        break
+                else:
+                    new_lines.insert(0, header_insert)
+
+            inc_file.write_text("\n".join(new_lines))
+            modified.append(inc_file)
+
+    return modified
+
+
+def _build_ck_binary(
+    example_dir: Path,
+    build_dir: Path,
+    cmake_target: str,
+) -> Path | None:
+    """Configure and build the CK example, returning the binary path."""
+    import subprocess
+
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    if not (build_dir / "CMakeCache.txt").exists():
+        configure_cmd = [
+            "cmake",
+            "-DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc",
+            "-DCMAKE_PREFIX_PATH=/opt/rocm",
+            "-S", str(example_dir),
+            "-B", str(build_dir),
+        ]
+        result = subprocess.run(
+            configure_cmd, capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            logger.error("cmake configure failed:\n%s", result.stderr)
+            return None
+
+    build_cmd = [
+        "cmake", "--build", str(build_dir),
+        "--target", cmake_target, "-j",
+    ]
+    result = subprocess.run(
+        build_cmd, capture_output=True, text=True, timeout=600,
+    )
+    if result.returncode != 0:
+        logger.error("cmake build failed:\n%s", result.stderr)
+        return None
+
+    binary = build_dir / "bin" / cmake_target
+    if not binary.exists():
+        binary = build_dir / cmake_target
+    if not binary.exists():
+        logger.error("Built binary not found at %s", binary)
+        return None
+
+    return binary
+
+
+def _save_original_binary(binary_path: Path, output_dir: Path) -> Path:
+    """Copy the original binary so it survives source edits + rebuilds."""
+    import shutil
+
+    dest = output_dir / "original_binary"
+    shutil.copy2(str(binary_path), str(dest))
+    dest.chmod(0o755)
+    return dest
+
+
+def _load_ck_template() -> str:
+    """Load the CK harness template."""
+    template_path = Path(__file__).resolve().parent.parent / "templates" / "ck_harness_template.py"
+    return template_path.read_text()
+
+
 # ── main entry point ─────────────────────────────────────────────────
 
 
@@ -130,6 +284,46 @@ def run_preprocessor(
     ctx["codebase_context_path"] = str(codebase_context_path)
     _print(f"  CODEBASE_CONTEXT.md written ({codebase_context_path.stat().st_size} bytes)")
 
+    # ── 2b. CK detection ──────────────────────────────────────────────
+    is_ck = _is_ck_kernel(Path(kernel_path))
+    ck_context: dict[str, Any] | None = None
+    if is_ck:
+        _print(
+            "[bold magenta]  CK kernel detected — using CK pipeline[/bold magenta]"
+            if console
+            else "  CK kernel detected — using CK pipeline"
+        )
+        example_dir = Path(kernel_path) if Path(kernel_path).is_dir() else Path(kernel_path).parent
+        cmake_target = _detect_ck_cmake_target(example_dir)
+        _print(f"  CMake target: {cmake_target}")
+
+        patched = _patch_ck_dump_output(example_dir)
+        _print(f"  Patched {len(patched)} .inc file(s) for GEAK_DUMP_OUTPUT")
+
+        build_dir = output_dir / "build"
+        original_binary_path: Path | None = None
+        if cmake_target:
+            _print("  Building original CK binary...")
+            binary = _build_ck_binary(example_dir, build_dir, cmake_target)
+            if binary:
+                original_binary_path = _save_original_binary(binary, output_dir)
+                _print(f"  Original binary saved: {original_binary_path}")
+            else:
+                _print(
+                    "  [yellow]Warning: CK build failed, correctness checking will be limited[/yellow]"
+                    if console
+                    else "  Warning: CK build failed, correctness checking will be limited"
+                )
+
+        ck_context = {
+            "original_binary_path": str(original_binary_path) if original_binary_path else None,
+            "build_dir": str(build_dir),
+            "cmake_target": cmake_target,
+            "cmake_source_dir": str(example_dir),
+            "template": _load_ck_template(),
+        }
+        ctx["ck_context"] = ck_context
+
     # ── 3. test-discovery (automated_test_discovery MCP) ────────────
     _print("[bold cyan]--- Step 3/7: Test discovery ---[/bold cyan]" if console else "--- Step 3/7: Test discovery ---")
 
@@ -190,6 +384,18 @@ def run_preprocessor(
                 "Do NOT use `cd` in the command. The profiler cannot handle compound shell commands."
             )
 
+            if ck_context:
+                discovery_context += (
+                    "\n\n## CK Harness Template\n\n"
+                    "Use the following template as your starting point. "
+                    "Fill in the placeholder values and adjust shapes as needed.\n\n"
+                    "```python\n" + ck_context["template"] + "\n```\n\n"
+                    f"ORIGINAL_BINARY = \"{ck_context.get('original_binary_path', '')}\"\n"
+                    f"BUILD_DIR = \"{ck_context.get('build_dir', '')}\"\n"
+                    f"CMAKE_SOURCE_DIR = \"{ck_context.get('cmake_source_dir', '')}\"\n"
+                    f"CMAKE_TARGET = \"{ck_context.get('cmake_target', '')}\"\n"
+                )
+
             test_command, harness_results = create_validated_harness(
                 model=_uta_model,
                 repo=Path(repo_root),
@@ -197,6 +403,7 @@ def run_preprocessor(
                 log_dir=output_dir,
                 discovery_context=discovery_context,
                 gpu_id=gpu_id,
+                ck_context=ck_context,
             )
             _print(f"  UnitTestAgent test_command: {test_command}")
             _print("  Harness static validation: OK")

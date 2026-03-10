@@ -51,6 +51,9 @@ KERNEL_PATTERNS = [
     r"@triton\.autotune",
     r"__global__\s+void",
     r"tl\.load|tl\.store",
+    r'#include\s*"ck/',
+    r"ck::tensor_operation",
+    r"DeviceMem",
 ]
 
 TEST_KEYWORDS = [
@@ -102,16 +105,53 @@ SKIP_DIRS = {
     ".pytest_cache",
 }
 
+CK_REPO_SKIP_DIRS = {
+    "include",
+    "library",
+    "codegen",
+    "tile_engine",
+    "profiler",
+    "dispatcher",
+    "test",
+    "client_example",
+    "docs",
+    "script",
+    "utils",
+}
+
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
 
+def _is_inside_ck_repo(path: Path) -> bool:
+    """Check if path is inside a Composable Kernel repo tree."""
+    parts = path.parts
+    for i, part in enumerate(parts):
+        if part == "composablekernel" or part == "composable_kernel":
+            remaining = parts[i + 1:] if i + 1 < len(parts) else ()
+            if remaining and remaining[0] == "example":
+                return True
+            if any(p == "include" and j + 1 < len(remaining) and remaining[j + 1] == "ck"
+                   for j, p in enumerate(remaining)):
+                return True
+            return True
+    return False
+
+
 def _should_skip(path: Path) -> bool:
     for part in path.parts:
         if part in SKIP_DIRS or part.endswith(".egg-info"):
             return True
+    if _is_inside_ck_repo(path):
+        parts = path.parts
+        for i, part in enumerate(parts):
+            if part in ("composablekernel", "composable_kernel"):
+                child_dirs = parts[i + 1:]
+                if child_dirs and child_dirs[0] in CK_REPO_SKIP_DIRS:
+                    return True
+                break
     return False
 
 
@@ -244,10 +284,26 @@ def _expand_workspace(kernel_path: Path) -> Path:
     When *kernel_path* is a directory (e.g. a repository root) we start the
     marker search from the directory itself, not its parent.  This ensures
     that ``/path/to/repo/.git`` is found when the caller passes ``/path/to/repo``.
+
+    For CK example directories (inside ``composablekernel/example/<name>/``),
+    the workspace is scoped to the example subdirectory rather than the CK
+    repo root, to avoid scanning hundreds of thousands of irrelevant files.
     """
+    start_dir = kernel_path if kernel_path.is_dir() else kernel_path.parent
+
+    # CK-aware scoping: if inside composablekernel/example/<name>/, return that dir
+    parts = start_dir.parts
+    for i, part in enumerate(parts):
+        if part in ("composablekernel", "composable_kernel"):
+            remaining = parts[i + 1:]
+            if len(remaining) >= 2 and remaining[0] == "example":
+                ck_example_dir = Path(*parts[: i + 3])
+                if ck_example_dir.is_dir():
+                    return ck_example_dir
+
     markers = ["pyproject.toml", "setup.py", ".git", "tests", "op_tests"]
 
-    current = kernel_path if kernel_path.is_dir() else kernel_path.parent
+    current = start_dir
     for _ in range(15):
         for marker in markers:
             if (current / marker).exists():
@@ -257,13 +313,21 @@ def _expand_workspace(kernel_path: Path) -> Path:
             break
         current = parent
 
-    return kernel_path if kernel_path.is_dir() else kernel_path.parent
+    return start_dir
 
 
 def _get_kernel_type(content: str, suffix: str = "") -> str:
     if "@triton" in content or "tl." in content:
         return "triton"
-    if "ck_tile::" in content or "ck::tile" in content or "#include <ck_tile/" in content:
+    if (
+        "ck_tile::" in content
+        or "ck::tile" in content
+        or "#include <ck_tile/" in content
+        or "ck::" in content
+        or '#include "ck/' in content
+        or "#include <ck/" in content
+        or "DeviceMem" in content
+    ):
         return "ck"
     if "__global__" in content and "hip" in content.lower():
         return "hip"
