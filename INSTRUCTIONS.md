@@ -268,11 +268,12 @@ is not set, there is zero overhead.
 ```bash
 cd /path/to/example_dir
 mkdir -p build && cd build
-cmake \
+cmake -G Ninja \
   -DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc \
   -DCMAKE_PREFIX_PATH="/opt/rocm" \
+  -DGPU_TARGETS=gfx942 \
   ..
-make -j <target_name>
+ninja <target_name>
 # Binary lands in build/bin/<target_name>
 ```
 

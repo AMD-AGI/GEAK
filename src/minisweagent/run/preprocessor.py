@@ -149,8 +149,10 @@ def _build_ck_binary(
     if not (build_dir / "CMakeCache.txt").exists():
         configure_cmd = [
             "cmake",
+            "-G", "Ninja",
             "-DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc",
             "-DCMAKE_PREFIX_PATH=/opt/rocm",
+            "-DGPU_TARGETS=gfx942",
             "-S", str(example_dir),
             "-B", str(build_dir),
         ]

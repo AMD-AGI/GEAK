@@ -76,8 +76,10 @@ def _rebuild_optimized():
         os.makedirs(BUILD_DIR, exist_ok=True)
         configure_cmd = [
             "cmake",
+            "-G", "Ninja",
             "-DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc",
-            f"-DCMAKE_PREFIX_PATH=/opt/rocm",
+            "-DCMAKE_PREFIX_PATH=/opt/rocm",
+            "-DGPU_TARGETS=gfx942",
             "-S", CMAKE_SOURCE_DIR,
             "-B", BUILD_DIR,
         ]
