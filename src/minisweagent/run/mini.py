@@ -502,7 +502,8 @@ def main(
         config.setdefault("model", {})["model_class"] = model_class
     # Set use_strategy_manager in model config based on enable_strategies flag
     config.setdefault("model", {})["use_strategy_manager"] = enable_strategies
-    model = get_model(model_name, config.get("model", {}))
+    model_name_resolved = model_name or os.getenv("GEAK_MODEL") or config.get("model", {}).get("model_name")
+    model = get_model(model_name_resolved, config.get("model", {}))
 
     _env_kwargs = config.get("env", {})
     if rag:
@@ -565,11 +566,10 @@ def main(
             output_dir=_pipeline_output,
             gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
             model=model,
-            model_factory=lambda: get_model(model_name, config.get("model", {})),
+            model_factory=lambda: get_model(model_name_resolved, config.get("model", {})),
             console=console,
         )
 
-        model_name_resolved = model_name or config.get("model", {}).get("model_name")
         model_cfg = config.get("model", {})
 
         report = run_orchestrator(
@@ -628,7 +628,7 @@ def main(
             "[bold yellow]Running UnitTestAgent to create test harness...[/bold yellow]"
         )
         test_command, _harness_results = create_validated_harness(
-            model=get_model(model_name, config.get("model", {})),
+            model=get_model(model_name_resolved, config.get("model", {})),
             repo=repo,
             kernel_name=kernel_name or "unknown",
             log_dir=patch_output,
@@ -829,7 +829,7 @@ def main(
             output=output,
             save_traj_fn=save_traj,
             console=console,
-            model_factory=lambda: get_model(model_name, config.get("model", {})),
+            model_factory=lambda: get_model(model_name_resolved, config.get("model", {})),
             env_factory=lambda _repo=repo: (MCPEnabledEnvironment if rag else LocalEnvironment)(
                 **{**copy.deepcopy(_env_kwargs), **({"cwd": str(Path(_repo).resolve())} if _repo else {})}
             ),

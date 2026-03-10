@@ -12,10 +12,13 @@ import itertools
 import logging
 import os
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+from minisweagent.debug_runtime import emit_debug_log
 
 
 # ── model ensemble support ───────────────────────────────────────────
@@ -173,12 +176,19 @@ def task_file_to_agent_task(task_file: Path):
     agent_type = filter_agent_type(meta.get("agent_type", "strategy_agent"))
     agent_class = _agent_type_to_class().get(agent_type, StrategyInteractiveAgent)
 
+    try:
+        inherited_step_limit = int(os.environ.get("GEAK_AGENT_STEP_LIMIT", "200"))
+    except ValueError:
+        inherited_step_limit = 200
+    task_step_limit = int(meta.get("step_limit", 0) or 0)
+    effective_step_limit = task_step_limit or inherited_step_limit
+
     if agent_type == "openevolve":
         # OpenEvolveWorker extends DefaultAgent (not InteractiveAgent),
         # so it does not accept 'mode' or 'use_strategy_manager'.
         cfg: dict = {
             "save_patch": True,
-            "step_limit": 0,
+            "step_limit": effective_step_limit,
             "cost_limit": 0.0,
         }
         if meta.get("kernel_path"):
@@ -190,7 +200,7 @@ def task_file_to_agent_task(task_file: Path):
     else:
         cfg = {
             "save_patch": True,
-            "step_limit": 0,
+            "step_limit": effective_step_limit,
             "cost_limit": 0.0,
             "mode": "yolo",
             "use_strategy_manager": True,
@@ -265,6 +275,7 @@ def task_file_to_agent_task(task_file: Path):
         priority=int(meta.get("priority", 10)),
         kernel_language=meta.get("kernel_language", "python"),
         config=cfg,
+        step_limit=task_step_limit,
         num_gpus=int(meta.get("num_gpus", 1)),
     )
 
@@ -304,6 +315,8 @@ def run_task_batch(
         return {"completed": 0, "failed": 0, "results": []}
 
     tasks = [task_file_to_agent_task(f) for f in task_files]
+    labels = [t.label for t in tasks]
+    duplicate_labels = sorted(label for label, count in Counter(labels).items() if count > 1)
 
     # Determine repo_path and harness_path from first task's metadata
     meta_0, _ = read_task_file(task_files[0])
@@ -339,6 +352,24 @@ def run_task_batch(
         )
 
     effective_model_factory = _build_ensemble_factory(model_factory)
+
+    # region agent log
+    emit_debug_log(
+        "dispatch.py:run_task_batch:before_parallel",
+        "Preparing to dispatch task batch",
+        {
+            "task_count": len(tasks),
+            "gpu_ids": gpu_ids,
+            "labels": labels,
+            "duplicate_labels": duplicate_labels,
+            "ensemble": os.environ.get("GEAK_MODEL_ENSEMBLE", "").strip() or None,
+            "excluded_agents": os.environ.get("GEAK_EXCLUDED_AGENTS", "").strip() or None,
+            "allowed_agents": os.environ.get("GEAK_ALLOWED_AGENTS", "").strip() or None,
+            "results_dir": str(results_dir),
+        },
+        hypothesis_id="H5",
+    )
+    # endregion
 
     try:
         raw_results = ParallelAgent.run_parallel(
@@ -390,6 +421,20 @@ def run_task_batch(
                 "patches": patch_count,
             }
         )
+
+    # region agent log
+    emit_debug_log(
+        "dispatch.py:run_task_batch:after_parallel",
+        "Parallel task batch completed",
+        {
+            "completed": completed,
+            "failed": failed,
+            "results_dir": str(results_dir),
+            "summaries": summaries,
+        },
+        hypothesis_id="H5",
+    )
+    # endregion
 
     return {
         "completed": completed,

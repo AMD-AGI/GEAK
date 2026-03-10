@@ -13,7 +13,9 @@ import pytest
 
 from minisweagent.run.orchestrator import (
     _evaluate_round_best,
+    _merge_round_evaluation_into_final_report,
     _parse_total_kernel_time_ms,
+    _parse_reported_speedup,
     _setup_eval_worktree,
     run_orchestrator,
 )
@@ -251,6 +253,127 @@ class TestEvaluateRoundBestSelection:
         result = _evaluate_round_best(ctx, 1, results_dir, lambda m: None)
         assert result is not None
         assert result["best_task"] == "real-agent"
+
+
+class TestFinalReportVerification:
+    def test_parse_reported_speedup_handles_percent_and_multiplier(self):
+        assert _parse_reported_speedup("0.46%") == pytest.approx(1.0046)
+        assert _parse_reported_speedup("1.16446x") == pytest.approx(1.16446)
+
+    @patch("minisweagent.memory.integration.record_optimization_outcome")
+    @patch("minisweagent.memory.cross_session_memory.classify_kernel_category", return_value="unknown")
+    def test_merge_round_evaluation_clamps_no_improvement(
+        self,
+        mock_classify,
+        mock_record,
+        tmp_path,
+    ):
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        patch_dir = output_dir / "results" / "round_1" / "dispatch-path-check"
+        patch_dir.mkdir(parents=True)
+        patch_file = patch_dir / "patch_9.patch"
+        patch_file.write_text("diff --git a/kernel b/kernel\n")
+
+        initial_report = {
+            "status": "complete",
+            "summary": (
+                "### Best Patch: wrong-task/patch_1\n"
+                "- **Speedup**: 0.46%\n"
+                "### Why Improvement is Limited\n"
+            ),
+            "best_patch": str(output_dir / "wrong.patch"),
+            "total_speedup": "0.46%",
+        }
+        (output_dir / "final_report.json").write_text(json.dumps(initial_report))
+
+        round_eval = {
+            "round": 1,
+            "best_task": "dispatch-path-check",
+            "best_patch": str(patch_file),
+            "benchmark_speedup": 1.004644,
+            "full_benchmark": {
+                "verified_speedup": 0.998989,
+                "baseline_ms": 0.012445,
+                "candidate_ms": 0.0124576,
+            },
+        }
+        ctx = {
+            "output_dir": str(output_dir),
+            "kernel_path": "/tmp/kernel.hpp",
+            "baseline_metrics": {"bottleneck": "balanced"},
+        }
+
+        merged = _merge_round_evaluation_into_final_report(
+            ctx,
+            output_dir,
+            dict(initial_report),
+            round_eval,
+        )
+
+        assert merged["best_patch"] == str(patch_file)
+        assert merged["total_speedup"] == "1.0000x"
+        assert merged["verified_speedup_raw"] == pytest.approx(0.998989)
+        assert merged["verified_improvement"] is False
+        assert "## Verified Final Selection" in merged["summary"]
+        assert "### Best Patch: dispatch-path-check/patch_9" in merged["summary"]
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["speedup_achieved"] == pytest.approx(1.0)
+        assert mock_record.call_args.kwargs["success"] is False
+
+    @patch("minisweagent.memory.integration.record_optimization_outcome")
+    @patch("minisweagent.memory.cross_session_memory.classify_kernel_category", return_value="normalization")
+    def test_merge_round_evaluation_uses_verified_positive_speedup(
+        self,
+        mock_classify,
+        mock_record,
+        tmp_path,
+    ):
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        patch_dir = output_dir / "results" / "round_1" / "split-k-reduction-rewrite"
+        patch_dir.mkdir(parents=True)
+        patch_file = patch_dir / "patch_7.patch"
+        patch_file.write_text("diff --git a/kernel b/kernel\n")
+
+        report = {
+            "status": "complete",
+            "summary": "### Best Patch: stale-task/patch_1\n- **Speedup**: 1.16x\n",
+            "best_patch": str(output_dir / "stale.patch"),
+            "total_speedup": "1.16x",
+        }
+
+        round_eval = {
+            "round": 1,
+            "best_task": "split-k-reduction-rewrite",
+            "best_patch": str(patch_file),
+            "benchmark_speedup": 1.16446,
+            "full_benchmark": {
+                "verified_speedup": 1.14731,
+                "baseline_ms": 0.053103,
+                "candidate_ms": 0.046268,
+            },
+        }
+        ctx = {
+            "output_dir": str(output_dir),
+            "kernel_path": "/tmp/kernel.py",
+            "baseline_metrics": {"bottleneck": "latency"},
+        }
+
+        merged = _merge_round_evaluation_into_final_report(
+            ctx,
+            output_dir,
+            report,
+            round_eval,
+        )
+
+        assert merged["best_patch"] == str(patch_file)
+        assert merged["total_speedup"] == "1.1473x"
+        assert merged["verified_improvement"] is True
+        assert "### Best Patch: split-k-reduction-rewrite/patch_7" in merged["summary"]
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["speedup_achieved"] == pytest.approx(1.14731)
+        assert mock_record.call_args.kwargs["success"] is True
 
 
 # ---------------------------------------------------------------------------

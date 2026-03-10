@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from minisweagent.run.task_generator import _parse_llm_response, generate_tasks
+from minisweagent.run.task_generator import (
+    _SYSTEM_PROMPT,
+    _build_workload_guidance,
+    _parse_llm_response,
+    generate_tasks,
+)
 from minisweagent.tools.discovery_types import DiscoveryResult, KernelInfo
 
 
@@ -194,3 +199,86 @@ def test_parse_sorts_by_priority():
     ]"""
     tasks = _parse_llm_response(json_text, FakeAgentClass)
     assert [t.label for t in tasks] == ["high", "mid", "low"]
+
+
+def test_build_workload_guidance_classifies_hip_search_as_latency_bound():
+    kernel = KernelInfo(
+        file_path=Path("/workspace/rocprim/device_binary_search.hpp"),
+        kernel_name="device_binary_search",
+        kernel_type="unknown",
+        kernel_language="cpp",
+        function_names=[],
+        has_jit_decorator=False,
+    )
+    baseline_metrics = {
+        "kernel_name": "rocprim::detail::binary_search lower_bound",
+        "bottleneck": "latency",
+        "metrics": {
+            "memory.hbm_bandwidth_utilization": 0.3,
+            "memory.l2_hit_rate": 70.6,
+        },
+        "top_kernels": [
+            {
+                "name": "transform_kernel<binary_search<lower_bound>>",
+                "bottleneck": "latency",
+            }
+        ],
+    }
+
+    guidance = _build_workload_guidance(kernel, baseline_metrics)
+
+    assert "HIP backend detected." in guidance
+    assert "Prefer First:" in guidance
+    assert "Branchless/control-flow simplification" in guidance
+    assert "Size-specialized kernel variants" in guidance
+    assert "Bandwidth-maximization or generic vectorization ideas as the main strategy." in guidance
+    assert "Search / pointer-chasing classifier:" in guidance
+
+
+def test_build_workload_guidance_for_triton_deprioritizes_autotune_and_dispatch():
+    kernel = KernelInfo(
+        file_path=Path("/workspace/kernel.py"),
+        kernel_name="fused_rms",
+        kernel_type="triton",
+        kernel_language="python",
+        function_names=["kernel_fwd"],
+        has_jit_decorator=True,
+        has_autotune=True,
+    )
+    baseline_metrics = {
+        "kernel_name": "fused_rms_fp8",
+        "bottleneck": "memory-bound",
+        "duration_us": 12.4,
+        "metrics": {
+            "memory.hbm_bandwidth_utilization": 71.2,
+            "memory.l2_hit_rate": 44.0,
+        },
+    }
+
+    guidance = _build_workload_guidance(kernel, baseline_metrics)
+
+    assert "Triton backend detected." in guidance
+    assert "Prefer First:" in guidance
+    assert "Memory-access rewrites inside the kernel body" in guidance
+    assert "@triton.autotune-only config sweeps." in guidance
+    assert "Python dispatch, import-routing, or wrapper-only edits" in guidance
+
+
+def test_build_workload_guidance_empty_when_no_backend_and_no_metrics():
+    kernel = KernelInfo(
+        file_path=Path("/workspace/kernel.txt"),
+        kernel_name="mystery",
+        kernel_type="unknown",
+        kernel_language="other",
+        function_names=[],
+        has_jit_decorator=False,
+    )
+
+    assert _build_workload_guidance(kernel, {}) == ""
+
+
+def test_system_prompt_deprioritizes_dispatch_path_work():
+    assert "- 0: Novel algorithmic kernel rewrites" in _SYSTEM_PROMPT
+    assert "- 15: Wrapper/launch-config/dispatch-only changes (lowest priority)" in _SYSTEM_PROMPT
+    assert 'Generate at least 3 tasks from the "Prefer First" families' in _SYSTEM_PROMPT
+    assert "Generate at least one priority-0 task that specifically checks the dispatch path" not in _SYSTEM_PROMPT

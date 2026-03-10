@@ -34,6 +34,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from minisweagent.debug_runtime import emit_debug_log, model_tools_snapshot
 from minisweagent.benchmark_parsing import (
     parse_median_latency_ms as _parse_median_latency_ms,
 )
@@ -164,11 +165,13 @@ def _tool_generate_tasks(
     output_dir = Path(ctx["output_dir"]) / "tasks" / f"round_{round_num}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    taskgen_model = ctx["model_factory"]() if ctx.get("model_factory") else ctx["model"]
+
     kwargs: dict[str, Any] = {
         "discovery_result": ctx["discovery_result"],
         "base_task_context": "",
         "agent_class": ctx["agent_class"],
-        "model": ctx["model"],
+        "model": taskgen_model,
         "num_gpus": len(ctx.get("gpu_ids", [0])),
     }
 
@@ -191,6 +194,20 @@ def _tool_generate_tasks(
     if previous_results_dir:
         kwargs["previous_results_dir"] = Path(previous_results_dir)
 
+    # region agent log
+    emit_debug_log(
+        "orchestrator.py:_tool_generate_tasks:before_gen",
+        "Invoking task generator with orchestrator model",
+        {
+            "round_num": round_num,
+            "previous_results_dir": str(previous_results_dir) if previous_results_dir else None,
+            "shared_model": model_tools_snapshot(ctx["model"]),
+            "taskgen_model": model_tools_snapshot(taskgen_model),
+        },
+        hypothesis_id="H2",
+    )
+    # endregion
+
     try:
         tasks = _gen(**kwargs)
     except RuntimeError as exc:
@@ -205,6 +222,27 @@ def _tool_generate_tasks(
                 "message": "Task generator hit step/cost limit – treating as convergence.",
             })
         raise
+
+    # region agent log
+    emit_debug_log(
+        "orchestrator.py:_tool_generate_tasks:after_gen",
+        "Task generator returned control to orchestrator",
+        {
+            "round_num": round_num,
+            "task_count": len(tasks) if tasks else 0,
+            "tasks": [
+                {
+                    "label": getattr(task, "label", None),
+                    "agent_class": getattr(getattr(task, "agent_class", None), "__name__", None),
+                }
+                for task in (tasks or [])
+            ],
+            "shared_model_after": model_tools_snapshot(ctx["model"]),
+            "taskgen_model_after": model_tools_snapshot(taskgen_model),
+        },
+        hypothesis_id="H2",
+    )
+    # endregion
 
     if not tasks:
         return json.dumps({"tasks": [], "message": "No tasks generated – converged."})
@@ -400,14 +438,123 @@ def _tool_finalize(
     report_path = output_dir / "final_report.json"
     report_path.write_text(json.dumps(report, indent=2))
 
+    return json.dumps(report)
+
+
+def _parse_reported_speedup(total_speedup: str | None) -> float | None:
+    """Parse either ``1.06x`` or ``6%`` style speedup strings."""
+    if total_speedup is None:
+        return None
+    text = str(total_speedup).strip()
+    if not text:
+        return None
+
+    pct_match = re.search(r"([\d.]+)\s*%", text)
+    if pct_match:
+        return 1.0 + float(pct_match.group(1)) / 100.0
+
+    mult_match = re.search(r"([\d.]+)\s*x", text, re.IGNORECASE)
+    if mult_match:
+        return float(mult_match.group(1))
+
+    raw_match = re.search(r"([\d.]+)", text)
+    if raw_match:
+        return float(raw_match.group(1))
+    return None
+
+
+def _extract_verified_speedup(round_eval: dict[str, Any]) -> float | None:
+    """Prefer FULL_BENCHMARK verified speedup, fall back to benchmark winner."""
+    full_benchmark = round_eval.get("full_benchmark", {})
+    if isinstance(full_benchmark, dict):
+        verified = full_benchmark.get("verified_speedup")
+        if isinstance(verified, (int, float)):
+            return float(verified)
+
+    benchmark_speedup = round_eval.get("benchmark_speedup")
+    if isinstance(benchmark_speedup, (int, float)):
+        return float(benchmark_speedup)
+    return None
+
+
+def _format_patch_label(patch_path: str | None) -> str:
+    if not patch_path:
+        return "unknown"
+    patch = Path(patch_path)
+    stem = patch.stem if patch.suffix else patch.name
+    parent = patch.parent.name
+    return f"{parent}/{stem}" if parent else stem
+
+
+def _rewrite_summary_with_verified_selection(
+    summary: str,
+    round_eval: dict[str, Any],
+    *,
+    verified_speedup_raw: float,
+    verified_speedup: float,
+) -> str:
+    """Prepend a verified final-selection block and normalize common lines."""
+    best_patch_label = _format_patch_label(round_eval.get("best_patch"))
+    best_task = round_eval.get("best_task") or Path(round_eval.get("best_patch", "")).parent.name or "unknown"
+    full_benchmark = round_eval.get("full_benchmark", {})
+    baseline_ms = full_benchmark.get("baseline_ms") if isinstance(full_benchmark, dict) else None
+    candidate_ms = full_benchmark.get("candidate_ms") if isinstance(full_benchmark, dict) else None
+
+    lines = [
+        "## Verified Final Selection",
+        f"- Best task: {best_task}",
+        f"- Best patch: {best_patch_label}",
+    ]
+    if verified_speedup_raw > 1.0:
+        lines.append(f"- Verified FULL_BENCHMARK speedup: {verified_speedup_raw:.4f}x")
+    else:
+        lines.append(
+            "- Verified FULL_BENCHMARK result: "
+            f"no improvement ({verified_speedup_raw:.4f}x raw, clamped to {verified_speedup:.4f}x)"
+        )
+    if isinstance(baseline_ms, (int, float)) and isinstance(candidate_ms, (int, float)):
+        lines.append(
+            f"- Full benchmark geomean: {baseline_ms:.6f} ms -> {candidate_ms:.6f} ms"
+        )
+    verified_block = "\n".join(lines)
+
+    updated = summary or ""
+    updated = re.sub(r"(?m)^### Best Patch: .*$", f"### Best Patch: {best_patch_label}", updated)
+    if verified_speedup_raw > 1.0:
+        speedup_line = f"- **Speedup**: {verified_speedup_raw:.4f}x (FULL_BENCHMARK verified)"
+    else:
+        speedup_line = (
+            "- **Speedup**: "
+            f"no verified improvement ({verified_speedup_raw:.4f}x raw, clamped to {verified_speedup:.4f}x)"
+        )
+    updated = re.sub(r"(?m)^- \*\*Speedup\*\*: .*$", speedup_line, updated)
+    if isinstance(candidate_ms, (int, float)):
+        updated = re.sub(
+            r"(?m)^- \*\*Optimized latency\*\*: .*$",
+            f"- **Optimized latency**: {candidate_ms:.4f}ms",
+            updated,
+        )
+    if verified_block not in updated:
+        updated = f"{verified_block}\n\n{updated}" if updated else verified_block
+    return updated
+
+
+def _record_final_outcome(ctx: dict[str, Any], report: dict[str, Any]) -> None:
+    """Record the final outcome using verified speedup when available."""
     try:
-        from minisweagent.memory.integration import record_optimization_outcome
         from minisweagent.memory.cross_session_memory import classify_kernel_category
-        speedup_val = 1.0
-        if total_speedup:
-            _sp_match = re.search(r"([\d.]+)", str(total_speedup))
-            if _sp_match:
-                speedup_val = float(_sp_match.group(1))
+        from minisweagent.memory.integration import record_optimization_outcome
+
+        speedup_val = report.get("verified_speedup")
+        if not isinstance(speedup_val, (int, float)):
+            parsed = _parse_reported_speedup(report.get("total_speedup"))
+            speedup_val = parsed if parsed is not None else 1.0
+
+        speedup_val = float(speedup_val)
+        success = bool(report.get("verified_improvement", speedup_val > 1.0))
+        if not success and speedup_val < 1.0:
+            speedup_val = 1.0
+
         _bm = ctx.get("baseline_metrics") or {}
         _kpath = ctx.get("kernel_path", "")
         _kcat = classify_kernel_category(_kpath) if _kpath else "unknown"
@@ -415,16 +562,63 @@ def _tool_finalize(
             kernel_path=_kpath,
             kernel_category=_kcat,
             bottleneck_type=_bm.get("bottleneck", "unknown"),
-            strategy_name=summary[:100] if summary else "",
+            strategy_name=(report.get("summary") or "")[:100],
             speedup_achieved=speedup_val,
-            success=speedup_val > 1.0,
-            failure_reason=None if speedup_val > 1.0 else "no_improvement",
-            patch_file=best_patch,
+            success=success,
+            failure_reason=None if success else "no_improvement",
+            profiling_metrics=_bm,
+            patch_file=report.get("best_patch"),
         )
     except Exception as _rec_exc:
-        logger.debug("Memory outcome recording failed: %s", _rec_exc)
+        logger.debug("Final memory outcome recording failed: %s", _rec_exc)
 
-    return json.dumps(report)
+
+def _merge_round_evaluation_into_final_report(
+    ctx: dict[str, Any],
+    output_dir: Path,
+    report: dict[str, Any],
+    round_eval: dict[str, Any],
+) -> dict[str, Any]:
+    """Rewrite final_report.json so it reflects verified final evaluation."""
+    final_report_path = output_dir / "final_report.json"
+    merged = dict(report)
+    if final_report_path.exists():
+        try:
+            merged = json.loads(final_report_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            merged = dict(report)
+
+    merged["round_evaluation"] = round_eval
+    if round_eval.get("best_patch"):
+        merged["best_patch"] = round_eval["best_patch"]
+    if round_eval.get("best_task"):
+        merged["best_task"] = round_eval["best_task"]
+
+    verified_speedup_raw = _extract_verified_speedup(round_eval)
+    if verified_speedup_raw is not None:
+        verified_speedup = max(1.0, float(verified_speedup_raw))
+        merged["verified_speedup_raw"] = round(float(verified_speedup_raw), 6)
+        merged["verified_speedup"] = round(verified_speedup, 6)
+        merged["verified_improvement"] = verified_speedup_raw > 1.0
+        merged["total_speedup"] = f"{verified_speedup:.4f}x"
+        merged["verification_note"] = (
+            f"Verified FULL_BENCHMARK speedup {verified_speedup_raw:.4f}x."
+            if verified_speedup_raw > 1.0
+            else (
+                "No verified FULL_BENCHMARK improvement "
+                f"({verified_speedup_raw:.4f}x raw); clamped to {verified_speedup:.4f}x."
+            )
+        )
+        merged["summary"] = _rewrite_summary_with_verified_selection(
+            str(merged.get("summary", "")),
+            round_eval,
+            verified_speedup_raw=float(verified_speedup_raw),
+            verified_speedup=verified_speedup,
+        )
+
+    final_report_path.write_text(json.dumps(merged, indent=2, default=str))
+    _record_final_outcome(ctx, merged)
+    return merged
 
 
 
@@ -515,6 +709,9 @@ def _auto_finalize(
     report_path.write_text(json.dumps(report, indent=2))
     _print(f"Auto-finalized: {summary_text}")
     _print(f"Report written to: {report_path}")
+
+    if not best_overall:
+        return report
 
     try:
         from minisweagent.memory.integration import record_optimization_outcome
@@ -1356,14 +1553,18 @@ def run_orchestrator(
 
     _working_mem = None
     try:
-        from minisweagent.memory.working_memory import WorkingMemory
-        from minisweagent.memory.cross_session_memory import classify_kernel_category
-        _kpath = str(preprocess_ctx.get("kernel_path", ""))
-        _working_mem = WorkingMemory(
-            kernel_category=classify_kernel_category(_kpath) if _kpath else "unknown",
-            max_steps=int(os.getenv("GEAK_AGENT_STEP_LIMIT", "100")),
-        )
-        ctx["working_memory"] = _working_mem
+        from minisweagent.memory.integration import is_working_memory_enabled
+
+        if is_working_memory_enabled():
+            from minisweagent.memory.working_memory import WorkingMemory
+            from minisweagent.memory.cross_session_memory import classify_kernel_category
+
+            _kpath = str(preprocess_ctx.get("kernel_path", ""))
+            _working_mem = WorkingMemory(
+                kernel_category=classify_kernel_category(_kpath) if _kpath else "unknown",
+                max_steps=int(os.getenv("GEAK_AGENT_STEP_LIMIT", "100")),
+            )
+            ctx["working_memory"] = _working_mem
     except Exception as _wm_exc:
         logger.debug("WorkingMemory init failed: %s", _wm_exc)
 
@@ -1489,17 +1690,15 @@ def run_orchestrator(
                 })
 
             if finalize_result is not None:
-                # Use last round eval as final report
                 if round_eval:
-                    finalize_result["round_evaluation"] = round_eval
-                    final_eval_path = _out / "final_report.json"
-                    if final_eval_path.exists():
-                        try:
-                            existing = json.loads(final_eval_path.read_text())
-                            existing["round_evaluation"] = round_eval
-                            final_eval_path.write_text(json.dumps(existing, indent=2, default=str))
-                        except (json.JSONDecodeError, OSError):
-                            pass
+                    finalize_result = _merge_round_evaluation_into_final_report(
+                        ctx,
+                        _out,
+                        finalize_result,
+                        round_eval,
+                    )
+                else:
+                    _record_final_outcome(ctx, finalize_result)
                 return finalize_result
     finally:
         if original_tools is not None:
@@ -1555,6 +1754,22 @@ def _run_llm_steps(
         tool_call = response.get("tools") if isinstance(response, dict) else None
 
         if not tool_call:
+            if phase.startswith("round_") and any(
+                name in content_text for name in ("dispatch_tasks", "collect_results", "finalize")
+            ):
+                # region agent log
+                emit_debug_log(
+                    "orchestrator.py:_run_llm_steps:no_tool_call",
+                    "Orchestrator produced text mentioning missing orchestration tools",
+                    {
+                        "phase": phase,
+                        "step": step,
+                        "content_preview": content_text[:300],
+                        "model_tools": model_tools_snapshot(model),
+                    },
+                    hypothesis_id="H3",
+                )
+                # endregion
             if content_text:
                 _print(f"  Orchestrator: {content_text[:300]}")
             messages.append({"role": "assistant", "content": content_text})

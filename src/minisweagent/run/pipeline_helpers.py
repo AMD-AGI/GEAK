@@ -28,7 +28,10 @@ MAX_HARNESS_RETRIES = 2
 
 DEFAULT_AGENT_BENCHMARK_ITERATIONS = int(os.getenv("GEAK_AGENT_BENCHMARK_ITERATIONS", "10"))
 
-DEFAULT_EVAL_BENCHMARK_ITERATIONS = DEFAULT_AGENT_BENCHMARK_ITERATIONS
+# Final evaluation should be stabler than agent-time exploration runs.
+DEFAULT_EVAL_BENCHMARK_ITERATIONS = int(
+    os.getenv("GEAK_EVAL_BENCHMARK_ITERATIONS", "30")
+)
 
 
 # ── agent filtering ──────────────────────────────────────────────────
@@ -449,16 +452,72 @@ _BOTTLENECK_GUIDANCE: dict[str, str] = {
 }
 
 
+_SEARCH_WORKLOAD_HINTS = (
+    "binary_search",
+    "lower_bound",
+    "upper_bound",
+    "search_n",
+    "device_search",
+    "haystack",
+    "needle",
+)
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _search_workload_guidance(metrics: dict) -> list[str]:
+    """Add narrower guidance for latency-bound HIP search workloads."""
+    evidence_chunks = [str(metrics.get("kernel_name", ""))]
+    for top in metrics.get("top_kernels", []) or []:
+        evidence_chunks.append(str(top.get("name", "")))
+    haystack = " ".join(evidence_chunks).lower()
+    if not any(hint in haystack for hint in _SEARCH_WORKLOAD_HINTS):
+        return []
+
+    bottleneck = str(metrics.get("bottleneck", "")).lower()
+    if "latency" not in bottleneck:
+        return []
+
+    derived = metrics.get("metrics", {}) or {}
+    hbm_util = _safe_float(derived.get("memory.hbm_bandwidth_utilization"))
+    l2_hit = _safe_float(derived.get("memory.l2_hit_rate"))
+    if hbm_util is not None and hbm_util >= 10.0:
+        return []
+
+    hbm_text = f"{hbm_util:.1f}%" if hbm_util is not None else "unknown"
+    l2_text = f"{l2_hit:.1f}%" if l2_hit is not None else "unknown"
+    return [
+        "## Workload Guidance (HIP search / pointer-chasing)",
+        (
+            "Profiler evidence suggests a latency-bound search workload: "
+            f"HBM utilization={hbm_text}, L2 hit rate={l2_text}."
+        ),
+        "Prioritize branchless search logic, operation-specific specialization, and size-specialized variants.",
+        "Also consider wavefront-cooperative upper-level search and amortized pivot-table narrowing when correctness rules allow it.",
+        "Deprioritize generic vectorization or bandwidth-maximization ideas unless later profiling shows memory throughput is actually the limiter.",
+        "",
+    ]
+
+
 def _bottleneck_guidance(bottleneck: str, metrics: dict) -> list[str]:
     """Return actionable optimization guidance lines based on bottleneck type."""
     bn_lower = bottleneck.lower().strip()
     for key, text in _BOTTLENECK_GUIDANCE.items():
         if key in bn_lower:
             lines = text.strip().splitlines()
+            lines.extend(_search_workload_guidance(metrics))
             lines.append("")
             return lines
 
     lines = _BOTTLENECK_GUIDANCE["balanced"].strip().splitlines()
+    lines.extend(_search_workload_guidance(metrics))
     lines.append("")
     return lines
 
@@ -590,7 +649,7 @@ def inject_pipeline_context(
 
     if benchmark_baseline:
         ctx.append("## Benchmark Baseline (compare your save_and_test output against this)")
-        ctx.append("This is the original kernel's --benchmark output on HARNESS_SHAPES (20-25 shapes).")
+        ctx.append("This is the original kernel's --benchmark output on the harness shape set.")
         ctx.append("Your save_and_test output includes benchmark results -- compare against these numbers.")
         ctx.append(f"```\n{benchmark_baseline.strip()}\n```")
         ctx.append("")

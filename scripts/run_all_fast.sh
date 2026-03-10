@@ -12,7 +12,7 @@ LOG="/home/sapmajum/fast_experiments.log"
 
 log() { echo "[$(date -u '+%H:%M:%S')] $1" | tee -a "$LOG"; }
 
-EXPERIMENTS=(exp0 exp2 exp3 exp4 exp7 exp8 exp10 exp11 exp12 exp_jsonl exp_lancedb)
+EXPERIMENTS=(exp0 exp2 exp3 exp4 exp8 exp_lancedb)
 
 wait_for() {
     local exp="$1"

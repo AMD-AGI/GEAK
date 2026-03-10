@@ -67,6 +67,18 @@ def parse_shape_count(output: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def parse_shape_latencies_ms(output: str) -> dict[str, float]:
+    """Extract per-shape latencies from harness benchmark output.
+
+    Expected format:
+        ``(32,4096): 0.0503 ms``
+    """
+    shape_latencies: dict[str, float] = {}
+    for m in re.finditer(r"^\s*(\([^)]*\)):\s*([\d.]+(?:e[+-]?\d+)?)\s*ms\s*$", output, re.MULTILINE):
+        shape_latencies[m.group(1)] = float(m.group(2))
+    return shape_latencies
+
+
 def _universal_latency_fallback(text: str) -> float | None:
     """Last-resort: find a number near latency-related keywords in the last
     30 lines of output. Handles formats like 'Overall Median: 0.052ms'."""
@@ -112,6 +124,29 @@ def _extract_latency(text: str) -> float | None:
     return _universal_latency_fallback(text)
 
 
+def extract_latency_ms(text: str) -> float | None:
+    """Public wrapper for standardized latency extraction."""
+    return _extract_latency(text)
+
+
+def compute_shape_speedups(
+    baseline_shapes_ms: dict[str, float],
+    candidate_shapes_ms: dict[str, float],
+) -> dict[str, dict[str, float]]:
+    """Compute per-shape speedups for the overlap between baseline and candidate."""
+    results: dict[str, dict[str, float]] = {}
+    for shape, baseline_ms in baseline_shapes_ms.items():
+        candidate_ms = candidate_shapes_ms.get(shape)
+        if candidate_ms is None or baseline_ms <= 0 or candidate_ms <= 0:
+            continue
+        results[shape] = {
+            "baseline_ms": round(baseline_ms, 6),
+            "candidate_ms": round(candidate_ms, 6),
+            "speedup": round(baseline_ms / candidate_ms, 6),
+        }
+    return results
+
+
 def _find_original_baseline_ms(patch_dir: Path) -> float | None:
     """Walk up from patch_dir to find benchmark_baseline.txt (the true baseline).
 
@@ -144,13 +179,20 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
     original_bl = _find_original_baseline_ms(patch_dir)
 
     baseline_file = patch_dir / "patch_0_test.txt"
+    baseline_text = ""
+    baseline_shape_latencies: dict[str, float] = {}
     if original_bl is not None:
         baseline_ms = original_bl
         baseline_source = "benchmark_baseline.txt"
+        baseline_file_path = next((p for p in [patch_dir, *patch_dir.parents] if (p / "benchmark_baseline.txt").is_file()), None)
+        if baseline_file_path is not None:
+            baseline_text = (baseline_file_path / "benchmark_baseline.txt").read_text()
+            baseline_shape_latencies = parse_shape_latencies_ms(baseline_text)
     elif baseline_file.exists():
         baseline_text = baseline_file.read_text()
         baseline_ms = _extract_latency(baseline_text)
         baseline_source = "patch_0_test.txt (FALLBACK)"
+        baseline_shape_latencies = parse_shape_latencies_ms(baseline_text)
     else:
         return None
 
@@ -163,6 +205,8 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
     best_patch_file: str | None = None
     best_test_file: str | None = None
     best_patch_size: int = 0
+    best_shape_speedups: dict[str, dict[str, float]] = {}
+    best_candidate_shape_latencies: dict[str, float] = {}
 
     for test_file in sorted(patch_dir.glob("patch_*_test.txt")):
         name = test_file.stem.replace("_test", "")
@@ -178,6 +222,7 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
         candidate_ms = _extract_latency(candidate_text)
         if candidate_ms is None or candidate_ms <= 0:
             continue
+        candidate_shape_latencies = parse_shape_latencies_ms(candidate_text)
 
         speedup = baseline_ms / candidate_ms
         if speedup > best_speedup:
@@ -187,6 +232,8 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
             best_patch_file = str(patch_file)
             best_test_file = str(test_file)
             best_patch_size = psz
+            best_candidate_shape_latencies = candidate_shape_latencies
+            best_shape_speedups = compute_shape_speedups(baseline_shape_latencies, candidate_shape_latencies)
 
     if best_patch_id is None or best_speedup <= 1.0:
         return None
@@ -200,6 +247,9 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
         "baseline_latency_ms": round(baseline_ms, 6),
         "candidate_latency_ms": round(best_candidate_ms, 6),
         "baseline_source": baseline_source,
+        "baseline_shape_latency_ms": baseline_shape_latencies,
+        "candidate_shape_latency_ms": best_candidate_shape_latencies,
+        "per_shape_speedups": best_shape_speedups,
         "llm_selection_analysis": (
             f"Deterministic: baseline={baseline_ms:.4f}ms ({baseline_source}), "
             f"candidate={best_candidate_ms:.4f}ms from {best_patch_id}. "

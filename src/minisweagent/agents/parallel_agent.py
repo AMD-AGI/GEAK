@@ -16,6 +16,7 @@ from typing import Any
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent, TerminatingException
 from minisweagent.agents.select_patch_agent import run_select_patch
+from minisweagent.debug_runtime import emit_debug_log
 
 
 @dataclass
@@ -734,18 +735,42 @@ class ParallelAgent(DefaultAgent):
                 env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
                 env_config_dict["cwd"] = wt_path_str
                 # Create a NEW dict to avoid shared-reference race across threads
-                env_config_dict["env"] = {
+                patched_env = {
                     **(env_config_dict.get("env") or {}),
                     "HIP_VISIBLE_DEVICES": hip_devices,
                     "GEAK_WORK_DIR": wt_path_str,
                     "GEAK_REPO_ROOT": str(repo_path.resolve()),
                     "GEAK_GPU_DEVICE": hip_devices,
                 }
+                geak_harness = patched_env.get("GEAK_HARNESS")
+                if isinstance(geak_harness, str) and geak_harness:
+                    patched_env["GEAK_HARNESS"] = cls._replace_paths(geak_harness, repo_path, wt_path)
+                env_config_dict["env"] = patched_env
                 parallel_env = type(base_env)(**env_config_dict)
 
                 parallel_output = None
                 if output:
                     parallel_output = output.parent / f"{output.stem}_task_{task_id}{output.suffix}"
+
+                # region agent log
+                emit_debug_log(
+                    "parallel_agent.py:execute_task:before_run",
+                    "Launching parallel optimization worker",
+                    {
+                        "task_id": task_id,
+                        "label": label,
+                        "slot_idx": slot_idx,
+                        "gpu_devices": hip_devices,
+                        "step_limit": cfg.get("step_limit"),
+                        "geak_harness": patched_env.get("GEAK_HARNESS"),
+                        "worktree": wt_path_str,
+                        "patch_dir": str(task_patch_dir),
+                        "patch_dir_entries": sorted(p.name for p in task_patch_dir.iterdir())[:10],
+                        "parallel_output": str(parallel_output) if parallel_output else None,
+                    },
+                    hypothesis_id="H5",
+                )
+                # endregion
 
                 _wm_bm_path = cfg.pop("baseline_metrics", None)
                 _wm_bb_path = cfg.pop("benchmark_baseline", None)
@@ -757,25 +782,60 @@ class ParallelAgent(DefaultAgent):
                     agent.log_file = log_file
 
                 try:
-                    from minisweagent.memory.working_memory import WorkingMemory
-                    _wm = WorkingMemory(
-                        kernel_category=cfg.get("kernel_name", "unknown"),
-                        max_steps=cfg.get("step_limit", int(os.environ.get("GEAK_AGENT_STEP_LIMIT", "100"))),
-                    )
-                    if _wm_bm_path and Path(_wm_bm_path).exists():
-                        import json as _json
-                        _bm = _json.loads(Path(_wm_bm_path).read_text())
-                        if _bm.get("duration_us"):
-                            _wm.baseline_latency_ms = float(_bm["duration_us"]) / 1000.0
-                        if _bm.get("bottleneck"):
-                            _wm.bottleneck_type = str(_bm["bottleneck"])
-                    if _wm_bb_path and Path(_wm_bb_path).exists():
-                        import re as _re
-                        _bb_text = Path(_wm_bb_path).read_text()
-                        _lat_m = _re.search(r'GEAK_RESULT_LATENCY_MS=(\d+\.\d+)', _bb_text)
-                        if _lat_m:
-                            _wm.baseline_latency_ms = float(_lat_m.group(1))
-                    agent._working_memory = _wm
+                    from minisweagent.memory.integration import is_working_memory_enabled
+
+                    if is_working_memory_enabled():
+                        from minisweagent.memory.working_memory import WorkingMemory
+
+                        _wm = WorkingMemory(
+                            kernel_category=cfg.get("kernel_name", "unknown"),
+                            max_steps=cfg.get("step_limit", int(os.environ.get("GEAK_AGENT_STEP_LIMIT", "100"))),
+                        )
+                        if _wm_bm_path and Path(_wm_bm_path).exists():
+                            import json as _json
+
+                            _bm = _json.loads(Path(_wm_bm_path).read_text())
+                            if _bm.get("duration_us"):
+                                _wm.baseline_latency_ms = float(_bm["duration_us"]) / 1000.0
+                            if _bm.get("bottleneck"):
+                                _wm.bottleneck_type = str(_bm["bottleneck"])
+                        if _wm_bb_path and Path(_wm_bb_path).exists():
+                            import re as _re
+
+                            _bb_text = Path(_wm_bb_path).read_text()
+                            _lat_m = _re.search(r'GEAK_RESULT_LATENCY_MS=(\d+\.\d+)', _bb_text)
+                            if _lat_m:
+                                _wm.baseline_latency_ms = float(_lat_m.group(1))
+                        # V2: Generate profiler diagnosis from baseline_metrics
+                        if _wm_bm_path and Path(_wm_bm_path).exists():
+                            try:
+                                _bm2 = _json.loads(Path(_wm_bm_path).read_text())
+                                _top = _bm2.get("top_kernels", [])
+                                if len(_top) > 3:
+                                    _target = _top[0] if _top else {}
+                                    _target_pct = _target.get("pct_of_total", 0)
+                                    _ext_pct = 100 - _target_pct
+                                    _top_summary = "; ".join(
+                                        f"{k.get('name','?')[:40]}: {k.get('duration_us',0):.1f}us ({k.get('pct_of_total',0):.0f}%)"
+                                        for k in _top[:3]
+                                    )
+                                    if _ext_pct > 50:
+                                        _wm.profiler_diagnosis = (
+                                            f"[ARCHITECTURE ALERT] Profiler shows {len(_top)} sub-kernels. "
+                                            f"Top 3: {_top_summary}. "
+                                            f"No single kernel dominates (largest is {_target_pct:.0f}%). "
+                                            "This usually means the entry point dispatches to UNFUSED external library calls. "
+                                            "FIRST ACTION: Check triton_op() for try/except that falls through to aiter or other libraries. "
+                                            "Bypass to use the local fused kernel. Also check for repeat_interleave or .contiguous() calls."
+                                        )
+                                    elif _target_pct > 60:
+                                        _wm.profiler_diagnosis = (
+                                            f"[PROFILER] Target kernel ({_target.get('name','?')[:40]}) dominates at {_target_pct:.0f}%. "
+                                            "Focus optimization on the kernel body itself."
+                                        )
+                            except Exception:
+                                pass
+                        agent._working_memory = _wm
                 except Exception:
                     pass
 
@@ -804,6 +864,25 @@ class ParallelAgent(DefaultAgent):
                                 agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info
                             )
 
+                # region agent log
+                emit_debug_log(
+                    "parallel_agent.py:execute_task:after_run",
+                    "Parallel optimization worker returned from agent.run",
+                    {
+                        "task_id": task_id,
+                        "label": label,
+                        "slot_idx": slot_idx,
+                        "gpu_devices": hip_devices,
+                        "exit_status": str(exit_status),
+                        "result_preview": (str(result)[:300] if result is not None else None),
+                        "has_traceback": bool(extra_info and extra_info.get("traceback")),
+                        "patch_count": len(list(task_patch_dir.glob("*.patch"))),
+                        "best_results_present": (task_patch_dir / "best_results.json").exists(),
+                    },
+                    hypothesis_id="H7",
+                )
+                # endregion
+
                 if console:
                     with _stdout_lock:
                         console.print(f"[bold blue]Task {task_id} ({label}): completed on GPU(s) {hip_devices}[/bold blue]")
@@ -818,14 +897,65 @@ class ParallelAgent(DefaultAgent):
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_slots) as executor:
             futures = {executor.submit(execute_task, tid, task): tid for tid, task in sorted_tasks}
+            # region agent log
+            emit_debug_log(
+                "parallel_agent.py:_run_pool:futures_submitted",
+                "Submitted pool tasks to ThreadPoolExecutor",
+                {
+                    "n_slots": n_slots,
+                    "n_tasks": n_tasks,
+                    "task_ids": [tid for tid, _task in sorted_tasks],
+                },
+                hypothesis_id="H8",
+            )
+            # endregion
             for future in concurrent.futures.as_completed(futures):
                 try:
                     r = future.result()
                     results.append(r)
+                    # region agent log
+                    emit_debug_log(
+                        "parallel_agent.py:_run_pool:future_completed",
+                        "Pool future completed successfully",
+                        {
+                            "task_id": futures[future],
+                            "results_collected": len(results),
+                            "exit_status": str(r[2]) if len(r) > 2 else None,
+                        },
+                        hypothesis_id="H8",
+                    )
+                    # endregion
                 except Exception as e:
                     task_id = futures[future]
                     from minisweagent.utils.log import logger
 
                     logger.error(f"Error in pool task {task_id}: {e}", exc_info=True)
+                    # region agent log
+                    emit_debug_log(
+                        "parallel_agent.py:_run_pool:future_exception",
+                        "Pool future raised exception while collecting result",
+                        {
+                            "task_id": task_id,
+                            "error_type": type(e).__name__,
+                            "error": str(e),
+                            "results_collected": len(results),
+                        },
+                        hypothesis_id="H8",
+                    )
+                    # endregion
+
+        # region agent log
+        emit_debug_log(
+            "parallel_agent.py:_run_pool:after_all_futures",
+            "All pool futures drained and _run_pool is returning",
+            {
+                "results_count": len(results),
+                "task_ids_completed": sorted(
+                    int(r[0]) for r in results if isinstance(r, tuple) and len(r) > 0 and isinstance(r[0], int)
+                ),
+            },
+            hypothesis_id="H9",
+        )
+        # endregion
 
         return results

@@ -74,6 +74,10 @@ class WorkingMemory:
     latency_history: list[float] = field(default_factory=list)
     tuning_steps: int = 0
     algo_steps: int = 0
+    profiler_diagnosis: str = ""
+    noise_floor_pct: float = 0.0
+    consecutive_same_category: int = 0
+    last_change_category: str = ""
 
     def update_step(self, step: int, cost: float):
         """Called after each agent step."""
@@ -151,15 +155,29 @@ class WorkingMemory:
             return f"BUDGET_WARN: ${self.current_cost:.2f}/${self.max_cost:.2f}, step {self.current_step}/{self.max_steps}. ~{int((1-pct)*self.max_steps)} steps remaining."
         return ""
 
+    def record_change_category(self, category: str):
+        """Track consecutive same-category changes for diversity enforcement."""
+        if category == self.last_change_category:
+            self.consecutive_same_category += 1
+        else:
+            self.consecutive_same_category = 1
+            self.last_change_category = category
+        if category == "tuning":
+            self.tuning_steps += 1
+            self.algo_steps = 0
+        elif category in ("algorithmic", "fusion"):
+            self.algo_steps += 1
+            self.tuning_steps = 0
+
     def format_for_injection(self) -> str:
-        """Format working memory for injection into LLM prompt (~800 tokens)."""
+        """Format working memory for injection into LLM prompt."""
         parts = []
 
-        parts.append(f"--- Working Memory (step {self.current_step}, ${self.current_cost:.2f}) ---")
+        parts.append(f"--- Working Memory (step {self.current_step}) ---")
         parts.append(
-            "PRIORITY: (1) Algorithmic kernel body rewrites (different algorithm, fused ops, "
-            "eliminate reshape/flip, split kernels) > (2) Operation fusion > "
-            "(3) Memory/compute restructuring > (4) Parameter tuning (ONLY after exhausting 1-3)."
+            "PRIORITY: (1) Algorithmic kernel rewrites > (2) Operation fusion > "
+            "(3) Memory restructuring > (4) Parameter tuning > "
+            "(5) Dispatch-path / wrapper changes LAST."
         )
 
         best_str = f"{self.best_speedup:.2f}x"
@@ -171,52 +189,77 @@ class WorkingMemory:
         if self.strategies_failed:
             parts.append(f"Failed: {', '.join(self.strategies_failed[-3:])}")
 
-        if self.tuning_steps >= 4 and self.steps_since_improvement >= 3:
+        # V2 Change 1: Profiler-to-architecture diagnosis (first 5 steps only)
+        if self.profiler_diagnosis and self.current_step <= 5:
+            parts.append("")
+            parts.append(self.profiler_diagnosis)
+
+        # V2 Change 6: Insight checkpoint at step 5
+        if self.current_step == 5 and self.best_speedup <= 1.01:
             parts.append(
-                "SWITCH: Parameter tuning saturated. Try algorithmic kernel restructuring "
-                "(split kernel variants, eliminate tl.reshape/tl.flip, fuse adjacent operations)."
+                "[STEP 5 CHECKPOINT] Have you identified the DOMINANT bottleneck? "
+                "Re-read profile.json. Look for: algorithmic shortcuts, fusion opportunities, "
+                "unnecessary memory copies (repeat_interleave), redundant ops, and only then "
+                "dispatch-path mismatches or unfused external library calls."
+            )
+
+        # V2 Change 2: Hard ceiling detector (replaces soft diminishing returns)
+        if self.is_diminishing_returns() and self.tuning_steps >= 3:
+            parts.append(
+                "[CEILING REACHED] Last 3 benchmarks within noise. "
+                "STOP parameter tuning. OPTIONS: (1) SUBMIT best result now, "
+                "(2) Try fundamentally different algorithm, "
+                "(3) Try @triton.autotune with shape-specific configs."
             )
         elif self.is_diminishing_returns():
             parts.append(
-                "DIMINISHING: Last 3 results within 1% of each other. "
-                "Current approach exhausted. Try these (in order): "
-                "(1) @triton.autotune with multiple BLOCK_S/num_warps configs so Triton picks the best per input shape, "
-                "(2) Shape-category dispatch: write 2-3 kernel variants (small S vs large S, or D=64 vs D=128) "
-                "and select in the Python wrapper based on input shape, "
-                "(3) A fundamentally different algorithm for the computation."
+                "[DIMINISHING] Last 3 results within 1%. Try a different approach: "
+                "@triton.autotune, shape-specialized kernel variants, or a different algorithm."
             )
 
+        # V2 Change 4: Approach diversity enforcer
+        if self.consecutive_same_category >= 3:
+            cat = self.last_change_category
+            parts.append(
+                f"[DIVERSITY REQUIRED] Last {self.consecutive_same_category} changes were all {cat.upper()}. "
+                "You MUST try a different category: "
+                + ("ALGORITHMIC or FUSION." if cat == "tuning" else "TUNING or MEMORY LAYOUT." if cat == "algorithmic" else "ALGORITHMIC or TUNING.")
+            )
+
+        # Bottleneck guidance (only when relevant)
         if self.bottleneck_type and self.tuning_steps >= 2:
             _bn_hint = {
-                "balanced": (
-                    "Bottleneck is balanced -- parameter tuning won't help. Focus on algorithmic changes. "
-                    "If improvement varies across input shapes, use @triton.autotune or shape-category dispatch."
-                ),
-                "memory-bound": "Bottleneck is memory -- try vectorized loads, LDS staging, or fuse ops to reduce traffic.",
-                "compute-bound": "Bottleneck is compute -- try MFMA instructions, reduce instruction count, or fuse ops.",
-                "latency-bound": (
-                    "Bottleneck is latency -- increase work per kernel, fuse with adjacent kernels. "
-                    "If geomean is low despite some shapes improving, use @triton.autotune to pick optimal config per shape."
-                ),
+                "balanced": "Bottleneck: balanced -- parameter tuning won't help. Focus on algorithmic changes or fusion; treat dispatch-path edits as a last resort.",
+                "memory-bound": "Bottleneck: memory -- try vectorized loads, LDS staging, or fuse ops.",
+                "compute-bound": "Bottleneck: compute -- try MFMA, reduce instructions, or fuse ops.",
+                "latency-bound": "Bottleneck: latency -- increase work per kernel, fuse with adjacent kernels, or try @triton.autotune.",
             }
             hint = _bn_hint.get(self.bottleneck_type)
             if hint:
                 parts.append(hint)
 
-        # Insight buffer (~200 tokens)
+        # V2 Change 5: Benchmark noise awareness
+        if self.noise_floor_pct > 0 and self.tuning_steps >= 2:
+            parts.append(f"Noise floor: ±{self.noise_floor_pct:.1f}%. Changes below this are NOISE, not signal.")
+
+        # Insight buffer
         if self.insights:
             parts.append("")
             parts.append("Recent insights:")
             for ins in self.insights[-MAX_INSIGHTS:]:
                 parts.append(f"  {ins.format()}")
 
-        # Progress signal (~100 tokens)
-        progress = self.get_progress_signal()
-        if progress:
-            parts.append("")
-            parts.append(progress)
+        # V2 Change 7: Early submission trigger
+        if self.steps_since_improvement > 8 and self.current_step > self.max_steps * 0.4:
+            parts.append(
+                f"[SUBMIT NOW] Best={self.best_speedup:.2f}x at step {self.best_speedup_step}. "
+                f"No improvement in {self.steps_since_improvement} steps. Submit and let next round try differently."
+            )
+        else:
+            progress = self.get_progress_signal()
+            if progress:
+                parts.append(progress)
 
-        # Budget signal (~100 tokens)
         budget = self.get_budget_signal()
         if budget:
             parts.append(budget)
@@ -244,26 +287,80 @@ def classify_change(text: str) -> str:
     return "wrapper"
 
 
-def summarize_change(text: str) -> str:
-    """Extract a brief ALGO/TUNE/FUSION prefix from code content."""
+def _summarize_change(text: str) -> str:
+    """Summarize a change from diff-like text in a backend-agnostic way."""
+    if not text:
+        return "EDIT"
+
+    diff_lines: list[str] = []
+    added_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith(("+++ ", "--- ")):
+            continue
+        if line.startswith("@@"):
+            diff_lines.append(line)
+            continue
+        if line.startswith(("+", "-")) and len(line) > 1:
+            body = line[1:].strip()
+            diff_lines.append(body)
+            if line.startswith("+"):
+                added_lines.append(body)
+            continue
+        if (
+            '"old_str"' in line
+            or '"new_str"' in line
+            or '"old_string"' in line
+            or '"new_string"' in line
+            or '"old_text"' in line
+            or '"new_text"' in line
+        ):
+            diff_lines.append(line)
+            if '"new_str"' in line or '"new_string"' in line or '"new_text"' in line:
+                added_lines.append(line)
+
+    haystack = "\n".join(diff_lines) if diff_lines else text
+    haystack = haystack[:4000]
+    added_haystack = "\n".join(added_lines)[:4000]
+    search_spaces = [added_haystack, haystack] if added_haystack else [haystack]
+
+    for space in search_spaces:
+        specific_tuning = re.search(
+            r'\b(num_warps|num_stages|waves_per_eu|items_per_thread|threads_per_block|warps_per_block|'
+            r'BLOCK[_A-Z0-9]*|TILE[_A-Z0-9]*|GROUP[_A-Z0-9]*)\s*=\s*([0-9]+)\b',
+            space,
+            re.IGNORECASE,
+        )
+        if specific_tuning:
+            return f"TUNE({specific_tuning.group(1)}={specific_tuning.group(2)})"
+
     indicators = [
-        (r'tl\.flip|tl\.reshape', 'ALGO(reshape/flip change)'),
-        (r'def \w+_kernel\w*\(', 'ALGO(new/split kernel)'),
-        (r'half.dim|BLOCK_D_HALF|x1.*x2', 'ALGO(half-dim loads)'),
-        (r'fuse|fusion|fused_', 'FUSION(fused ops)'),
-        (r'scale_inv|precompute', 'ALGO(precompute)'),
-        (r'contiguous|stride.*removed', 'ALGO(memory layout)'),
-        (r'vectori|float[24]', 'ALGO(vectorized access)'),
-        (r'BLOCK_S\s*=\s*(\d+)', 'TUNE(BLOCK_S={})'),
-        (r'num_warps\s*=\s*(\d+)', 'TUNE(num_warps={})'),
-        (r'num_stages\s*=\s*(\d+)', 'TUNE(num_stages={})'),
-        (r'@triton\.autotune', 'TUNE(autotune)'),
+        (r'@triton\.autotune|triton\.Config|autotun', 'TUNE(autotune/config)'),
+        (
+            r'\b(aiter|ck|tensile|rocblas|cublas|cutlass|flash_attention|'
+            r'scaled_dot_product_attention|enable_gqa|dispatch)\b',
+            'PATH(dispatch/backend)',
+        ),
+        (r'\b(fuse|fuses|fused|fusing|merge\w*|combine\w*|single[-_ ]pass)\b', 'FUSION(op merge)'),
+        (
+            r'\b(repeat_interleave|contiguous|reshape|view|expand|transpose|permute|stride|layout)\b',
+            'ALGO(data layout)',
+        ),
+        (r'\b(vector\w*|float2|float4|half2|half4|int2|int4|packed|simd|mfma|wmma)\b', 'ALGO(vectorization)'),
+        (r'\b(__shared__|shared memory|lds|smem|cache\w*|prefetch|register\w*|coalesc\w*)\b', 'ALGO(memory hierarchy)'),
+        (r'__global__|__device__|@triton\.jit|template\s*<|def\s+\w+\(|struct\s+\w+|class\s+\w+', 'ALGO(new kernel/helper)'),
+        (r'\b(reduce\w*|scan\w*|sort\w*|heap\w*|bitonic|radix|attention|matmul|gemm|tile\w*|split\w*)\b', 'ALGO(algorithm rewrite)'),
     ]
-    for pat, desc in indicators:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            return desc.format(m.group(1)) if '{}' in desc and m.lastindex else desc
+    for space in search_spaces:
+        for pat, desc in indicators:
+            if re.search(pat, space, re.IGNORECASE):
+                return desc
     return "EDIT"
+
+
+def summarize_change(text: str) -> str:
+    """Backward-compatible public wrapper for change summarization."""
+    return _summarize_change(text)
 
 
 def extract_strategy_from_edit(edit_content: str) -> str | None:
@@ -291,6 +388,9 @@ def extract_insight_from_tool_result(tool_name: str, output: str, returncode: in
     latency_match = re.search(r'GEAK_RESULT_LATENCY_MS=(\d+\.\d+)', output)
     if latency_match:
         lat = float(latency_match.group(1))
+        change_desc = _summarize_change(output)
+        if change_desc != "EDIT":
+            return Insight(step=0, tag="OK", message=f"{change_desc} -> latency: {lat:.4f}ms")
         return Insight(step=0, tag="OK", message=f"Benchmark latency: {lat:.4f}ms")
 
     # Speedup results

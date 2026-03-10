@@ -19,6 +19,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from minisweagent.debug_runtime import emit_debug_log
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 
@@ -40,6 +41,7 @@ from minisweagent.run.pipeline_helpers import (
     execute_harness_validation,
     extract_harness_path,
     run_baseline_profile,
+    validate_harness,
 )
 
 # ── main entry point ─────────────────────────────────────────────────
@@ -165,7 +167,83 @@ def run_preprocessor(
     test_command = None
     harness_results: list[dict] | None = None
     _uta_model = model or (model_factory() if model_factory else None)
-    if _uta_model and repo_root:
+    _discovery_harness_candidates: list[tuple[str, str, str]] = []
+    for t in tests[:5]:
+        cmd = t.get("command")
+        path = t.get("file")
+        if not cmd or not path:
+            continue
+        harness_path = extract_harness_path(cmd)
+        if Path(harness_path).is_file():
+            _discovery_harness_candidates.append((cmd, harness_path, "discovery_test"))
+    focused = disc_dict.get("focused_test") or {}
+    focused_cmd = focused.get("focused_command")
+    if focused_cmd:
+        focused_harness = extract_harness_path(focused_cmd)
+        if Path(focused_harness).is_file():
+            _discovery_harness_candidates.append((focused_cmd, focused_harness, "focused_test"))
+
+    _seen_harnesses: set[str] = set()
+    for candidate_cmd, candidate_harness, source in _discovery_harness_candidates:
+        if candidate_harness in _seen_harnesses:
+            continue
+        _seen_harnesses.add(candidate_harness)
+        try:
+            ok_static, static_errors = validate_harness(candidate_harness)
+            if not ok_static:
+                continue
+            ok_runtime, runtime_errors, candidate_results = execute_harness_validation(
+                candidate_harness,
+                repo_root=repo_root,
+                gpu_id=gpu_id,
+            )
+            if not ok_runtime:
+                continue
+
+            test_command = candidate_cmd
+            harness_results = candidate_results
+            ctx["harness_path"] = candidate_harness
+            _print(f"  Using discovered harness directly: {candidate_harness}")
+            for r in harness_results:
+                status = "PASS" if r["success"] else "FAIL"
+                _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
+            _print("  Harness execution: ALL MODES PASSED")
+            # region agent log
+            emit_debug_log(
+                "preprocessor.py:run_preprocessor:harness_fast_path",
+                "Used discovery-provided harness instead of UnitTestAgent",
+                {
+                    "kernel_path": kernel_path,
+                    "source": source,
+                    "harness_path": candidate_harness,
+                    "modes": [
+                        {
+                            "mode": r.get("mode"),
+                            "success": bool(r.get("success")),
+                            "returncode": r.get("returncode"),
+                        }
+                        for r in harness_results
+                    ],
+                },
+                hypothesis_id="H6",
+            )
+            # endregion
+            break
+        except Exception:
+            continue
+
+    if test_command is None and _uta_model and repo_root:
+        # region agent log
+        emit_debug_log(
+            "preprocessor.py:run_preprocessor:harness_agent_fallback",
+            "Falling back to UnitTestAgent for harness creation",
+            {
+                "kernel_path": kernel_path,
+                "candidate_count": len(_seen_harnesses),
+            },
+            hypothesis_id="H6",
+        )
+        # endregion
         _print(
             "[bold cyan]--- Step 3b/3c: UnitTestAgent (harness creation + execution) ---[/bold cyan]"
             if console
@@ -393,6 +471,47 @@ def run_preprocessor(
     ctx["commandment"] = commandment
     if commandment:
         (output_dir / "COMMANDMENT.md").write_text(commandment)
+
+    # region agent log
+    emit_debug_log(
+        "preprocessor.py:run_preprocessor:complete",
+        "Preprocessor completed with artifact summary",
+        {
+            "kernel_url": kernel_url,
+            "kernel_path": kernel_path,
+            "repo_root": repo_root,
+            "tests_found": len(tests),
+            "has_test_command": bool(test_command),
+            "harness_path": ctx.get("harness_path"),
+            "harness_modes": (
+                {
+                    r.get("mode", "?"): {
+                        "success": bool(r.get("success")),
+                        "returncode": r.get("returncode"),
+                    }
+                    for r in (harness_results or [])
+                }
+            ),
+            "benchmark_baseline_present": bool(benchmark_baseline),
+            "full_benchmark_baseline_present": bool(full_benchmark_baseline),
+            "profiling_success": None if profiling is None else bool(profiling.get("success", True)),
+            "baseline_bottleneck": (baseline_metrics or {}).get("bottleneck"),
+            "baseline_duration_us": (baseline_metrics or {}).get("duration_us"),
+            "commandment_present": bool(commandment),
+            "artifacts": {
+                "resolved.json": (output_dir / "resolved.json").exists(),
+                "discovery.json": (output_dir / "discovery.json").exists(),
+                "harness_results.json": (output_dir / "harness_results.json").exists(),
+                "benchmark_baseline.txt": (output_dir / "benchmark_baseline.txt").exists(),
+                "full_benchmark_baseline.txt": (output_dir / "full_benchmark_baseline.txt").exists(),
+                "profile.json": (output_dir / "profile.json").exists(),
+                "baseline_metrics.json": (output_dir / "baseline_metrics.json").exists(),
+                "COMMANDMENT.md": (output_dir / "COMMANDMENT.md").exists(),
+            },
+        },
+        hypothesis_id="H3",
+    )
+    # endregion
 
     _print("")
     _print("Preprocessing complete. Artefacts written to: " + str(output_dir))

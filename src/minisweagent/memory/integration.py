@@ -29,6 +29,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+from minisweagent.debug_runtime import emit_debug_log
+
 
 def _is_disabled(env_var: str) -> bool:
     return os.environ.get(env_var, "").strip() in ("1", "true", "yes")
@@ -139,6 +141,10 @@ def _format_factory_outcomes(
 
 def is_memory_enabled() -> bool:
     return not _is_disabled("GEAK_MEMORY_DISABLE")
+
+
+def is_working_memory_enabled() -> bool:
+    return is_memory_enabled() and not _is_disabled("GEAK_MEMORY_NO_WORKING")
 
 
 def assemble_memory_context(
@@ -351,6 +357,25 @@ def record_optimization_outcome(
 ) -> None:
     if not is_memory_enabled():
         return
+
+    # region agent log
+    emit_debug_log(
+        "integration.py:record_optimization_outcome:entry",
+        "Attempting to record optimization outcome",
+        {
+            "kernel_path": kernel_path,
+            "kernel_category": kernel_category,
+            "strategy_name": strategy_name,
+            "speedup_achieved": speedup_achieved,
+            "success": success,
+            "failure_reason": failure_reason,
+            "steps_taken": steps_taken,
+            "cross_session_enabled": not _is_disabled("GEAK_MEMORY_NO_CROSSSESSION"),
+            "patch_file_exists": bool(patch_file and Path(patch_file).exists()),
+        },
+        hypothesis_id="H4",
+    )
+    # endregion
 
     if not _is_disabled("GEAK_MEMORY_NO_CROSSSESSION"):
         try:

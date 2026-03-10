@@ -422,17 +422,50 @@ class DefaultAgent:
                     for m in reversed(self.messages):
                         if m.get("role") == "assistant":
                             last_assistant = m.get("content", "")
+                            tool_calls = m.get("tool_calls")
+                            if tool_calls:
+                                try:
+                                    calls = tool_calls if isinstance(tool_calls, list) else [tool_calls]
+                                    payloads = []
+                                    for call in calls:
+                                        if not isinstance(call, dict):
+                                            continue
+                                        tool_args = call.get("function", {}).get("arguments", {})
+                                        if isinstance(tool_args, str):
+                                            try:
+                                                tool_args = json.loads(tool_args)
+                                            except Exception:
+                                                pass
+                                        if isinstance(tool_args, dict):
+                                            edit_keys = (
+                                                "old_str",
+                                                "new_str",
+                                                "old_string",
+                                                "new_string",
+                                                "old_text",
+                                                "new_text",
+                                            )
+                                            edit_args = {
+                                                k: tool_args[k]
+                                                for k in edit_keys
+                                                if k in tool_args
+                                            }
+                                            if edit_args:
+                                                payloads.append(json.dumps(edit_args, ensure_ascii=False))
+                                        elif isinstance(tool_args, str) and tool_args.strip():
+                                            payloads.append(tool_args)
+                                    if payloads:
+                                        # Prefer real edit payloads over assistant prose so WM labels
+                                        # are driven by the diff, not by task/context text.
+                                        last_assistant = "\n".join(payloads)
+                                except Exception:
+                                    pass
                             break
                     strat = extract_strategy_from_edit(last_assistant)
                     if strat:
                         change_type = classify_change(last_assistant)
                         _wm.record_strategy(strat, True)
-                        if change_type == "tuning":
-                            _wm.tuning_steps += 1
-                            _wm.algo_steps = 0
-                        elif change_type in ("algorithmic", "fusion"):
-                            _wm.algo_steps += 1
-                            _wm.tuning_steps = 0
+                        _wm.record_change_category(change_type)
             except Exception:
                 pass
 
