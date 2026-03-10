@@ -230,11 +230,20 @@ class DiscoveryResult:
         points should use this instead of inline dict unpacking.
         """
         kp = Path(kernel_path)
-        kernel_info = disc_dict.get("kernel") or {}
+        raw_kernel = disc_dict.get("kernel")
+        if isinstance(raw_kernel, list):
+            kernel_entries = raw_kernel
+        elif isinstance(raw_kernel, dict):
+            kernel_entries = [raw_kernel]
+        else:
+            kernel_entries = []
+
         kernels: list[KernelInfo] = []
-        if kernel_info.get("file"):
+        for kernel_info in kernel_entries:
+            if not isinstance(kernel_info, dict) or not kernel_info.get("file"):
+                continue
             ktype = kernel_info.get("type", "unknown")
-            klang = _infer_kernel_language(kp, ktype)
+            klang = _infer_kernel_language(Path(kernel_info["file"]), ktype)
 
             _build_info: BuildInfo | None = None
             if klang == "cpp":
