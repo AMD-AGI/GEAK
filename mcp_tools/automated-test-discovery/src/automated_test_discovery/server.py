@@ -263,7 +263,9 @@ def _expand_workspace(kernel_path: Path) -> Path:
 def _get_kernel_type(content: str, suffix: str = "") -> str:
     if "@triton" in content or "tl." in content:
         return "triton"
-    if "ck_tile::" in content or "ck::tile" in content or "#include <ck_tile/" in content:
+    if "ck::" in content or "#include <ck/" in content:
+        return "ck"
+    if "ck_tile::" in content or "#include <ck_tile/" in content:
         return "ck"
     if "__global__" in content and "hip" in content.lower():
         return "hip"
