@@ -427,7 +427,7 @@ def _llm_finalize_discovery(
 
 def _find_kernels_in_dir(directory: Path) -> list[dict]:
     """Recursively scan *directory* for kernel files and return info dicts."""
-    extensions = {".py", ".cpp", ".cc", ".cu", ".hip"}
+    extensions = {".py", ".cpp", ".cc", ".cu", ".hip", ".hpp", ".inc"}
     kernels: list[dict] = []
     for candidate in directory.rglob("*"):
         if not candidate.is_file():

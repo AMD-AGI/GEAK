@@ -103,6 +103,8 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tu
             )
     except Exception as e:
         console.print(f"[yellow]Discovery failed: {e}[/yellow]")
+        import traceback
+        traceback.print_exc()
     return ""
 
 
