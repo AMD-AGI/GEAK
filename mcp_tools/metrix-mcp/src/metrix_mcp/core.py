@@ -144,6 +144,7 @@ class MetrixTool:
         kernel_filter: str = None,
         auto_select: bool = False,
         quick: bool = False,
+        cwd: str = None,
     ) -> dict[str, Any]:
         """
         Profile a kernel using metrix.
@@ -184,7 +185,7 @@ class MetrixTool:
         # Always return a list for consistency
         results_list = []
         for device in self.gpu_devices:
-            result = self._profile_single_gpu(device, command, num_replays, kernel_filter, auto_select, quick)
+            result = self._profile_single_gpu(device, command, num_replays, kernel_filter, auto_select, quick, cwd)
             # Add device_id to the result
             result["device_id"] = device
             results_list.append(result)
@@ -202,6 +203,7 @@ class MetrixTool:
         kernel_filter: str,
         auto_select: bool,
         quick: bool,
+        cwd: str
     ) -> dict[str, Any]:
         """Profile on a single GPU."""
         logger.info(f"Profiling GPU {device}...")
@@ -218,6 +220,7 @@ class MetrixTool:
                 num_replays=num_replays,
                 aggregate_by_kernel=True,
                 kernel_filter=kernel_filter,
+                cwd=cwd,
             )
         finally:
             # Restore original HIP_VISIBLE_DEVICES

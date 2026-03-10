@@ -128,6 +128,11 @@ class MCPToolBridge:
 
     def _shutdown_loop(self):
         """Stop the background loop (called at exit or manually)."""
+        if self._client:
+            try:
+                self._run_async(self._client.stop())
+            except Exception:
+                pass
         loop = self._loop
         if loop is None or loop.is_closed():
             return

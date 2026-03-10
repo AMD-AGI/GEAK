@@ -80,6 +80,8 @@ class BashCommand:
             if "COMMANDMENT.md" in command:
                 output_text = self._maybe_validate_commandment(command, output_text)
 
+            if not output_text:
+                output_text = "Bash command executed successfully."
             return {
                 "output": output_text,
                 "returncode": result.returncode,
