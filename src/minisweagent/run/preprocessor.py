@@ -136,13 +136,50 @@ def _patch_ck_dump_output(example_dir: Path) -> list[Path]:
     return modified
 
 
+def _find_ck_root(example_dir: Path) -> Path | None:
+    """Walk up from *example_dir* to find the CK project root.
+
+    The CK root is identified by having a top-level ``CMakeLists.txt``
+    that contains a ``project(composable_kernel ...)`` directive.  If no
+    such ancestor is found, returns ``None``.
+    """
+    candidate = example_dir.resolve()
+    for _ in range(10):
+        cmake = candidate / "CMakeLists.txt"
+        if cmake.exists():
+            try:
+                text = cmake.read_text(errors="replace")
+                if "project(composable_kernel" in text:
+                    return candidate
+            except OSError:
+                pass
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    return None
+
+
 def _build_ck_binary(
     example_dir: Path,
     build_dir: Path,
     cmake_target: str,
 ) -> Path | None:
-    """Configure and build the CK example, returning the binary path."""
+    """Configure and build the CK example, returning the binary path.
+
+    CK examples cannot be built in isolation — their ``CMakeLists.txt``
+    files depend on functions (``add_example_executable``) defined by the
+    parent project.  We therefore configure CMake from the CK project
+    root and build only the requested target.
+    """
     import subprocess
+
+    ck_root = _find_ck_root(example_dir)
+    if ck_root is None:
+        logger.error(
+            "Could not locate CK project root from %s", example_dir,
+        )
+        return None
 
     build_dir.mkdir(parents=True, exist_ok=True)
 
@@ -153,11 +190,11 @@ def _build_ck_binary(
             "-DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc",
             "-DCMAKE_PREFIX_PATH=/opt/rocm",
             "-DGPU_TARGETS=gfx942",
-            "-S", str(example_dir),
+            "-S", str(ck_root),
             "-B", str(build_dir),
         ]
         result = subprocess.run(
-            configure_cmd, capture_output=True, text=True, timeout=300,
+            configure_cmd, capture_output=True, text=True, timeout=600,
         )
         if result.returncode != 0:
             logger.error("cmake configure failed:\n%s", result.stderr)
