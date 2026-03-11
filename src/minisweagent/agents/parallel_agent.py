@@ -267,6 +267,28 @@ class ParallelAgent(DefaultAgent):
         if num_parallel == 1:
             # For single run, save patches directly to base_patch_dir (no parallel_0 subdirectory)
             base_patch_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Determine workspace path for single agent
+            single_repo_path = (
+                Path(self.config.repo).resolve()
+                if self.config.repo
+                else Path(getattr(self.env.config, "cwd", None) or os.getcwd()).resolve()
+            )
+            
+            # Bootstrap git repo and commit baseline (same as parallel mode)
+            # This is required for: 1) save_and_test to generate patches, 2) reset to baseline later
+            if not _is_real_git_repo(single_repo_path):
+                if console:
+                    console.print(f"[bold yellow]Directory {single_repo_path} is not a git repo, bootstrapping...[/bold yellow]")
+                if not _bootstrap_git_repo(single_repo_path, console):
+                    if console:
+                        console.print("[bold red]Warning: Failed to bootstrap git repo. Patch generation may not work.[/bold red]")
+            else:
+                # Commit any pending changes as baseline
+                if not _commit_pending_changes(single_repo_path, console):
+                    if console:
+                        console.print("[bold yellow]Warning: Failed to commit baseline state.[/bold yellow]")
+            
             prev_patch_output_dir = self.config.patch_output_dir
             self.config.patch_output_dir = str(base_patch_dir)
             try:
@@ -284,6 +306,13 @@ class ParallelAgent(DefaultAgent):
             if best_result and console and best_result.llm_conclusion:
                 console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
                 console.print(best_result.llm_conclusion)
+            # Ensure the selected best patch is applied to the original workspace (repo/cwd).
+            # This is critical for external evaluators that run on the original workspace
+            # rather than the agent's internal state.
+            try:
+                self._apply_best_patch(base_patch_dir, target_dir=single_repo_path)
+            except Exception:
+                pass
             return exit_status, result
 
         if not self.config.repo:
@@ -340,6 +369,14 @@ class ParallelAgent(DefaultAgent):
         if best_result and console and best_result.llm_conclusion:
             console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
             console.print(best_result.llm_conclusion)
+
+        # Apply selected best patch back to the original repo path (not the worktree).
+        # The parallel agents modify isolated worktrees; without this, the original
+        # workspace remains unmodified.
+        try:
+            self._apply_best_patch(base_patch_dir, target_dir=repo_path)
+        except Exception:
+            pass
 
         if results:
             return results[0][2], results[0][3]

@@ -380,8 +380,135 @@ class DefaultAgent:
             task = select_agent.setup_selection_task(base_patch_dir, num_parallel, self.config.metric)
             if task:
                 select_agent.run(task, _skip_select_patch=True)
+            # Apply the selected best patch back to the original workspace so downstream
+            # evaluators (that run on the original cwd/repo) see the best patch content.
+            self._apply_best_patch(base_patch_dir)
         except Exception:
             # Best-effort: selection should not block returning the agent's final output.
+            return
+
+    @staticmethod
+    def _is_git_repo(path: Path) -> bool:
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def _apply_patch_file(self, patch_file: Path, target_dir: Path) -> tuple[bool, str]:
+        """Apply a unified diff patch file to target_dir (best-effort, non-interactive)."""
+        patch_file = patch_file.resolve()
+        target_dir = target_dir.resolve()
+
+        if not patch_file.exists():
+            return False, f"Patch file not found: {patch_file}"
+        if not target_dir.exists():
+            return False, f"Target directory not found: {target_dir}"
+
+        # Prefer git apply when available inside a git repo (better diagnostics).
+        if self._is_git_repo(target_dir):
+            try:
+                r = subprocess.run(
+                    ["git", "-C", str(target_dir), "apply", "--whitespace=nowarn", str(patch_file)],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if r.returncode == 0:
+                    return True, (r.stdout + r.stderr).strip()
+                git_err = (r.stdout + r.stderr).strip()
+            except Exception as e:
+                git_err = str(e)
+        else:
+            git_err = "target is not a git repo"
+
+        # Fallback: GNU patch (works outside git repos). Try -p1 (git-style) then -p0.
+        for strip in ("1", "0"):
+            try:
+                r = subprocess.run(
+                    ["patch", f"-p{strip}", "--batch", "--forward", "-i", str(patch_file)],
+                    cwd=target_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if r.returncode == 0:
+                    return True, (r.stdout + r.stderr).strip()
+            except FileNotFoundError:
+                return False, f"Neither git apply nor patch succeeded (patch not installed). git error: {git_err}"
+            except Exception:
+                continue
+
+        return False, f"Failed to apply patch. git error: {git_err}"
+
+    def _reset_to_baseline(self, target_dir: Path) -> tuple[bool, str]:
+        """Reset target_dir to baseline state (HEAD commit) before applying best patch.
+        
+        This is necessary because the agent may have applied multiple patches during
+        optimization, and the current file state may not be the best patch.
+        """
+        target_dir = target_dir.resolve()
+        if not self._is_git_repo(target_dir):
+            return False, "target is not a git repo, cannot reset to baseline"
+        
+        try:
+            # Use git checkout . to discard all unstaged changes (safer than reset --hard)
+            r = subprocess.run(
+                ["git", "-C", str(target_dir), "checkout", "."],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if r.returncode == 0:
+                return True, "reset to baseline (HEAD) successful"
+            return False, (r.stdout + r.stderr).strip()
+        except Exception as e:
+            return False, str(e)
+
+    def _apply_best_patch(self, base_patch_dir: Path, target_dir: Path | None = None) -> None:
+        """Reset to baseline and apply best_patch_file from best_results.json to target_dir.
+        
+        Important: The agent may have tried multiple patches. The final file state is
+        the LAST modification, not necessarily the BEST patch. So we must:
+        1. Reset to baseline (clean state before any agent modifications)
+        2. Apply the selected best patch
+        """
+        try:
+            best_file = (base_patch_dir / "best_results.json").resolve()
+            if not best_file.exists():
+                return
+            best_results = json.loads(best_file.read_text())
+            patch_path = best_results.get("best_patch_file")
+            if not patch_path:
+                return
+            patch_file = Path(patch_path)
+
+            if target_dir is None:
+                target_dir = (self.base_repo_path or Path(getattr(self.env.config, "cwd", None) or os.getcwd())).resolve()
+
+            # Step 1: Reset to baseline before applying best patch
+            self._log_message(f"[SelectPatch] Resetting {target_dir} to baseline before applying best patch...")
+            reset_ok, reset_msg = self._reset_to_baseline(target_dir)
+            if reset_ok:
+                self._log_message(f"[SelectPatch] {reset_msg}")
+            else:
+                self._log_message(f"[SelectPatch] Warning: Could not reset to baseline: {reset_msg}")
+                # Continue anyway - maybe the patch can still be applied
+
+            # Step 2: Apply best patch
+            self._log_message(f"[SelectPatch] Applying best patch to {target_dir}: {patch_file}")
+            ok, msg = self._apply_patch_file(patch_file, target_dir)
+            if ok:
+                self._log_message("[SelectPatch] Best patch applied successfully.")
+            else:
+                self._log_message(f"[SelectPatch] Failed to apply best patch: {msg}")
+        except Exception:
+            # Best-effort: never block agent completion.
             return
 
     def execute_action(self, action: dict) -> dict:
