@@ -83,12 +83,12 @@ def load_geak_model(
     from minisweagent.config import get_config_path
     from minisweagent.models import get_model
 
-    resolved_name = model_name or os.environ.get("GEAK_MODEL")
     cfg_path = get_config_path(config_spec)
     model_config: dict[str, Any] = {}
     if cfg_path.exists():
         full_cfg = yaml.safe_load(cfg_path.read_text()) or {}
         model_config = full_cfg.get("model", {})
+    resolved_name = model_name or model_config.get("model_name") or os.environ.get("GEAK_MODEL")
 
     return get_model(resolved_name, config=model_config)
 
@@ -104,12 +104,12 @@ def geak_model_factory(
     from minisweagent.config import get_config_path
     from minisweagent.models import get_model
 
-    resolved_name = model_name or os.environ.get("GEAK_MODEL")
     cfg_path = get_config_path(config_spec)
     model_config: dict[str, Any] = {}
     if cfg_path.exists():
         full_cfg = yaml.safe_load(cfg_path.read_text()) or {}
         model_config = full_cfg.get("model", {})
+    resolved_name = model_name or model_config.get("model_name") or os.environ.get("GEAK_MODEL")
 
     def _factory():
         return get_model(resolved_name, config=copy.deepcopy(model_config))

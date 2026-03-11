@@ -261,7 +261,13 @@ def run_preprocessor(
         raise RuntimeError(f"resolve-kernel-url failed: {resolved['error']}")
 
     kernel_path = resolved["local_file_path"]
-    repo_root = resolved.get("local_repo_path") or str(Path(kernel_path).parent)
+    _kp = Path(kernel_path)
+    if resolved.get("local_repo_path"):
+        repo_root = resolved["local_repo_path"]
+    elif _kp.is_dir():
+        repo_root = str(_kp)
+    else:
+        repo_root = str(_kp.parent)
     ctx["resolved"] = resolved
     ctx["kernel_path"] = kernel_path
     ctx["repo_root"] = repo_root
