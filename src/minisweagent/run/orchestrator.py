@@ -958,6 +958,7 @@ def _run_homogeneous_orchestrator(
     _print,
     console,
     model_factory=None,
+    agent_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the orchestrator in homogeneous mode.
 
@@ -1039,6 +1040,7 @@ def _run_homogeneous_orchestrator(
                 output_dir=results_dir,
                 model_factory=model_factory,
                 console=console,
+                extra_agent_config=agent_config,
             )
         except Exception as exc:
             _print(f"  [yellow]Round {round_num} dispatch failed: {exc}[/yellow]")
@@ -1237,6 +1239,7 @@ def run_orchestrator(
     start_round: int = 1,
     heterogeneous: bool = False,
     console=None,
+    agent_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the orchestrator agent loop.
 
@@ -1283,6 +1286,7 @@ def run_orchestrator(
         return _run_homogeneous_orchestrator(
             preprocess_ctx, gpu_ids, _out, max_rounds, start_round, _print, console,
             model_factory=model_factory,
+            agent_config=agent_config,
         )
 
     # Build DiscoveryResult from preprocessor's discovery dict
