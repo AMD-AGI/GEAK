@@ -687,7 +687,7 @@ def discover(
                     pass
 
             test_score = _score_as_test(file_path)
-            if test_score >= 0.3:
+            if (test_score >= 0.3 and relevance >= 2.5) or (test_score >= 2.0 and relevance >= 0.3):
                 combined = test_score + relevance
                 tests.append(
                     {
@@ -699,7 +699,7 @@ def discover(
                 )
 
             bench_score = _score_as_bench(file_path)
-            if bench_score >= 0.3:
+            if (bench_score >= 0.3 and relevance >= 2.5) or (bench_score >= 2.0 and relevance >= 0.3):
                 combined = bench_score + relevance
                 benchmarks.append(
                     {
