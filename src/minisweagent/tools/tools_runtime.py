@@ -126,6 +126,9 @@ class ToolRuntime:
         evolve = MCPToolBridge("kernel-evolve", timeout=300)
         self._mcp_bridges.append(evolve)
         self._tool_table["generate_optimization"] = evolve.tool("generate_optimization")
+        self._tool_table["mutate_kernel"] = evolve.tool("mutate_kernel")
+        self._tool_table["crossover_kernels"] = evolve.tool("crossover_kernels")
+        self._tool_table["get_optimization_strategies"] = evolve.tool("get_optimization_strategies")
 
         ercs = MCPToolBridge("kernel-ercs", timeout=300)
         self._mcp_bridges.append(ercs)

@@ -268,6 +268,84 @@
     }
   },
   {
+    "name": "mutate_kernel",
+    "type": "function",
+    "description": "Mutate an existing kernel optimization to explore variations. Makes intelligent changes based on mutation type (parameter tuning, algorithmic change, or hybrid). Use when you have a promising kernel and want to explore nearby variants.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kernel_code": {
+          "type": "string",
+          "description": "The current kernel code to mutate"
+        },
+        "mutation_type": {
+          "type": "string",
+          "enum": ["parameter", "algorithm", "hybrid"],
+          "description": "Type of mutation: parameter (block sizes, warps), algorithm (different approach), hybrid (add technique)"
+        },
+        "latency_us": {
+          "type": "number",
+          "description": "Current latency in microseconds (for context)"
+        },
+        "speedup": {
+          "type": "number",
+          "description": "Current speedup vs baseline (for context)"
+        }
+      },
+      "required": [
+        "kernel_code"
+      ]
+    }
+  },
+  {
+    "name": "crossover_kernels",
+    "type": "function",
+    "description": "Combine two kernel optimizations to create a hybrid that takes the best aspects of both parents. Use when you have two promising variants with different strengths.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kernel1": {
+          "type": "string",
+          "description": "First parent kernel code"
+        },
+        "kernel2": {
+          "type": "string",
+          "description": "Second parent kernel code"
+        },
+        "speedup1": {
+          "type": "number",
+          "description": "Speedup of first parent vs baseline"
+        },
+        "speedup2": {
+          "type": "number",
+          "description": "Speedup of second parent vs baseline"
+        }
+      },
+      "required": [
+        "kernel1",
+        "kernel2"
+      ]
+    }
+  },
+  {
+    "name": "get_optimization_strategies",
+    "type": "function",
+    "description": "Get recommended optimization strategies for a specific bottleneck type. Returns a prioritized list of strategies with descriptions. Fast lookup, no LLM call.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "bottleneck": {
+          "type": "string",
+          "enum": ["compute", "memory", "latency", "lds", "balanced"],
+          "description": "The bottleneck type to get strategies for"
+        }
+      },
+      "required": [
+        "bottleneck"
+      ]
+    }
+  },
+  {
     "name": "evaluate_kernel_quality",
     "type": "function",
     "description": "Evaluate a GPU kernel across AMD GPU optimization criteria. Returns scores and suggestions.",
