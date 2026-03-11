@@ -41,7 +41,7 @@ def main():
     # evaluate command
     eval_parser = subparsers.add_parser("evaluate", help="Evaluate kernel quality")
     eval_parser.add_argument("kernel_file", help="Path to kernel file")
-    eval_parser.add_argument("--model", "-m", default="claude-sonnet-4.5", help="LLM model")
+    eval_parser.add_argument("--model", "-m", default="claude-sonnet-4-6", help="LLM model")
 
     # reflect command
     ref_parser = subparsers.add_parser("reflect", help="Reflect on kernel test results")
@@ -53,7 +53,7 @@ def main():
     )
     ref_parser.add_argument("--history", help="Optimization history summary")
     ref_parser.add_argument("--tried", help="Comma-separated list of tried strategies")
-    ref_parser.add_argument("--model", "-m", default="claude-sonnet-4.5", help="LLM model")
+    ref_parser.add_argument("--model", "-m", default="claude-sonnet-4-6", help="LLM model")
 
     # specs command
     subparsers.add_parser("specs", help="Get AMD MI350X GPU specifications")

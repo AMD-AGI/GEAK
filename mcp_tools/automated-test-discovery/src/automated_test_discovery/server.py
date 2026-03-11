@@ -386,7 +386,7 @@ def _llm_finalize_discovery(
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4.5",
+            model="claude-sonnet-4-6",
             max_tokens=4000,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
