@@ -331,7 +331,10 @@ def main(
         # Set HIP_VISIBLE_DEVICES for single agent GPU isolation
         env.config.env = env.config.env or {}
         env.config.env["HIP_VISIBLE_DEVICES"] = str(parsed_gpu_ids[0])
-    
+        if repo:
+            env.config.cwd = str(Path(repo).resolve())
+            console.print(f"[dim]Working directory: {env.config.cwd}[/dim]")
+            
     # Create and run agent
     agent = agent_class(model, env, **agent_config)
     agent.log_file = agent_log_file
