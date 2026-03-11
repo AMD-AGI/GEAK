@@ -584,6 +584,7 @@ def main(
             max_rounds=max_rounds,
             heterogeneous=heterogeneous,
             console=console,
+            agent_config=config.get("agent"),
         )
 
         console.print("\n[bold green]Pipeline complete.[/bold green]")
