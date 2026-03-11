@@ -1,6 +1,7 @@
 """Save-and-test tool: saves patches and runs correctness + benchmark tests."""
 
 import os
+import re
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -80,6 +81,15 @@ class SaveAndTestTool:
         """Get current changes as patch content."""
         ctx = self.context
         cwd = ctx.cwd
+
+        # If test_command starts with "cd /path && ...", extract the actual task directory
+        # This handles the case where cwd is the agent workspace but the task is in a different repo
+        if ctx.test_command:
+            cd_match = re.match(r'^cd\s+([^\s&]+)\s*&&', ctx.test_command)
+            if cd_match:
+                task_dir = cd_match.group(1)
+                if Path(task_dir).is_dir():
+                    cwd = task_dir
 
         if self._is_git_repo(Path(cwd)):
             result = subprocess.run(
