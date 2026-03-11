@@ -11,11 +11,13 @@
           "description": "The bash command to execute."
         }
       },
-      "required": ["command"]
+      "required": [
+        "command"
+      ]
     }
   },
   {
-    "name": "test_perf",
+    "name": "save_and_test",
     "type": "function",
     "description": "Save current changes as patch and run performance test. Use this after implementing optimizations to measure performance impact. The system will automatically save your changes, run the configured test command, and report results.",
     "parameters": {
@@ -53,7 +55,12 @@
       "properties": {
         "command": {
           "type": "string",
-          "enum": ["view", "create", "str_replace", "insert"],
+          "enum": [
+            "view",
+            "create",
+            "str_replace",
+            "insert"
+          ],
           "description": "The editor command to execute."
         },
         "path": {
@@ -66,7 +73,9 @@
         },
         "view_range": {
           "type": "array",
-          "items": {"type": "integer"},
+          "items": {
+            "type": "integer"
+          },
           "description": "Line range [start, end] to view. Optional for: view."
         },
         "old_str": {
@@ -82,7 +91,10 @@
           "description": "Line number to insert at. Required for: insert."
         }
       },
-      "required": ["command", "path"]
+      "required": [
+        "command",
+        "path"
+      ]
     }
   },
   {
@@ -101,7 +113,10 @@
           "description": "The command to execute the kernel during profiling, e.g. execution command using in performance test."
         }
       },
-      "required": ["profiling_workdir", "profiling_cmd"]
+      "required": [
+        "profiling_workdir",
+        "profiling_cmd"
+      ]
     }
   },
   {
@@ -113,7 +128,17 @@
       "properties": {
         "command": {
           "type": "string",
-          "enum": ["create", "show", "next", "mark", "add", "remove", "update", "note", "summary"],
+          "enum": [
+            "create",
+            "show",
+            "next",
+            "mark",
+            "add",
+            "remove",
+            "update",
+            "note",
+            "summary"
+          ],
           "description": "The operation to perform."
         },
         "index": {
@@ -122,7 +147,15 @@
         },
         "status": {
           "type": "string",
-          "enum": ["pending", "exploring", "successful", "failed", "partial", "skipped", "combined"],
+          "enum": [
+            "pending",
+            "exploring",
+            "successful",
+            "failed",
+            "partial",
+            "skipped",
+            "combined"
+          ],
           "description": "Strategy status. Required for: mark. Optional for: update."
         },
         "result": {
@@ -151,7 +184,9 @@
         },
         "baseline_metrics": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "description": "Baseline metrics in 'Key:Value' format. Required for: create."
         },
         "baseline_log": {
@@ -160,12 +195,17 @@
         },
         "strategies": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "description": "Initial strategies in 'Name|Description|Expected|Target' format. Optional for: create."
         },
         "method": {
           "type": "string",
-          "enum": ["skip", "delete"],
+          "enum": [
+            "skip",
+            "delete"
+          ],
           "description": "Remove method. Default: skip. For: remove."
         },
         "note": {
@@ -173,7 +213,9 @@
           "description": "Note message. Required for: note."
         }
       },
-      "required": ["command"]
+      "required": [
+        "command"
+      ]
     }
   }
 ]

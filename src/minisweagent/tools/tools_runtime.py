@@ -5,7 +5,7 @@ from typing import Dict, Any
 from minisweagent.tools.bash_command import BashCommand
 from minisweagent.tools.strategy_manager import StrategyManagerTool
 from minisweagent.tools.str_replace_editor import str_replace_editor
-from minisweagent.tools.test_perf import TestPerfTool
+from minisweagent.tools.save_and_test import SaveAndTestTool
 from minisweagent.tools.submit import SubmitTool
 
 current_dir = os.path.dirname(__file__)
@@ -36,7 +36,7 @@ class ToolRuntime:
         self._tool_table = {
             "bash": BashCommand(),
             "str_replace_editor": str_replace_editor(),
-            "test_perf": TestPerfTool(),
+            "save_and_test": SaveAndTestTool(),
             "submit": SubmitTool(),
         }
         if profiling_type in ['roofline', 'profiling', 'profiler_analyzer']:
