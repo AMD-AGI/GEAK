@@ -25,32 +25,36 @@ It enables systematic, profiling-driven, and scalable optimization of GPU kernel
 
 ---
 
-## Evolution: From Kernel-Level to Repo-Level Automation
+## Evolution: From Foundation to Platform
 
-### GEAK v1 / v2 — Single Kernel Optimization
+### GEAK v1 — Foundation (Triton)
 
-Earlier versions focused on optimizing individual GPU kernels through iterative patch generation and performance validation.
+GEAK v1 established the foundation with Triton-based kernel generation.
 
-They demonstrated that LLM-based agents can:
+- Reflexion-based kernel generation
+- Instruction → Triton kernels
+- TritonBench / ROCmBench improvements
 
-- Analyze kernel structure
-- Propose optimization strategies
-- Generate performance-improving patches
+**Outcome:** AI viability proven — LLM-based agents can generate and improve GPU kernels.
 
-### GEAK v3 — Autonomous Repo-Level Optimization
+### GEAK v2 — Expansion (Agent Family)
 
-GEAK v3 upgrades the system into a full lifecycle GPU optimization framework.
+GEAK v2 expanded into a multi-agent system for HIP kernel optimization.
 
-It operates at repository scale and automates:
+- **OptimAgent:** profiling-driven optimization with multi-offspring exploration
+- **OpenEvolve:** genetic optimization for kernel evolution
+- support HIP → HIP kernel optimization
 
-- 🔍 Test discovery and generation
-- 📊 Baseline performance measurement
-- 🧠 Profiling-guided bottleneck diagnosis
-- 🎯 Strategy planning and execution
-- ✅ Patch validation and regression testing
-- 🔁 Multi-round iterative improvement
+**Outcome:** Scalable multi-agent system
+### GEAK v3 — Platform (L1 → L3)
 
-The system forms a closed-loop optimization engine capable of continuous performance evolution with minimal human intervention.
+GEAK v3 evolves into a unified platform supporting the full optimization stack.
+
+- Support **L3** kernel optimization (repository-level, full lifecycle)
+- Reduce human intervention via closed-loop automation
+- Unified kernel optimization (test discovery, baselines, profiling, strategy execution, validation)
+
+**Outcome:** Anyone can optimize kernels — from single-kernel tuning to autonomous repo-level optimization.
 
 ---
 
