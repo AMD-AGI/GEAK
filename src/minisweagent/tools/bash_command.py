@@ -25,7 +25,7 @@ _COMMANDMENT_WRITE_RE = re.compile(
 
 
 class BashCommand:
-    DEFAULT_TIMEOUT: int = 120
+    DEFAULT_TIMEOUT: int = 180
 
     def __init__(self):
         self._env_override: dict[str, str] = {}
