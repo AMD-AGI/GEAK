@@ -100,13 +100,22 @@ GEAK v3 supports parallel optimization agents. This parallel scaling:
 ```bash
 git clone https://github.com/AMD-AGI/GEAK
 cd GEAK
-git switch -c dev origin/dev
 pip install -e .
 
 # To use the Knowledge feature, also install the langchain dependencies
 pip install -e '.[langchain]'
 
-# Set LLM API key
+# Set model name and key
+
+# Option 1: set a LiteLLM model + provider API key
+export MSWEA_MODEL_NAME="openai/gpt-5"
+export OPENAI_API_KEY="YOUR_KEY"
+
+# Anthropic example
+export MSWEA_MODEL_NAME="anthropic/claude-sonnet-4-5-20250929"
+export ANTHROPIC_API_KEY="YOUR_KEY"
+
+# Option 2: If you use AMD LLM Gateway (model_class: amd_llm)
 export AMD_LLM_API_KEY="YOUR_KEY"
 ```
 
