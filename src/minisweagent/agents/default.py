@@ -47,6 +47,7 @@ class AgentConfig:
     strategy_file_path: str = ".optimization_strategies.md"
     profiling_type: str | None = None
     codebase_context: str | None = None
+    starting_patch: str | None = None
     # Interactive/exit behaviour (set by --exit-immediately)
     confirm_exit: bool = True
 
@@ -120,8 +121,6 @@ class DefaultAgent:
         # Initialize tool runtime with strategy manager settings
         # Subclasses (like StrategyAgent) can override _get_strategy_callback() for UI notifications
         self.toolruntime = ToolRuntime(
-            profiling_type=self.config.profiling_type,
-            llm_model=self.model,
             use_strategy_manager=self.config.use_strategy_manager,
             strategy_file=self._get_strategy_file()
             if self.config.use_strategy_manager
@@ -133,8 +132,12 @@ class DefaultAgent:
         agent_env = getattr(self.env.config, "env", None)
         if agent_env:
             self.toolruntime.set_env(agent_env)
-        # Setup test_perf tool context
-        self._setup_test_perf_context()
+        # Propagate working directory so bash tool commands run in the correct worktree
+        agent_cwd = getattr(self.env.config, "cwd", None)
+        if agent_cwd:
+            self.toolruntime.set_cwd(agent_cwd)
+        # Setup save_and_test tool context
+        self._setup_save_and_test_context()
         # Wire sub_agent context (needs model + env for recursive agent calls)
         if getattr(self.toolruntime, "_sub_agent_tool", None):
             self.toolruntime._sub_agent_tool.set_context(
@@ -162,13 +165,13 @@ class DefaultAgent:
         """Get the callback for strategy changes. Override in subclasses for UI notifications."""
         return
 
-    def _setup_test_perf_context(self):
-        """Setup context for test_perf tool."""
-        from minisweagent.tools.test_perf import TestPerfContext
+    def _setup_save_and_test_context(self):
+        """Setup context for save_and_test tool."""
+        from minisweagent.tools.save_and_test import SaveAndTestContext
 
         cwd = getattr(self.env.config, "cwd", None) or os.getcwd()
 
-        context = TestPerfContext(
+        context = SaveAndTestContext(
             cwd=cwd,
             test_command=self.config.test_command,
             timeout=getattr(self.env.config, "timeout", 3600),
@@ -179,11 +182,10 @@ class DefaultAgent:
             patch_counter=self.patch_counter,
         )
 
-        test_perf_tool = self.toolruntime._tool_table.get("test_perf")
-        if test_perf_tool:
-            test_perf_tool.set_context(context)
-            # Keep reference to sync state
-            self._test_perf_context = context
+        save_and_test_tool = self.toolruntime._tool_table.get("save_and_test")
+        if save_and_test_tool:
+            save_and_test_tool.set_context(context)
+            self._save_and_test_context = context
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
@@ -384,14 +386,12 @@ class DefaultAgent:
         raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
 
     def _handle_tool_result(self, result: dict) -> dict:
-        """Handle tool results. Submit tool raises Submitted, test_perf handles itself."""
-        # Sync test_perf context state back to agent
-        if hasattr(self, "_test_perf_context"):
-            self.patch_counter = self._test_perf_context.patch_counter
+        """Handle tool results. Submit tool raises Submitted, save_and_test handles itself."""
+        if hasattr(self, "_save_and_test_context"):
+            self.patch_counter = self._save_and_test_context.patch_counter
         return result
 
     def _run_select_patch_agent(self) -> None:
-        # Always try to run select patch agent if patch_output_dir is configured
         if not self.config.patch_output_dir:
             return
 
@@ -399,6 +399,13 @@ class DefaultAgent:
         if not base_patch_dir.exists():
             return
 
+        # Try deterministic benchmark parsing first -- avoids LLM cost
+        from minisweagent.benchmark_parsing import rewrite_best_results
+        det_result = rewrite_best_results(base_patch_dir)
+        if det_result:
+            return
+
+        # Fall back to LLM-based selection only if deterministic parsing failed
         try:
             from minisweagent.agents.select_patch_agent import SelectPatchAgent
             from minisweagent.config import load_agent_config
@@ -422,8 +429,10 @@ class DefaultAgent:
             task = select_agent.setup_selection_task(base_patch_dir, num_parallel, self.config.metric)
             if task:
                 select_agent.run(task, _skip_select_patch=True)
+
+            # Final deterministic override as safety net
+            rewrite_best_results(base_patch_dir)
         except Exception:
-            # Best-effort: selection should not block returning the agent's final output.
             return
 
     def execute_action(self, action: dict) -> dict:

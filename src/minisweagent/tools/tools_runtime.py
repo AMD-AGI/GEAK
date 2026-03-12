@@ -3,10 +3,10 @@ from pathlib import Path
 from typing import Any
 
 from minisweagent.tools.bash_command import BashCommand
+from minisweagent.tools.save_and_test import SaveAndTestTool
 from minisweagent.tools.str_replace_editor import str_replace_editor
 from minisweagent.tools.strategy_manager import StrategyManagerTool
 from minisweagent.tools.submit import SubmitTool
-from minisweagent.tools.test_perf import TestPerfTool
 
 current_dir = Path(__file__).resolve().parent
 json_path = current_dir / "tools.json"
@@ -16,7 +16,7 @@ with open(json_path, encoding="utf-8") as f:
 _TOOL_PROFILES: dict[str, set[str] | None] = {
     "full": None,  # None = register all tools (existing behavior)
     "swe": {
-        "bash", "str_replace_editor", "test_perf", "submit",
+        "bash", "str_replace_editor", "save_and_test", "submit",
         "profile_kernel", "baseline_metrics", "strategy_manager",
     },
 }
@@ -43,8 +43,6 @@ tools_list = _all_tools
 class ToolRuntime:
     def __init__(
         self,
-        profiling_type: str = None,
-        llm_model=None,
         use_strategy_manager: bool = False,
         strategy_file: str = ".optimization_strategies.md",
         on_strategy_change=None,
@@ -58,7 +56,7 @@ class ToolRuntime:
         self._tool_table = {
             "bash": BashCommand(),
             "str_replace_editor": str_replace_editor(),
-            "test_perf": TestPerfTool(),
+            "save_and_test": SaveAndTestTool(),
             "submit": SubmitTool(),
         }
 
@@ -76,12 +74,6 @@ class ToolRuntime:
             self._sub_agent_tool = None
         else:
             # Full mode: register everything (existing behavior)
-            if profiling_type in ["roofline", "profiling", "profiler_analyzer"]:
-                from minisweagent.tools.profiling_tools import ProfilingAnalyzer
-                self._tool_table["profiling"] = ProfilingAnalyzer(
-                    profiling_type=profiling_type,
-                    llm_model=llm_model,
-                )
             if use_strategy_manager:
                 self._tool_table["strategy_manager"] = StrategyManagerTool(
                     filepath=strategy_file, on_change_callback=on_strategy_change
@@ -148,11 +140,14 @@ class ToolRuntime:
         bash = self._tool_table.get("bash")
         if bash is not None:
             bash._env_override = env
-        profiling = self._tool_table.get("profiling")
-        if profiling is not None:
-            profiling._env_override = env
         for bridge in self._mcp_bridges:
             bridge.set_env(env)
+
+    def set_cwd(self, cwd: str | None) -> None:
+        """Propagate working directory to the bash tool so commands run in the correct worktree."""
+        bash = self._tool_table.get("bash")
+        if bash is not None:
+            bash._cwd = cwd
 
     def set_codebase_context(self, context: str | None) -> None:
         """Store codebase context and propagate to SubAgentTool if present."""

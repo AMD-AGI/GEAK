@@ -174,7 +174,7 @@ def _relevance_score(file_path: Path, kernel_path: Path, kernel_name: str, kerne
 
 def _is_kernel_file(path: Path) -> bool:
     try:
-        content = path.read_text()[:3000]
+        content = path.read_text()
         for pattern in KERNEL_PATTERNS:
             if re.search(pattern, content):
                 return True
@@ -219,7 +219,7 @@ def _score_as_bench(path: Path) -> float:
 
 def _get_test_command(path: Path) -> str:
     try:
-        content = path.read_text()[:2000]
+        content = path.read_text()
     except Exception:
         content = ""
 
@@ -258,13 +258,17 @@ def _expand_workspace(kernel_path: Path) -> Path:
     return kernel_path if kernel_path.is_dir() else kernel_path.parent
 
 
-def _get_kernel_type(content: str) -> str:
+def _get_kernel_type(content: str, suffix: str = "") -> str:
     if "@triton" in content or "tl." in content:
         return "triton"
-    elif "__global__" in content and "hip" in content.lower():
+    if "ck_tile::" in content or "ck::tile" in content or "#include <ck_tile/" in content:
+        return "ck"
+    if "__global__" in content and "hip" in content.lower():
         return "hip"
-    elif "__global__" in content:
+    if "__global__" in content:
         return "cuda"
+    if suffix in (".cu", ".hip", ".cpp"):
+        return "hip" if "hip" in content.lower() else "cuda"
     return "unknown"
 
 
@@ -317,7 +321,7 @@ def _llm_finalize_discovery(
 
     # Read kernel source (truncated)
     try:
-        kernel_source = kernel_file.read_text()[:4000]
+        kernel_source = kernel_file.read_text()
     except Exception:
         return None
 
@@ -432,13 +436,13 @@ def _find_kernels_in_dir(directory: Path) -> list[dict]:
             continue
         if _is_kernel_file(candidate):
             try:
-                content = candidate.read_text()[:3000]
+                content = candidate.read_text()
             except Exception:
                 content = ""
             kernels.append(
                 {
                     "name": candidate.stem,
-                    "type": _get_kernel_type(content),
+                    "type": _get_kernel_type(content, candidate.suffix),
                     "file": str(candidate),
                 }
             )
@@ -627,8 +631,8 @@ def discover(
         kernel_name = path.parent.name
 
     try:
-        content = path.read_text()[:5000]
-        kernel_type = _get_kernel_type(content)
+        content = path.read_text()
+        kernel_type = _get_kernel_type(content, path.suffix)
     except Exception:
         content = ""
         kernel_type = "unknown"
@@ -670,7 +674,7 @@ def discover(
             # Bonus: if kernel_function name appears inside the test file content
             if kernel_functions and relevance < 2.0:
                 try:
-                    test_content = file_path.read_text()[:5000]
+                    test_content = file_path.read_text()
                     for kf in kernel_functions:
                         if kf in test_content:
                             relevance += 2.0

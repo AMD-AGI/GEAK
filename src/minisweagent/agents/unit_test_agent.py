@@ -54,7 +54,9 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- A build step is REQUIRED before running tests.\n"
         "- Use the project's build system (CMake/Makefile) or compile with `hipcc` directly.\n"
         "- Use host-side validation (compare GPU output against CPU reference).\n"
-        "- Use `hipEventElapsedTime` or `torch.cuda.Event` for benchmarking."
+        "- Use `hipEventElapsedTime` or `torch.cuda.Event` for benchmarking.\n"
+        "- NEVER use `sys.path.insert(0, '/absolute/path/...')`. "
+        "Rely on PYTHONPATH set by the COMMANDMENT SETUP section."
     ),
     "cuda": (
         "This is a CUDA kernel (C++ compiled with nvcc).\n"
@@ -68,7 +70,9 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- A build step is REQUIRED. Needs CK headers and hipcc.\n"
         "- Template parameters (tile sizes, vector widths) are compile-time; test multiple configs.\n"
         "- Use host-side validation against a reference GEMM/convolution.\n"
-        "- Use `hipEventElapsedTime` for benchmarking."
+        "- Use `hipEventElapsedTime` for benchmarking.\n"
+        "- NEVER use `sys.path.insert(0, '/absolute/path/...')`. "
+        "Rely on PYTHONPATH set by the COMMANDMENT SETUP section."
     ),
     "asm": (
         "This is a precompiled HSACO assembly kernel.\n"
@@ -76,6 +80,11 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- Test ONLY via the Python wrapper that loads and launches it.\n"
         "- Use `torch.testing.assert_close` for correctness against a torch reference.\n"
         "- Benchmark the wrapper launch, not the assembly directly."
+    ),
+    "unknown": (
+        "Kernel type could not be determined automatically.\n"
+        "- Inspect the source file to determine if it is Triton, HIP, CUDA, or CK.\n"
+        "- Apply the appropriate testing strategy based on your analysis."
     ),
 }
 
@@ -86,8 +95,7 @@ def format_discovery_for_agent(result) -> str:
     Includes kernel analysis, language-specific testing guidance, discovered
     tests/benchmarks with confidence scores, and extracted test patterns.
 
-    This replaces the old ``run_discovery_pipeline()`` which ran a second
-    discovery pass.  Now we just format the already-available result.
+    Formats an already-available ``DiscoveryResult`` for agent consumption.
     """
     if result is None:
         return ""
@@ -181,28 +189,6 @@ def format_discovery_for_agent(result) -> str:
 
     return "\n".join(lines)
 
-
-# Keep backward-compatible alias so existing call sites don't break
-def run_discovery_pipeline(kernel_path: Path, repo: Path) -> str:
-    """Run discovery and format results.  Prefer ``format_discovery_for_agent``
-    with a pre-existing ``DiscoveryResult`` to avoid a redundant scan."""
-    try:
-        from minisweagent.tools.discovery import DiscoveryPipeline
-        from minisweagent.tools.resolve_kernel_url_impl import find_resolved_clone_root
-    except ImportError:
-        return ""
-
-    try:
-        workspace = repo
-        clone_root = find_resolved_clone_root(kernel_path)
-        if clone_root is not None:
-            workspace = clone_root
-        pipeline = DiscoveryPipeline(workspace_path=workspace)
-        result = pipeline.run(kernel_path=kernel_path, interactive=False)
-    except Exception:
-        return ""
-
-    return format_discovery_for_agent(result)
 
 
 def run_unit_test_agent(

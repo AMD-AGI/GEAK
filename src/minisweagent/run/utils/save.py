@@ -71,6 +71,6 @@ def save_traj(
         data["info"].update(extra_info)
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     if print_path:
         print_fct(f"Saved trajectory to '{path}'")

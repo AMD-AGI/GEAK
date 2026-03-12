@@ -28,7 +28,7 @@ for _sub in ("mcp_tools/profiler-mcp/src", "mcp_tools/metrix-mcp/src"):
 EXAMPLES = """
 Examples (metrix backend, default):
   %(prog)s 'python3 /path/to/kernel.py --profile'
-  %(prog)s 'python3 kernel.py --profile' --gpu-devices 3
+  %(prog)s 'python3 kernel.py --profile' --gpu-devices 2
   %(prog)s 'python3 kernel.py --profile' --replays 5
   %(prog)s 'python3 kernel.py --profile' --quick
 
@@ -287,28 +287,6 @@ def _profile_with_metrix(command: str, gpu_devices, replays: int, quick: bool) -
 
 
 # ---------------------------------------------------------------------------
-# rocprof-compute backend
-# ---------------------------------------------------------------------------
-
-
-def _profile_with_rocprof(command: str, workdir: str, profiling_type: str, gpu_device: str) -> dict:
-    """Profile using rocprof-compute and return backend-neutral JSON."""
-    from minisweagent.tools.profiling_tools import ProfilingAnalyzer
-
-    analyzer = ProfilingAnalyzer(profiling_type=profiling_type)
-    try:
-        raw = analyzer.profile_structured(profiling_workdir=workdir, profiling_cmd=command)
-    finally:
-        analyzer.cleanup()
-
-    if not raw.get("success"):
-        print(f"ERROR: rocprof-compute profiling failed: {raw.get('error')}", file=sys.stderr)
-        sys.exit(1)
-
-    return _build_rocprof_result(raw, gpu_device=gpu_device)
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -352,8 +330,8 @@ def main():
     )
     parser.add_argument(
         "--gpu-devices",
-        default="3",
-        help='GPU device ID(s): single ("3") or comma-separated ("0,1,2") (default: 3)',
+        default="0",
+        help='GPU device ID(s): single ("0") or comma-separated ("0,1,2") (default: 0)',
     )
 
     # Metrix-specific options

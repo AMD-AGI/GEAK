@@ -15,7 +15,7 @@ flowchart TD
     SET_ENV --> BASH["BashCommand._env_override"]
     SET_ENV --> MCP["MCPToolBridge.server_config.env"]
     SET_ENV --> PROF["ProfilingAnalyzer._env_override"]
-    ENV -->|"_setup_test_perf_context()\nreads env.config.env"| TP["TestPerfTool.context.env_vars"]
+    ENV -->|"_setup_save_and_test_context()\nreads env.config.env"| TP["SaveAndTestTool.context.env_vars"]
 
     BASH -->|"os.environ | _env_override"| SUB1["subprocess.run(env=...)"]
     MCP -->|"MCP server inherits env"| SUB2["MCP subprocess"]
@@ -32,6 +32,20 @@ flowchart TD
 | 3 | `agents/default.py` `__init__` | Reads `env.config.env` and calls `toolruntime.set_env()`. |
 | 4 | `tools/tools_runtime.py` `set_env()` | Defensive-copies the dict, then sets `_env_override` on `BashCommand`, `ProfilingAnalyzer`, and calls `bridge.set_env()` on every `MCPToolBridge`. |
 | 5 | Individual tools | Each tool merges `_env_override` into `os.environ` when spawning subprocesses. |
+
+## Other Environment Variables Using This Path
+
+`GEAK_BENCHMARK_EXTRA_ARGS` (default: `--iterations 50`) follows the same
+propagation chain as `HIP_VISIBLE_DEVICES`.  It is set in:
+
+- `dispatch.py` `run_task_batch()` — `base_env_vars` for agents in pool mode.
+- `mini.py` `main()` — `config["env"]["env"]` for agents in `geak --from-task`.
+- `orchestrator.py` `_build_eval_env()` — for COMMANDMENT-based evaluation.
+
+This ensures all benchmark invocations (agent-time and evaluation-time) use
+the same iteration count.  The COMMANDMENT BENCHMARK / FULL_BENCHMARK
+sections expand `${GEAK_BENCHMARK_EXTRA_ARGS:-}`, and `run_harness._run_single`
+reads it from the subprocess env for direct harness invocations.
 
 ## Invariants
 

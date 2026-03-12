@@ -11,7 +11,7 @@ from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.docker import DockerEnvironment
 from minisweagent.models import get_model
-from minisweagent.run.extra.config import configure_if_first_time
+from minisweagent.run.config.global_config import configure_if_first_time
 from minisweagent.run.utils.save import save_traj
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_GITHUB_CONFIG_PATH", builtin_config_dir / "github_issue.yaml"))

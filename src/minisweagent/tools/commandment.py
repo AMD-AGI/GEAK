@@ -1,14 +1,17 @@
 """Generate and validate COMMANDMENT.md files for OpenEvolve.
 
 A COMMANDMENT.md is the evaluation contract between the agent and OpenEvolve.
-It has exactly three sections:
-  ## SETUP        -- prepare the evaluation environment
-  ## CORRECTNESS  -- verify the optimized kernel is correct
-  ## PROFILE      -- benchmark the optimized kernel
+It has exactly five sections:
+  ## SETUP          -- prepare the evaluation environment
+  ## CORRECTNESS    -- verify the optimized kernel is correct
+  ## PROFILE        -- deep hardware analysis (Metrix, 5 PROFILE_SHAPES)
+  ## BENCHMARK      -- wall-clock latency (20-25 HARNESS_SHAPES, iterative feedback)
+  ## FULL_BENCHMARK -- wall-clock latency (all discovered shapes, final evaluation)
 
 This module generates a valid COMMANDMENT.md deterministically from:
   - kernel_path: the kernel file to optimize
-  - harness_path: the test harness (must support --correctness and --profile)
+  - harness_path: the test harness (must support --correctness, --profile,
+    --benchmark, and --full-benchmark)
   - repo_root: the repository root (for PYTHONPATH)
   - inner_kernel: whether the kernel is an inner kernel imported by a wrapper
 
@@ -59,15 +62,17 @@ def generate_commandment(
     *,
     inner_kernel: bool = False,
     inner_kernel_relpath: str | None = None,
-    warmup_runs: int = 1,
+    warmup_runs: int = 2,
     profile_replays: int = 5,
+    kernel_language: str = "python",
 ) -> str:
     """Generate a valid COMMANDMENT.md and return its content.
 
     Args:
         kernel_path: Absolute path to the kernel file being optimized.
         harness_path: Absolute path to the test harness script.  Must accept
-            ``--correctness`` and ``--profile`` flags.
+            ``--correctness``, ``--profile``, ``--benchmark``, and
+            ``--full-benchmark`` flags.
         repo_root: Repository root for PYTHONPATH.  If *None*, uses the
             parent of *kernel_path*.
         inner_kernel: If *True*, the kernel is an inner file imported by a
@@ -76,8 +81,12 @@ def generate_commandment(
         inner_kernel_relpath: Relative path from *repo_root* to the inner
             kernel file (e.g. ``aiter/ops/triton/_triton_kernels/rope/rope.py``).
             Required when *inner_kernel* is True.
-        warmup_runs: Number of warm-up invocations before profiling.
+        warmup_runs: Number of warm-up invocations before profiling.  Kept
+            in sync with profiler-mcp's default so that agent-side and
+            preprocessor-side profiling see identical warm-up conditions.
         profile_replays: Number of replay passes for ``kernel-profile``.
+        kernel_language: ``"python"``, ``"cpp"``, or ``"asm"``.  When
+            ``"cpp"``, SETUP includes a build step and JIT cache isolation.
 
     Returns:
         The content of a valid COMMANDMENT.md as a string.
@@ -115,9 +124,10 @@ def generate_commandment(
             repo_root=repo_root,
             warmup_runs=warmup_runs,
             profile_replays=profile_replays,
+            kernel_language=kernel_language,
         )
 
-    return _validate_and_fix(content)
+    return _validate_and_fix(content, harness_path=str(harness_path))
 
 
 def _warmup_block(command: str, warmup_runs: int) -> str:
@@ -133,29 +143,77 @@ def _warmup_block(command: str, warmup_runs: int) -> str:
     return f"for _i in $(seq 1 {warmup_runs}); do {command}; done"
 
 
+def _detect_build_command(repo_root: Path) -> str:
+    """Return the appropriate build command for a C++ repo."""
+    if (repo_root / "setup.py").exists() or (repo_root / "pyproject.toml").exists():
+        return "cd ${GEAK_WORK_DIR} && pip install -e . --no-deps --no-build-isolation 2>&1 | tail -5"
+    if (repo_root / "CMakeLists.txt").exists():
+        return "cd ${GEAK_WORK_DIR} && cmake --build build/ 2>&1 | tail -5"
+    if (repo_root / "Makefile").exists():
+        return "cd ${GEAK_WORK_DIR} && make 2>&1 | tail -5"
+    return "cd ${GEAK_WORK_DIR} && pip install -e . --no-deps --no-build-isolation 2>&1 | tail -5"
+
+
 def _generate_simple(
     kernel_path: Path,
     harness_path: Path,
     repo_root: Path,
     warmup_runs: int,
     profile_replays: int,
+    kernel_language: str = "python",
 ) -> str:
-    """Generate COMMANDMENT for a simple (non-inner) kernel."""
+    """Generate COMMANDMENT for a simple (non-inner) kernel.
+
+    All paths are expressed via environment variables so that the
+    COMMANDMENT can be executed verbatim in any worktree:
+
+      * ``GEAK_WORK_DIR``  -- the agent's working copy / worktree root
+      * ``GEAK_REPO_ROOT`` -- the original repository root
+      * ``GEAK_GPU_DEVICE`` -- GPU device ID
+      * ``GEAK_HARNESS``   -- absolute path to the test harness script
+    """
     warmup_block = _warmup_block(
-        f"${{GEAK_WORK_DIR}}/run.sh {harness_path} --profile > /dev/null 2>&1 || true",
+        "${GEAK_WORK_DIR}/run.sh ${GEAK_HARNESS} --profile > /dev/null 2>&1 || true",
         warmup_runs,
     )
 
+    if kernel_language == "cpp":
+        build_cmd = _detect_build_command(repo_root)
+        setup_section = (
+            "rm -rf ${GEAK_WORK_DIR}/.aiter_jit\n"
+            + build_cmd + "\n"
+            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+            "export HIP_VISIBLE_DEVICES=%s\\n"
+            "export AITER_JIT_DIR=%s/.aiter_jit\\n"
+            'exec python3 "$@"\\n\' '
+            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
+            "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
+        )
+    else:
+        setup_section = (
+            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+            "export HIP_VISIBLE_DEVICES=%s\\n"
+            'exec python3 "$@"\\n\' '
+            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
+            "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
+        )
+
     return f"""\
 ## SETUP
-printf '#!/bin/bash\\nexport PYTHONPATH=%s:{repo_root}:${{PYTHONPATH}}\\nexport HIP_VISIBLE_DEVICES=%s\\nexec python3 "$@"\\n' "${{GEAK_WORK_DIR}}" "${{GEAK_GPU_DEVICE}}" > ${{GEAK_WORK_DIR}}/run.sh && chmod +x ${{GEAK_WORK_DIR}}/run.sh
+{setup_section}
 
 ## CORRECTNESS
-${{GEAK_WORK_DIR}}/run.sh {harness_path} --correctness
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --correctness
 
 ## PROFILE
 {warmup_block}
-kernel-profile "${{GEAK_WORK_DIR}}/run.sh {harness_path} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
+kernel-profile "${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
+
+## BENCHMARK
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+
+## FULL_BENCHMARK
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
 """
 
 
@@ -203,10 +261,10 @@ def _generate_inner_kernel(
         setup_lines.append(f"touch {init_touch}")
 
     setup_lines.append(
-        f"printf '#!/bin/bash\\nexport PYTHONPATH=%s:{repo_root}:${{PYTHONPATH}}\\n"
-        f'export HIP_VISIBLE_DEVICES=%s\\nexec python3 {harness_path} "$@"\\n\' '
-        f'"${{GEAK_WORK_DIR}}" "${{GEAK_GPU_DEVICE}}" > ${{GEAK_WORK_DIR}}/run_harness.sh '
-        f"&& chmod +x ${{GEAK_WORK_DIR}}/run_harness.sh"
+        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+        'export HIP_VISIBLE_DEVICES=%s\\nexec python3 ${GEAK_HARNESS} "$@"\\n\' '
+        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" > ${GEAK_WORK_DIR}/run_harness.sh '
+        "&& chmod +x ${GEAK_WORK_DIR}/run_harness.sh"
     )
 
     setup_block = "\n".join(setup_lines)
@@ -221,16 +279,22 @@ ${{GEAK_WORK_DIR}}/run_harness.sh --correctness
 ## PROFILE
 {warmup_block}
 kernel-profile "${{GEAK_WORK_DIR}}/run_harness.sh --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
+
+## BENCHMARK
+${{GEAK_WORK_DIR}}/run_harness.sh --benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+
+## FULL_BENCHMARK
+${{GEAK_WORK_DIR}}/run_harness.sh --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
 """
 
 
-def _validate_and_fix(content: str) -> str:
+def _validate_and_fix(content: str, *, harness_path: str | None = None) -> str:
     """Validate content and attempt to auto-fix known issues.
 
     Raises ValueError if the content cannot be made valid after retries.
     """
     for attempt in range(_MAX_FIX_RETRIES + 1):
-        result = validate_commandment(content)
+        result = validate_commandment(content, harness_path=harness_path)
         if result["valid"]:
             return content
 
@@ -239,7 +303,7 @@ def _validate_and_fix(content: str) -> str:
 
         content = _auto_fix(content, result["errors"])
 
-    msg = format_validation_message(validate_commandment(content))
+    msg = format_validation_message(validate_commandment(content, harness_path=harness_path))
     raise ValueError(f"COMMANDMENT.md generation failed validation after {_MAX_FIX_RETRIES} retries:\n{msg}")
 
 
@@ -254,14 +318,16 @@ def _auto_fix(content: str, errors: list[str]) -> str:
                 content = re.sub(rf"^## {re.escape(name)}\b.*$", "", content, flags=re.MULTILINE)
 
         # Fix: shell built-in as command prefix -> wrap in bash -c
-        m = re.search(r"Command starts with shell built-in '(\w+)': '(.*?)'", error)
+        # Match both single and double quotes (repr() may use either)
+        m = re.search(r"Command starts with shell built-in ['\"](\w+)['\"].*?['\"](.+?)['\"]", error)
         if m:
             original_cmd = m.group(2)
             fixed_cmd = f'bash -c "{original_cmd}"'
             content = content.replace(original_cmd, fixed_cmd)
 
         # Fix: inline env var prefix -> wrap in bash -c
-        m = re.search(r"Command uses inline env var prefix '(\w+=\S+)' .* '(.*?)'", error)
+        # Match both single and double quotes (repr() may use either)
+        m = re.search(r"Command uses inline env var prefix ['\"](\w+=\S+)['\"].*?['\"](.+?)['\"]", error)
         if m:
             original_cmd = m.group(2)
             fixed_cmd = f'bash -c "{original_cmd}"'
@@ -308,7 +374,7 @@ def main():
     )
     parser.add_argument("--inner-kernel", action="store_true", help="Kernel is an inner file imported by a wrapper")
     parser.add_argument("--inner-kernel-relpath", default=None, help="Relative path from repo-root to inner kernel")
-    parser.add_argument("--warmup-runs", type=int, default=1, help="Warm-up runs before profiling (default: 1)")
+    parser.add_argument("--warmup-runs", type=int, default=2, help="Warm-up runs before profiling (default: 2)")
     parser.add_argument("--profile-replays", type=int, default=5, help="Profiling replay count (default: 5)")
     parser.add_argument("-o", "--output", default=None, help="Output file path (default: stdout)")
 

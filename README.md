@@ -142,7 +142,7 @@ Install individually: `pip install -e mcp_tools/<server-name>/`
 geak <url> --gpu-ids 0,1,2,3
   │
   ├─ Preprocessor (sequential, no LLM)
-  │    resolve_kernel_url → discover → profile_kernel → baseline_metrics → commandment
+  │    resolve_kernel_url → discover → profile_kernel → baseline_metrics → commandment → baseline_benchmarks
   │
   ├─ Orchestrator (LLM agent with tools)
   │    generate_tasks → dispatch_tasks → collect_results → [iterate or finalize]
@@ -169,6 +169,18 @@ src/minisweagent/
 └── baseline_metrics.py      # Format profiler output for downstream tools
 mcp_tools/                   # Standalone MCP servers (profiler, kernel-evolve, kernel-ercs, etc.)
 ```
+
+## Key Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AMD_LLM_API_KEY` | (required) | LLM API key |
+| `GEAK_MAX_ROUNDS` | `5` | Max orchestration rounds |
+| `GEAK_BENCHMARK_EXTRA_ARGS` | `--iterations 50` | Extra args for benchmark commands (set by pipeline) |
+| `GEAK_ALLOWED_AGENTS` | (all) | Comma-separated agent type allowlist |
+| `GEAK_EXCLUDED_AGENTS` | (none) | Comma-separated agent type blocklist |
+
+See `INSTRUCTIONS.md` Section 6 for the full reference.
 
 ## License
 

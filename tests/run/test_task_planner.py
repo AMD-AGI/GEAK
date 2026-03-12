@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from minisweagent.run.task_planner import _pick_fusion_target_lang, build_optimization_tasks
-from minisweagent.tools.discovery import (
+from minisweagent.tools.discovery_types import (
     DiscoveryResult,
     FusionOpportunity,
     KernelDependencyGraph,

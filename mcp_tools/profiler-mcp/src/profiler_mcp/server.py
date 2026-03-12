@@ -11,6 +11,9 @@ Usage:
 
 import logging
 import os
+import re
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -31,6 +34,38 @@ mcp = FastMCP(
         "roofline and instruction-level analysis."
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# Command normalisation
+# ---------------------------------------------------------------------------
+
+_SHELL_META = re.compile(r'[&|;$`(){}<>!\\]|&&|\|\||<<|>>|\bcd\b|\bsource\b|\bexport\b')
+
+# Detects inline env-var assignment: "VAR=value command ..."
+# rocprofv3 treats "VAR=value" as the executable name and crashes.
+_INLINE_ENV = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=\S+\s')
+
+
+def _normalize_command(command: str) -> str:
+    """Wrap *command* in ``bash -c`` if it contains shell constructs.
+
+    ``rocprofv3`` uses ``os.execvpe`` to launch the profiled command, which
+    bypasses the shell entirely.  This means shell builtins (``cd``),
+    environment variable expansion (``$VAR``), compound operators
+    (``&&``, ``|``), and inline env-var assignments
+    (``HIP_VISIBLE_DEVICES=0 python3 ...``) will all fail.  Wrapping in
+    ``bash -c`` ensures the command is interpreted by a real shell.
+
+    Simple commands (e.g. ``python3 kernel.py --profile``) are left as-is
+    so that ``execvpe`` can launch them directly without the extra process.
+    """
+    if command.startswith("bash -c ") or command.startswith("bash -c'"):
+        return command
+    if _SHELL_META.search(command) or _INLINE_ENV.match(command):
+        logger.info(f"Command contains shell constructs, wrapping in bash -c: {command[:120]}")
+        return f"bash -c {shlex.quote(command)}"
+    return command
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +174,34 @@ def _profile_with_rocprof(
 
 
 # ---------------------------------------------------------------------------
+# Warmup helper (backend-agnostic)
+# ---------------------------------------------------------------------------
+
+
+def _warmup(command: str, warmup_runs: int) -> None:
+    """Run the profiling command without instrumentation to warm caches.
+
+    Warms Triton JIT cache, GPU instruction/data caches, GPU clock
+    frequencies, and HIP runtime so that the first instrumented run
+    reflects steady-state performance.  Failures are tolerated (best-effort).
+    """
+    if warmup_runs <= 0:
+        return
+    for i in range(warmup_runs):
+        logger.info(f"Warmup run {i + 1}/{warmup_runs}: {command}")
+        try:
+            subprocess.run(
+                command,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=300,
+            )
+        except Exception as exc:
+            logger.warning(f"Warmup run {i + 1} failed (non-fatal): {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Unified MCP tool
 # ---------------------------------------------------------------------------
 
@@ -154,6 +217,7 @@ def profile_kernel(
     auto_select: bool = False,
     quick: bool = False,
     gpu_devices: str | list[str] | None = None,
+    warmup_runs: int = 2,
 ) -> dict[str, Any]:
     """Profile a GPU kernel.
 
@@ -169,6 +233,8 @@ def profile_kernel(
         auto_select: Auto-select main kernel (metrix only).
         quick: Quick profile with fewer metrics (metrix only).
         gpu_devices: GPU device ID(s) to profile on.
+        warmup_runs: Number of un-instrumented warmup executions before
+                     profiling (default 2).  Set to 0 to skip warmup.
 
     Returns:
         {
@@ -181,6 +247,10 @@ def profile_kernel(
     logger.info("=" * 60)
     logger.info(f"Profiler MCP: backend={backend}, command={command}")
     logger.info("=" * 60)
+
+    command = _normalize_command(command)
+
+    _warmup(command, warmup_runs)
 
     try:
         if backend == "metrix":

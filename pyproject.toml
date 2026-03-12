@@ -51,8 +51,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# LangChain hybrid retrieval for AMD GPU knowledge base (embedding + BM25 + reranker)
+langchain = [
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
+    "langchain-huggingface>=0.1.0",
+    "langchain-text-splitters>=0.3.0",
+    "sentence-transformers>=2.2.0",
+    "faiss-cpu>=1.7.4",
+    "rank_bm25>=0.2.2",
+    "numpy>=1.24.0",
+]
+
 full = [
     "mini-swe-agent[dev]",
+    "mini-swe-agent[langchain]",
     "swe-rex>=1.4.0",
 ]
 
@@ -86,7 +99,10 @@ task-generator = "minisweagent.run.task_generator:main"
 # Modular pipeline steps
 commandment = "minisweagent.tools.commandment:main"
 validate-commandment = "minisweagent.tools.validate_commandment:main"
+run-harness = "minisweagent.tools.run_harness:main"
 baseline-metrics = "minisweagent.baseline_metrics:main"
+codebase-context = "minisweagent.run.codebase_context:main"
+# test-discovery is provided by mcp_tools/automated-test-discovery (separate installable)
 openevolve-worker = "minisweagent.agents.openevolve_worker:main"
 run-tasks = "minisweagent.run.task_runner:main"
 select-patch = "minisweagent.agents.select_patch_agent:main"

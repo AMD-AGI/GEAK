@@ -9,14 +9,19 @@ from minisweagent.tools.validate_commandment import (
 
 VALID_COMMANDMENT = """\
 ## SETUP
-mkdir -p ${GEAK_WORK_DIR}/pkg
-cp ${GEAK_WORK_DIR}/kernel.py ${GEAK_WORK_DIR}/pkg/kernel.py
+printf '#!/bin/bash\\nexport PYTHONPATH=%s:${PYTHONPATH}\\n' "${GEAK_WORK_DIR}" > ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh
 
 ## CORRECTNESS
 ${GEAK_WORK_DIR}/run_harness.sh --correctness
 
 ## PROFILE
 ${GEAK_WORK_DIR}/run_harness.sh --profile
+
+## BENCHMARK
+${GEAK_WORK_DIR}/run_harness.sh --benchmark
+
+## FULL_BENCHMARK
+${GEAK_WORK_DIR}/run_harness.sh --full-benchmark
 """
 
 
@@ -36,6 +41,12 @@ echo hello
 
 ## CORRECTNESS
 python3 test.py
+
+## BENCHMARK
+python3 bench.py --benchmark
+
+## FULL_BENCHMARK
+python3 bench.py --full-benchmark
 """
     result = validate_commandment(content)
     assert result["valid"] is False
@@ -49,6 +60,8 @@ def test_missing_all_sections():
     assert any("SETUP" in e for e in result["errors"])
     assert any("CORRECTNESS" in e for e in result["errors"])
     assert any("PROFILE" in e for e in result["errors"])
+    assert any("BENCHMARK" in e for e in result["errors"])
+    assert any("FULL_BENCHMARK" in e for e in result["errors"])
 
 
 # ---- Unknown sections ----
@@ -67,10 +80,16 @@ python3 test.py
 
 ## PROFILE
 python3 test.py --profile
+
+## BENCHMARK
+python3 bench.py --benchmark
+
+## FULL_BENCHMARK
+python3 bench.py --full-benchmark
 """
     result = validate_commandment(content)
     assert result["valid"] is False
-    assert any("Test" in e and "IGNORED" in e for e in result["errors"])
+    assert any("Test" in e and "recognized" in e for e in result["errors"])
 
 
 # ---- Shell built-ins ----
@@ -86,6 +105,12 @@ python3 test.py
 
 ## PROFILE
 cd /workspace && python3 bench.py
+
+## BENCHMARK
+python3 bench.py --benchmark
+
+## FULL_BENCHMARK
+python3 bench.py --full-benchmark
 """
     result = validate_commandment(content)
     assert result["valid"] is False
@@ -102,6 +127,12 @@ python3 test.py
 
 ## PROFILE
 python3 bench.py
+
+## BENCHMARK
+python3 bench.py --benchmark
+
+## FULL_BENCHMARK
+python3 bench.py --full-benchmark
 """
     result = validate_commandment(content)
     assert result["valid"] is False
@@ -118,6 +149,12 @@ python3 test.py
 
 ## PROFILE
 python3 bench.py
+
+## BENCHMARK
+python3 bench.py --benchmark
+
+## FULL_BENCHMARK
+python3 bench.py --full-benchmark
 """
     result = validate_commandment(content)
     assert result["valid"] is False
@@ -136,6 +173,12 @@ python3 test.py
 
 ## PROFILE
 python3 bench.py
+
+## BENCHMARK
+python3 bench.py --benchmark
+
+## FULL_BENCHMARK
+python3 bench.py --full-benchmark
 """
     result = validate_commandment(content)
     assert result["valid"] is False
@@ -173,6 +216,12 @@ python3 /path/to/test.py
 
 ## PROFILE
 HIP_VISIBLE_DEVICES=1 python3 /path/to/bench.py --profile
+
+## BENCHMARK
+python3 /path/to/bench.py --benchmark
+
+## FULL_BENCHMARK
+python3 /path/to/bench.py --full-benchmark
 """
     result = validate_commandment(content)
     assert result["valid"] is False
@@ -190,6 +239,12 @@ PYTHONPATH=/workspace python3 /path/to/test.py
 
 ## PROFILE
 python3 /path/to/bench.py --profile
+
+## BENCHMARK
+python3 /path/to/bench.py --benchmark
+
+## FULL_BENCHMARK
+python3 /path/to/bench.py --full-benchmark
 """
     result = validate_commandment(content)
     assert result["valid"] is False
@@ -207,9 +262,14 @@ python3 /path/to/test.py
 
 ## PROFILE
 python3 /path/to/bench.py --profile
+
+## BENCHMARK
+python3 /path/to/bench.py --benchmark
+
+## FULL_BENCHMARK
+python3 /path/to/bench.py --full-benchmark
 """
     result = validate_commandment(content)
-    # Should not have inline env var errors (only CORRECTNESS/PROFILE are checked)
     assert not any("inline env var" in e for e in result["errors"])
 
 
@@ -225,6 +285,12 @@ python3 /path/to/test.py
 ## PROFILE
 HIP_VISIBLE_DEVICES=0 python3 /path/to/bench.py
 CUDA_VISIBLE_DEVICES=1 python3 /path/to/bench.py
+
+## BENCHMARK
+python3 /path/to/bench.py --benchmark
+
+## FULL_BENCHMARK
+python3 /path/to/bench.py --full-benchmark
 """
     result = validate_commandment(content)
     assert result["valid"] is False
@@ -249,6 +315,12 @@ python3 test.py
 
 ## PROFILE
 python3 bench.py
+
+## BENCHMARK
+python3 bench.py --benchmark
+
+## FULL_BENCHMARK
+python3 bench.py --full-benchmark
 """
     # cd is inside a code block in SETUP section -- our validator checks
     # lines in recognized sections regardless (since COMMANDMENT commands

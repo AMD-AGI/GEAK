@@ -56,8 +56,9 @@ agent:
     The test harness must be a Python script with exactly four CLI modes:
        - `--correctness`: validates kernel output against a trusted reference (torch reference, or non-fused path when applicable). Must exit non-zero on failure.
        - `--profile`: runs the kernel ONCE with minimal setup (for profiling tools like rocprof). Fast, no correctness check.
-       - `--benchmark`: runs the kernel with at least 20 iterations on HARNESS_SHAPES (sampled subset); prints a stable timing metric (median latency).
-       - `--full-benchmark`: like --benchmark but runs ALL discovered shapes. Used only at the start and end of optimization to get a complete picture.
+       - `--benchmark`: runs the kernel with at least 20 iterations on HARNESS_SHAPES (sampled subset); prints a stable timing metric (median latency). The LAST line of output MUST be exactly: GEAK_RESULT_LATENCY_MS=<number> where <number> is the overall median or geomean latency in milliseconds. This line is machine-parsed by the evaluation pipeline -- do NOT omit it.
+       - `--full-benchmark`: like --benchmark but runs ALL discovered shapes. Used only at the start and end of optimization to get a complete picture. Must also print GEAK_RESULT_LATENCY_MS=<number> as the last line.
+       - `--iterations N`: optional override for the number of benchmark iterations (default 20). Applied to both --benchmark and --full-benchmark. Reads from env var GEAK_BENCHMARK_ITERATIONS if the flag is not passed.
     Requirements:
        - Import the kernel via its package path (do NOT use `importlib.util`).
        - Use `torch.testing.assert_close` for correctness (Python/Triton) or host-side validation (C++/HIP).

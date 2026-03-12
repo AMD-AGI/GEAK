@@ -105,7 +105,11 @@ class ParallelAgent(DefaultAgent):
         if not repo_path.exists():
             raise ValueError(f"Repository path does not exist: {repo_path}")
 
-        is_git_repo = (repo_path / ".git").exists()
+        # Determine whether repo_path is already a git repo. For non-git repos we
+        # create per-agent isolated copies and bootstrap git *inside the copy* so
+        # save_and_test can capture diffs without modifying the source directory.
+        is_git_repo = (repo_path / ".git").exists() or (repo_path / ".git").is_file()
+
         output = kwargs.get("output")
         save_traj_fn = kwargs.get("save_traj_fn")
 
@@ -154,6 +158,17 @@ class ParallelAgent(DefaultAgent):
 
         model = model_factory()
         _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
+
+        # Override with deterministic benchmark parsing when possible
+        from minisweagent.benchmark_parsing import rewrite_best_results
+        det_result = rewrite_best_results(base_patch_dir)
+        if det_result:
+            best_patch_id = det_result.get("best_patch_id", best_patch_id)
+            print(
+                f"[ParallelAgent] Deterministic override: {best_patch_id} "
+                f"({det_result.get('best_patch_speedup', '?')}x)",
+                flush=True,
+            )
 
         if not best_patch_id:
             print("[ParallelAgent] SelectPatchAgent did not produce best_results.json", flush=True)
@@ -207,6 +222,99 @@ class ParallelAgent(DefaultAgent):
         from minisweagent.run.task_file import _ensure_safe_directory
 
         _ensure_safe_directory(repo_path)
+
+    @staticmethod
+    def _bootstrap_git_repo(repo_path: Path, console=None) -> bool:
+        """Bootstrap a minimal git repository for non-git directories.
+
+        Creates .git, adds .gitignore to exclude build artifacts, and creates
+        an initial commit. This allows unified git diff-based patch generation.
+
+        Returns True if successful, False otherwise.
+        """
+        import subprocess
+
+        try:
+            # 1. git init
+            subprocess.run(
+                ["git", "init", "-b", "geak-bootstrap"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            # 2. Create .gitignore with common build artifacts
+            gitignore_path = repo_path / ".gitignore"
+            gitignore_content = """# GEAK auto-generated gitignore for build artifacts
+build/
+*/build/
+.rocprofv3/
+__pycache__/
+*.pyc
+*.o
+*.so
+*.a
+*.log
+*.dat
+optimization_logs/
+*_logs/
+CMakeCache.txt
+CMakeFiles/
+.pytest_cache/
+*.egg-info/
+.geak_resolved/
+traj.json
+"""
+            # Append to existing .gitignore if present
+            if gitignore_path.exists():
+                existing = gitignore_path.read_text()
+                if "# GEAK auto-generated" not in existing:
+                    gitignore_path.write_text(existing + "\n" + gitignore_content)
+            else:
+                gitignore_path.write_text(gitignore_content)
+
+            # 3. git add -A (respects .gitignore)
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            # 4. git commit (use -c to avoid needing global config)
+            subprocess.run(
+                [
+                    "git",
+                    "-c", "user.name=geak-bootstrap",
+                    "-c", "user.email=geak@local",
+                    "commit",
+                    "-m", "GEAK bootstrap commit",
+                    "--allow-empty",
+                ],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            if console:
+                console.print("[bold green]Git repo bootstrapped successfully[/bold green]")
+            return True
+
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr or e.stdout or str(e)
+            if console:
+                console.print(f"[bold red]Failed to bootstrap git repo: {error_msg}[/bold red]")
+            return False
+        except Exception as e:
+            if console:
+                console.print(f"[bold red]Failed to bootstrap git repo: {e}[/bold red]")
+            return False
 
     @staticmethod
     def _create_worktree(repo_path: Path, worktree_path: Path) -> Path:
@@ -355,6 +463,9 @@ class ParallelAgent(DefaultAgent):
                 worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             else:
                 worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
+                # Bootstrap a local git repo in the isolated copy so diffs are
+                # captured from this workspace (avoid accidentally diffing a parent repo).
+                cls._bootstrap_git_repo(worktree_path, console)
             worktree_path_str = str(worktree_path.resolve())
 
             if console:
@@ -387,9 +498,12 @@ class ParallelAgent(DefaultAgent):
             # Create a NEW dict to avoid shared-reference race across threads
             new_env = dict(env_config_dict.get("env") or {})
             new_env[repo_path_str] = worktree_path_str
+            new_env["GEAK_WORK_DIR"] = worktree_path_str
+            new_env["GEAK_REPO_ROOT"] = repo_path_str
             if gpu_ids and agent_id < len(gpu_ids):
                 gpu_id = gpu_ids[agent_id]
                 new_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+                new_env["GEAK_GPU_DEVICE"] = str(gpu_id)
                 if console:
                     # Use lock to ensure console output completes before stdout redirection
                     with _stdout_lock:
@@ -410,6 +524,9 @@ class ParallelAgent(DefaultAgent):
                 agent.extra_template_vars[repo_path_str] = worktree_path_str
             if hasattr(agent, "base_repo_path"):
                 agent.base_repo_path = repo_path_resolved
+                # Re-initialize test_perf context with updated base_repo_path
+                if hasattr(agent, '_setup_test_perf_context'):
+                    agent._setup_test_perf_context()
             if hasattr(agent, "log_file"):
                 agent.log_file = log_file
 
@@ -496,6 +613,7 @@ class ParallelAgent(DefaultAgent):
                 worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             else:
                 worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
+                cls._bootstrap_git_repo(worktree_path, console)
             worktree_path_str = str(worktree_path.resolve())
 
             label = spec.label or spec.agent_class.__name__
@@ -535,7 +653,13 @@ class ParallelAgent(DefaultAgent):
             env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
             env_config_dict["cwd"] = worktree_path_str
             # Create a NEW dict to avoid shared-reference race across threads
-            env_config_dict["env"] = {**(env_config_dict.get("env") or {}), "HIP_VISIBLE_DEVICES": spec.hip_visible_devices}
+            env_config_dict["env"] = {
+                **(env_config_dict.get("env") or {}),
+                "HIP_VISIBLE_DEVICES": spec.hip_visible_devices,
+                "GEAK_WORK_DIR": worktree_path_str,
+                "GEAK_REPO_ROOT": str(repo_path.resolve()),
+                "GEAK_GPU_DEVICE": spec.hip_visible_devices,
+            }
 
             parallel_env = type(base_env)(**env_config_dict)
 
@@ -645,9 +769,17 @@ class ParallelAgent(DefaultAgent):
         # Sort tasks by priority (lower = runs first)
         sorted_tasks = sorted(enumerate(tasks), key=lambda t: t[1].priority)
 
+        # Disambiguate duplicate labels so each task gets its own patch directory
+        _label_counts: dict[str, int] = {}
+        for _, t in sorted_tasks:
+            _lbl = t.label or ""
+            _label_counts[_lbl] = _label_counts.get(_lbl, 0) + 1
+        _has_dup_labels = any(c > 1 for c in _label_counts.values())
+
         def execute_task(task_id: int, task) -> tuple[int, Any, Any, Any]:
             """Execute a single task on dynamically-assigned GPU(s)."""
             needed = getattr(task, "num_gpus", 1) or 1
+            needed = min(needed, n_slots)
             acquired_gpus: list[int] = []
             for _ in range(needed):
                 acquired_gpus.append(gpu_queue.get())  # blocks until a GPU is free
@@ -667,13 +799,22 @@ class ParallelAgent(DefaultAgent):
                 # Create or reset worktree for this slot
                 wt_path = worktree_base / f"slot_{slot_idx}"
                 if is_git_repo:
-                    cls._create_worktree(repo_path, wt_path)
+                    starting_patch = task.config.get("starting_patch")
+                    if starting_patch:
+                        from minisweagent.run.task_file import create_worktree_with_patch
+                        create_worktree_with_patch(repo_path, wt_path, starting_patch)
+                    else:
+                        cls._create_worktree(repo_path, wt_path)
                 else:
                     cls._create_copy_workdir(repo_path, wt_path)
+                    cls._bootstrap_git_repo(wt_path, console)
                 wt_path_str = str(wt_path.resolve())
 
                 # Each task gets its own patch dir named by label (persists across worktree resets)
-                dir_name = task.label if task.label else f"task_{task_id}"
+                if _has_dup_labels:
+                    dir_name = f"{task.label}_{task_id}" if task.label else f"task_{task_id}"
+                else:
+                    dir_name = task.label if task.label else f"task_{task_id}"
                 task_patch_dir = (base_patch_dir / dir_name).resolve()
                 task_patch_dir.mkdir(parents=True, exist_ok=True)
 
@@ -707,7 +848,13 @@ class ParallelAgent(DefaultAgent):
                 env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
                 env_config_dict["cwd"] = wt_path_str
                 # Create a NEW dict to avoid shared-reference race across threads
-                env_config_dict["env"] = {**(env_config_dict.get("env") or {}), "HIP_VISIBLE_DEVICES": hip_devices}
+                env_config_dict["env"] = {
+                    **(env_config_dict.get("env") or {}),
+                    "HIP_VISIBLE_DEVICES": hip_devices,
+                    "GEAK_WORK_DIR": wt_path_str,
+                    "GEAK_REPO_ROOT": str(repo_path.resolve()),
+                    "GEAK_GPU_DEVICE": hip_devices,
+                }
                 parallel_env = type(base_env)(**env_config_dict)
 
                 parallel_output = None

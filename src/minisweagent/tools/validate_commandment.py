@@ -1,12 +1,14 @@
 """Programmatic validation for COMMANDMENT.md files.
 
-OpenEvolve's evaluator only recognizes three section headers:
-  ## SETUP
-  ## CORRECTNESS
-  ## PROFILE
+COMMANDMENT.md is the single source of truth for kernel evaluation.  It
+must contain exactly five section headers:
+  ## SETUP          -- environment preparation
+  ## CORRECTNESS    -- correctness gate
+  ## PROFILE        -- deep hardware analysis (Metrix on PROFILE_SHAPES)
+  ## BENCHMARK      -- wall-clock latency (HARNESS_SHAPES, iterative feedback)
+  ## FULL_BENCHMARK -- wall-clock latency (all shapes, final evaluation)
 
-Any other header (e.g., ``## Test Command``, ``## Benchmark``) is silently
-ignored, resulting in 0 iterations and ``Metrix: N/A``.
+Any other header (e.g., ``## Test Command``) is flagged as an error.
 
 Additionally, ``rocprofv3`` uses ``os.execvpe()`` to run commands, which
 means shell built-ins like ``cd``, ``source``, and ``export`` cannot be
@@ -23,18 +25,88 @@ from __future__ import annotations
 
 import re
 
-REQUIRED_SECTIONS = {"SETUP", "CORRECTNESS", "PROFILE"}
+REQUIRED_SECTIONS = {"SETUP", "CORRECTNESS", "PROFILE", "BENCHMARK", "FULL_BENCHMARK"}
 SHELL_BUILTINS = {"cd", "source", "export", "alias", "ulimit", "pushd", "popd"}
 
 
-def validate_commandment(content: str) -> dict:
+def _extract_section_text(content: str, section: str) -> str | None:
+    """Return the raw text of a ``## <section>`` block, or *None* if absent."""
+    lines: list[str] = []
+    in_section = False
+    for raw_line in content.splitlines():
+        header = re.match(r"^##\s+(\w+)", raw_line.strip())
+        if header:
+            if header.group(1) == section:
+                in_section = True
+                continue
+            elif in_section:
+                break
+            continue
+        if in_section:
+            lines.append(raw_line)
+    if not lines:
+        return None
+    return "\n".join(lines)
+
+
+_REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
+
+
+def _validate_harness_flags(harness_path: str) -> list[str]:
+    """Check that a harness script defines the required CLI flags.
+
+    Returns a (possibly empty) list of warning strings.  This is a
+    secondary safety net; the primary validation lives in the preprocessor
+    where the harness can be re-generated via the UnitTestAgent retry loop.
+    """
+    from pathlib import Path as _Path
+
+    harness = _Path(harness_path)
+    warnings: list[str] = []
+    if not harness.is_file():
+        warnings.append(f"Harness file not found: {harness}")
+        return warnings
+
+    source = harness.read_text()
+    has_parser = (
+        "argparse" in source
+        or "ArgumentParser" in source
+        or "click" in source
+        or "typer" in source
+    )
+    if not has_parser:
+        warnings.append(
+            f"Harness '{harness.name}' does not use argparse/click/typer -- "
+            "CLI flags referenced in COMMANDMENT will be silently ignored"
+        )
+    for flag in _REQUIRED_HARNESS_FLAGS:
+        if flag not in source:
+            warnings.append(
+                f"Harness '{harness.name}' does not define '{flag}' flag "
+                "but COMMANDMENT references it"
+            )
+    return warnings
+
+
+def validate_commandment(content: str, *, harness_path: str | None = None) -> dict:
     """Validate a COMMANDMENT.md file's content.
 
-    Returns:
-        dict with keys:
-          - valid (bool): True if no errors found
-          - errors (list[str]): Critical issues that will cause OpenEvolve failure
-          - warnings (list[str]): Non-critical issues worth noting
+    Parameters
+    ----------
+    content:
+        The raw COMMANDMENT.md text.
+    harness_path:
+        Optional path to the test harness script.  When provided the
+        validator performs additional static checks to ensure the harness
+        supports the CLI flags used in CORRECTNESS / PROFILE / BENCHMARK /
+        FULL_BENCHMARK sections.
+
+    Returns
+    -------
+    dict with keys:
+      - valid (bool): True if no errors found
+      - errors (list[str]): Critical issues that will cause OpenEvolve failure
+      - warnings (list[str]): Non-critical issues worth noting
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -50,15 +122,14 @@ def validate_commandment(content: str) -> dict:
     if missing:
         errors.append(
             f"Missing required section(s): {', '.join(f'## {s}' for s in sorted(missing))}. "
-            f"COMMANDMENT.md MUST contain exactly: ## SETUP, ## CORRECTNESS, ## PROFILE."
+            f"COMMANDMENT.md MUST contain exactly: ## SETUP, ## CORRECTNESS, ## PROFILE, ## BENCHMARK, ## FULL_BENCHMARK."
         )
 
     unknown = found_sections - REQUIRED_SECTIONS
     if unknown:
         errors.append(
             f"Unknown section(s): {', '.join(f'## {s}' for s in sorted(unknown))}. "
-            f"These will be SILENTLY IGNORED by OpenEvolve. "
-            f"Only ## SETUP, ## CORRECTNESS, ## PROFILE are recognized."
+            f"Only ## SETUP, ## CORRECTNESS, ## PROFILE, ## BENCHMARK, ## FULL_BENCHMARK are recognized."
         )
 
     # --- Check for shell built-ins in commands ---
@@ -100,7 +171,7 @@ def validate_commandment(content: str) -> dict:
         # Check for inline env var prefixes (VAR=value command ...)
         # These work in a shell but NOT with os.execvpe() used by rocprofv3
         env_prefix = re.match(r"^(\w+=\S+)\s+(.+)", stripped)
-        if env_prefix and current_section in ("CORRECTNESS", "PROFILE"):
+        if env_prefix and current_section in ("CORRECTNESS", "PROFILE", "BENCHMARK", "FULL_BENCHMARK"):
             var_assign = env_prefix.group(1)
             errors.append(
                 f"Command uses inline env var prefix '{var_assign}' in "
@@ -110,6 +181,17 @@ def validate_commandment(content: str) -> dict:
                 f"Set the variable in ## SETUP (via a wrapper script) or "
                 f'use: bash -c "{stripped}"'
             )
+
+    # --- Check that SETUP configures PYTHONPATH ---
+    setup_text = _extract_section_text(content, "SETUP")
+    if setup_text is not None and "PYTHONPATH" not in setup_text:
+        errors.append(
+            "## SETUP does not configure PYTHONPATH. "
+            "The COMMANDMENT's SETUP section MUST set PYTHONPATH so that "
+            "test harnesses can import the package under optimization. "
+            "All agents execute COMMANDMENT commands verbatim; without "
+            "PYTHONPATH the imports will fail."
+        )
 
     # --- Check for common mistakes ---
     if "HIP_VISIBLE_DEVICES" in content and not re.search(r"\$\{?HIP_VISIBLE_DEVICES", content):
@@ -136,6 +218,10 @@ def validate_commandment(content: str) -> dict:
                 f"Section ## {section} exists but contains no commands. "
                 f"Each section must have at least one executable command."
             )
+
+    # --- Validate harness supports the flags used in COMMANDMENT ---
+    if harness_path:
+        warnings.extend(_validate_harness_flags(harness_path))
 
     return {
         "valid": len(errors) == 0,

@@ -4,7 +4,7 @@ Unlike StrategyInteractiveAgent which has access to LLM-powered MCP tools
 (kernel-evolve, kernel-ercs), the SWE agent relies on its own reasoning to
 read code, make edits, test correctness, and profile performance.
 
-Tool set: bash, str_replace_editor, test_perf, submit, profile_kernel,
+Tool set: bash, str_replace_editor, save_and_test, submit, profile_kernel,
 baseline_metrics, strategy_manager.
 """
 
@@ -36,7 +36,7 @@ class SweAgent(InteractiveAgent):
             patch_output_dir=self.config.patch_output_dir,
             tool_profile="swe",
         )
-        self._setup_test_perf_context()
+        self._setup_save_and_test_context()
 
         # Override model tools so the LLM only sees dispatchable tools
         if hasattr(self.model, "set_tools"):

@@ -20,7 +20,7 @@ from minisweagent.tools.tools_runtime import ToolRuntime
 EXPECTED_NATIVE_TOOLS = {
     "bash",
     "str_replace_editor",
-    "test_perf",
+    "save_and_test",
     "submit",
     "resolve_kernel_url",
     "baseline_metrics",

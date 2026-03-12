@@ -37,7 +37,11 @@ class AmdLlmModel:
 
         config = AmdLlmModelConfig(**kwargs)
 
-        if "gpt" in config.model_name:
+        if "gpt-5.2" in config.model_name or "gpt5.2" in config.model_name:
+            from minisweagent.models.amd_openai_chat import AmdOpenAIChatModel
+
+            self._impl = AmdOpenAIChatModel(config)
+        elif "gpt" in config.model_name:
             from minisweagent.models.amd_openai import AmdOpenAIModel
 
             self._impl = AmdOpenAIModel(config)
