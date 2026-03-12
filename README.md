@@ -227,18 +227,6 @@ mcp_tools/                   # Standalone MCP servers (profiler, kernel-evolve, 
 
 See `INSTRUCTIONS.md` Section 6 for the full reference.
 
-## Branch: `fix/mcp-essential`
-
-Changes required for MCP tools to work outside the AMD LLM Gateway (e.g. with a direct Anthropic API key on LUMI or other non-gateway environments).
-
-| # | Commit | What changed | Why needed |
-|---|--------|--------------|------------|
-| 1 | `458f811` Add ANTHROPIC_API_KEY support to kernel-evolve MCP server | `call_llm()` gains a 3-tier backend: AMD gateway, direct Anthropic API, litellm | kernel-evolve tools (generate, mutate, crossover) fail when only `ANTHROPIC_API_KEY` is set |
-| 2 | `ec519d4` Add ANTHROPIC_API_KEY support to kernel-ercs MCP server | Same 3-tier fallback added to kernel-ercs | `evaluate_kernel_quality` and `reflect_on_kernel_result` fail without AMD gateway |
-| 3 | `c256eb3` Thread agent config through orchestrator pipeline to dispatch | `extra_agent_config` parameter threaded through `run_orchestrator` -> `run_task_batch` -> `ParallelAgent` | Custom YAML configs (system prompt, cost limit, etc.) were silently dropped -- agents always got the default prompt |
-| 4 | `23adeb2` Register mutate_kernel, crossover_kernels, get_optimization_strategies | Add 3 kernel-evolve tools to `ToolRuntime._tool_table` and `tools.json` | These tools existed on the MCP server but were invisible to the agent |
-| 5 | `d225845` Add GEAK_MCP_MODEL env var for flexible MCP model selection | Replace hardcoded `claude-sonnet-4.5` with configurable model via env var + YAML | The hardcoded model name is an AMD gateway alias that doesn't work with other LLM providers |
-
 ## License
 
 MIT License - see LICENSE.md for details
