@@ -642,6 +642,7 @@ def main(
             repo=repo,
             kernel_name=kernel_name or "unknown",
             log_dir=patch_output,
+            kernel_path=Path(_resolved_kernel_path) if _resolved_kernel_path else None,
             discovery_context=discovery_context,
             gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
         )

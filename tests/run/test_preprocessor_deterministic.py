@@ -70,6 +70,7 @@ def test_run_preprocessor_uses_explicit_deterministic_harness(tmp_path, monkeypa
     _write_demo_harness(harness_path)
 
     output_dir = tmp_path / "output"
+    output_dir.mkdir()
 
     fake_pkg = types.ModuleType("automated_test_discovery")
     fake_server = types.ModuleType("automated_test_discovery.server")
@@ -153,6 +154,7 @@ def test_run_preprocessor_accepts_local_deterministic_harness_path(tmp_path, mon
     _write_demo_harness(harness_path)
 
     output_dir = tmp_path / "output"
+    output_dir.mkdir()
 
     fake_pkg = types.ModuleType("automated_test_discovery")
     fake_server = types.ModuleType("automated_test_discovery.server")
@@ -163,6 +165,8 @@ def test_run_preprocessor_accepts_local_deterministic_harness_path(tmp_path, mon
     fake_server.discover = _discover
     monkeypatch.setitem(sys.modules, "automated_test_discovery", fake_pkg)
     monkeypatch.setitem(sys.modules, "automated_test_discovery.server", fake_server)
+    materialized_harness = output_dir / "test_kernel_harness.py"
+    materialized_harness.write_text("# materialized harness\n")
 
     with (
         patch("minisweagent.run.preprocessor._ensure_mcp_importable", return_value=None),
@@ -240,6 +244,8 @@ def test_run_preprocessor_prefers_focused_harness_when_top_test_is_irrelevant(tm
     fake_server.discover = _discover
     monkeypatch.setitem(sys.modules, "automated_test_discovery", fake_pkg)
     monkeypatch.setitem(sys.modules, "automated_test_discovery.server", fake_server)
+    materialized_harness = output_dir / "test_kernel_harness.py"
+    materialized_harness.write_text("# materialized harness\n")
 
     with (
         patch("minisweagent.run.preprocessor._ensure_mcp_importable", return_value=None),
@@ -260,6 +266,14 @@ def test_run_preprocessor_prefers_focused_harness_when_top_test_is_irrelevant(tm
         patch(
             "minisweagent.run.preprocessor.execute_harness_validation",
             side_effect=lambda harness_path, **kwargs: (True, [], _demo_harness_results()),
+        ),
+        patch(
+            "minisweagent.run.preprocessor._materialize_preprocessor_harness",
+            side_effect=lambda **kwargs: (
+                kwargs["test_command"],
+                kwargs["harness_path"],
+                kwargs["harness_results"],
+            ),
         ),
         patch("minisweagent.run.preprocessor.create_validated_harness", side_effect=AssertionError("UnitTestAgent should be skipped")),
         patch("minisweagent.run.preprocessor.run_baseline_profile", return_value=None),
@@ -317,6 +331,8 @@ def test_run_preprocessor_skips_generic_cached_harness_when_top_test_is_irreleva
     fake_server.discover = _discover
     monkeypatch.setitem(sys.modules, "automated_test_discovery", fake_pkg)
     monkeypatch.setitem(sys.modules, "automated_test_discovery.server", fake_server)
+    materialized_harness = output_dir / "test_kernel_harness.py"
+    materialized_harness.write_text("# materialized harness\n")
 
     with (
         patch("minisweagent.run.preprocessor._ensure_mcp_importable", return_value=None),
@@ -345,6 +361,14 @@ def test_run_preprocessor_skips_generic_cached_harness_when_top_test_is_irreleva
         patch(
             "minisweagent.run.preprocessor.execute_harness_validation",
             side_effect=lambda harness_path, **kwargs: (True, [], _demo_harness_results()),
+        ),
+        patch(
+            "minisweagent.run.preprocessor._materialize_preprocessor_harness",
+            side_effect=lambda **kwargs: (
+                kwargs["test_command"],
+                kwargs["harness_path"],
+                kwargs["harness_results"],
+            ),
         ),
         patch("minisweagent.run.preprocessor.create_validated_harness", side_effect=AssertionError("UnitTestAgent should be skipped")),
         patch("minisweagent.run.preprocessor.run_baseline_profile", return_value=None),
@@ -378,6 +402,7 @@ def test_run_preprocessor_uses_unit_test_agent_when_irrelevant_top_test_has_no_v
     _write_demo_harness(repo_harness)
 
     output_dir = tmp_path / "output"
+    output_dir.mkdir()
     focused_harness = output_dir / "test_demo_focused.py"
     focused_harness.parent.mkdir(parents=True, exist_ok=True)
     focused_harness.write_text("print('not a four-mode harness')\n")
@@ -445,3 +470,77 @@ def test_run_preprocessor_uses_unit_test_agent_when_irrelevant_top_test_has_no_v
     assert create_harness.called
     assert ctx["harness_path"] == str(generated_harness.resolve())
     assert ctx["testcase_selection"]["selected_source"] == "unit_test_agent"
+
+
+def test_run_preprocessor_materializes_discovery_harness_into_output_dir(tmp_path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    task_dir = repo_root / "tasks" / "demo"
+    task_dir.mkdir(parents=True)
+    kernel_path = task_dir / "kernel.py"
+    harness_path = task_dir / "test_demo_harness.py"
+    kernel_path.write_text("def kernel():\n    return 1\n")
+    _write_demo_harness(harness_path)
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    materialized_harness = output_dir / "test_kernel_harness.py"
+    materialized_harness.write_text("# materialized harness\n")
+
+    fake_pkg = types.ModuleType("automated_test_discovery")
+    fake_server = types.ModuleType("automated_test_discovery.server")
+
+    def _discover(*, kernel_path: str, output_dir: str):
+        return {
+            "tests": [
+                {
+                    "file": str(harness_path),
+                    "command": f"python {harness_path}",
+                }
+            ],
+            "kernel": {"type": "python"},
+        }
+
+    fake_server.discover = _discover
+    monkeypatch.setitem(sys.modules, "automated_test_discovery", fake_pkg)
+    monkeypatch.setitem(sys.modules, "automated_test_discovery.server", fake_server)
+
+    with (
+        patch("minisweagent.run.preprocessor._ensure_mcp_importable", return_value=None),
+        patch(
+            "minisweagent.tools.resolve_kernel_url_impl.resolve_kernel_url",
+            return_value={
+                "error": None,
+                "local_repo_path": str(repo_root),
+                "local_file_path": str(kernel_path),
+            },
+        ),
+        patch(
+            "minisweagent.run.codebase_context.generate_codebase_context",
+            side_effect=lambda repo_root, kernel_path, output_dir: output_dir / "CODEBASE_CONTEXT.md",
+        ),
+        patch("minisweagent.run.preprocessor.get_testcase_cache_dir", return_value=None),
+        patch(
+            "minisweagent.run.preprocessor.execute_harness_validation",
+            side_effect=lambda harness_path, **kwargs: (True, [], _demo_harness_results()),
+        ),
+        patch(
+            "minisweagent.run.preprocessor._materialize_preprocessor_harness",
+            return_value=(
+                f"python {materialized_harness}",
+                str(materialized_harness.resolve()),
+                _demo_harness_results(),
+            ),
+        ),
+        patch("minisweagent.run.preprocessor.run_baseline_profile", return_value=None),
+        patch("minisweagent.tools.commandment.generate_commandment", return_value="COMMANDMENT"),
+    ):
+        (output_dir / "CODEBASE_CONTEXT.md").write_text("context\n")
+        ctx = run_preprocessor(
+            str(kernel_path),
+            output_dir=output_dir,
+            gpu_id=0,
+        )
+
+    assert ctx["harness_path"] == str(materialized_harness.resolve())
+    assert ctx["testcase_selection"]["selected_source"] == "discovery_test"
+    assert materialized_harness.is_file()

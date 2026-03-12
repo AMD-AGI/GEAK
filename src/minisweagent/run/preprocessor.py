@@ -38,6 +38,7 @@ def _ensure_mcp_importable() -> None:
 
 from minisweagent.run.pipeline_helpers import (
     DEFAULT_EVAL_BENCHMARK_ITERATIONS,
+    _materialize_validated_harness,
     create_validated_harness,
     execute_harness_validation,
     extract_harness_path,
@@ -200,6 +201,29 @@ def _build_harness_candidates(
     for _rank, _index, cmd, harness_path, source in sorted(ranked_discovery, key=lambda item: (item[0], item[1])):
         candidates.append((cmd, harness_path, source))
     return candidates
+
+
+def _materialize_preprocessor_harness(
+    *,
+    test_command: str,
+    harness_path: str,
+    repo_root: str | Path,
+    output_dir: Path,
+    kernel_path: str | Path,
+    gpu_id: int,
+    harness_results: list[dict[str, Any]],
+) -> tuple[str, str, list[dict[str, Any]]]:
+    materialized = _materialize_validated_harness(
+        test_command=test_command,
+        harness_path=harness_path,
+        repo_root=Path(repo_root),
+        log_dir=output_dir,
+        kernel_path=Path(kernel_path),
+        gpu_id=gpu_id,
+    )
+    if materialized is not None:
+        return materialized
+    return test_command, harness_path, harness_results
 
 
 def run_preprocessor(
@@ -401,6 +425,15 @@ def run_preprocessor(
                             gpu_id=gpu_id,
                         )
                         if ok_runtime:
+                            candidate_cmd, candidate_harness, candidate_results = _materialize_preprocessor_harness(
+                                test_command=candidate_cmd,
+                                harness_path=candidate_harness,
+                                repo_root=repo_root,
+                                output_dir=output_dir,
+                                kernel_path=kernel_path,
+                                gpu_id=gpu_id,
+                                harness_results=candidate_results,
+                            )
                             test_command = candidate_cmd
                             harness_results = candidate_results
                             ctx["harness_path"] = candidate_harness
@@ -435,6 +468,15 @@ def run_preprocessor(
                 if not ok_runtime:
                     continue
 
+                candidate_cmd, candidate_harness, candidate_results = _materialize_preprocessor_harness(
+                    test_command=candidate_cmd,
+                    harness_path=candidate_harness,
+                    repo_root=repo_root,
+                    output_dir=output_dir,
+                    kernel_path=kernel_path,
+                    gpu_id=gpu_id,
+                    harness_results=candidate_results,
+                )
                 test_command = candidate_cmd
                 harness_results = candidate_results
                 ctx["harness_path"] = candidate_harness
@@ -508,6 +550,7 @@ def run_preprocessor(
                 repo=Path(repo_root),
                 kernel_name=kernel_name,
                 log_dir=output_dir,
+                kernel_path=Path(kernel_path),
                 discovery_context=discovery_context,
                 gpu_id=gpu_id,
             )

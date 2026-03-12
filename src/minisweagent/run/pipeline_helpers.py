@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -159,6 +160,136 @@ def extract_harness_path(test_command: str) -> str:
     return tokens[-1] if tokens else test_command
 
 
+def _preferred_harness_path(log_dir: Path, kernel_path: Path | None) -> Path:
+    if kernel_path is not None:
+        stem = kernel_path.stem or "kernel"
+        return log_dir / f"test_{stem}_harness.py"
+    return log_dir / "geak_test_harness.py"
+
+
+def _materialized_harness_bootstrap(
+    *,
+    repo_root: Path,
+    kernel_path: Path | None,
+) -> str:
+    kernel_dir = kernel_path.resolve().parent if kernel_path is not None else None
+    rel_kernel_dir: Path | None = None
+    if kernel_dir is not None:
+        try:
+            rel_kernel_dir = kernel_dir.relative_to(repo_root.resolve())
+        except ValueError:
+            rel_kernel_dir = None
+
+    rel_kernel_dir_text = str(rel_kernel_dir).replace("\\", "/") if rel_kernel_dir is not None else ""
+    original_kernel_dir = str(kernel_dir) if kernel_dir is not None else ""
+    return (
+        "# GEAK materialized harness bootstrap\n"
+        "def _resolve_geak_kernel_dir():\n"
+        "    candidates = []\n"
+        "    work_dir = os.environ.get(\"GEAK_WORK_DIR\", \"\").strip()\n"
+        "    if work_dir:\n"
+        "        candidates.append(work_dir)\n"
+        "    repo_root = os.environ.get(\"GEAK_REPO_ROOT\", \"\").strip()\n"
+        f"    rel_kernel_dir = {rel_kernel_dir_text!r}\n"
+        "    if repo_root and rel_kernel_dir:\n"
+        "        candidates.append(os.path.join(repo_root, rel_kernel_dir))\n"
+        f"    original_kernel_dir = {original_kernel_dir!r}\n"
+        "    if original_kernel_dir:\n"
+        "        candidates.append(original_kernel_dir)\n"
+        "    for candidate in candidates:\n"
+        "        if candidate and os.path.isfile(os.path.join(candidate, \"kernel.py\")):\n"
+        "            return candidate\n"
+        "    return original_kernel_dir or os.getcwd()\n"
+        "\n"
+        "_KERNEL_DIR = _resolve_geak_kernel_dir()\n"
+        "if _KERNEL_DIR not in sys.path:\n"
+        "    sys.path.insert(0, _KERNEL_DIR)\n"
+    )
+
+
+def _rewrite_materialized_harness_source(
+    source_text: str,
+    *,
+    repo_root: Path,
+    kernel_path: Path | None,
+) -> str:
+    bootstrap = _materialized_harness_bootstrap(
+        repo_root=repo_root,
+        kernel_path=kernel_path,
+    )
+    legacy_patterns = [
+        re.compile(
+            r"(?ms)^# Ensure the kernel directory is importable\n"
+            r"_KERNEL_DIR = os\.path\.dirname\(os\.path\.abspath\(__file__\)\)\n"
+            r"if _KERNEL_DIR not in sys\.path:\n"
+            r"\s+sys\.path\.insert\(0, _KERNEL_DIR\)\n"
+        ),
+        re.compile(
+            r"(?ms)^_KERNEL_DIR = os\.path\.dirname\(os\.path\.abspath\(__file__\)\)\n"
+            r"if _KERNEL_DIR not in sys\.path:\n"
+            r"\s+sys\.path\.insert\(0, _KERNEL_DIR\)\n"
+        ),
+    ]
+    for pattern in legacy_patterns:
+        if pattern.search(source_text):
+            return pattern.sub(bootstrap, source_text, count=1)
+
+    import_block = re.compile(
+        r"(?ms)\A((?:from __future__ import annotations\n)?(?:import .+\n|from .+ import .+\n)+)"
+    )
+    match = import_block.match(source_text)
+    if match:
+        return source_text[: match.end()] + "\n" + bootstrap + source_text[match.end():]
+    return bootstrap + "\n" + source_text
+
+
+def _materialize_validated_harness(
+    *,
+    test_command: str,
+    harness_path: str,
+    repo_root: Path,
+    log_dir: Path | None,
+    kernel_path: Path | None,
+    gpu_id: int,
+) -> tuple[str, str, list[dict[str, Any]]] | None:
+    if log_dir is None:
+        return None
+
+    source_harness = Path(harness_path).resolve()
+    target_dir = log_dir.resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_harness = _preferred_harness_path(target_dir, kernel_path)
+    if source_harness == target_harness:
+        return None
+
+    rewritten_text = _rewrite_materialized_harness_source(
+        source_harness.read_text(),
+        repo_root=repo_root,
+        kernel_path=kernel_path,
+    )
+    target_harness.write_text(rewritten_text)
+    shutil.copymode(source_harness, target_harness)
+
+    materialized_command = test_command.replace(str(source_harness), str(target_harness))
+    valid, static_errors = validate_harness(str(target_harness))
+    if not valid:
+        raise RuntimeError(
+            "Materialized harness static validation failed: " + "; ".join(static_errors)
+        )
+
+    exec_ok, exec_errors, harness_results = execute_harness_validation(
+        str(target_harness),
+        repo_root=str(repo_root),
+        gpu_id=gpu_id,
+    )
+    if not exec_ok:
+        raise RuntimeError(
+            "Materialized harness runtime validation failed: "
+            + "; ".join(e.splitlines()[0] for e in exec_errors)
+        )
+    return materialized_command, str(target_harness), harness_results
+
+
 # ── harness validation ───────────────────────────────────────────────
 
 
@@ -289,6 +420,7 @@ def create_validated_harness(
     repo: Path,
     kernel_name: str,
     log_dir: Path | None,
+    kernel_path: Path | None,
     discovery_context: str,
     max_retries: int = MAX_HARNESS_RETRIES,
     gpu_id: int = 0,
@@ -334,6 +466,8 @@ def create_validated_harness(
             repo=repo,
             kernel_name=kernel_name,
             log_dir=log_dir,
+            preferred_harness_path=_preferred_harness_path(log_dir, kernel_path) if log_dir else None,
+            kernel_path=kernel_path,
             discovery_context=ctx,
         )
         logger.info("UnitTestAgent test_command (attempt %d): %s", attempt, test_command)
@@ -364,6 +498,31 @@ def create_validated_harness(
             harness, repo_root=repo_root, gpu_id=gpu_id,
         )
         if exec_ok:
+            try:
+                materialized = _materialize_validated_harness(
+                    test_command=test_command,
+                    harness_path=harness,
+                    repo_root=repo,
+                    log_dir=log_dir,
+                    kernel_path=kernel_path,
+                    gpu_id=gpu_id,
+                )
+            except Exception as exc:
+                harness_errors = [str(exc)]
+                logger.warning(
+                    "Harness materialization failed (attempt %d/%d): %s",
+                    attempt,
+                    max_attempts,
+                    harness_errors,
+                )
+                if attempt == max_attempts:
+                    raise RuntimeError(
+                        f"Harness materialization failed after {max_attempts} attempts: {exc}"
+                    )
+                continue
+            if materialized is not None:
+                test_command, harness, harness_results = materialized
+                logger.info("Materialized harness to %s", harness)
             logger.info("Harness runtime validation: ALL MODES PASSED")
             return test_command, harness_results
 
