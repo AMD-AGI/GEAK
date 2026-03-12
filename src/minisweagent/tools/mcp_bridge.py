@@ -186,10 +186,17 @@ class MCPToolBridge:
         site_pkgs = [p for p in sys.path if "site-packages" in p]
         pythonpath = os.pathsep.join([str(src_dir)] + site_pkgs)
 
+        env = {"PYTHONPATH": pythonpath}
+
+        for key in ("GEAK_MCP_MODEL", "ANTHROPIC_API_KEY", "AMD_LLM_API_KEY", "LLM_GATEWAY_KEY"):
+            val = os.environ.get(key)
+            if val:
+                env[key] = val
+
         return {
             "command": ["python3", "-m", f"{module_name}.server"],
             "cwd": str(mcp_dir),
-            "env": {"PYTHONPATH": pythonpath},
+            "env": env,
         }
 
 

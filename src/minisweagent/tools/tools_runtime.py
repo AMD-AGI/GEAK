@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -51,9 +52,11 @@ class ToolRuntime:
         on_strategy_change=None,
         patch_output_dir: str | None = None,
         tool_profile: str = "full",
+        mcp_config: dict | None = None,
     ):
         self._tool_profile = tool_profile
         self._mcp_bridges: list = []
+        self._mcp_config = mcp_config if mcp_config is not None else self._load_default_mcp_config()
         allowed = _TOOL_PROFILES.get(tool_profile)
 
         self._tool_table = {
@@ -99,6 +102,16 @@ class ToolRuntime:
         self.use_strategy_manager = use_strategy_manager
         self._codebase_context: str | None = None
 
+    @staticmethod
+    def _load_default_mcp_config() -> dict:
+        """Load the ``mcp`` section from the built-in geak.yaml config."""
+        try:
+            from minisweagent.config import load_config
+            cfg = load_config("geak")
+            return cfg.get("mcp", {}) or {}
+        except Exception:
+            return {}
+
     def _register_profiler_mcp(self):
         """Register only the profiler-mcp tool."""
         try:
@@ -108,6 +121,26 @@ class ToolRuntime:
         profiler = MCPToolBridge("profiler-mcp", timeout=600)
         self._mcp_bridges.append(profiler)
         self._tool_table["profile_kernel"] = profiler.tool("profile_kernel")
+
+    def _resolve_mcp_model(self, server_name: str) -> str | None:
+        """Resolve MCP model for a server from YAML config.
+
+        Resolution order (env var is handled at the bridge/server level):
+          1. GEAK_MCP_MODEL env var  (highest -- forwarded by MCPToolBridge)
+          2. mcp.tools.<server>.model (YAML per-tool)
+          3. mcp.default_model        (YAML global)
+          4. hardcoded fallback        (in server code)
+
+        Returns the YAML-derived model string (for steps 2-3), or None to let
+        the server use its own default (step 4).  Step 1 is already handled by
+        MCPToolBridge._default_config forwarding the env var.
+        """
+        if os.environ.get("GEAK_MCP_MODEL"):
+            return None  # env var takes priority; bridge already forwards it
+        per_tool = self._mcp_config.get("tools", {}).get(server_name, {}).get("model")
+        if per_tool:
+            return per_tool
+        return self._mcp_config.get("default_model")
 
     def _register_mcp_tools(self):
         """Register all MCP server tools via MCPToolBridge.
@@ -139,6 +172,12 @@ class ToolRuntime:
         openevolve = MCPToolBridge("openevolve-mcp", timeout=7200)
         self._mcp_bridges.append(openevolve)
         self._tool_table["openevolve"] = openevolve.tool("optimize_kernel")
+
+        # Apply YAML model overrides (only when GEAK_MCP_MODEL env var is not set)
+        for bridge in self._mcp_bridges:
+            model = self._resolve_mcp_model(bridge.server_name)
+            if model:
+                bridge.set_env({"GEAK_MCP_MODEL": model})
 
     def set_env(self, env: dict[str, str]) -> None:
         """Propagate environment overrides (e.g. HIP_VISIBLE_DEVICES) to tools."""
