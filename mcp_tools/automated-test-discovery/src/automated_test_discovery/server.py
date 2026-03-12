@@ -21,6 +21,8 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+_DEFAULT_MODEL = os.environ.get("GEAK_MCP_MODEL", "claude-sonnet-4.5")
+
 # Initialize MCP server
 mcp = FastMCP(
     name="automated-test-discovery",
@@ -387,7 +389,7 @@ def _llm_finalize_discovery(
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4.5",
+            model=_DEFAULT_MODEL,
             max_tokens=4000,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,

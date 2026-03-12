@@ -36,6 +36,8 @@ except ImportError:
     ANTHROPIC_AVAILABLE = False
 
 
+_DEFAULT_MODEL = os.environ.get("GEAK_MCP_MODEL", "claude-sonnet-4.5")
+
 # Create the MCP server
 mcp = FastMCP(
     name="kernel-ercs",
@@ -99,11 +101,55 @@ def call_amd_gateway(messages: list, model: str, temperature: float = 0.1) -> st
     return response.content[0].text
 
 
+def _extract_system_and_messages(messages: list) -> tuple[str, list]:
+    """Separate system message from user/assistant messages for Anthropic API."""
+    system_content = ""
+    filtered_messages = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_content = msg.get("content", "")
+        else:
+            filtered_messages.append(msg)
+    return system_content, filtered_messages
+
+
 def call_llm(messages: list, model: str, temperature: float = 0.1) -> str:
-    """Call LLM using appropriate backend."""
-    if is_amd_model(model) and ANTHROPIC_AVAILABLE:
+    """Call LLM using AMD gateway, direct Anthropic API, or litellm.
+
+    Backend selection order:
+      1. AMD LLM Gateway  – if AMD_LLM_API_KEY or LLM_GATEWAY_KEY is set
+      2. Direct Claude API – if ANTHROPIC_API_KEY is set
+      3. litellm fallback  – if litellm is installed
+    """
+    amd_api_key = os.environ.get("AMD_LLM_API_KEY") or os.environ.get("LLM_GATEWAY_KEY")
+    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    # --- 1. AMD LLM Gateway ---------------------------------------------------
+    if ANTHROPIC_AVAILABLE and amd_api_key:
         return call_amd_gateway(messages, model, temperature)
-    elif LITELLM_AVAILABLE:
+
+    # --- 2. Direct Claude API (api.anthropic.com) ------------------------------
+    if ANTHROPIC_AVAILABLE and anthropic_api_key:
+        client = anthropic.Anthropic(
+            api_key=anthropic_api_key,
+            base_url="https://api.anthropic.com",
+        )
+
+        model_name = model.removeprefix("amd/")
+        system_content, filtered_messages = _extract_system_and_messages(messages)
+
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=4096,
+            system=system_content if system_content else anthropic.NOT_GIVEN,
+            messages=filtered_messages,
+            temperature=temperature,
+        )
+
+        return response.content[0].text
+
+    # --- 3. litellm fallback ---------------------------------------------------
+    if LITELLM_AVAILABLE:
         api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
         response = completion(
             model=model,
@@ -112,8 +158,11 @@ def call_llm(messages: list, model: str, temperature: float = 0.1) -> str:
             temperature=temperature,
         )
         return response.choices[0].message.content
-    else:
-        raise RuntimeError("No LLM backend available. Install anthropic or litellm.")
+
+    raise RuntimeError(
+        "No LLM backend available. Set ANTHROPIC_API_KEY for direct Claude access, "
+        "AMD_LLM_API_KEY for AMD gateway, or install litellm."
+    )
 
 
 # Kernel Evaluation Prompt
@@ -221,7 +270,7 @@ Only output valid JSON.
 
 
 @mcp.tool()
-def evaluate_kernel_quality(kernel_code: str, model: str = "claude-sonnet-4.5") -> dict[str, Any]:
+def evaluate_kernel_quality(kernel_code: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
     """
     Evaluate Triton kernel quality using LLM analysis.
 
@@ -230,7 +279,7 @@ def evaluate_kernel_quality(kernel_code: str, model: str = "claude-sonnet-4.5") 
 
     Args:
         kernel_code: The Triton kernel code to evaluate
-        model: LLM model to use (default: claude-sonnet-4.5)
+        model: LLM model to use (default: GEAK_MCP_MODEL env var or claude-sonnet-4.5)
 
     Returns:
         dict with scores (0.0-1.0 each), total_score, reasoning, and suggestions
@@ -288,7 +337,7 @@ def reflect_on_kernel_result(
     correctness_status: str = "unknown",
     history: str = "",
     tried_strategies: str = "",
-    model: str = "claude-sonnet-4.5",
+    model: str = _DEFAULT_MODEL,
 ) -> dict[str, Any]:
     """
     Analyze kernel test results and get targeted improvement suggestions.
