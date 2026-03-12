@@ -109,6 +109,25 @@ Rules:
   3. Did it violate the COMMANDMENT?  Reject if so.
   4. Did the correctness tests pass?  Reject if tests failed.
   Mark rejected results as "rejected" and explain why.
+
+## Dashboard Status Updates
+
+When producing responses, emit structured status markers so the live
+dashboard can track progress. Place them on their own line:
+
+    <!-- GEAK_DASH: {"event": "phase", "phase": "exploring kernel"} -->
+    <!-- GEAK_DASH: {"event": "log", "msg": "Found 3 bottleneck kernels"} -->
+    <!-- GEAK_DASH: {"event": "speedup", "value": 1.08, "round": 1} -->
+
+Available events:
+- `phase`: update current phase (e.g. "exploring", "planning tasks", "reviewing results")
+- `log`: log a short message to the activity feed
+- `speedup`: report a speedup value for a round
+- `task_start`: mark a task starting (include "gpu" and "label")
+- `task_done`: mark a task completed (include "gpu", "label", optionally "speedup")
+- `task_error`: mark a task failed (include "gpu", "label")
+
+Keep markers brief. They are stripped from displayed output.
 """
 
 _INSTANCE_TEMPLATE = """\
