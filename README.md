@@ -9,7 +9,7 @@ GEAK is an AI-powered framework for automated GPU kernel optimization. It profil
 ### Prerequisites
 
 - Docker with AMD GPU access (`/dev/kfd`, `/dev/dri`)
-- `AMD_LLM_API_KEY` environment variable set
+- LLM API key: set `AMD_LLM_API_KEY` (AMD gateway) or `ANTHROPIC_API_KEY` (direct Anthropic API)
 
 ### Enter the container
 
@@ -131,12 +131,50 @@ Standalone MCP servers for specialized tasks:
 |--------|---------|
 | `automated-test-discovery` | Content-based test/benchmark discovery |
 | `kernel-profiler` | GPU profiling via Metrix and rocprof-compute |
-| `kernel-evolve` | LLM-guided kernel optimization |
+| `kernel-evolve` | LLM-guided kernel optimization (generate, mutate, crossover) |
 | `kernel-ercs` | Kernel evaluation, reflection, compatibility checks |
 | `openevolve-mcp` | OpenEvolve evolutionary optimizer |
 | `mcp-client` | JSON-RPC 2.0 client for MCP communication |
 
 Install individually: `pip install -e mcp_tools/<server-name>/`
+
+### MCP Model Configuration
+
+MCP tool servers that make LLM calls (kernel-evolve, kernel-ercs, automated-test-discovery)
+need a valid model name. The model is resolved in this order (highest priority first):
+
+1. **`GEAK_MCP_MODEL` env var** -- operator override, applies to all tools
+2. **YAML per-tool config** -- `mcp.tools.<server>.model` in `geak.yaml`
+3. **YAML global default** -- `mcp.default_model` in `geak.yaml`
+4. **Hardcoded fallback** -- `claude-sonnet-4.5` (AMD gateway alias)
+
+Example: to use `claude-sonnet-4-6` for all MCP tools when running outside the AMD gateway:
+
+```bash
+export GEAK_MCP_MODEL=claude-sonnet-4-6
+```
+
+Or configure per-tool in `geak.yaml`:
+
+```yaml
+mcp:
+  default_model: "claude-sonnet-4-6"
+  tools:
+    kernel-evolve:
+      model: "claude-haiku-4-5"    # cheaper model for generation
+    kernel-ercs:
+      model: "claude-sonnet-4-6"   # smarter model for evaluation
+```
+
+### MCP API Key Support
+
+Each MCP server that calls an LLM supports three backends (tried in order):
+
+1. **AMD LLM Gateway** -- if `AMD_LLM_API_KEY` or `LLM_GATEWAY_KEY` is set
+2. **Direct Anthropic API** -- if `ANTHROPIC_API_KEY` is set
+3. **litellm fallback** -- if the litellm package is installed
+
+API keys are automatically forwarded from the parent GEAK process to MCP subprocess environments.
 
 ## Architecture
 
@@ -176,13 +214,30 @@ mcp_tools/                   # Standalone MCP servers (profiler, kernel-evolve, 
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `AMD_LLM_API_KEY` | (required) | LLM API key |
+| `AMD_LLM_API_KEY` | (required*) | AMD LLM Gateway API key |
+| `ANTHROPIC_API_KEY` | (required*) | Direct Anthropic API key (alternative to AMD gateway) |
+| `GEAK_MODEL` | from `geak.yaml` | Override agent LLM model name |
+| `GEAK_MCP_MODEL` | `claude-sonnet-4.5` | Override LLM model for all MCP tool servers |
 | `GEAK_MAX_ROUNDS` | `5` | Max orchestration rounds |
 | `GEAK_BENCHMARK_EXTRA_ARGS` | `--iterations 50` | Extra args for benchmark commands (set by pipeline) |
 | `GEAK_ALLOWED_AGENTS` | (all) | Comma-separated agent type allowlist |
 | `GEAK_EXCLUDED_AGENTS` | (none) | Comma-separated agent type blocklist |
 
+\* At least one of `AMD_LLM_API_KEY` or `ANTHROPIC_API_KEY` must be set.
+
 See `INSTRUCTIONS.md` Section 6 for the full reference.
+
+## Branch: `fix/mcp-essential`
+
+Changes required for MCP tools to work outside the AMD LLM Gateway (e.g. with a direct Anthropic API key on LUMI or other non-gateway environments).
+
+| # | Commit | What changed | Why needed |
+|---|--------|--------------|------------|
+| 1 | `458f811` Add ANTHROPIC_API_KEY support to kernel-evolve MCP server | `call_llm()` gains a 3-tier backend: AMD gateway, direct Anthropic API, litellm | kernel-evolve tools (generate, mutate, crossover) fail when only `ANTHROPIC_API_KEY` is set |
+| 2 | `ec519d4` Add ANTHROPIC_API_KEY support to kernel-ercs MCP server | Same 3-tier fallback added to kernel-ercs | `evaluate_kernel_quality` and `reflect_on_kernel_result` fail without AMD gateway |
+| 3 | `c256eb3` Thread agent config through orchestrator pipeline to dispatch | `extra_agent_config` parameter threaded through `run_orchestrator` -> `run_task_batch` -> `ParallelAgent` | Custom YAML configs (system prompt, cost limit, etc.) were silently dropped -- agents always got the default prompt |
+| 4 | `23adeb2` Register mutate_kernel, crossover_kernels, get_optimization_strategies | Add 3 kernel-evolve tools to `ToolRuntime._tool_table` and `tools.json` | These tools existed on the MCP server but were invisible to the agent |
+| 5 | `d225845` Add GEAK_MCP_MODEL env var for flexible MCP model selection | Replace hardcoded `claude-sonnet-4.5` with configurable model via env var + YAML | The hardcoded model name is an AMD gateway alias that doesn't work with other LLM providers |
 
 ## License
 
