@@ -1281,17 +1281,38 @@ def run_orchestrator(
 
     max_rounds = max_rounds or int(os.getenv("GEAK_MAX_ROUNDS", "5"))
 
+    # Dashboard integration (optional)
+    _dashboard = None
+    if os.getenv("GEAK_DASHBOARD", "").lower() in ("1", "true", "yes"):
+        try:
+            from minisweagent.run.dashboard import Dashboard
+            kernel_name = preprocess_ctx.get("kernel_name", "")
+            _dashboard = Dashboard(
+                num_gpus=len(gpu_ids),
+                max_rounds=max_rounds,
+                kernel_name=kernel_name,
+            )
+            _dashboard.start()
+        except Exception:
+            _dashboard = None
+
     def _print(msg: str) -> None:
+        if _dashboard:
+            _dashboard.parse_log_line(msg)
         if console:
             console.print(msg)
         else:
             print(msg, file=sys.stderr)
 
     if not heterogeneous:
-        return _run_homogeneous_orchestrator(
-            preprocess_ctx, gpu_ids, _out, max_rounds, start_round, _print, console,
-            model_factory=model_factory,
-        )
+        try:
+            return _run_homogeneous_orchestrator(
+                preprocess_ctx, gpu_ids, _out, max_rounds, start_round, _print, console,
+                model_factory=model_factory,
+            )
+        finally:
+            if _dashboard:
+                _dashboard.stop()
 
     # Build DiscoveryResult from preprocessor's discovery dict
     from minisweagent.tools.discovery_types import DiscoveryResult
