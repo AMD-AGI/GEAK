@@ -201,24 +201,69 @@ class Dashboard:
 
     def parse_log_line(self, line: str):
         """Parse orchestrator log lines for status updates."""
-        line_lower = line.lower()
-        if "round" in line_lower and ("starting" in line_lower or "begin" in line_lower):
-            m = re.search(r"round\s*(\d+)", line_lower)
-            if m:
-                self.update_round(int(m.group(1)))
-        elif "dispatch" in line_lower:
+        line_stripped = re.sub(r"\[.*?\]", "", line).strip()
+        line_lower = line_stripped.lower()
+
+        # Round start: "--- Homogeneous round 1/2 ---" or "round N"
+        m = re.search(r"round\s+(\d+)\s*/\s*(\d+)", line_lower)
+        if m:
+            self.update_round(int(m.group(1)))
+            return
+
+        # Dispatching
+        if "dispatching" in line_lower or "run_task_batch" in line_lower:
             self.update_phase("dispatching")
-        elif "speedup" in line_lower:
-            m = re.search(r"(\d+\.?\d*)\s*x", line)
-            if m:
-                self.update_speedup(float(m.group(1)))
-        elif "correctness" in line_lower and "pass" in line_lower:
-            self.log("Correctness passed")
-        elif "error" in line_lower or "fail" in line_lower:
-            self.log(f"⚠ {line.strip()[:60]}")
-        elif "finalize" in line_lower:
+            self.log(line_stripped[:70])
+            return
+
+        # Round best result: "Round 1 best: kernel_optimization (1.08x)"
+        m = re.search(r"round\s+(\d+)\s+best:.*?(\d+\.?\d*)\s*x", line_lower)
+        if m:
+            self.update_speedup(float(m.group(2)), int(m.group(1)))
+            self.update_phase("evaluated")
+            self.log(line_stripped[:70])
+            return
+
+        # FULL_BENCHMARK
+        if "full_benchmark" in line_lower:
+            if "running" in line_lower:
+                self.update_phase("full benchmark")
+            self.log(line_stripped[:70])
+            return
+
+        # PROFILE
+        if "profile" in line_lower and ("running" in line_lower or "comparison" in line_lower):
+            self.update_phase("profiling")
+            self.log(line_stripped[:70])
+            return
+
+        # Early stopping
+        if "early stop" in line_lower:
+            self.update_phase("early stopped")
+            self.log(line_stripped[:70])
+            return
+
+        # Finalize
+        if "finalize" in line_lower or "auto-finalize" in line_lower:
             self.update_phase("finalizing")
-            self.log("Finalizing...")
+            self.log(line_stripped[:70])
+            return
+
+        # Task file
+        if "task file:" in line_lower:
+            self.log(line_stripped[:70])
+            return
+
+        # Dispatch failed
+        if "dispatch failed" in line_lower or "failed" in line_lower:
+            self.log(f"⚠ {line_stripped[:65]}")
+            return
+
+        # Generic speedup mention
+        m = re.search(r"(\d+\.\d+)\s*x", line)
+        if m and "speedup" in line_lower:
+            self.update_speedup(float(m.group(1)))
+            return
 
 
 def demo():
