@@ -41,7 +41,7 @@ MODE_TO_FLAG: dict[str, str] = {
 }
 
 MODE_TIMEOUTS: dict[str, int] = {
-    "correctness": 300,
+    "correctness": 600,
     "profile": 120,
     "benchmark": 600,
     "full-benchmark": 900,

@@ -82,56 +82,129 @@ def _detect_ck_cmake_target(example_dir: Path) -> str | None:
 
 _GEAK_DUMP_SENTINEL = "// GEAK: dump output tensor if requested"
 
-_GEAK_DUMP_SNIPPET = """\
-    // GEAK: dump output tensor if requested
-    {
-        const char* dump_path = std::getenv("GEAK_DUMP_OUTPUT");
-        if(dump_path) { out_device.savetxt(dump_path); }
-    }
+_GEAK_DUMP_SNIPPET_TEMPLATE = """\
+    // GEAK: dump output tensor if requested (binary float32)
+    {{
+        const char* _geak_dp = std::getenv("GEAK_DUMP_OUTPUT");
+        if(_geak_dp) {{
+            std::ofstream _geak_f(_geak_dp, std::ios::binary);
+            for(const auto& _geak_v : {tensor_var}.mData) {{
+                float _geak_fv = ck::type_convert<float>(_geak_v);
+                _geak_f.write(reinterpret_cast<const char*>(&_geak_fv), sizeof(_geak_fv));
+            }}
+        }}
+    }}
 """
+
+_GEAK_RAND_SEED_SENTINEL = "// GEAK: seed RNG"
+
+
+def _extract_tensor_from_fromdevice(line: str) -> str | None:
+    """Extract the host tensor variable from a ``FromDevice(T.mData.data())`` call."""
+    import re
+    m = re.search(r'\.FromDevice\s*\(\s*(.+?)\.mData\.data\(\)', line)
+    if m:
+        return m.group(1)
+    return None
 
 
 def _patch_ck_dump_output(example_dir: Path) -> list[Path]:
-    """Patch .inc files to add GEAK_DUMP_OUTPUT tensor dumping.
+    """Patch .inc and .cpp files to add GEAK_DUMP_OUTPUT tensor dumping.
 
-    Inserts a small block after every ``FromDevice(`` call that writes
-    the output tensor to a file when the GEAK_DUMP_OUTPUT env var is set.
+    Inserts a block after the first ``FromDevice(T.mData.data())`` call
+    that writes the output tensor in binary float32 format when the
+    ``GEAK_DUMP_OUTPUT`` env var is set.
     Returns the list of files that were actually modified.
     """
+    import itertools
     import re
 
     modified: list[Path] = []
-    for inc_file in example_dir.glob("*.inc"):
-        content = inc_file.read_text(errors="replace")
+    for src_file in itertools.chain(example_dir.glob("*.inc"), example_dir.glob("*.cpp")):
+        content = src_file.read_text(errors="replace")
         if _GEAK_DUMP_SENTINEL in content:
             continue
+        if ".FromDevice" not in content:
+            continue
 
-        # Match lines containing FromDevice(...) — we insert right after
         lines = content.split("\n")
         new_lines: list[str] = []
         inserted = False
         for line in lines:
             new_lines.append(line)
-            if re.search(r"\.FromDevice\s*\(", line) and not inserted:
+            if not inserted and re.search(r"\.FromDevice\s*\(", line):
+                tensor_var = _extract_tensor_from_fromdevice(line) or "out_device"
+                snippet = _GEAK_DUMP_SNIPPET_TEMPLATE.format(tensor_var=tensor_var)
                 new_lines.append("")
-                for snippet_line in _GEAK_DUMP_SNIPPET.rstrip("\n").split("\n"):
+                for snippet_line in snippet.rstrip("\n").split("\n"):
                     new_lines.append(snippet_line)
                 new_lines.append("")
                 inserted = True
 
         if inserted:
-            # Ensure <cstdlib> is included for std::getenv
+            for header in ('#include <fstream>', '#include <cstdlib>'):
+                if header not in content:
+                    tag = header.split("<")[1].rstrip(">")
+                    header_line = f'{header}  // GEAK: for {tag}'
+                    for i, line in enumerate(new_lines):
+                        if line.startswith("#include"):
+                            new_lines.insert(i, header_line)
+                            break
+                    else:
+                        new_lines.insert(0, header_line)
+
+            src_file.write_text("\n".join(new_lines))
+            modified.append(src_file)
+
+    return modified
+
+
+def _patch_ck_rand_seed(example_dir: Path) -> list[Path]:
+    """Patch .inc and .cpp files to seed ``rand()`` from ``GEAK_RAND_SEED``.
+
+    Inserts ``srand(GEAK_RAND_SEED)`` before the first ``rand()`` call so
+    that random shape generation is deterministic across runs.
+    """
+    import itertools
+
+    seed_snippet = (
+        "    // GEAK: seed RNG for deterministic shapes\n"
+        "    {\n"
+        '        const char* _geak_seed = std::getenv("GEAK_RAND_SEED");\n'
+        "        if(_geak_seed) srand(static_cast<unsigned>(std::stoul(_geak_seed)));\n"
+        "    }\n"
+    )
+
+    modified: list[Path] = []
+    for src_file in itertools.chain(example_dir.glob("*.inc"), example_dir.glob("*.cpp")):
+        content = src_file.read_text(errors="replace")
+        if _GEAK_RAND_SEED_SENTINEL in content:
+            continue
+        if "rand()" not in content or "srand" in content:
+            continue
+
+        lines = content.split("\n")
+        new_lines: list[str] = []
+        inserted = False
+        for line in lines:
+            if not inserted and "rand()" in line and "srand" not in line:
+                for snippet_line in seed_snippet.rstrip("\n").split("\n"):
+                    new_lines.append(snippet_line)
+                inserted = True
+            new_lines.append(line)
+
+        if inserted:
             if "#include <cstdlib>" not in content:
-                header_insert = '#include <cstdlib>  // GEAK: for std::getenv'
+                header_line = '#include <cstdlib>  // GEAK: for std::getenv, srand'
                 for i, line in enumerate(new_lines):
                     if line.startswith("#include"):
-                        new_lines.insert(i, header_insert)
+                        new_lines.insert(i, header_line)
                         break
                 else:
-                    new_lines.insert(0, header_insert)
+                    new_lines.insert(0, header_line)
 
-            inc_file.write_text("\n".join(new_lines))
-            modified.append(inc_file)
+            src_file.write_text("\n".join(new_lines))
+            modified.append(src_file)
 
     return modified
 
@@ -343,7 +416,10 @@ def run_preprocessor(
         _print(f"  CMake target: {cmake_target}")
 
         patched = _patch_ck_dump_output(example_dir)
-        _print(f"  Patched {len(patched)} .inc file(s) for GEAK_DUMP_OUTPUT")
+        _print(f"  Patched {len(patched)} file(s) for GEAK_DUMP_OUTPUT (binary float32)")
+
+        patched_seed = _patch_ck_rand_seed(example_dir)
+        _print(f"  Patched {len(patched_seed)} file(s) for GEAK_RAND_SEED")
 
         build_dir = output_dir / "build"
         original_binary_path: Path | None = None
@@ -366,6 +442,8 @@ def run_preprocessor(
             "cmake_target": cmake_target,
             "cmake_source_dir": str(example_dir),
             "template": _load_ck_template(),
+            "dump_patched_files": [str(f) for f in patched],
+            "rand_seed_patched_files": [str(f) for f in patched_seed],
         }
         ctx["ck_context"] = ck_context
 
@@ -430,6 +508,8 @@ def run_preprocessor(
             )
 
             if ck_context:
+                _dump_files = ck_context.get("dump_patched_files", [])
+                _seed_files = ck_context.get("rand_seed_patched_files", [])
                 discovery_context += (
                     "\n\n## CK Harness Template\n\n"
                     "Use the following template as your starting point. "
@@ -439,6 +519,19 @@ def run_preprocessor(
                     f"BUILD_DIR = \"{ck_context.get('build_dir', '')}\"\n"
                     f"CMAKE_SOURCE_DIR = \"{ck_context.get('cmake_source_dir', '')}\"\n"
                     f"CMAKE_TARGET = \"{ck_context.get('cmake_target', '')}\"\n"
+                    "\n## CK Runtime Characteristics\n\n"
+                    f"- GEAK_DUMP_OUTPUT auto-patched (binary float32): "
+                    f"{', '.join(_dump_files) if _dump_files else 'NONE (agent must patch manually)'}\n"
+                    f"- GEAK_RAND_SEED auto-patched: "
+                    f"{', '.join(_seed_files) if _seed_files else 'NONE (no rand() calls found)'}\n"
+                    "- Both original and optimized binaries support GEAK_DUMP_OUTPUT and GEAK_RAND_SEED\n"
+                    "  (source was patched BEFORE building the original binary).\n"
+                    "- Dump format: raw binary float32 (read with np.fromfile, NOT np.loadtxt).\n"
+                    "- CK StreamConfig uses nrepeat=50 internal iterations when time_kernel=1.\n"
+                    "  Use exactly 1 external call per shape for benchmarks.\n"
+                    "- Recommended shape limits: HARNESS_SHAPES <= 8, PROFILE_SHAPES = 5.\n"
+                    "- For multi-output / grouped kernels, the auto-patched dump may only\n"
+                    "  capture the first output tensor.  Check and adjust if needed.\n"
                 )
 
             test_command, harness_results = create_validated_harness(

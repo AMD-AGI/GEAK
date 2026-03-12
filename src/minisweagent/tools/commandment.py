@@ -218,9 +218,10 @@ def _generate_simple(
         setup_section = (
             f"cmake --build ${{GEAK_WORK_DIR}}/build --target {cmake_target_str} -j 2>&1 | tail -5\n"
             "cp ${GEAK_WORK_DIR}/original_binary ${GEAK_WORK_DIR}/original_binary_copy 2>/dev/null || true\n"
-            "printf '#!/bin/bash\\nexport HIP_VISIBLE_DEVICES=%s\\n"
+            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+            "export HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES}\\n"
             'exec python3 "$@"\\n\' '
-            '"${GEAK_GPU_DEVICE}" '
+            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" '
             "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
         )
     elif kernel_language == "cpp":
