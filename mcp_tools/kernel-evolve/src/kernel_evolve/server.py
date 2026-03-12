@@ -35,6 +35,8 @@ except ImportError:
     LITELLM_AVAILABLE = False
 
 
+_DEFAULT_MODEL = os.environ.get("GEAK_MCP_MODEL", "claude-sonnet-4.5")
+
 # Create the MCP server
 mcp = FastMCP(
     name="kernel-evolve", instructions="Evolutionary GPU kernel optimization using LLM-guided mutation and crossover"
@@ -53,7 +55,7 @@ def _extract_system_and_messages(messages: list) -> tuple[str, list]:
     return system_content, filtered_messages
 
 
-def call_llm(messages: list, model: str = "claude-sonnet-4.5", temperature: float = 0.7) -> str:
+def call_llm(messages: list, model: str = _DEFAULT_MODEL, temperature: float = 0.7) -> str:
     """Call LLM using AMD gateway, direct Anthropic API, or litellm.
 
     Backend selection order:
@@ -258,7 +260,7 @@ def extract_code(response: str) -> str:
 
 @mcp.tool()
 def generate_optimization(
-    kernel_code: str, bottleneck: str = "balanced", strategy: str = None, model: str = "claude-sonnet-4.5"
+    kernel_code: str, bottleneck: str = "balanced", strategy: str = None, model: str = _DEFAULT_MODEL
 ) -> dict[str, Any]:
     """
     Generate an optimized kernel variant using LLM.
@@ -305,7 +307,7 @@ def mutate_kernel(
     mutation_type: str = "parameter",
     latency_us: float = 0.0,
     speedup: float = 1.0,
-    model: str = "claude-sonnet-4.5",
+    model: str = _DEFAULT_MODEL,
 ) -> dict[str, Any]:
     """
     Mutate an existing kernel optimization to explore variations.
@@ -358,7 +360,7 @@ def mutate_kernel(
 
 @mcp.tool()
 def crossover_kernels(
-    kernel1: str, kernel2: str, speedup1: float = 1.0, speedup2: float = 1.0, model: str = "claude-sonnet-4.5"
+    kernel1: str, kernel2: str, speedup1: float = 1.0, speedup2: float = 1.0, model: str = _DEFAULT_MODEL
 ) -> dict[str, Any]:
     """
     Combine two kernel optimizations to create a hybrid.

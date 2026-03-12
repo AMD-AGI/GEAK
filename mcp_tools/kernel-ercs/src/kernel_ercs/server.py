@@ -36,6 +36,8 @@ except ImportError:
     ANTHROPIC_AVAILABLE = False
 
 
+_DEFAULT_MODEL = os.environ.get("GEAK_MCP_MODEL", "claude-sonnet-4.5")
+
 # Create the MCP server
 mcp = FastMCP(
     name="kernel-ercs",
@@ -268,7 +270,7 @@ Only output valid JSON.
 
 
 @mcp.tool()
-def evaluate_kernel_quality(kernel_code: str, model: str = "claude-sonnet-4.5") -> dict[str, Any]:
+def evaluate_kernel_quality(kernel_code: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
     """
     Evaluate Triton kernel quality using LLM analysis.
 
@@ -277,7 +279,7 @@ def evaluate_kernel_quality(kernel_code: str, model: str = "claude-sonnet-4.5") 
 
     Args:
         kernel_code: The Triton kernel code to evaluate
-        model: LLM model to use (default: claude-sonnet-4.5)
+        model: LLM model to use (default: GEAK_MCP_MODEL env var or claude-sonnet-4.5)
 
     Returns:
         dict with scores (0.0-1.0 each), total_score, reasoning, and suggestions
@@ -335,7 +337,7 @@ def reflect_on_kernel_result(
     correctness_status: str = "unknown",
     history: str = "",
     tried_strategies: str = "",
-    model: str = "claude-sonnet-4.5",
+    model: str = _DEFAULT_MODEL,
 ) -> dict[str, Any]:
     """
     Analyze kernel test results and get targeted improvement suggestions.

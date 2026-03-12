@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -179,10 +180,17 @@ class MCPToolBridge:
         module_name = server_name.replace("-", "_")
         src_dir = mcp_dir / "src"
 
+        env = {"PYTHONPATH": str(src_dir)}
+
+        for key in ("GEAK_MCP_MODEL", "ANTHROPIC_API_KEY", "AMD_LLM_API_KEY", "LLM_GATEWAY_KEY"):
+            val = os.environ.get(key)
+            if val:
+                env[key] = val
+
         return {
             "command": ["python3", "-m", f"{module_name}.server"],
             "cwd": str(mcp_dir),
-            "env": {"PYTHONPATH": str(src_dir)},
+            "env": env,
         }
 
 
