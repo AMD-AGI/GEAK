@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -50,7 +51,7 @@ def main():
         help="Bottleneck type",
     )
     gen_parser.add_argument("--strategy", "-s", help="Specific strategy to apply")
-    gen_parser.add_argument("--model", "-m", default="claude-sonnet-4.5", help="LLM model")
+    gen_parser.add_argument("--model", "-m", default=os.environ.get("GEAK_MCP_MODEL", "claude-sonnet-4.5"), help="LLM model")
 
     # mutate command
     mut_parser = subparsers.add_parser("mutate", help="Mutate existing kernel")
@@ -60,7 +61,7 @@ def main():
     )
     mut_parser.add_argument("--latency", "-l", type=float, default=0.0, help="Current latency (us)")
     mut_parser.add_argument("--speedup", "-s", type=float, default=1.0, help="Current speedup")
-    mut_parser.add_argument("--model", "-m", default="claude-sonnet-4.5", help="LLM model")
+    mut_parser.add_argument("--model", "-m", default=os.environ.get("GEAK_MCP_MODEL", "claude-sonnet-4.5"), help="LLM model")
 
     # crossover command
     cross_parser = subparsers.add_parser("crossover", help="Combine two kernels")
@@ -68,7 +69,7 @@ def main():
     cross_parser.add_argument("kernel2", help="Path to second kernel")
     cross_parser.add_argument("--speedup1", type=float, default=1.0, help="Speedup of kernel1")
     cross_parser.add_argument("--speedup2", type=float, default=1.0, help="Speedup of kernel2")
-    cross_parser.add_argument("--model", "-m", default="claude-sonnet-4.5", help="LLM model")
+    cross_parser.add_argument("--model", "-m", default=os.environ.get("GEAK_MCP_MODEL", "claude-sonnet-4.5"), help="LLM model")
 
     # strategies command
     strat_parser = subparsers.add_parser("strategies", help="Get strategies for bottleneck")

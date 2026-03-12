@@ -41,3 +41,15 @@ tools:
   # reflect_on_kernel_result: kernel-ercs MCP
   # Native tools (always registered)
   # resolve_kernel_url, baseline_metrics, check_kernel_compatibility, sub_agent
+
+# MCP model configuration
+# Resolution order: GEAK_MCP_MODEL env var > per-tool > default_model > hardcoded fallback
+mcp:
+  # default_model: "claude-sonnet-4-6"
+  # tools:
+  #   kernel-evolve:
+  #     model: "claude-haiku-4-5"
+  #   kernel-ercs:
+  #     model: "claude-sonnet-4-6"
+  #   automated-test-discovery:
+  #     model: "claude-haiku-4-5"
