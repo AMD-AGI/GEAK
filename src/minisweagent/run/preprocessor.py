@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,8 +44,81 @@ from minisweagent.run.pipeline_helpers import (
     run_baseline_profile,
     validate_harness,
 )
+from minisweagent.run.testcase_cache import (
+    build_testcase_cache_key,
+    get_testcase_cache_dir,
+    get_testcase_cache_entry,
+    materialize_cached_harness,
+    save_cached_harness,
+)
+from minisweagent.benchmark_parsing import extract_latency_ms
 
 # ── main entry point ─────────────────────────────────────────────────
+
+
+def _build_deterministic_test_command(harness_path: str | Path) -> str:
+    harness = Path(harness_path).resolve()
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))} --correctness"
+
+
+def _resolve_deterministic_harness(
+    harness_spec: str,
+    *,
+    kernel_url: str,
+    repo_root: str | Path,
+    output_dir: Path,
+) -> tuple[str, dict[str, Any]]:
+    from minisweagent.tools.resolve_kernel_url_impl import (
+        is_weblink,
+        parse_github_source_url,
+        resolve_kernel_url,
+    )
+
+    spec = (harness_spec or "").strip()
+    if not spec:
+        raise RuntimeError("Deterministic harness spec is empty")
+
+    repo_root_path = Path(repo_root).resolve()
+    if not is_weblink(spec):
+        harness_path = Path(spec).expanduser()
+        if not harness_path.is_absolute():
+            harness_path = repo_root_path / harness_path
+        harness_path = harness_path.resolve()
+        if not harness_path.is_file():
+            raise RuntimeError(f"Deterministic harness file not found: {harness_path}")
+        return str(harness_path), {"source": "local_path", "path": str(harness_path)}
+
+    harness_remote = parse_github_source_url(spec)
+    if harness_remote is None:
+        raise RuntimeError(f"Unsupported deterministic harness URL: {spec}")
+
+    kernel_remote = parse_github_source_url(kernel_url) if is_weblink(kernel_url) else None
+    if kernel_remote and all(
+        kernel_remote[key] == harness_remote[key] for key in ("owner", "repo", "ref")
+    ):
+        harness_path = (repo_root_path / harness_remote["file_path"]).resolve()
+        if not harness_path.is_file():
+            raise RuntimeError(
+                "Deterministic harness is in the same remote repo/ref as the kernel, "
+                f"but the file is missing from the fresh clone: {harness_path}"
+            )
+        return str(harness_path), {"source": "same_fresh_remote_repo", **harness_remote}
+
+    resolved = resolve_kernel_url(spec, clone_into=output_dir / "_deterministic_harness")
+    if resolved.get("error"):
+        raise RuntimeError(f"Deterministic harness resolve failed: {resolved['error']}")
+
+    harness_repo = Path(resolved["local_repo_path"]).resolve() if resolved.get("local_repo_path") else None
+    if harness_repo is not None and harness_repo != repo_root_path:
+        raise RuntimeError(
+            "Deterministic harness must come from the same remote repo/ref as --kernel-url "
+            "so the harness benchmarks the exact fresh source tree being optimized."
+        )
+
+    harness_path = Path(resolved["local_file_path"]).resolve()
+    if not harness_path.is_file():
+        raise RuntimeError(f"Resolved deterministic harness file not found: {harness_path}")
+    return str(harness_path), {"source": "fresh_remote_clone", **harness_remote}
 
 
 def run_preprocessor(
@@ -55,6 +129,8 @@ def run_preprocessor(
     model=None,
     model_factory=None,
     console=None,
+    deterministic: bool = False,
+    deterministic_harness: str | None = None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -90,6 +166,9 @@ def run_preprocessor(
             print(msg, file=sys.stderr)
 
     ctx: dict[str, Any] = {}
+    deterministic_requested = bool(deterministic or deterministic_harness)
+    if deterministic_requested and not deterministic_harness:
+        raise RuntimeError("--deterministic currently requires --deterministic-harness")
 
     # ── 1. resolve-kernel-url ────────────────────────────────────────
     _print(
@@ -166,7 +245,90 @@ def run_preprocessor(
     # If either step fails we feed errors back to the agent and retry.
     test_command = None
     harness_results: list[dict] | None = None
+    selected_harness_source: str | None = None
     _uta_model = model or (model_factory() if model_factory else None)
+    testcase_cache_dir = None if deterministic_requested else get_testcase_cache_dir()
+    testcase_cache_key = build_testcase_cache_key(kernel_url, kernel_path)
+    testcase_cache_entry = (
+        get_testcase_cache_entry(testcase_cache_dir, testcase_cache_key)
+        if testcase_cache_dir is not None
+        else None
+    )
+    testcase_selection: dict[str, Any] = {
+        "cache_key": testcase_cache_key,
+        "cache_dir": str(testcase_cache_entry) if testcase_cache_entry else None,
+        "reused_cache": False,
+        "selected_source": None,
+        "saved_cache_manifest": None,
+        "deterministic_requested": deterministic_requested,
+        "deterministic_harness": deterministic_harness,
+    }
+
+    if deterministic_harness:
+        deterministic_path, deterministic_meta = _resolve_deterministic_harness(
+            deterministic_harness,
+            kernel_url=kernel_url,
+            repo_root=repo_root,
+            output_dir=output_dir,
+        )
+        ok_static, static_errors = validate_harness(deterministic_path)
+        if not ok_static:
+            raise RuntimeError(
+                "Deterministic harness validation failed: " + "; ".join(static_errors)
+            )
+        ok_runtime, runtime_errors, candidate_results = execute_harness_validation(
+            deterministic_path,
+            repo_root=repo_root,
+            gpu_id=gpu_id,
+        )
+        if not ok_runtime:
+            raise RuntimeError(
+                "Deterministic harness execution failed: " + "; ".join(runtime_errors)
+            )
+        test_command = _build_deterministic_test_command(deterministic_path)
+        harness_results = candidate_results
+        ctx["harness_path"] = deterministic_path
+        selected_harness_source = "deterministic_harness"
+        testcase_selection["selected_source"] = selected_harness_source
+        testcase_selection["deterministic_resolution"] = deterministic_meta
+        _print(f"  Using deterministic harness: {deterministic_path}")
+        for r in harness_results:
+            status = "PASS" if r["success"] else "FAIL"
+            _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
+        _print("  Deterministic harness execution: ALL MODES PASSED")
+
+    if testcase_cache_entry is not None:
+        try:
+            cached = materialize_cached_harness(
+                testcase_cache_entry,
+                repo_root=repo_root,
+                output_dir=output_dir,
+                kernel_path=kernel_path,
+            )
+            if cached:
+                candidate_cmd, candidate_harness, _manifest = cached
+                ok_static, _ = validate_harness(candidate_harness)
+                if ok_static:
+                    ok_runtime, _runtime_errors, candidate_results = execute_harness_validation(
+                        candidate_harness,
+                        repo_root=repo_root,
+                        gpu_id=gpu_id,
+                    )
+                    if ok_runtime:
+                        test_command = candidate_cmd
+                        harness_results = candidate_results
+                        ctx["harness_path"] = candidate_harness
+                        selected_harness_source = "canonical_cache"
+                        testcase_selection["reused_cache"] = True
+                        testcase_selection["selected_source"] = selected_harness_source
+                        _print(f"  Reusing canonical testcase harness: {candidate_harness}")
+                        for r in harness_results:
+                            status = "PASS" if r["success"] else "FAIL"
+                            _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
+                        _print("  Canonical harness execution: ALL MODES PASSED")
+        except Exception as exc:
+            testcase_selection["cache_error"] = str(exc)
+
     _discovery_harness_candidates: list[tuple[str, str, str]] = []
     for t in tests[:5]:
         cmd = t.get("command")
@@ -184,53 +346,56 @@ def run_preprocessor(
             _discovery_harness_candidates.append((focused_cmd, focused_harness, "focused_test"))
 
     _seen_harnesses: set[str] = set()
-    for candidate_cmd, candidate_harness, source in _discovery_harness_candidates:
-        if candidate_harness in _seen_harnesses:
-            continue
-        _seen_harnesses.add(candidate_harness)
-        try:
-            ok_static, static_errors = validate_harness(candidate_harness)
-            if not ok_static:
+    if test_command is None:
+        for candidate_cmd, candidate_harness, source in _discovery_harness_candidates:
+            if candidate_harness in _seen_harnesses:
                 continue
-            ok_runtime, runtime_errors, candidate_results = execute_harness_validation(
-                candidate_harness,
-                repo_root=repo_root,
-                gpu_id=gpu_id,
-            )
-            if not ok_runtime:
-                continue
+            _seen_harnesses.add(candidate_harness)
+            try:
+                ok_static, static_errors = validate_harness(candidate_harness)
+                if not ok_static:
+                    continue
+                ok_runtime, runtime_errors, candidate_results = execute_harness_validation(
+                    candidate_harness,
+                    repo_root=repo_root,
+                    gpu_id=gpu_id,
+                )
+                if not ok_runtime:
+                    continue
 
-            test_command = candidate_cmd
-            harness_results = candidate_results
-            ctx["harness_path"] = candidate_harness
-            _print(f"  Using discovered harness directly: {candidate_harness}")
-            for r in harness_results:
-                status = "PASS" if r["success"] else "FAIL"
-                _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
-            _print("  Harness execution: ALL MODES PASSED")
-            # region agent log
-            emit_debug_log(
-                "preprocessor.py:run_preprocessor:harness_fast_path",
-                "Used discovery-provided harness instead of UnitTestAgent",
-                {
-                    "kernel_path": kernel_path,
-                    "source": source,
-                    "harness_path": candidate_harness,
-                    "modes": [
-                        {
-                            "mode": r.get("mode"),
-                            "success": bool(r.get("success")),
-                            "returncode": r.get("returncode"),
-                        }
-                        for r in harness_results
-                    ],
-                },
-                hypothesis_id="H6",
-            )
-            # endregion
-            break
-        except Exception:
-            continue
+                test_command = candidate_cmd
+                harness_results = candidate_results
+                ctx["harness_path"] = candidate_harness
+                selected_harness_source = source
+                testcase_selection["selected_source"] = source
+                _print(f"  Using discovered harness directly: {candidate_harness}")
+                for r in harness_results:
+                    status = "PASS" if r["success"] else "FAIL"
+                    _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
+                _print("  Harness execution: ALL MODES PASSED")
+                # region agent log
+                emit_debug_log(
+                    "preprocessor.py:run_preprocessor:harness_fast_path",
+                    "Used discovery-provided harness instead of UnitTestAgent",
+                    {
+                        "kernel_path": kernel_path,
+                        "source": source,
+                        "harness_path": candidate_harness,
+                        "modes": [
+                            {
+                                "mode": r.get("mode"),
+                                "success": bool(r.get("success")),
+                                "returncode": r.get("returncode"),
+                            }
+                            for r in harness_results
+                        ],
+                    },
+                    hypothesis_id="H6",
+                )
+                # endregion
+                break
+            except Exception:
+                continue
 
     if test_command is None and _uta_model and repo_root:
         # region agent log
@@ -274,6 +439,8 @@ def run_preprocessor(
                 discovery_context=discovery_context,
                 gpu_id=gpu_id,
             )
+            selected_harness_source = "unit_test_agent"
+            testcase_selection["selected_source"] = selected_harness_source
             _print(f"  UnitTestAgent test_command: {test_command}")
             _print("  Harness static validation: OK")
             for r in harness_results:
@@ -299,20 +466,49 @@ def run_preprocessor(
         focused_cmd = focused.get("focused_command")
         if focused_cmd:
             test_command = focused_cmd
+            selected_harness_source = "fallback_focused_test"
+            testcase_selection["selected_source"] = selected_harness_source
             _print(f"  Falling back to discovery focused test: {test_command}")
         elif tests:
             test_command = tests[0]["command"]
+            selected_harness_source = "fallback_discovery_test"
+            testcase_selection["selected_source"] = selected_harness_source
             _print(f"  Falling back to discovery test: {test_command}")
 
     ctx["test_command"] = test_command
     ctx["harness_results"] = harness_results
+    ctx["testcase_selection"] = testcase_selection
     if harness_results:
         (output_dir / "harness_results.json").write_text(
             json.dumps(harness_results, indent=2, default=str)
         )
+    if test_command and not ctx.get("harness_path"):
+        ctx["harness_path"] = extract_harness_path(test_command)
+    if testcase_cache_entry is not None and test_command and harness_results and ctx.get("harness_path"):
+        try:
+            manifest_path = save_cached_harness(
+                testcase_cache_entry,
+                kernel_url=kernel_url,
+                source=selected_harness_source or "validated_harness",
+                test_command=test_command,
+                harness_path=ctx["harness_path"],
+                repo_root=repo_root,
+                output_dir=output_dir,
+                kernel_path=kernel_path,
+                harness_results=harness_results,
+            )
+            testcase_selection["saved_cache_manifest"] = str(manifest_path) if manifest_path else None
+        except Exception as exc:
+            testcase_selection["cache_save_error"] = str(exc)
+    testcase_selection["test_command"] = test_command
+    testcase_selection["harness_path"] = ctx.get("harness_path")
+    (output_dir / "testcase_selection.json").write_text(
+        json.dumps(testcase_selection, indent=2, default=str)
+    )
 
-    # Collect baselines using the same iteration count the orchestrator
-    # evaluation will use, so that speedup comparisons are apples-to-apples.
+    # Collect a canonical benchmark baseline using the same iteration count the
+    # orchestrator evaluation will use, so every reported speedup is
+    # benchmark-vs-benchmark on the exact same contract.
     benchmark_baseline: str | None = None
     full_benchmark_baseline: str | None = None
 
@@ -339,18 +535,21 @@ def run_preprocessor(
         for r in baseline_results:
             if r["mode"] == "benchmark" and r["success"]:
                 benchmark_baseline = r["stdout"]
-                (output_dir / "benchmark_baseline.txt").write_text(r["stdout"])
             if r["mode"] == "full-benchmark" and r["success"]:
                 full_benchmark_baseline = r["stdout"]
-                (output_dir / "full_benchmark_baseline.txt").write_text(r["stdout"])
     elif harness_results:
         for r in harness_results:
             if r["mode"] == "benchmark" and r["success"]:
                 benchmark_baseline = r["stdout"]
-                (output_dir / "benchmark_baseline.txt").write_text(r["stdout"])
             if r["mode"] == "full-benchmark" and r["success"]:
                 full_benchmark_baseline = r["stdout"]
-                (output_dir / "full_benchmark_baseline.txt").write_text(r["stdout"])
+
+    canonical_benchmark_baseline = full_benchmark_baseline or benchmark_baseline
+    if canonical_benchmark_baseline:
+        benchmark_baseline = canonical_benchmark_baseline
+        full_benchmark_baseline = canonical_benchmark_baseline
+        (output_dir / "benchmark_baseline.txt").write_text(canonical_benchmark_baseline)
+        (output_dir / "full_benchmark_baseline.txt").write_text(canonical_benchmark_baseline)
 
     ctx["benchmark_baseline"] = benchmark_baseline
     ctx["full_benchmark_baseline"] = full_benchmark_baseline
@@ -407,9 +606,9 @@ def run_preprocessor(
 
     ctx["baseline_metrics"] = baseline_metrics
 
-    # Enrich baseline_metrics with wall-clock benchmark data so that all
-    # consumers (OpenEvolve, orchestrator) compare benchmark-vs-benchmark
-    # instead of mixing Metrix profile durations with wall-clock latencies.
+    # Enrich baseline_metrics with the canonical wall-clock benchmark so all
+    # consumers compare benchmark-vs-benchmark instead of mixing Metrix
+    # profile durations with wall-clock latencies.
     if baseline_metrics is None:
         baseline_metrics = {}
     bb_path = output_dir / "benchmark_baseline.txt"
@@ -417,21 +616,7 @@ def run_preprocessor(
         import re as _re
 
         bb_text = bb_path.read_text()
-        _bm_val: float | None = None
-        # Try BENCHMARK_LATENCY_MS: <float> (common harness format)
-        _blms_re = r"BENCHMARK_LATENCY_MS:\s*([\d.]+(?:e[+-]?\d+)?)"
-        _m = _re.search(_blms_re, bb_text, _re.IGNORECASE)
-        if _m:
-            _bm_val = float(_m.group(1))
-        if _bm_val is None:
-            # Try "median latency" or "median time" variants
-            _m = _re.search(
-                r"median\s+(?:latency|time)[\w\s]*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms",
-                bb_text,
-                _re.IGNORECASE,
-            )
-            if _m:
-                _bm_val = float(_m.group(1))
+        _bm_val = extract_latency_ms(bb_text)
         if _bm_val is not None:
             baseline_metrics["benchmark_duration_us"] = _bm_val * 1000.0
         _sm = _re.search(r"(\d+)\s+shapes", bb_text, _re.IGNORECASE)
@@ -547,6 +732,16 @@ def main() -> None:
         default=None,
         help="Model name for UnitTestAgent harness creation (uses default if omitted)",
     )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Require an explicit deterministic harness contract for this preprocessing run.",
+    )
+    parser.add_argument(
+        "--deterministic-harness",
+        default=None,
+        help="Exact harness URL/path to use. Discovery and UnitTestAgent fallback are disabled.",
+    )
     args = parser.parse_args()
 
     try:
@@ -566,6 +761,8 @@ def main() -> None:
         gpu_id=args.gpu,
         model_factory=_model_factory,
         console=console,
+        deterministic=args.deterministic,
+        deterministic_harness=args.deterministic_harness,
     )
 
     print(json.dumps(ctx, indent=2, default=str))

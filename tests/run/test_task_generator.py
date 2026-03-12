@@ -281,4 +281,5 @@ def test_system_prompt_deprioritizes_dispatch_path_work():
     assert "- 0: Novel algorithmic kernel rewrites" in _SYSTEM_PROMPT
     assert "- 15: Wrapper/launch-config/dispatch-only changes (lowest priority)" in _SYSTEM_PROMPT
     assert 'Generate at least 3 tasks from the "Prefer First" families' in _SYSTEM_PROMPT
+    assert "leave some gpus idle" in _SYSTEM_PROMPT.lower()
     assert "Generate at least one priority-0 task that specifically checks the dispatch path" not in _SYSTEM_PROMPT

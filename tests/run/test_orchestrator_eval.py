@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 from minisweagent.run.orchestrator import (
+    _auto_finalize,
     _evaluate_round_best,
     _merge_round_evaluation_into_final_report,
     _parse_total_kernel_time_ms,
@@ -373,6 +374,91 @@ class TestFinalReportVerification:
         assert "### Best Patch: split-k-reduction-rewrite/patch_7" in merged["summary"]
         mock_record.assert_called_once()
         assert mock_record.call_args.kwargs["speedup_achieved"] == pytest.approx(1.14731)
+        assert mock_record.call_args.kwargs["success"] is True
+
+    @patch("minisweagent.memory.integration.record_optimization_outcome")
+    @patch("minisweagent.memory.cross_session_memory.classify_kernel_category", return_value="unknown")
+    def test_auto_finalize_prefers_best_verified_round_over_best_patch_speedup(
+        self,
+        mock_classify,
+        mock_record,
+        tmp_path,
+    ):
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+
+        round_2_dir = output_dir / "results" / "round_2"
+        round_3_dir = output_dir / "results" / "round_3"
+        round_2_dir.mkdir(parents=True)
+        round_3_dir.mkdir(parents=True)
+
+        _make_task_dir(round_2_dir, "kernel_optimization", speedup=1.360269, patch_id="patch_9")
+        _make_task_dir(round_3_dir, "kernel_optimization", speedup=1.250000, patch_id="patch_2")
+
+        round_2_patch = round_2_dir / "kernel_optimization" / "patch_9.patch"
+        round_3_patch = round_3_dir / "kernel_optimization" / "patch_2.patch"
+        round_2_patch.write_text("diff --git a/kernel.py b/kernel.py\n")
+        round_3_patch.write_text("diff --git a/kernel.py b/kernel.py\n")
+
+        (output_dir / "round_2_evaluation.json").write_text(
+            json.dumps(
+                {
+                    "round": 2,
+                    "best_task": "kernel_optimization",
+                    "best_patch": str(round_2_patch),
+                    "benchmark_speedup": 1.360269,
+                    "full_benchmark": {
+                        "verified_speedup": 1.3160,
+                        "baseline_ms": 0.0404,
+                        "candidate_ms": 0.0307,
+                    },
+                }
+            )
+        )
+        (output_dir / "round_3_evaluation.json").write_text(
+            json.dumps(
+                {
+                    "round": 3,
+                    "best_task": "kernel_optimization",
+                    "best_patch": str(round_3_patch),
+                    "benchmark_speedup": 1.250000,
+                    "full_benchmark": {
+                        "verified_speedup": 1.3333,
+                        "baseline_ms": 0.0404,
+                        "candidate_ms": 0.0303,
+                    },
+                }
+            )
+        )
+
+        ctx = {
+            "output_dir": str(output_dir),
+            "kernel_path": "/tmp/topk/kernel.py",
+            "baseline_metrics": {"bottleneck": "latency"},
+        }
+
+        messages: list[str] = []
+        report = _auto_finalize(ctx, messages.append)
+
+        assert report["best_round"] == "round_3"
+        assert report["best_task"] == "kernel_optimization"
+        assert report["best_patch"] == str(round_3_patch)
+        assert report["best_speedup"] == pytest.approx(1.3333)
+        assert report["best_speedup_verified"] == pytest.approx(1.3333)
+        assert report["total_speedup"] == "1.3333x"
+        assert report["verified_improvement"] is True
+        assert report["best_patch_analysis"].startswith("Verified FULL_BENCHMARK:")
+        assert report["summary"].startswith("## Verified Final Selection")
+        assert "round_2" not in report["summary"]
+        assert "patch_9" not in report["summary"]
+
+        persisted = json.loads((output_dir / "final_report.json").read_text())
+        assert persisted["best_round"] == "round_3"
+        assert persisted["best_patch"] == str(round_3_patch)
+        assert persisted["total_speedup"] == "1.3333x"
+
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["speedup_achieved"] == pytest.approx(1.3333)
         assert mock_record.call_args.kwargs["success"] is True
 
 

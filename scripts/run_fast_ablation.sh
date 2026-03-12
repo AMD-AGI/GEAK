@@ -19,9 +19,10 @@ CONTAINER="geak-fast-$EXP_ID"
 KEY1="${AMD_LLM_API_KEY:-fa273d4402b74a9c830c9e9fc4ebfb54}"
 KEY2="${AMD_LLM_API_KEY_2:-471c248fdb454e8b96173c8d25b03593}"
 BASE_GEAK_MODEL="${GEAK_MODEL:-claude-opus-4.6}"
-OPT_AGENT_ENSEMBLE="${GEAK_MODEL_ENSEMBLE:-gpt-5.2,gemini-3-pro-preview,claude-opus-4.6}"
+OPT_AGENT_ENSEMBLE="${GEAK_MODEL_ENSEMBLE:-gpt-5.2,claude-opus-4.6}"
 GEAK_MAX_ROUNDS_OVERRIDE="${GEAK_MAX_ROUNDS:-}"
 GEAK_AGENT_STEP_LIMIT_OVERRIDE="${GEAK_AGENT_STEP_LIMIT:-200}"
+DEFAULT_MEMORY_ENV="GEAK_MEMORY_NO_CROSSSESSION=${GEAK_MEMORY_NO_CROSSSESSION:-1} GEAK_MEMORY_NO_REME=${GEAK_MEMORY_NO_REME:-1} GEAK_MEMORY_NO_PRINCIPLES=${GEAK_MEMORY_NO_PRINCIPLES:-1}"
 
 TRITON_NAMES=(rope fused_rms_fp8 topk nsa_backward)
 TRITON_URLS=(
@@ -108,15 +109,16 @@ EXP_CONFIGS[exp8_qv_nogpu_verify]="GEAK_MEMORY_NO_CROSSSESSION=1 GEAK_MEMORY_NO_
 EXP_CONFIGS[exp10]="GEAK_MEMORY_BUDGET=500 GEAK_MEMORY_NO_SAGE=0"
 EXP_CONFIGS[exp11]="GEAK_MEMORY_BUDGET=500 GEAK_MEMORY_NO_CONFIDENCE=0"
 EXP_CONFIGS[exp12]="GEAK_MEMORY_BUDGET=500 GEAK_MEMORY_NO_ANTIFIXATION=0"
-EXP_CONFIGS[exp_jsonl]="GEAK_MEMORY_BUDGET=500 GEAK_MEMORY_BACKEND=jsonl"
-EXP_CONFIGS[exp_lancedb]="GEAK_MEMORY_BUDGET=500 GEAK_MEMORY_BACKEND=lancedb"
+EXP_CONFIGS[exp_jsonl]="GEAK_MEMORY_NO_CROSSSESSION=0 GEAK_MEMORY_BUDGET=500 GEAK_MEMORY_BACKEND=jsonl"
+EXP_CONFIGS[exp_lancedb]="GEAK_MEMORY_NO_CROSSSESSION=0 GEAK_MEMORY_BUDGET=500 GEAK_MEMORY_BACKEND=lancedb"
 
-EXP_ENV="${EXP_CONFIGS[$EXP_ID]}"
-if [ -z "$EXP_ENV" ]; then
+EXP_CONFIG="${EXP_CONFIGS[$EXP_ID]}"
+if [ -z "$EXP_CONFIG" ]; then
     echo "ERROR: Unknown experiment '$EXP_ID'"
     echo "Available: ${!EXP_CONFIGS[@]}"
     exit 1
 fi
+EXP_ENV="$DEFAULT_MEMORY_ENV $EXP_CONFIG"
 
 echo "=== Experiment: $EXP_ID ==="
 echo "Config: $EXP_ENV"
@@ -138,8 +140,9 @@ docker run -d \
     --name "$CONTAINER" \
     --device /dev/kfd --device /dev/dri \
     -v "$REPO_DIR:/workspace" \
-    -v /home/sapmajum/AIG-Eval:/workspace/AIG-Eval \
+    -v /home/sapmajum/AIG-Eval:/workspace/AIG-Eval:ro \
     -v /home/sapmajum/.cursor:/home/sapmajum/.cursor \
+    -v "$EXPERIMENTS_DIR:/geak-experiments" \
     -v "$OUTPUT_DIR:/output" \
     -e AMD_LLM_API_KEY="$KEY1" \
     -e AMD_LLM_API_KEY_2="$KEY2" \
@@ -191,19 +194,50 @@ case "'"$EXP_ID"'" in
 esac
 find /workspace/src -name "*.pyc" -delete 2>/dev/null
 find /workspace/src -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null
-mkdir -p /workspace/.geak_resolved
-# Create a proper git repo from host-mounted AIG-Eval (host has no .git)
-if [ ! -d "/workspace/.geak_resolved/AMD-AGI_AIG-Eval/.git" ]; then
-    rm -rf /workspace/.geak_resolved/AMD-AGI_AIG-Eval
-    cp -a /workspace/AIG-Eval /workspace/.geak_resolved/AMD-AGI_AIG-Eval
-    cd /workspace/.geak_resolved/AMD-AGI_AIG-Eval
-    git init -b geak-eval-kernels && git add -A && \
-    GIT_AUTHOR_NAME="geak" GIT_AUTHOR_EMAIL="geak@local" \
-    GIT_COMMITTER_NAME="geak" GIT_COMMITTER_EMAIL="geak@local" \
-    git commit -q -m "init from host"
-    echo "AIG-Eval git repo created ($(git rev-parse --short HEAD))"
-    cd /workspace
+mkdir -p /workspace/.geak_seed /workspace/.geak_pristine /workspace/.geak_resolved /output/logs
+mkdir -p /geak-experiments/_testcase_cache
+SEED_CACHE=/workspace/.geak_seed/AMD-AGI_AIG-Eval
+ACTIVE_RESOLVER=/workspace/.geak_resolved/AMD-AGI_AIG-Eval
+SEED_SOURCE=""
+rm -rf "$SEED_CACHE"
+if [ -d "$ACTIVE_RESOLVER" ]; then
+    cp -a --no-preserve=ownership "$ACTIVE_RESOLVER" "$SEED_CACHE"
+    SEED_SOURCE="$ACTIVE_RESOLVER"
+else
+    cp -a --no-preserve=ownership /workspace/AIG-Eval "$SEED_CACHE"
+    SEED_SOURCE="/workspace/AIG-Eval"
 fi
+rm -rf "$SEED_CACHE/.git"
+cd "$SEED_CACHE"
+git init -b geak-eval-kernels >/dev/null
+git add -A
+GIT_AUTHOR_NAME="geak" GIT_AUTHOR_EMAIL="geak@local" \
+GIT_COMMITTER_NAME="geak" GIT_COMMITTER_EMAIL="geak@local" \
+git commit -q -m "pristine experiment seed"
+rm -rf /workspace/.geak_pristine/AMD-AGI_AIG-Eval /workspace/.geak_resolved/AMD-AGI_AIG-Eval
+cp -a --no-preserve=ownership "$SEED_CACHE" /workspace/.geak_pristine/AMD-AGI_AIG-Eval
+cd /workspace/.geak_pristine/AMD-AGI_AIG-Eval
+SEED_COMMIT=$(git -c safe.directory=/workspace/.geak_pristine/AMD-AGI_AIG-Eval rev-parse --short HEAD 2>/dev/null || echo "")
+SEED_TREE=$(git -c safe.directory=/workspace/.geak_pristine/AMD-AGI_AIG-Eval rev-parse HEAD^{tree} 2>/dev/null || echo "")
+cd /workspace
+cp -a --no-preserve=ownership /workspace/.geak_pristine/AMD-AGI_AIG-Eval /workspace/.geak_resolved/AMD-AGI_AIG-Eval
+python3 - <<PY
+import json
+from pathlib import Path
+
+payload = {
+    "seed_source": "$SEED_SOURCE",
+    "seed_cache": "$SEED_CACHE",
+    "seed_repo": "/workspace/.geak_pristine/AMD-AGI_AIG-Eval",
+    "resolved_repo": "/workspace/.geak_resolved/AMD-AGI_AIG-Eval",
+    "seed_commit": "$SEED_COMMIT",
+    "seed_tree": "$SEED_TREE",
+    "source_mount": "/workspace/AIG-Eval",
+    "source_mount_read_only": True,
+}
+Path("/output/logs/source_seed.json").write_text(json.dumps(payload, indent=2))
+print("AIG-Eval pristine seed prepared (%s tree=%s)" % (payload["seed_commit"], payload["seed_tree"]))
+PY
 mkdir -p /root/.config/mini-swe-agent
 cat > /root/.config/mini-swe-agent/.env << ENVEOF
 MODEL=openai/amd-llama-4-maverick
@@ -243,6 +277,7 @@ EXP_ID="'"$EXP_ID"'"
 EXP_ENV="'"$EXP_ENV"'"
 BASE_GEAK_MODEL="'"$BASE_GEAK_MODEL"'"
 OPT_AGENT_ENSEMBLE="'"$OPT_AGENT_ENSEMBLE"'"
+DEFAULT_MEMORY_ENV="'"$DEFAULT_MEMORY_ENV"'"
 GEAK_MAX_ROUNDS_OVERRIDE="'"$GEAK_MAX_ROUNDS_OVERRIDE"'"
 GEAK_AGENT_STEP_LIMIT_OVERRIDE="'"$GEAK_AGENT_STEP_LIMIT_OVERRIDE"'"
 
@@ -258,16 +293,35 @@ shopt -u dotglob nullglob
 
 LOG="$BASE/logs"
 mkdir -p "$LOG"
+SEED_TREE=$(git -c safe.directory=/workspace/.geak_pristine/AMD-AGI_AIG-Eval -C /workspace/.geak_pristine/AMD-AGI_AIG-Eval rev-parse HEAD^{tree} 2>/dev/null || echo "")
+SEED_COMMIT=$(git -c safe.directory=/workspace/.geak_pristine/AMD-AGI_AIG-Eval -C /workspace/.geak_pristine/AMD-AGI_AIG-Eval rev-parse --short HEAD 2>/dev/null || echo "")
+python3 - <<PY
+import json
+from pathlib import Path
+
+payload = {
+    "seed_repo": "/workspace/.geak_pristine/AMD-AGI_AIG-Eval",
+    "resolved_repo": "/workspace/.geak_resolved/AMD-AGI_AIG-Eval",
+    "seed_commit": "$SEED_COMMIT",
+    "seed_tree": "$SEED_TREE",
+    "source_mount": "/workspace/AIG-Eval",
+    "source_mount_read_only": True,
+}
+Path("$LOG/source_seed.json").write_text(json.dumps(payload, indent=2))
+PY
 
 echo "=== $EXP_ID ===" > "$LOG/master.log"
 echo "Config: $EXP_ENV" >> "$LOG/master.log"
 echo "Kernels: ${KERNEL_NAMES[*]}" >> "$LOG/master.log"
 echo "Base GEAK model: $BASE_GEAK_MODEL" >> "$LOG/master.log"
 echo "Optimization ensemble: $OPT_AGENT_ENSEMBLE" >> "$LOG/master.log"
+echo "Memory defaults: $DEFAULT_MEMORY_ENV" >> "$LOG/master.log"
+echo "Canonical testcase cache: /geak-experiments/_testcase_cache" >> "$LOG/master.log"
 if [ -n "$GEAK_MAX_ROUNDS_OVERRIDE" ]; then
     echo "GEAK max rounds override: $GEAK_MAX_ROUNDS_OVERRIDE" >> "$LOG/master.log"
 fi
 echo "GEAK agent step limit: $GEAK_AGENT_STEP_LIMIT_OVERRIDE" >> "$LOG/master.log"
+echo "Source seed: ${SEED_COMMIT} tree=${SEED_TREE}" >> "$LOG/master.log"
 echo "Started: $(date)" >> "$LOG/master.log"
 
 SEQ=1
@@ -276,9 +330,17 @@ for i in "${!KERNEL_NAMES[@]}"; do
     U="${KERNEL_URLS[$i]}"
     [ $((SEQ % 2)) -eq 1 ] && K="$KEY1" || K="$KEY2"
 
-    # Clean git state between kernels so worktrees are fresh
-    (cd /workspace/.geak_resolved/AMD-AGI_AIG-Eval 2>/dev/null && git clean -fd && git checkout . ) 2>/dev/null || true
+    # Rebuild the active resolver repo from the pristine experiment seed so
+    # every kernel starts from the same clean baseline source tree.
+    rm -rf /workspace/.geak_resolved/AMD-AGI_AIG-Eval
+    cp -a --no-preserve=ownership /workspace/.geak_pristine/AMD-AGI_AIG-Eval /workspace/.geak_resolved/AMD-AGI_AIG-Eval
     rm -rf /workspace/.geak_resolved/AMD-AGI_AIG-Eval/.git/worktrees/* 2>/dev/null || true
+    SEED_TREE=$(git -c safe.directory=/workspace/.geak_pristine/AMD-AGI_AIG-Eval -C /workspace/.geak_pristine/AMD-AGI_AIG-Eval rev-parse HEAD^{tree} 2>/dev/null || echo "")
+    ACTIVE_TREE=$(git -c safe.directory=/workspace/.geak_resolved/AMD-AGI_AIG-Eval -C /workspace/.geak_resolved/AMD-AGI_AIG-Eval rev-parse HEAD^{tree} 2>/dev/null || echo "")
+    if [ -z "$SEED_TREE" ] || [ "$SEED_TREE" != "$ACTIVE_TREE" ]; then
+        echo "[$SEQ/${#KERNEL_NAMES[@]}] ERROR $T -> clean baseline reset failed" >> "$LOG/master.log"
+        exit 1
+    fi
 
     # Start each kernel from a truly clean output tree so stale task files,
     # best_results.json, and patch logs cannot bleed into a new run.
@@ -299,6 +361,7 @@ for i in "${!KERNEL_NAMES[@]}"; do
     env $EXP_ENV AMD_LLM_API_KEY="$K" HIP_VISIBLE_DEVICES="" GEAK_AGENT_STEP_LIMIT="$GEAK_AGENT_STEP_LIMIT_OVERRIDE" \
     GEAK_MODEL="$BASE_GEAK_MODEL" \
     GEAK_MODEL_ENSEMBLE="$OPT_AGENT_ENSEMBLE" \
+    GEAK_TESTCASE_CACHE_DIR="/geak-experiments/_testcase_cache" \
     GEAK_EXCLUDED_AGENTS=openevolve \
     "${EXTRA_ENV[@]}" \
     geak --kernel-url "$U" --gpu-ids 0,1,2,3,4,5,6,7 \

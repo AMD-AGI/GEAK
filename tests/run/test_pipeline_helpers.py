@@ -21,6 +21,7 @@ def test_bottleneck_guidance_adds_search_specific_hip_hints() -> None:
 
     text = "\n".join(_bottleneck_guidance("latency", metrics))
 
+    assert "Optimization Guidance (bottleneck: latency-bound)" in text
     assert "Workload Guidance (HIP search / pointer-chasing)" in text
     assert "branchless search logic" in text
     assert "Deprioritize generic vectorization" in text

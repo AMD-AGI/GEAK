@@ -132,6 +132,9 @@ agent is to discover improvements that humans missed.  Generate at least 3-5
 genuinely different *algorithmic* approaches per kernel -- not 3-5 variations
 of launch config parameters.
 
+It is acceptable to leave some GPUs idle rather than spending them on
+wrapper-only or dispatch-only tasks before kernel-body avenues are exhausted.
+
 ## Task priority scheme (lower number = higher priority = runs first)
 
 - 0: Novel algorithmic kernel rewrites (different algorithm, different reduction/scan tree, split kernel variants, eliminate expensive ops like tl.reshape/tl.flip)
@@ -303,6 +306,8 @@ Generate optimization tasks for the kernel at {{ kernel_path }}.
 {% if num_gpus > 1 %}## GPU Budget
 Available GPUs: {{ num_gpus }}
 Generate enough tasks so the total num_gpus across all tasks is close to {{ num_gpus }}.
+It is acceptable to leave some GPUs idle rather than padding the batch with
+low-priority wrapper / dispatch work.
 OpenEvolve tasks can use 2-4 GPUs each; strategy_agent and swe_agent tasks use 1 GPU each.
 {% endif %}
 ## Instructions
@@ -480,6 +485,7 @@ def _build_triton_guidance(kernel: Any, baseline_metrics: dict[str, Any]) -> str
         "Planning policy:",
         "- Fill most task slots with 'Prefer First' families below.",
         "- Only add autotune / launch / wrapper tasks after at least 3 preferred-family tasks exist.",
+        "- Leave GPUs idle if the remaining ideas are only low-priority wrapper work.",
         "Prefer First:",
         *[f"- {item}" for item in prefer_first],
         "Consider Next:",
@@ -566,6 +572,7 @@ def _build_hip_guidance(kernel: Any, baseline_metrics: dict[str, Any]) -> str:
         "Planning policy:",
         "- Fill most task slots with 'Prefer First' families below.",
         "- Only add launch / dispatch / wrapper tasks after at least 3 preferred-family tasks exist.",
+        "- Leave GPUs idle if the remaining ideas are only low-priority wrapper work.",
         "Prefer First:",
         *[f"- {item}" for item in prefer_first],
         "Consider Next:",
@@ -852,10 +859,14 @@ def _run_task_agent(
                 r_num = rev.get("round", "?")
                 evals_text += f"### Round {r_num}\n"
                 evals_text += f"- Best task: {rev.get('best_task', 'N/A')}\n"
-                evals_text += f"- Benchmark speedup (agent-reported): {rev.get('benchmark_speedup', 'N/A')}x\n"
                 fb = rev.get("full_benchmark", {})
+                canonical_speedup = (
+                    fb.get("verified_speedup", "N/A")
+                    if isinstance(fb, dict) and fb
+                    else rev.get("benchmark_speedup", "N/A")
+                )
+                evals_text += f"- Canonical benchmark speedup: {canonical_speedup}x\n"
                 if fb:
-                    evals_text += f"- Verified speedup (FULL_BENCHMARK): {fb.get('verified_speedup', 'N/A')}x\n"
                     evals_text += f"- Verified kernel time: {fb.get('kernel_time_ms', 'N/A')}ms\n"
                 profile = rev.get("profile", {})
                 if profile:
@@ -892,15 +903,27 @@ def _run_task_agent(
         _bm_dict: dict[str, Any] = {}
         try:
             from minisweagent.memory.integration import assemble_memory_context
+            from minisweagent.memory.working_notebook import summarize_working_notebook
             if baseline_metrics_path and Path(baseline_metrics_path).exists():
                 _bm_dict = json.loads(Path(baseline_metrics_path).read_text())
+            _notebook_dir = None
+            if baseline_metrics_path and Path(baseline_metrics_path).exists():
+                _notebook_dir = Path(baseline_metrics_path).resolve().parent / "_working_memory"
+            elif previous_results_dir and Path(previous_results_dir).is_dir():
+                _notebook_dir = Path(previous_results_dir).resolve().parent.parent / "_working_memory"
+            _wm_ctx = summarize_working_notebook(_notebook_dir)
             _mem = assemble_memory_context(
                 kernel_path=str(kernel.file_path),
                 bottleneck_type=_bm_dict.get("bottleneck"),
                 profiling_metrics=_bm_dict,
             )
-            if _mem:
-                template_vars["memory_context"] = _mem.strip()
+            combined_memory = "\n\n".join(
+                part.strip()
+                for part in (_wm_ctx, _mem or "")
+                if part and str(part).strip()
+            )
+            if combined_memory:
+                template_vars["memory_context"] = combined_memory
         except Exception:
             pass
 
@@ -1248,7 +1271,7 @@ def main():
         "--benchmark-baseline",
         default=None,
         metavar="FILE",
-        help="Path to benchmark_baseline.txt (raw --benchmark output from preprocessing)",
+        help="Path to benchmark_baseline.txt (canonical benchmark output from preprocessing)",
     )
     parser.add_argument(
         "--round",

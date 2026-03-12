@@ -1,5 +1,6 @@
 """Save-and-test tool: saves patches and runs correctness + benchmark tests."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -64,6 +65,7 @@ class SaveAndTestTool:
 
             # Run test
             test_output, test_passed, test_returncode = self._run_test()
+            patch_profile = self._maybe_profile_patch(patch_name, test_passed)
 
             status = "✓ PASSED" if test_passed else "✗ FAILED"
             self._log(f"[SaveAndTest] Test result for {patch_name}: {status}")
@@ -73,7 +75,14 @@ class SaveAndTestTool:
                 self._save_patch_file(patch_name, patch_content)
                 self._save_test_output(patch_name, test_output)
 
-            output = self._format_output(patch_name, patch_content, test_output, test_passed, test_returncode)
+            output = self._format_output(
+                patch_name,
+                patch_content,
+                test_output,
+                test_passed,
+                test_returncode,
+                patch_profile=patch_profile,
+            )
             return {"output": output, "returncode": 0 if test_passed else 1}
 
         except subprocess.TimeoutExpired:
@@ -239,6 +248,202 @@ class SaveAndTestTool:
             current = parent
         return None
 
+    @staticmethod
+    def _is_truthy(value: Any) -> bool:
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _patch_profiling_enabled(self) -> bool:
+        ctx = self.context
+        if not ctx:
+            return False
+        env_vars = ctx.env_vars or {}
+        flag = env_vars.get("GEAK_PROFILE_EVERY_PATCH")
+        if flag is None:
+            flag = os.environ.get("GEAK_PROFILE_EVERY_PATCH")
+        return self._is_truthy(flag)
+
+    def _build_test_env(self) -> dict[str, str]:
+        ctx = self.context
+        test_env = os.environ.copy()
+        if ctx and ctx.env_vars:
+            for key, value in ctx.env_vars.items():
+                if value is None:
+                    continue
+                test_env[str(key)] = str(value)
+        test_env["PYTHONUNBUFFERED"] = "1"
+        return test_env
+
+    @staticmethod
+    def _merged_pythonpath(*parts: str | Path | None) -> str:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            if part is None:
+                continue
+            if isinstance(part, Path):
+                tokens = [str(part)]
+            else:
+                tokens = [token for token in str(part).split(os.pathsep) if token]
+            for token in tokens:
+                if token and token not in seen:
+                    seen.add(token)
+                    merged.append(token)
+        return os.pathsep.join(merged)
+
+    def _build_profile_env(self) -> dict[str, str]:
+        ctx = self.context
+        profile_env = self._build_test_env()
+        if not ctx:
+            return profile_env
+        profile_env["PYTHONPATH"] = self._merged_pythonpath(
+            ctx.cwd,
+            ctx.base_repo_path,
+            profile_env.get("PYTHONPATH"),
+        )
+        return profile_env
+
+    def _profile_harness_path(self) -> Path | None:
+        ctx = self.context
+        if not ctx:
+            return None
+        harness = (ctx.env_vars or {}).get("GEAK_HARNESS")
+        if not isinstance(harness, str) or not harness.strip():
+            return None
+        harness_path = Path(harness)
+        if not harness_path.is_absolute():
+            harness_path = Path(ctx.cwd) / harness_path
+        return Path(os.path.abspath(harness_path))
+
+    def _profile_gpu_devices(self) -> str:
+        ctx = self.context
+        env_vars = (ctx.env_vars or {}) if ctx else {}
+        gpu_value = (
+            env_vars.get("GEAK_GPU_DEVICE")
+            or env_vars.get("HIP_VISIBLE_DEVICES")
+            or env_vars.get("CUDA_VISIBLE_DEVICES")
+            or os.environ.get("GEAK_GPU_DEVICE")
+            or os.environ.get("HIP_VISIBLE_DEVICES")
+            or os.environ.get("CUDA_VISIBLE_DEVICES")
+            or "0"
+        )
+        return str(gpu_value)
+
+    @staticmethod
+    def _apply_process_env(temp_env: dict[str, str]) -> tuple[dict[str, str | None], set[str]]:
+        previous = {key: os.environ.get(key) for key in temp_env}
+        newly_added = {key for key in temp_env if key not in os.environ}
+        os.environ.update(temp_env)
+        return previous, newly_added
+
+    @staticmethod
+    def _restore_process_env(previous: dict[str, str | None], newly_added: set[str]) -> None:
+        for key in newly_added:
+            os.environ.pop(key, None)
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _run_patch_profile(
+        self,
+        *,
+        harness_path: Path,
+        profile_env: dict[str, str],
+        gpu_devices: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        from minisweagent.run.pipeline_helpers import _ensure_mcp_importable
+
+        _ensure_mcp_importable()
+        from profiler_mcp.server import profile_kernel
+
+        previous, newly_added = self._apply_process_env(profile_env)
+        try:
+            _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
+            raw_result = _profile_fn(
+                command=f"python {harness_path} --profile",
+                backend="metrix",
+                num_replays=3,
+                quick=True,
+                gpu_devices=gpu_devices,
+            )
+        finally:
+            self._restore_process_env(previous, newly_added)
+
+        metrics: dict[str, Any] = {}
+        if raw_result:
+            try:
+                from minisweagent.baseline_metrics import build_baseline_metrics
+
+                metrics = build_baseline_metrics(raw_result, include_all=True)
+            except Exception:
+                metrics = {}
+        return raw_result, metrics
+
+    def _save_profile_output(self, patch_name: str, profile_payload: dict[str, Any]) -> str | None:
+        ctx = self.context
+        if not ctx or not ctx.patch_output_dir:
+            return None
+        output_dir = Path(ctx.patch_output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        profile_path = output_dir / f"{patch_name}_profile.json"
+        payload = dict(profile_payload)
+        payload["profile_path"] = str(profile_path)
+        profile_path.write_text(json.dumps(payload, indent=2, default=str))
+        return str(profile_path)
+
+    def _maybe_profile_patch(self, patch_name: str, test_passed: bool) -> dict[str, Any] | None:
+        if not self._patch_profiling_enabled():
+            return None
+
+        result: dict[str, Any] = {"enabled": True, "status": "skipped"}
+        if not test_passed:
+            result["reason"] = "test_failed"
+            self._save_profile_output(patch_name, result)
+            return result
+
+        self._restore_missing_harness_helper()
+        harness_path = self._profile_harness_path()
+        if harness_path is None:
+            result["reason"] = "missing_geak_harness"
+            self._save_profile_output(patch_name, result)
+            return result
+        if not harness_path.exists():
+            result["reason"] = f"missing_harness_file:{harness_path}"
+            self._save_profile_output(patch_name, result)
+            return result
+
+        profile_env = self._build_profile_env()
+        gpu_devices = self._profile_gpu_devices()
+        command = f"python {harness_path} --profile"
+        result.update(
+            {
+                "command": command,
+                "gpu_devices": gpu_devices,
+                "harness_path": str(harness_path),
+            }
+        )
+
+        try:
+            self._log(f"[SaveAndTest] Per-patch Metrix profiling enabled for {patch_name}: {command}")
+            raw_result, metrics = self._run_patch_profile(
+                harness_path=harness_path,
+                profile_env=profile_env,
+                gpu_devices=gpu_devices,
+            )
+            result["status"] = "ok"
+            result["raw_result"] = raw_result
+            result["metrics"] = metrics
+        except Exception as exc:
+            result["status"] = "error"
+            result["error"] = str(exc)
+            self._log(f"[SaveAndTest] Per-patch Metrix profiling failed for {patch_name}: {exc}")
+
+        profile_path = self._save_profile_output(patch_name, result)
+        if profile_path:
+            result["profile_path"] = profile_path
+        return result
+
     def _format_speedup_summary(self, test_output: str) -> list[str]:
         """Summarize overall and per-shape speedups against the true baseline."""
         baseline_file = self._find_true_baseline_file()
@@ -339,10 +544,7 @@ class SaveAndTestTool:
             self._log(error_msg)
             return error_msg, False, -1
 
-        test_env = os.environ.copy()
-        if ctx.env_vars:
-            test_env.update(ctx.env_vars)
-        test_env["PYTHONUNBUFFERED"] = "1"
+        test_env = self._build_test_env()
         self._restore_missing_harness_helper()
 
         # If test_command still contains the original repo root path, replace it with the
@@ -387,7 +589,14 @@ class SaveAndTestTool:
                     pass
 
     def _format_output(
-        self, patch_name: str, patch_content: str, test_output: str, test_passed: bool, returncode: int
+        self,
+        patch_name: str,
+        patch_content: str,
+        test_output: str,
+        test_passed: bool,
+        returncode: int,
+        *,
+        patch_profile: dict[str, Any] | None = None,
     ) -> str:
         status = "PASSED ✓" if test_passed else "FAILED ✗"
 
@@ -398,19 +607,21 @@ class SaveAndTestTool:
             f"Return code: {returncode}",
         ]
         lines.extend(self._format_speedup_summary(test_output))
+        lines.extend(self._format_patch_profile_summary(patch_profile))
 
         # Add log file locations if patch_output_dir is configured
         if self.context.patch_output_dir:
             output_dir = Path(self.context.patch_output_dir).resolve()
             patch_file = output_dir / f"{patch_name}.patch"
             test_log_file = output_dir / f"{patch_name}_test.txt"
-            lines.extend(
-                [
-                    "\nFiles saved to:",
-                    f"  - Patch: {patch_file}",
-                    f"  - Test log: {test_log_file}",
-                ]
-            )
+            saved_files = [
+                "\nFiles saved to:",
+                f"  - Patch: {patch_file}",
+                f"  - Test log: {test_log_file}",
+            ]
+            if patch_profile and patch_profile.get("profile_path"):
+                saved_files.append(f"  - Profile: {patch_profile['profile_path']}")
+            lines.extend(saved_files)
 
         lines.extend(
             [
@@ -422,6 +633,30 @@ class SaveAndTestTool:
         )
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_patch_profile_summary(patch_profile: dict[str, Any] | None) -> list[str]:
+        if not patch_profile or not patch_profile.get("enabled"):
+            return []
+
+        lines = ["\nPer-patch Metrix profile:"]
+        status = patch_profile.get("status", "unknown")
+        lines.append(f"Status: {status}")
+
+        if status == "ok":
+            metrics = patch_profile.get("metrics", {})
+            duration_us = metrics.get("duration_us")
+            bottleneck = metrics.get("bottleneck")
+            if isinstance(duration_us, (int, float)):
+                lines.append(f"Duration: {duration_us:.3f} us")
+            if bottleneck:
+                lines.append(f"Bottleneck: {bottleneck}")
+        elif patch_profile.get("reason"):
+            lines.append(f"Reason: {patch_profile['reason']}")
+        elif patch_profile.get("error"):
+            lines.append(f"Error: {patch_profile['error']}")
+
+        return lines
 
     def _handle_error(self, patch_name: str, patch_content: str, error_msg: str, status: str) -> dict:
         ctx = self.context

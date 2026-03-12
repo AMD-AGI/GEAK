@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 from minisweagent.debug_runtime import emit_debug_log, model_tools_snapshot
 from minisweagent.benchmark_parsing import (
-    parse_median_latency_ms as _parse_median_latency_ms,
+    extract_latency_ms as _extract_latency_ms,
 )
 from minisweagent.benchmark_parsing import (
     parse_shape_count as _parse_shape_count,
@@ -280,6 +280,62 @@ def _tool_generate_tasks(
     return json.dumps({"tasks": task_files, "count": len(task_files)})
 
 
+def _dispatch_stage_name(priority: int) -> str:
+    """Map task priority to a staged dispatch band."""
+    if priority <= 5:
+        return "kernel_body"
+    if priority <= 8:
+        return "tuning_fallback"
+    return "wrapper_fallback"
+
+
+def _group_task_files_by_dispatch_stage(task_files: list[Path]) -> list[tuple[str, list[Path]]]:
+    """Group task files into staged dispatch bands in priority order."""
+    from minisweagent.run.task_file import read_task_file
+
+    stage_order = ("kernel_body", "tuning_fallback", "wrapper_fallback")
+    grouped: dict[str, list[tuple[int, Path]]] = {name: [] for name in stage_order}
+    for task_file in task_files:
+        try:
+            meta, _ = read_task_file(task_file)
+        except Exception:
+            meta = {}
+        try:
+            priority = int(meta.get("priority", 10))
+        except (TypeError, ValueError):
+            priority = 10
+        grouped[_dispatch_stage_name(priority)].append((priority, task_file))
+
+    stages: list[tuple[str, list[Path]]] = []
+    for stage_name in stage_order:
+        entries = sorted(grouped[stage_name], key=lambda item: (item[0], item[1].name))
+        if entries:
+            stages.append((stage_name, [path for _, path in entries]))
+    return stages
+
+
+def _stage_found_improvement(results_dir: Path, task_files: list[Path]) -> bool:
+    """Return True if any dispatched task produced a >1.0x candidate."""
+    from minisweagent.run.task_file import read_task_file
+
+    for task_file in task_files:
+        try:
+            meta, _ = read_task_file(task_file)
+        except Exception:
+            meta = {}
+        label = str(meta.get("label") or task_file.stem)
+        best_results_path = results_dir / label / "best_results.json"
+        if not best_results_path.is_file():
+            continue
+        try:
+            payload = json.loads(best_results_path.read_text())
+            if float(payload.get("best_patch_speedup", 0) or 0) > 1.0:
+                return True
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return False
+
+
 def _tool_dispatch_tasks(
     ctx: dict[str, Any],
     task_files: list[str] | str | None = None,
@@ -342,14 +398,59 @@ def _tool_dispatch_tasks(
     results_dir = base_dir / "results" / round_dir
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    results = run_task_batch(
-        task_files=[Path(f) for f in task_files],
-        gpu_ids=gpu_ids,
-        output_dir=results_dir,
-        model_factory=ctx["model_factory"],
-    )
+    task_paths = [Path(f) for f in task_files]
 
-    return json.dumps(results, default=str)
+    stage_gating_enabled = os.environ.get("GEAK_STAGE_PRIORITY_GATING", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+    if not stage_gating_enabled:
+        results = run_task_batch(
+            task_files=task_paths,
+            gpu_ids=gpu_ids,
+            output_dir=results_dir,
+            model_factory=ctx["model_factory"],
+        )
+        return json.dumps(results, default=str)
+
+    grouped_stages = _group_task_files_by_dispatch_stage(task_paths)
+    aggregate: dict[str, Any] = {
+        "completed": 0,
+        "failed": 0,
+        "results": [],
+        "results_dir": str(results_dir),
+        "stages": [],
+    }
+
+    for stage_name, stage_files in grouped_stages:
+        logger.info(
+            "Dispatch stage %s with %d task(s)",
+            stage_name,
+            len(stage_files),
+        )
+        stage_result = run_task_batch(
+            task_files=stage_files,
+            gpu_ids=gpu_ids,
+            output_dir=results_dir,
+            model_factory=ctx["model_factory"],
+        )
+        aggregate["completed"] += int(stage_result.get("completed", 0) or 0)
+        aggregate["failed"] += int(stage_result.get("failed", 0) or 0)
+        aggregate["results"].extend(stage_result.get("results", []))
+
+        improvement_found = _stage_found_improvement(results_dir, stage_files)
+        aggregate["stages"].append(
+            {
+                "stage": stage_name,
+                "task_count": len(stage_files),
+                "improvement_found": improvement_found,
+            }
+        )
+        if improvement_found:
+            break
+
+    return json.dumps(aggregate, default=str)
 
 
 def _tool_collect_results(
@@ -464,17 +565,73 @@ def _parse_reported_speedup(total_speedup: str | None) -> float | None:
 
 
 def _extract_verified_speedup(round_eval: dict[str, Any]) -> float | None:
-    """Prefer FULL_BENCHMARK verified speedup, fall back to benchmark winner."""
+    """Return only FULL_BENCHMARK verified speedup."""
     full_benchmark = round_eval.get("full_benchmark", {})
     if isinstance(full_benchmark, dict):
         verified = full_benchmark.get("verified_speedup")
         if isinstance(verified, (int, float)):
             return float(verified)
-
-    benchmark_speedup = round_eval.get("benchmark_speedup")
-    if isinstance(benchmark_speedup, (int, float)):
-        return float(benchmark_speedup)
     return None
+
+
+def _round_eval_label(round_eval: dict[str, Any]) -> str:
+    """Return a stable round label like ``round_2`` for a round evaluation."""
+    round_val = round_eval.get("round")
+    if isinstance(round_val, int):
+        return f"round_{round_val}"
+    text = str(round_val).strip()
+    if not text:
+        return ""
+    return text if text.startswith("round_") else f"round_{text}"
+
+
+def _round_eval_candidate_ms(round_eval: dict[str, Any]) -> float | None:
+    """Return the candidate latency from FULL_BENCHMARK, if available."""
+    full_benchmark = round_eval.get("full_benchmark", {})
+    if isinstance(full_benchmark, dict):
+        candidate = full_benchmark.get("candidate_ms")
+        if isinstance(candidate, (int, float)) and candidate > 0:
+            return float(candidate)
+    return None
+
+
+def _select_best_verified_round_evaluation(output_dir: Path) -> dict[str, Any] | None:
+    """Pick the best verified round deterministically from ``round_*_evaluation.json``.
+
+    Selection order:
+    1. Highest FULL_BENCHMARK verified speedup
+    2. Lowest FULL_BENCHMARK candidate latency
+    3. Stable lexical patch/task/round tie-breakers
+    """
+    candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    for eval_path in sorted(output_dir.glob("round_*_evaluation.json")):
+        try:
+            round_eval = json.loads(eval_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        verified = _extract_verified_speedup(round_eval)
+        if verified is None:
+            continue
+
+        candidate_ms = _round_eval_candidate_ms(round_eval)
+        best_patch = str(round_eval.get("best_patch") or "")
+        best_task = str(round_eval.get("best_task") or "")
+        round_label = _round_eval_label(round_eval) or eval_path.stem.replace("_evaluation", "")
+        sort_key = (
+            -float(verified),
+            float(candidate_ms) if candidate_ms is not None else float("inf"),
+            best_patch,
+            best_task,
+            round_label,
+        )
+        candidates.append((sort_key, round_eval))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
 
 
 def _format_patch_label(patch_path: str | None) -> str:
@@ -519,6 +676,13 @@ def _rewrite_summary_with_verified_selection(
     verified_block = "\n".join(lines)
 
     updated = summary or ""
+    if not updated.strip():
+        return verified_block
+    # Auto-finalize can produce a plain single-line summary that references a
+    # patch-test winner. Replace that entirely so the report has one canonical,
+    # verified result instead of a verified block plus stale fallback text.
+    if "### Best Patch:" not in updated and "- **Speedup**" not in updated:
+        return verified_block
     updated = re.sub(r"(?m)^### Best Patch: .*$", f"### Best Patch: {best_patch_label}", updated)
     if verified_speedup_raw > 1.0:
         speedup_line = f"- **Speedup**: {verified_speedup_raw:.4f}x (FULL_BENCHMARK verified)"
@@ -593,10 +757,15 @@ def _merge_round_evaluation_into_final_report(
         merged["best_patch"] = round_eval["best_patch"]
     if round_eval.get("best_task"):
         merged["best_task"] = round_eval["best_task"]
+    round_label = _round_eval_label(round_eval)
+    if round_label:
+        merged["best_round"] = round_label
 
     verified_speedup_raw = _extract_verified_speedup(round_eval)
     if verified_speedup_raw is not None:
         verified_speedup = max(1.0, float(verified_speedup_raw))
+        merged["best_speedup"] = round(float(verified_speedup_raw), 6)
+        merged["best_speedup_verified"] = round(float(verified_speedup_raw), 6)
         merged["verified_speedup_raw"] = round(float(verified_speedup_raw), 6)
         merged["verified_speedup"] = round(verified_speedup, 6)
         merged["verified_improvement"] = verified_speedup_raw > 1.0
@@ -609,6 +778,23 @@ def _merge_round_evaluation_into_final_report(
                 f"({verified_speedup_raw:.4f}x raw); clamped to {verified_speedup:.4f}x."
             )
         )
+        best_patch_path = str(merged.get("best_patch") or round_eval.get("best_patch") or "")
+        if best_patch_path and Path(best_patch_path).is_file():
+            merged["best_patch_size_bytes"] = Path(best_patch_path).stat().st_size
+        full_benchmark = round_eval.get("full_benchmark", {})
+        if isinstance(full_benchmark, dict):
+            baseline_ms = full_benchmark.get("baseline_ms")
+            candidate_ms = full_benchmark.get("candidate_ms")
+            patch_sz = merged.get("best_patch_size_bytes")
+            if isinstance(baseline_ms, (int, float)) and isinstance(candidate_ms, (int, float)):
+                analysis = (
+                    f"Verified FULL_BENCHMARK: baseline={float(baseline_ms):.4f}ms, "
+                    f"candidate={float(candidate_ms):.4f}ms. "
+                    f"Speedup={float(verified_speedup_raw):.4f}x."
+                )
+                if isinstance(patch_sz, int) and patch_sz >= 0:
+                    analysis += f" Patch={patch_sz}B."
+                merged["best_patch_analysis"] = analysis
         merged["summary"] = _rewrite_summary_with_verified_selection(
             str(merged.get("summary", "")),
             round_eval,
@@ -705,7 +891,19 @@ def _auto_finalize(
         "round_summaries": round_summaries,
     }
 
+    best_verified_round_eval = _select_best_verified_round_evaluation(output_dir)
     report_path = output_dir / "final_report.json"
+    if best_verified_round_eval is not None:
+        merged = _merge_round_evaluation_into_final_report(
+            ctx,
+            output_dir,
+            report,
+            best_verified_round_eval,
+        )
+        _print(f"Auto-finalized: {merged.get('verification_note', summary_text)}")
+        _print(f"Report written to: {report_path}")
+        return merged
+
     report_path.write_text(json.dumps(report, indent=2))
     _print(f"Auto-finalized: {summary_text}")
     _print(f"Report written to: {report_path}")
@@ -920,6 +1118,9 @@ def _evaluate_round_best(
                 "patch_file": patch_file,
                 "speedup": speedup,
                 "kernel_time_ms": kernel_time,
+                "per_shape_speedups": br.get("per_shape_speedups") or {},
+                "baseline_shape_latency_ms": br.get("baseline_shape_latency_ms") or {},
+                "candidate_shape_latency_ms": br.get("candidate_shape_latency_ms") or {},
             })
         except (json.JSONDecodeError, ValueError, TypeError):
             continue
@@ -964,6 +1165,12 @@ def _evaluate_round_best(
         "best_task": best_task,
         "benchmark_speedup": best_speedup,
     }
+    if best.get("per_shape_speedups"):
+        round_eval["per_shape_speedups"] = best["per_shape_speedups"]
+    if best.get("baseline_shape_latency_ms"):
+        round_eval["baseline_shape_latency_ms"] = best["baseline_shape_latency_ms"]
+    if best.get("candidate_shape_latency_ms"):
+        round_eval["candidate_shape_latency_ms"] = best["candidate_shape_latency_ms"]
 
     commandment_path = pp_dir / "COMMANDMENT.md"
     if not commandment_path.exists():
@@ -1029,9 +1236,9 @@ def _evaluate_round_best(
 
                 # Programmatic speedup verification
                 if fb_result.returncode == 0:
-                    candidate_ms = _parse_median_latency_ms(fb_stdout)
+                    candidate_ms = _extract_latency_ms(fb_stdout)
                     baseline_ref = full_benchmark_baseline or benchmark_baseline
-                    baseline_ms = _parse_median_latency_ms(baseline_ref) if baseline_ref else None
+                    baseline_ms = _extract_latency_ms(baseline_ref) if baseline_ref else None
                     if candidate_ms and baseline_ms and baseline_ms > 0:
                         verified_speedup = baseline_ms / candidate_ms
                         round_eval["full_benchmark"]["verified_speedup"] = round(verified_speedup, 4)
@@ -1560,10 +1767,21 @@ def run_orchestrator(
             from minisweagent.memory.cross_session_memory import classify_kernel_category
 
             _kpath = str(preprocess_ctx.get("kernel_path", ""))
+            _wm_notebook_dir = str(_out / "_working_memory")
             _working_mem = WorkingMemory(
                 kernel_category=classify_kernel_category(_kpath) if _kpath else "unknown",
                 max_steps=int(os.getenv("GEAK_AGENT_STEP_LIMIT", "100")),
+                notebook_dir=_wm_notebook_dir,
+                notebook_writer_id="orchestrator",
             )
+            _bm_dict = preprocess_ctx.get("baseline_metrics") or {}
+            if _bm_dict.get("bottleneck"):
+                _working_mem.bottleneck_type = str(_bm_dict["bottleneck"])
+            if _bm_dict.get("benchmark_duration_us"):
+                _working_mem.baseline_latency_ms = float(_bm_dict["benchmark_duration_us"]) / 1000.0
+            elif _bm_dict.get("duration_us"):
+                _working_mem.baseline_latency_ms = float(_bm_dict["duration_us"]) / 1000.0
+            _working_mem.sync_notebook_baseline()
             ctx["working_memory"] = _working_mem
     except Exception as _wm_exc:
         logger.debug("WorkingMemory init failed: %s", _wm_exc)
@@ -1677,6 +1895,8 @@ def run_orchestrator(
             )
             if round_eval:
                 ctx[f"round_{round_num}_eval"] = round_eval
+                if _working_mem:
+                    _working_mem.record_round_evaluation(round_eval)
                 # Feed evaluation into next round's context
                 eval_summary = json.dumps(round_eval, indent=2, default=str)[:2000]
                 messages.append({

@@ -5,7 +5,7 @@ and a ``compute_best_patch()`` function that selects the best non-empty
 patch by comparing benchmark numbers -- no LLM involved.
 
 Measurement methodology:
-- Uses ``benchmark_baseline.txt`` (true unmodified kernel) as the baseline
+- Uses ``benchmark_baseline.txt`` (the canonical unmodified baseline benchmark)
 - Prioritizes ``GEAK_RESULT_LATENCY_MS=<number>`` marker (standardized)
 - Falls back to legacy parsers and universal latency keyword scanner
 - Only reports speedups > 1.0 (genuine improvements over true baseline)
@@ -148,7 +148,7 @@ def compute_shape_speedups(
 
 
 def _find_original_baseline_ms(patch_dir: Path) -> float | None:
-    """Walk up from patch_dir to find benchmark_baseline.txt (the true baseline).
+    """Walk up from patch_dir to find benchmark_baseline.txt (the canonical baseline).
 
     The preprocessing phase writes benchmark_baseline.txt at the kernel
     output root (e.g. patches/exp0/rope/benchmark_baseline.txt).  Task dirs
@@ -172,7 +172,7 @@ def _find_original_baseline_ms(patch_dir: Path) -> float | None:
 def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
     """Deterministically select the best non-empty patch from a task directory.
 
-    Uses ``benchmark_baseline.txt`` as the true (unmodified) baseline rather
+    Uses ``benchmark_baseline.txt`` as the canonical (unmodified) baseline rather
     than ``patch_0_test.txt`` which is the agent's first attempt.  Only
     returns a result if a patch genuinely beats the true baseline (>1.0x).
     """
@@ -261,7 +261,7 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
 def rewrite_best_results(patch_dir: Path) -> dict[str, Any] | None:
     """Overwrite ``best_results.json`` with deterministic selection if possible.
 
-    Uses the true baseline from benchmark_baseline.txt.  If no patch
+    Uses the canonical baseline from benchmark_baseline.txt.  If no patch
     genuinely improves on the true baseline, clamps any LLM-reported
     speedup to 1.0x to prevent false positives.
     """

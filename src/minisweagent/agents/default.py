@@ -141,7 +141,19 @@ class DefaultAgent:
         # Wire sub_agent context (needs model + env for recursive agent calls)
         if getattr(self.toolruntime, "_sub_agent_tool", None):
             self.toolruntime._sub_agent_tool.set_context(
-                self.model, self.env, codebase_context=self.config.codebase_context,
+                self.model,
+                self.env,
+                codebase_context=self.config.codebase_context,
+                inherited_config={
+                    "test_command": self.config.test_command,
+                    "patch_output_dir": self.config.patch_output_dir,
+                    "metric": self.config.metric,
+                    "save_patch": self.config.save_patch,
+                    "use_strategy_manager": self.config.use_strategy_manager,
+                    "strategy_file_path": self.config.strategy_file_path,
+                    "profiling_type": self.config.profiling_type,
+                },
+                save_and_test_context=getattr(self, "_save_and_test_context", None),
             )
         if self.config.codebase_context:
             self.toolruntime.set_codebase_context(self.config.codebase_context)
@@ -416,6 +428,14 @@ class DefaultAgent:
                         _sp = _re.search(r'(\d+\.\d+)x', insight.message)
                         if _sp:
                             _wm.update_speedup(float(_sp.group(1)))
+                    _wm.note_tool_result(
+                        output_str,
+                        rc,
+                        tag=insight.tag,
+                        message=insight.message,
+                    )
+                else:
+                    _wm.note_tool_result(output_str, rc)
                 if "has been edited" in output_str:
                     from minisweagent.memory.working_memory import classify_change
                     last_assistant = ""
@@ -466,6 +486,7 @@ class DefaultAgent:
                         change_type = classify_change(last_assistant)
                         _wm.record_strategy(strat, True)
                         _wm.record_change_category(change_type)
+                        _wm.remember_pending_change(strat, change_type)
             except Exception:
                 pass
 

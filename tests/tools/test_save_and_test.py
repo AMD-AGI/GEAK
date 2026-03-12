@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -187,3 +188,90 @@ def test_format_output_includes_true_baseline_speedups(tmp_path: Path) -> None:
     assert "Overall: 1.0000x (0.054772 ms -> 0.054772 ms)" in formatted
     assert "(32,4096): 1.2500x (0.050000 ms -> 0.040000 ms)" in formatted
     assert "(64,4096): 0.8000x (0.060000 ms -> 0.075000 ms)" in formatted
+
+
+def test_maybe_profile_patch_is_disabled_by_default(tmp_path: Path, monkeypatch) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    harness = worktree / "test_harness_demo.py"
+    harness.write_text("print('profile harness')\n")
+
+    tool = SaveAndTestTool()
+    tool.set_context(
+        SaveAndTestContext(
+            cwd=str(worktree),
+            test_command='python "${GEAK_HARNESS}"',
+            timeout=10,
+            patch_output_dir=str(tmp_path / "results"),
+            env_vars={"GEAK_HARNESS": str(harness), "GEAK_GPU_DEVICE": "3"},
+            base_repo_path=None,
+        )
+    )
+
+    def _should_not_profile(**kwargs):
+        raise AssertionError("per-patch profiling should stay disabled by default")
+
+    monkeypatch.setattr(tool, "_run_patch_profile", _should_not_profile)
+
+    assert tool._maybe_profile_patch("patch_1", True) is None
+
+
+def test_maybe_profile_patch_enabled_writes_profile_artifact(tmp_path: Path, monkeypatch) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    harness = worktree / "test_harness_demo.py"
+    harness.write_text("print('profile harness')\n")
+    output_dir = tmp_path / "results"
+
+    tool = SaveAndTestTool()
+    tool.set_context(
+        SaveAndTestContext(
+            cwd=str(worktree),
+            test_command='python "${GEAK_HARNESS}"',
+            timeout=10,
+            patch_output_dir=str(output_dir),
+            env_vars={
+                "GEAK_HARNESS": str(harness),
+                "GEAK_GPU_DEVICE": "4",
+                "GEAK_PROFILE_EVERY_PATCH": "1",
+            },
+            base_repo_path=tmp_path / "base_repo",
+        )
+    )
+
+    seen: dict[str, object] = {}
+
+    def _fake_profile(*, harness_path: Path, profile_env: dict[str, str], gpu_devices: str):
+        seen["harness_path"] = harness_path
+        seen["profile_env"] = profile_env
+        seen["gpu_devices"] = gpu_devices
+        return {"trace": "ok"}, {"duration_us": 123.0, "bottleneck": "memory-bound"}
+
+    monkeypatch.setattr(tool, "_run_patch_profile", _fake_profile)
+
+    profile = tool._maybe_profile_patch("patch_7", True)
+
+    assert profile is not None
+    assert profile["status"] == "ok"
+    assert seen["harness_path"] == harness
+    assert seen["gpu_devices"] == "4"
+    assert str(worktree) in str(seen["profile_env"]["PYTHONPATH"])
+
+    profile_file = output_dir / "patch_7_profile.json"
+    assert profile_file.exists()
+    saved = json.loads(profile_file.read_text())
+    assert saved["status"] == "ok"
+    assert saved["metrics"]["duration_us"] == 123.0
+    assert saved["metrics"]["bottleneck"] == "memory-bound"
+
+    formatted = tool._format_output(
+        patch_name="patch_7",
+        patch_content="diff --git a/kernel.py b/kernel.py\n",
+        test_output="GEAK_RESULT_LATENCY_MS=0.100000",
+        test_passed=True,
+        returncode=0,
+        patch_profile=profile,
+    )
+    assert "Per-patch Metrix profile:" in formatted
+    assert "Duration: 123.000 us" in formatted
+    assert f"  - Profile: {profile_file}" in formatted

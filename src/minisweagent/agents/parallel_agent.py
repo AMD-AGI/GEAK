@@ -787,9 +787,17 @@ class ParallelAgent(DefaultAgent):
                     if is_working_memory_enabled():
                         from minisweagent.memory.working_memory import WorkingMemory
 
+                        _wm_notebook_dir = None
+                        if _wm_bm_path:
+                            try:
+                                _wm_notebook_dir = str(Path(_wm_bm_path).resolve().parent / "_working_memory")
+                            except Exception:
+                                _wm_notebook_dir = None
                         _wm = WorkingMemory(
                             kernel_category=cfg.get("kernel_name", "unknown"),
                             max_steps=cfg.get("step_limit", int(os.environ.get("GEAK_AGENT_STEP_LIMIT", "100"))),
+                            notebook_dir=_wm_notebook_dir,
+                            notebook_writer_id=f"{task.label or f'task_{task_id}'}-slot-{slot_idx}",
                         )
                         if _wm_bm_path and Path(_wm_bm_path).exists():
                             import json as _json
@@ -806,6 +814,7 @@ class ParallelAgent(DefaultAgent):
                             _lat_m = _re.search(r'GEAK_RESULT_LATENCY_MS=(\d+\.\d+)', _bb_text)
                             if _lat_m:
                                 _wm.baseline_latency_ms = float(_lat_m.group(1))
+                        _wm.sync_notebook_baseline()
                         # V2: Generate profiler diagnosis from baseline_metrics
                         if _wm_bm_path and Path(_wm_bm_path).exists():
                             try:

@@ -125,6 +125,8 @@ def _commandment_test_command(commandment_path: str) -> str | None:
     setup = _read_commandment_section(commandment_path, "SETUP")
     correctness = _read_commandment_section(commandment_path, "CORRECTNESS")
     benchmark = _read_commandment_section(commandment_path, "BENCHMARK")
+    if not benchmark:
+        benchmark = _read_commandment_section(commandment_path, "FULL_BENCHMARK")
 
     if not correctness:
         return None
@@ -208,6 +210,8 @@ def task_file_to_agent_task(task_file: Path):
 
     # COMMANDMENT is the single source of truth for test commands.
     # Its SETUP + CORRECTNESS + BENCHMARK sections are executed verbatim.
+    # BENCHMARK is the canonical latency path and intentionally mirrors
+    # FULL_BENCHMARK in the generated COMMANDMENT.
     if meta.get("commandment") and Path(meta["commandment"]).exists():
         derived = _commandment_test_command(meta["commandment"])
         if derived:

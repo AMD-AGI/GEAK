@@ -26,6 +26,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from minisweagent.memory.working_notebook import WorkingNotebook, summarize_working_notebook
+
 
 MAX_WORKING_MEMORY_TOKENS = 800
 MAX_INSIGHTS = 5
@@ -78,6 +80,23 @@ class WorkingMemory:
     noise_floor_pct: float = 0.0
     consecutive_same_category: int = 0
     last_change_category: str = ""
+    notebook_dir: str | None = None
+    notebook_writer_id: str = "default"
+    best_strategy: str = ""
+    best_change_category: str = ""
+    pending_strategy: str = ""
+    pending_change_category: str = ""
+    _notebook: WorkingNotebook | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.notebook_dir:
+            try:
+                self._notebook = WorkingNotebook(
+                    self.notebook_dir,
+                    writer_id=self.notebook_writer_id or "default",
+                )
+            except Exception:
+                self._notebook = None
 
     def update_step(self, step: int, cost: float):
         """Called after each agent step."""
@@ -127,6 +146,94 @@ class WorkingMemory:
             self.strategies_tried.append(name)
         if not success and name not in self.strategies_failed:
             self.strategies_failed.append(name)
+
+    def sync_notebook_baseline(self) -> None:
+        """Persist the current baseline metadata into the working notebook."""
+        if not self._notebook:
+            return
+        self._notebook.record_baseline(
+            baseline_latency_ms=self.baseline_latency_ms or None,
+            bottleneck_type=self.bottleneck_type or None,
+            kernel_category=self.kernel_category or None,
+        )
+
+    def remember_pending_change(self, strategy: str, change_category: str) -> None:
+        """Remember the last concrete edit so benchmark results can be linked to it."""
+        self.pending_strategy = strategy
+        self.pending_change_category = change_category
+        if self._notebook:
+            self._notebook.record_attempt(
+                strategy=strategy,
+                change_category=change_category,
+                step=self.current_step,
+            )
+
+    def note_tool_result(
+        self,
+        output: str,
+        returncode: int,
+        *,
+        tag: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Persist a tool result into the file-backed notebook."""
+        if not self._notebook or not output:
+            return
+        self._notebook.record_result(
+            output=output,
+            returncode=returncode,
+            strategy=self.pending_strategy or None,
+            change_category=self.pending_change_category or None,
+            tag=tag,
+            message=message,
+            step=self.current_step,
+        )
+
+        overall = re.search(r"Overall:\s*([0-9]+(?:\.[0-9]+)?)x", output, re.IGNORECASE)
+        if overall:
+            speedup = float(overall.group(1))
+            if speedup > self.best_speedup:
+                self.best_strategy = self.pending_strategy
+                self.best_change_category = self.pending_change_category
+
+        if "Patch saved:" in output or "Test status:" in output:
+            self.pending_strategy = ""
+            self.pending_change_category = ""
+
+    def record_round_evaluation(self, round_eval: dict[str, Any]) -> None:
+        """Store verified round-level evidence into the working notebook."""
+        full_benchmark = round_eval.get("full_benchmark", {}) if isinstance(round_eval, dict) else {}
+        verified_speedup = (
+            full_benchmark.get("verified_speedup")
+            if isinstance(full_benchmark, dict)
+            else None
+        )
+        if verified_speedup:
+            self.update_speedup(float(verified_speedup))
+            self.best_strategy = str(round_eval.get("best_task") or self.best_strategy)
+        candidate_ms = (
+            full_benchmark.get("candidate_ms")
+            if isinstance(full_benchmark, dict)
+            else None
+        )
+        if candidate_ms:
+            candidate_val = float(candidate_ms)
+            if self.best_latency_ms <= 0 or candidate_val < self.best_latency_ms:
+                self.best_latency_ms = candidate_val
+        if not self._notebook:
+            return
+        self._notebook.record_round_evaluation(
+            round_num=int(round_eval.get("round", 0) or 0),
+            best_task=round_eval.get("best_task"),
+            verified_speedup=verified_speedup,
+            baseline_ms=(
+                full_benchmark.get("baseline_ms")
+                if isinstance(full_benchmark, dict)
+                else None
+            ),
+            candidate_ms=candidate_ms,
+            per_shape_speedups=round_eval.get("per_shape_speedups"),
+        )
 
     def get_progress_signal(self) -> str:
         """Get progress/early-stop signal."""
@@ -184,6 +291,9 @@ class WorkingMemory:
         if self.best_latency_ms > 0:
             best_str += f" ({self.best_latency_ms:.4f}ms vs baseline {self.baseline_latency_ms:.4f}ms)"
         parts.append(f"Kernel: {self.kernel_category} | Best: {best_str}")
+        if self.best_strategy:
+            category_suffix = f" [{self.best_change_category}]" if self.best_change_category else ""
+            parts.append(f"Best strategy so far: {self.best_strategy}{category_suffix}")
         if self.strategies_tried:
             parts.append(f"Tried: {', '.join(self.strategies_tried[-5:])}")
         if self.strategies_failed:
@@ -248,6 +358,11 @@ class WorkingMemory:
             parts.append("Recent insights:")
             for ins in self.insights[-MAX_INSIGHTS:]:
                 parts.append(f"  {ins.format()}")
+
+        notebook_summary = summarize_working_notebook(self.notebook_dir)
+        if notebook_summary:
+            parts.append("")
+            parts.append(notebook_summary)
 
         # V2 Change 7: Early submission trigger
         if self.steps_since_improvement > 8 and self.current_step > self.max_steps * 0.4:

@@ -150,6 +150,42 @@ def _copy_untracked_files(repo_path: Path, worktree_path: Path) -> None:
         pass
 
 
+def _apply_dirty_tracked_changes(repo_path: Path, worktree_path: Path) -> None:
+    """Apply tracked-but-uncommitted repo changes to the fresh worktree.
+
+    `git worktree add` checks out `HEAD`, which omits local tracked edits in the
+    source repo. Apply that dirty diff so worker slots run the exact live code.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--no-ext-diff", "--binary", "HEAD"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        return
+
+    patch_text = result.stdout
+    if not patch_text.strip():
+        return
+
+    apply_result = subprocess.run(
+        ["git", "apply", "--whitespace=nowarn", "--binary", "-"],
+        cwd=worktree_path,
+        input=patch_text,
+        capture_output=True,
+        text=True,
+    )
+    if apply_result.returncode != 0:
+        error_text = apply_result.stderr or apply_result.stdout or "unknown error"
+        raise RuntimeError(
+            "Failed to sync dirty tracked files into worktree: "
+            f"{error_text[:500]}"
+        )
+
+
 def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
     """Create a git worktree, cleaning up any existing one first.
 
@@ -262,6 +298,7 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
             raise RuntimeError(f"Failed to create worktree: {error_msg}") from e
 
     _ensure_safe_directory(worktree_path)
+    _apply_dirty_tracked_changes(repo_path, worktree_path)
     _copy_untracked_files(repo_path, worktree_path)
     return worktree_path
 

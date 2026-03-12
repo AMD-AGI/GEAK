@@ -26,12 +26,13 @@ REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-b
 
 MAX_HARNESS_RETRIES = 2
 
-DEFAULT_AGENT_BENCHMARK_ITERATIONS = int(os.getenv("GEAK_AGENT_BENCHMARK_ITERATIONS", "10"))
-
-# Final evaluation should be stabler than agent-time exploration runs.
+# Use one canonical benchmark definition everywhere. The legacy
+# GEAK_AGENT_BENCHMARK_ITERATIONS split is intentionally ignored so
+# agent-time patch testing and final verification stay apples-to-apples.
 DEFAULT_EVAL_BENCHMARK_ITERATIONS = int(
     os.getenv("GEAK_EVAL_BENCHMARK_ITERATIONS", "30")
 )
+DEFAULT_AGENT_BENCHMARK_ITERATIONS = DEFAULT_EVAL_BENCHMARK_ITERATIONS
 
 
 # ── agent filtering ──────────────────────────────────────────────────
@@ -509,6 +510,13 @@ def _search_workload_guidance(metrics: dict) -> list[str]:
 def _bottleneck_guidance(bottleneck: str, metrics: dict) -> list[str]:
     """Return actionable optimization guidance lines based on bottleneck type."""
     bn_lower = bottleneck.lower().strip()
+    bn_aliases = {
+        "latency": "latency-bound",
+        "memory": "memory-bound",
+        "compute": "compute-bound",
+        "lds": "lds-bound",
+    }
+    bn_lower = bn_aliases.get(bn_lower, bn_lower)
     for key, text in _BOTTLENECK_GUIDANCE.items():
         if key in bn_lower:
             lines = text.strip().splitlines()
@@ -649,8 +657,8 @@ def inject_pipeline_context(
 
     if benchmark_baseline:
         ctx.append("## Benchmark Baseline (compare your save_and_test output against this)")
-        ctx.append("This is the original kernel's --benchmark output on the harness shape set.")
-        ctx.append("Your save_and_test output includes benchmark results -- compare against these numbers.")
+        ctx.append("This is the original kernel's canonical benchmark output from the same full benchmark contract used for patch testing.")
+        ctx.append("Your save_and_test output includes canonical benchmark results -- compare against these numbers.")
         ctx.append(f"```\n{benchmark_baseline.strip()}\n```")
         ctx.append("")
 
