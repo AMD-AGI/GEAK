@@ -105,7 +105,11 @@ class ParallelAgent(DefaultAgent):
         if not repo_path.exists():
             raise ValueError(f"Repository path does not exist: {repo_path}")
 
-        is_git_repo = (repo_path / ".git").exists()
+        # Determine whether repo_path is already a git repo. For non-git repos we
+        # create per-agent isolated copies and bootstrap git *inside the copy* so
+        # save_and_test can capture diffs without modifying the source directory.
+        is_git_repo = (repo_path / ".git").exists() or (repo_path / ".git").is_file()
+
         output = kwargs.get("output")
         save_traj_fn = kwargs.get("save_traj_fn")
 
@@ -218,6 +222,99 @@ class ParallelAgent(DefaultAgent):
         from minisweagent.run.task_file import _ensure_safe_directory
 
         _ensure_safe_directory(repo_path)
+
+    @staticmethod
+    def _bootstrap_git_repo(repo_path: Path, console=None) -> bool:
+        """Bootstrap a minimal git repository for non-git directories.
+
+        Creates .git, adds .gitignore to exclude build artifacts, and creates
+        an initial commit. This allows unified git diff-based patch generation.
+
+        Returns True if successful, False otherwise.
+        """
+        import subprocess
+
+        try:
+            # 1. git init
+            subprocess.run(
+                ["git", "init", "-b", "geak-bootstrap"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            # 2. Create .gitignore with common build artifacts
+            gitignore_path = repo_path / ".gitignore"
+            gitignore_content = """# GEAK auto-generated gitignore for build artifacts
+build/
+*/build/
+.rocprofv3/
+__pycache__/
+*.pyc
+*.o
+*.so
+*.a
+*.log
+*.dat
+optimization_logs/
+*_logs/
+CMakeCache.txt
+CMakeFiles/
+.pytest_cache/
+*.egg-info/
+.geak_resolved/
+traj.json
+"""
+            # Append to existing .gitignore if present
+            if gitignore_path.exists():
+                existing = gitignore_path.read_text()
+                if "# GEAK auto-generated" not in existing:
+                    gitignore_path.write_text(existing + "\n" + gitignore_content)
+            else:
+                gitignore_path.write_text(gitignore_content)
+
+            # 3. git add -A (respects .gitignore)
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            # 4. git commit (use -c to avoid needing global config)
+            subprocess.run(
+                [
+                    "git",
+                    "-c", "user.name=geak-bootstrap",
+                    "-c", "user.email=geak@local",
+                    "commit",
+                    "-m", "GEAK bootstrap commit",
+                    "--allow-empty",
+                ],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            if console:
+                console.print("[bold green]Git repo bootstrapped successfully[/bold green]")
+            return True
+
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr or e.stdout or str(e)
+            if console:
+                console.print(f"[bold red]Failed to bootstrap git repo: {error_msg}[/bold red]")
+            return False
+        except Exception as e:
+            if console:
+                console.print(f"[bold red]Failed to bootstrap git repo: {e}[/bold red]")
+            return False
 
     @staticmethod
     def _create_worktree(repo_path: Path, worktree_path: Path) -> Path:
@@ -366,6 +463,9 @@ class ParallelAgent(DefaultAgent):
                 worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             else:
                 worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
+                # Bootstrap a local git repo in the isolated copy so diffs are
+                # captured from this workspace (avoid accidentally diffing a parent repo).
+                cls._bootstrap_git_repo(worktree_path, console)
             worktree_path_str = str(worktree_path.resolve())
 
             if console:
@@ -513,6 +613,7 @@ class ParallelAgent(DefaultAgent):
                 worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             else:
                 worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
+                cls._bootstrap_git_repo(worktree_path, console)
             worktree_path_str = str(worktree_path.resolve())
 
             label = spec.label or spec.agent_class.__name__
@@ -706,6 +807,7 @@ class ParallelAgent(DefaultAgent):
                         cls._create_worktree(repo_path, wt_path)
                 else:
                     cls._create_copy_workdir(repo_path, wt_path)
+                    cls._bootstrap_git_repo(wt_path, console)
                 wt_path_str = str(wt_path.resolve())
 
                 # Each task gets its own patch dir named by label (persists across worktree resets)

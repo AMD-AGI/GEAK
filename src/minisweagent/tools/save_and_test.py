@@ -78,7 +78,11 @@ class SaveAndTestTool:
             self.context.log_fn(message)
 
     def _get_patch_content(self) -> str:
-        """Get current changes as patch content."""
+        """Get current changes as patch content.
+
+        Relies on .gitignore to exclude build artifacts. The build_agent ensures
+        all workspaces are git repos with proper .gitignore before agent starts.
+        """
         ctx = self.context
         cwd = ctx.cwd
 
@@ -91,41 +95,21 @@ class SaveAndTestTool:
                 if Path(task_dir).is_dir():
                     cwd = task_dir
 
-        if self._is_git_repo(Path(cwd)):
-            result = subprocess.run(
-                "git add -N . && git diff -- . ':(exclude)traj.json' ':(exclude)*.log' ':(exclude).rocprofv3/' ':(exclude)__pycache__/' ':(exclude)*.pyc' ':(exclude).pytest_cache/' ':(exclude)*.egg-info/' ':(exclude)*.so' ':(exclude).geak_resolved/'",
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                shell=True,
-            )
-            return result.stdout
+        if not self._is_git_repo(Path(cwd)):
+            self._log("[SaveAndTest] Warning: not a git repo, cannot generate patch")
+            return ""
 
-        if ctx.base_repo_path and ctx.base_repo_path.exists():
-            excludes = [".git", "__pycache__"]
-            if ctx.patch_output_dir:
-                run_dir_name = Path(ctx.patch_output_dir).resolve().parent.name
-                if run_dir_name:
-                    excludes.append(run_dir_name)
-
-            result = subprocess.run(
-                [
-                    "diff",
-                    "-ruN",
-                    "--exclude=.git",
-                    "--exclude=__pycache__",
-                    *[f"--exclude={p}" for p in excludes if p not in (".git", "__pycache__")],
-                    str(ctx.base_repo_path),
-                    str(cwd),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            return result.stdout
-
-        return ""
+        # git add -N stages "intent to add" for new files (respects .gitignore)
+        # git diff then includes these new files in the diff output
+        result = subprocess.run(
+            "git add -N . && git diff",
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            shell=True,
+        )
+        return result.stdout
 
     def _run_test(self) -> tuple[str, bool, int]:
         """Run test command and return (output, passed, returncode)."""

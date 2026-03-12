@@ -354,6 +354,9 @@ def apply_runtime_settings(
     rag: bool,
     debug: bool,
     console: Console,
+    metric: str | None = None,
+    num_parallel: int | None = None,
+    gpu_ids: str | None = None,
 ) -> RuntimeContext:
     """Apply CLI flags to config, create model + env, merge configs."""
     if yolo or ti.yolo:
@@ -401,7 +404,7 @@ def apply_runtime_settings(
 
     detect_content = None if ti.tf_meta else ti.task_content
     result = load_and_merge_configs(
-        config, ti.repo, ti.test_command, None, None, None, ti.patch_output,
+        config, ti.repo, ti.test_command, metric, num_parallel, gpu_ids, ti.patch_output,
         detect_content, yolo or ti.yolo, model, console,
     )
 
@@ -572,6 +575,8 @@ def build_agent(
 
     agent = agent_class(model, env, **agent_config)
     agent.log_file = agent_log_file
+
+    # Set base_repo_path for patch generation (used for path substitution in test commands)
     if ti.tf_meta and ti.tf_meta.get("repo_root"):
         agent.base_repo_path = Path(ti.tf_meta["repo_root"]).resolve()
     console.print(f"[bold cyan]Agent log: {agent_log_file}[/bold cyan]")

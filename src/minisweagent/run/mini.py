@@ -143,6 +143,7 @@ def main(
         exit_immediately=exit_immediately, model_name=model_name,
         model_class=model_class, enable_strategies=enable_strategies,
         rag=rag, debug=debug, console=console,
+        metric=metric, num_parallel=num_parallel, gpu_ids=gpu_ids,
     )
 
     # --- Phase 4: Full pipeline early-return ---
