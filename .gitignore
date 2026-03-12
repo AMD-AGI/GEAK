@@ -199,5 +199,7 @@ optimization_output/
 .cursor/
 .vscode/
 .geak_resolved/
+.geak_pristine/
+.geak_seed/
 geak_output/
 patches/

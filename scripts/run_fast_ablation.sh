@@ -16,8 +16,12 @@ OUTPUT_DIR="$EXPERIMENTS_DIR/$EXP_ID"
 IMAGE="lmsysorg/sglang:v0.5.6.post1-rocm700-mi35x"
 CONTAINER="geak-fast-$EXP_ID"
 
-KEY1="${AMD_LLM_API_KEY:-fa273d4402b74a9c830c9e9fc4ebfb54}"
-KEY2="${AMD_LLM_API_KEY_2:-471c248fdb454e8b96173c8d25b03593}"
+KEY1="${AMD_LLM_API_KEY:-}"
+KEY2="${AMD_LLM_API_KEY_2:-${AMD_LLM_API_KEY:-}}"
+if [ -z "$KEY1" ]; then
+    echo "ERROR: AMD_LLM_API_KEY must be set in the environment."
+    exit 1
+fi
 BASE_GEAK_MODEL="${GEAK_MODEL:-claude-opus-4.6}"
 OPT_AGENT_ENSEMBLE="${GEAK_MODEL_ENSEMBLE:-gpt-5.2,claude-opus-4.6}"
 GEAK_MAX_ROUNDS_OVERRIDE="${GEAK_MAX_ROUNDS:-}"

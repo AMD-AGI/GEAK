@@ -116,3 +116,27 @@ def test_standalone_harness_snapshot_rewrites_repo_and_output_paths(tmp_path: Pa
     assert str(source_output.resolve()) not in text
     assert test_command == f"python {new_harness} --benchmark"
     assert manifest["source_type"] == "standalone"
+
+
+def test_build_testcase_cache_key_is_stable_within_same_function(tmp_path: Path) -> None:
+    kernel_path = tmp_path / "kernel.py"
+    kernel_path.write_text(
+        "\n".join(
+            [
+                "def first_kernel():",
+                "    value = 1",
+                "    return value",
+                "",
+                "def second_kernel():",
+                "    return 2",
+                "",
+            ]
+        )
+    )
+
+    first_at_def = build_testcase_cache_key(f"{kernel_path}#L1", kernel_path)
+    first_inside_body = build_testcase_cache_key(f"{kernel_path}#L2", kernel_path)
+    second_kernel = build_testcase_cache_key(f"{kernel_path}#L5", kernel_path)
+
+    assert first_at_def == first_inside_body
+    assert first_at_def != second_kernel

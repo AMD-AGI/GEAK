@@ -121,6 +121,87 @@ def _resolve_deterministic_harness(
     return str(harness_path), {"source": "fresh_remote_clone", **harness_remote}
 
 
+_TRUSTED_IRRELEVANT_TOP_TEST_CACHE_SOURCES = {
+    "deterministic_harness",
+    "focused_test",
+    "fallback_focused_test",
+    "unit_test_agent",
+}
+
+
+def _common_path_depth(left: str | Path, right: str | Path) -> int:
+    left_parts = Path(left).resolve().parts
+    right_parts = Path(right).resolve().parts
+    depth = 0
+    for left_part, right_part in zip(left_parts, right_parts):
+        if left_part != right_part:
+            break
+        depth += 1
+    return depth
+
+
+def _focused_harness_candidate(disc_dict: dict[str, Any]) -> tuple[str, str] | None:
+    focused = disc_dict.get("focused_test") or {}
+    focused_cmd = str(focused.get("focused_command") or "").strip()
+    if not focused_cmd:
+        return None
+    focused_harness = extract_harness_path(focused_cmd)
+    if not Path(focused_harness).is_file():
+        return None
+    return focused_cmd, focused_harness
+
+
+def _should_skip_cached_harness(manifest: dict[str, Any] | None, disc_dict: dict[str, Any]) -> bool:
+    focused = disc_dict.get("focused_test") or {}
+    if focused.get("top_test_is_relevant") is not False:
+        return False
+    source = str((manifest or {}).get("source") or "").strip()
+    return source not in _TRUSTED_IRRELEVANT_TOP_TEST_CACHE_SOURCES
+
+
+def _build_harness_candidates(
+    tests: list[dict[str, Any]],
+    disc_dict: dict[str, Any],
+    kernel_path: str | Path,
+) -> list[tuple[str, str, str]]:
+    candidates: list[tuple[str, str, str]] = []
+    focused_candidate = _focused_harness_candidate(disc_dict)
+    focused = disc_dict.get("focused_test") or {}
+    if focused_candidate is not None:
+        focused_cmd, focused_harness = focused_candidate
+        candidates.append((focused_cmd, focused_harness, "focused_test"))
+
+    ranked_discovery: list[tuple[tuple[int, int], int, str, str, str]] = []
+    kernel_parent = Path(kernel_path).resolve().parent
+    focused_harness = focused_candidate[1] if focused_candidate is not None else None
+    restrict_to_kernel_tree = focused.get("top_test_is_relevant") is False
+    for index, test in enumerate(tests[:5]):
+        cmd = test.get("command")
+        path = test.get("file")
+        if not cmd or not path:
+            continue
+        harness_path = extract_harness_path(cmd)
+        if not Path(harness_path).is_file():
+            continue
+        candidate_parent = Path(harness_path).resolve().parent
+        candidate_in_kernel_tree = candidate_parent == kernel_parent or kernel_parent in candidate_parent.parents
+        if restrict_to_kernel_tree and not candidate_in_kernel_tree:
+            continue
+        same_directory = candidate_parent == kernel_parent
+        common_depth = _common_path_depth(candidate_parent, kernel_parent)
+        duplicate_focused = focused_harness is not None and Path(harness_path).resolve() == Path(focused_harness).resolve()
+        rank = (
+            1 if duplicate_focused else 0,
+            0 if same_directory else 1,
+            -common_depth,
+        )
+        ranked_discovery.append((rank, index, cmd, harness_path, "discovery_test"))
+
+    for _rank, _index, cmd, harness_path, source in sorted(ranked_discovery, key=lambda item: (item[0], item[1])):
+        candidates.append((cmd, harness_path, source))
+    return candidates
+
+
 def run_preprocessor(
     kernel_url: str,
     output_dir: Path,
@@ -307,43 +388,34 @@ def run_preprocessor(
             )
             if cached:
                 candidate_cmd, candidate_harness, _manifest = cached
-                ok_static, _ = validate_harness(candidate_harness)
-                if ok_static:
-                    ok_runtime, _runtime_errors, candidate_results = execute_harness_validation(
-                        candidate_harness,
-                        repo_root=repo_root,
-                        gpu_id=gpu_id,
-                    )
-                    if ok_runtime:
-                        test_command = candidate_cmd
-                        harness_results = candidate_results
-                        ctx["harness_path"] = candidate_harness
-                        selected_harness_source = "canonical_cache"
-                        testcase_selection["reused_cache"] = True
-                        testcase_selection["selected_source"] = selected_harness_source
-                        _print(f"  Reusing canonical testcase harness: {candidate_harness}")
-                        for r in harness_results:
-                            status = "PASS" if r["success"] else "FAIL"
-                            _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
-                        _print("  Canonical harness execution: ALL MODES PASSED")
+                if _should_skip_cached_harness(_manifest, disc_dict):
+                    testcase_selection["cache_skipped"] = True
+                    testcase_selection["cache_skip_reason"] = "focused_test_required_for_irrelevant_top_test"
+                    testcase_selection["cache_skipped_source"] = _manifest.get("source")
+                else:
+                    ok_static, _ = validate_harness(candidate_harness)
+                    if ok_static:
+                        ok_runtime, _runtime_errors, candidate_results = execute_harness_validation(
+                            candidate_harness,
+                            repo_root=repo_root,
+                            gpu_id=gpu_id,
+                        )
+                        if ok_runtime:
+                            test_command = candidate_cmd
+                            harness_results = candidate_results
+                            ctx["harness_path"] = candidate_harness
+                            selected_harness_source = "canonical_cache"
+                            testcase_selection["reused_cache"] = True
+                            testcase_selection["selected_source"] = selected_harness_source
+                            _print(f"  Reusing canonical testcase harness: {candidate_harness}")
+                            for r in harness_results:
+                                status = "PASS" if r["success"] else "FAIL"
+                                _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
+                            _print("  Canonical harness execution: ALL MODES PASSED")
         except Exception as exc:
             testcase_selection["cache_error"] = str(exc)
 
-    _discovery_harness_candidates: list[tuple[str, str, str]] = []
-    for t in tests[:5]:
-        cmd = t.get("command")
-        path = t.get("file")
-        if not cmd or not path:
-            continue
-        harness_path = extract_harness_path(cmd)
-        if Path(harness_path).is_file():
-            _discovery_harness_candidates.append((cmd, harness_path, "discovery_test"))
-    focused = disc_dict.get("focused_test") or {}
-    focused_cmd = focused.get("focused_command")
-    if focused_cmd:
-        focused_harness = extract_harness_path(focused_cmd)
-        if Path(focused_harness).is_file():
-            _discovery_harness_candidates.append((focused_cmd, focused_harness, "focused_test"))
+    _discovery_harness_candidates = _build_harness_candidates(tests, disc_dict, kernel_path)
 
     _seen_harnesses: set[str] = set()
     if test_command is None:

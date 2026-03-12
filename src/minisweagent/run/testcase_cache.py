@@ -10,8 +10,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
+
+from minisweagent.tools.resolve_kernel_url_impl import (
+    get_kernel_name_at_line,
+    is_weblink,
+    parse_github_source_url,
+)
 
 
 def get_testcase_cache_dir() -> Path | None:
@@ -24,11 +31,59 @@ def get_testcase_cache_dir() -> Path | None:
     return path
 
 
+_LINE_FRAGMENT_RE = re.compile(r"#L(?P<start>\d+)(?:-L?(?P<end>\d+))?$")
+
+
+def _extract_line_start(kernel_spec: str) -> int | None:
+    match = _LINE_FRAGMENT_RE.search((kernel_spec or "").strip())
+    if not match:
+        return None
+    try:
+        return int(match.group("start"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _strip_line_fragment(kernel_spec: str) -> str:
+    return (kernel_spec or "").split("#", 1)[0].rstrip()
+
+
+def _build_kernel_identity(kernel_spec: str, kernel_path: str | Path) -> tuple[str, str]:
+    kernel_path = Path(kernel_path).resolve()
+    spec_no_fragment = _strip_line_fragment(kernel_spec)
+    line_start = _extract_line_start(kernel_spec)
+    function_name = get_kernel_name_at_line(kernel_path, line_start) if line_start else None
+
+    if spec_no_fragment and is_weblink(spec_no_fragment):
+        parsed = parse_github_source_url(spec_no_fragment)
+        if parsed:
+            location = (
+                f"github:{parsed['owner']}/{parsed['repo']}"
+                f"@{parsed['ref']}/{parsed['file_path']}"
+            )
+        else:
+            location = f"weblink:{spec_no_fragment}"
+    else:
+        location = f"local:{kernel_path}"
+
+    if function_name:
+        slug = function_name
+        identity = f"{location}::{function_name}"
+    elif line_start:
+        slug = f"{kernel_path.stem}-line-{line_start}"
+        identity = f"{location}::L{line_start}"
+    else:
+        slug = kernel_path.stem
+        identity = location
+
+    return slug, identity
+
+
 def build_testcase_cache_key(kernel_url: str, kernel_path: str | Path) -> str:
     """Build a stable cache key for a kernel."""
-    kernel_path = Path(kernel_path)
-    slug = "".join(ch if ch.isalnum() else "-" for ch in kernel_path.stem.lower()).strip("-") or "kernel"
-    digest = hashlib.sha256(kernel_url.strip().encode("utf-8")).hexdigest()[:12]
+    slug, identity = _build_kernel_identity(kernel_url, kernel_path)
+    slug = "".join(ch if ch.isalnum() else "-" for ch in slug.lower()).strip("-") or "kernel"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
     return f"{slug}-{digest}"
 
 
@@ -160,6 +215,7 @@ def save_cached_harness(
     manifest: dict[str, Any] = {
         "version": 1,
         "kernel_url": kernel_url,
+        "kernel_identity": _build_kernel_identity(kernel_url, kernel_path)[1],
         "source": source,
         "source_test_command": test_command,
         "source_harness_path": str(harness_path),

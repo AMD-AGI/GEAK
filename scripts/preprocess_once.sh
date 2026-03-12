@@ -11,7 +11,11 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PREPROCESS_DIR="/home/sapmajum/geak-experiments/preprocess"
 IMAGE="lmsysorg/sglang:v0.5.6.post1-rocm700-mi35x"
 
-KEY1="${AMD_LLM_API_KEY:-fa273d4402b74a9c830c9e9fc4ebfb54}"
+KEY1="${AMD_LLM_API_KEY:-}"
+if [ -z "$KEY1" ]; then
+    echo "ERROR: AMD_LLM_API_KEY must be set in the environment."
+    exit 1
+fi
 CONTAINER="geak-preprocess"
 
 declare -A KERNEL_URLS
