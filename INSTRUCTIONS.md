@@ -119,6 +119,53 @@ script that imports the kernel, creates test inputs, and provides
 `--correctness`, `--profile`, `--benchmark`, `--full-benchmark`, and
 `--iterations N` modes.
 
+**Step 0: Read any README in the kernel directory.**
+Before writing a harness, check for a `README.md` (or `README`) in the
+kernel directory and any parent directories up to the repo root.  If one
+exists, read it and extract:
+- The **mathematical formulation** (what operation the kernel computes)
+- The **input tensors/parameters** (names, data types, valid shape ranges,
+  constraints such as alignment or divisibility requirements)
+- The **output tensors** (names, data types, expected properties)
+- Any **documented CLI arguments, parameter ranges, or configurations**
+- **Build and run instructions** (compiler flags, dependencies, example
+  invocations)
+
+Use this information to inform every subsequent step: input generation,
+correctness strategy, and shape selection.
+
+**Step 1: Analyze kernel inputs and outputs.**
+From the README (if available) and the kernel source code, systematically
+identify:
+1. All **input** tensors/parameters: their names, data types, valid value
+   ranges, and shape constraints (e.g. "M must be divisible by 128").
+2. All **output** tensors: their names, data types, and expected properties
+   (e.g. "output is the matrix product A * B + bias").
+3. Any **auxiliary parameters** (e.g. group count, number of heads,
+   strides, dilations) and their valid ranges.
+4. A **correctness strategy**: how to verify the output is correct.
+   Options include:
+   - Compare against a reference implementation (torch, numpy, CPU)
+   - Compare original binary output vs. optimized binary output
+   - Use the kernel's built-in verification mode
+   - Check mathematical properties (e.g. symmetry, norms, known outputs
+     for identity inputs)
+5. A **small, deterministic test set** of input shapes that exercises the
+   kernel without taking too long.  Target 2-4 shapes for correctness
+   (total runtime under 60s) and 1-2 shapes for profiling.
+
+**Step 2: Generate valid input data.**
+- All inputs must be **deterministic** (use fixed random seeds:
+  `torch.manual_seed(42)`, `np.random.seed(42)`, or `srand(42)` for C++).
+- Choose input values that are **numerically well-conditioned** (avoid
+  denormals, infinities, or values that cause overflow in the operation).
+- For integer-initialized kernels (e.g. CK `init_method=1`), use the
+  built-in deterministic initialization.
+- Keep shapes **small enough** that the full correctness suite runs in
+  under 60 seconds total, but large enough to exercise the kernel's
+  tiling and blocking logic (typically at least one shape that fills
+  multiple thread blocks).
+
 **If discovery found existing test files**, read them first and reuse:
 - Their reference implementations for correctness checking
 - Their input generation patterns (shapes, dtypes, edge cases)
@@ -222,6 +269,24 @@ When the kernel is NOT a Python/Triton kernel, the test harness approach varies:
   assembly. The test harness should test the Python wrapper's launch config
   (grid dims, block dims, shared memory size).
 
+**Modifying the kernel to support the test harness:**
+
+You MAY modify the original kernel source to make it testable, as long as
+you do NOT change the kernel's core mathematical operation.  Permitted
+modifications include:
+- Adding environment-variable-gated output dumping (e.g. `GEAK_DUMP_OUTPUT`)
+- Adding deterministic input initialization controlled by a flag or env var
+- Exposing a simpler entry point that the harness can call directly
+  (e.g. a function that accepts pre-allocated buffers instead of doing its
+  own allocation and I/O)
+- Adding include guards or header includes needed by the dumping/init hooks
+- Wrapping `main()` logic in a callable function so the harness can invoke
+  it with specific parameters
+
+Do NOT change the kernel's compute logic, tile sizes, memory access
+patterns, or algorithmic structure.  The goal is to make the kernel
+observable and controllable by the harness, not to optimize it at this stage.
+
 ### CK (Composable Kernel) Test Harness
 
 CK kernels are template-heavy C++ that compile with `hipcc` via CMake.  The
@@ -236,9 +301,10 @@ A typical CK example directory contains:
 
 | File | Purpose |
 |------|---------|
-| `grouped_conv_fwd_xdl_fp16.cpp` | Entry point: data-type aliases, template instance, `main()` |
-| `run_grouped_conv_fwd_example.inc` | Core logic: tensor setup, kernel invocation, verification |
+| `<kernel_name>.cpp` | Entry point: data-type aliases, template instance, `main()` |
+| `<run_kernel_example>.inc` | Core logic: tensor setup, kernel invocation, verification |
 | `CMakeLists.txt` | Build rules: `add_example_executable(TARGET SOURCE)` |
+| `README.md` (optional) | Describes the operation, inputs, outputs, and usage |
 | `common.hpp` (optional) | Shared type definitions and descriptor helpers |
 
 The `.cpp` file `#include`s the `.inc` file and defines `main()`.  The `.inc`
@@ -278,7 +344,7 @@ ninja <target_name>
 ```
 
 The target name comes from `CMakeLists.txt`, e.g.
-`add_example_executable(example_grouped_conv_conv_fwd_xdl_fp16 ...)`.
+`add_example_executable(<target_name> ...)`.
 
 #### Binary interface
 

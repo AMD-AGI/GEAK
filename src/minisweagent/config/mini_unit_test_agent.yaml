@@ -36,22 +36,55 @@ agent:
 
 
     Workflow (required)
-    Part 1: Review discovery results and read INSTRUCTIONS.md
+    Part 1: Review discovery results, read README, and read INSTRUCTIONS.md
     (Mandatory first steps — do NOT skip.)
     1) Your task context contains **pre-scanned discovery results** from an automated scan.
        Review the Kernel Analysis, discovered test files, and language-specific guidance provided.
        These results tell you the kernel type, build system, existing tests, and how to test this kind of kernel.
-    2) **Read INSTRUCTIONS.md** in the repository (sections 1a and 1b) for:
+    2) **Read any README.md** (or README) in the kernel directory and parent directories.
+       From the README, extract:
+       - The **mathematical formulation** (what operation the kernel computes)
+       - The **input tensors/parameters** (names, data types, valid shape ranges, constraints)
+       - The **output tensors** (names, data types, expected properties)
+       - Any **documented CLI arguments, parameter ranges, or configurations**
+       - **Build and run instructions** (compiler flags, dependencies, example invocations)
+       This information is critical for designing valid test inputs and correctness checks.
+    3) **Read INSTRUCTIONS.md** in the repository (sections 1a and 1b) for:
        - Test harness requirements (the `--correctness`, `--profile`, `--benchmark` modes)
        - COMMANDMENT format rules (the harness will be referenced in COMMANDMENT.md)
        - Common pitfalls to avoid (import patterns, PYTHONPATH, random seeds, tensor generation)
        Follow these rules when creating or adapting the test harness.
-    3) Determine the **absolute path** of the repo root (run `pwd` or use task context).
-    4) If discovery found high-confidence existing tests, **validate them first**:
+    4) Determine the **absolute path** of the repo root (run `pwd` or use task context).
+    5) If discovery found high-confidence existing tests, **validate them first**:
        - Read the test file. If it already has `--correctness` and `--profile` modes, use it directly.
        - If it needs minor adaptation (e.g. adding `--profile` mode), adapt it.
        - Prefer reusing existing tests over creating new ones.
-    5) Do NOT use interactive terminal programs (`view`, `less`, `vi`, `vim`, etc.).
+    6) Do NOT use interactive terminal programs (`view`, `less`, `vi`, `vim`, etc.).
+
+    Part 1.5: Analyze kernel inputs, outputs, and plan test strategy
+    (Required before writing any harness code.)
+    Using the README and kernel source code, systematically determine:
+    1) All **input tensors/parameters**: names, data types, valid value ranges,
+       and shape constraints (e.g. "M must be divisible by tile size").
+    2) All **output tensors**: names, data types, and expected mathematical
+       relationship to the inputs.
+    3) Any **auxiliary parameters** (e.g. group count, number of heads, strides,
+       dilations, activation functions) and their valid ranges.
+    4) A **correctness strategy** — how to verify the output is correct:
+       - Compare against a reference implementation (torch, numpy, CPU code)
+       - Compare original binary output vs. optimized binary output
+       - Use the kernel's built-in verification mode (e.g. verify=1)
+       - Check mathematical properties (symmetry, norms, identity inputs)
+    5) A **small, deterministic test set** of input shapes:
+       - 2-4 shapes for correctness (total runtime under 60 seconds)
+       - 1-2 shapes for profiling
+       - Shapes must be large enough to exercise the kernel's tiling/blocking
+         logic but small enough to run quickly
+    6) **Deterministic execution plan**:
+       - Fixed random seeds for all input generation (torch.manual_seed(42),
+         np.random.seed(42), srand(42) for C++)
+       - For kernels with non-deterministic execution (e.g. atomics), plan
+         for wider tolerances or statistical correctness checks
 
     Part 2: Creating a new test harness
     (Only if no suitable existing test can be adapted.)
@@ -69,6 +102,16 @@ agent:
        - If discovery provided test patterns (tolerances, shapes, imports), reuse them.
        - For (B) fused tasks: the harness must test BOTH unfused and fused paths.
        - Keep the harness file outside the kernel directory (e.g. in repo root or a `tests/` dir).
+       - Generate **valid input data** based on your Part 1.5 analysis: use shapes,
+         data types, and value ranges that the kernel actually supports.
+       - Keep the test set **small enough** to run all correctness checks in
+         under 60 seconds total.  Use 2-4 shapes for correctness, 1-2 for profiling.
+       - You MAY modify the original kernel source to support the test harness,
+         as long as you do NOT change the kernel's core mathematical operation.
+         Permitted modifications include: adding environment-variable-gated
+         output dumping, adding deterministic initialization hooks, exposing a
+         simpler callable entry point, or adding headers needed by these hooks.
+         This can be necessary to make the kernel deterministically testable.
 
     CRITICAL - Shape extraction and usage rules:
        You MUST read the top discovered test file(s) and extract ALL input
@@ -103,7 +146,9 @@ agent:
       where <command> must start with `cd <absolute_path> &&` and include build (if needed) then correctness then benchmark. Nothing else.
     - **Submit only after** you have reverted to original git status, run the test command once, and confirmed it succeeds; do not submit an unverified command.
     - If you create a new test script, you may edit that new file to fix errors.
-      Do NOT modify existing test scripts or kernel code.
+      Do NOT modify existing test scripts unless adapting them into your harness.
+      Do NOT modify the kernel's core mathematical operation, but you MAY add
+      hooks for output dumping, deterministic initialization, or test entry points.
 
     Here is an example of a correct response:
 
