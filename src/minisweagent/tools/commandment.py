@@ -146,11 +146,24 @@ def _warmup_block(command: str, warmup_runs: int) -> str:
 
 
 def _detect_build_command(repo_root: Path) -> str:
-    """Return the appropriate build command for a C++ repo."""
+    """Return the appropriate build command for a C++ repo.
+
+    Detection order: setup.py/pyproject.toml (Python-extended C++) → CMake → Makefile.
+    Repos with both setup.py and CMakeLists.txt use the Python build (common for
+    HIP/CUDA libs with Python bindings). Not covered: Meson, Bazel, Autotools,
+    or custom scripts (build.sh); those fall back to pip if setup.py exists.
+    """
     if (repo_root / "setup.py").exists() or (repo_root / "pyproject.toml").exists():
         return "cd ${GEAK_WORK_DIR} && pip install -e . --no-deps --no-build-isolation 2>&1 | tail -5"
     if (repo_root / "CMakeLists.txt").exists():
-        return "cd ${GEAK_WORK_DIR} && cmake --build build/ 2>&1 | tail -5"
+        if (repo_root / "CMakeLists_standalone.txt").exists():
+            # Use standalone CMake so cmake .. works in the worktree
+            return (
+                "cd ${GEAK_WORK_DIR} && cp CMakeLists_standalone.txt CMakeLists.txt && "
+                "mkdir -p build && cd build && cmake .. && cmake --build . 2>&1 | tail -5"
+            )
+        # Standard out-of-tree: build dir = GEAK_WORK_DIR/build
+        return "cd ${GEAK_WORK_DIR} && mkdir -p build && cd build && cmake .. && cmake --build . 2>&1 | tail -5"
     if (repo_root / "Makefile").exists():
         return "cd ${GEAK_WORK_DIR} && make 2>&1 | tail -5"
     return "cd ${GEAK_WORK_DIR} && pip install -e . --no-deps --no-build-isolation 2>&1 | tail -5"
@@ -181,9 +194,12 @@ def _generate_simple(
 
     if kernel_language == "cpp":
         build_cmd = _detect_build_command(repo_root)
-        setup_section = (
-            "rm -rf ${GEAK_WORK_DIR}/.aiter_jit\n"
-            + build_cmd + "\n"
+        cpp_setup_lines = [
+            "rm -rf ${GEAK_WORK_DIR}/.aiter_jit",
+            "rm -rf ${GEAK_WORK_DIR}/build",
+        ]
+        cpp_setup_lines.append(build_cmd)
+        cpp_setup_lines.append(
             "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
             "export HIP_VISIBLE_DEVICES=%s\\n"
             "export AITER_JIT_DIR=%s/.aiter_jit\\n"
@@ -191,6 +207,14 @@ def _generate_simple(
             '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
             "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
         )
+        # Instruction for the optimizer: incremental rebuild after editing kernel source
+        cpp_setup_lines.append(
+            "# After editing the kernel source, rebuild with: cd ${GEAK_WORK_DIR}/build && cmake --build . 2>&1 | tail -5"
+        )
+        cpp_setup_lines.append(
+            "# (Re-running full SETUP does a clean configure+build; save_and_test runs SETUP automatically.)"
+        )
+        setup_section = "\n".join(cpp_setup_lines)
     else:
         setup_section = (
             "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
