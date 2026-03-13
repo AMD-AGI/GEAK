@@ -142,6 +142,23 @@ class ToolRuntime:
             return per_tool
         return self._mcp_config.get("default_model")
 
+    def _is_server_enabled(self, server_name: str) -> bool:
+        """Check if an MCP server is enabled via env var or YAML config.
+
+        Resolution: GEAK_ENABLE_<NAME> env var > mcp.servers.<name>.enabled > default (True).
+        OpenEvolve defaults to False (heavyweight).
+        """
+        env_key = "GEAK_ENABLE_" + server_name.replace("-", "_").upper()
+        env_val = os.environ.get(env_key)
+        if env_val is not None:
+            return env_val.strip().lower() in ("1", "true", "yes")
+        yaml_enabled = (
+            self._mcp_config.get("servers", {}).get(server_name, {}).get("enabled")
+        )
+        if yaml_enabled is not None:
+            return bool(yaml_enabled)
+        return True
+
     def _register_mcp_tools(self):
         """Register all MCP server tools via MCPToolBridge.
 
@@ -171,7 +188,9 @@ class ToolRuntime:
 
         openevolve = MCPToolBridge("openevolve-mcp", timeout=7200)
         self._mcp_bridges.append(openevolve)
-        self._tool_table["openevolve"] = openevolve.tool("optimize_kernel")
+        self._tool_table["check_openevolve_status"] = openevolve.tool("check_openevolve_status")
+        if self._is_server_enabled("openevolve-mcp"):
+            self._tool_table["openevolve"] = openevolve.tool("optimize_kernel")
 
         # Apply YAML model overrides (only when GEAK_MCP_MODEL env var is not set)
         for bridge in self._mcp_bridges:

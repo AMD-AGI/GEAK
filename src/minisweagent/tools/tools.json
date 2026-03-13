@@ -497,5 +497,52 @@
         "task"
       ]
     }
+  },
+  {
+    "name": "openevolve",
+    "type": "function",
+    "description": "Run OpenEvolve LLM-guided evolutionary optimization on a GPU kernel. This is a heavyweight tool that spawns a long-running subprocess (up to 2 hours) using GPU compute. It evolves the kernel through multiple iterations of mutation, evaluation, and selection. Use check_openevolve_status first to verify the subsystem is available.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kernel_path": {
+          "type": "string",
+          "description": "Path to kernel file (.py) or directory containing kernel files"
+        },
+        "max_iterations": {
+          "type": "integer",
+          "description": "Max evolution iterations (default: 10)"
+        },
+        "gpu": {
+          "type": "string",
+          "description": "GPU device ID(s) -- single int or comma-separated string (e.g. '0,1,2'). Default: '0'"
+        },
+        "output_dir": {
+          "type": "string",
+          "description": "Output directory for results. Defaults to <kernel_dir>/optimization_output"
+        },
+        "commandment_path": {
+          "type": "string",
+          "description": "Path to pre-built COMMANDMENT.md (skips auto-build)"
+        },
+        "baseline_metrics_path": {
+          "type": "string",
+          "description": "Path to pre-computed baseline metrics JSON"
+        }
+      },
+      "required": [
+        "kernel_path"
+      ]
+    }
+  },
+  {
+    "name": "check_openevolve_status",
+    "type": "function",
+    "description": "Check if the OpenEvolve subsystem is properly installed and configured. Returns availability of GEAK_OE_ROOT, run_openevolve.py, the openevolve package, and kernel-profile tool. Call this before using the openevolve tool to verify prerequisites.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
   }
 ]

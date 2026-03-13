@@ -53,3 +53,8 @@ mcp:
   #     model: "claude-sonnet-4-6"
   #   automated-test-discovery:
   #     model: "claude-haiku-4-5"
+
+  # Per-server enable/disable. Override with GEAK_ENABLE_OPENEVOLVE=1 env var.
+  servers:
+    openevolve-mcp:
+      enabled: false  # heavyweight: spawns 2hr subprocess, uses GPU
