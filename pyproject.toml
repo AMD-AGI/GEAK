@@ -93,6 +93,7 @@ mini-e= "minisweagent.run.mini_extra:main"
 # GEAK-specific entry points (ported from MSA branch)
 geak = "minisweagent.run.mini:app"
 geak-preprocess = "minisweagent.run.preprocessor:main"
+geak-from-harness = "minisweagent.run.pipeline.from_harness:main"
 geak-orchestrate = "minisweagent.run.orchestrator:main"
 kernel-profile = "minisweagent.kernel_profile:main"
 task-generator = "minisweagent.run.task_generator:main"
