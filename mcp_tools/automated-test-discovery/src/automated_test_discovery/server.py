@@ -268,6 +268,8 @@ def _get_kernel_type(content: str, suffix: str = "") -> str:
         return "triton"
     if "ck_tile::" in content or "ck::tile" in content or "#include <ck_tile/" in content:
         return "ck"
+    if "@flyc.kernel" in content or "flydsl.compiler" in content or "flydsl.expr" in content:
+        return "flydsl"
     if "__global__" in content and "hip" in content.lower():
         return "hip"
     if "__global__" in content:
@@ -646,8 +648,11 @@ def discover(
     kernel_functions: list[str] = []
     if kernel_function:
         kernel_functions.append(kernel_function)
-    # Also extract @triton.jit decorated functions and __global__ functions
+    # Also extract @triton.jit, @flyc.kernel decorated functions and __global__ functions
     for m in re.finditer(r"@triton\.jit\s*\n\s*def\s+(\w+)", content):
+        if m.group(1) not in kernel_functions:
+            kernel_functions.append(m.group(1))
+    for m in re.finditer(r"@flyc\.kernel\s*\n\s*def\s+(\w+)", content):
         if m.group(1) not in kernel_functions:
             kernel_functions.append(m.group(1))
     for m in re.finditer(r"__global__\s+void\s+(\w+)", content):

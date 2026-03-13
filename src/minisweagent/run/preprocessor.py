@@ -200,6 +200,9 @@ def run_preprocessor(
                 gpu_id=gpu_id,
             )
             _print(f"  UnitTestAgent test_command: {test_command}")
+            # Lock harness_path to the validated script so it is not overwritten by fallback (e.g. repo test_softmax.py without GEAK flags)
+            if test_command:
+                ctx["harness_path"] = extract_harness_path(test_command)
             _print("  Harness static validation: OK")
             for r in harness_results:
                 status = "PASS" if r["success"] else "FAIL"
@@ -292,7 +295,8 @@ def run_preprocessor(
 
     profiling: dict[str, Any] | None = None
     if test_command:
-        ctx["harness_path"] = extract_harness_path(test_command)
+        if not ctx.get("harness_path"):
+            ctx["harness_path"] = extract_harness_path(test_command)
         (output_dir / "harness_path.txt").write_text(ctx["harness_path"])
 
         try:

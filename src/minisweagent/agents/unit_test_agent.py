@@ -77,6 +77,24 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- NEVER use `sys.path.insert(0, '/absolute/path/...')`. "
         "Rely on PYTHONPATH set by the COMMANDMENT SETUP section."
     ),
+    "flydsl": (
+        "This is a FlyDSL kernel (Python DSL with @flyc.kernel / @flyc.jit, JIT-compiled via MLIR/ROCm).\n"
+        "- No separate kernel build step; the repo must be built once (scripts/build.sh) so that "
+        "build-fly/python_packages and MLIR libs exist. The harness runs in the repo root with "
+        "PYTHONPATH and LD_LIBRARY_PATH set.\n"
+        "- Import the kernel via its Python package path (e.g. `from kernels.softmax_kernel import build_softmax_module`). "
+        "Do NOT use importlib.util; use normal imports with PYTHONPATH set in COMMANDMENT SETUP.\n"
+        "- Use `torch.testing.assert_close` for correctness against a PyTorch reference (e.g. torch.softmax for softmax). "
+        "Reuse tolerances and shapes from existing tests in tests/kernels/ (e.g. test_softmax.py, test_preshuffle_gemm.py).\n"
+        "- Use fixed random seed (`torch.manual_seed(42)`) and fixed tensor sizes. "
+        "For benchmarking use torch CUDA events or the project's run_perftest/bench_gpu_us_torch from tests/test_common.py and tests/kernels/benchmark_common.py.\n"
+        "- The harness MUST support exactly these CLI modes (GEAK contract): --correctness, --profile, --benchmark, --full-benchmark. "
+        "The last line of --benchmark and --full-benchmark output MUST be: GEAK_RESULT_LATENCY_MS=<number> (median or geomean latency in ms).\n"
+        "- COMMANDMENT SETUP MUST set both PYTHONPATH and LD_LIBRARY_PATH. "
+        "Typical values: PYTHONPATH=<REPO_ROOT>/build-fly/python_packages:<REPO_ROOT>; "
+        "LD_LIBRARY_PATH=<REPO_ROOT>/build-fly/python_packages/flydsl/_mlir/_mlir_libs. "
+        "NEVER use sys.path.insert(0, ...) inside the harness; rely on PYTHONPATH set in SETUP."
+    ),
     "asm": (
         "This is a precompiled HSACO assembly kernel.\n"
         "- The assembly binary CANNOT be modified or recompiled.\n"
@@ -86,7 +104,7 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
     ),
     "unknown": (
         "Kernel type could not be determined automatically.\n"
-        "- Inspect the source file to determine if it is Triton, HIP, CUDA, or CK.\n"
+        "- Inspect the source file to determine if it is Triton, HIP, CUDA, CK, or FlyDSL.\n"
         "- Apply the appropriate testing strategy based on your analysis."
     ),
 }
