@@ -17,6 +17,7 @@ from typing import Any
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent, TerminatingException
 from minisweagent.agents.select_patch_agent import run_select_patch
+from minisweagent.run.pipeline_helpers import harness_path_in_worktree
 
 
 @dataclass
@@ -402,6 +403,9 @@ class ParallelAgent(DefaultAgent):
             new_env[repo_path_str] = worktree_path_str
             new_env["GEAK_WORK_DIR"] = worktree_path_str
             new_env["GEAK_REPO_ROOT"] = repo_path_str
+            _harness = new_env.get("GEAK_HARNESS")
+            if _harness:
+                new_env["GEAK_HARNESS"] = harness_path_in_worktree(_harness, repo_path, worktree_path)
             if gpu_ids and agent_id < len(gpu_ids):
                 gpu_id = gpu_ids[agent_id]
                 new_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
@@ -550,14 +554,19 @@ class ParallelAgent(DefaultAgent):
             base_env = env_factory()
             env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
             env_config_dict["cwd"] = worktree_path_str
+            base_env_vars = env_config_dict.get("env") or {}
+            _harness = base_env_vars.get("GEAK_HARNESS")
+            worktree_harness = harness_path_in_worktree(_harness, repo_path, worktree_path) if _harness else None
             # Create a NEW dict to avoid shared-reference race across threads
             env_config_dict["env"] = {
-                **(env_config_dict.get("env") or {}),
+                **base_env_vars,
                 "HIP_VISIBLE_DEVICES": spec.hip_visible_devices,
                 "GEAK_WORK_DIR": worktree_path_str,
                 "GEAK_REPO_ROOT": str(repo_path.resolve()),
                 "GEAK_GPU_DEVICE": spec.hip_visible_devices,
             }
+            if worktree_harness is not None:
+                env_config_dict["env"]["GEAK_HARNESS"] = worktree_harness
 
             parallel_env = type(base_env)(**env_config_dict)
 
@@ -734,14 +743,19 @@ class ParallelAgent(DefaultAgent):
                 base_env = env_factory()
                 env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
                 env_config_dict["cwd"] = wt_path_str
+                base_env_vars = env_config_dict.get("env") or {}
+                _harness = base_env_vars.get("GEAK_HARNESS")
+                worktree_harness = harness_path_in_worktree(_harness, repo_path, wt_path) if _harness else None
                 # Create a NEW dict to avoid shared-reference race across threads
                 env_config_dict["env"] = {
-                    **(env_config_dict.get("env") or {}),
+                    **base_env_vars,
                     "HIP_VISIBLE_DEVICES": hip_devices,
                     "GEAK_WORK_DIR": wt_path_str,
                     "GEAK_REPO_ROOT": str(repo_path.resolve()),
                     "GEAK_GPU_DEVICE": hip_devices,
                 }
+                if worktree_harness is not None:
+                    env_config_dict["env"]["GEAK_HARNESS"] = worktree_harness
                 parallel_env = type(base_env)(**env_config_dict)
 
                 parallel_output = None

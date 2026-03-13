@@ -157,6 +157,42 @@ def extract_harness_path(test_command: str) -> str:
     return tokens[-1] if tokens else test_command
 
 
+def harness_path_in_worktree(
+    harness_path: str,
+    repo_root: str | Path,
+    worktree_path: str | Path,
+) -> str:
+    """Resolve the harness path to its location inside a worktree.
+
+    When the optimizer runs in a git worktree, GEAK_HARNESS must point at
+    the harness inside that worktree (so run.sh executes the worktree's
+    test_harness.py), not the original repo path.
+
+    Args:
+        harness_path: Original harness path (absolute or relative to repo_root).
+        repo_root: Original repository root (where preprocessing ran).
+        worktree_path: Agent/worktree directory (same tree structure as repo).
+
+    Returns:
+        Absolute path to the harness file inside the worktree.
+    """
+    repo = Path(repo_root).resolve()
+    worktree = Path(worktree_path).resolve()
+    hp = Path(harness_path)
+
+    if hp.is_absolute():
+        try:
+            rel = hp.resolve().relative_to(repo)
+        except ValueError:
+            # Harness not under repo_root (e.g. different prefix). Use basename
+            # so at least worktree root is tried (e.g. test_harness.py in slot).
+            rel = Path(hp.name)
+    else:
+        rel = hp
+
+    return str((worktree / rel).resolve())
+
+
 # ── harness validation ───────────────────────────────────────────────
 
 

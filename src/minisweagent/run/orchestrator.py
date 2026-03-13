@@ -625,13 +625,13 @@ def _build_eval_env(
     is used, which is intentionally higher than the agent-time default (20)
     to reduce GPU timing noise in the final evaluation.
     """
-    from minisweagent.run.pipeline_helpers import DEFAULT_EVAL_BENCHMARK_ITERATIONS
+    from minisweagent.run.pipeline_helpers import DEFAULT_EVAL_BENCHMARK_ITERATIONS, harness_path_in_worktree
 
     iters = benchmark_iterations or DEFAULT_EVAL_BENCHMARK_ITERATIONS
     env = os.environ.copy()
     env["GEAK_WORK_DIR"] = str(work_dir)
     env["GEAK_REPO_ROOT"] = repo_root
-    env["GEAK_HARNESS"] = harness_path
+    env["GEAK_HARNESS"] = harness_path_in_worktree(harness_path, repo_root, work_dir) if harness_path else ""
     env["GEAK_GPU_DEVICE"] = str(gpu_id)
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
     env["GEAK_BENCHMARK_EXTRA_ARGS"] = f"--iterations {iters}"
