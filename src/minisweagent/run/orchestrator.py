@@ -39,11 +39,18 @@ from minisweagent.benchmark_parsing import (
     extract_latency_ms as _extract_latency_ms,
 )
 from minisweagent.benchmark_parsing import (
+    extract_reported_speedup as _extract_reported_speedup,
+)
+from minisweagent.benchmark_parsing import (
     parse_shape_count as _parse_shape_count,
 )
 from minisweagent.benchmark_parsing import (
     parse_total_kernel_time_ms as _parse_total_kernel_time_ms,
 )
+from minisweagent.run.generated_artifacts import (
+    apply_patch_with_generated_helper_fallback,
+)
+from minisweagent.run.git_safe_env import get_git_safe_env
 
 # ── System prompt for the orchestrator LLM ───────────────────────────
 
@@ -110,6 +117,9 @@ Rules:
   3. Did it violate the COMMANDMENT?  Reject if so.
   4. Did the correctness tests pass?  Reject if tests failed.
   Mark rejected results as "rejected" and explain why.
+- For cross-round decisions, treat the system-provided FULL_BENCHMARK
+  evaluation as canonical. Raw task-local speedups are provisional and
+  may be noisy or invalidated by later verification.
 """
 
 _INSTANCE_TEMPLATE = """\
@@ -538,6 +548,15 @@ def _tool_finalize(
 
     report_path = output_dir / "final_report.json"
     report_path.write_text(json.dumps(report, indent=2))
+    best_verified_round_eval = _select_best_verified_round_evaluation(output_dir)
+    if best_verified_round_eval is not None:
+        merged = _merge_round_evaluation_into_final_report(
+            ctx,
+            output_dir,
+            report,
+            best_verified_round_eval,
+        )
+        return json.dumps(merged, indent=2, default=str)
 
     return json.dumps(report)
 
@@ -650,12 +669,22 @@ def _rewrite_summary_with_verified_selection(
     verified_speedup_raw: float,
     verified_speedup: float,
 ) -> str:
-    """Prepend a verified final-selection block and normalize common lines."""
+    """Return one canonical verified final-selection summary block."""
     best_patch_label = _format_patch_label(round_eval.get("best_patch"))
     best_task = round_eval.get("best_task") or Path(round_eval.get("best_patch", "")).parent.name or "unknown"
     full_benchmark = round_eval.get("full_benchmark", {})
     baseline_ms = full_benchmark.get("baseline_ms") if isinstance(full_benchmark, dict) else None
     candidate_ms = full_benchmark.get("candidate_ms") if isinstance(full_benchmark, dict) else None
+    baseline_speedup = (
+        full_benchmark.get("baseline_reported_speedup")
+        if isinstance(full_benchmark, dict)
+        else None
+    )
+    candidate_speedup = (
+        full_benchmark.get("candidate_reported_speedup")
+        if isinstance(full_benchmark, dict)
+        else None
+    )
 
     lines = [
         "## Verified Final Selection",
@@ -673,34 +702,12 @@ def _rewrite_summary_with_verified_selection(
         lines.append(
             f"- Full benchmark geomean: {baseline_ms:.6f} ms -> {candidate_ms:.6f} ms"
         )
-    verified_block = "\n".join(lines)
-
-    updated = summary or ""
-    if not updated.strip():
-        return verified_block
-    # Auto-finalize can produce a plain single-line summary that references a
-    # patch-test winner. Replace that entirely so the report has one canonical,
-    # verified result instead of a verified block plus stale fallback text.
-    if "### Best Patch:" not in updated and "- **Speedup**" not in updated:
-        return verified_block
-    updated = re.sub(r"(?m)^### Best Patch: .*$", f"### Best Patch: {best_patch_label}", updated)
-    if verified_speedup_raw > 1.0:
-        speedup_line = f"- **Speedup**: {verified_speedup_raw:.4f}x (FULL_BENCHMARK verified)"
-    else:
-        speedup_line = (
-            "- **Speedup**: "
-            f"no verified improvement ({verified_speedup_raw:.4f}x raw, clamped to {verified_speedup:.4f}x)"
+    elif isinstance(baseline_speedup, (int, float)) and isinstance(candidate_speedup, (int, float)):
+        lines.append(
+            "- Full benchmark reported speedup: "
+            f"{baseline_speedup:.4f}x -> {candidate_speedup:.4f}x"
         )
-    updated = re.sub(r"(?m)^- \*\*Speedup\*\*: .*$", speedup_line, updated)
-    if isinstance(candidate_ms, (int, float)):
-        updated = re.sub(
-            r"(?m)^- \*\*Optimized latency\*\*: .*$",
-            f"- **Optimized latency**: {candidate_ms:.4f}ms",
-            updated,
-        )
-    if verified_block not in updated:
-        updated = f"{verified_block}\n\n{updated}" if updated else verified_block
-    return updated
+    return "\n".join(lines)
 
 
 def _record_final_outcome(ctx: dict[str, Any], report: dict[str, Any]) -> None:
@@ -752,6 +759,7 @@ def _merge_round_evaluation_into_final_report(
         except (json.JSONDecodeError, OSError):
             merged = dict(report)
 
+    existing_summary = str(merged.get("summary", ""))
     merged["round_evaluation"] = round_eval
     if round_eval.get("best_patch"):
         merged["best_patch"] = round_eval["best_patch"]
@@ -795,12 +803,15 @@ def _merge_round_evaluation_into_final_report(
                 if isinstance(patch_sz, int) and patch_sz >= 0:
                     analysis += f" Patch={patch_sz}B."
                 merged["best_patch_analysis"] = analysis
-        merged["summary"] = _rewrite_summary_with_verified_selection(
-            str(merged.get("summary", "")),
+        canonical_summary = _rewrite_summary_with_verified_selection(
+            existing_summary,
             round_eval,
             verified_speedup_raw=float(verified_speedup_raw),
             verified_speedup=verified_speedup,
         )
+        if existing_summary.strip() and existing_summary.strip() != canonical_summary.strip():
+            merged["agent_summary"] = existing_summary
+        merged["summary"] = canonical_summary
 
     final_report_path.write_text(json.dumps(merged, indent=2, default=str))
     _record_final_outcome(ctx, merged)
@@ -958,6 +969,7 @@ def _setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> P
     repo = Path(repo_root).resolve()
     is_git = (repo / ".git").exists() or (repo / ".git").is_file()
 
+    git_env = get_git_safe_env(output_dir)
     if is_git:
         subprocess.run(
             ["git", "worktree", "add", "--detach", str(eval_dir)],
@@ -965,18 +977,24 @@ def _setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> P
             capture_output=True,
             text=True,
             check=True,
+            env=git_env,
         )
     else:
         shutil.copytree(str(repo), str(eval_dir), dirs_exist_ok=True)
 
     patch_path = Path(patch_file)
     if patch_path.exists() and patch_path.stat().st_size > 0:
-        apply_result = subprocess.run(
-            ["git", "apply", "--whitespace=nowarn", str(patch_path)],
-            cwd=str(eval_dir),
-            capture_output=True,
-            text=True,
+        patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+        apply_result, removed_paths = apply_patch_with_generated_helper_fallback(
+            patch_text=patch_text,
+            cwd=eval_dir,
+            env=git_env,
         )
+        if removed_paths:
+            logger.warning(
+                "Retrying evaluation patch apply without generated helper artifacts: %s",
+                ", ".join(removed_paths[:5]),
+            )
         if apply_result.returncode != 0:
             error_msg = f"git apply failed (rc={apply_result.returncode}): {apply_result.stderr[:500]}"
             logger.warning(error_msg)
@@ -991,11 +1009,13 @@ def _cleanup_eval_worktree(repo_root: str, eval_dir: Path) -> None:
     repo = Path(repo_root).resolve()
     is_git = (repo / ".git").exists() or (repo / ".git").is_file()
     if is_git:
+        git_env = get_git_safe_env(eval_dir.parent)
         subprocess.run(
             ["git", "worktree", "remove", "--force", str(eval_dir)],
             cwd=str(repo),
             capture_output=True,
             text=True,
+            env=git_env,
         )
     if eval_dir.exists():
         shutil.rmtree(eval_dir, ignore_errors=True)
@@ -1248,6 +1268,33 @@ def _evaluate_round_best(
                             f"  FULL_BENCHMARK verified speedup: {verified_speedup:.4f}x "
                             f"({baseline_ms:.4f} ms -> {candidate_ms:.4f} ms)"
                         )
+                    else:
+                        candidate_reported_speedup = _extract_reported_speedup(fb_stdout)
+                        baseline_reported_speedup = (
+                            _extract_reported_speedup(baseline_ref) if baseline_ref else None
+                        )
+                        if (
+                            isinstance(candidate_reported_speedup, (int, float))
+                            and isinstance(baseline_reported_speedup, (int, float))
+                            and baseline_reported_speedup > 0
+                        ):
+                            verified_speedup = (
+                                float(candidate_reported_speedup)
+                                / float(baseline_reported_speedup)
+                            )
+                            round_eval["full_benchmark"]["verified_speedup"] = round(verified_speedup, 4)
+                            round_eval["full_benchmark"]["candidate_reported_speedup"] = round(
+                                float(candidate_reported_speedup), 6
+                            )
+                            round_eval["full_benchmark"]["baseline_reported_speedup"] = round(
+                                float(baseline_reported_speedup), 6
+                            )
+                            _print(
+                                "  FULL_BENCHMARK verified speedup: "
+                                f"{verified_speedup:.4f}x "
+                                f"(reported speedup {baseline_reported_speedup:.4f}x "
+                                f"-> {candidate_reported_speedup:.4f}x)"
+                            )
                     # Shape count validation
                     candidate_shapes = _parse_shape_count(fb_stdout)
                     baseline_shapes = _parse_shape_count(baseline_ref) if baseline_ref else None
@@ -1879,7 +1926,9 @@ def run_orchestrator(
                     "Call generate_tasks, dispatch_tasks, collect_results. "
                     "Then evaluate the results and respond with your analysis. "
                     "Focus on strategies not yet tried or that build on "
-                    "previous successes."
+                    "previous successes. For later-round decisions, prefer the "
+                    "system-provided FULL_BENCHMARK verified outcomes over raw "
+                    "task-local speedup claims."
                 )
             messages.append({"role": "user", "content": round_instruction})
 
@@ -1905,7 +1954,9 @@ def run_orchestrator(
                         f"## Round {round_num} Evaluation\n\n"
                         f"The best kernel from round {round_num} was evaluated "
                         f"with FULL_BENCHMARK and PROFILE:\n```\n{eval_summary}\n```\n"
-                        "Use this data to inform your next-round strategy."
+                        "Use this data to inform your next-round strategy. "
+                        "Treat the FULL_BENCHMARK result as canonical and use "
+                        "task-local speedups only as supporting evidence."
                     ),
                 })
 
@@ -2083,8 +2134,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--gpu-ids",
-        default="0",
-        help="Comma-separated GPU device IDs (default: 0)",
+        default=None,
+        help="Comma-separated GPU device IDs (default: all detected GPUs, or 0 as fallback)",
     )
     parser.add_argument(
         "--max-rounds",
@@ -2166,7 +2217,12 @@ def main() -> None:
 
     model = load_geak_model(args.model)
     _model_factory = geak_model_factory(args.model)
-    gpu_ids = [int(g.strip()) for g in args.gpu_ids.split(",")]
+    if args.gpu_ids:
+        gpu_ids = [int(g.strip()) for g in args.gpu_ids.split(",")]
+    else:
+        from minisweagent.agents.agent_spec import detect_available_gpus
+
+        gpu_ids = detect_available_gpus()
 
     try:
         from rich.console import Console

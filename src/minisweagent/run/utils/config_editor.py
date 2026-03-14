@@ -425,6 +425,11 @@ def load_and_merge_configs(
         gpu_ids = gpu_ids_value
         patch_output = patch_output_value
 
+    def _default_gpu_ids() -> list[int]:
+        from minisweagent.agents.agent_spec import detect_available_gpus
+
+        return detect_available_gpus()
+
     # Parse GPU IDs into list[int]
     parsed_gpu_ids = []
     if gpu_ids:
@@ -432,9 +437,9 @@ def load_and_merge_configs(
             parsed_gpu_ids = [int(gpu_id.strip()) for gpu_id in gpu_ids.split(",") if gpu_id.strip()]
         except ValueError:
             console.print(
-                f"[bold red]Warning: Invalid GPU IDs format '{gpu_ids}'. Expected comma-separated integers (e.g., '0,1,2,3'). Using default \\[0].[/bold red]"
+                f"[bold red]Warning: Invalid GPU IDs format '{gpu_ids}'. Expected comma-separated integers (e.g., '0,1,2,3'). Using auto-detected GPUs.[/bold red]"
             )
-            parsed_gpu_ids = [0]
+            parsed_gpu_ids = _default_gpu_ids()
     else:
         # Try to get from config file
         config_gpu_ids = config.get("patch", {}).get("gpu_ids")
@@ -447,10 +452,10 @@ def load_and_merge_configs(
                         int(gpu_id.strip()) for gpu_id in str(config_gpu_ids).split(",") if gpu_id.strip()
                     ]
                 except ValueError:
-                    parsed_gpu_ids = [0]
+                    parsed_gpu_ids = _default_gpu_ids()
         else:
-            # Default to GPU 0
-            parsed_gpu_ids = [0]
+            # Default to all detected GPUs.
+            parsed_gpu_ids = _default_gpu_ids()
 
     # Auto-detect num_parallel from gpu_ids when not explicitly provided.
     # If the user passed --gpu-ids 4,5,6,7 but didn't set --num-parallel,

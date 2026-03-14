@@ -129,6 +129,8 @@ _TRUSTED_IRRELEVANT_TOP_TEST_CACHE_SOURCES = {
     "unit_test_agent",
 }
 
+_NONPY_KERNEL_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".cuh", ".cu", ".cc", ".cpp", ".cxx", ".hip"}
+
 
 def _common_path_depth(left: str | Path, right: str | Path) -> int:
     left_parts = Path(left).resolve().parts
@@ -152,6 +154,98 @@ def _focused_harness_candidate(disc_dict: dict[str, Any]) -> tuple[str, str] | N
     return focused_cmd, focused_harness
 
 
+def _normalize_candidate_identifier(value: str | Path) -> str:
+    text = Path(str(value)).stem.lower()
+    for prefix in ("benchmark_", "bench_", "test_", "focused_", "example_"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    text = text.removeprefix("test_")
+    text = text.removesuffix("_harness")
+    text = text.removesuffix("_focused")
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return text
+
+
+def _kernel_identity_names(kernel_path: str | Path) -> list[str]:
+    kp = Path(kernel_path)
+    candidates = [
+        _normalize_candidate_identifier(kp.name),
+        _normalize_candidate_identifier(kp.stem),
+        _normalize_candidate_identifier(kp.parent.name),
+    ]
+    names: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in names and candidate != "detail":
+            names.append(candidate)
+    return names
+
+
+def _candidate_identity_rank(candidate_path: str | Path, kernel_path: str | Path) -> tuple[int, int]:
+    candidate_name = _normalize_candidate_identifier(candidate_path)
+    kernel_names = _kernel_identity_names(kernel_path)
+    if not candidate_name:
+        return (3, 0)
+    if candidate_name in kernel_names:
+        return (0, 1000)
+
+    cand_tokens = {tok for tok in candidate_name.split("_") if tok}
+    best_overlap = 0
+    for kernel_name in kernel_names:
+        if kernel_name and (kernel_name in candidate_name or candidate_name in kernel_name):
+            return (1, len(kernel_name))
+        kernel_tokens = {tok for tok in kernel_name.split("_") if tok}
+        best_overlap = max(best_overlap, len(cand_tokens & kernel_tokens))
+
+    if best_overlap > 0:
+        return (2, best_overlap)
+    return (3, 0)
+
+
+def _build_repo_native_reference_context(
+    *,
+    tests: list[dict[str, Any]],
+    benchmarks: list[dict[str, Any]],
+    kernel_path: str | Path,
+    limit: int = 6,
+) -> str:
+    """Build a compact repo-native reference block for non-Python harness generation."""
+
+    kernel_suffix = Path(kernel_path).suffix.lower()
+    if kernel_suffix not in _NONPY_KERNEL_SUFFIXES:
+        return ""
+
+    ranked: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
+    for source_name, items in (("benchmark", benchmarks), ("test", tests)):
+        for idx, item in enumerate(items[:12]):
+            path = str(item.get("file") or "").strip()
+            cmd = str(item.get("command") or "").strip()
+            if not path:
+                continue
+            tier, overlap = _candidate_identity_rank(path, kernel_path)
+            if tier >= 3:
+                continue
+            # Prefer benchmarks over tests for non-Python kernels when identity matches.
+            source_rank = 0 if source_name == "benchmark" else 1
+            ranked.append(((tier, source_rank, idx), {"path": path, "command": cmd, "source": source_name, "overlap": overlap}))
+
+    if not ranked:
+        return ""
+
+    lines = [
+        "## Preferred Repo-Native Benchmark/Test References",
+        "For non-Python kernels, prefer adapting these semantically matched repo-native sources before inventing a new harness from scratch:",
+    ]
+    for _key, item in sorted(ranked, key=lambda pair: pair[0])[:limit]:
+        path = item["path"]
+        command = item["command"]
+        source = item["source"]
+        lines.append(f"- `{source}`: `{path}`")
+        if command:
+            lines.append(f"  Command hint: `{command}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _should_skip_cached_harness(manifest: dict[str, Any] | None, disc_dict: dict[str, Any]) -> bool:
     focused = disc_dict.get("focused_test") or {}
     if focused.get("top_test_is_relevant") is not False:
@@ -162,13 +256,19 @@ def _should_skip_cached_harness(manifest: dict[str, Any] | None, disc_dict: dict
 
 def _build_harness_candidates(
     tests: list[dict[str, Any]],
+    benchmarks: list[dict[str, Any]],
     disc_dict: dict[str, Any],
     kernel_path: str | Path,
 ) -> list[tuple[str, str, str]]:
     candidates: list[tuple[str, str, str]] = []
     focused_candidate = _focused_harness_candidate(disc_dict)
     focused = disc_dict.get("focused_test") or {}
-    if focused_candidate is not None:
+    kernel_suffix = Path(kernel_path).suffix.lower()
+    prefer_repo_native = (
+        kernel_suffix in _NONPY_KERNEL_SUFFIXES
+        and focused.get("top_test_is_relevant") is False
+    )
+    if focused_candidate is not None and not prefer_repo_native:
         focused_cmd, focused_harness = focused_candidate
         candidates.append((focused_cmd, focused_harness, "focused_test"))
 
@@ -176,30 +276,43 @@ def _build_harness_candidates(
     kernel_parent = Path(kernel_path).resolve().parent
     focused_harness = focused_candidate[1] if focused_candidate is not None else None
     restrict_to_kernel_tree = focused.get("top_test_is_relevant") is False
-    for index, test in enumerate(tests[:5]):
-        cmd = test.get("command")
-        path = test.get("file")
-        if not cmd or not path:
-            continue
-        harness_path = extract_harness_path(cmd)
-        if not Path(harness_path).is_file():
-            continue
-        candidate_parent = Path(harness_path).resolve().parent
-        candidate_in_kernel_tree = candidate_parent == kernel_parent or kernel_parent in candidate_parent.parents
-        if restrict_to_kernel_tree and not candidate_in_kernel_tree:
-            continue
-        same_directory = candidate_parent == kernel_parent
-        common_depth = _common_path_depth(candidate_parent, kernel_parent)
-        duplicate_focused = focused_harness is not None and Path(harness_path).resolve() == Path(focused_harness).resolve()
-        rank = (
-            1 if duplicate_focused else 0,
-            0 if same_directory else 1,
-            -common_depth,
-        )
-        ranked_discovery.append((rank, index, cmd, harness_path, "discovery_test"))
+    discovery_sources: list[tuple[str, list[dict[str, Any]]]] = [
+        ("discovery_test", tests[:8]),
+        ("discovery_benchmark", benchmarks[:8]),
+    ]
+    for source, items in discovery_sources:
+        for index, test in enumerate(items):
+            cmd = test.get("command")
+            path = test.get("file")
+            if not cmd or not path:
+                continue
+            harness_path = extract_harness_path(cmd)
+            if not Path(harness_path).is_file():
+                continue
+            candidate_parent = Path(harness_path).resolve().parent
+            candidate_in_kernel_tree = candidate_parent == kernel_parent or kernel_parent in candidate_parent.parents
+            if restrict_to_kernel_tree and not candidate_in_kernel_tree:
+                continue
+            same_directory = candidate_parent == kernel_parent
+            common_depth = _common_path_depth(candidate_parent, kernel_parent)
+            duplicate_focused = focused_harness is not None and Path(harness_path).resolve() == Path(focused_harness).resolve()
+            semantic_tier, semantic_overlap = _candidate_identity_rank(path, kernel_path)
+            source_rank = 0 if (prefer_repo_native and source == "discovery_benchmark") else 1
+            rank = (
+                semantic_tier,
+                source_rank,
+                1 if duplicate_focused else 0,
+                0 if same_directory else 1,
+                -semantic_overlap,
+                -common_depth,
+            )
+            ranked_discovery.append((rank, index, cmd, harness_path, source))
 
     for _rank, _index, cmd, harness_path, source in sorted(ranked_discovery, key=lambda item: (item[0], item[1])):
         candidates.append((cmd, harness_path, source))
+    if focused_candidate is not None and prefer_repo_native:
+        focused_cmd, focused_harness = focused_candidate
+        candidates.append((focused_cmd, focused_harness, "focused_test"))
     return candidates
 
 
@@ -335,6 +448,7 @@ def run_preprocessor(
     (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))
 
     tests = disc_dict.get("tests", [])
+    benchmarks = disc_dict.get("benchmarks", [])
     _print(f"  Tests found: {len(tests)}")
 
     # ── 3b. UnitTestAgent: create a proper test harness ─────────────
@@ -448,7 +562,12 @@ def run_preprocessor(
         except Exception as exc:
             testcase_selection["cache_error"] = str(exc)
 
-    _discovery_harness_candidates = _build_harness_candidates(tests, disc_dict, kernel_path)
+    _discovery_harness_candidates = _build_harness_candidates(
+        tests,
+        benchmarks,
+        disc_dict,
+        kernel_path,
+    )
 
     _seen_harnesses: set[str] = set()
     if test_command is None:
@@ -537,6 +656,14 @@ def run_preprocessor(
 
             if codebase_context_path.exists():
                 discovery_context = codebase_context_path.read_text() + "\n\n" + discovery_context
+
+            repo_native_refs = _build_repo_native_reference_context(
+                tests=tests,
+                benchmarks=benchmarks,
+                kernel_path=kernel_path,
+            )
+            if repo_native_refs:
+                discovery_context += "\n\n" + repo_native_refs
 
             kernel_name = Path(kernel_path).stem
             discovery_context += (

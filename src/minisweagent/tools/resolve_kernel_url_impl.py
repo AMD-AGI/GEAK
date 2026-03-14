@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+from minisweagent.run.git_safe_env import get_git_safe_env
+
 # Canonical name of the directory used to cache cloned repos.
 # Other modules (discovery, mini.py) import this constant to detect
 # whether a kernel path lives inside a resolved clone.
@@ -118,6 +120,7 @@ def _github_clone_urls(owner: str, repo: str) -> list[str]:
 def _list_remote_refs(owner: str, repo: str) -> tuple[list[str], list[str]]:
     """Return branch/tag names from the remote, trying SSH first."""
     errors: list[str] = []
+    git_env = get_git_safe_env(None)
     for clone_url in _github_clone_urls(owner, repo):
         try:
             result = subprocess.run(
@@ -125,6 +128,7 @@ def _list_remote_refs(owner: str, repo: str) -> tuple[list[str], list[str]]:
                 capture_output=True,
                 text=True,
                 timeout=180,
+                env=git_env,
             )
         except subprocess.TimeoutExpired:
             errors.append(f"git ls-remote timed out for {clone_url}")
@@ -200,6 +204,7 @@ def _resolved_clone_dir(base: Path, owner: str, repo: str, ref: str) -> Path:
 def _clone_remote_repo(owner: str, repo: str, ref: str, target_dir: str) -> tuple[str | None, str | None]:
     """Clone the remote repo into ``target_dir`` and return ``(clone_url, error)``."""
     errors: list[str] = []
+    git_env = get_git_safe_env(Path(target_dir).parent)
     for clone_url in _github_clone_urls(owner, repo):
         if _looks_like_commitish(ref):
             clone_cmd = ["git", "clone", clone_url, target_dir]
@@ -211,6 +216,7 @@ def _clone_remote_repo(owner: str, repo: str, ref: str, target_dir: str) -> tupl
             capture_output=True,
             text=True,
             timeout=180,
+            env=git_env,
         )
         if result.returncode != 0:
             errors.append(result.stderr or result.stdout or f"git clone failed for {clone_url}")
@@ -223,6 +229,7 @@ def _clone_remote_repo(owner: str, repo: str, ref: str, target_dir: str) -> tupl
                 capture_output=True,
                 text=True,
                 timeout=180,
+                env=git_env,
             )
             if checkout.returncode != 0:
                 errors.append(checkout.stderr or checkout.stdout or f"git checkout failed for {ref}")

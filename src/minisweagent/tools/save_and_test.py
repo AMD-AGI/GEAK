@@ -16,6 +16,7 @@ from minisweagent.benchmark_parsing import (
     parse_shape_latencies_ms,
 )
 from minisweagent.debug_runtime import emit_debug_log
+from minisweagent.run.generated_artifacts import generated_helper_excludes
 
 
 @dataclass
@@ -131,16 +132,7 @@ class SaveAndTestTool:
             return []
 
         cwd = Path(os.path.abspath(ctx.cwd))
-        excludes = [
-            "run.sh",
-            "run_harness.sh",
-            "build",
-            "build_harness",
-            "test_harness.py",
-            "test_harness_*.py",
-            "test_harness_*.cpp",
-            "rocprim_version.hpp",
-        ]
+        excludes = generated_helper_excludes(cwd)
         harness_helper = self._generated_harness_helper_path()
         if harness_helper is not None:
             try:
@@ -501,7 +493,7 @@ class SaveAndTestTool:
             ]
             exclude_args = " ".join(f"':(exclude){entry}'" for entry in excludes)
             result = subprocess.run(
-                f"git add -N . && git diff -- . {exclude_args}",
+                f"git add -N . && git diff --binary -- . {exclude_args}",
                 cwd=cwd,
                 capture_output=True,
                 text=True,

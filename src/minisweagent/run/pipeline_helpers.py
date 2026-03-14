@@ -61,10 +61,35 @@ def add_agent_filter_args(parser: argparse.ArgumentParser) -> None:
 
 def apply_agent_filter_env(args: argparse.Namespace) -> None:
     """Propagate ``--allowed-agents`` / ``--excluded-agents`` to env vars."""
-    if getattr(args, "allowed_agents", None):
-        os.environ["GEAK_ALLOWED_AGENTS"] = args.allowed_agents
-    if getattr(args, "excluded_agents", None):
-        os.environ["GEAK_EXCLUDED_AGENTS"] = args.excluded_agents
+    configure_agent_filter_env(
+        getattr(args, "allowed_agents", None),
+        getattr(args, "excluded_agents", None),
+    )
+
+
+def configure_agent_filter_env(
+    allowed_agents: str | None,
+    excluded_agents: str | None,
+) -> None:
+    """Apply generic default agent filters.
+
+    Default behavior excludes ``openevolve`` unless the user explicitly
+    supplies an allowlist/excludelist or pre-sets ``GEAK_EXCLUDED_AGENTS``.
+    This keeps the default pipeline focused on the lighter-weight agents while
+    still allowing users to opt in deliberately.
+    """
+
+    if allowed_agents:
+        os.environ["GEAK_ALLOWED_AGENTS"] = allowed_agents
+        if excluded_agents is not None:
+            os.environ["GEAK_EXCLUDED_AGENTS"] = excluded_agents
+        return
+
+    if excluded_agents:
+        os.environ["GEAK_EXCLUDED_AGENTS"] = excluded_agents
+        return
+
+    os.environ.setdefault("GEAK_EXCLUDED_AGENTS", "openevolve")
 
 
 # ── model loading ────────────────────────────────────────────────────

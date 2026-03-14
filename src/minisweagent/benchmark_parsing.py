@@ -129,6 +129,28 @@ def extract_latency_ms(text: str) -> float | None:
     return _extract_latency(text)
 
 
+def extract_reported_speedup(text: str) -> float | None:
+    """Extract a reported speedup scalar from benchmark output.
+
+    Supported markers include:
+    - ``GEAK_RESULT_GEOMEAN_SPEEDUP=<number>``
+    - ``GEAK_RESULT_SPEEDUP=<number>``
+    - ``Geometric mean speedup: <number>x``
+    - ``Speedup (geomean): <number>x``
+    """
+
+    for pat in (
+        r"GEAK_RESULT_GEOMEAN_SPEEDUP=([\d.]+(?:e[+-]?\d+)?)",
+        r"GEAK_RESULT_SPEEDUP=([\d.]+(?:e[+-]?\d+)?)",
+        r"Geometric mean speedup:\s*([\d.]+(?:e[+-]?\d+)?)x",
+        r"Speedup\s*\(geomean\)\s*:\s*([\d.]+(?:e[+-]?\d+)?)x",
+    ):
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return float(m.group(1))
+    return None
+
+
 def compute_shape_speedups(
     baseline_shapes_ms: dict[str, float],
     candidate_shapes_ms: dict[str, float],
