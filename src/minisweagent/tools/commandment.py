@@ -5,8 +5,8 @@ It has exactly five sections:
   ## SETUP          -- prepare the evaluation environment
   ## CORRECTNESS    -- verify the optimized kernel is correct
   ## PROFILE        -- deep hardware analysis (Metrix, 5 PROFILE_SHAPES)
-  ## BENCHMARK      -- wall-clock latency (20-25 HARNESS_SHAPES, iterative feedback)
-  ## FULL_BENCHMARK -- wall-clock latency (all discovered shapes, final evaluation)
+  ## BENCHMARK      -- canonical wall-clock latency benchmark
+  ## FULL_BENCHMARK -- legacy alias of the canonical benchmark
 
 This module generates a valid COMMANDMENT.md deterministically from:
   - kernel_path: the kernel file to optimize
@@ -210,7 +210,7 @@ ${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --correctness
 kernel-profile "${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
 
 ## BENCHMARK
-${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
 
 ## FULL_BENCHMARK
 ${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
@@ -281,7 +281,7 @@ ${{GEAK_WORK_DIR}}/run_harness.sh --correctness
 kernel-profile "${{GEAK_WORK_DIR}}/run_harness.sh --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
 
 ## BENCHMARK
-${{GEAK_WORK_DIR}}/run_harness.sh --benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+${{GEAK_WORK_DIR}}/run_harness.sh --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
 
 ## FULL_BENCHMARK
 ${{GEAK_WORK_DIR}}/run_harness.sh --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}

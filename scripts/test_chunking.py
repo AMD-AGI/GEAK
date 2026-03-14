@@ -6,7 +6,7 @@ from langchain_core.documents import Document
 from build_index import get_markdown_splitter, SplitterConfig
 
 # Test document path (container path, using actual knowledge base file)
-TEST_DOC = Path("/workspace/mini-swe-agent/knowledge_base/docs/amd-knowledge-base/layer-6-extended/optimize-guides/Report_flash_attention.md")
+TEST_DOC = Path("/workspace/mini-swe-agent/knowledge-base/amd-knowledge-base/layer-6-extended/optimize-guides/Report_flash_attention.md")
 
 def main():
     # 1. Initialize splitter

@@ -197,6 +197,8 @@ def run_unit_test_agent(
     repo: Path,
     kernel_name: str,
     log_dir: Path | None = None,
+    preferred_harness_path: Path | None = None,
+    kernel_path: Path | None = None,
     discovery_context: str = "",
 ) -> str:
     """Run UnitTestAgent in ``repo`` and return the extracted test command string.
@@ -219,6 +221,27 @@ def run_unit_test_agent(
         f"IMPORTANT: Read INSTRUCTIONS.md in the repository for test harness requirements\n"
         f"and COMMANDMENT format rules before creating the harness."
     )
+    if preferred_harness_path is not None:
+        task += (
+            f"\n\nWrite the harness to this exact path: {preferred_harness_path}"
+            "\nDo NOT place the final harness next to the kernel source file."
+            "\nReturn TEST_COMMAND using this exact harness path."
+        )
+    if kernel_path is not None:
+        kernel_dir = kernel_path.resolve().parent
+        try:
+            rel_kernel_dir = kernel_dir.relative_to(repo.resolve())
+        except ValueError:
+            rel_kernel_dir = None
+        task += (
+            f"\n\nTarget kernel file: {kernel_path.resolve()}"
+            "\nThe harness must remain runnable even when it is outside the kernel directory."
+            "\nDo NOT rely on __file__ being in the same directory as kernel.py."
+            "\nResolve imports by preferring GEAK_WORK_DIR when available, then "
+            "GEAK_REPO_ROOT plus the kernel's repo-relative directory, then the original kernel directory."
+        )
+        if rel_kernel_dir is not None:
+            task += f"\nKernel repo-relative directory: {rel_kernel_dir.as_posix()}"
     if discovery_context:
         task += f"\n\n{discovery_context}"
 

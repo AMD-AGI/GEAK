@@ -37,7 +37,7 @@ from rank_bm25 import BM25Okapi
 
 
 # Default paths
-DEFAULT_KB_PATH = Path(__file__).parent.parent / "knowledge_base" / "docs"
+DEFAULT_KB_PATH = Path(__file__).parent.parent / "knowledge-base"
 DEFAULT_OUTPUT_PATH = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
 DEFAULT_MODEL = "BAAI/bge-large-en-v1.5"
 

@@ -66,19 +66,13 @@ def get_model(input_model_name: str | None = None, config: dict | None = None) -
 
 
 def get_model_name(input_model_name: str | None = None, config: dict | None = None) -> str:
-    """Get a model name from any kind of user input or settings.
-
-    Resolution order: explicit arg > config ``model_name`` > ``GEAK_MODEL``
-    env > ``MSWEA_MODEL_NAME`` env.
-    """
+    """Get a model name from any kind of user input or settings."""
     if config is None:
         config = {}
     if input_model_name:
         return input_model_name
     if from_config := config.get("model_name"):
         return from_config
-    if from_env := os.getenv("GEAK_MODEL"):
-        return from_env
     if from_env := os.getenv("MSWEA_MODEL_NAME"):
         return from_env
     raise ValueError("No default model set. Please run `mini-extra config setup` to set one.")
