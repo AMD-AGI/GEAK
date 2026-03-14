@@ -71,4 +71,3 @@ class StdioTransport:
         """Close the transport."""
         if self.process and self.process.stdin:
             self.process.stdin.close()
-            await self.process.wait()

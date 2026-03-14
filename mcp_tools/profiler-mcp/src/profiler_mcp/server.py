@@ -80,6 +80,7 @@ def _profile_with_metrix(
     auto_select: bool = False,
     quick: bool = False,
     gpu_devices: str | list[str] | None = None,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
     """Profile using AMD Metrix API. Returns structured JSON."""
     # Import MetrixTool from the installed metrix-mcp or in-tree copy
@@ -101,6 +102,7 @@ def _profile_with_metrix(
             kernel_filter=kernel_filter,
             auto_select=auto_select,
             quick=quick,
+            cwd=cwd,
         )
     except Exception as e:
         return {
@@ -261,6 +263,7 @@ def profile_kernel(
                 auto_select=auto_select,
                 quick=quick,
                 gpu_devices=gpu_devices,
+                cwd=workdir,
             )
         elif backend == "rocprof-compute":
             return _profile_with_rocprof(
