@@ -19,11 +19,13 @@ Can also parse LLM-emitted markers:
     <!-- GEAK_DASH: {"event": "task_start", "gpu": 0, "label": "optimize"} -->
 """
 
+import logging
 import re
 import time
 from collections import deque
 from threading import Lock
 
+from rich.columns import Columns
 from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
@@ -35,9 +37,34 @@ from rich.text import Text
 MARKER_RE = re.compile(r"<!--\s*GEAK_DASH:\s*(\{.*?\})\s*-->")
 
 
+def _truncate_text(text: str, max_len: int = 56) -> str:
+    compact = re.sub(r"\s+", " ", text).strip()
+    if len(compact) <= max_len:
+        return compact
+    return compact[: max_len - 3] + "..."
+
+
+class _DashboardLive(Live):
+    """Live subclass that re-renders from the Dashboard on every tick."""
+
+    def __init__(self, dashboard, **kwargs):
+        self._dashboard = dashboard
+        super().__init__("", **kwargs)
+
+    def get_renderable(self):
+        return self._dashboard._render()
+
+
 class Dashboard:
-    def __init__(self, num_gpus: int = 8, max_rounds: int = 2, kernel_name: str = ""):
-        self.num_gpus = num_gpus
+    def __init__(
+        self,
+        num_gpus: int = 8,
+        max_rounds: int = 2,
+        kernel_name: str = "",
+        gpu_ids: list[int] | None = None,
+    ):
+        self.gpu_ids = list(gpu_ids) if gpu_ids is not None else list(range(num_gpus))
+        self.num_gpus = len(self.gpu_ids)
         self.max_rounds = max_rounds
         self.kernel_name = kernel_name
         self._lock = Lock()
@@ -47,15 +74,25 @@ class Dashboard:
         self.best_speedup = 1.0
         self.best_round = 0
         self.gpu_status = {}
-        for i in range(num_gpus):
-            self.gpu_status[i] = {"status": "idle", "label": "", "elapsed": 0}
+        for gpu_id in self.gpu_ids:
+            self.gpu_status[gpu_id] = {
+                "status": "idle",
+                "label": "",
+                "elapsed": 0,
+                "stage": "",
+                "step": None,
+                "tool": "",
+                "intent": "",
+                "result": "",
+                "history": deque(maxlen=3),
+            }
         self.logs = deque(maxlen=12)
         self.round_results = {}
         self._start_time = time.time()
         self._live = None
 
     def start(self):
-        self._live = Live(self._render(), refresh_per_second=2, console=Console())
+        self._live = _DashboardLive(self, refresh_per_second=2, console=Console())
         self._live.start()
 
     def stop(self):
@@ -71,7 +108,7 @@ class Dashboard:
         )
         layout["body"].split_row(
             Layout(name="status", ratio=1),
-            Layout(name="gpus", ratio=1),
+            Layout(name="workers", ratio=2),
         )
 
         elapsed = time.time() - self._start_time
@@ -99,11 +136,8 @@ class Dashboard:
             status_table.add_row(f"Round {rnd}", f"{spd}x")
         layout["status"].update(Panel(status_table, title="Status"))
 
-        # GPU box
-        gpu_table = Table(expand=True, padding=(0, 1))
-        gpu_table.add_column("GPU", style="bold", width=4)
-        gpu_table.add_column("Status", width=10)
-        gpu_table.add_column("Task")
+        # Worker cards
+        worker_cards = []
         for gpu_id in sorted(self.gpu_status.keys()):
             info = self.gpu_status[gpu_id]
             status = info["status"]
@@ -115,12 +149,40 @@ class Dashboard:
                 style = "red"
             else:
                 style = "dim"
-            gpu_table.add_row(
-                str(gpu_id),
-                Text(status, style=style),
-                info.get("label", ""),
+
+            worker_table = Table.grid(expand=True, padding=(0, 1))
+            worker_table.add_column("Key", style="bold", width=7)
+            worker_table.add_column("Value")
+            worker_table.add_row("Status", Text(status, style=style))
+            worker_table.add_row("Task", info.get("label", "-") or "-")
+            if info.get("stage"):
+                worker_table.add_row("Stage", info["stage"])
+            if info.get("step") is not None:
+                worker_table.add_row("Step", str(info["step"]))
+            if info.get("tool"):
+                worker_table.add_row("Tool", _truncate_text(info["tool"], max_len=22))
+            if info.get("intent"):
+                worker_table.add_row("Intent", _truncate_text(info["intent"], max_len=54))
+            if info.get("result"):
+                worker_table.add_row("Result", _truncate_text(info["result"], max_len=54))
+            history = list(info.get("history") or [])
+            if history:
+                worker_table.add_row("Recent", "\n".join(history[-2:]))
+
+            worker_cards.append(
+                Panel(
+                    worker_table,
+                    title=f"GPU {gpu_id}",
+                    border_style=style,
+                )
             )
-        layout["gpus"].update(Panel(gpu_table, title="GPUs"))
+
+        layout["workers"].update(
+            Panel(
+                Columns(worker_cards, equal=True, expand=True) if worker_cards else "(no workers)",
+                title="Workers",
+            )
+        )
 
         # Logs box
         log_lines = list(self.logs)
@@ -137,8 +199,16 @@ class Dashboard:
         with self._lock:
             self.current_round = round_num
             self.phase = "generating tasks"
-            self.log(f"Starting round {round_num}")
-            self._refresh()
+            for gpu_id in self.gpu_status:
+                self.gpu_status[gpu_id]["status"] = "idle"
+                self.gpu_status[gpu_id]["label"] = ""
+                self.gpu_status[gpu_id]["stage"] = ""
+                self.gpu_status[gpu_id]["step"] = None
+                self.gpu_status[gpu_id]["tool"] = ""
+                self.gpu_status[gpu_id]["intent"] = ""
+                self.gpu_status[gpu_id]["result"] = ""
+                self.gpu_status[gpu_id]["history"].clear()
+            self.log(f"Starting round {round_num}", _already_locked=True)
 
     def update_phase(self, phase: str):
         with self._lock:
@@ -148,24 +218,79 @@ class Dashboard:
     def update_task(self, gpu_id: int, status: str, label: str = ""):
         with self._lock:
             if gpu_id in self.gpu_status:
-                self.gpu_status[gpu_id]["status"] = status
-                self.gpu_status[gpu_id]["label"] = label
+                info = self.gpu_status[gpu_id]
+                info["status"] = status
+                info["label"] = label
+                if status == "running":
+                    info["stage"] = "starting"
+                    info["step"] = None
+                    info["tool"] = ""
+                    info["intent"] = ""
+                    info["result"] = ""
+                    info["history"].clear()
+                elif status == "done":
+                    info["stage"] = "completed"
+                elif status == "error":
+                    info["stage"] = "failed"
+            self._refresh()
+
+    def update_worker_message(
+        self,
+        gpu_id: int,
+        *,
+        stage: str | None = None,
+        step: int | None = None,
+        tool_name: str = "",
+        intent: str | None = None,
+        result: str | None = None,
+        history_line: str | None = None,
+    ):
+        with self._lock:
+            if gpu_id not in self.gpu_status:
+                return
+            info = self.gpu_status[gpu_id]
+            if stage:
+                info["stage"] = stage
+            if step is not None:
+                if info.get("step") != step:
+                    info["result"] = ""
+                info["step"] = step
+            if tool_name:
+                info["tool"] = tool_name
+            if intent:
+                info["intent"] = intent
+            if result:
+                info["result"] = result
+            if history_line:
+                line = _truncate_text(history_line, max_len=42)
+                history = info["history"]
+                if not history or history[-1] != line:
+                    history.append(line)
             self._refresh()
 
     def update_speedup(self, speedup: float, round_num: int = None):
         with self._lock:
-            rnd = round_num or self.current_round
+            rnd = round_num if round_num is not None else self.current_round
             self.round_results[rnd] = {"speedup": f"{speedup:.3f}"}
             if speedup > self.best_speedup:
                 self.best_speedup = speedup
                 self.best_round = rnd
-                self.log(f"New best: {speedup:.3f}x (round {rnd})")
-            self._refresh()
+                self.log(f"New best: {speedup:.3f}x (round {rnd})", _already_locked=True)
+            else:
+                self._refresh()
 
-    def log(self, msg: str):
+    def log(self, msg: str, _already_locked: bool = False):
         ts = time.strftime("%H:%M:%S")
-        self.logs.append(f"[{ts}] {msg}")
-        if self._live:
+        if _already_locked:
+            formatted = f"[{ts}] {msg}"
+            if not self.logs or self.logs[-1] != formatted:
+                self.logs.append(formatted)
+            self._refresh()
+            return
+        with self._lock:
+            formatted = f"[{ts}] {msg}"
+            if not self.logs or self.logs[-1] != formatted:
+                self.logs.append(formatted)
             self._refresh()
 
     def parse_llm_output(self, text: str) -> str:
@@ -193,15 +318,23 @@ class Dashboard:
                     self.log(data.get("msg", ""))
                 elif event == "speedup":
                     self.update_speedup(data.get("value", 1.0), data.get("round"))
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).debug("GEAK_DASH marker parse error: %s", exc)
             return ""
 
         return MARKER_RE.sub(_handle_marker, text)
 
     def parse_log_line(self, line: str):
-        """Parse orchestrator log lines for status updates."""
-        line_stripped = re.sub(r"\[.*?\]", "", line).strip()
+        """Parse orchestrator log lines for status updates.
+
+        Also checks for GEAK_DASH markers embedded in the line.
+        """
+        marker_match = MARKER_RE.search(line)
+        if marker_match:
+            self.parse_llm_output(line)
+            return
+
+        line_stripped = re.sub(r"\[/?[a-z_ ]+\]", "", line).strip()
         line_lower = line_stripped.lower()
 
         # Round start: "--- Homogeneous round 1/2 ---" or "round N"
@@ -254,8 +387,8 @@ class Dashboard:
             self.log(line_stripped[:70])
             return
 
-        # Dispatch failed
-        if "dispatch failed" in line_lower or "failed" in line_lower:
+        # Dispatch / build / apply failures
+        if "dispatch failed" in line_lower or "build failed" in line_lower or "patch apply failed" in line_lower:
             self.log(f"⚠ {line_stripped[:65]}")
             return
 

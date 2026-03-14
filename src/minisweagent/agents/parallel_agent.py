@@ -2,11 +2,13 @@
 
 import concurrent.futures
 import json
+import logging
 import re
 import shutil
 import sys
 import threading
 import traceback
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +32,7 @@ class BestPatchResult:
 
 
 _stdout_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -154,7 +157,7 @@ class ParallelAgent(DefaultAgent):
         base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory
     ) -> BestPatchResult | None:
         """Select the best patch from multiple parallel runs using SelectPatchAgent."""
-        print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
+        logger.info("Using SelectPatchAgent for patch selection...")
 
         model = model_factory()
         _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
@@ -164,17 +167,17 @@ class ParallelAgent(DefaultAgent):
         det_result = rewrite_best_results(base_patch_dir)
         if det_result:
             best_patch_id = det_result.get("best_patch_id", best_patch_id)
-            print(
-                f"[ParallelAgent] Deterministic override: {best_patch_id} "
-                f"({det_result.get('best_patch_speedup', '?')}x)",
-                flush=True,
+            logger.info(
+                "Deterministic override: %s (%sx)",
+                best_patch_id,
+                det_result.get("best_patch_speedup", "?"),
             )
 
         if not best_patch_id:
-            print("[ParallelAgent] SelectPatchAgent did not produce best_results.json", flush=True)
+            logger.warning("SelectPatchAgent did not produce best_results.json")
             return None
 
-        print(f"[ParallelAgent] Selected best patch: {best_patch_id}", flush=True)
+        logger.info("Selected best patch: %s", best_patch_id)
 
         try:
             # Read the best_results.json for additional details
@@ -213,7 +216,7 @@ class ParallelAgent(DefaultAgent):
                 llm_conclusion=best_results.get("llm_selection_analysis", ""),
             )
         except Exception as e:
-            print(f"[ParallelAgent] Failed to process best_results.json: {e}", flush=True)
+            logger.warning("Failed to process best_results.json: %s", e)
             return None
 
     @staticmethod
@@ -395,6 +398,7 @@ traj.json
         console=None,
         agent_specs: list | None = None,
         tasks: list | None = None,
+        task_status_hook: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[tuple[int, Any, Any, Any]]:
         """Run multiple parallel agents and return their results.
 
@@ -422,6 +426,7 @@ traj.json
                 redirect_output_fn=redirect_output_fn,
                 save_traj_fn=save_traj_fn,
                 console=console,
+                task_status_hook=task_status_hook,
             )
 
         # Heterogeneous mode: use agent_specs if provided (legacy)
@@ -727,6 +732,7 @@ traj.json
         redirect_output_fn=redirect_output_to_file,
         save_traj_fn=None,
         console=None,
+        task_status_hook: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[tuple[int, Any, Any, Any]]:
         """Run M tasks across N GPU slots with overflow queuing.
 
@@ -775,20 +781,42 @@ traj.json
             _lbl = t.label or ""
             _label_counts[_lbl] = _label_counts.get(_lbl, 0) + 1
         _has_dup_labels = any(c > 1 for c in _label_counts.values())
+        task_labels = {
+            task_id: (task.label or task.agent_class.__name__)
+            for task_id, task in sorted_tasks
+        }
+
+        def _emit_task_status(event: str, **payload: Any) -> None:
+            if not task_status_hook:
+                return
+            try:
+                task_status_hook({"event": event, **payload})
+            except Exception as exc:
+                logger.debug("task_status_hook failed for %s: %s", event, exc)
 
         def execute_task(task_id: int, task) -> tuple[int, Any, Any, Any]:
             """Execute a single task on dynamically-assigned GPU(s)."""
-            needed = getattr(task, "num_gpus", 1) or 1
-            needed = min(needed, n_slots)
+            label = task_labels.get(task_id, task.agent_class.__name__)
             acquired_gpus: list[int] = []
-            for _ in range(needed):
-                acquired_gpus.append(gpu_queue.get())  # blocks until a GPU is free
-            gpu_id = acquired_gpus[0]
-            slot_idx = gpu_to_slot[gpu_id]
-            hip_devices = ",".join(str(g) for g in acquired_gpus)
+            slot_idx: int | None = None
+            hip_devices = ""
 
             try:
-                label = task.label or task.agent_class.__name__
+                needed = getattr(task, "num_gpus", 1) or 1
+                needed = min(needed, n_slots)
+                for _ in range(needed):
+                    acquired_gpus.append(gpu_queue.get())  # blocks until a GPU is free
+                gpu_id = acquired_gpus[0]
+                slot_idx = gpu_to_slot[gpu_id]
+                hip_devices = ",".join(str(g) for g in acquired_gpus)
+
+                _emit_task_status(
+                    "task_start",
+                    task_id=task_id,
+                    label=label,
+                    gpu_ids=list(acquired_gpus),
+                    slot_idx=slot_idx,
+                )
                 if console:
                     with _stdout_lock:
                         console.print(
@@ -866,6 +894,26 @@ traj.json
                     agent.base_repo_path = repo_path_resolved
                 if hasattr(agent, "log_file"):
                     agent.log_file = log_file
+                if task_status_hook:
+                    def _ui_message_callback(
+                        payload: dict[str, Any],
+                        *,
+                        _task_id: int = task_id,
+                        _label: str = label,
+                        _gpu_ids: list[int] = list(acquired_gpus),
+                        _slot_idx: int | None = slot_idx,
+                    ) -> None:
+                        _emit_task_status(
+                            "task_message",
+                            task_id=_task_id,
+                            label=_label,
+                            gpu_ids=list(_gpu_ids),
+                            slot_idx=_slot_idx,
+                            **payload,
+                        )
+
+                    setattr(agent, "ui_message_callback", _ui_message_callback)
+                    setattr(agent, "suppress_console_output", True)
 
                 with open(log_file, "w", encoding="utf-8") as f:
                     f.write(f"Task {task_id} ({label}) Conversation Log\n")
@@ -873,6 +921,7 @@ traj.json
                     f.write("=" * 60 + "\n\n")
 
                 exit_status, result, extra_info = None, None, None
+                task_failed = False
                 with redirect_output_fn(log_file):
                     try:
                         exit_status, result = agent.run(agent_task, _is_parallel_mode=True)
@@ -882,6 +931,7 @@ traj.json
                             f.write(f"\n\n{exit_status}: {result}\n")
                     except Exception as e:
                         exit_status, result = type(e).__name__, str(e)
+                        task_failed = True
                         extra_info = {"traceback": traceback.format_exc()}
                         with open(log_file, "a", encoding="utf-8") as f:
                             f.write(f"\n\nERROR: {exit_status}: {result}\n")
@@ -892,12 +942,31 @@ traj.json
                                 agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info
                             )
 
+                _emit_task_status(
+                    "task_error" if task_failed else "task_done",
+                    task_id=task_id,
+                    label=label,
+                    gpu_ids=list(acquired_gpus),
+                    slot_idx=slot_idx,
+                    exit_status=exit_status,
+                    error=str(result) if task_failed and result is not None else None,
+                )
                 if console:
                     with _stdout_lock:
                         console.print(f"[bold blue]Task {task_id} ({label}): completed on GPU(s) {hip_devices}[/bold blue]")
 
                 return task_id, agent, exit_status, result
-
+            except Exception as exc:
+                _emit_task_status(
+                    "task_error",
+                    task_id=task_id,
+                    label=label,
+                    gpu_ids=list(acquired_gpus),
+                    slot_idx=slot_idx,
+                    exit_status=type(exc).__name__,
+                    error=str(exc),
+                )
+                raise
             finally:
                 for g in acquired_gpus:
                     gpu_queue.put(g)
@@ -912,8 +981,6 @@ traj.json
                     results.append(r)
                 except Exception as e:
                     task_id = futures[future]
-                    from minisweagent.utils.log import logger
-
                     logger.error(f"Error in pool task {task_id}: {e}", exc_info=True)
 
         return results

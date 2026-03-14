@@ -985,6 +985,7 @@ def _run_homogeneous_orchestrator(
     _print,
     console,
     model_factory=None,
+    dashboard=None,
 ) -> dict[str, Any]:
     """Run the orchestrator in homogeneous mode.
 
@@ -1056,6 +1057,220 @@ def _run_homogeneous_orchestrator(
         results_dir.mkdir(parents=True, exist_ok=True)
 
         n_agents = len(gpu_ids)
+        finished_task_ids: set[int] = set()
+
+        def _compact_dashboard_text(text: str, max_len: int = 90) -> str:
+            text = re.sub(r"```.*?```", "[code block]", text, flags=re.DOTALL)
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if not lines:
+                return ""
+            compact = " ".join(lines[:2]) if len(lines[0]) < 24 and len(lines) > 1 else lines[0]
+            compact = re.sub(r"\s+", " ", compact).strip()
+            compact = re.sub(r"^(now\s+let\s+me|let\s+me|i(?:'| a)?ll|i will)\s+", "", compact, flags=re.IGNORECASE)
+            compact = compact.rstrip(":")
+            if len(compact) > max_len:
+                return compact[: max_len - 3] + "..."
+            if len(lines) > 1:
+                return compact + " ..."
+            return compact
+
+        def _infer_worker_stage(tool_name: str, text: str = "", result_summary: str = "") -> str:
+            tool_name = (tool_name or "").strip()
+            text_lower = text.lower()
+            result_lower = result_summary.lower()
+
+            if tool_name == "str_replace_editor":
+                return "editing"
+            if tool_name == "strategy_manager":
+                return "planning"
+            if tool_name == "profile_kernel":
+                return "profiling"
+            if tool_name == "save_and_test":
+                if "benchmark" in text_lower or "benchmark" in result_lower:
+                    return "benchmarking"
+                if "correctness" in text_lower or "correctness" in result_lower or "test passed" in result_lower:
+                    return "testing"
+                return "validating"
+            if tool_name == "bash":
+                if "benchmark" in text_lower or "benchmark" in result_lower:
+                    return "benchmarking"
+                if "correctness" in text_lower or "test" in text_lower:
+                    return "testing"
+                if "profile" in text_lower or "profile run complete" in result_lower:
+                    return "profiling"
+                if (
+                    "view " in text_lower
+                    or "inspect " in text_lower
+                    or "understand " in text_lower
+                    or "read " in text_lower
+                    or "inspected file contents" in result_lower
+                ):
+                    return "analyzing"
+                return "working"
+            return "working"
+
+        def _summarize_tool_result(content: str) -> str:
+            try:
+                data = json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                return _compact_dashboard_text(content)
+
+            if not isinstance(data, dict):
+                return _compact_dashboard_text(str(data))
+
+            error_text = data.get("error")
+            if error_text:
+                return "error: " + _compact_dashboard_text(str(error_text), max_len=70)
+
+            output_text = data.get("output")
+            output_str = str(output_text or "")
+            latency_match = re.search(
+                r"(?:GEAK_RESULT_LATENCY_MS=|Overall median latency:\s*)([\d.]+)\s*ms?",
+                output_str,
+                flags=re.IGNORECASE,
+            )
+            if "No changes detected, baseline running." in output_str:
+                return "running baseline without code changes"
+            if "All correctness tests passed" in output_str:
+                return "correctness passed"
+            if "Test status: PASSED" in output_str:
+                if latency_match:
+                    return f"test passed, benchmark {latency_match.group(1)} ms"
+                return "test passed"
+            if "Test status: FAILED" in output_str:
+                return "test failed"
+            if latency_match:
+                return f"benchmark {latency_match.group(1)} ms"
+            if "Profile run complete" in output_str:
+                return "profile run complete"
+            if "File created successfully at:" in output_str:
+                return "file created"
+            if "has been edited." in output_str:
+                return "file edited"
+            if "result of running `cat -n`" in output_str or "result of running `sed -n`" in output_str:
+                return "inspected file contents"
+            if "Marked Strategy" in output_str or "Added strategy:" in output_str:
+                return _compact_dashboard_text(output_str, max_len=70)
+            if "Running correctness test on" in output_str and "PASS:" in output_str:
+                return "correctness checks running"
+            if "Running benchmark on" in output_str:
+                return "benchmark running"
+            if (
+                "# SPDX-License-Identifier" in output_str
+                or output_str.startswith("import ")
+                or "def " in output_str[:200]
+            ):
+                return "inspected file contents"
+
+            summary = _compact_dashboard_text(output_str)
+            rc = data.get("returncode")
+            if rc not in (None, 0):
+                return f"rc={rc}: {summary}" if summary else f"rc={rc}"
+            return summary or (f"rc={rc}" if rc is not None else "")
+
+        def _handle_task_status(event: dict[str, Any]) -> None:
+            if not dashboard:
+                return
+
+            event_name = str(event.get("event") or "")
+            task_id = event.get("task_id")
+            label = str(event.get("label") or "task")
+            gpu_list = [int(gid) for gid in (event.get("gpu_ids") or [])]
+            gpu_text = ",".join(str(gid) for gid in gpu_list)
+            gpu_prefix = "GPU" if len(gpu_list) == 1 else "GPUs"
+            actor_prefix = f"{gpu_prefix} {gpu_text}" if gpu_list else label
+
+            if event_name == "task_start":
+                dashboard.update_phase("running tasks")
+                for gid in gpu_list:
+                    dashboard.update_task(gid, "running", label)
+                dashboard.log(
+                    f"{gpu_prefix} {gpu_text}: {label} started"
+                    if gpu_list else f"{label} started"
+                )
+                return
+
+            if event_name == "task_message":
+                role = str(event.get("role") or "")
+                step_num = event.get("step")
+                tool_name = str(event.get("tool_name") or "")
+                content = str(event.get("content") or "")
+                if role == "assistant":
+                    summary = _compact_dashboard_text(content)
+                    step_prefix = f" step {step_num}" if step_num is not None else ""
+                    stage = _infer_worker_stage(tool_name, text=summary)
+                    for gid in gpu_list:
+                        dashboard.update_worker_message(
+                            gid,
+                            stage=stage,
+                            step=step_num if isinstance(step_num, int) else None,
+                            tool_name=tool_name,
+                            intent=summary or None,
+                            history_line=f"{stage}: {summary}" if summary else None,
+                        )
+                    if tool_name and summary:
+                        dashboard.log(f"{actor_prefix}{step_prefix} -> {tool_name}: {summary}")
+                    elif tool_name:
+                        dashboard.log(f"{actor_prefix}{step_prefix} -> {tool_name}")
+                    elif summary:
+                        dashboard.log(f"{actor_prefix}{step_prefix}: {summary}")
+                elif role == "tool":
+                    result_summary = _summarize_tool_result(content)
+                    stage = _infer_worker_stage(tool_name, result_summary=result_summary)
+                    for gid in gpu_list:
+                        dashboard.update_worker_message(
+                            gid,
+                            stage=stage,
+                            step=step_num if isinstance(step_num, int) else None,
+                            tool_name=tool_name,
+                            result=result_summary or None,
+                            history_line=f"{tool_name or 'tool'}: {result_summary}" if result_summary else None,
+                        )
+                    if result_summary:
+                        dashboard.log(
+                            f"{actor_prefix} {tool_name}: {result_summary}"
+                            if tool_name else f"{actor_prefix}: {result_summary}"
+                        )
+                return
+
+            if event_name not in ("task_done", "task_error"):
+                return
+
+            if task_id is not None:
+                if task_id in finished_task_ids:
+                    return
+                finished_task_ids.add(task_id)
+
+            status = "error" if event_name == "task_error" else "done"
+            for gid in gpu_list:
+                dashboard.update_task(gid, status, label)
+                dashboard.update_worker_message(
+                    gid,
+                    stage="failed" if event_name == "task_error" else "completed",
+                    history_line=f"{status}: {label}",
+                )
+
+            if event_name == "task_error":
+                error_text = str(event.get("error") or event.get("exit_status") or "unknown error")
+                dashboard.log(
+                    f"{gpu_prefix} {gpu_text}: {label} error: {error_text[:60]}"
+                    if gpu_list else f"{label} error: {error_text[:60]}"
+                )
+            else:
+                exit_status = event.get("exit_status")
+                suffix = (
+                    f" ({exit_status})"
+                    if exit_status not in (None, "Submitted", "submitted")
+                    else ""
+                )
+                dashboard.log(
+                    f"{gpu_prefix} {gpu_text}: {label} finished{suffix}"
+                    if gpu_list else f"{label} finished{suffix}"
+                )
+
+            if len(finished_task_ids) >= n_agents:
+                dashboard.update_phase("tasks finished")
+
         _print(f"  Dispatching: run_task_batch({task_file.name}, {n_agents} agents on {n_agents} GPUs)")
         try:
             from minisweagent.run.pipeline.dispatch import run_task_batch
@@ -1066,6 +1281,7 @@ def _run_homogeneous_orchestrator(
                 output_dir=results_dir,
                 model_factory=model_factory,
                 console=console,
+                task_status_hook=_handle_task_status if dashboard else None,
             )
         except Exception as exc:
             _print(f"  [yellow]Round {round_num} dispatch failed: {exc}[/yellow]")
@@ -1302,36 +1518,60 @@ def run_orchestrator(
 
     # Dashboard integration (optional)
     _dashboard = None
+    _dashboard_logger_levels: dict[str, int] = {}
     if os.getenv("GEAK_DASHBOARD", "").lower() in ("1", "true", "yes"):
         try:
             from minisweagent.run.dashboard import Dashboard
             kernel_name = preprocess_ctx.get("kernel_name", "")
+            if not kernel_name:
+                kp = preprocess_ctx.get("kernel_path", "")
+                kernel_name = Path(kp).stem if kp else ""
             _dashboard = Dashboard(
-                num_gpus=len(gpu_ids),
+                gpu_ids=gpu_ids,
                 max_rounds=max_rounds,
                 kernel_name=kernel_name,
             )
             _dashboard.start()
+            for logger_name in (
+                "minisweagent.run.pipeline.dispatch",
+                "minisweagent.agents.parallel_agent",
+            ):
+                noisy_logger = logging.getLogger(logger_name)
+                _dashboard_logger_levels[logger_name] = noisy_logger.level
+                noisy_logger.setLevel(logging.WARNING)
         except Exception:
             _dashboard = None
 
     def _print(msg: str) -> None:
         if _dashboard:
             _dashboard.parse_log_line(msg)
-        if console:
-            console.print(msg)
         else:
-            print(msg, file=sys.stderr)
+            if console:
+                console.print(msg)
+            else:
+                print(msg, file=sys.stderr)
 
-    if not heterogeneous:
-        try:
+    def _handle_llm_output(text: str) -> str:
+        """Parse GEAK_DASH markers from LLM output, return cleaned text."""
+        if _dashboard and text:
+            return _dashboard.parse_llm_output(text)
+        return text
+
+    try:
+        if not heterogeneous:
+            # When the dashboard is active, suppress nested Rich output from
+            # run_task_batch/ParallelAgent and let the dashboard own the TUI.
             return _run_homogeneous_orchestrator(
-                preprocess_ctx, gpu_ids, _out, max_rounds, start_round, _print, console,
+                preprocess_ctx, gpu_ids, _out, max_rounds, start_round, _print,
+                None if _dashboard else console,
                 model_factory=model_factory,
+                dashboard=_dashboard,
             )
-        finally:
-            if _dashboard:
-                _dashboard.stop()
+    finally:
+        if _dashboard and not heterogeneous:
+            _dashboard.stop()
+        for logger_name, previous_level in _dashboard_logger_levels.items():
+            logging.getLogger(logger_name).setLevel(previous_level)
 
     # Build DiscoveryResult from preprocessor's discovery dict
     from minisweagent.tools.discovery_types import DiscoveryResult
@@ -1467,6 +1707,7 @@ def run_orchestrator(
             )
             finalize_result = _run_llm_steps(
                 model, messages, ctx, _print, console, phase="explore",
+                llm_output_handler=_handle_llm_output,
             )
             if finalize_result is not None:
                 return finalize_result
@@ -1505,6 +1746,7 @@ def run_orchestrator(
             finalize_result = _run_llm_steps(
                 model, messages, ctx, _print, console,
                 phase=f"round_{round_num}",
+                llm_output_handler=_handle_llm_output,
             )
 
             # Per-round evaluation: FULL_BENCHMARK + PROFILE on best kernel
@@ -1544,6 +1786,10 @@ def run_orchestrator(
             model_impl.tools = original_tools
         elif hasattr(model_impl, "tools"):
             model_impl.tools = []
+        if _dashboard:
+            _dashboard.stop()
+        for logger_name, previous_level in _dashboard_logger_levels.items():
+            logging.getLogger(logger_name).setLevel(previous_level)
 
     _print(
         "[yellow]Orchestrator completed all rounds without calling finalize – auto-selecting best result...[/yellow]"
@@ -1562,12 +1808,16 @@ def _run_llm_steps(
     console,
     *,
     phase: str,
+    llm_output_handler=None,
 ) -> dict[str, Any] | None:
     """Run LLM tool-call steps until the LLM responds with text or calls ``finalize``.
 
     Returns a finalize report dict if the LLM called ``finalize``,
     otherwise ``None`` (the LLM responded with text, signalling it is
     ready for the next phase).
+
+    ``llm_output_handler``, when provided, is called on LLM content text
+    to extract structured markers (e.g. GEAK_DASH) before display.
     """
     max_steps = int(os.getenv("GEAK_ORCHESTRATOR_STEP_LIMIT", "200"))
     step = 0
@@ -1583,6 +1833,9 @@ def _run_llm_steps(
 
         content_text = response.get("content", "") if isinstance(response, dict) else ""
         tool_call = response.get("tools") if isinstance(response, dict) else None
+
+        if llm_output_handler and content_text:
+            content_text = llm_output_handler(content_text)
 
         if not tool_call:
             if content_text:

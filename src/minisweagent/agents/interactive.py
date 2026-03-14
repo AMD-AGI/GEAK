@@ -6,9 +6,10 @@ There are three modes:
 - yolo: commands issued by the LM are executed immediately without confirmation
 """
 
+import logging
 import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.shortcuts import PromptSession
@@ -20,6 +21,7 @@ from minisweagent.agents.default import AgentConfig, DefaultAgent, LimitsExceede
 
 console = Console(highlight=False)
 prompt_session = PromptSession(history=FileHistory(global_config_dir / "interactive_history.txt"))
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,10 +46,37 @@ class InteractiveAgent(DefaultAgent):
     def __init__(self, *args, config_class=InteractiveAgentConfig, **kwargs):
         super().__init__(*args, config_class=config_class, **kwargs)
         self.cost_last_confirmed = 0.0
+        self.ui_message_callback = None
+        self.suppress_console_output = False
+
+    def _emit_ui_message(self, role: str, content: str, **kwargs) -> None:
+        callback = getattr(self, "ui_message_callback", None)
+        if not callback:
+            return
+        payload: dict[str, Any] = {
+            "role": role,
+            "content": content,
+        }
+        if role == "assistant":
+            payload["step"] = getattr(self.model, "n_calls", None)
+            tool_call = kwargs.get("tool_calls")
+            if isinstance(tool_call, dict):
+                func = tool_call.get("function", {}) or {}
+                payload["tool_name"] = func.get("name")
+                payload["tool_arguments"] = func.get("arguments")
+        elif role == "tool":
+            payload["tool_name"] = kwargs.get("name")
+        try:
+            callback(payload)
+        except Exception as exc:
+            logger.debug("ui_message_callback failed: %s", exc)
 
     def add_message(self, role: str, content: str, **kwargs):
         # Extend supermethod to print messages
         super().add_message(role, content, **kwargs)
+        self._emit_ui_message(role, content, **kwargs)
+        if self.suppress_console_output:
+            return
         if role == "assistant":
             console.print(
                 f"\n[red][bold]mini-swe-agent[/bold] (step [bold]{self.model.n_calls}[/bold], [bold]${self.model.cost:.2f}[/bold]):[/red]\n",
@@ -69,9 +98,13 @@ class InteractiveAgent(DefaultAgent):
                     self.add_message("assistant", msg["content"])
                     return msg
         try:
+            if self.suppress_console_output:
+                return super().query()
             with console.status("Waiting for the LM to respond..."):
                 return super().query()
         except LimitsExceeded:
+            if self.suppress_console_output:
+                raise
             console.print(
                 f"Limits exceeded. Limits: {self.config.step_limit} steps, ${self.config.cost_limit}.\n"
                 f"Current spend: {self.model.n_calls} steps, ${self.model.cost:.2f}."
@@ -83,7 +116,8 @@ class InteractiveAgent(DefaultAgent):
     def step(self) -> dict:
         # Override the step method to handle user interruption
         try:
-            console.print(Rule())
+            if not self.suppress_console_output:
+                console.print(Rule())
             return super().step()
         except KeyboardInterrupt:
             # We always add a message about the interrupt and then just proceed to the next step

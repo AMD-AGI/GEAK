@@ -12,6 +12,7 @@ import itertools
 import logging
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -272,6 +273,7 @@ def run_task_batch(
     model_factory,
     *,
     console=None,
+    task_status_hook: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run a batch of task files via ParallelAgent pool mode.
 
@@ -287,6 +289,9 @@ def run_task_batch(
         Callable returning a new model instance.
     console:
         Optional Rich console.
+    task_status_hook:
+        Optional callback that receives structured task lifecycle events from
+        the pool runner (e.g. task_start, task_done, task_error).
 
     Returns
     -------
@@ -351,6 +356,7 @@ def run_task_batch(
             gpu_ids=gpu_ids,
             console=console,
             tasks=tasks,
+            task_status_hook=task_status_hook,
         )
     except Exception as exc:
         logger.error("Task batch execution failed: %s", exc, exc_info=True)
