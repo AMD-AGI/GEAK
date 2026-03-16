@@ -10,19 +10,16 @@ graph TB
 
     subgraph AGENTS ["Agent Hierarchy"]
         DA["<b>DefaultAgent</b>\n<i>Base: bash, editor, tools</i>"]
-        DA --- IA["InteractiveAgent\n<i>Human/confirm/yolo modes</i>"]
-        IA --- SA["StrategyAgent\n<i>Strategy management + UI</i>"]
-        SA --- SIA["StrategyInteractiveAgent\n<i>Rich console strategy agent</i>"]
-        IA --- SWE["SweAgent\n<i>Code-level modifications</i>"]
+        DA --- SIA["StrategyInteractiveAgent\n<i>Strategy-based optimisation</i>"]
+        DA --- SWE["SweAgent\n<i>Code-level modifications</i>"]
         DA --- PA["<b>ParallelAgent</b>\n<i>Wraps any agent class</i>"]
         DA --- SPA["SelectPatchAgent\n<i>LLM best-patch selection</i>"]
         DA --- OEW["OpenEvolveWorker\n<i>OpenEvolve task execution</i>"]
         DA --- UTA["UnitTestAgent\n<i>Test discovery / creation</i>"]
 
         PA --- SINGLE["single mode\n(num_parallel=1)\n1 agent + patch save"]
-        PA --- HOMOGENEOUS["homogeneous mode\n(default)\nN identical agents, 1 GPU each"]
-        PA --- HETEROGENEOUS["heterogeneous mode\n(agent_specs=…)\ndifferent agent types\nfixed GPU assignments"]
-        PA --- POOL["pool mode\n(tasks=…)\nM tasks on N GPUs\ntasks queue as GPUs free"]
+        PA --- PARALLEL["parallel mode\n(num_parallel>1)\nN agents on N GPUs\ngit worktrees"]
+        PA --- POOL["pool mode\n(tasks=…)\nheterogeneous tasks\nacross GPU pool"]
     end
 
     subgraph MCP ["MCP Servers (mcp_tools/)"]
@@ -35,29 +32,21 @@ graph TB
     end
 
     subgraph BUILTIN ["Built-in Tools (src/minisweagent/tools/)"]
-        T_BASH["bash"]
-        T_EDIT["str_replace_editor"]
-        T_SAT["save_and_test"]
-        T_SUB["submit"]
-        T_STRAT["strategy_manager"]
-        T_BL["baseline_metrics"]
         T_RKU["resolve_kernel_url"]
         T_CMD["commandment"]
         T_VCMD["validate_commandment"]
-        T_COMPAT["check_kernel_compatibility"]
-        T_SUBAG["sub_agent"]
     end
 
     subgraph SHARED ["Shared Pipeline Helpers (src/minisweagent/run/)"]
-        PH["<b>pipeline_helpers.py</b>\nload_geak_model / geak_model_factory\nadd_agent_filter_args / apply_agent_filter_env\nextract_harness_path / validate_harness\nexecute_harness_validation\ncreate_validated_harness\ninject_pipeline_context\nrun_baseline_profile\nREQUIRED_HARNESS_FLAGS\nMAX_HARNESS_RETRIES\nDEFAULT_AGENT_BENCHMARK_ITERATIONS\nDEFAULT_EVAL_BENCHMARK_ITERATIONS"]
-        DT["<b>discovery_types.py</b>\n<i>(src/minisweagent/tools/)</i>\nDiscoveryResult.from_dict()"]
+        PH["<b>pipeline_helpers.py</b>\nload_geak_model\nadd_agent_filter_args\ninject_pipeline_context\nvalidate_harness\ncreate_validated_harness\nrun_baseline_profile\nDEFAULT_EVAL_BENCHMARK_ITERATIONS"]
+        DT["<b>discovery_types.py</b>\nDiscoveryResult.from_dict()"]
     end
 
     subgraph CTXPASS ["Context Passing (src/minisweagent/run/)"]
         CTX_GEN["codebase_context.py\ngenerate CODEBASE_CONTEXT.md"]
-        CTX_DISP["dispatch.py\nrun_task_batch()\ntask_file_to_agent_task()\ninject context into\nsub-agent prompts"]
-        CTX_TG["task_generator.py\ngenerate_tasks()\ncontext available\nto LLM planner"]
-        CTX_TR["ToolRuntime\nset_codebase_context()\nset_env() / set_cwd()\npropagate to SubAgentTool"]
+        CTX_DISP["dispatch.py\ninject context into\nsub-agent prompts"]
+        CTX_TG["task_generator.py\ncontext available\nto LLM planner"]
+        CTX_TR["ToolRuntime\nset_codebase_context()\npropagate to SubAgentTool"]
         CTX_GEN --> CTX_DISP --> CTX_TR
         CTX_GEN --> CTX_TG
     end
@@ -66,8 +55,6 @@ graph TB
         M_AMD["amd_llm"]
         M_ANTH["anthropic"]
         M_LITE["litellm"]
-        M_OR["openrouter"]
-        M_PK["portkey"]
     end
 
     CLI --> AGENTS

@@ -141,7 +141,19 @@ class DefaultAgent:
         # Wire sub_agent context (needs model + env for recursive agent calls)
         if getattr(self.toolruntime, "_sub_agent_tool", None):
             self.toolruntime._sub_agent_tool.set_context(
-                self.model, self.env, codebase_context=self.config.codebase_context,
+                self.model,
+                self.env,
+                codebase_context=self.config.codebase_context,
+                inherited_config={
+                    "test_command": self.config.test_command,
+                    "patch_output_dir": self.config.patch_output_dir,
+                    "metric": self.config.metric,
+                    "save_patch": self.config.save_patch,
+                    "use_strategy_manager": self.config.use_strategy_manager,
+                    "strategy_file_path": self.config.strategy_file_path,
+                    "profiling_type": self.config.profiling_type,
+                },
+                save_and_test_context=getattr(self, "_save_and_test_context", None),
             )
         if self.config.codebase_context:
             self.toolruntime.set_codebase_context(self.config.codebase_context)
@@ -319,6 +331,14 @@ class DefaultAgent:
             raise LimitsExceeded()
         if self._allow_one_summary_step:
             self._allow_one_summary_step = False
+
+        _wm = getattr(self, "_working_memory", None)
+        if _wm:
+            _wm.update_step(self.model.n_calls, self.model.cost)
+            _wm_text = _wm.format_for_injection()
+            if _wm_text and not any("[Working Memory" in m.get("content", "") for m in self.messages[-3:]):
+                self.messages.append({"role": "user", "content": f"[Working Memory Update]\n{_wm_text}"})
+
         response = self.model.query(self.messages)
         output = response["content"]
         # Include tool_calls in assistant message when the model requests a tool call
@@ -389,6 +409,87 @@ class DefaultAgent:
         """Handle tool results. Submit tool raises Submitted, save_and_test handles itself."""
         if hasattr(self, "_save_and_test_context"):
             self.patch_counter = self._save_and_test_context.patch_counter
+
+        _wm = getattr(self, "_working_memory", None)
+        if _wm and result:
+            try:
+                from minisweagent.memory.working_memory import extract_insight_from_tool_result, extract_strategy_from_edit
+                output_str = result.get("output", "") if isinstance(result, dict) else str(result)
+                rc = result.get("returncode", 0) if isinstance(result, dict) else 0
+                insight = extract_insight_from_tool_result("", output_str, rc)
+                if insight:
+                    insight.step = _wm.current_step
+                    _wm.add_insight(insight.tag, insight.message)
+                    import re as _re
+                    _lat = _re.search(r'latency:\s*(\d+\.\d+)ms', insight.message, _re.IGNORECASE)
+                    if _lat:
+                        _wm.update_latency(float(_lat.group(1)))
+                    else:
+                        _sp = _re.search(r'(\d+\.\d+)x', insight.message)
+                        if _sp:
+                            _wm.update_speedup(float(_sp.group(1)))
+                    _wm.note_tool_result(
+                        output_str,
+                        rc,
+                        tag=insight.tag,
+                        message=insight.message,
+                    )
+                else:
+                    _wm.note_tool_result(output_str, rc)
+                if "has been edited" in output_str:
+                    from minisweagent.memory.working_memory import classify_change
+                    last_assistant = ""
+                    for m in reversed(self.messages):
+                        if m.get("role") == "assistant":
+                            last_assistant = m.get("content", "")
+                            tool_calls = m.get("tool_calls")
+                            if tool_calls:
+                                try:
+                                    calls = tool_calls if isinstance(tool_calls, list) else [tool_calls]
+                                    payloads = []
+                                    for call in calls:
+                                        if not isinstance(call, dict):
+                                            continue
+                                        tool_args = call.get("function", {}).get("arguments", {})
+                                        if isinstance(tool_args, str):
+                                            try:
+                                                tool_args = json.loads(tool_args)
+                                            except Exception:
+                                                pass
+                                        if isinstance(tool_args, dict):
+                                            edit_keys = (
+                                                "old_str",
+                                                "new_str",
+                                                "old_string",
+                                                "new_string",
+                                                "old_text",
+                                                "new_text",
+                                            )
+                                            edit_args = {
+                                                k: tool_args[k]
+                                                for k in edit_keys
+                                                if k in tool_args
+                                            }
+                                            if edit_args:
+                                                payloads.append(json.dumps(edit_args, ensure_ascii=False))
+                                        elif isinstance(tool_args, str) and tool_args.strip():
+                                            payloads.append(tool_args)
+                                    if payloads:
+                                        # Prefer real edit payloads over assistant prose so WM labels
+                                        # are driven by the diff, not by task/context text.
+                                        last_assistant = "\n".join(payloads)
+                                except Exception:
+                                    pass
+                            break
+                    strat = extract_strategy_from_edit(last_assistant)
+                    if strat:
+                        change_type = classify_change(last_assistant)
+                        _wm.record_strategy(strat, True)
+                        _wm.record_change_category(change_type)
+                        _wm.remember_pending_change(strat, change_type)
+            except Exception:
+                pass
+
         return result
 
     def _run_select_patch_agent(self) -> None:

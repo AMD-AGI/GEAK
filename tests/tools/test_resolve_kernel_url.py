@@ -9,10 +9,12 @@ import pytest
 from minisweagent.tools.resolve_kernel_url_impl import (
     _parse_fragment,
     _parse_github_blob,
+    _resolved_clone_dir,
     _strip_fragment,
     cleanup_resolved_path,
     get_kernel_name_at_line,
     is_weblink,
+    parse_github_source_url,
     resolve_kernel_url,
 )
 
@@ -54,6 +56,28 @@ class TestParseGithubBlob:
 
     def test_short_raw_url_returns_none(self):
         assert _parse_github_blob("https://raw.githubusercontent.com/owner/repo") is None
+
+    def test_parse_github_source_url_supports_refs_with_slashes(self):
+        url = (
+            "https://github.com/AMD-AGI/AIG-Eval/blob/"
+            "sdubagun/fix-kernel-harness-parity/tasks/geak_eval/topk/kernel.py"
+        )
+        ls_remote = "\n".join(
+            [
+                "abc refs/heads/main",
+                "def refs/heads/sdubagun/fix-kernel-harness-parity",
+            ]
+        )
+        with patch("minisweagent.tools.resolve_kernel_url_impl.subprocess.run") as mock_run:
+            mock_run.return_value = type("R", (), {"returncode": 0, "stderr": "", "stdout": ls_remote})()
+            got = parse_github_source_url(url)
+
+        assert got == {
+            "owner": "AMD-AGI",
+            "repo": "AIG-Eval",
+            "ref": "sdubagun/fix-kernel-harness-parity",
+            "file_path": "tasks/geak_eval/topk/kernel.py",
+        }
 
 
 class TestParseFragment:
@@ -201,6 +225,62 @@ class TestResolveKernelUrl:
             assert out["is_weblink"] is True
             assert out["error"] is not None
             assert "File not found" in out["error"] or "not found" in out["error"]
+
+    def test_clone_into_reclones_fresh_and_prefers_ssh(self, tmp_path):
+        url = (
+            "https://github.com/AMD-AGI/AIG-Eval/blob/"
+            "sdubagun/fix-kernel-harness-parity/tasks/geak_eval/topk/kernel.py"
+        )
+        target_root = _resolved_clone_dir(
+            tmp_path,
+            "AMD-AGI",
+            "AIG-Eval",
+            "sdubagun/fix-kernel-harness-parity",
+        )
+        target_root.mkdir(parents=True)
+        stale_file = target_root / "tasks" / "geak_eval" / "topk" / "kernel.py"
+        stale_file.parent.mkdir(parents=True)
+        stale_file.write_text("stale\n")
+
+        ls_remote = "\n".join(
+            [
+                "abc refs/heads/main",
+                "def refs/heads/sdubagun/fix-kernel-harness-parity",
+            ]
+        )
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, capture_output, text, timeout):
+            calls.append(list(cmd))
+            if cmd[:4] == ["git", "ls-remote", "--heads", "--tags"]:
+                return type("R", (), {"returncode": 0, "stderr": "", "stdout": ls_remote})()
+            if cmd[:3] == ["git", "clone", "--depth"]:
+                clone_target = Path(cmd[-1])
+                kernel = clone_target / "tasks" / "geak_eval" / "topk" / "kernel.py"
+                kernel.parent.mkdir(parents=True, exist_ok=True)
+                kernel.write_text("fresh\n")
+                return type("R", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+            raise AssertionError(f"Unexpected command: {cmd}")
+
+        with patch("minisweagent.tools.resolve_kernel_url_impl.subprocess.run", side_effect=_fake_run):
+            out = resolve_kernel_url(url, clone_into=tmp_path)
+
+        assert out["error"] is None
+        assert out["remote_clone_url"] == "git@github.com:AMD-AGI/AIG-Eval.git"
+        assert Path(out["local_file_path"]).read_text() == "fresh\n"
+        assert stale_file.exists()
+        assert stale_file.read_text() == "fresh\n"
+        assert any(
+            cmd[:6] == [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                "sdubagun/fix-kernel-harness-parity",
+            ]
+            for cmd in calls
+        )
 
 
 class TestCleanupResolvedPath:
