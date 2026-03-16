@@ -71,26 +71,6 @@ def _strip_fragment(spec: str) -> str:
     return spec.split("#", 1)[0].rstrip()
 
 
-def _parse_github_blob(url: str) -> tuple[str, str, str, str] | None:
-    """
-    Parse GitHub blob URL: https://github.com/OWNER/REPO/blob/BRANCH/PATH
-    Returns (owner, repo, branch, file_path) or None.
-    """
-    parsed = urlparse(url)
-    if parsed.netloc not in ("github.com", "raw.githubusercontent.com"):
-        return None
-    path = parsed.path.strip("/")
-    if "raw.githubusercontent.com" in parsed.netloc:
-        parts = path.split("/", 3)
-        if len(parts) >= 4:
-            return (parts[0], parts[1], parts[2], parts[3])
-        return None
-    match = re.match(r"([^/]+)/([^/]+)/blob/([^/]+)/(.+)", path)
-    if match:
-        return (match.group(1), match.group(2), match.group(3), match.group(4))
-    return None
-
-
 def _parse_github_source_parts(url: str) -> tuple[str, str, str] | None:
     """Return ``(owner, repo, ref_and_path)`` for GitHub blob/raw URLs."""
     parsed = urlparse(url)
@@ -197,7 +177,7 @@ def parse_github_source_url(url: str) -> dict[str, str] | None:
 
 def _resolved_clone_dir(base: Path, owner: str, repo: str, ref: str) -> Path:
     ref_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", ref).strip("._-") or "ref"
-    ref_hash = hashlib.sha1(f"{owner}/{repo}@{ref}".encode("utf-8")).hexdigest()[:12]
+    ref_hash = hashlib.sha1(f"{owner}/{repo}@{ref}".encode()).hexdigest()[:12]
     return base / RESOLVED_DIR_NAME / f"{owner}_{repo}" / f"{ref_slug}-{ref_hash}"
 
 
@@ -242,69 +222,55 @@ def _clone_remote_repo(owner: str, repo: str, ref: str, target_dir: str) -> tupl
     return None, error
 
 
-def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
+def _parse_github_repo_url(url: str) -> dict[str, str] | None:
+    """Parse a plain GitHub repo URL like ``https://github.com/org/repo[/tree/ref]``."""
+    parsed = urlparse(url)
+    if parsed.netloc != "github.com":
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) < 2:
+        return None
+    owner, repo_name = parts[0], parts[1]
+    ref = "main"
+    if len(parts) >= 4 and parts[2] == "tree":
+        ref = "/".join(parts[3:])
+    return {"owner": owner, "repo": repo_name, "ref": ref}
+
+
+def _clone_github_and_find(
+    out: dict,
+    owner: str,
+    repo_name: str,
+    ref: str,
+    file_path: str,
+    clone_into: str | Path | None,
+    line_start: int | None,
+    line_end: int | None,
+) -> dict:
+    """Clone a GitHub repo and locate *file_path* within it.
+
+    Populates *out* with GitHub metadata, clone paths, and the resolved
+    local file path.  Returns *out* (mutated).
     """
-    If spec is a web link (e.g. GitHub file URL), clone the repo to a temp dir
-    (or into clone_into/{RESOLVED_DIR_NAME}/<repo> if clone_into is set) and return local paths.
-    Otherwise return the spec as a local path.
-
-    Returns dict with: is_weblink, local_repo_path (or None), local_file_path,
-    original_spec, line_number (int or None), line_end (int or None), error (or None).
-    """
-    spec = (spec or "").strip()
-    line_start, line_end = _parse_fragment(spec)
-    spec_no_frag = _strip_fragment(spec)
-    out = {
-        "is_weblink": False,
-        "local_repo_path": None,
-        "local_file_path": spec_no_frag,
-        "original_spec": spec,
-        "line_number": line_start,
-        "line_end": line_end,
-        "error": None,
-        "github_owner": None,
-        "github_repo": None,
-        "github_ref": None,
-        "github_file_path": None,
-        "remote_clone_url": None,
-    }
-    if not spec_no_frag:
-        out["error"] = "Empty spec"
-        return out
-    if not is_weblink(spec_no_frag):
-        out["local_file_path"] = spec_no_frag
-        out["line_number"] = line_start
-        out["line_end"] = line_end
-        return out
-
-    out["is_weblink"] = True
-    parsed = parse_github_source_url(spec_no_frag)
-    if not parsed:
-        out["error"] = "Only GitHub blob or raw URLs are supported"
-        return out
-
-    owner = parsed["owner"]
-    repo = parsed["repo"]
-    branch = parsed["ref"]
-    file_path = parsed["file_path"]
-    out["github_owner"] = owner
-    out["github_repo"] = repo
-    out["github_ref"] = branch
-    out["github_file_path"] = file_path
+    out.update(
+        is_weblink=True,
+        github_owner=owner,
+        github_repo=repo_name,
+        github_ref=ref,
+        github_file_path=file_path,
+    )
     try:
         if clone_into is not None:
             base = Path(clone_into)
             base.mkdir(parents=True, exist_ok=True)
-            tmpdir_path = _resolved_clone_dir(base, owner, repo, branch)
-            # Always refresh remote clones inside the target tree so a GitHub URL
-            # reflects the current remote ref rather than stale local resolver state.
+            tmpdir_path = _resolved_clone_dir(base, owner, repo_name, ref)
             if tmpdir_path.exists():
                 shutil.rmtree(tmpdir_path, ignore_errors=True)
             tmpdir_path.parent.mkdir(parents=True, exist_ok=True)
             tmpdir = str(tmpdir_path)
         else:
-            tmpdir = tempfile.mkdtemp(prefix=f"geak_kernel_{repo}_")
-        clone_url, clone_error = _clone_remote_repo(owner, repo, branch, tmpdir)
+            tmpdir = tempfile.mkdtemp(prefix=f"geak_kernel_{repo_name}_")
+        clone_url, clone_error = _clone_remote_repo(owner, repo_name, ref, tmpdir)
         if clone_error:
             out["error"] = clone_error
             return out
@@ -327,6 +293,143 @@ def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
     except Exception as e:
         out["error"] = str(e)
         return out
+
+def resolve_kernel_url(
+    spec: str,
+    repo: str | None = None,
+    clone_into: str | Path | None = None,
+) -> dict:
+    """Resolve a kernel file specification to local paths.
+
+    Parameters
+    ----------
+    spec:
+        Kernel identifier -- a GitHub blob/raw URL
+        (e.g. ``https://github.com/org/repo/blob/main/ops/kernel.py#L42``)
+        or a local file path (absolute, or relative to *repo* / CWD).
+    repo:
+        Optional repository root -- a local directory path or a GitHub URL.
+        When provided, *spec* is resolved relative to *repo* for local
+        paths, or within the cloned checkout for remote URLs.  This
+        ensures ``local_repo_path`` is always populated when *repo* is
+        given, avoiding the fallback to ``spec``'s parent directory.
+    clone_into:
+        Directory for cloning remote repositories.  When set, clones land
+        in ``clone_into/.geak_resolved/<repo>/`` and are refreshed on
+        every call.  When ``None``, a temporary directory is used.
+
+    Returns
+    -------
+    dict with keys:
+        ``is_weblink``, ``local_repo_path``, ``local_file_path``,
+        ``original_spec``, ``line_number``, ``line_end``, ``error``,
+        ``github_owner``, ``github_repo``, ``github_ref``,
+        ``github_file_path``, ``remote_clone_url``.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    spec = (spec or "").strip()
+    repo = (repo or "").strip() or None
+
+    line_start, line_end = _parse_fragment(spec)
+    spec_no_frag = _strip_fragment(spec)
+
+    out = {
+        "is_weblink": False,
+        "local_repo_path": None,
+        "local_file_path": spec_no_frag,
+        "original_spec": spec,
+        "line_number": line_start,
+        "line_end": line_end,
+        "error": None,
+        "github_owner": None,
+        "github_repo": None,
+        "github_ref": None,
+        "github_file_path": None,
+        "remote_clone_url": None,
+    }
+
+    if not spec_no_frag:
+        out["error"] = "Empty spec"
+        return out
+
+    # ── classify inputs ───────────────────────────────────────────
+    spec_is_url = is_weblink(spec_no_frag)
+    repo_is_url = is_weblink(repo) if repo else False
+    spec_is_relative = not spec_is_url and not Path(spec_no_frag).is_absolute()
+
+    # ── validate impossible combinations ──────────────────────────
+    if repo_is_url and not spec_is_url and not spec_is_relative:
+        out["error"] = (
+            "Cannot combine a remote --repo URL with an absolute local "
+            f"kernel path: {spec_no_frag}"
+        )
+        return out
+
+    if repo_is_url and spec_is_url:
+        logger.info("Both --repo and kernel spec are URLs; ignoring --repo")
+        repo = None
+        repo_is_url = False
+
+    # ── Case 1: spec is a URL ────────────────────────────────────
+    if spec_is_url:
+        if repo and not repo_is_url:
+            logger.warning(
+                "--repo is a local path but kernel spec is a remote URL; "
+                "ignoring --repo for resolution"
+            )
+        out["is_weblink"] = True
+        parsed = parse_github_source_url(spec_no_frag)
+        if not parsed:
+            out["error"] = "Only GitHub blob or raw URLs are supported"
+            return out
+        return _clone_github_and_find(
+            out, parsed["owner"], parsed["repo"], parsed["ref"],
+            parsed["file_path"], clone_into, line_start, line_end,
+        )
+
+    # ── Case 2: repo is a URL, spec is relative ──────────────────
+    if repo_is_url:
+        parsed_repo = _parse_github_repo_url(repo)
+        if not parsed_repo:
+            out["error"] = f"Unsupported --repo URL: {repo}"
+            return out
+        return _clone_github_and_find(
+            out, parsed_repo["owner"], parsed_repo["repo"],
+            parsed_repo["ref"], spec_no_frag, clone_into,
+            line_start, line_end,
+        )
+
+    # ── Case 3: both local ───────────────────────────────────────
+    base = Path(repo).resolve() if repo else Path.cwd()
+    if repo and not base.is_dir():
+        out["error"] = f"--repo directory not found: {base}"
+        return out
+
+    kernel_path = Path(spec_no_frag)
+    if kernel_path.is_absolute():
+        kernel_path = kernel_path.resolve()
+        if repo:
+            try:
+                kernel_path.relative_to(base)
+            except ValueError:
+                logger.warning(
+                    "Kernel %s is outside --repo %s", kernel_path, base,
+                )
+    else:
+        kernel_path = (base / kernel_path).resolve()
+
+    if not kernel_path.is_file():
+        out["error"] = f"Kernel file not found: {kernel_path}"
+        return out
+
+    out["local_repo_path"] = str(base) if repo else None
+    out["local_file_path"] = str(kernel_path)
+    out["line_number"] = line_start
+    out["line_end"] = line_end
+    return out
 
 
 def get_kernel_name_at_line(file_path: str | Path, line_number: int) -> str | None:
