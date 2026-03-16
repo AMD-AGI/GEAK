@@ -184,3 +184,5 @@ pyrightconfig.json
 
 .vscode/  
 .cursor/
+.optimization_strategies.md
+optimization_logs/
