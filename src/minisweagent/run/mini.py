@@ -105,6 +105,7 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tu
 
 
 from minisweagent.run.pipeline_helpers import (
+    configure_agent_filter_env,
     create_validated_harness,
     extract_harness_path,
     run_baseline_profile,
@@ -228,7 +229,7 @@ def main(
     metric: str | None = typer.Option(None, "--metric", help="Metric extraction task description for LLM"),
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents to run (only effective with --save-patch). If not specified, reads from config file."),
     repo: Path | None = typer.Option(None, "--repo", help="Repository path for parallel execution. Required when num_parallel > 1. Each agent will get an isolated workdir using git worktree."),
-    gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs for agents (e.g., '0,1,2,3'). For single agent, uses first GPU. Defaults to '0'."),
+    gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs for agents (e.g., '0,1,2,3'). Defaults to all detected GPUs."),
     # Runtime environment configuration (ported from MSA branch)
     runtime: str = typer.Option("local", "--runtime", help="Runtime environment: local, docker, or auto (auto-detects GPU availability).", rich_help_panel="Advanced"),
     docker_image: str | None = typer.Option(None, "--docker-image", help="Docker image to use when --runtime=docker.", rich_help_panel="Advanced"),
@@ -237,9 +238,9 @@ def main(
     deterministic: bool = typer.Option(False, "--deterministic", help="Require an explicit deterministic harness contract for --kernel-url runs.", rich_help_panel="Kernel"),
     deterministic_harness: str | None = typer.Option(None, "--deterministic-harness", help="Exact harness URL/path to use for --kernel-url runs. Discovery/UnitTestAgent fallback is disabled.", rich_help_panel="Kernel"),
     max_rounds: int | None = typer.Option(None, "--max-rounds", help="Maximum optimisation rounds for the orchestrator (default: GEAK_MAX_ROUNDS env or 5).", rich_help_panel="Advanced"),
-    allowed_agents: str | None = typer.Option(None, "--allowed-agents", help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS.", rich_help_panel="Advanced"),
-    excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS.", rich_help_panel="Advanced"),
-    heterogeneous: bool = typer.Option(False, "--heterogeneous", help="Use LLM-generated diverse optimization tasks (requires preprocessing/discovery). Default: homogeneous.", rich_help_panel="Advanced"),
+    allowed_agents: str | None = typer.Option(None, "--allowed-agents", help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS and overrides the default OpenEvolve exclusion.", rich_help_panel="Advanced"),
+    excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS. Default: openevolve is excluded unless explicitly re-enabled.", rich_help_panel="Advanced"),
+    heterogeneous: bool = typer.Option(True, "--heterogeneous/--no-heterogeneous", help="Use LLM-generated diverse optimization tasks (requires preprocessing/discovery). Default: enabled.", rich_help_panel="Advanced"),
     from_task: Path | None = typer.Option(None, "--from-task", help="Deprecated: use --task with a YAML-frontmatter .md file instead.", hidden=True),
     rag: bool = typer.Option(False, "--rag", help="Enable RAG retrieval from AMD/NVIDIA knowledge base"),
     debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --rag)"),
@@ -247,10 +248,7 @@ def main(
     # fmt: on
     configure_if_first_time()
 
-    if allowed_agents:
-        os.environ["GEAK_ALLOWED_AGENTS"] = allowed_agents
-    if excluded_agents:
-        os.environ["GEAK_EXCLUDED_AGENTS"] = excluded_agents
+    configure_agent_filter_env(allowed_agents, excluded_agents)
     if deterministic_harness and not kernel_url:
         raise typer.BadParameter("--deterministic-harness requires --kernel-url")
     if deterministic and not kernel_url:

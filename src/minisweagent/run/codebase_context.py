@@ -57,6 +57,9 @@ _CONFIG_FILES: set[str] = {
 _MAX_TREE_DEPTH = 4
 _MAX_TREE_ENTRIES = 300
 _MAX_KEY_FILES = 40
+_MAX_ADJACENT_CONTEXT_FILES = 12
+_HEADER_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".cuh"}
+_CODE_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".cuh", ".cu", ".hip", ".cpp", ".cc", ".cxx"}
 
 
 # ── Directory tree ────────────────────────────────────────────────────
@@ -185,6 +188,15 @@ def _classify_file(path: Path, kernel_path: Path, repo_root: Path) -> str | None
     return None
 
 
+def _normalize_related_name(path: Path | str) -> str:
+    name = Path(str(path)).stem.lower()
+    for prefix in ("benchmark_", "bench_", "test_", "example_"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+    name = re.sub(r"[^a-z0-9]+", "_", name).strip("_")
+    return name
+
+
 def _identify_key_files(
     repo_root: Path,
     kernel_path: Path,
@@ -221,6 +233,85 @@ def _identify_key_files(
                 rel = abs_item
             results.append({"file": str(rel), "role": role})
 
+    return results
+
+
+def _related_name_score(candidate: Path, kernel_path: Path) -> tuple[int, int]:
+    kernel_name = _normalize_related_name(kernel_path)
+    candidate_name = _normalize_related_name(candidate)
+    if not kernel_name or not candidate_name:
+        return (3, 0)
+    if candidate_name == kernel_name:
+        return (0, len(kernel_name))
+    if kernel_name in candidate_name or candidate_name in kernel_name:
+        return (1, min(len(kernel_name), len(candidate_name)))
+    kernel_tokens = {tok for tok in kernel_name.split("_") if tok}
+    candidate_tokens = {tok for tok in candidate_name.split("_") if tok}
+    overlap = len(kernel_tokens & candidate_tokens)
+    if overlap > 0:
+        return (2, overlap)
+    return (3, 0)
+
+
+def _adjacent_kernel_context_files(
+    repo_root: Path,
+    kernel_path: Path,
+    *,
+    max_files: int = _MAX_ADJACENT_CONTEXT_FILES,
+) -> list[dict[str, str]]:
+    """Return nearby implementation/config/benchmark files for header kernels."""
+
+    if kernel_path.suffix.lower() not in _HEADER_SUFFIXES:
+        return []
+
+    root_abs = repo_root.resolve()
+    kernel_abs = kernel_path.resolve()
+    seen: set[Path] = {kernel_abs}
+    candidates: list[tuple[tuple[int, int, int, str], Path, str]] = []
+
+    search_roots: list[tuple[Path, str]] = [
+        (kernel_path.parent, "Adjacent implementation"),
+        (kernel_path.parent / "detail", "Adjacent detail implementation"),
+        (kernel_path.parent.parent / "detail", "Adjacent detail implementation"),
+    ]
+    for base, default_role in search_roots:
+        if not base.is_dir():
+            continue
+        for item in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+            if not item.is_file() or item.resolve() in seen:
+                continue
+            if item.suffix.lower() not in _CODE_SUFFIXES:
+                continue
+            score_tier, overlap = _related_name_score(item, kernel_path)
+            if score_tier >= 3:
+                continue
+            role = "Adjacent config" if "config" in item.name.lower() else default_role
+            rel = item.resolve().relative_to(root_abs)
+            candidates.append(((score_tier, 0, -overlap, rel.as_posix()), item.resolve(), role))
+            seen.add(item.resolve())
+
+    for item in _iter_repo_files(repo_root):
+        abs_item = item.resolve()
+        if abs_item in seen or not item.is_file():
+            continue
+        rel = abs_item.relative_to(root_abs)
+        rel_text = rel.as_posix().lower()
+        if "/benchmark/" not in rel_text and "/test/" not in rel_text:
+            continue
+        score_tier, overlap = _related_name_score(item, kernel_path)
+        if score_tier >= 3:
+            continue
+        role = "Matched benchmark" if "/benchmark/" in rel_text else "Matched test file"
+        candidates.append(((score_tier, 1, -overlap, rel.as_posix()), abs_item, role))
+        seen.add(abs_item)
+
+    results: list[dict[str, str]] = []
+    for _key, abs_item, role in sorted(candidates, key=lambda item: item[0])[:max_files]:
+        try:
+            rel = abs_item.relative_to(root_abs)
+        except ValueError:
+            rel = abs_item
+        results.append({"file": str(rel), "role": role})
     return results
 
 
@@ -330,6 +421,19 @@ def generate_codebase_context(
         sections.append("|------|------|")
         for kf in key_files:
             sections.append(f"| `{kf['file']}` | {kf['role']} |")
+        sections.append("")
+
+    adjacent_files = _adjacent_kernel_context_files(repo_root, kernel_path)
+    if adjacent_files:
+        sections.append("## Adjacent Kernel Context\n")
+        sections.append(
+            "For header / template kernels, the hot implementation often lives in nearby "
+            "`detail/`, config, benchmark, or test files. Start by reading these:\n"
+        )
+        sections.append("| File | Role |")
+        sections.append("|------|------|")
+        for item in adjacent_files:
+            sections.append(f"| `{item['file']}` | {item['role']} |")
         sections.append("")
 
     # 3. Import / dependency chain
