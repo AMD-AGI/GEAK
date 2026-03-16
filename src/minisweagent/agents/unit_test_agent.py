@@ -79,9 +79,10 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "CMakeLists_standalone.txt, SETUP will copy the standalone over CMakeLists.txt and run cmake so the build succeeds.\n"
         "- Otherwise put a standalone CMake at the worktree root: project(), CMAKE_CXX_COMPILER=hipcc, CK include_directories, "
         "add_executable(...) for the kernel .cpp. Do NOT rely on CK's add_example_executable (only works inside full CK tree).\n"
-        "- Build dir must be `build/`; binary at `${GEAK_WORK_DIR}/build/bin/<name>`.\n"
-        "- Harness: resolve binary via GEAK_WORK_DIR/build/bin/<name> or build/bin. "
-        "Do not hardcode paths or invoke the build; SETUP builds, harness only runs the binary."
+        "- Build dir must be `build/`; binary at `${GEAK_WORK_DIR}/build/bin/<executable_name>`.\n"
+        "- Harness: resolve binary via GEAK_WORK_DIR/build/bin/<executable_name> or build/bin. "
+        "Do not hardcode paths or invoke the build; SETUP builds, harness only runs the binary.\n"
+        "- COMMANDMENT file is created by the pipeline, do not generate it manually.\n"
     ),
     "asm": (
         "This is a precompiled HSACO assembly kernel.\n"
