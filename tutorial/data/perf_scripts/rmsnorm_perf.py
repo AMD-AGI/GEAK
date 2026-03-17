@@ -12,10 +12,9 @@ sys.path.insert(0, SCRIPT_DIR)
 from rmsnorm import rmsnorm_triton_wrapper
 
 # Import reference kernel from kernels directory using importlib to avoid cache
-KERNELS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'kernels'))
+KERNELS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "kernels"))
 ref_spec = importlib.util.spec_from_file_location(
-    "rmsnorm_ref", 
-    os.path.join(KERNELS_DIR, "rmsnorm.py")
+    "rmsnorm_ref", os.path.join(KERNELS_DIR, "rmsnorm.py")
 )
 ref_module = importlib.util.module_from_spec(ref_spec)
 ref_spec.loader.exec_module(ref_module)
@@ -27,14 +26,15 @@ import torch
 import triton
 import triton.language as tl
 
+
 class performance_metrics(Performance_Metrics):
     def __init__(self, dtype=None, is_backward=False, **kwargs):
-        super().__init__('rmsnorm', dtype=dtype, is_backward=is_backward, **kwargs)
-        
+        super().__init__("rmsnorm", dtype=dtype, is_backward=is_backward, **kwargs)
+
     def get_input_tensors(self):
         self.input_tensors = []
         for i in range(4, 14):  # Adjust the range as needed for your testing
-            batch_size = 2 ** i
+            batch_size = 2**i
             M = 128  # Example fixed size, adjust as needed
             K = 256  # Example fixed size, adjust as needed
             x = torch.rand((batch_size, M, K), dtype=torch.float32)
@@ -55,10 +55,12 @@ class performance_metrics(Performance_Metrics):
 
     def get_gbps(self, input_tensor, runtime):
         x, rms_w = input_tensor
-        total_bytes = (x.numel() + rms_w.numel() + x.numel()) * x.element_size()  # input, weight, and output
+        total_bytes = (
+            x.numel() + rms_w.numel() + x.numel()
+        ) * x.element_size()  # input, weight, and output
         GBPS = total_bytes / (runtime / 1000) / 1e9
         return GBPS
-    
+
     def get_tflops(self, input_tensor, runtime):
         x, rms_w = input_tensor
         # FLOPS: 2 operations per element (square and multiply), plus additional operations for normalization
@@ -66,7 +68,8 @@ class performance_metrics(Performance_Metrics):
         TFLOPS = FLOPS / (runtime / 1000) / 1e12
         return TFLOPS
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     op_perf = performance_metrics()
     op_perf.get_input_tensors()
     op_perf.get_do_bench_config(warmup=100, rep=1000)

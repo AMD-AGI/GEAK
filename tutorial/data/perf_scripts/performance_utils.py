@@ -9,17 +9,19 @@ import json
 import os
 import random
 
+
 def get_random_choice(item_list):
     return random.choice(item_list)
 
-class do_bench_config():
+
+class do_bench_config:
     def __init__(
-            self,
-            warm_up=25,
-            repetition=100,
-            grad_to_none=None,
-            quantiles=[0.5, 0.8, 0.2],
-            return_mode="median"
+        self,
+        warm_up=25,
+        repetition=100,
+        grad_to_none=None,
+        quantiles=[0.5, 0.8, 0.2],
+        return_mode="median",
     ):
         self.warm_up = warm_up
         self.repetition = repetition
@@ -27,19 +29,14 @@ class do_bench_config():
         self.quantiles = quantiles
         self.return_mode = return_mode
 
+
 class Performance_Metrics:
-    def __init__(
-            self,
-            op_name,
-            dtype=None,
-            is_backward=False,
-            **kwargs
-    ):
+    def __init__(self, op_name, dtype=None, is_backward=False, **kwargs):
         self.op_name = op_name
-        self.ref_op_name = op_name + '_ref'
+        self.ref_op_name = op_name + "_ref"
         self.dtype = dtype
         if is_backward:
-            self.op_name += 'backward'
+            self.op_name += "backward"
         self.kwargs = kwargs
 
         self.input_tensors = []
@@ -50,12 +47,14 @@ class Performance_Metrics:
 
     def to_cuda(self, input_tensor):
         raise NotImplementedError("You must implement this method to get input tensors")
-    
+
     def call_op(self, input_tensor):
         raise NotImplementedError("You must implement this method to call the op")
 
     def call_op_ref(self, input_tensor):
-        raise NotImplementedError("You must implement this method to call the reference op")
+        raise NotImplementedError(
+            "You must implement this method to call the reference op"
+        )
 
     def get_do_bench_config(self, warmup=None, rep=None):
         if warmup != None and rep != None:
@@ -71,21 +70,30 @@ class Performance_Metrics:
             warmup=self.do_bench_config.warm_up,
             rep=self.do_bench_config.repetition,
             quantiles=self.do_bench_config.quantiles,
-            return_mode=self.do_bench_config.return_mode
+            return_mode=self.do_bench_config.return_mode,
         )
         return ms
-    
+
     def get_gbps(self, input_tensor, runtime):
-        raise NotImplementedError("You must implement this method to get the method to calculate GBPS")
+        raise NotImplementedError(
+            "You must implement this method to get the method to calculate GBPS"
+        )
 
     def get_tflops(self, input_tensor, runtime):
-        raise NotImplementedError("You must implement this method to get the method to calculate TFLOPS")
+        raise NotImplementedError(
+            "You must implement this method to get the method to calculate TFLOPS"
+        )
 
     def check_close(self, a, b, rtol=1e-05, atol=1e-08):
         if isinstance(a, (list, tuple)):
-            return all(self.check_close(x, y, rtol=rtol, atol=atol) for x, y in zip(a, b))
+            return all(
+                self.check_close(x, y, rtol=rtol, atol=atol) for x, y in zip(a, b)
+            )
         if isinstance(a, dict):
-            return all(key in b and self.check_close(a[key], b[key], rtol=rtol, atol=atol) for key in a)
+            return all(
+                key in b and self.check_close(a[key], b[key], rtol=rtol, atol=atol)
+                for key in a
+            )
         if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
             return torch.allclose(a, b, rtol=rtol, atol=atol)
         return a == b
@@ -106,21 +114,23 @@ class Performance_Metrics:
         for input_tensor_ in self.input_tensors:
             try:
                 input_tensor = self.to_mlu(input_tensor_)
-                op = lambda : self.call_op(input_tensor)            
-                op_ref = lambda : self.call_op_ref(input_tensor)
-                
+                op = lambda: self.call_op(input_tensor)
+                op_ref = lambda: self.call_op_ref(input_tensor)
+
                 # Keep dummy initial calls to converge to optimal triton autotune configs
                 output = self.call_op(input_tensor)
-                output_ref = self.call_op_ref(input_tensor)                
-    
+                output_ref = self.call_op_ref(input_tensor)
+
                 # The following calls should be using the optimal triton autotune configs
                 output = self.call_op(input_tensor)
                 output_ref = self.call_op_ref(input_tensor)
-                
+
                 if not self.check_close(output, output_ref, rtol=1e-3, atol=1e-3):
-                    print(f"Output mismatch for input size {self.get_num_elements(input_tensor_)}")
+                    print(
+                        f"Output mismatch for input size {self.get_num_elements(input_tensor_)}"
+                    )
                     continue
-    
+
                 # Randomly choose which operation to run first to avoid bias
                 if get_random_choice([0, 1]) == 0:
                     ms = self.get_runtime(op)
@@ -128,7 +138,7 @@ class Performance_Metrics:
                 else:
                     ms_ref = self.get_runtime(op_ref)
                     ms = self.get_runtime(op)
-                
+
                 gbps = self.get_gbps(input_tensor, ms)
                 tflops = self.get_tflops(input_tensor, ms)
                 result = {
@@ -136,7 +146,7 @@ class Performance_Metrics:
                     "ms": ms,
                     "ms_ref": ms_ref,
                     "GB/s": gbps,
-                    "TFLOPS": tflops
+                    "TFLOPS": tflops,
                 }
                 results.append(result)
                 perf.append(ms)
@@ -150,9 +160,7 @@ class Performance_Metrics:
         if perf and perf_ref:
             speedup = sum(perf_ref) / sum(perf)
 
-        results.append({
-            "speedup": speedup
-        })
+        results.append({"speedup": speedup})
 
         print(f"```json\n{json.dumps(results, indent=4)}\n```")
 
