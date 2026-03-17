@@ -102,7 +102,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 ## Requirements:
-1.  **Cambricon MLU Compatibility:** Generate code compatible with Cambricon MLU MLUs and Cambricon MLU. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon MLU Compatibility:** Generate code compatible with Cambricon MLU MLUs and Cambricon MLU. **DO NOT use CUDA-specific features.**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:
@@ -126,7 +126,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
     *   **`tl.dot`:** Ensure inputs are 2D blocks and have compatible types (e.g., float16, bfloat16). Int32 is generally not supported directly as input.
     *   **`tl.arange`:** Arguments `start` and `end` **must be `tl.constexpr`**.
     *   **Math:** Use functions from `tl.math` where available (e.g., `tl.math.exp`, `tl.math.sqrt`). Check function existence; avoid assuming functions like `tanh` or `log1p` exist if they don't in `tl.math`.
-8.  **Triton Version:** Assume Triton version 3.1.0 or later.
+8.  **Triton Version:** Assume Triton version 3.2.0 or later.
 
 # Metrics information
 {metrics_info}
@@ -181,7 +181,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
 {function_signatures}
 
 ## Requirements:
-1.  **Cambricon Compatibility:** Generate code compatible with Cambricon MLUs. **DO NOT use CUDA-specific features or functions (e.g., `tl.libdevice`).**
+1.  **Cambricon Compatibility:** Generate code compatible with Cambricon MLUs.**
 2.  **Complete Code:** Generate a single, complete, and syntactically correct Python code block.
 3.  **Triton Kernel:** The core logic must be implemented within a Triton kernel function decorated with `@triton.jit`.
 4.  **Imports:** ALWAYS include necessary imports at the beginning:
@@ -205,7 +205,7 @@ Based on analysis, the implementation requires these EXACT function signatures:
     *   **`tl.dot`:** Ensure inputs are 2D blocks and have compatible types (e.g., float16, bfloat16). Int32 is generally not supported directly as input.
     *   **`tl.arange`:** Arguments `start` and `end` **must be `tl.constexpr`**.
     *   **Math:** Use functions from `tl.math` where available (e.g., `tl.math.exp`, `tl.math.sqrt`). Check function existence; avoid assuming functions like `tanh` or `log1p` exist if they don't in `tl.math`.
-8.  **Triton Version:** Assume Triton version 3.1.0 or later.
+8.  **Triton Version:** Assume Triton version 3.2.0 or later.
 
 # Metrics information
 {metrics_info}
