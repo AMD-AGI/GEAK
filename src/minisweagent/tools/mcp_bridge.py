@@ -74,8 +74,8 @@ class MCPToolBridge:
             raw = self._run_async(self._async_call(tool_name, arguments or {}))
             return self._format_result(raw)
         except Exception as e:
-            logger.exception(f"MCPToolBridge({self.server_name}).{tool_name} failed: {e!r}")
-            return {"output": f"MCP tool error: {e!r}", "returncode": 1}
+            logger.error(f"MCPToolBridge({self.server_name}).{tool_name} failed: {e}")
+            return {"output": f"MCP tool error: {e}", "returncode": 1}
 
     # ------------------------------------------------------------------
     # Internal

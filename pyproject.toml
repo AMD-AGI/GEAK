@@ -119,7 +119,7 @@ where = ["src"]
 include = ["minisweagent*"]
 
 [tool.setuptools.package-data]
-minisweagent = ["config/**/*", "tools/tools.json"]
+minisweagent = ["config/**/*"]
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.
