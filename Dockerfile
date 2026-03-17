@@ -11,10 +11,11 @@ RUN pip install -e .
 # Install MCP dependencies
 RUN pip install fastmcp
 
-# Install Metrix from AMD intellikit (required by metrix-mcp)
-RUN git clone https://github.com/AMDResearch/intellikit.git /tmp/intellikit \
-    && cd /tmp/intellikit/metrix \
-    && pip install -e . \
+# Install Metrix from AMD intellikit (required by metrix-mcp).
+# Keep the source outside /tmp and install non-editably so imports do not break
+# if /tmp is cleaned later.
+RUN git clone https://github.com/AMDResearch/intellikit.git /opt/intellikit \
+    && pip install /opt/intellikit/metrix \
     && cd /workspace
 
 # Install all MCP tools (metrix-mcp needs metrix installed first)

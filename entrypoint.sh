@@ -24,6 +24,18 @@ else
     echo "   Set it with: export AMD_LLM_API_KEY=your-key"
 fi
 
+# Repair Metrix if an old editable install points at a cleaned /tmp path.
+if ! python3 -c "from metrix import Metrix" >/dev/null 2>&1; then
+    echo "🔧 Repairing Metrix installation..."
+    if [ ! -d /opt/intellikit/metrix ]; then
+        git clone --depth 1 https://github.com/AMDResearch/intellikit.git /opt/intellikit >/dev/null 2>&1 || true
+    fi
+    if [ -d /opt/intellikit/metrix ]; then
+        pip uninstall -y metrix >/dev/null 2>&1 || true
+        pip install /opt/intellikit/metrix >/dev/null 2>&1 || true
+    fi
+fi
+
 # Run health checks
 echo ""
 echo "🔍 Running tool health checks..."

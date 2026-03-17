@@ -2,11 +2,14 @@
 
 import concurrent.futures
 import json
+import logging
+import os
 import re
 import shutil
 import sys
 import threading
 import traceback
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +18,7 @@ from typing import Any
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent, TerminatingException
 from minisweagent.agents.select_patch_agent import run_select_patch
+from minisweagent.debug_runtime import emit_debug_log
 
 
 @dataclass
@@ -30,6 +34,7 @@ class BestPatchResult:
 
 
 _stdout_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -105,11 +110,7 @@ class ParallelAgent(DefaultAgent):
         if not repo_path.exists():
             raise ValueError(f"Repository path does not exist: {repo_path}")
 
-        # Determine whether repo_path is already a git repo. For non-git repos we
-        # create per-agent isolated copies and bootstrap git *inside the copy* so
-        # save_and_test can capture diffs without modifying the source directory.
-        is_git_repo = (repo_path / ".git").exists() or (repo_path / ".git").is_file()
-
+        is_git_repo = (repo_path / ".git").exists()
         output = kwargs.get("output")
         save_traj_fn = kwargs.get("save_traj_fn")
 
@@ -154,7 +155,7 @@ class ParallelAgent(DefaultAgent):
         base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory
     ) -> BestPatchResult | None:
         """Select the best patch from multiple parallel runs using SelectPatchAgent."""
-        print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
+        logger.info("Using SelectPatchAgent for patch selection...")
 
         model = model_factory()
         _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
@@ -164,17 +165,17 @@ class ParallelAgent(DefaultAgent):
         det_result = rewrite_best_results(base_patch_dir)
         if det_result:
             best_patch_id = det_result.get("best_patch_id", best_patch_id)
-            print(
-                f"[ParallelAgent] Deterministic override: {best_patch_id} "
-                f"({det_result.get('best_patch_speedup', '?')}x)",
-                flush=True,
+            logger.info(
+                "Deterministic override: %s (%sx)",
+                best_patch_id,
+                det_result.get("best_patch_speedup", "?"),
             )
 
         if not best_patch_id:
-            print("[ParallelAgent] SelectPatchAgent did not produce best_results.json", flush=True)
+            logger.warning("SelectPatchAgent did not produce best_results.json")
             return None
 
-        print(f"[ParallelAgent] Selected best patch: {best_patch_id}", flush=True)
+        logger.info("Selected best patch: %s", best_patch_id)
 
         try:
             # Read the best_results.json for additional details
@@ -213,7 +214,7 @@ class ParallelAgent(DefaultAgent):
                 llm_conclusion=best_results.get("llm_selection_analysis", ""),
             )
         except Exception as e:
-            print(f"[ParallelAgent] Failed to process best_results.json: {e}", flush=True)
+            logger.warning("Failed to process best_results.json: %s", e)
             return None
 
     @staticmethod
@@ -222,99 +223,6 @@ class ParallelAgent(DefaultAgent):
         from minisweagent.run.task_file import _ensure_safe_directory
 
         _ensure_safe_directory(repo_path)
-
-    @staticmethod
-    def _bootstrap_git_repo(repo_path: Path, console=None) -> bool:
-        """Bootstrap a minimal git repository for non-git directories.
-
-        Creates .git, adds .gitignore to exclude build artifacts, and creates
-        an initial commit. This allows unified git diff-based patch generation.
-
-        Returns True if successful, False otherwise.
-        """
-        import subprocess
-
-        try:
-            # 1. git init
-            subprocess.run(
-                ["git", "init", "-b", "geak-bootstrap"],
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            # 2. Create .gitignore with common build artifacts
-            gitignore_path = repo_path / ".gitignore"
-            gitignore_content = """# GEAK auto-generated gitignore for build artifacts
-build/
-*/build/
-.rocprofv3/
-__pycache__/
-*.pyc
-*.o
-*.so
-*.a
-*.log
-*.dat
-optimization_logs/
-*_logs/
-CMakeCache.txt
-CMakeFiles/
-.pytest_cache/
-*.egg-info/
-.geak_resolved/
-traj.json
-"""
-            # Append to existing .gitignore if present
-            if gitignore_path.exists():
-                existing = gitignore_path.read_text()
-                if "# GEAK auto-generated" not in existing:
-                    gitignore_path.write_text(existing + "\n" + gitignore_content)
-            else:
-                gitignore_path.write_text(gitignore_content)
-
-            # 3. git add -A (respects .gitignore)
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-
-            # 4. git commit (use -c to avoid needing global config)
-            subprocess.run(
-                [
-                    "git",
-                    "-c", "user.name=geak-bootstrap",
-                    "-c", "user.email=geak@local",
-                    "commit",
-                    "-m", "GEAK bootstrap commit",
-                    "--allow-empty",
-                ],
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-
-            if console:
-                console.print("[bold green]Git repo bootstrapped successfully[/bold green]")
-            return True
-
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr or e.stdout or str(e)
-            if console:
-                console.print(f"[bold red]Failed to bootstrap git repo: {error_msg}[/bold red]")
-            return False
-        except Exception as e:
-            if console:
-                console.print(f"[bold red]Failed to bootstrap git repo: {e}[/bold red]")
-            return False
 
     @staticmethod
     def _create_worktree(repo_path: Path, worktree_path: Path) -> Path:
@@ -395,6 +303,7 @@ traj.json
         console=None,
         agent_specs: list | None = None,
         tasks: list | None = None,
+        task_status_hook: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[tuple[int, Any, Any, Any]]:
         """Run multiple parallel agents and return their results.
 
@@ -422,6 +331,7 @@ traj.json
                 redirect_output_fn=redirect_output_fn,
                 save_traj_fn=save_traj_fn,
                 console=console,
+                task_status_hook=task_status_hook,
             )
 
         # Heterogeneous mode: use agent_specs if provided (legacy)
@@ -463,9 +373,6 @@ traj.json
                 worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             else:
                 worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
-                # Bootstrap a local git repo in the isolated copy so diffs are
-                # captured from this workspace (avoid accidentally diffing a parent repo).
-                cls._bootstrap_git_repo(worktree_path, console)
             worktree_path_str = str(worktree_path.resolve())
 
             if console:
@@ -524,9 +431,6 @@ traj.json
                 agent.extra_template_vars[repo_path_str] = worktree_path_str
             if hasattr(agent, "base_repo_path"):
                 agent.base_repo_path = repo_path_resolved
-                # Re-initialize test_perf context with updated base_repo_path
-                if hasattr(agent, '_setup_test_perf_context'):
-                    agent._setup_test_perf_context()
             if hasattr(agent, "log_file"):
                 agent.log_file = log_file
 
@@ -613,7 +517,6 @@ traj.json
                 worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             else:
                 worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
-                cls._bootstrap_git_repo(worktree_path, console)
             worktree_path_str = str(worktree_path.resolve())
 
             label = spec.label or spec.agent_class.__name__
@@ -727,6 +630,7 @@ traj.json
         redirect_output_fn=redirect_output_to_file,
         save_traj_fn=None,
         console=None,
+        task_status_hook: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[tuple[int, Any, Any, Any]]:
         """Run M tasks across N GPU slots with overflow queuing.
 
@@ -775,20 +679,41 @@ traj.json
             _lbl = t.label or ""
             _label_counts[_lbl] = _label_counts.get(_lbl, 0) + 1
         _has_dup_labels = any(c > 1 for c in _label_counts.values())
+        task_labels = {
+            task_id: (task.label or task.agent_class.__name__)
+            for task_id, task in sorted_tasks
+        }
 
+        def _emit_task_status(event: str, **payload: Any) -> None:
+            if not task_status_hook:
+                return
+            try:
+                task_status_hook({"event": event, **payload})
+            except Exception as exc:
+                logger.debug("task_status_hook failed for %s: %s", event, exc)
         def execute_task(task_id: int, task) -> tuple[int, Any, Any, Any]:
             """Execute a single task on dynamically-assigned GPU(s)."""
-            needed = getattr(task, "num_gpus", 1) or 1
-            needed = min(needed, n_slots)
+            label = task_labels.get(task_id, task.agent_class.__name__)
             acquired_gpus: list[int] = []
-            for _ in range(needed):
-                acquired_gpus.append(gpu_queue.get())  # blocks until a GPU is free
-            gpu_id = acquired_gpus[0]
-            slot_idx = gpu_to_slot[gpu_id]
-            hip_devices = ",".join(str(g) for g in acquired_gpus)
+            slot_idx: int | None = None
+            hip_devices = ""
 
             try:
-                label = task.label or task.agent_class.__name__
+                needed = getattr(task, "num_gpus", 1) or 1
+                needed = min(needed, n_slots)
+                for _ in range(needed):
+                    acquired_gpus.append(gpu_queue.get())  # blocks until a GPU is free
+                gpu_id = acquired_gpus[0]
+                slot_idx = gpu_to_slot[gpu_id]
+                hip_devices = ",".join(str(g) for g in acquired_gpus)
+
+                _emit_task_status(
+                    "task_start",
+                    task_id=task_id,
+                    label=label,
+                    gpu_ids=list(acquired_gpus),
+                    slot_idx=slot_idx,
+                )
                 if console:
                     with _stdout_lock:
                         console.print(
@@ -807,14 +732,10 @@ traj.json
                         cls._create_worktree(repo_path, wt_path)
                 else:
                     cls._create_copy_workdir(repo_path, wt_path)
-                    cls._bootstrap_git_repo(wt_path, console)
                 wt_path_str = str(wt_path.resolve())
 
                 # Each task gets its own patch dir named by label (persists across worktree resets)
-                if _has_dup_labels:
-                    dir_name = f"{task.label}_{task_id}" if task.label else f"task_{task_id}"
-                else:
-                    dir_name = task.label if task.label else f"task_{task_id}"
+                dir_name = task.label if task.label else f"task_{task_id}"
                 task_patch_dir = (base_patch_dir / dir_name).resolve()
                 task_patch_dir.mkdir(parents=True, exist_ok=True)
 
@@ -848,24 +769,138 @@ traj.json
                 env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
                 env_config_dict["cwd"] = wt_path_str
                 # Create a NEW dict to avoid shared-reference race across threads
-                env_config_dict["env"] = {
+                patched_env = {
                     **(env_config_dict.get("env") or {}),
                     "HIP_VISIBLE_DEVICES": hip_devices,
                     "GEAK_WORK_DIR": wt_path_str,
                     "GEAK_REPO_ROOT": str(repo_path.resolve()),
                     "GEAK_GPU_DEVICE": hip_devices,
                 }
+                geak_harness = patched_env.get("GEAK_HARNESS")
+                if isinstance(geak_harness, str) and geak_harness:
+                    patched_env["GEAK_HARNESS"] = cls._replace_paths(geak_harness, repo_path, wt_path)
+                env_config_dict["env"] = patched_env
                 parallel_env = type(base_env)(**env_config_dict)
 
                 parallel_output = None
                 if output:
                     parallel_output = output.parent / f"{output.stem}_task_{task_id}{output.suffix}"
 
+                # region agent log
+                emit_debug_log(
+                    "parallel_agent.py:execute_task:before_run",
+                    "Launching parallel optimization worker",
+                    {
+                        "task_id": task_id,
+                        "label": label,
+                        "slot_idx": slot_idx,
+                        "gpu_devices": hip_devices,
+                        "step_limit": cfg.get("step_limit"),
+                        "geak_harness": patched_env.get("GEAK_HARNESS"),
+                        "worktree": wt_path_str,
+                        "patch_dir": str(task_patch_dir),
+                        "patch_dir_entries": sorted(p.name for p in task_patch_dir.iterdir())[:10],
+                        "parallel_output": str(parallel_output) if parallel_output else None,
+                    },
+                    hypothesis_id="H5",
+                )
+                # endregion
+
+                _wm_bm_path = cfg.pop("baseline_metrics", None)
+                _wm_bb_path = cfg.pop("benchmark_baseline", None)
+
                 agent = task.agent_class(parallel_model, parallel_env, **cfg)
                 if hasattr(agent, "base_repo_path"):
                     agent.base_repo_path = repo_path_resolved
                 if hasattr(agent, "log_file"):
                     agent.log_file = log_file
+                if task_status_hook:
+                    def _ui_message_callback(
+                        payload: dict[str, Any],
+                        *,
+                        _task_id: int = task_id,
+                        _label: str = label,
+                        _gpu_ids: list[int] = list(acquired_gpus),
+                        _slot_idx: int | None = slot_idx,
+                    ) -> None:
+                        _emit_task_status(
+                            "task_message",
+                            task_id=_task_id,
+                            label=_label,
+                            gpu_ids=list(_gpu_ids),
+                            slot_idx=_slot_idx,
+                            **payload,
+                        )
+
+                    setattr(agent, "ui_message_callback", _ui_message_callback)
+                    setattr(agent, "suppress_console_output", True)
+
+                try:
+                    from minisweagent.memory.integration import is_working_memory_enabled
+
+                    if is_working_memory_enabled():
+                        from minisweagent.memory.working_memory import WorkingMemory
+
+                        _wm_notebook_dir = None
+                        if _wm_bm_path:
+                            try:
+                                _wm_notebook_dir = str(Path(_wm_bm_path).resolve().parent / "_working_memory")
+                            except Exception:
+                                _wm_notebook_dir = None
+                        _wm = WorkingMemory(
+                            kernel_category=cfg.get("kernel_name", "unknown"),
+                            max_steps=cfg.get("step_limit", int(os.environ.get("GEAK_AGENT_STEP_LIMIT", "100"))),
+                            notebook_dir=_wm_notebook_dir,
+                            notebook_writer_id=f"{task.label or f'task_{task_id}'}-slot-{slot_idx}",
+                        )
+                        if _wm_bm_path and Path(_wm_bm_path).exists():
+                            import json as _json
+
+                            _bm = _json.loads(Path(_wm_bm_path).read_text())
+                            if _bm.get("duration_us"):
+                                _wm.baseline_latency_ms = float(_bm["duration_us"]) / 1000.0
+                            if _bm.get("bottleneck"):
+                                _wm.bottleneck_type = str(_bm["bottleneck"])
+                        if _wm_bb_path and Path(_wm_bb_path).exists():
+                            import re as _re
+
+                            _bb_text = Path(_wm_bb_path).read_text()
+                            _lat_m = _re.search(r'GEAK_RESULT_LATENCY_MS=(\d+\.\d+)', _bb_text)
+                            if _lat_m:
+                                _wm.baseline_latency_ms = float(_lat_m.group(1))
+                        _wm.sync_notebook_baseline()
+                        # V2: Generate profiler diagnosis from baseline_metrics
+                        if _wm_bm_path and Path(_wm_bm_path).exists():
+                            try:
+                                _bm2 = _json.loads(Path(_wm_bm_path).read_text())
+                                _top = _bm2.get("top_kernels", [])
+                                if len(_top) > 3:
+                                    _target = _top[0] if _top else {}
+                                    _target_pct = _target.get("pct_of_total", 0)
+                                    _ext_pct = 100 - _target_pct
+                                    _top_summary = "; ".join(
+                                        f"{k.get('name','?')[:40]}: {k.get('duration_us',0):.1f}us ({k.get('pct_of_total',0):.0f}%)"
+                                        for k in _top[:3]
+                                    )
+                                    if _ext_pct > 50:
+                                        _wm.profiler_diagnosis = (
+                                            f"[ARCHITECTURE ALERT] Profiler shows {len(_top)} sub-kernels. "
+                                            f"Top 3: {_top_summary}. "
+                                            f"No single kernel dominates (largest is {_target_pct:.0f}%). "
+                                            "This usually means the entry point dispatches to UNFUSED external library calls. "
+                                            "FIRST ACTION: Check triton_op() for try/except that falls through to aiter or other libraries. "
+                                            "Bypass to use the local fused kernel. Also check for repeat_interleave or .contiguous() calls."
+                                        )
+                                    elif _target_pct > 60:
+                                        _wm.profiler_diagnosis = (
+                                            f"[PROFILER] Target kernel ({_target.get('name','?')[:40]}) dominates at {_target_pct:.0f}%. "
+                                            "Focus optimization on the kernel body itself."
+                                        )
+                            except Exception:
+                                pass
+                        agent._working_memory = _wm
+                except Exception:
+                    pass
 
                 with open(log_file, "w", encoding="utf-8") as f:
                     f.write(f"Task {task_id} ({label}) Conversation Log\n")
@@ -873,6 +908,7 @@ traj.json
                     f.write("=" * 60 + "\n\n")
 
                 exit_status, result, extra_info = None, None, None
+                task_failed = False
                 with redirect_output_fn(log_file):
                     try:
                         exit_status, result = agent.run(agent_task, _is_parallel_mode=True)
@@ -882,6 +918,7 @@ traj.json
                             f.write(f"\n\n{exit_status}: {result}\n")
                     except Exception as e:
                         exit_status, result = type(e).__name__, str(e)
+                        task_failed = True
                         extra_info = {"traceback": traceback.format_exc()}
                         with open(log_file, "a", encoding="utf-8") as f:
                             f.write(f"\n\nERROR: {exit_status}: {result}\n")
@@ -892,12 +929,49 @@ traj.json
                                 agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info
                             )
 
+                _emit_task_status(
+                    "task_error" if task_failed else "task_done",
+                    task_id=task_id,
+                    label=label,
+                    gpu_ids=list(acquired_gpus),
+                    slot_idx=slot_idx,
+                    exit_status=exit_status,
+                    error=str(result) if task_failed and result is not None else None,
+                )
+                # region agent log
+                emit_debug_log(
+                    "parallel_agent.py:execute_task:after_run",
+                    "Parallel optimization worker returned from agent.run",
+                    {
+                        "task_id": task_id,
+                        "label": label,
+                        "slot_idx": slot_idx,
+                        "gpu_devices": hip_devices,
+                        "exit_status": str(exit_status),
+                        "result_preview": (str(result)[:300] if result is not None else None),
+                        "has_traceback": bool(extra_info and extra_info.get("traceback")),
+                        "patch_count": len(list(task_patch_dir.glob("*.patch"))),
+                        "best_results_present": (task_patch_dir / "best_results.json").exists(),
+                    },
+                    hypothesis_id="H7",
+                )
+                # endregion
                 if console:
                     with _stdout_lock:
                         console.print(f"[bold blue]Task {task_id} ({label}): completed on GPU(s) {hip_devices}[/bold blue]")
 
                 return task_id, agent, exit_status, result
-
+            except Exception as exc:
+                _emit_task_status(
+                    "task_error",
+                    task_id=task_id,
+                    label=label,
+                    gpu_ids=list(acquired_gpus),
+                    slot_idx=slot_idx,
+                    exit_status=type(exc).__name__,
+                    error=str(exc),
+                )
+                raise
             finally:
                 for g in acquired_gpus:
                     gpu_queue.put(g)
@@ -906,14 +980,63 @@ traj.json
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_slots) as executor:
             futures = {executor.submit(execute_task, tid, task): tid for tid, task in sorted_tasks}
+            # region agent log
+            emit_debug_log(
+                "parallel_agent.py:_run_pool:futures_submitted",
+                "Submitted pool tasks to ThreadPoolExecutor",
+                {
+                    "n_slots": n_slots,
+                    "n_tasks": n_tasks,
+                    "task_ids": [tid for tid, _task in sorted_tasks],
+                },
+                hypothesis_id="H8",
+            )
+            # endregion
             for future in concurrent.futures.as_completed(futures):
                 try:
                     r = future.result()
                     results.append(r)
+                    # region agent log
+                    emit_debug_log(
+                        "parallel_agent.py:_run_pool:future_completed",
+                        "Pool future completed successfully",
+                        {
+                            "task_id": futures[future],
+                            "results_collected": len(results),
+                            "exit_status": str(r[2]) if len(r) > 2 else None,
+                        },
+                        hypothesis_id="H8",
+                    )
+                    # endregion
                 except Exception as e:
                     task_id = futures[future]
-                    from minisweagent.utils.log import logger
-
                     logger.error(f"Error in pool task {task_id}: {e}", exc_info=True)
+                    # region agent log
+                    emit_debug_log(
+                        "parallel_agent.py:_run_pool:future_exception",
+                        "Pool future raised exception while collecting result",
+                        {
+                            "task_id": task_id,
+                            "error_type": type(e).__name__,
+                            "error": str(e),
+                            "results_collected": len(results),
+                        },
+                        hypothesis_id="H8",
+                    )
+                    # endregion
+
+        # region agent log
+        emit_debug_log(
+            "parallel_agent.py:_run_pool:after_all_futures",
+            "All pool futures drained and _run_pool is returning",
+            {
+                "results_count": len(results),
+                "task_ids_completed": sorted(
+                    int(r[0]) for r in results if isinstance(r, tuple) and len(r) > 0 and isinstance(r[0], int)
+                ),
+            },
+            hypothesis_id="H9",
+        )
+        # endregion
 
         return results

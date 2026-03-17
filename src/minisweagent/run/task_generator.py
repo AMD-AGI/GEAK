@@ -1,14 +1,1464 @@
-# ruff: noqa: I001
-"""Backward-compatible shim. Use ``minisweagent.run.pipeline.task_generator`` instead."""
-import warnings as _w
-_w.warn(
-    "minisweagent.run.task_generator is deprecated, "
-    "use minisweagent.run.pipeline.task_generator",
-    DeprecationWarning,
-    stacklevel=2,
-)
-from minisweagent.run.pipeline import task_generator as _mod  # noqa: E402
-from minisweagent.run.pipeline.task_generator import *  # noqa: F401,F403,E402
+"""Agent-based task generator -- produces optimization tasks by running a
+read-only planning agent that inspects profiling data and kernel metadata.
 
-def __getattr__(name):
-    return getattr(_mod, name)
+The agent reads files via ``str_replace_editor view`` and submits a JSON
+task list via the ``submit`` tool.  No rule-based fallback: an LLM model
+is required.
+
+Priority scheme (lower = higher priority, runs first):
+  0  -- OpenEvolve on the inner kernel (highest impact, automated)
+  5  -- Kernel fusion / advanced tuning
+  10 -- Targeted optimization (autotune, memory, launch config)
+  15 -- Profile-guided (generic fallback)
+
+Usage (Python):
+    from minisweagent.run.task_generator import generate_tasks
+    tasks = generate_tasks(
+        discovery_result=result,
+        base_task_context=task_text,
+        agent_class=StrategyAgent,
+        model=model,
+        profiling_path=Path("profile.json"),
+        commandment_path=Path("COMMANDMENT.md"),
+    )
+
+Usage (CLI):
+    python -m minisweagent.run.task_generator \\
+        --kernel-path /path/to/kernel.py \\
+        --profiling profiler_output.json \\
+        --commandment COMMANDMENT.md \\
+        --baseline-metrics baseline_metrics.json
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import tempfile
+import textwrap
+from pathlib import Path
+from typing import Any
+
+from minisweagent.agents.agent_spec import AgentTask
+from minisweagent.debug_runtime import emit_debug_log, model_tools_snapshot, tool_names
+from minisweagent.run.task_planner import _GPU_AND_PROFILER_RULES
+from minisweagent.tools.discovery_types import DiscoveryResult
+
+logger = logging.getLogger(__name__)
+
+_KNOWLEDGE_BASE_REL = "knowledge_base/optimization_strategies.py"
+
+_HIP_SEARCH_HINT_PATTERNS = (
+    "binary_search",
+    "lower_bound",
+    "upper_bound",
+    "search_n",
+    "device_search",
+    "haystack",
+    "needle",
+)
+
+# ============================================================================
+# Prompt templates for the planning agent
+# ============================================================================
+
+_SYSTEM_PROMPT = textwrap.dedent("""\
+You are an expert GPU kernel optimization planner for AMD GPUs. You have
+access to profiling data, kernel metadata, and a knowledge base of
+optimization strategies via file paths. Read the files you need using
+the `str_replace_editor` tool (command: "view"), reason about the best
+optimization approach, then submit your task list as JSON via the
+`submit` tool.
+
+## Available Agents and Tools
+
+### Agents (task execution)
+
+1. **strategy_agent** (default) -- An LLM-guided agent with bash, editor,
+   profiling tools, AND LLM-powered MCP assistants (kernel-evolve,
+   kernel-ercs). It can delegate code generation, quality evaluation, and
+   reflection to these MCP tools. Best for complex optimizations where
+   LLM-generated mutations and quality evaluation help: kernel fusion,
+   advanced tuning, multi-step refactoring.
+
+2. **swe_agent** -- An LLM-guided agent with bash, editor, save_and_test,
+   submit, profile_kernel, baseline_metrics, and strategy_manager. It codes
+   manually -- reads code, reasons about bottlenecks, makes edits, then
+   tests and profiles. NO access to kernel-evolve or kernel-ercs MCP tools.
+   Best for targeted edits, autotune configs, and straightforward
+   optimizations where the agent should read-think-edit-test-profile
+   without LLM tool assistance.
+
+3. **openevolve** -- An LLM-guided evolutionary optimizer that mutates the
+   kernel and evaluates candidates automatically using COMMANDMENT.md and
+   baseline_metrics.json. Has its own internal orchestration loop. Best for
+   inner kernels where automated mutation + selection is effective.
+
+### Tools (available to strategy_agent via MCP)
+
+4. **kernel-evolve** -- LLM-guided mutation/crossover of kernel code.
+   Commands: `generate` (optimized variant from bottleneck + strategy),
+   `mutate` (improve existing kernel), `crossover` (combine two kernels),
+   `strategies` (list strategies for a bottleneck), `params` (suggest
+   parameters for a kernel type). Instruct the strategy_agent to use
+   kernel-evolve when the task involves generating new kernel variants.
+
+5. **kernel-ercs** -- LLM-based evaluation, reflection, compatibility
+   checking, and AMD GPU specs. Commands: `evaluate` (score kernel quality),
+   `reflect` (analyze test results, suggest next steps), `compat` (check
+   AMD compatibility), `specs` (AMD MI350X specs). Instruct the
+   strategy_agent to use kernel-ercs for quality assessment and reflection.
+
+## PRIORITY DIRECTIVE -- KERNEL ALGORITHMIC IMPROVEMENT IS THE PRIMARY GOAL
+
+Your PRIMARY goal is **algorithmic improvement of the GPU kernel body** --
+the `@triton.jit` functions, HIP `__global__` / `__device__` kernels, CK
+template bodies, or ASM routines.  This means changing *how the computation
+is performed*: different tiling strategies, different reduction algorithms,
+fused operations, restructured memory access patterns, alternative scan /
+sort / attention algorithms -- all **inside** the kernel body itself.
+
+**Wrapper changes are LOW priority**: Launch config tuning (`num_warps`,
+`BLOCK_SIZE`), Python dispatch changes (`matmul` -> `mm`), import routing
+changes (`aiter` bypass), and `repeat_interleave` -> `expand` style wrapper
+fixes are acceptable ONLY after exhausting kernel-body approaches.  Assign
+wrapper-only tasks priority 15.
+
+**Do NOT give up**: Even if the kernel looks well-optimized by human experts,
+you MUST attempt novel algorithmic improvements.  The entire purpose of this
+agent is to discover improvements that humans missed.  Generate at least 3-5
+genuinely different *algorithmic* approaches per kernel -- not 3-5 variations
+of launch config parameters.
+
+It is acceptable to leave some GPUs idle rather than spending them on
+wrapper-only or dispatch-only tasks before kernel-body avenues are exhausted.
+
+## Task priority scheme (lower number = higher priority = runs first)
+
+- 0: Novel algorithmic kernel rewrites (different algorithm, different reduction/scan tree, split kernel variants, eliminate expensive ops like tl.reshape/tl.flip)
+- 3: Operation fusion (fuse adjacent kernels, fuse elementwise ops into kernel body, fuse normalization + quantization)
+- 4: Shape-adaptive optimization (use @triton.autotune with multiple configs so optimal BLOCK_S/num_warps is selected per input shape; or build 2-3 kernel variants specialized to different shape categories, with any wrapper selection logic kept secondary)
+- 5: Kernel-body memory access restructuring, computation reordering, LDS optimization, register pressure optimization
+- 8: Autotune configs, parameter search (BLOCK_S, num_warps, num_stages -- kernel-level but not algorithmic)
+- 15: Wrapper/launch-config/dispatch-only changes (lowest priority)
+
+Dispatch-path checks are allowed but LOW priority. Only propose them when the
+profile strongly suggests an unfused or misrouted entry path, and still assign
+them priority 15 behind kernel-body algorithmic work.
+
+## Your analysis process
+
+1. Use `str_replace_editor` with command "view" to read the profiling file
+   first. Identify which sub-kernels are real optimization targets vs.
+   framework noise (e.g., PyTorch ATen elementwise ops, ROCm runtime
+   kernels, hipMemcpy internals).
+2. Read the discovery file for kernel metadata (language, inner kernel, etc.).
+3. Read the knowledge base for applicable optimization strategies.
+4. Optionally read baseline metrics, COMMANDMENT.md, deep search findings,
+   or prior results if the paths are provided.
+5. Group related kernels (e.g., multiple Tensile GEMMs with different tile
+   sizes are one target; CK GEMM variants are another).
+6. For each group, propose a specific optimization task naming:
+   - The target sub-kernels
+   - The backend/language (CK, Tensile, Triton, HIP, PyTorch)
+   - Concrete strategies from the knowledge base
+   - Which agent/tool to use (and specific tool commands if applicable)
+   - Expected impact
+7. Prioritize tasks that modify the GPU kernel body code.  Wrapper-only
+   changes (Python-level dispatch, launch config, PyTorch API swaps) must
+   be assigned priority 15 and should only appear after at least 3
+   kernel-body algorithmic tasks have been generated.
+8. If prior round results or tasks are provided, do NOT re-generate tasks
+   for strategies that already appeared in prior rounds, regardless of
+   whether they succeeded or failed. Focus on genuinely new approaches or
+   strategies that build on what worked.
+9. If a "Workload / Backend Guidance" block is present, treat it as
+   mandatory. Generate at least 3 tasks from the "Prefer First" families
+   in that block before proposing anything from the "Deprioritize Until
+   Later" bucket (for example autotune-only, launch-only, or dispatch-only
+   work).
+
+## Output format
+
+When you are done analyzing, call the `submit` tool with the `summary`
+parameter containing a JSON array of task objects. Each task has:
+- "label": short kebab-case identifier (e.g. "openevolve-inner", "ck-tile-tuning")
+- "priority": integer 0-15
+- "agent_type": "strategy_agent", "swe_agent", or "openevolve"
+- "kernel_language": "python", "cpp", or "asm"
+- "num_gpus": integer (default 1). How many GPUs this task needs.
+  OpenEvolve tasks benefit from 2-4 GPUs for parallel candidate evaluation.
+  strategy_agent and swe_agent tasks should use 1 GPU.
+- "task_prompt": detailed instructions for the sub-agent (specific
+  optimization focus, which tools to use, what to measure). This is
+  the FULL prompt the agent will see.
+
+## Rules for task_prompt content
+
+{gpu_rules}
+
+**FORBIDDEN tasks**: NEVER generate tasks that modify the test harness,
+test file, or test command. The test harness is the evaluation contract --
+it defines correctness and must remain unchanged. Tasks like "test harness
+optimization", "test improvement", or "benchmark refactoring" are INVALID.
+
+**REQUIRED focus**: Tasks MUST target the GPU kernel body -- the `@triton.jit`
+function, the HIP `__global__` kernel, the CK template, or the ASM routine.
+The agent should change the *algorithm* or *implementation* inside the kernel.
+Wrapper-level changes (Python dispatch, launch config knobs, PyTorch API
+swaps) are low-value and must not dominate the task list.
+
+**Path deduplication**: The task file metadata already stores kernel_path,
+commandment, baseline_metrics, and profiling paths. Do NOT repeat these
+file paths in the task_prompt body. Instead, reference them generically
+(e.g. "the kernel file", "the COMMANDMENT", "baseline metrics"). The
+sub-agent receives these paths automatically from the task metadata.
+
+**Baseline comparison**: Each task_prompt MUST instruct the sub-agent to
+compare its results against the baseline metrics provided in the task
+metadata. The sub-agent should report the specific metric improvement
+(e.g. duration reduction, bandwidth improvement) relative to baseline.
+
+**COMMANDMENT adherence**: Each task_prompt MUST instruct the sub-agent
+to read and follow the COMMANDMENT file. The COMMANDMENT defines the
+correctness criteria and constraints. Any changes that violate the
+COMMANDMENT must be rejected by the sub-agent itself.
+
+**Verification for strategy_agent and swe_agent tasks**: Each task_prompt
+for strategy_agent or swe_agent tasks MUST include instructions to:
+1. Read the COMMANDMENT and follow its constraints
+2. Verify correctness after making changes (use the `save_and_test` tool)
+3. Profile the result to measure improvement (use the `profile_kernel` tool)
+4. Compare results against baseline metrics and report before/after numbers
+5. If correctness tests fail, revert changes and report failure
+
+OpenEvolve tasks handle verification automatically via COMMANDMENT.md.
+
+Submit ONLY the JSON array via the submit tool. No markdown fences, no explanation.
+""").format(gpu_rules=_GPU_AND_PROFILER_RULES.strip())
+
+
+def _build_agent_restriction_addendum() -> str:
+    """Return a prompt paragraph describing agent restrictions, or empty string."""
+    from minisweagent.agents.agent_spec import ALL_AGENT_TYPES, get_allowed_agent_types
+
+    allowed = get_allowed_agent_types()
+    if allowed is None:
+        return ""
+
+    excluded_raw = os.environ.get("GEAK_EXCLUDED_AGENTS", "").strip()
+    allowed_raw = os.environ.get("GEAK_ALLOWED_AGENTS", "").strip()
+
+    if allowed_raw:
+        agent_list = ", ".join(sorted(allowed))
+        return (
+            f"\n\n**Agent restriction**: Only the following agents are available "
+            f"for this run: {agent_list}. You MUST NOT assign tasks to any other "
+            f"agent type. Use only these agent types in the `agent_type` field.\n"
+        )
+
+    if excluded_raw:
+        excluded = ALL_AGENT_TYPES - allowed
+        excluded_list = ", ".join(sorted(excluded))
+        return (
+            f"\n\n**Agent restriction**: The following agents are NOT available "
+            f"for this run: {excluded_list}. You MUST NOT assign tasks to these "
+            f"agent types. Choose from the remaining available agents instead.\n"
+        )
+
+    return ""
+
+
+_INSTANCE_TEMPLATE = textwrap.dedent("""\
+Generate optimization tasks for the kernel at {{ kernel_path }}.
+
+## Kernel Metadata
+- Name: {{ kernel_name }}
+- Type: {{ kernel_type }}
+- Language: {{ kernel_language }}
+{% if inner_kernel_path %}- Inner kernel: {{ inner_kernel_path }}
+- Inner kernel language: {{ inner_kernel_language }}
+{% endif %}{% if has_autotune %}- Has autotune: yes
+{% endif %}{% if function_names %}- Functions: {{ function_names }}
+{% endif %}
+## Files to read (use `str_replace_editor` with command "view")
+{% if codebase_context_path %}- **Codebase context** (repo layout, key files): {{ codebase_context_path }}
+{% endif %}{% if discovery_path %}- **Discovery** (kernel info, tests, benchmarks): {{ discovery_path }}
+{% endif %}{% if profiling_path %}- **Profiling** (sub-kernels, bottlenecks, metrics): {{ profiling_path }}
+{% endif %}{% if baseline_metrics_path %}- **Baseline metrics**: {{ baseline_metrics_path }}
+{% endif %}{% if commandment_path %}- **COMMANDMENT.md** (evaluation contract): {{ commandment_path }}
+{% endif %}{% if knowledge_base_path %}- **Knowledge base** (optimization strategies): {{ knowledge_base_path }}
+{% endif %}{% if deep_search_path %}- **Deep search findings**: {{ deep_search_path }}
+{% endif %}{% if previous_results_path %}- **Prior round results** (what actually happened): {{ previous_results_path }}
+{% endif %}{% if previous_tasks_path %}- **Prior tasks planned** (avoid repeating): {{ previous_tasks_path }}
+{% endif %}{% if round_evaluations_path %}- **Round evaluations** (orchestrator-verified results): {{ round_evaluations_path }}
+{% endif %}
+{% if memory_context %}
+## Optimization Memory (from past kernel optimization runs)
+{{ memory_context }}
+{% endif %}
+{% if workload_guidance %}
+## Workload / Backend Guidance
+{{ workload_guidance }}
+{% endif %}
+{% if num_gpus > 1 %}## GPU Budget
+Available GPUs: {{ num_gpus }}
+Generate enough tasks so the total num_gpus across all tasks is close to {{ num_gpus }}.
+It is acceptable to leave some GPUs idle rather than padding the batch with
+low-priority wrapper / dispatch work.
+OpenEvolve tasks can use 2-4 GPUs each; strategy_agent and swe_agent tasks use 1 GPU each.
+{% endif %}
+## Instructions
+
+Read the profiling file first to understand the sub-kernel landscape, then
+the discovery file for context. Consult the knowledge base for applicable
+strategies. Finally, submit your task list as JSON via the `submit` tool.
+
+{{ base_task_context }}
+""")
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_optional_float(value: float | None, suffix: str = "") -> str:
+    if value is None:
+        return "unknown"
+    return f"{value:.1f}{suffix}"
+
+
+def _normalized_bottleneck(baseline_metrics: dict[str, Any]) -> str:
+    text = str(baseline_metrics.get("bottleneck", "unknown")).lower().strip()
+    if "latency" in text:
+        return "latency"
+    if "memory" in text:
+        return "memory"
+    if "compute" in text:
+        return "compute"
+    if "lds" in text:
+        return "lds"
+    if "balanced" in text:
+        return "balanced"
+    return "unknown"
+
+
+def _is_hip_like_kernel(kernel: Any) -> bool:
+    path = str(getattr(kernel, "file_path", "")).lower()
+    ext = Path(path).suffix.lower()
+    kernel_type = str(getattr(kernel, "kernel_type", "")).lower()
+    if kernel_type in {"triton", "ck", "asm"}:
+        return False
+    return (
+        kernel_type == "hip"
+        or (
+            ext in {".hpp", ".h", ".cpp", ".cu", ".hip"}
+            and any(token in path for token in ("rocprim", "hip", "rocm"))
+        )
+    )
+
+
+def _is_triton_like_kernel(kernel: Any) -> bool:
+    path = str(getattr(kernel, "file_path", "")).lower()
+    kernel_type = str(getattr(kernel, "kernel_type", "")).lower()
+    if kernel_type == "triton":
+        return True
+    return bool(getattr(kernel, "has_jit_decorator", False)) or ("triton" in path and path.endswith(".py"))
+
+
+def _detect_backend(kernel: Any) -> str:
+    if _is_triton_like_kernel(kernel):
+        return "triton"
+    if _is_hip_like_kernel(kernel):
+        return "hip"
+    return "generic"
+
+
+def _is_search_like_workload(kernel: Any, baseline_metrics: dict[str, Any]) -> bool:
+    evidence_chunks: list[str] = [
+        str(getattr(kernel, "kernel_name", "")),
+        str(getattr(kernel, "file_path", "")),
+        str(baseline_metrics.get("kernel_name", "")),
+    ]
+    for top in baseline_metrics.get("top_kernels", []) or []:
+        evidence_chunks.append(str(top.get("name", "")))
+    haystack = " ".join(evidence_chunks).lower()
+    return any(pat in haystack for pat in _HIP_SEARCH_HINT_PATTERNS)
+
+
+def _profiling_summary_lines(baseline_metrics: dict[str, Any]) -> list[str]:
+    metrics = baseline_metrics.get("metrics", {}) or {}
+    duration_us = _safe_float(baseline_metrics.get("duration_us"))
+    hbm_util = _safe_float(metrics.get("memory.hbm_bandwidth_utilization"))
+    l2_hit = _safe_float(metrics.get("memory.l2_hit_rate"))
+    bottleneck = _normalized_bottleneck(baseline_metrics)
+    return [
+        "Profiling summary:",
+        (
+            f"- Bottleneck: {bottleneck}"
+            f"; kernel duration: {_format_optional_float(duration_us, ' us')}"
+            f"; HBM utilization: {_format_optional_float(hbm_util, '%')}"
+            f"; L2 hit rate: {_format_optional_float(l2_hit, '%')}"
+        ),
+    ]
+
+
+def _build_triton_guidance(kernel: Any, baseline_metrics: dict[str, Any]) -> str:
+    bottleneck = _normalized_bottleneck(baseline_metrics)
+    has_autotune = bool(getattr(kernel, "has_autotune", False))
+
+    prefer_first = [
+        "Algorithmic kernel-body rewrites that change the reduction tree, tiling scheme, decomposition, or math formulation.",
+        "Operation fusion or launch-count reduction when adjacent work can be merged into the Triton kernel body.",
+    ]
+    consider_next = [
+        "Shape-specialized kernel variants when different input regimes clearly want different algorithms or tile structures.",
+        "Kernel-body memory-layout and live-range cleanup that directly supports the hottest profiled path.",
+    ]
+    deprioritize = [
+        "@triton.autotune-only config sweeps.",
+        "Pure num_warps / num_stages / BLOCK_* parameter search without a kernel-body change.",
+        "Python dispatch, import-routing, or wrapper-only edits unless profiling clearly shows the wrapper dominates.",
+    ]
+
+    if bottleneck == "memory":
+        prefer_first.extend(
+            [
+                "Memory-access rewrites inside the kernel body: better blocking, fewer redundant loads/stores, and higher SRAM/L2 reuse.",
+                "Masking, pointer-arithmetic, or load/store simplifications that reduce HBM traffic on the hottest path.",
+            ]
+        )
+        consider_next.append(
+            "Vectorized or blocked load/store patterns when they are part of a broader kernel-body memory-traffic reduction plan."
+        )
+    elif bottleneck == "compute":
+        prefer_first.extend(
+            [
+                "Instruction-count reduction and control-flow simplification inside hot loops.",
+                "MFMA / tl.dot-friendly reformulations, cheaper math primitives, or algorithmic approximations when correct.",
+            ]
+        )
+        consider_next.append(
+            "Register-pressure and live-range reductions that let the compiler schedule the kernel body more efficiently."
+        )
+    elif bottleneck == "latency":
+        prefer_first.extend(
+            [
+                "Fuse adjacent short kernels so each launch performs materially more work.",
+                "Increase work per program or use persistent / multi-tile kernel patterns that amortize launch overhead.",
+            ]
+        )
+        consider_next.append(
+            "Shape-specialized kernel variants for small vs large shapes so short kernels are not forced into one-size-fits-all code."
+        )
+    elif bottleneck == "lds":
+        prefer_first.extend(
+            [
+                "LDS-bank-conflict reduction and staged-access restructuring inside the kernel body.",
+                "Move transient data from LDS to registers when it reduces LDS pressure without hurting occupancy too much.",
+            ]
+        )
+    else:
+        prefer_first.extend(
+            [
+                "Profiling-driven kernel-body simplifications on the hottest sub-kernels instead of generic parameter sweeps.",
+                "Common kernel optimization strategies such as fusion, shape-specialized variants, and memory/computation reordering.",
+            ]
+        )
+
+    if has_autotune:
+        deprioritize.insert(
+            0,
+            "Expanding an existing autotune table without a substantive kernel-body change.",
+        )
+
+    lines = [
+        "Triton backend detected. Prefer profiling-driven kernel-body strategies over autotune or wrapper work.",
+        * _profiling_summary_lines(baseline_metrics),
+        "Planning policy:",
+        "- Fill most task slots with 'Prefer First' families below.",
+        "- Only add autotune / launch / wrapper tasks after at least 3 preferred-family tasks exist.",
+        "- Leave GPUs idle if the remaining ideas are only low-priority wrapper work.",
+        "Prefer First:",
+        *[f"- {item}" for item in prefer_first],
+        "Consider Next:",
+        *[f"- {item}" for item in consider_next],
+        "Deprioritize Until Later:",
+        *[f"- {item}" for item in deprioritize],
+    ]
+    return "\n".join(lines)
+
+
+def _build_hip_guidance(kernel: Any, baseline_metrics: dict[str, Any]) -> str:
+    metrics = baseline_metrics.get("metrics", {}) or {}
+    bottleneck = _normalized_bottleneck(baseline_metrics)
+    hbm_util = _safe_float(metrics.get("memory.hbm_bandwidth_utilization"))
+    bandwidth_deprioritized = bottleneck == "latency" and (hbm_util is None or hbm_util < 10.0)
+    is_search_like = _is_search_like_workload(kernel, baseline_metrics)
+
+    prefer_first = [
+        "Algorithmic HIP kernel-body rewrites that change the search / reduction / tiling structure.",
+        "Common kernel optimizations driven by the hottest profiled path, not by generic occupancy or launch heuristics.",
+    ]
+    consider_next = [
+        "Kernel-body memory-layout, register-pressure, or LDS-usage cleanup that directly helps the profiled bottleneck.",
+        "Size-specialized kernel variants when one generic implementation is serving multiple very different workload regimes.",
+    ]
+    deprioritize = [
+        "Launch-config or occupancy-only tuning.",
+        "Wrapper / dispatch / copy-path edits unless profiling shows they dominate total time.",
+    ]
+
+    if bottleneck == "memory":
+        prefer_first.extend(
+            [
+                "Coalescing, vectorized access, or LDS staging when they directly raise effective bandwidth on the hot path.",
+                "Global-memory traffic reduction by fusing steps or recomputing cheap values instead of reloading them.",
+            ]
+        )
+        consider_next.append(
+            "Wavefront-level memory-access reordering or bank-conflict reduction when it is supported by the profile."
+        )
+    elif bottleneck == "compute":
+        prefer_first.extend(
+            [
+                "Instruction-count reduction, branch simplification, and cheaper per-thread math in the hottest loops.",
+                "Wave intrinsics, MFMA-friendly decomposition, or unrolled inner loops when they reduce compute bottlenecks.",
+            ]
+        )
+    elif bottleneck == "latency":
+        prefer_first.extend(
+            [
+                "Branchless/control-flow simplification that reduces serialized decision cost in short kernels.",
+                "Operation-specific specialization so the hot path does not pay for generic functionality it does not need.",
+                "Wavefront-cooperative or persistent-work patterns that amortize per-launch or per-query overhead.",
+            ]
+        )
+        if is_search_like:
+            prefer_first.extend(
+                [
+                    "Size-specialized kernel variants for separate small / medium / huge haystack paths.",
+                    "Wavefront-cooperative upper-level search or coarse-index narrowing when preprocessing can be amortized.",
+                ]
+            )
+        if bandwidth_deprioritized:
+            deprioritize.insert(0, "Bandwidth-maximization or generic vectorization ideas as the main strategy.")
+            deprioritize.insert(1, "Items-per-thread or throughput-only tuning without a latency-reduction hypothesis.")
+    elif bottleneck == "lds":
+        prefer_first.extend(
+            [
+                "LDS-bank-conflict reduction and staged-access redesign inside the kernel body.",
+                "Register-vs-LDS tradeoff changes that lower LDS pressure on the hot path.",
+            ]
+        )
+    else:
+        prefer_first.extend(
+            [
+                "Fusion, algorithmic simplification, and memory/computation reordering based on the hottest profiled sub-kernels.",
+                "Operation-specific or size-specific kernel variants when the profile suggests one implementation is serving mismatched regimes.",
+            ]
+        )
+
+    lines = [
+        "HIP backend detected. Prefer profiling-driven kernel-body strategies over launch tuning or wrapper work.",
+        * _profiling_summary_lines(baseline_metrics),
+        "Planning policy:",
+        "- Fill most task slots with 'Prefer First' families below.",
+        "- Only add launch / dispatch / wrapper tasks after at least 3 preferred-family tasks exist.",
+        "- Leave GPUs idle if the remaining ideas are only low-priority wrapper work.",
+        "Prefer First:",
+        *[f"- {item}" for item in prefer_first],
+        "Consider Next:",
+        *[f"- {item}" for item in consider_next],
+        "Deprioritize Until Later:",
+        *[f"- {item}" for item in deprioritize],
+    ]
+
+    if is_search_like and bottleneck == "latency":
+        l2_hit = _safe_float(metrics.get("memory.l2_hit_rate"))
+        lines.extend(
+            [
+                "Search / pointer-chasing classifier:",
+                (
+                    f"- Evidence: bottleneck={bottleneck}; HBM utilization={_format_optional_float(hbm_util, '%')}; "
+                    f"L2 hit rate={_format_optional_float(l2_hit, '%')}"
+                ),
+                "- Treat this as latency-bound search work, so branchlessness, specialization, and cooperative search matter more than throughput tuning.",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def _build_workload_guidance(kernel: Any, baseline_metrics: dict[str, Any]) -> str:
+    """Return backend/workload-specific guidance for task planning."""
+    backend = _detect_backend(kernel)
+    if backend == "triton":
+        return _build_triton_guidance(kernel, baseline_metrics)
+    if backend == "hip":
+        return _build_hip_guidance(kernel, baseline_metrics)
+    if not baseline_metrics:
+        return ""
+    lines = [
+        "Backend-specific classifier unavailable, but profiling guidance is still mandatory.",
+        * _profiling_summary_lines(baseline_metrics),
+        "Prefer First:",
+        "- Algorithmic kernel-body rewrites, fusion, and common kernel optimizations suggested by the hottest profiled path.",
+        "Deprioritize Until Later:",
+        "- Autotune-only, launch-only, and dispatch-only work unless profiling strongly implicates them.",
+    ]
+    return "\n".join(lines)
+
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+
+def generate_tasks(
+    discovery_result: DiscoveryResult,
+    base_task_context: str,
+    agent_class: type,
+    model: Any,
+    *,
+    profiling_path: Path | None = None,
+    commandment_path: Path | None = None,
+    baseline_metrics_path: Path | None = None,
+    deep_search_path: Path | None = None,
+    previous_results_dir: Path | None = None,
+    discovery_path: Path | None = None,
+    codebase_context_path: Path | None = None,
+    previous_tasks_dir: Path | None = None,
+    round_evaluations: list[dict[str, Any]] | None = None,
+    current_round: int = 1,
+    num_gpus: int = 1,
+) -> list[AgentTask]:
+    """Generate optimization tasks using an LLM planning agent.
+
+    Args:
+        discovery_result: Output of DiscoveryPipeline.run().
+        base_task_context: Common context prepended to each task prompt.
+        agent_class: Default agent class for tasks (typically StrategyAgent).
+        model: LLM model instance (required).
+        profiling_path: Path to kernel-profile JSON output.
+        commandment_path: Path to COMMANDMENT.md.
+        baseline_metrics_path: Path to baseline_metrics.json.
+        deep_search_path: Path to deep search findings file.
+        previous_results_dir: Path to previous round results directory.
+        discovery_path: Path to the discovery.json file.
+        codebase_context_path: Path to CODEBASE_CONTEXT.md file.
+        previous_tasks_dir: Path to the parent tasks/ directory.
+        round_evaluations: List of orchestrator round evaluation dicts.
+        current_round: Current round number (for scanning prior tasks).
+
+    Returns:
+        List of AgentTask sorted by priority.
+
+    Raises:
+        RuntimeError: If the agent fails to submit results.
+    """
+    if not discovery_result.kernels:
+        return []
+
+    submitted_text = _run_task_agent(
+        discovery_result=discovery_result,
+        base_task_context=base_task_context,
+        model=model,
+        profiling_path=profiling_path,
+        commandment_path=commandment_path,
+        baseline_metrics_path=baseline_metrics_path,
+        deep_search_path=deep_search_path,
+        previous_results_dir=previous_results_dir,
+        discovery_path=discovery_path,
+        codebase_context_path=codebase_context_path,
+        previous_tasks_dir=previous_tasks_dir,
+        round_evaluations=round_evaluations,
+        current_round=current_round,
+        num_gpus=num_gpus,
+    )
+
+    kernel = discovery_result.kernels[0]
+    return _parse_llm_response(
+        submitted_text,
+        agent_class,
+        kernel_path=str(kernel.file_path),
+        commandment_path=str(commandment_path) if commandment_path else None,
+        baseline_metrics_path=str(baseline_metrics_path) if baseline_metrics_path else None,
+    )
+
+
+def generate_tasks_from_content(
+    discovery_result: DiscoveryResult,
+    base_task_context: str,
+    agent_class: type,
+    model: Any,
+    *,
+    profiling_result: dict | None = None,
+    commandment_content: str | None = None,
+    baseline_metrics: dict | None = None,
+    deep_search_content: str | None = None,
+    previous_results_dir: Path | None = None,
+    discovery_path: Path | None = None,
+    codebase_context_path: Path | None = None,
+    previous_tasks_dir: Path | None = None,
+    round_evaluations: list[dict[str, Any]] | None = None,
+    current_round: int = 1,
+    num_gpus: int = 1,
+) -> list[AgentTask]:
+    """Convenience wrapper that materializes in-memory content to temp files.
+
+    Use this when the caller has data in memory (dicts/strings) rather than
+    on disk.  Each non-None content argument is written to a temporary file
+    whose path is then forwarded to :func:`generate_tasks`.
+    """
+    tmp_files: list[Path] = []
+    try:
+        profiling_path = _write_temp(json.dumps(profiling_result, indent=2), ".json") if profiling_result else None
+        if profiling_path:
+            tmp_files.append(profiling_path)
+
+        commandment_path = _write_temp(commandment_content, ".md") if commandment_content else None
+        if commandment_path:
+            tmp_files.append(commandment_path)
+
+        baseline_metrics_path = (
+            _write_temp(json.dumps(baseline_metrics, indent=2), ".json") if baseline_metrics else None
+        )
+        if baseline_metrics_path:
+            tmp_files.append(baseline_metrics_path)
+
+        deep_search_path = _write_temp(deep_search_content, ".md") if deep_search_content else None
+        if deep_search_path:
+            tmp_files.append(deep_search_path)
+
+        return generate_tasks(
+            discovery_result=discovery_result,
+            base_task_context=base_task_context,
+            agent_class=agent_class,
+            model=model,
+            profiling_path=profiling_path,
+            commandment_path=commandment_path,
+            baseline_metrics_path=baseline_metrics_path,
+            deep_search_path=deep_search_path,
+            previous_results_dir=previous_results_dir,
+            discovery_path=discovery_path,
+            codebase_context_path=codebase_context_path,
+            previous_tasks_dir=previous_tasks_dir,
+            round_evaluations=round_evaluations,
+            current_round=current_round,
+            num_gpus=num_gpus,
+        )
+    finally:
+        for f in tmp_files:
+            try:
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+# ============================================================================
+# Agent execution
+# ============================================================================
+
+
+def _write_temp(content: str, suffix: str) -> Path:
+    """Write content to a temporary file and return its path."""
+    fd, name = tempfile.mkstemp(suffix=suffix, prefix=".task_gen_")
+    os.close(fd)
+    Path(name).write_text(content)
+    return Path(name)
+
+
+def _find_knowledge_base(workspace: Path) -> Path | None:
+    """Locate the optimization strategies knowledge base file."""
+    for root in [workspace, workspace.parent, workspace.parent.parent]:
+        p = root / _KNOWLEDGE_BASE_REL
+        if p.exists():
+            return p
+    return None
+
+
+def _run_task_agent(
+    discovery_result: DiscoveryResult,
+    base_task_context: str,
+    model: Any,
+    profiling_path: Path | None,
+    commandment_path: Path | None,
+    baseline_metrics_path: Path | None,
+    deep_search_path: Path | None,
+    previous_results_dir: Path | None,
+    discovery_path: Path | None,
+    codebase_context_path: Path | None = None,
+    previous_tasks_dir: Path | None = None,
+    round_evaluations: list[dict[str, Any]] | None = None,
+    current_round: int = 1,
+    num_gpus: int = 1,
+) -> str:
+    """Run a read-only planning agent and return the submitted JSON text."""
+    from minisweagent.agents.default import DefaultAgent
+    from minisweagent.environments.local import LocalEnvironment
+    from minisweagent.tools.tools_runtime import get_tools_list
+
+    kernel = discovery_result.kernels[0]
+    workspace = discovery_result.workspace_path or kernel.file_path.parent
+
+    read_only_tools = [t for t in get_tools_list() if t["name"] in ("str_replace_editor", "submit")]
+    # AmdLlmModel forwards set_tools() to its _impl; snapshot the actual target.
+    _model_target = getattr(model, "_impl", model)
+    original_tools = list(_model_target.tools) if hasattr(_model_target, "tools") else None
+    # region agent log
+    emit_debug_log(
+        "task_generator.py:_run_task_agent:before_override",
+        "Replacing model tools for task-planning sub-agent",
+        {
+            "workspace": str(workspace),
+            "read_only_tools": tool_names(read_only_tools),
+            "original_tools": tool_names(original_tools),
+            "model_target_type": type(_model_target).__name__,
+            "model_target_id": id(_model_target),
+            "model_before": model_tools_snapshot(model),
+        },
+        hypothesis_id="H1",
+    )
+    # endregion
+    if hasattr(model, "set_tools"):
+        model.set_tools(read_only_tools)
+    else:
+        _model_target.tools = read_only_tools
+
+    tmp_files: list[Path] = []
+    try:
+        env = LocalEnvironment(cwd=str(workspace))
+        kb_path = _find_knowledge_base(Path(workspace))
+
+        prev_results_path: Path | None = None
+        if previous_results_dir and Path(previous_results_dir).is_dir():
+            summary = _scan_previous_results(Path(previous_results_dir))
+            if summary:
+                prev_results_path = _write_temp(summary, "_prev_results.md")
+                tmp_files.append(prev_results_path)
+
+        prev_tasks_path: Path | None = None
+        if previous_tasks_dir and Path(previous_tasks_dir).is_dir() and current_round > 1:
+            tasks_summary = _scan_previous_tasks(Path(previous_tasks_dir), current_round)
+            if tasks_summary:
+                prev_tasks_path = _write_temp(tasks_summary, "_prev_tasks.md")
+                tmp_files.append(prev_tasks_path)
+
+        round_evals_path: Path | None = None
+        if round_evaluations:
+            evals_text = "## Orchestrator Round Evaluations\n\n"
+            for rev in round_evaluations:
+                r_num = rev.get("round", "?")
+                evals_text += f"### Round {r_num}\n"
+                evals_text += f"- Best task: {rev.get('best_task', 'N/A')}\n"
+                fb = rev.get("full_benchmark", {})
+                canonical_speedup = (
+                    fb.get("verified_speedup", "N/A")
+                    if isinstance(fb, dict) and fb
+                    else rev.get("benchmark_speedup", "N/A")
+                )
+                evals_text += f"- Canonical benchmark speedup: {canonical_speedup}x\n"
+                if fb:
+                    evals_text += f"- Verified kernel time: {fb.get('kernel_time_ms', 'N/A')}ms\n"
+                profile = rev.get("profile", {})
+                if profile:
+                    evals_text += f"- Profile comparison: {json.dumps(profile, default=str)[:500]}\n"
+                evals_text += f"- Best patch: {rev.get('best_patch', 'N/A')}\n\n"
+            round_evals_path = _write_temp(evals_text, "_round_evals.md")
+            tmp_files.append(round_evals_path)
+
+        template_vars = {
+            "kernel_path": str(kernel.file_path),
+            "kernel_name": kernel.kernel_name,
+            "kernel_type": kernel.kernel_type,
+            "kernel_language": kernel.kernel_language,
+            "inner_kernel_path": str(kernel.inner_kernel_path) if kernel.inner_kernel_path else "",
+            "inner_kernel_language": kernel.inner_kernel_language or "",
+            "has_autotune": kernel.has_autotune,
+            "function_names": ", ".join(kernel.function_names) if kernel.function_names else "",
+            "codebase_context_path": str(codebase_context_path) if codebase_context_path else "",
+            "discovery_path": str(discovery_path) if discovery_path else "",
+            "profiling_path": str(profiling_path) if profiling_path else "",
+            "commandment_path": str(commandment_path) if commandment_path else "",
+            "baseline_metrics_path": str(baseline_metrics_path) if baseline_metrics_path else "",
+            "knowledge_base_path": str(kb_path) if kb_path else "",
+            "deep_search_path": str(deep_search_path) if deep_search_path else "",
+            "previous_results_path": str(prev_results_path) if prev_results_path else "",
+            "previous_tasks_path": str(prev_tasks_path) if prev_tasks_path else "",
+            "round_evaluations_path": str(round_evals_path) if round_evals_path else "",
+            "base_task_context": base_task_context,
+            "num_gpus": num_gpus,
+            "memory_context": "",
+            "workload_guidance": "",
+        }
+
+        _bm_dict: dict[str, Any] = {}
+        try:
+            from minisweagent.memory.integration import assemble_memory_context
+            from minisweagent.memory.working_notebook import summarize_working_notebook
+            if baseline_metrics_path and Path(baseline_metrics_path).exists():
+                _bm_dict = json.loads(Path(baseline_metrics_path).read_text())
+            _notebook_dir = None
+            if baseline_metrics_path and Path(baseline_metrics_path).exists():
+                _notebook_dir = Path(baseline_metrics_path).resolve().parent / "_working_memory"
+            elif previous_results_dir and Path(previous_results_dir).is_dir():
+                _notebook_dir = Path(previous_results_dir).resolve().parent.parent / "_working_memory"
+            _wm_ctx = summarize_working_notebook(_notebook_dir)
+            _mem = assemble_memory_context(
+                kernel_path=str(kernel.file_path),
+                bottleneck_type=_bm_dict.get("bottleneck"),
+                profiling_metrics=_bm_dict,
+            )
+            combined_memory = "\n\n".join(
+                part.strip()
+                for part in (_wm_ctx, _mem or "")
+                if part and str(part).strip()
+            )
+            if combined_memory:
+                template_vars["memory_context"] = combined_memory
+        except Exception:
+            pass
+
+        template_vars["workload_guidance"] = _build_workload_guidance(kernel, _bm_dict)
+
+        tg_step_limit = int(os.getenv("GEAK_TASKGEN_STEP_LIMIT", "200"))
+        tg_cost_limit = float(os.getenv("GEAK_TASKGEN_COST_LIMIT", "50.0"))
+
+        system_prompt = _SYSTEM_PROMPT + _build_agent_restriction_addendum()
+
+        agent = DefaultAgent(
+            model,
+            env,
+            system_template=system_prompt,
+            instance_template=_INSTANCE_TEMPLATE,
+            step_limit=tg_step_limit,
+            cost_limit=tg_cost_limit,
+        )
+
+        logger.info(
+            "Starting task-generation agent (step_limit=%d, cost_limit=%.1f)",
+            tg_step_limit,
+            tg_cost_limit,
+        )
+
+        exit_type, exit_msg = agent.run(
+            task="generate optimization tasks",
+            **template_vars,
+        )
+
+        if exit_type == "Submitted":
+            return exit_msg
+
+        raise RuntimeError(f"Task-generation agent did not submit results (exit: {exit_type}): {exit_msg[:500]}")
+    finally:
+        if original_tools is not None:
+            if hasattr(model, "set_tools"):
+                model.set_tools(original_tools)
+            else:
+                _model_target.tools = original_tools
+        # region agent log
+        emit_debug_log(
+            "task_generator.py:_run_task_agent:after_restore",
+            "Finished task-planning tool restore",
+            {
+                "restored_tools": tool_names(original_tools),
+                "model_target_type": type(_model_target).__name__,
+                "model_target_id": id(_model_target),
+                "model_after": model_tools_snapshot(model),
+            },
+            hypothesis_id="H1",
+        )
+        # endregion
+        for f in tmp_files:
+            try:
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _parse_llm_response(
+    content: str,
+    agent_class: type,
+    *,
+    kernel_path: str | None = None,
+    commandment_path: str | None = None,
+    baseline_metrics_path: str | None = None,
+) -> list[AgentTask]:
+    """Parse JSON response into AgentTask objects.
+
+    When the LLM sets ``agent_type`` to ``"openevolve"``, the task is
+    assigned to :class:`OpenEvolveWorker` and the required config
+    (kernel_path, commandment_path, baseline_metrics_path) is populated
+    from the caller-supplied paths.
+    """
+    content = content.strip()
+    if content.startswith("```"):
+        lines = content.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        content = "\n".join(lines)
+
+    raw_tasks = json.loads(content)
+    if not isinstance(raw_tasks, list):
+        raise TypeError(f"Expected JSON array, got {type(raw_tasks).__name__}")
+
+    from minisweagent.agents.agent_spec import _agent_type_to_class, filter_agent_type
+
+    type_to_class = _agent_type_to_class()
+
+    tasks: list[AgentTask] = []
+    for item in raw_tasks:
+        if not isinstance(item, dict):
+            continue
+
+        label = str(item.get("label", "unknown"))
+        try:
+            priority = int(item.get("priority", 10))
+        except (ValueError, TypeError):
+            priority = 10  # Default priority if parsing fails
+        priority = max(0, min(15, priority))
+        agent_type = filter_agent_type(str(item.get("agent_type", "strategy_agent")))
+        kernel_language = str(item.get("kernel_language", "python"))
+        task_prompt = str(item.get("task_prompt", ""))
+        try:
+            task_num_gpus = max(1, int(item.get("num_gpus", 1)))
+        except (ValueError, TypeError):
+            task_num_gpus = 1
+
+        if not task_prompt:
+            continue
+
+        resolved_class = type_to_class.get(agent_type, agent_class)
+
+        cfg: dict[str, Any] = {}
+        if agent_type == "openevolve":
+            if kernel_path:
+                cfg["kernel_path"] = kernel_path
+            if commandment_path:
+                cfg["commandment_path"] = commandment_path
+            if baseline_metrics_path:
+                cfg["baseline_metrics_path"] = baseline_metrics_path
+
+        tasks.append(
+            AgentTask(
+                agent_class=resolved_class,
+                task=task_prompt,
+                label=label,
+                priority=priority,
+                kernel_language=kernel_language,
+                config=cfg,
+                num_gpus=task_num_gpus,
+            )
+        )
+
+    if not tasks:
+        raise ValueError("LLM response contained no valid tasks")
+
+    return sorted(tasks, key=lambda t: t.priority)
+
+
+# ============================================================================
+# CLI helpers
+# ============================================================================
+
+
+def _scan_single_round_results(results_dir: Path) -> list[str]:
+    """Scan a single round's results directory and return section strings."""
+    import re as _re
+
+    sections: list[str] = []
+    task_dirs = sorted(
+        d for d in results_dir.iterdir() if d.is_dir() and d.name not in ("worktrees",) and not d.name.startswith(".")
+    )
+    if not task_dirs:
+        return sections
+
+    for td in task_dirs:
+        label = td.name
+        patches = sorted(td.glob("patch_*.patch"))
+        test_outputs = sorted(td.glob("patch_*_test.txt"))
+        log_files = sorted(td.glob("*.log"))
+
+        section = [f"### {label}"]
+        section.append(f"- Patches produced: {len(patches)}")
+
+        for tf in test_outputs[:3]:
+            try:
+                content = tf.read_text(errors="replace")[-2000:]
+                speedups = _re.findall(r"speedup[:\s]+([0-9.]+)x?", content, _re.IGNORECASE)
+                durations = _re.findall(r"duration[:\s]+([0-9.]+)\s*(?:us|µs|ms)", content, _re.IGNORECASE)
+                if speedups:
+                    section.append(f"- {tf.name}: speedup = {speedups[-1]}")
+                elif durations:
+                    section.append(f"- {tf.name}: duration = {durations[-1]}")
+                else:
+                    lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+                    tail = lines[-3:] if len(lines) >= 3 else lines
+                    section.append(f"- {tf.name} (tail): {' | '.join(tail)}")
+            except Exception:
+                section.append(f"- {tf.name}: (unreadable)")
+
+        oe_result = td / "openevolve_result.json"
+        if oe_result.is_file():
+            try:
+                import json as _json
+                oe_data = _json.loads(oe_result.read_text(errors="replace"))
+                section.append(
+                    f"- OpenEvolve: speedup={oe_data.get('speedup', '?')}x, "
+                    f"iterations={oe_data.get('iterations_completed', '?')}, "
+                    f"baseline={oe_data.get('baseline_latency_us', '?')}us, "
+                    f"best={oe_data.get('best_latency_us', '?')}us"
+                )
+            except Exception:
+                pass
+
+        for lf in log_files[:1]:
+            try:
+                content = lf.read_text(errors="replace")[-1000:]
+                if "ERROR" in content or "Traceback" in content:
+                    section.append(f"- Log ({lf.name}): contains errors")
+                else:
+                    section.append(f"- Log ({lf.name}): completed")
+            except Exception:
+                pass
+
+        sections.append("\n".join(section))
+
+    return sections
+
+
+def _scan_previous_results(results_dir: Path) -> str:
+    """Scan previous round results and build a combined summary.
+
+    Accepts either a single round directory (e.g. results/round_1) or
+    the parent results/ directory containing multiple round_N subdirs.
+    Returns a Markdown summary covering ALL prior rounds.
+    """
+    sections: list[str] = []
+
+    round_subdirs = sorted(
+        d for d in results_dir.iterdir()
+        if d.is_dir() and d.name.startswith("round_")
+    ) if results_dir.is_dir() else []
+
+    if round_subdirs:
+        for rd in round_subdirs:
+            round_sections = _scan_single_round_results(rd)
+            if round_sections:
+                sections.append(f"## {rd.name.replace('_', ' ').title()} Results\n")
+                sections.extend(round_sections)
+    else:
+        single_sections = _scan_single_round_results(results_dir)
+        if single_sections:
+            sections.append("## Previous Round Results\n")
+            sections.extend(single_sections)
+
+    if not sections:
+        return ""
+
+    return "\n\n".join(sections) + "\n"
+
+
+def _scan_previous_tasks(tasks_dir: Path, current_round: int) -> str:
+    """Scan prior rounds' task directories and summarize what was planned.
+
+    Reads YAML frontmatter (label, agent_type, priority) and the first
+    ~200 chars of the task body from each .md task file under
+    tasks/round_1 through tasks/round_{current_round - 1}.
+    """
+    import re as _re
+
+    sections: list[str] = []
+    for r in range(1, current_round):
+        round_dir = tasks_dir / f"round_{r}"
+        if not round_dir.is_dir():
+            continue
+        task_files = sorted(round_dir.glob("*.md"))
+        if not task_files:
+            continue
+        round_items: list[str] = []
+        for tf in task_files:
+            try:
+                text = tf.read_text(errors="replace")
+                parts = _re.split(r"^---\s*$", text, maxsplit=2, flags=_re.MULTILINE)
+                if len(parts) >= 3:
+                    import yaml as _yaml
+                    fm = _yaml.safe_load(parts[1]) or {}
+                    body_preview = parts[2].strip()[:200]
+                else:
+                    fm = {}
+                    body_preview = text.strip()[:200]
+                label = fm.get("label", tf.stem)
+                agent_type = fm.get("agent_type", "unknown")
+                priority = fm.get("priority", "?")
+                round_items.append(
+                    f"- **{label}** (agent={agent_type}, priority={priority}): "
+                    f"{body_preview}{'...' if len(body_preview) >= 200 else ''}"
+                )
+            except Exception:
+                round_items.append(f"- {tf.name}: (unreadable)")
+
+        if round_items:
+            sections.append(f"## Round {r} Planned Tasks\n\n" + "\n".join(round_items))
+
+    if not sections:
+        return ""
+
+    return "\n\n".join(sections) + "\n"
+
+
+# ============================================================================
+# CLI
+# ============================================================================
+
+
+def main():
+    """Generate optimization tasks from the command line."""
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="Generate optimization tasks using an LLM planning agent",
+    )
+    parser.add_argument("--kernel-path", default=None, help="Path to the kernel file")
+    parser.add_argument(
+        "--from-discovery",
+        default=None,
+        metavar="FILE",
+        help="Read discovery.json and extract kernel-path and repo-root",
+    )
+    parser.add_argument("--profiling", default=None, help="Path to kernel-profile JSON output")
+    parser.add_argument("--commandment", default=None, help="Path to COMMANDMENT.md")
+    parser.add_argument("--baseline-metrics", default=None, help="Path to baseline_metrics.json")
+    parser.add_argument("--model", default=None, help="Model name (default: from config/env)")
+    parser.add_argument("--repo-root", default=None, help="Repository root (for discovery)")
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        metavar="DIR",
+        help="Write task files to this directory (one .md per task) instead of JSON to stdout",
+    )
+    parser.add_argument(
+        "--from-results",
+        default=None,
+        metavar="DIR",
+        help="Previous round results directory (for iterative refinement)",
+    )
+    parser.add_argument(
+        "--deep-search",
+        default=None,
+        metavar="FILE",
+        help="Path to deep search findings (JSON or Markdown file)",
+    )
+    parser.add_argument(
+        "--codebase-context",
+        default=None,
+        metavar="FILE",
+        help="Path to CODEBASE_CONTEXT.md (auto-detected from --from-discovery directory if not set)",
+    )
+    parser.add_argument(
+        "--benchmark-baseline",
+        default=None,
+        metavar="FILE",
+        help="Path to benchmark_baseline.txt (canonical benchmark output from preprocessing)",
+    )
+    parser.add_argument(
+        "--round",
+        type=int,
+        default=1,
+        help="Round number for task file frontmatter (default: 1)",
+    )
+    parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=1,
+        help="Number of available GPUs (guides task count and GPU allocation, default: 1)",
+    )
+    from minisweagent.run.pipeline_helpers import add_agent_filter_args, apply_agent_filter_env
+
+    add_agent_filter_args(parser)
+
+    args = parser.parse_args()
+    apply_agent_filter_env(args)
+
+    # Populate from discovery JSON if provided (explicit flags override)
+    disc_json = None
+    test_command = None
+    if args.from_discovery:
+        disc_json = json.loads(Path(args.from_discovery).read_text())
+        if not args.kernel_path:
+            args.kernel_path = (disc_json.get("kernel") or {}).get("file")
+        if not args.repo_root:
+            args.repo_root = disc_json.get("workspace")
+        focused = disc_json.get("focused_test") or {}
+        if focused.get("focused_command"):
+            test_command = focused["focused_command"]
+        else:
+            for t in disc_json.get("tests") or []:
+                if t.get("command"):
+                    test_command = t["command"]
+                    break
+
+    # Auto-detect codebase context from --from-discovery directory
+    if not args.codebase_context and args.from_discovery:
+        _ctx_sibling = Path(args.from_discovery).parent / "CODEBASE_CONTEXT.md"
+        if _ctx_sibling.exists():
+            args.codebase_context = str(_ctx_sibling)
+
+    if not args.kernel_path:
+        parser.error("--kernel-path is required (or provide --from-discovery)")
+
+    kernel_path = Path(args.kernel_path).resolve()
+    if not kernel_path.exists():
+        print(f"ERROR: kernel path not found: {args.kernel_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if not disc_json:
+        # No pre-computed discovery JSON -- run automated-test-discovery
+        print(f"[task-generator] Running discovery on {kernel_path}...", file=sys.stderr)
+        try:
+            from automated_test_discovery.server import discover as atd_discover
+
+            _discover_fn = getattr(atd_discover, "fn", atd_discover)
+            disc_json = _discover_fn(
+                kernel_path=str(kernel_path),
+                output_dir=str(kernel_path.parent),
+            )
+        except Exception as e:
+            print(f"ERROR: discovery failed: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(f"[task-generator] Loading discovery from {args.from_discovery}...", file=sys.stderr)
+
+    discovery_result = DiscoveryResult.from_dict(disc_json, kernel_path)
+
+    if not discovery_result.kernels:
+        print("ERROR: no kernels found by discovery", file=sys.stderr)
+        sys.exit(1)
+
+    # Create model (REQUIRED)
+    try:
+        from minisweagent.run.pipeline_helpers import load_geak_model
+
+        model = load_geak_model(args.model or os.environ.get("GEAK_MODEL"))
+        print(f"[task-generator] Using model: {model.config.model_name}", file=sys.stderr)
+    except Exception as e:
+        print(
+            f"ERROR: task-generator requires an LLM model. Set GEAK_MODEL or use --model. ({e})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Placeholder agent class for CLI output
+    from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+
+    agent_class = StrategyInteractiveAgent
+
+    base_task_context = f"Optimize the kernel at {kernel_path} for maximum performance."
+
+    # Resolve file paths (pass through to the agent, not loaded into memory)
+    profiling_path = Path(args.profiling).resolve() if args.profiling else None
+    commandment_path = Path(args.commandment).resolve() if args.commandment else None
+    baseline_metrics_path = Path(args.baseline_metrics).resolve() if args.baseline_metrics else None
+    deep_search_path = Path(args.deep_search).resolve() if args.deep_search else None
+    previous_results_dir = Path(args.from_results).resolve() if args.from_results else None
+    discovery_path = Path(args.from_discovery).resolve() if args.from_discovery else None
+    codebase_context_path = Path(args.codebase_context).resolve() if args.codebase_context else None
+
+    # Generate tasks
+    tasks = generate_tasks(
+        discovery_result=discovery_result,
+        base_task_context=base_task_context,
+        agent_class=agent_class,
+        model=model,
+        profiling_path=profiling_path,
+        commandment_path=commandment_path,
+        baseline_metrics_path=baseline_metrics_path,
+        deep_search_path=deep_search_path,
+        previous_results_dir=previous_results_dir,
+        discovery_path=discovery_path,
+        codebase_context_path=codebase_context_path,
+        num_gpus=args.num_gpus,
+    )
+
+    # Print summary to stderr
+    print(f"\n[task-generator] Generated {len(tasks)} task(s):\n", file=sys.stderr)
+    for t in tasks:
+        print(f"  [{t.priority:2d}] {t.label} ({t.kernel_language})", file=sys.stderr)
+
+    # Output: directory of task files or JSON to stdout
+    if args.output:
+        from minisweagent.run.task_file import write_task_file
+
+        out_dir = Path(args.output)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        from minisweagent.agents.agent_spec import _agent_class_to_type
+
+        _AGENT_CLASS_TO_TYPE = _agent_class_to_type()
+
+        manifest = []
+        for i, t in enumerate(tasks):
+            filename = f"{t.priority:02d}_{t.label}.md"
+            task_path = out_dir / filename
+
+            metadata = {
+                "label": t.label,
+                "priority": t.priority,
+                "agent_type": _AGENT_CLASS_TO_TYPE.get(t.agent_class, "strategy_agent"),
+                "kernel_language": t.kernel_language,
+                "kernel_path": str(kernel_path),
+                "repo_root": args.repo_root,
+                "commandment": args.commandment,
+                "baseline_metrics": args.baseline_metrics,
+                "profiling": args.profiling,
+                "codebase_context": args.codebase_context,
+                "benchmark_baseline": args.benchmark_baseline,
+                "num_gpus": t.num_gpus,
+                "test_command": test_command,
+                "round": args.round,
+            }
+
+            body = f"# {t.label}\n\n{t.task}\n"
+            write_task_file(task_path, metadata, body)
+
+            manifest.append(
+                {
+                    "index": i,
+                    "label": t.label,
+                    "priority": t.priority,
+                    "kernel_language": t.kernel_language,
+                    "file": str(task_path),
+                }
+            )
+
+        print(f"\n[task-generator] Wrote {len(tasks)} task file(s) to {out_dir}/", file=sys.stderr)
+        print(json.dumps(manifest, indent=2))
+    else:
+        output = []
+        for i, t in enumerate(tasks):
+            output.append(
+                {
+                    "index": i,
+                    "label": t.label,
+                    "priority": t.priority,
+                    "kernel_language": t.kernel_language,
+                    "task_prompt_preview": t.task[:300] + ("..." if len(t.task) > 300 else ""),
+                }
+            )
+        print(json.dumps(output, indent=2))
+
+
+if __name__ == "__main__":
+    main()
