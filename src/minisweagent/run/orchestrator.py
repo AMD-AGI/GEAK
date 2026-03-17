@@ -1449,7 +1449,7 @@ def _run_homogeneous_orchestrator(
         metadata: dict[str, Any] = {
             "label": "kernel_optimization",
             "priority": 10,
-            "agent_type": "swe_agent",
+            "agent_type": "strategy_agent",
             "kernel_path": preprocess_ctx.get("kernel_path"),
             "repo_root": preprocess_ctx.get("repo_root"),
             "test_command": preprocess_ctx.get("test_command"),

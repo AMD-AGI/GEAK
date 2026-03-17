@@ -252,76 +252,6 @@ class ParallelAgent(DefaultAgent):
         return workdir_path
 
     @staticmethod
-    def _bootstrap_git_repo(repo_path: Path, console=None) -> bool:
-        """Bootstrap a minimal git repository for non-git directories.
-
-        Creates .git, adds .gitignore to exclude build artifacts, and creates
-        an initial commit. This allows unified git diff-based patch generation.
-
-        Returns True if successful, False otherwise.
-        """
-        import subprocess
-
-        try:
-            subprocess.run(
-                ["git", "init", "-b", "geak-bootstrap"],
-                cwd=repo_path, check=True, capture_output=True, text=True, timeout=30,
-            )
-
-            gitignore_path = repo_path / ".gitignore"
-            gitignore_content = "\n".join([
-                "# GEAK auto-generated gitignore for build artifacts",
-                "build/",
-                "*/build/",
-                ".rocprofv3/",
-                "__pycache__/",
-                "*.pyc",
-                "*.o",
-                "*.so",
-                "*.a",
-                "*.log",
-                "*.dat",
-                "optimization_logs/",
-                "*/_logs/",
-                "CMakeCache.txt",
-                "CMakeFiles/",
-                ".pytest_cache/",
-                "*.egg-info/",
-                ".geak_resolved/",
-                "traj.json",
-            ])
-            if gitignore_path.exists():
-                existing = gitignore_path.read_text()
-                if "# GEAK auto-generated" not in existing:
-                    gitignore_path.write_text(existing + "\n" + gitignore_content)
-            else:
-                gitignore_path.write_text(gitignore_content)
-
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=repo_path, check=True, capture_output=True, text=True, timeout=120,
-            )
-            subprocess.run(
-                ["git", "-c", "user.name=geak-bootstrap", "-c", "user.email=geak@local",
-                 "commit", "-m", "GEAK bootstrap commit", "--allow-empty"],
-                cwd=repo_path, check=True, capture_output=True, text=True, timeout=60,
-            )
-
-            if console:
-                console.print("[bold green]Git repo bootstrapped successfully[/bold green]")
-            return True
-
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr or e.stdout or str(e)
-            if console:
-                console.print(f"[bold red]Failed to bootstrap git repo: {error_msg}[/bold red]")
-            return False
-        except Exception as e:
-            if console:
-                console.print(f"[bold red]Failed to bootstrap git repo: {e}[/bold red]")
-            return False
-
-    @staticmethod
     def _replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
         """Replace repository paths with worktree path in text.
 
@@ -438,7 +368,6 @@ class ParallelAgent(DefaultAgent):
                 worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             else:
                 worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
-                cls._bootstrap_git_repo(worktree_path, console)
             worktree_path_str = str(worktree_path.resolve())
 
             if console:
@@ -583,7 +512,6 @@ class ParallelAgent(DefaultAgent):
                 worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             else:
                 worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
-                cls._bootstrap_git_repo(worktree_path, console)
             worktree_path_str = str(worktree_path.resolve())
 
             label = spec.label or spec.agent_class.__name__
@@ -738,11 +666,6 @@ class ParallelAgent(DefaultAgent):
 
         # Sort tasks by priority (lower = runs first)
         sorted_tasks = sorted(enumerate(tasks), key=lambda t: t[1].priority)
-        _label_counts: dict[str, int] = {}
-        for _, t in sorted_tasks:
-            _lbl = t.label or ""
-            _label_counts[_lbl] = _label_counts.get(_lbl, 0) + 1
-        _has_dup_labels = any(c > 1 for c in _label_counts.values())
 
         def execute_task(task_id: int, task) -> tuple[int, Any, Any, Any]:
             """Execute a single task on dynamically-assigned GPU(s)."""
@@ -775,14 +698,10 @@ class ParallelAgent(DefaultAgent):
                         cls._create_worktree(repo_path, wt_path)
                 else:
                     cls._create_copy_workdir(repo_path, wt_path)
-                    cls._bootstrap_git_repo(wt_path, console)
                 wt_path_str = str(wt_path.resolve())
 
                 # Each task gets its own patch dir named by label (persists across worktree resets)
-                if _has_dup_labels:
-                    dir_name = f"{task.label}_{task_id}" if task.label else f"task_{task_id}"
-                else:
-                    dir_name = task.label if task.label else f"task_{task_id}"
+                dir_name = task.label if task.label else f"task_{task_id}"
                 task_patch_dir = (base_patch_dir / dir_name).resolve()
                 task_patch_dir.mkdir(parents=True, exist_ok=True)
 
