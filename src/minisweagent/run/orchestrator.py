@@ -2184,58 +2184,6 @@ def run_orchestrator(
         _dashboard.update_checklist_item("evaluation", "pending", "")
         _dashboard.update_checklist_item("finalize", "pending", "")
 
-    if _dashboard:
-        kernel_path = str(preprocess_ctx.get("kernel_path", ""))
-        discovery = preprocess_ctx.get("discovery") or {}
-        profiling = preprocess_ctx.get("profiling") or {}
-        baseline = preprocess_ctx.get("baseline_metrics") or {}
-        harness_path = str(preprocess_ctx.get("harness_path") or "")
-        commandment = str(preprocess_ctx.get("commandment") or "")
-
-        _dashboard.update_checklist_item(
-            "resolve",
-            "done" if kernel_path else "pending",
-            Path(kernel_path).name if kernel_path else "",
-        )
-        _dashboard.update_checklist_item(
-            "discovery",
-            "done" if discovery else "pending",
-            f"{len(discovery.get('tests', []))} tests" if discovery else "",
-        )
-        _dashboard.update_checklist_item(
-            "harness",
-            "done" if harness_path else "pending",
-            Path(harness_path).name if harness_path else "",
-        )
-        profile_error = str(profiling.get("error") or "") if isinstance(profiling, dict) else ""
-        _dashboard.update_checklist_item(
-            "profile",
-            "error" if profile_error else ("done" if profiling else "pending"),
-            profile_error[:32] if profile_error else ("profile.json" if profiling else ""),
-        )
-        baseline_detail = ""
-        if baseline:
-            if baseline.get("benchmark_duration_us"):
-                baseline_detail = f"{float(baseline['benchmark_duration_us']) / 1000.0:.4f} ms"
-            elif baseline.get("duration_us"):
-                baseline_detail = f"{float(baseline['duration_us']) / 1000.0:.4f} ms"
-            else:
-                baseline_detail = "metrics ready"
-        _dashboard.update_checklist_item(
-            "baseline",
-            "done" if baseline else "pending",
-            baseline_detail,
-        )
-        _dashboard.update_checklist_item(
-            "commandment",
-            "done" if commandment else "pending",
-            "COMMANDMENT.md" if commandment else "",
-        )
-        _dashboard.update_checklist_item("round", "pending", f"0/{max_rounds}")
-        _dashboard.update_checklist_item("dispatch", "pending", "")
-        _dashboard.update_checklist_item("evaluation", "pending", "")
-        _dashboard.update_checklist_item("finalize", "pending", "")
-
     def _print(msg: str) -> None:
         if _dashboard:
             _dashboard.parse_log_line(msg)

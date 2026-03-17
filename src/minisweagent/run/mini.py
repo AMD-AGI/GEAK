@@ -6,7 +6,6 @@
 import copy
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -32,6 +31,7 @@ from minisweagent.run.utils.config_editor import load_and_merge_configs
 from minisweagent.run.utils.save import save_traj
 from minisweagent.run.utils.task_parser import _resolve_path_case
 from minisweagent.utils.log import logger
+
 
 def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tuple[str, object]:
     """Run test discovery on the resolved kernel and return formatted results for the task prompt.
@@ -125,7 +125,6 @@ def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -
     resolved = resolve_kernel_url(kernel_url, clone_into=clone_into)
     if resolved.get("error"):
         raise SystemExit(f"Kernel URL resolve failed: {resolved['error']}")
-    _inject_resolved_kernel._last_resolved = resolved
     path = resolved["local_file_path"]
     line_num = resolved.get("line_number")
     kernel_name = get_kernel_name_at_line(path, line_num) if line_num else None
@@ -205,7 +204,6 @@ More information about the usage: [bold green]https://mini-swe-agent.com/latest/
 # fmt: off
 @app.command(help=_HELP_TEXT)
 def main(
-    ctx: typer.Context,
     visual: bool = typer.Option(False, "-v", "--visual", help="Toggle (pager-style) UI (Textual) depending on the MSWEA_VISUAL_MODE_DEFAULT environment setting",),
     model_name: str | None = typer.Option( None, "-m", "--model", help="Model to use",),
     model_class: str | None = typer.Option(None, "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),

@@ -198,3 +198,8 @@ optimization_output/
 # IDE
 .cursor/
 .vscode/
+.geak_resolved/
+.geak_pristine/
+.geak_seed/
+geak_output/
+patches/

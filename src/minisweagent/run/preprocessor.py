@@ -349,7 +349,6 @@ def run_preprocessor(
     console=None,
     deterministic: bool = False,
     deterministic_harness: str | None = None,
-    resolved_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -396,14 +395,11 @@ def run_preprocessor(
         else "--- Step 1/7: Resolve kernel URL ---"
     )
 
-    if resolved_override is not None:
-        resolved = dict(resolved_override)
-    else:
-        from minisweagent.tools.resolve_kernel_url_impl import resolve_kernel_url
+    from minisweagent.tools.resolve_kernel_url_impl import resolve_kernel_url
 
-        resolved = resolve_kernel_url(kernel_url, clone_into=str(output_dir))
-        if resolved.get("error"):
-            raise RuntimeError(f"resolve-kernel-url failed: {resolved['error']}")
+    resolved = resolve_kernel_url(kernel_url, clone_into=str(output_dir))
+    if resolved.get("error"):
+        raise RuntimeError(f"resolve-kernel-url failed: {resolved['error']}")
 
     kernel_path = resolved["local_file_path"]
     repo_root = resolved.get("local_repo_path") or str(Path(kernel_path).parent)
