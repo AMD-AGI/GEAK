@@ -38,9 +38,10 @@ In addition to standard bash commands, you can use MCP tools with the @amd: pref
 
 ### Writing Effective @amd:query Topics
 
-**CRITICAL**: Generic queries produce unhelpful results. Your query topic MUST be specific and include relevant context.
+**CRITICAL**: Generic queries produce unhelpful results. Your query topic MUST include the kernel name and be specific and include relevant context.
 
 **Query Format Guidelines:**
+- Include the **kernel name** (e.g., `floyd_warshall`, the kernel name is from file name of the kernel code, e.g., `test_floyd_warshall.hip` -> `floyd_warshall`)
 - Include the **specific GPU model** (e.g., MI300X, MI250, MI210)
 - Include **specific APIs** found in the code (e.g., `hipLaunchKernelGGL`, `hipMalloc`, `torch.compile`)
 - Include **kernel characteristics** (e.g., shared memory size, block dimensions, grid dimensions)
@@ -56,20 +57,20 @@ In addition to standard bash commands, you can use MCP tools with the @amd: pref
 
 **GOOD queries - Write as natural language sentences (40-60 words):**
 
-Include: (1) GPU model/architecture, (2) current implementation details, (3) problem with numbers.
+Include: (1) kernel name, (2) GPU model/architecture, (3) current implementation details, (4) problem with numbers.
 
-**❌ DON'T write like this:** "MI308X gfx942 bf16 SiLU scalar load vectorized memory bandwidth"
-**✅ DO write like this:** "How to optimize bfloat16 SiLU kernel on MI308X gfx942? Current implementation uses scalar __bfloat162float() loads, each thread loading one bf16 element, achieving ~800 GB/s. Need vectorized load/store (uint32_t packing, __hip_bfloat162) for better memory coalescing."
+**❌ DON'T write like this:** "floyd_warshall kernel on MI308X gfx942"
+**✅ DO write like this:** "How to optimize floyd_warshall kernel resolve shared memory bank conflicts when using float 32x32 tile with blockDim(16,16) on MI308X gfx942? Need to understand optimal padding or access pattern changes."
 
 **How to construct a query:**
 1. Get GPU model from `rocm-smi` or `rocminfo`
-2. Read code to identify: data types, memory access patterns, current bottleneck
-3. Combine into query: GPU model + current implementation + problem + optimization goal
+2. Read code to identify: kernel name from kernel code file name, data types, memory access patterns, current bottleneck
+3. Combine into query: kernel name + GPU model + current implementation + problem + optimization goal
 
 MCP tools are executed like bash commands in a code block:
 
 ```bash
-@amd:query {"topic": "How to resolve shared memory bank conflicts when using float 32x32 tile with blockDim(16,16) on <YOUR_GPU_MODEL>? Need to understand optimal padding or access pattern changes."}
+@amd:query {"topic": "How to optimze floyd_warshall kernel resolve shared memory bank conflicts when using float 32x32 tile with blockDim(16,16) on <YOUR_GPU_MODEL>? Need to understand optimal padding or access pattern changes."}
 ```
 
 You can use MCP tools at any step when you need GPU optimization guidance or reference examples.
@@ -97,13 +98,14 @@ Follow this systematic workflow to optimize GPU kernels. Each phase should be co
 ### Phase 2: Codebase Analysis
 
 2. **Analyze the target kernel** by finding and reading relevant files
+   - Identify the kernel name from kernel code file name
    - Understand the current implementation
    - Identify the kernel's computational pattern
    - Note resource usage (registers, shared memory, threads)
    - Note the key points in benchmark test
 
 **[MCP Integration]** After analyzing the code, use `@amd:query` to search for architecture-specific optimization information:
-- Example: `@amd:query {"topic": "How to resolve shared memory bank conflicts for float[32][32] tile on <YOUR_GPU_MODEL>? Current implementation shows bank conflicts in profiler."}`
+- Example: `@amd:query {"topic": "How to optimze floyd_warshall kernel resolve shared memory bank conflicts for float[32][32] tile on <YOUR_GPU_MODEL>? Current implementation shows bank conflicts in profiler."}`
 - Query should include: GPU model + specific APIs/patterns found + optimization goal
 
 ### Phase 3: Baseline Measurement

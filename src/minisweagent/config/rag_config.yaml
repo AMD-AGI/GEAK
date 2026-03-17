@@ -5,7 +5,7 @@ retrieval:
   embed_top_k: 25          # Number of embedding retrieval candidates
   bm25_top_k: 25           # Number of BM25 retrieval candidates
   enable_bm25: true        # Enable BM25 dual-channel recall
-  mcp_top_k: 8             # Number of final results returned
+  mcp_top_k: 3             # Number of final results returned
 
 reranker:
   enable_reranker: true    # Enable reranking stage
@@ -20,10 +20,10 @@ summary:
   rag_subagent_model: "claude-opus-4.5"
 
 chunking:
-  chunk_size: 1000           # Max characters per chunk
+  chunk_size: 1500           # Max characters per chunk
   chunk_overlap: 200         # Overlap characters between chunks
   min_chunk_size: 200        # Chunks shorter than this are discarded
-  enable_header_split: true  # Enable Markdown header splitting (phase 1)
+  enable_header_split: false  # Enable Markdown header splitting (phase 1)
 
 debug:
   verbose: false           # Print verbose MCP tool logs
