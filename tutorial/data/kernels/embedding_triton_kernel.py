@@ -4,6 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def embedding_kernel(
     weight,
@@ -34,11 +35,22 @@ def embedding_kernel(
         dim_mask = offs_d < hiden_size
         load_mask = id_mask[:, None] & dim_mask[None, :]
         store_mask = n_ctx_mask[:, None] & dim_mask[None, :]
-        vecs = tl.load(weight + token_ids[:, None] * stride_weight_seq + offs_d[None, :], mask=load_mask, other=0.0)
-        tl.store(out + offs_seq[:, None] * stride_out_seq + offs_d[None, :], vecs, mask=store_mask)
+        vecs = tl.load(
+            weight + token_ids[:, None] * stride_weight_seq + offs_d[None, :],
+            mask=load_mask,
+            other=0.0,
+        )
+        tl.store(
+            out + offs_seq[:, None] * stride_out_seq + offs_d[None, :],
+            vecs,
+            mask=store_mask,
+        )
+
 
 @torch.no_grad()
-def embedding(input_ids, weight: torch.Tensor, vob_start_id, vob_end_id, out: torch.Tensor):
+def embedding(
+    input_ids, weight: torch.Tensor, vob_start_id, vob_end_id, out: torch.Tensor
+):
     BLOCK_N = 64
     BLOCK_NN = 1
     BLOCK_DMODEL = triton.next_power_of_2(weight.shape[1])
@@ -64,66 +76,58 @@ def embedding(input_ids, weight: torch.Tensor, vob_start_id, vob_end_id, out: to
     )
 
 
-
-
 ##################################################################################################################################################
 
 
 import torch
 
+
 def test_embedding():
     # 参数定义
-    vocab_size = 1000         # 词汇表大小
-    embedding_dim = 512       # 嵌入维度
-    sequence_length = 128     # 输入序列长度
-    vob_start_id = 10         # 词汇表起始 ID
-    vob_end_id = 1000         # 词汇表结束 ID
+    vocab_size = 1000  # 词汇表大小
+    embedding_dim = 512  # 嵌入维度
+    sequence_length = 128  # 输入序列长度
+    vob_start_id = 10  # 词汇表起始 ID
+    vob_end_id = 1000  # 词汇表结束 ID
 
     # 创建测试输入张量
     input_ids = torch.randint(
-        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device='mlu'
+        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device="mlu"
     )
-    weight = torch.randn(
-        vocab_size, embedding_dim, dtype=torch.float32, device='mlu'
-    )
-    out = torch.zeros(
-        sequence_length, embedding_dim, dtype=torch.float32, device='mlu'
-    )
+    weight = torch.randn(vocab_size, embedding_dim, dtype=torch.float32, device="mlu")
+    out = torch.zeros(sequence_length, embedding_dim, dtype=torch.float32, device="mlu")
 
     # 调用嵌入函数
     embedding(input_ids, weight, vob_start_id, vob_end_id, out)
 
     # 保存结果
     results = {}
-    results['test_case_1'] = out.clone()
+    results["test_case_1"] = out.clone()
 
     # 测试不同的输入
     input_ids = torch.randint(
-        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device='mlu'
+        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device="mlu"
     )
     embedding(input_ids, weight, vob_start_id, vob_end_id, out)
-    results['test_case_2'] = out.clone()
+    results["test_case_2"] = out.clone()
 
     # 测试不同的词汇表范围
     vob_start_id = 0
     vob_end_id = 500
     input_ids = torch.randint(
-        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device='mlu'
+        vob_start_id, vob_end_id, (sequence_length,), dtype=torch.int32, device="mlu"
     )
     embedding(input_ids, weight, vob_start_id, vob_end_id, out)
-    results['test_case_3'] = out.clone()
+    results["test_case_3"] = out.clone()
 
     # 测试不同的嵌入维度
     embedding_dim = 256
-    weight = torch.randn(
-        vocab_size, embedding_dim, dtype=torch.float32, device='mlu'
-    )
-    out = torch.zeros(
-        sequence_length, embedding_dim, dtype=torch.float32, device='mlu'
-    )
+    weight = torch.randn(vocab_size, embedding_dim, dtype=torch.float32, device="mlu")
+    out = torch.zeros(sequence_length, embedding_dim, dtype=torch.float32, device="mlu")
     embedding(input_ids, weight, vob_start_id, vob_end_id, out)
-    results['test_case_4'] = out.clone()
+    results["test_case_4"] = out.clone()
 
     return results
+
 
 result_gold = test_embedding()

@@ -11,7 +11,7 @@ from sin_computation import sin_triton
 
 # Import reference kernel from kernels directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-KERNELS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'kernels'))
+KERNELS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "kernels"))
 sys.path.insert(0, KERNELS_DIR)
 from sin_computation import sin_triton as sin_triton_ref
 
@@ -21,14 +21,17 @@ import torch
 import triton
 import triton.language as tl
 
+
 class performance_metrics(Performance_Metrics):
     def __init__(self, dtype=None, is_backward=False, **kwargs):
-        super().__init__('sin_computation', dtype=dtype, is_backward=is_backward, **kwargs)
-        
+        super().__init__(
+            "sin_computation", dtype=dtype, is_backward=is_backward, **kwargs
+        )
+
     def get_input_tensors(self):
         self.input_tensors = []
         for i in range(12, 26):
-            size = 2 ** i
+            size = 2**i
             input_tensor = torch.rand(size, dtype=torch.float32)
             self.input_tensors.append(input_tensor)
 
@@ -39,7 +42,7 @@ class performance_metrics(Performance_Metrics):
         out = torch.empty_like(input_tensor)
         sin_triton(input_tensor, out)
         return out
-    
+
     def call_op_ref(self, input_tensor):
         out = torch.empty_like(input_tensor)
         sin_triton_ref(input_tensor, out)
@@ -49,13 +52,14 @@ class performance_metrics(Performance_Metrics):
         total_bytes = 2 * input_tensor.numel() * input_tensor.element_size()
         GBPS = total_bytes / (runtime / 1000) / 1e9
         return GBPS
-    
+
     def get_tflops(self, input_tensor, runtime):
         FLOPS = float(input_tensor.numel())
         TFLOPS = FLOPS / (runtime / 1000) / 1e12
         return TFLOPS
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     op_perf = performance_metrics()
     op_perf.get_input_tensors()
     op_perf.get_do_bench_config(warmup=100, rep=1000)

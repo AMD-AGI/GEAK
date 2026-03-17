@@ -24,14 +24,13 @@ from .display import (
 )
 
 __all__ = [
-    'setup_environment',
-    'print_header',
-    'print_section', 
-    'print_config',
-    'display_kernel_info',
-    'load_results',
-    'display_results_summary',
-    'display_generated_code',
-    'display_strategy',
+    "setup_environment",
+    "print_header",
+    "print_section",
+    "print_config",
+    "display_kernel_info",
+    "load_results",
+    "display_results_summary",
+    "display_generated_code",
+    "display_strategy",
 ]
-
