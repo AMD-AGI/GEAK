@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -477,6 +478,13 @@ class SaveAndTestTool:
         """Get current changes as patch content."""
         ctx = self.context
         cwd = ctx.cwd
+
+        if ctx.test_command:
+            cd_match = re.match(r'^cd\s+([^\s&]+)\s*&&', ctx.test_command)
+            if cd_match:
+                task_dir = cd_match.group(1)
+                if Path(task_dir).is_dir():
+                    cwd = task_dir
 
         if self._is_git_repo(Path(cwd)):
             excludes = [
