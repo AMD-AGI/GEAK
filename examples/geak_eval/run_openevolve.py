@@ -607,20 +607,26 @@ def build_config(
     os.makedirs(eval_dir, exist_ok=True)
     config.evaluator.eval_dir = eval_dir
 
-    # Set API key from environment if not in config
-    resolved_key = (
+    # Set API key from environment if not in config.
+    # Anthropic backend uses ANTHROPIC_API_KEY; OpenAI backend uses
+    # AMD_LLM_API_KEY / OPENAI_API_KEY.
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    openai_key = (
         api_key
         or os.environ.get("AMD_LLM_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
     )
-    if resolved_key:
-        for model_cfg in config.llm.models:
-            if not model_cfg.api_key:
-                model_cfg.api_key = resolved_key
-        for model_cfg in config.llm.evaluator_models:
-            if not model_cfg.api_key:
-                model_cfg.api_key = resolved_key
-        os.environ["OPENAI_API_KEY"] = resolved_key
+
+    for model_cfg in config.llm.models + config.llm.evaluator_models:
+        if model_cfg.api_key:
+            continue
+        if getattr(model_cfg, "backend", "openai") == "anthropic" and anthropic_key:
+            model_cfg.api_key = anthropic_key
+        elif openai_key:
+            model_cfg.api_key = openai_key
+
+    if openai_key:
+        os.environ["OPENAI_API_KEY"] = openai_key
 
     return config
 

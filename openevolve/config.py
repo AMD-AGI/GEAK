@@ -22,6 +22,7 @@ class LLMModelConfig:
     api_key: Optional[str] = None
     api_version: str = ""  # Default API version for OpenAI models
     name: str = None
+    backend: str = "openai"  # "openai" or "anthropic"
 
     # Weight for model in ensemble
     weight: float = 1.0

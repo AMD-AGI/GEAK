@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 from openevolve.llm.base import LLMInterface
 from openevolve.llm.openai import OpenAILLM
+from openevolve.llm.anthropic_llm import AnthropicLLM
 from openevolve.config import LLMModelConfig
 from openevolve.llm.sampling import get_sampling_function
 
@@ -25,8 +26,12 @@ class LLMEnsemble:
         self.models_cfg = models_cfg
 
 
-        # Initialize models from the configuration
-        self.models = [OpenAILLM(model_cfg) for model_cfg in models_cfg]
+        # Initialize models from the configuration, selecting backend per model
+        self.models = [
+            AnthropicLLM(model_cfg) if model_cfg.backend == "anthropic"
+            else OpenAILLM(model_cfg)
+            for model_cfg in models_cfg
+        ]
 
         # Extract and normalize model weights
         self.weights = [model.weight for model in models_cfg]

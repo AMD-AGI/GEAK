@@ -5,20 +5,20 @@ max_iterations: 10
 checkpoint_interval: 5
 log_level: "INFO"
 
-# LLM configuration - uses AMD LLM gateway (OpenAI-compatible endpoint)
+# LLM configuration - native Anthropic API (set ANTHROPIC_API_KEY env var)
 llm:
   sampling:
     fn: "random"
   models:
-    - name: "claude-opus-4-5"
+    - name: "claude-haiku-4-5"
+      backend: "anthropic"
       weight: 1.0
-      api_base: "https://llm-api.amd.com/claude3/deployments/claude-opus-4-5"
-      api_key: null  # Set via OPENAI_API_KEY env var (= AMD_LLM_API_KEY)
+      api_key: null  # Set via ANTHROPIC_API_KEY env var
 
   evaluator_models:
-    - name: "claude-opus-4-5"
+    - name: "claude-haiku-4-5"
+      backend: "anthropic"
       weight: 1.0
-      api_base: "https://llm-api.amd.com/claude3/deployments/claude-opus-4-5"
       api_key: null
 
 prompt:
