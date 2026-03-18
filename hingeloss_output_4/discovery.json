@@ -1,0 +1,76 @@
+{
+  "kernel": {
+    "name": "hingeloss",
+    "type": "unknown",
+    "file": "/workspace/GEAK/HingeLoss/hingeloss.py",
+    "functions": []
+  },
+  "workspace": "/workspace/GEAK",
+  "tests": [
+    {
+      "file": "/workspace/GEAK/HingeLoss/test_harness_translation.py",
+      "name": "test_harness_translation.py",
+      "confidence": 4.2,
+      "command": "python /workspace/GEAK/HingeLoss/test_harness_translation.py"
+    },
+    {
+      "file": "/workspace/GEAK/hingeloss_output_2/results/round_1/worktrees/slot_0/test_harness_translation.py",
+      "name": "test_harness_translation.py",
+      "confidence": 3.2,
+      "command": "python /workspace/GEAK/hingeloss_output_2/results/round_1/worktrees/slot_0/test_harness_translation.py"
+    },
+    {
+      "file": "/workspace/GEAK/hingeloss_output_3/results/round_2/worktrees/slot_0/test_harness_translation.py",
+      "name": "test_harness_translation.py",
+      "confidence": 3.2,
+      "command": "python /workspace/GEAK/hingeloss_output_3/results/round_2/worktrees/slot_0/test_harness_translation.py"
+    },
+    {
+      "file": "/workspace/GEAK/hingeloss_output_3/results/round_1/worktrees/slot_0/test_harness_translation.py",
+      "name": "test_harness_translation.py",
+      "confidence": 3.2,
+      "command": "python /workspace/GEAK/hingeloss_output_3/results/round_1/worktrees/slot_0/test_harness_translation.py"
+    },
+    {
+      "file": "/workspace/GEAK/hingeloss_output_1/results/round_1/worktrees/slot_0/test_harness.py",
+      "name": "test_harness.py",
+      "confidence": 3.0,
+      "command": "python /workspace/GEAK/hingeloss_output_1/results/round_1/worktrees/slot_0/test_harness.py"
+    }
+  ],
+  "benchmarks": [
+    {
+      "file": "/workspace/GEAK/HingeLoss/test_harness_translation.py",
+      "name": "test_harness_translation.py",
+      "confidence": 4.05,
+      "command": "python /workspace/GEAK/HingeLoss/test_harness_translation.py"
+    },
+    {
+      "file": "/workspace/GEAK/hingeloss_output_2/results/round_1/worktrees/slot_0/test_harness_translation.py",
+      "name": "test_harness_translation.py",
+      "confidence": 3.05,
+      "command": "python /workspace/GEAK/hingeloss_output_2/results/round_1/worktrees/slot_0/test_harness_translation.py"
+    },
+    {
+      "file": "/workspace/GEAK/hingeloss_output_3/results/round_2/worktrees/slot_0/test_harness_translation.py",
+      "name": "test_harness_translation.py",
+      "confidence": 3.05,
+      "command": "python /workspace/GEAK/hingeloss_output_3/results/round_2/worktrees/slot_0/test_harness_translation.py"
+    },
+    {
+      "file": "/workspace/GEAK/hingeloss_output_3/results/round_1/worktrees/slot_0/test_harness_translation.py",
+      "name": "test_harness_translation.py",
+      "confidence": 3.05,
+      "command": "python /workspace/GEAK/hingeloss_output_3/results/round_1/worktrees/slot_0/test_harness_translation.py"
+    },
+    {
+      "file": "/workspace/GEAK/hingeloss_output_1/results/round_1/worktrees/slot_0/test_harness.py",
+      "name": "test_harness.py",
+      "confidence": 2.8,
+      "command": "python /workspace/GEAK/hingeloss_output_1/results/round_1/worktrees/slot_0/test_harness.py"
+    }
+  ],
+  "total_tests_found": 57,
+  "total_benchmarks_found": 56,
+  "summary": "Found 57 test(s) and 56 benchmark(s) for hingeloss (unknown kernel). Recommended test: /workspace/GEAK/HingeLoss/test_harness_translation.py"
+}

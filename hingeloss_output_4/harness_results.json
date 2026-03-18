@@ -1,0 +1,34 @@
+[
+  {
+    "mode": "correctness",
+    "success": true,
+    "returncode": 0,
+    "stdout": "=== Running in Baseline mode ===\n\n[Baseline] Running correctness tests on 5 shapes...\n\u2713 All 5 baseline correctness tests passed\n",
+    "stderr": "",
+    "duration_s": 9.76
+  },
+  {
+    "mode": "profile",
+    "success": true,
+    "returncode": 0,
+    "stdout": "=== Running in Baseline mode ===\n\n[Baseline] Running profile mode on 5 shapes...\n\u2713 Baseline profile run completed on 5 shapes\n",
+    "stderr": "",
+    "duration_s": 9.75
+  },
+  {
+    "mode": "benchmark",
+    "success": true,
+    "returncode": 0,
+    "stdout": "=== Running in Baseline mode ===\n\n[Baseline] Running benchmark on 5 shapes with 20 iterations...\n  PyTorch shape (   128,    128): 0.044866 ms\n  PyTorch shape (  2048,   2048): 0.077505 ms\n  PyTorch shape (  8192,   8192): 0.441474 ms\n  PyTorch shape ( 16384,  16384): 1.850732 ms\n  PyTorch shape ( 32768,  32768): 7.695080 ms\n\n[Baseline] PyTorch median latency: 0.441474 ms\nGEAK_RESULT_LATENCY_MS=0.441474\n",
+    "stderr": "",
+    "duration_s": 9.89
+  },
+  {
+    "mode": "full-benchmark",
+    "success": true,
+    "returncode": 0,
+    "stdout": "=== Running in Baseline mode ===\n\n[Baseline] Running benchmark on 9 shapes with 20 iterations...\n  PyTorch shape (   128,    128): 0.044867 ms\n  PyTorch shape (   256,    256): 0.054982 ms\n  PyTorch shape (   512,    512): 0.048862 ms\n  PyTorch shape (  1024,   1024): 0.050535 ms\n  PyTorch shape (  2048,   2048): 0.063393 ms\n  PyTorch shape (  4096,   4096): 0.135961 ms\n  PyTorch shape (  8192,   8192): 0.437638 ms\n  PyTorch shape ( 16384,  16384): 1.862328 ms\n  PyTorch shape ( 32768,  32768): 7.724433 ms\n\n[Baseline] PyTorch median latency: 0.063393 ms\nGEAK_RESULT_LATENCY_MS=0.063393\n",
+    "stderr": "",
+    "duration_s": 10.02
+  }
+]

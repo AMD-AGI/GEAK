@@ -1,0 +1,26 @@
+{
+  "round": 1,
+  "best_patch": "/workspace/GEAK/hingeloss_output_4/results/round_1/pytorch_to_flydsl_translation/patch_22.patch",
+  "best_task": "pytorch_to_flydsl_translation",
+  "benchmark_speedup": 1.0,
+  "full_benchmark": {
+    "stdout": "WARNING: Could not load FlyDSL kernel from /workspace/GEAK/hingeloss_output_4/_eval_worktree/hingeloss_flydsl.py, falling back to baseline mode\n=== Running in Baseline mode ===\n\n[Baseline] Running benchmark on 9 shapes with 10 iterations...\n  PyTorch shape (   128,    128): 0.046769 ms\n  PyTorch shape (   256,    256): 0.055483 ms\n  PyTorch shape (   512,    512): 0.051146 ms\n  PyTorch shape (  1024,   1024): 0.051466 ms\n  PyTorch shape (  2048,   2048): 0.063895 ms\n  PyTorch shape (  4096,   4096): 0.135020 ms\n  PyTorch shape (  8192,   8192): 0.433081 ms\n  PyTorch shape ( 16384,  16384): 1.957958 ms\n  PyTorch shape ( 32768,  32768): 7.800257 ms\n\n[Baseline] PyTorch median latency: 0.063895 ms\nGEAK_RESULT_LATENCY_MS=0.063895\n",
+    "returncode": 0,
+    "success": true,
+    "baseline": "=== Running in Baseline mode ===\n\n[Baseline] Running benchmark on 9 shapes with 10 iterations...\n  PyTorch shape (   128,    128): 0.046359 ms\n  PyTorch shape (   256,    256): 0.055572 ms\n  PyTorch shape (   512,    512): 0.050665 ms\n  PyTorch shape (  1024,   1024): 0.051106 ms\n  PyTorch shape (  2048,   2048): 0.064937 ms\n  PyTorch shape (  4096,   4096): 0.134639 ms\n  PyTorch shape (  8192,   8192): 0.426512 ms\n  PyTorch shape ( 16384,  16384): 1.883830 ms\n  PyTorch shape ( 32768,  32768): 7.670333 ms\n\n[Baseline] PyTorch median latency: 0.064937 ms\nGEAK_RESULT_LATENCY_MS=0.064937",
+    "verified_speedup": 1.0163,
+    "candidate_ms": 0.063895,
+    "baseline_ms": 0.064937
+  },
+  "profile_comparison": {
+    "duration_us": {
+      "baseline": 1686.619,
+      "optimized": 1682.8079999999998,
+      "change_pct": -0.2
+    },
+    "bottleneck": {
+      "baseline": "balanced",
+      "optimized": "balanced"
+    }
+  }
+}

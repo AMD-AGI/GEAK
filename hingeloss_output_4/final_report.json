@@ -1,0 +1,15 @@
+{
+  "status": "auto_finalized",
+  "summary": "Best result: pytorch_to_flydsl_translation (round_2) with 1.01x speedup. Patch: /workspace/GEAK/hingeloss_output_4/results/round_2/pytorch_to_flydsl_translation/patch_0.patch",
+  "best_round": "round_2",
+  "best_task": "pytorch_to_flydsl_translation",
+  "best_speedup": 1.008776,
+  "best_speedup_verified": 1.008776,
+  "best_patch": "/workspace/GEAK/hingeloss_output_4/results/round_2/pytorch_to_flydsl_translation/patch_0.patch",
+  "best_patch_size_bytes": 16715,
+  "best_patch_analysis": "Deterministic: baseline=0.4340ms (benchmark_baseline.txt), candidate=0.4303ms from patch_0. Speedup=1.0088x. Patch=16715B.",
+  "round_summaries": [
+    "## round_1\n## Previous Round Results\n\n\n### pytorch_to_flydsl_translation\n- Patches produced: 23\n- patch_0_test.txt (tail): PyTorch shape ( 32768,  32768): 7.796861 ms | [Baseline] PyTorch median latency: 0.442676 ms | GEAK_RESULT_LATENCY_MS=0.442676\n- patch_10_test.txt (tail): Expected 1.0854002237319946 but got 1.0867679119110107. | Absolute difference: 0.0013676881790161133 (up to 1e-05 allowed) | Relative difference: 0.0012600772960166817 (up to 0.0001 allowed)\n- patch_11_test.txt (tail): Expected 1.0854002237319946 but got 1.0867679119110107. | Absolute difference: 0.0013676881790161133 (up to 1e-05 allowed) | Relative difference: 0.0012600772960166817 (up to 0.0001 allowed)\n- Log (select_agent.log): completed\n",
+    "## round_2\n## Previous Round Results\n\n\n### pytorch_to_flydsl_translation\n- Patches produced: 22\n- patch_0_test.txt (tail): PyTorch shape ( 32768,  32768): 7.755850 ms | [Baseline] PyTorch median latency: 0.430267 ms | GEAK_RESULT_LATENCY_MS=0.430267\n- patch_10_test.txt (tail): Expected 1.0854002237319946 but got 1.07929527759552. | Absolute difference: 0.006104946136474609 (up to 1e-05 allowed) | Relative difference: 0.005624603720352681 (up to 0.0001 allowed)\n- patch_11_test.txt (tail): Expected 1.0854002237319946 but got 1.07929527759552. | Absolute difference: 0.006104946136474609 (up to 1e-05 allowed) | Relative difference: 0.005624603720352681 (up to 0.0001 allowed)\n- Log (task_0.log): completed\n"
+  ]
+}

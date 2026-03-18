@@ -1,0 +1,11 @@
+{
+  "best_patch_id": "patch_0",
+  "best_patch_speedup": 1.008776,
+  "best_patch_file": "/workspace/GEAK/hingeloss_output_4/results/round_2/pytorch_to_flydsl_translation/patch_0.patch",
+  "best_patch_test_output": "/workspace/GEAK/hingeloss_output_4/results/round_2/pytorch_to_flydsl_translation/patch_0_test.txt",
+  "best_patch_size_bytes": 16715,
+  "baseline_latency_ms": 0.434043,
+  "candidate_latency_ms": 0.430267,
+  "baseline_source": "benchmark_baseline.txt",
+  "llm_selection_analysis": "Deterministic: baseline=0.4340ms (benchmark_baseline.txt), candidate=0.4303ms from patch_0. Speedup=1.0088x. Patch=16715B."
+}

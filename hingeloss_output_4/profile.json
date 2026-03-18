@@ -1,0 +1,124 @@
+{
+  "success": true,
+  "backend": "metrix",
+  "results": [
+    {
+      "gpu_info": {
+        "detected": true,
+        "device_id": "0",
+        "vendor": "AMD",
+        "architecture": "gfx942",
+        "model": "AMD Instinct MI300X",
+        "compute_units": 304,
+        "peak_hbm_bandwidth_gbs": 5300.0,
+        "peak_l2_bandwidth_gbs": 11000.0,
+        "l2_size_mb": 256.0,
+        "lds_size_per_cu_kb": 64.0,
+        "wavefront_size": 64,
+        "fp32_tflops": 163.4,
+        "fp64_tflops": 81.7
+      },
+      "kernels": [
+        {
+          "name": "__amd_rocclr_copyBuffer",
+          "duration_us": 2.857333333333333,
+          "bottleneck": "latency",
+          "observations": [
+            "Classified as latency-bound (HBM util: 0.0%, severely under-utilized)"
+          ],
+          "metrics": {
+            "duration_us": 2.857333333333333,
+            "duration_us_min": 2.804,
+            "duration_us_max": 2.944,
+            "memory.hbm_bandwidth_utilization": 0.0017640262771262555,
+            "memory.l2_hit_rate": 30.99885189437428
+          }
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int, bool)#1})",
+          "duration_us": 521.936,
+          "bottleneck": "balanced",
+          "observations": [
+            "Classified as balanced",
+            "L2 hit rate: 36.4%",
+            "HBM utilization: 10.2%"
+          ],
+          "metrics": {
+            "duration_us": 521.936,
+            "duration_us_min": 521.612,
+            "duration_us_max": 522.25,
+            "memory.hbm_bandwidth_utilization": 10.168556980748871,
+            "memory.l2_hit_rate": 36.4236030657186
+          }
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnOther_add<float>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnOther_add<float>, std::array<char*, 2ul>)",
+          "duration_us": 479.52866666666665,
+          "bottleneck": "balanced",
+          "observations": [
+            "Classified as balanced",
+            "L2 hit rate: 33.3%",
+            "HBM utilization: 11.6%"
+          ],
+          "metrics": {
+            "duration_us": 479.52866666666665,
+            "duration_us_min": 477.594,
+            "duration_us_max": 482.898,
+            "memory.hbm_bandwidth_utilization": 11.5998276398265,
+            "memory.l2_hit_rate": 33.348373657263494
+          }
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>)",
+          "duration_us": 447.7253333333333,
+          "bottleneck": "balanced",
+          "observations": [
+            "Classified as balanced",
+            "L2 hit rate: 33.4%",
+            "HBM utilization: 12.8%"
+          ],
+          "metrics": {
+            "duration_us": 447.7253333333333,
+            "duration_us_min": 447.279,
+            "duration_us_max": 448.077,
+            "memory.hbm_bandwidth_utilization": 12.786784613466807,
+            "memory.l2_hit_rate": 33.3604197683559
+          }
+        },
+        {
+          "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::MeanOps<float, float, float, float>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::MeanOps<float, float, float, float>, unsigned int, float, 4, 4>)",
+          "duration_us": 238.27800000000002,
+          "bottleneck": "balanced",
+          "observations": [
+            "Classified as balanced",
+            "L2 hit rate: 0.2%",
+            "HBM utilization: 12.3%"
+          ],
+          "metrics": {
+            "duration_us": 238.27800000000002,
+            "duration_us_min": 235.712,
+            "duration_us_max": 240.436,
+            "memory.hbm_bandwidth_utilization": 12.282082369921428,
+            "memory.l2_hit_rate": 0.20087754472478705
+          }
+        },
+        {
+          "name": "__amd_rocclr_fillBufferAligned",
+          "duration_us": 1.7073333333333334,
+          "bottleneck": "latency",
+          "observations": [
+            "Classified as latency-bound (HBM util: 0.0%, severely under-utilized)"
+          ],
+          "metrics": {
+            "duration_us": 1.7073333333333334,
+            "duration_us_min": 1.618,
+            "duration_us_max": 1.826,
+            "memory.hbm_bandwidth_utilization": 0.0007987165374068418,
+            "memory.l2_hit_rate": 40.229885057471265
+          }
+        }
+      ],
+      "device_id": "0"
+    }
+  ]
+}

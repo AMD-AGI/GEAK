@@ -1,0 +1,9 @@
+{
+  "best_patch_id": "patch_22",
+  "best_patch_speedup": 1.0,
+  "best_patch_file": "/workspace/GEAK/hingeloss_output_4/results/round_1/pytorch_to_flydsl_translation/patch_22.patch",
+  "best_patch_test_output": "/workspace/GEAK/hingeloss_output_4/results/round_1/pytorch_to_flydsl_translation/patch_22_test.txt",
+  "llm_selection_analysis": "Analyzed 22 patches (patch_1 through patch_22) against baseline (patch_0). Baseline shows PyTorch median latency of 0.442676 ms. Only 4 patches successfully completed: patch_19 (2.328219 ms), patch_20 (2.343279 ms), patch_21 (2.343730 ms), and patch_22 (2.302208 ms). All other patches (1-18) failed with various errors including TypeError, verification errors, and compilation failures. Among successful patches, patch_22 achieved the lowest FlyDSL latency at 2.302208 ms, resulting in a speedup of 0.192x (baseline_latency / patch_latency = 0.442676 / 2.302208 = 0.192). While this represents a slowdown compared to PyTorch baseline, patch_22 is the best performing FlyDSL translation among all attempts. Note that for larger tensor shapes (16384, 32768), patch_22 does show speedups of 1.24x and 1.38x over PyTorch, but smaller shapes drag down the median performance. [Clamped: no patch beat true baseline 0.4340ms]",
+  "baseline_latency_ms": 0.434043,
+  "baseline_source": "benchmark_baseline.txt"
+}
