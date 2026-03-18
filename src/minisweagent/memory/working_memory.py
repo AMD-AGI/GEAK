@@ -192,9 +192,22 @@ class WorkingMemory:
         overall = re.search(r"Overall:\s*([0-9]+(?:\.[0-9]+)?)x", output, re.IGNORECASE)
         if overall:
             speedup = float(overall.group(1))
-            if speedup > self.best_speedup:
-                self.best_strategy = self.pending_strategy
-                self.best_change_category = self.pending_change_category
+        else:
+            # Fallback: parse GEAK_RESULT_GEOMEAN_SPEEDUP or GEAK_RESULT_SPEEDUP when Overall: absent
+            # (e.g. moe harness before fix, or harnesses that only output speedup)
+            fallback = re.search(
+                r"GEAK_RESULT_(?:GEOMEAN_)?SPEEDUP=([0-9]+(?:\.[0-9]+)?)",
+                output,
+                re.IGNORECASE,
+            )
+            if fallback:
+                speedup = float(fallback.group(1))
+            else:
+                speedup = None
+        if speedup is not None and speedup > self.best_speedup:
+            self.best_strategy = self.pending_strategy
+            self.best_change_category = self.pending_change_category
+            self.update_speedup(speedup)
 
         if "Patch saved:" in output or "Test status:" in output:
             self.pending_strategy = ""

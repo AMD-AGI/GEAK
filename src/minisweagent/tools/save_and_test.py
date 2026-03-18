@@ -32,6 +32,7 @@ class SaveAndTestContext:
     log_fn: Callable[[str], None] | None = None
     patch_counter: int = 0
     helper_harness_logged: bool = False
+    benchmark_baseline_path: str | Path | None = None
 
 
 class SaveAndTestTool:
@@ -233,13 +234,30 @@ class SaveAndTestTool:
         # endregion
 
     def _find_true_baseline_file(self) -> Path | None:
-        """Walk upward from patch_output_dir to find the original benchmark baseline."""
+        """Find the canonical benchmark baseline file.
+
+        Prefers explicit benchmark_baseline_path from task config (avoids worktree
+        path recursion). Falls back to walking upward from patch_output_dir.
+        """
         ctx = self.context
-        if not ctx or not ctx.patch_output_dir:
+        if not ctx:
+            return None
+
+        # Canonical path from task config (parallel agent passes this)
+        if ctx.benchmark_baseline_path:
+            p = Path(ctx.benchmark_baseline_path)
+            if p.is_file():
+                return p.resolve()
+            # May be a directory; check for benchmark_baseline.txt inside
+            candidate = p / "benchmark_baseline.txt" if p.is_dir() else p
+            if candidate.is_file():
+                return candidate.resolve()
+
+        if not ctx.patch_output_dir:
             return None
 
         current = Path(ctx.patch_output_dir).resolve()
-        for _ in range(8):
+        for _ in range(12):
             candidate = current / "benchmark_baseline.txt"
             if candidate.is_file():
                 return candidate

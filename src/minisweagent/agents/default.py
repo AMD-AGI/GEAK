@@ -42,6 +42,7 @@ class AgentConfig:
     test_command: str | None = None
     patch_output_dir: str | None = None
     metric: str | None = None
+    benchmark_baseline_path: str | None = None
     # Strategy manager configuration
     use_strategy_manager: bool = False
     strategy_file_path: str = ".optimization_strategies.md"
@@ -192,6 +193,7 @@ class DefaultAgent:
             base_repo_path=self.base_repo_path,
             log_fn=self._log_message,
             patch_counter=self.patch_counter,
+            benchmark_baseline_path=getattr(self.config, "benchmark_baseline_path", None),
         )
 
         save_and_test_tool = self.toolruntime._tool_table.get("save_and_test")

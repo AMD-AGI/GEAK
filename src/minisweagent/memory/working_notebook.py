@@ -62,6 +62,15 @@ def parse_speedup_report(text: str) -> dict[str, Any]:
         report["overall_speedup"] = float(overall.group(1))
         report["baseline_ms"] = float(overall.group(2))
         report["candidate_ms"] = float(overall.group(3))
+    else:
+        # Fallback: GEAK_RESULT_GEOMEAN_SPEEDUP or GEAK_RESULT_SPEEDUP (e.g. moe harness)
+        fallback = re.search(
+            r"GEAK_RESULT_(?:GEOMEAN_)?SPEEDUP=([0-9]+(?:\.[0-9]+)?)",
+            text,
+            re.IGNORECASE,
+        )
+        if fallback:
+            report["overall_speedup"] = float(fallback.group(1))
 
     per_shape: dict[str, dict[str, float]] = {}
     for match in _PER_SHAPE_RE.finditer(text):

@@ -95,6 +95,39 @@ def _get_backend() -> str:
     return os.environ.get("GEAK_MEMORY_BACKEND", "sqlite").strip().lower()
 
 
+def _log_cross_session_issue(
+    issue: str,
+    kernel_path: str | None = None,
+    kernel_category: str | None = None,
+    details: str | None = None,
+    **kwargs: object,
+) -> None:
+    """Log cross-session issues for diagnostics. Cross-session may be non-functional;
+    this preserves evidence for debugging."""
+    import json
+    import time
+
+    entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "issue": issue,
+        "kernel_path": kernel_path,
+        "kernel_category": kernel_category,
+        "details": details,
+        **kwargs,
+    }
+    logger.info("CROSS_SESSION_ISSUE [%s] kernel=%s category=%s details=%s", issue, kernel_path, kernel_category, details)
+    try:
+        log_path = Path(os.environ.get(
+            "MSWEA_GLOBAL_CONFIG_DIR",
+            Path.home() / ".config" / "mini-swe-agent",
+        )) / "cross_session_issues.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
 def _format_factory_outcomes(
     outcomes: list[dict], kernel_category: str | None, bottleneck_type: str | None,
 ) -> str:
@@ -226,6 +259,14 @@ def assemble_memory_context(
                         profiling_metrics=profiling_metrics,
                     )
                 mem.close()
+                if not ctx:
+                    _log_cross_session_issue(
+                        "assemble_empty",
+                        kernel_path=kernel_path,
+                        kernel_category=kernel_category,
+                        details="DB has 0 outcomes or no matching category; format_memory_context returned empty",
+                        backend=backend,
+                    )
             if ctx:
                 # Apply SAGE forgetting filter if enabled
                 if _is_enabled_opt_in("GEAK_MEMORY_NO_SAGE"):
@@ -244,8 +285,21 @@ def assemble_memory_context(
                         pass
 
                 blocks["cross_session"] = ctx
+            if not _is_disabled("GEAK_MEMORY_NO_CROSSSESSION") and "cross_session" not in blocks:
+                _log_cross_session_issue(
+                    "assemble_no_block",
+                    kernel_path=kernel_path,
+                    kernel_category=kernel_category,
+                    details="Cross-session enabled but no block added (empty DB, backend error, or format returned empty)",
+                )
         except Exception as e:
             logger.debug("Cross-session memory failed: %s", e)
+            _log_cross_session_issue(
+                "assemble_failed",
+                kernel_path=kernel_path,
+                kernel_category=kernel_category,
+                details=str(e),
+            )
 
     # UCB1 anti-fixation guidance (KernelBand-inspired)
     if _is_enabled_opt_in("GEAK_MEMORY_NO_ANTIFIXATION"):
@@ -290,8 +344,10 @@ def assemble_memory_context(
         from minisweagent.memory.context_budget import enforce_budget
         result = enforce_budget(
             gpu_specs=blocks.get("gpu_specs", ""),
+            commandment_status="",
             pitfalls="",
             strategy_effectiveness="",
+            anti_fixation=blocks.get("anti_fixation", ""),
             cross_kernel=blocks.get("cross_session", ""),
             reme_insights=blocks.get("reme", ""),
             principles=blocks.get("principles", ""),
@@ -383,6 +439,13 @@ def record_optimization_outcome(
             is_valid, reason = verify_outcome(speedup_achieved, steps_taken, cost_dollars)
             if not is_valid:
                 logger.warning("Outcome failed write verification: %s", reason)
+                _log_cross_session_issue(
+                    "record_skipped_verify",
+                    kernel_path=kernel_path,
+                    kernel_category=kernel_category,
+                    details=reason,
+                    speedup_achieved=speedup_achieved,
+                )
                 return
         except Exception:
             pass
@@ -463,3 +526,11 @@ def record_optimization_outcome(
                 mem.close()
         except Exception as e:
             logger.warning("Failed to record outcome: %s", e)
+            _log_cross_session_issue(
+                "record_failed",
+                kernel_path=kernel_path,
+                kernel_category=kernel_category,
+                details=str(e),
+                speedup_achieved=speedup_achieved,
+                strategy_name=strategy_name,
+            )

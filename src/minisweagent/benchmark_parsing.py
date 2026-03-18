@@ -96,6 +96,31 @@ def _universal_latency_fallback(text: str) -> float | None:
     return candidates[-1] if candidates else None
 
 
+def _parse_moe_table_geomean_ms(text: str) -> float | None:
+    """Extract geometric mean of Kernel (ms) from moe-style benchmark table.
+
+    Format: data rows with Shape (M=..., N=..., K=...), Ref (ms), Kernel (ms), Speedup.
+    Used when baseline has GEAK_RESULT_GEOMEAN_SPEEDUP but no GEAK_RESULT_LATENCY_MS.
+    """
+    import math
+
+    # Match data rows: M=N, N=N, K=N  ref_ms  kernel_ms  speedup
+    pattern = re.compile(
+        r"M=\d+.*?\s+([\d.]+)\s+([\d.]+)\s+[\d.]+x",
+        re.MULTILINE,
+    )
+    matches = pattern.findall(text)
+    if not matches:
+        return None
+    kernel_ms_values = [float(m[1]) for m in matches]
+    if not kernel_ms_values:
+        return None
+    geomean = math.exp(
+        sum(math.log(v) for v in kernel_ms_values) / len(kernel_ms_values)
+    )
+    return geomean
+
+
 def _extract_latency(text: str) -> float | None:
     """Extract latency from benchmark output.
 
@@ -118,6 +143,10 @@ def _extract_latency(text: str) -> float | None:
     if val is not None:
         return val
     val = parse_google_benchmark_ms(text)
+    if val is not None:
+        return val
+
+    val = _parse_moe_table_geomean_ms(text)
     if val is not None:
         return val
 

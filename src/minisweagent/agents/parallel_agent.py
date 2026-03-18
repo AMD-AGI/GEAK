@@ -855,6 +855,7 @@ class ParallelAgent(DefaultAgent):
 
                 _wm_bm_path = cfg.pop("baseline_metrics", None)
                 _wm_bb_path = cfg.pop("benchmark_baseline", None)
+                cfg["benchmark_baseline_path"] = _wm_bb_path
 
                 agent = task.agent_class(parallel_model, parallel_env, **cfg)
                 if hasattr(agent, "base_repo_path"):
@@ -869,7 +870,12 @@ class ParallelAgent(DefaultAgent):
                         from minisweagent.memory.working_memory import WorkingMemory
 
                         _wm_notebook_dir = None
-                        if _wm_bm_path:
+                        if _wm_bb_path and Path(_wm_bb_path).exists():
+                            try:
+                                _wm_notebook_dir = str(Path(_wm_bb_path).resolve().parent / "_working_memory")
+                            except Exception:
+                                _wm_notebook_dir = None
+                        if not _wm_notebook_dir and _wm_bm_path:
                             try:
                                 _wm_notebook_dir = str(Path(_wm_bm_path).resolve().parent / "_working_memory")
                             except Exception:
