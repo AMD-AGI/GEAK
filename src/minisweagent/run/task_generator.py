@@ -154,27 +154,32 @@ them priority 15 behind kernel-body algorithmic work.
    first. Identify which sub-kernels are real optimization targets vs.
    framework noise (e.g., PyTorch ATen elementwise ops, ROCm runtime
    kernels, hipMemcpy internals).
-2. Read the discovery file for kernel metadata (language, inner kernel, etc.).
-3. Read the knowledge base for applicable optimization strategies.
-4. Optionally read baseline metrics, COMMANDMENT.md, deep search findings,
+2. Read the codebase context file for the kernel dependency tree. Every file
+   listed is in-repo code the target kernel depends on and is a potential
+   optimization target -- improving any of them can reduce the target
+   kernel's overall latency. Note which functions are imported from each
+   dependency to identify what to optimize.
+3. Read the discovery file for kernel metadata (language, inner kernel, etc.).
+4. Read the knowledge base for applicable optimization strategies.
+5. Optionally read baseline metrics, COMMANDMENT.md, deep search findings,
    or prior results if the paths are provided.
-5. Group related kernels (e.g., multiple Tensile GEMMs with different tile
+6. Group related kernels (e.g., multiple Tensile GEMMs with different tile
    sizes are one target; CK GEMM variants are another).
-6. For each group, propose a specific optimization task naming:
+7. For each group, propose a specific optimization task naming:
    - The target sub-kernels
    - The backend/language (CK, Tensile, Triton, HIP, PyTorch)
    - Concrete strategies from the knowledge base
    - Which agent/tool to use (and specific tool commands if applicable)
    - Expected impact
-7. Prioritize tasks that modify the GPU kernel body code.  Wrapper-only
+8. Prioritize tasks that modify the GPU kernel body code.  Wrapper-only
    changes (Python-level dispatch, launch config, PyTorch API swaps) must
    be assigned priority 15 and should only appear after at least 3
    kernel-body algorithmic tasks have been generated.
-8. If prior round results or tasks are provided, do NOT re-generate tasks
+9. If prior round results or tasks are provided, do NOT re-generate tasks
    for strategies that already appeared in prior rounds, regardless of
    whether they succeeded or failed. Focus on genuinely new approaches or
    strategies that build on what worked.
-9. If a "Workload / Backend Guidance" block is present, treat it as
+10. If a "Workload / Backend Guidance" block is present, treat it as
    mandatory. Generate at least 3 tasks from the "Prefer First" families
    in that block before proposing anything from the "Deprioritize Until
    Later" bucket (for example autotune-only, launch-only, or dispatch-only
@@ -284,7 +289,7 @@ Generate optimization tasks for the kernel at {{ kernel_path }}.
 {% endif %}{% if function_names %}- Functions: {{ function_names }}
 {% endif %}
 ## Files to read (use `str_replace_editor` with command "view")
-{% if codebase_context_path %}- **Codebase context** (repo layout, key files): {{ codebase_context_path }}
+{% if codebase_context_path %}- **Codebase context** (repo layout, kernel dependency tree with optimization targets): {{ codebase_context_path }}
 {% endif %}{% if discovery_path %}- **Discovery** (kernel info, tests, benchmarks): {{ discovery_path }}
 {% endif %}{% if profiling_path %}- **Profiling** (sub-kernels, bottlenecks, metrics): {{ profiling_path }}
 {% endif %}{% if baseline_metrics_path %}- **Baseline metrics**: {{ baseline_metrics_path }}
@@ -312,9 +317,12 @@ OpenEvolve tasks can use 2-4 GPUs each; strategy_agent and swe_agent tasks use 1
 {% endif %}
 ## Instructions
 
-Read the profiling file first to understand the sub-kernel landscape, then
-the discovery file for context. Consult the knowledge base for applicable
-strategies. Finally, submit your task list as JSON via the `submit` tool.
+Read the profiling file first to understand the sub-kernel landscape. Then
+read the codebase context file for the kernel dependency tree -- every
+dependency listed is in-repo code that could be an optimization target.
+Read the discovery file for additional kernel metadata, and consult the
+knowledge base for applicable strategies. Finally, submit your task list
+as JSON via the `submit` tool.
 
 {{ base_task_context }}
 """)

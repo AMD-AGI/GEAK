@@ -1,18 +1,21 @@
 """Codebase context generator -- builds a CODEBASE_CONTEXT.md briefing file.
 
 Runs as Step 2 of the preprocessor pipeline, right after resolve-kernel-url
-and before test-discovery. The generated file captures the repository layout,
-key files, and the kernel's import chain so that downstream components
-(discovery, orchestrator, task generator, sub-agents) can start with full
-situational awareness instead of re-exploring the directory structure.
+and before test-discovery. The generated file captures the repository layout
+and the kernel's transitive dependency tree so that downstream components
+(orchestrator, task generator, sub-agents) can start with full situational
+awareness instead of re-exploring the directory structure.
 
 The entire generation is deterministic -- no LLM calls.
 """
 
 from __future__ import annotations
 
+import ast
 import logging
 import re
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -39,27 +42,9 @@ _SKIP_DIRS: set[str] = {
     "env",
 }
 
-_CONFIG_FILES: set[str] = {
-    "pyproject.toml",
-    "setup.py",
-    "setup.cfg",
-    "CMakeLists.txt",
-    "Makefile",
-    "meson.build",
-    "Cargo.toml",
-    "go.mod",
-    "package.json",
-    "requirements.txt",
-    "environment.yml",
-    ".gitignore",
-}
-
-_MAX_TREE_DEPTH = 4
-_MAX_TREE_ENTRIES = 300
-_MAX_KEY_FILES = 40
-_MAX_ADJACENT_CONTEXT_FILES = 12
-_HEADER_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".cuh"}
-_CODE_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".cuh", ".cu", ".hip", ".cpp", ".cc", ".cxx"}
+_MAX_TREE_DEPTH = 4       # Max directory nesting in the repo layout tree (kernel ancestors always expand)
+_MAX_TREE_ENTRIES = 300   # Max total entries in the repo layout tree before truncation
+_MAX_DEP_FILES = 30       # Max resolved in-repo files in the dependency BFS
 
 
 # ── Directory tree ────────────────────────────────────────────────────
@@ -85,18 +70,22 @@ def _build_directory_tree(
 ) -> str:
     """Build a pruned directory tree string with annotations.
 
-    Returns an ASCII tree like::
-
-        repo/
-        ├── ops/
-        │   ├── kernel.py    ← TARGET KERNEL
-        │   └── utils.py
-        └── tests/
-            └── test_kernel.py
+    Directories along the kernel's ancestor path are always expanded
+    regardless of depth limits so the target file is never hidden.
     """
     lines: list[str] = []
-    counter = [0]
+    counter = [0]  # To enable passing by reference.
     kernel_abs = kernel_path.resolve()
+    root_abs = root.resolve()
+
+    # Pre-compute directories on the path to the kernel so they're always expanded
+    kernel_ancestors: set[Path] = set()
+    p = kernel_abs.parent
+    while p != p.parent:
+        kernel_ancestors.add(p)
+        if p == root_abs:
+            break
+        p = p.parent
 
     def _walk(current: Path, prefix: str, depth: int) -> None:
         if counter[0] >= max_entries:
@@ -128,7 +117,8 @@ def _build_directory_tree(
             if item.is_dir():
                 lines.append(f"{prefix}{connector}{item.name}/")
                 counter[0] += 1
-                if depth + 1 < max_depth:
+                is_kernel_ancestor = item.resolve() in kernel_ancestors
+                if depth + 1 < max_depth or is_kernel_ancestor:
                     _walk(item, child_prefix, depth + 1)
                 else:
                     try:
@@ -150,233 +140,241 @@ def _build_directory_tree(
     return "\n".join(lines)
 
 
-# ── Key files identification ──────────────────────────────────────────
+# ── Import extraction ─────────────────────────────────────────────────
 
-
-def _classify_file(path: Path, kernel_path: Path, repo_root: Path) -> str | None:
-    """Return a role string for a file based on filename heuristics, or None."""
-    name = path.name.lower()
-    rel = path.resolve()
-
-    if rel == kernel_path.resolve():
-        return "TARGET KERNEL - edit this"
-
-    if name in _CONFIG_FILES or name in {n.lower() for n in _CONFIG_FILES}:
-        return "Project config"
-
-    if name.startswith("test_") or name.endswith("_test.py") or name.startswith("test."):
-        return "Test file"
-    if "test" in name and path.suffix in (".py", ".cpp", ".cc"):
-        return "Test file (likely)"
-
-    if name.startswith("bench_") or name.startswith("benchmark_"):
-        return "Benchmark"
-    if "benchmark" in name or "bench" in name:
-        if path.suffix in (".py", ".cpp", ".cc"):
-            return "Benchmark (likely)"
-
-    if name in ("readme.md", "readme.rst", "readme.txt", "readme"):
-        return "Documentation"
-    if name in ("license", "license.md", "license.txt"):
-        return "License"
-
-    if name.endswith((".cu", ".hip", ".cl")):
-        return "GPU kernel source"
-    if name.endswith(".cuh"):
-        return "GPU kernel header"
-
-    return None
-
-
-def _normalize_related_name(path: Path | str) -> str:
-    name = Path(str(path)).stem.lower()
-    for prefix in ("benchmark_", "bench_", "test_", "example_"):
-        if name.startswith(prefix):
-            name = name[len(prefix):]
-    name = re.sub(r"[^a-z0-9]+", "_", name).strip("_")
-    return name
-
-
-def _identify_key_files(
-    repo_root: Path,
-    kernel_path: Path,
-    *,
-    max_files: int = _MAX_KEY_FILES,
-) -> list[dict[str, str]]:
-    """Walk the repo and return a list of key files with roles."""
-    results: list[dict[str, str]] = []
-    kernel_abs = kernel_path.resolve()
-    root_abs = repo_root.resolve()
-
-    # Always include the kernel itself first
-    try:
-        rel = kernel_abs.relative_to(root_abs)
-    except ValueError:
-        rel = kernel_abs
-    results.append({"file": str(rel), "role": "TARGET KERNEL - edit this"})
-
-    seen = {kernel_abs}
-
-    for item in _iter_repo_files(repo_root):
-        if len(results) >= max_files:
-            break
-        abs_item = item.resolve()
-        if abs_item in seen:
-            continue
-
-        role = _classify_file(item, kernel_path, repo_root)
-        if role:
-            seen.add(abs_item)
-            try:
-                rel = abs_item.relative_to(root_abs)
-            except ValueError:
-                rel = abs_item
-            results.append({"file": str(rel), "role": role})
-
-    return results
-
-
-def _related_name_score(candidate: Path, kernel_path: Path) -> tuple[int, int]:
-    kernel_name = _normalize_related_name(kernel_path)
-    candidate_name = _normalize_related_name(candidate)
-    if not kernel_name or not candidate_name:
-        return (3, 0)
-    if candidate_name == kernel_name:
-        return (0, len(kernel_name))
-    if kernel_name in candidate_name or candidate_name in kernel_name:
-        return (1, min(len(kernel_name), len(candidate_name)))
-    kernel_tokens = {tok for tok in kernel_name.split("_") if tok}
-    candidate_tokens = {tok for tok in candidate_name.split("_") if tok}
-    overlap = len(kernel_tokens & candidate_tokens)
-    if overlap > 0:
-        return (2, overlap)
-    return (3, 0)
-
-
-def _adjacent_kernel_context_files(
-    repo_root: Path,
-    kernel_path: Path,
-    *,
-    max_files: int = _MAX_ADJACENT_CONTEXT_FILES,
-) -> list[dict[str, str]]:
-    """Return nearby implementation/config/benchmark files for header kernels."""
-
-    if kernel_path.suffix.lower() not in _HEADER_SUFFIXES:
-        return []
-
-    root_abs = repo_root.resolve()
-    kernel_abs = kernel_path.resolve()
-    seen: set[Path] = {kernel_abs}
-    candidates: list[tuple[tuple[int, int, int, str], Path, str]] = []
-
-    search_roots: list[tuple[Path, str]] = [
-        (kernel_path.parent, "Adjacent implementation"),
-        (kernel_path.parent / "detail", "Adjacent detail implementation"),
-        (kernel_path.parent.parent / "detail", "Adjacent detail implementation"),
-    ]
-    for base, default_role in search_roots:
-        if not base.is_dir():
-            continue
-        for item in sorted(base.iterdir(), key=lambda p: p.name.lower()):
-            if not item.is_file() or item.resolve() in seen:
-                continue
-            if item.suffix.lower() not in _CODE_SUFFIXES:
-                continue
-            score_tier, overlap = _related_name_score(item, kernel_path)
-            if score_tier >= 3:
-                continue
-            role = "Adjacent config" if "config" in item.name.lower() else default_role
-            rel = item.resolve().relative_to(root_abs)
-            candidates.append(((score_tier, 0, -overlap, rel.as_posix()), item.resolve(), role))
-            seen.add(item.resolve())
-
-    for item in _iter_repo_files(repo_root):
-        abs_item = item.resolve()
-        if abs_item in seen or not item.is_file():
-            continue
-        rel = abs_item.relative_to(root_abs)
-        rel_text = rel.as_posix().lower()
-        if "/benchmark/" not in rel_text and "/test/" not in rel_text:
-            continue
-        score_tier, overlap = _related_name_score(item, kernel_path)
-        if score_tier >= 3:
-            continue
-        role = "Matched benchmark" if "/benchmark/" in rel_text else "Matched test file"
-        candidates.append(((score_tier, 1, -overlap, rel.as_posix()), abs_item, role))
-        seen.add(abs_item)
-
-    results: list[dict[str, str]] = []
-    for _key, abs_item, role in sorted(candidates, key=lambda item: item[0])[:max_files]:
-        try:
-            rel = abs_item.relative_to(root_abs)
-        except ValueError:
-            rel = abs_item
-        results.append({"file": str(rel), "role": role})
-    return results
-
-
-def _iter_repo_files(repo_root: Path):
-    """Yield files from the repo, skipping ignored directories."""
-    try:
-        for item in sorted(repo_root.iterdir(), key=lambda p: p.name.lower()):
-            if item.is_dir():
-                if _should_skip_dir(item.name):
-                    continue
-                yield from _iter_repo_files(item)
-            elif item.is_file():
-                yield item
-    except PermissionError:
-        return
-
-
-# ── Import chain extraction ───────────────────────────────────────────
-
-_PY_IMPORT_RE = re.compile(
-    r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))", re.MULTILINE
-)
 _CPP_INCLUDE_RE = re.compile(r'^\s*#include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
 
 
-def _extract_imports(kernel_path: Path) -> list[str]:
-    """Extract import/include statements from the kernel file."""
+@dataclass
+class _ImportEntry:
+    """A single import statement with the module path and imported names."""
+    module: str
+    names: list[str]
+
+
+def _extract_py_imports(source: str) -> list[_ImportEntry]:
+    """Use ``ast.parse`` to extract structured import info from Python source."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    entries: list[_ImportEntry] = []
+    seen: set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            module = ("." * (node.level or 0)) + node.module
+            names = [a.name for a in node.names if a.name != "*"]
+
+            for name in names:
+                qual = f"{module}.{name}"
+                if qual not in seen:
+                    seen.add(qual)
+                    entries.append(_ImportEntry(module=qual, names=[name]))
+
+            if module not in seen:
+                seen.add(module)
+                entries.append(_ImportEntry(module=module, names=names))
+
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name not in seen:
+                    seen.add(alias.name)
+                    entries.append(_ImportEntry(module=alias.name, names=[]))
+
+    return entries
+
+
+def _extract_imports(kernel_path: Path) -> list[_ImportEntry]:
+    """Extract structured import info from a source file.
+
+    For Python files, uses ``ast.parse`` to handle all import styles
+    (multi-line, parenthesized, conditional, aliased).  For C/C++ files,
+    falls back to a regex for ``#include`` directives.
+    """
     try:
         source = kernel_path.read_text(errors="replace")
     except (OSError, UnicodeDecodeError):
         return []
 
     suffix = kernel_path.suffix.lower()
-
     if suffix == ".py":
-        imports: list[str] = []
-        for m in _PY_IMPORT_RE.finditer(source):
-            mod = m.group(1) or m.group(2)
-            if mod and not mod.startswith("__"):
-                imports.append(mod)
-        return imports
-
+        return _extract_py_imports(source)
     if suffix in (".cpp", ".cc", ".cu", ".hip", ".cuh", ".h", ".hpp"):
-        includes: list[str] = []
-        for m in _CPP_INCLUDE_RE.finditer(source):
-            includes.append(m.group(1))
-        return includes
-
+        return [_ImportEntry(module=m.group(1), names=[])
+                for m in _CPP_INCLUDE_RE.finditer(source)]
     return []
 
 
-# ── Ignore list ───────────────────────────────────────────────────────
+# ── Dependency tree ───────────────────────────────────────────────────
 
 
-def _find_skip_dirs_present(repo_root: Path) -> list[str]:
-    """Return which skip-listed directories actually exist in the repo root."""
-    present: list[str] = []
+def _resolve_import_to_path(
+    module_name: str,
+    repo_root: Path,
+    source_file: Path,
+) -> Path | None:
+    """Resolve a Python module name or C++ include to a file under *repo_root*.
+
+    Returns None for stdlib / third-party modules that don't exist in the repo.
+    """
+    suffix = source_file.suffix.lower()
+
+    if suffix == ".py":
+        # Handle relative imports (leading dots)
+        stripped = module_name.lstrip(".")
+        num_dots = len(module_name) - len(stripped)
+        if num_dots > 0:
+            base = source_file.parent
+            for _ in range(num_dots - 1):
+                base = base.parent
+            parts = stripped.replace(".", "/") if stripped else ""
+            search_base = base / parts if parts else base
+        else:
+            parts = module_name.replace(".", "/")
+            search_base = repo_root / parts
+
+        for candidate in (
+            search_base.with_suffix(".py") if search_base.suffix != ".py" else search_base,
+            search_base / "__init__.py",
+        ):
+            if candidate.is_file():
+                return candidate.resolve()
+
+        # Fallback: same-directory import (e.g. `from chip_info import ...`
+        # when sys.path includes the source file's directory)
+        if num_dots == 0 and "/" not in parts:
+            for candidate in (
+                source_file.parent / f"{parts}.py",
+                source_file.parent / parts / "__init__.py",
+            ):
+                if candidate.is_file():
+                    return candidate.resolve()
+
+        return None
+
+    # C/C++ includes: try relative to source dir, include/ subdir, then repo root
+    if suffix in (".cpp", ".cc", ".cu", ".hip", ".cuh", ".h", ".hpp"):
+        search_dirs = [
+            source_file.parent,
+            source_file.parent / "include",
+            repo_root,
+        ]
+        for base in search_dirs:
+            candidate = base / module_name
+            if candidate.is_file():
+                return candidate.resolve()
+        return None
+
+    return None
+
+
+# Patterns used by _describe_file to auto-detect file descriptions
+_DOCSTRING_RE = re.compile(r'^(?:[ \t]*#[^\n]*\n)*[ \t]*(?:\'\'\'|""")(.+?)(?:\'\'\'|""")', re.DOTALL)  # Python module docstring
+_TRITON_JIT_RE = re.compile(r"@triton\.(?:jit|autotune)")  # Triton kernel decorator
+_GLOBAL_RE = re.compile(r"__global__\s+void\s+(\w+)")  # HIP/CUDA kernel function
+
+
+def _describe_file(path: Path) -> str:
+    """Auto-detect a brief description of a source file from its content."""
     try:
-        for item in repo_root.iterdir():
-            if item.is_dir() and _should_skip_dir(item.name):
-                present.append(item.name)
-    except PermissionError:
-        pass
-    return sorted(present)
+        source = path.read_text(errors="replace")[:4096]
+    except (OSError, UnicodeDecodeError):
+        return "Source file"
 
+    # Try module docstring first line
+    m = _DOCSTRING_RE.match(source)
+    if m:
+        first_line = m.group(1).strip().split("\n")[0].strip()
+        if len(first_line) > 10:
+            return first_line[:120]
+
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        if _TRITON_JIT_RE.search(source):
+            return "Triton kernel definitions (@triton.jit)"
+        if re.search(r"^class\s+\w+", source, re.MULTILINE):
+            return "Class definitions"
+        return "Python module"
+
+    if suffix in (".cu", ".hip"):
+        gm = _GLOBAL_RE.search(source)
+        if gm:
+            return f"GPU kernel (defines {gm.group(1)})"
+        return "GPU kernel source"
+
+    if suffix in (".h", ".hpp", ".cuh"):
+        return "Header file"
+
+    return "Source file"
+
+
+def _build_dependency_tree(
+    repo_root: Path,
+    kernel_path: Path,
+    *,
+    max_files: int = _MAX_DEP_FILES,
+) -> list[dict]:
+    """BFS over imports starting from *kernel_path*.
+
+    Returns a list of resolved in-repo dependencies.  Each entry:
+    ``{file, names, imported_by, depth, description}`` where *names*
+    lists the specific symbols imported from that file.
+    """
+    resolved: list[dict] = []
+    visited: set[Path] = {kernel_path.resolve()}
+    # Track names per resolved file so multiple import lines merge
+    file_entry: dict[Path, dict] = {}
+
+    queue: deque[tuple[Path, int]] = deque()
+    queue.append((kernel_path, 0))
+
+    while queue and len(resolved) < max_files:
+        current, depth = queue.popleft()
+
+        for entry in _extract_imports(current):
+            target = _resolve_import_to_path(entry.module, repo_root, current)
+            if target is None:
+                continue
+
+            # If this file was already resolved, just merge imported names
+            if target in file_entry:
+                existing = file_entry[target]
+                for n in entry.names:
+                    if n not in existing["names"]:
+                        existing["names"].append(n)
+                continue
+
+            if target in visited:
+                continue
+            visited.add(target)
+
+            try:
+                rel_file = target.relative_to(repo_root)
+            except ValueError:
+                rel_file = target
+            try:
+                rel_parent = current.relative_to(repo_root)
+            except ValueError:
+                rel_parent = current
+
+            rec = {
+                "file": str(rel_file),
+                "names": list(entry.names),
+                "imported_by": str(rel_parent),
+                "depth": depth + 1,
+                "description": _describe_file(target),
+            }
+            resolved.append(rec)
+            file_entry[target] = rec
+
+            if len(resolved) >= max_files:
+                break
+
+            queue.append((target, depth + 1))
+
+    return resolved
 
 # ── Main entry point ──────────────────────────────────────────────────
 
@@ -406,6 +404,11 @@ def generate_codebase_context(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    try:
+        rel_kernel = kernel_path.relative_to(repo_root)
+    except ValueError:
+        rel_kernel = kernel_path
+
     sections: list[str] = ["# Codebase Context\n"]
 
     # 1. Repository layout
@@ -413,52 +416,43 @@ def generate_codebase_context(
     sections.append("## Repository Layout\n")
     sections.append(f"```\n{tree}\n```\n")
 
-    # 2. Key files
-    key_files = _identify_key_files(repo_root, kernel_path)
-    if key_files:
-        sections.append("## Key Files\n")
-        sections.append("| File | Role |")
-        sections.append("|------|------|")
-        for kf in key_files:
-            sections.append(f"| `{kf['file']}` | {kf['role']} |")
+    # 2. Kernel dependency tree
+    deps = _build_dependency_tree(repo_root, kernel_path)
+
+    sections.append("## Kernel Dependency Tree\n")
+    sections.append(f"Target kernel: `{rel_kernel}`\n")
+
+    # Group by depth
+    by_depth: dict[int, list[dict]] = {}
+    for dep in deps:
+        by_depth.setdefault(dep["depth"], []).append(dep)
+
+    for depth in sorted(by_depth):
+        if depth == 1:
+            sections.append("### Direct dependencies\n")
+            sections.append("| File | Imports | Description |")
+            sections.append("|------|---------|-------------|")
+            for dep in by_depth[depth]:
+                names = ", ".join(f"`{n}`" for n in dep["names"]) if dep["names"] else "*module*"
+                sections.append(
+                    f"| `{dep['file']}` | {names} | {dep['description']} |"
+                )
+        else:
+            sections.append(f"\n### Transitive dependencies (depth {depth})\n")
+            sections.append(
+                "Improving these may improve the target kernel's performance.\n"
+            )
+            sections.append("| File | Imports | Used by | Description |")
+            sections.append("|------|---------|---------|-------------|")
+            for dep in by_depth[depth]:
+                names = ", ".join(f"`{n}`" for n in dep["names"]) if dep["names"] else "*module*"
+                sections.append(
+                    f"| `{dep['file']}` | {names} | `{dep['imported_by']}` | {dep['description']} |"
+                )
         sections.append("")
 
-    adjacent_files = _adjacent_kernel_context_files(repo_root, kernel_path)
-    if adjacent_files:
-        sections.append("## Adjacent Kernel Context\n")
-        sections.append(
-            "For header / template kernels, the hot implementation often lives in nearby "
-            "`detail/`, config, benchmark, or test files. Start by reading these:\n"
-        )
-        sections.append("| File | Role |")
-        sections.append("|------|------|")
-        for item in adjacent_files:
-            sections.append(f"| `{item['file']}` | {item['role']} |")
-        sections.append("")
-
-    # 3. Import / dependency chain
-    imports = _extract_imports(kernel_path)
-    if imports:
-        try:
-            rel_kernel = kernel_path.relative_to(repo_root)
-        except ValueError:
-            rel_kernel = kernel_path
-        sections.append("## Kernel Import Chain\n")
-        sections.append(f"Imports found in `{rel_kernel}`:\n")
-        for imp in imports:
-            sections.append(f"- `{imp}`")
-        sections.append("")
-
-    # 4. Directories to ignore
-    skip_present = _find_skip_dirs_present(repo_root)
-    if skip_present:
-        sections.append("## Directories to Ignore\n")
-        sections.append(
-            "These directories exist in the repo but should not be explored or modified:\n"
-        )
-        for d in skip_present:
-            sections.append(f"- `{d}/`")
-        sections.append("")
+    if not deps:
+        sections.append("No in-repo dependencies found.\n")
 
     out_path = output_dir / "CODEBASE_CONTEXT.md"
     content = "\n".join(sections)

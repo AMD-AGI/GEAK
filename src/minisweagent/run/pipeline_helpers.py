@@ -848,7 +848,12 @@ def inject_pipeline_context(
         ctx.append("")
 
     if codebase_context:
-        ctx.append("## Codebase Context (repo structure and key files)")
+        ctx.append("## Codebase Context (kernel dependency tree)")
+        ctx.append(
+            "The dependency tree below shows in-repo files the target kernel "
+            "imports. Every listed dependency is a potential optimization "
+            "target -- improving any of them can reduce overall latency."
+        )
         ctx.append(codebase_context.strip())
         ctx.append("")
         cfg["codebase_context"] = codebase_context.strip()

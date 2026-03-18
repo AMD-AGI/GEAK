@@ -434,12 +434,13 @@ def run_preprocessor(
     from automated_test_discovery.server import discover as atd_discover
 
     _discover_fn = getattr(atd_discover, "fn", atd_discover)
-    disc_dict = {}  # Initialize to empty dict to avoid NameError if discovery fails
+    disc_dict = {}
     _discovery_kwargs: dict[str, Any] = {
         "kernel_path": kernel_path,
         "output_dir": str(output_dir),
     }
     if harness:
+        _discovery_kwargs["harness"] = harness
         _discovery_kwargs["use_llm"] = False
 
     try:
@@ -447,14 +448,6 @@ def run_preprocessor(
     except Exception as exc:
         logger.warning("Test discovery failed: %s", exc)
         _print(f"  [yellow]Warning: Test discovery failed: {exc}[/yellow]" if console else f"  Warning: Test discovery failed: {exc}")
-
-    if harness:
-        disc_dict.setdefault("focused_test", {
-            "focused_test_file": harness,
-            "focused_command": f"python {harness} --correctness",
-            "top_test_is_relevant": True,
-            "reason": "User-provided harness",
-        })
 
     ctx["discovery"] = disc_dict
     (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))

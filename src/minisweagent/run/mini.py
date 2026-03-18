@@ -114,7 +114,7 @@ from minisweagent.run.pipeline_helpers import (
 )
 
 
-def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -> tuple[str, str | None]:
+def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str, repo: str | None = None) -> tuple[str, str | None]:
     """Resolve kernel URL to local path/line/kernel name and append to task."""
     repo_root = Path(__file__).resolve().parent.parent.parent.parent
     if str(repo_root) not in sys.path:
@@ -124,7 +124,7 @@ def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str) -
     except ImportError as e:
         raise SystemExit(f"Cannot resolve --kernel-url: resolve_kernel_url_impl not found ({e}).") from e
     clone_into = Path(workspace) if workspace else Path.cwd()
-    resolved = resolve_kernel_url(kernel_url, clone_into=clone_into)
+    resolved = resolve_kernel_url(kernel_url, repo=repo, clone_into=clone_into)
     if resolved.get("error"):
         raise SystemExit(f"Kernel URL resolve failed: {resolved['error']}")
     path = resolved["local_file_path"]
@@ -474,13 +474,15 @@ def main(
     _resolved_kernel_path = None
     _resolved_kernel_name = None
     if kernel_url:
-        task_content, _resolved_kernel_name = _inject_resolved_kernel(kernel_url, str(workspace) if workspace else None, task_content)
+        task_content, _resolved_kernel_name = _inject_resolved_kernel(kernel_url, str(workspace) if workspace else None, task_content, repo=str(repo) if repo else None)
         import re as _re
         _m = _re.search(r"Kernel path: (\S+)", task_content)
         if _m:
             _resolved_kernel_path = _m.group(1)
-    # Run test discovery and inject results into task
-    if _resolved_kernel_path:
+    # Run test discovery and inject results into task.
+    # Skip when --kernel-url is set: the preprocessor pipeline handles
+    # discovery (with harness awareness) and this would be a redundant scan.
+    if _resolved_kernel_path and not kernel_url:
         discovery_block = _run_discovery(_resolved_kernel_path, _resolved_kernel_name)
         if discovery_block:
             task_content = task_content + discovery_block

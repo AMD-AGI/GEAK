@@ -457,6 +457,7 @@ def discover(
     max_tests: int = 5,
     max_benchmarks: int = 5,
     use_llm: bool = True,
+    harness: str = "",
 ) -> dict:
     """
     Discover tests and benchmarks for a GPU kernel.
@@ -465,6 +466,10 @@ def discover(
       Phase 1 (automated): Content-based scan with relevance scoring.
       Phase 2 (LLM finisher, optional): Validates top results and generates
         a focused test script that tests ONLY the target kernel function(s).
+
+    When *harness* is provided, both phases are skipped entirely and a
+    minimal result is returned with kernel metadata and the harness
+    registered as the test/benchmark.
 
     Args:
         kernel_path: Path to a kernel file (.py/.cu/.hip) OR a repository
@@ -480,6 +485,8 @@ def discover(
         max_benchmarks: Maximum number of benchmark results to return (default: 5)
         use_llm: Whether to run Phase 2 LLM finisher (default: True).
             Set to False for fast automated-only results.
+        harness: Path to a user-provided test harness. When set, scanning
+            is skipped and the harness is used as the test/benchmark.
 
     Returns:
         Complete discovery result with:
@@ -502,6 +509,58 @@ def discover(
             "tests": [],
             "benchmarks": [],
             "summary": "Error: path not found",
+        }
+
+    # --- Harness mode: skip scanning, return minimal result ---
+    if harness:
+        content = ""
+        try:
+            content = path.read_text()
+        except Exception:
+            pass
+        kernel_name = path.stem
+        _GENERIC_STEMS = {"kernel", "main", "module", "op", "impl"}
+        if kernel_name.lower() in _GENERIC_STEMS and path.parent.name:
+            kernel_name = path.parent.name
+        kernel_type = _get_kernel_type(content, path.suffix)
+        kernel_functions = []
+        for m in re.finditer(r"@triton\.jit\s*\n\s*def\s+(\w+)", content):
+            if m.group(1) not in kernel_functions:
+                kernel_functions.append(m.group(1))
+        for m in re.finditer(r"__global__\s+void\s+(\w+)", content):
+            if m.group(1) not in kernel_functions:
+                kernel_functions.append(m.group(1))
+
+        harness_name = Path(harness).name
+        return {
+            "kernel": {
+                "name": kernel_name,
+                "type": kernel_type,
+                "file": str(path),
+                "functions": kernel_functions,
+            },
+            "workspace": str(_expand_workspace(path)),
+            "tests": [{
+                "file": harness,
+                "name": harness_name,
+                "confidence": 10.0,
+                "command": f"python {harness} --correctness",
+            }],
+            "benchmarks": [{
+                "file": harness,
+                "name": harness_name,
+                "confidence": 10.0,
+                "command": f"python {harness} --benchmark",
+            }],
+            "total_tests_found": 1,
+            "total_benchmarks_found": 1,
+            "summary": f"Discovery skipped (harness provided: {harness_name})",
+            "focused_test": {
+                "focused_test_file": harness,
+                "focused_command": f"python {harness} --correctness",
+                "top_test_is_relevant": True,
+                "reason": "User-provided harness",
+            },
         }
 
     # --- Directory mode: discover kernels, then find per-kernel tests ---
