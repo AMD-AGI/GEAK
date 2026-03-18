@@ -242,8 +242,6 @@ def main(
     excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS. Default: openevolve is excluded unless explicitly re-enabled.", rich_help_panel="Advanced"),
     heterogeneous: bool = typer.Option(True, "--heterogeneous/--no-heterogeneous", help="Use LLM-generated diverse optimization tasks (requires preprocessing/discovery). Default: enabled.", rich_help_panel="Advanced"),
     from_task: Path | None = typer.Option(None, "--from-task", help="Deprecated: use --task with a YAML-frontmatter .md file instead.", hidden=True),
-    rag: bool = typer.Option(False, "--rag", help="Enable RAG retrieval from AMD/NVIDIA knowledge base"),
-    debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --rag)"),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
@@ -317,6 +315,11 @@ def main(
         if "strategy_manager" in tools_cfg:
             config.setdefault("agent", {}).setdefault("use_strategy_manager", tools_cfg["strategy_manager"])
             config.setdefault("model", {}).setdefault("use_strategy_manager", tools_cfg["strategy_manager"])
+
+    rag_enabled = tools_cfg.get("rag", False)
+    llm_filter_enabled = tools_cfg.get("enable_llm_filter", False)
+    console.print(f"[dim]RAG: {'enabled' if rag_enabled else 'disabled'}, "
+                  f"LLM filter: {'enabled' if llm_filter_enabled else 'disabled'}[/dim]")
 
     # Backward compatibility: legacy top-level tool flags
     if "profiling" in config:
@@ -512,27 +515,7 @@ def main(
     model = get_model(model_name_resolved, config.get("model", {}))
 
     _env_kwargs = config.get("env", {})
-    if rag:
-        try:
-            from minisweagent.mcp_integration.mcp_environment import MCPEnabledEnvironment
-            from minisweagent.mcp_integration.prompts import INSTANCE_TEMPLATE, SYSTEM_TEMPLATE
-            from minisweagent.mcp_integration.run_agent import DebugMCPEnvironment
-        except ImportError as e:
-            console.print("[red]Error: RAG retrieval requires langchain dependencies. Run: pip install -e '.[langchain]'[/red]")
-            console.print(f"[red]Import error: {e}[/red]")
-            raise typer.Exit(1)
-
-        if debug:
-            env = DebugMCPEnvironment(**_env_kwargs)
-            console.print("[bold yellow]Debug mode enabled[/bold yellow]")
-        else:
-            env = MCPEnabledEnvironment(**_env_kwargs)
-
-        config.setdefault("agent", {})["system_template"] = SYSTEM_TEMPLATE
-        config.setdefault("agent", {})["instance_template"] = INSTANCE_TEMPLATE
-        console.print("[bold green]RAG knowledge retrieval enabled[/bold green]")
-    else:
-        env = LocalEnvironment(**_env_kwargs)
+    env = LocalEnvironment(**_env_kwargs)
 
     # Load and merge configurations: Command-line > extra_config from yaml > auto-detect
     # When running from a task file, skip auto-detection from the task body:
@@ -732,6 +715,11 @@ def main(
     if _codebase_ctx_text:
         agent_config["codebase_context"] = _codebase_ctx_text
 
+    if rag_enabled:
+        agent_config["rag_config"] = {
+            "enable_subagent": llm_filter_enabled,
+        }
+
     # Create log directory and prepare log file path
     log_dir = Path(patch_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -839,7 +827,7 @@ def main(
             save_traj_fn=save_traj,
             console=console,
             model_factory=lambda: get_model(model_name_resolved, config.get("model", {})),
-            env_factory=lambda _repo=repo: (MCPEnabledEnvironment if rag else LocalEnvironment)(
+            env_factory=lambda _repo=repo: LocalEnvironment(
                 **{**copy.deepcopy(_env_kwargs), **({"cwd": str(Path(_repo).resolve())} if _repo else {})}
             ),
         )

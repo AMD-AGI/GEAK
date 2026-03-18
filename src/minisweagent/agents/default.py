@@ -48,6 +48,8 @@ class AgentConfig:
     profiling_type: str | None = None
     codebase_context: str | None = None
     starting_patch: str | None = None
+    # RAG MCP configuration (from mini_rag.yaml)
+    rag_config: dict | None = None
     # Interactive/exit behaviour (set by --exit-immediately)
     confirm_exit: bool = True
 
@@ -127,6 +129,7 @@ class DefaultAgent:
             else ".optimization_strategies.md",
             on_strategy_change=self._get_strategy_callback(),
             patch_output_dir=self.config.patch_output_dir,
+            rag_config=self.config.rag_config,
         )
         # Propagate agent's env vars (HIP_VISIBLE_DEVICES etc.) to tools
         agent_env = getattr(self.env.config, "env", None)

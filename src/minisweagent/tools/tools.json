@@ -398,6 +398,60 @@
     }
   },
   {
+    "name": "rag_query",
+    "type": "function",
+    "description": "Search the GPU/ROCm/HIP knowledge base for relevant information. Use this when you need architecture-specific optimization guidance, API references, or best practices for AMD GPU programming.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string",
+          "description": "Search query describing the information you need. Be specific: include GPU model, APIs, data types, and optimization goals."
+        },
+        "layer": {
+          "type": "string",
+          "description": "Optional layer filter (e.g. 'hip', 'rocm', 'ai_frameworks')."
+        },
+        "top_k": {
+          "type": "integer",
+          "description": "Number of results to return (default: from server config)."
+        }
+      },
+      "required": [
+        "topic"
+      ]
+    }
+  },
+  {
+    "name": "rag_optimize",
+    "type": "function",
+    "description": "Retrieve optimization suggestions for GPU kernels from the knowledge base. Use this when you need specific optimization tips for a kernel type on a target GPU.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "code_type": {
+          "type": "string",
+          "description": "Type of code/kernel to optimize (e.g. 'matrix multiplication', 'convolution', 'attention')."
+        },
+        "context": {
+          "type": "string",
+          "description": "Additional context about the optimization goal."
+        },
+        "gpu_model": {
+          "type": "string",
+          "description": "Target GPU model (e.g. 'MI300X', 'MI250')."
+        },
+        "top_k": {
+          "type": "integer",
+          "description": "Number of results to return (default: from server config)."
+        }
+      },
+      "required": [
+        "code_type"
+      ]
+    }
+  },
+  {
     "name": "sub_agent",
     "type": "function",
     "description": "Spawn a child agent to perform a focused sub-task. The child runs independently with its own step/cost budget and returns the result. Use for algorithm rewrites, cross-file edits, or any task that benefits from dedicated agent reasoning. For substantial rewrites, keep step_limit at 150 or higher and leave cost_limit at 0.0 so the dollar cap does not stop the child first.",

@@ -183,3 +183,6 @@ model:
     # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
     text:
       verbosity: low
+tools:
+  rag: false
+  enable_llm_filter: false
