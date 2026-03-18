@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import json
+import logging
 import os
 import re
 import shutil
@@ -33,14 +34,99 @@ class BestPatchResult:
 
 _stdout_lock = threading.Lock()
 
+_thread_log_file = threading.local()
+_redirect_installed = False
+_original_stdout = None
+_original_stderr = None
+
+
+def _get_thread_log():
+    return getattr(_thread_log_file, "file", None)
+
+
+class _ThreadLocalStream:
+    """Writes to thread-local log file when set, else to original stream."""
+
+    def __init__(self, original):
+        self._original = original
+
+    def write(self, s):
+        f = _get_thread_log()
+        if f is not None:
+            try:
+                f.write(s)
+                f.flush()
+            except Exception:
+                pass
+        else:
+            self._original.write(s)
+            self._original.flush()
+
+    def flush(self):
+        f = _get_thread_log()
+        if f is not None:
+            try:
+                f.flush()
+            except Exception:
+                pass
+        else:
+            self._original.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+
+def _install_redirect_once():
+    global _redirect_installed, _original_stdout, _original_stderr
+    if not _redirect_installed:
+        _original_stdout = sys.stdout
+        _original_stderr = sys.stderr
+        sys.stdout = _ThreadLocalStream(_original_stdout)
+        sys.stderr = _ThreadLocalStream(_original_stderr)
+        _install_logging_redirect()
+        _redirect_installed = True
+
+
+def _install_logging_redirect():
+    """Route minisweagent logger to thread-local file when in sub-agent thread."""
+    ms_logger = logging.getLogger("minisweagent")
+
+    def filter_main_thread(record):
+        return _get_thread_log() is None
+
+    def filter_sub_agent_thread(record):
+        return _get_thread_log() is not None
+
+    class ThreadLocalFileHandler(logging.Handler):
+        def emit(self, record):
+            f = _get_thread_log()
+            if f is not None:
+                try:
+                    f.write(self.format(record) + "\n")
+                    f.flush()
+                except Exception:
+                    self.handleError(record)
+
+    for h in list(ms_logger.handlers):
+        h.addFilter(filter_main_thread)
+    th = ThreadLocalFileHandler()
+    th.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    th.addFilter(filter_sub_agent_thread)
+    ms_logger.addHandler(th)
+
 
 @contextmanager
 def redirect_output_to_file(log_file: Path):
-    """No-op context manager. Agent writes to log file directly via add_message/log_message.
-
-    Stdout/stderr redirection doesn't work for parallel threads since sys.stdout is global.
-    """
-    yield
+    """Redirect this thread's stdout/stderr to the log file. Sub-agent output goes to its own file."""
+    _install_redirect_once()
+    f = open(log_file, "a", encoding="utf-8")
+    prev = getattr(_thread_log_file, "file", None)
+    _thread_log_file.file = f
+    try:
+        yield
+    finally:
+        _thread_log_file.file = prev
+        f.close()
 
 
 @dataclass
