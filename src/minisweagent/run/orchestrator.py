@@ -1022,8 +1022,12 @@ def _run_homogeneous_orchestrator(
         task_dir.mkdir(parents=True, exist_ok=True)
 
         task_file = task_dir / "00_optimize.md"
+
+        _is_translation = bool(preprocess_ctx.get("pytorch_translation"))
+        _flydsl_filename = preprocess_ctx.get("flydsl_kernel_filename", "")
+
         metadata: dict[str, Any] = {
-            "label": "kernel_optimization",
+            "label": "pytorch_to_flydsl_translation" if _is_translation else "kernel_optimization",
             "priority": 10,
             "agent_type": "strategy_agent",
             "kernel_path": preprocess_ctx.get("kernel_path"),
@@ -1038,19 +1042,53 @@ def _run_homogeneous_orchestrator(
             "round": round_num,
             "starting_patch": starting_patch,
         }
+        if _is_translation:
+            metadata["pytorch_translation"] = True
+            metadata["flydsl_kernel_filename"] = _flydsl_filename
 
-        task_body = (
-            "Optimize this GPU kernel for maximum performance.\n\n"
-            "Follow the workflow described in the pipeline instructions.\n"
-            "Use the discovered tests and benchmarks for correctness and performance validation.\n"
-            "Report final speedup when done."
-        )
+        if _is_translation:
+            _kernel_name = Path(preprocess_ctx.get("kernel_path", "kernel")).stem
+            task_body = (
+                f"Translate the PyTorch kernel `{_kernel_name}.py` into an equivalent "
+                f"FlyDSL GPU kernel and optimize it.\n\n"
+                f"**FlyDSL kernel file**: Create `{_flydsl_filename}` in the working directory.\n"
+                "The test harness will load it via `--flydsl-kernel` and compare outputs "
+                "against the PyTorch reference.\n\n"
+                "You MUST use FlyDSL (`import flydsl.compiler as flyc`, `import flydsl.expr as fx`). "
+                "Do NOT use Triton or any other kernel language.\n\n"
+                "**Phase 1 — Correctness**: Write a FlyDSL kernel whose output "
+                "matches the PyTorch reference (the correctness test must PASS).\n"
+                "**Phase 2 — Performance**: Once correct, optimize to outperform PyTorch's "
+                "default kernels. Target speedup > 1.0x.\n\n"
+                "Use `save_and_test` after every change. Report final correctness status "
+                "and speedup when done."
+            )
+        else:
+            task_body = (
+                "Optimize this GPU kernel for maximum performance.\n\n"
+                "Follow the workflow described in the pipeline instructions.\n"
+                "Use the discovered tests and benchmarks for correctness and performance validation.\n"
+                "Report final speedup when done."
+            )
 
         write_task_file(task_file, metadata, task_body, relative_to=task_file.parent)
         _print(f"  Task file: {task_file}")
 
         results_dir = output_dir / "results" / f"round_{round_num}"
         results_dir.mkdir(parents=True, exist_ok=True)
+
+        # For translation tasks, load the specialized agent config
+        effective_agent_config = agent_config
+        if _is_translation:
+            try:
+                from minisweagent.config import load_config
+
+                translation_cfg = load_config("mini_kernel_pytorch_to_flydsl")
+                translation_agent_cfg = translation_cfg.get("agent", {})
+                effective_agent_config = {**(agent_config or {}), **translation_agent_cfg}
+                _print("  Using PyTorch-to-FlyDSL translation agent config")
+            except Exception as exc:
+                logger.warning("Failed to load translation config, using default: %s", exc)
 
         n_agents = len(gpu_ids)
         _print(f"  Dispatching: run_task_batch({task_file.name}, {n_agents} agents on {n_agents} GPUs)")
@@ -1063,7 +1101,7 @@ def _run_homogeneous_orchestrator(
                 output_dir=results_dir,
                 model_factory=model_factory,
                 console=console,
-                extra_agent_config=agent_config,
+                extra_agent_config=effective_agent_config,
             )
         except Exception as exc:
             _print(f"  [yellow]Round {round_num} dispatch failed: {exc}[/yellow]")

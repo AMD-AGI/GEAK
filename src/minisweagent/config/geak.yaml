@@ -14,9 +14,9 @@ env:
     TQDM_DISABLE: '1'
   timeout: 3600
 model:
-  model_class: amd_llm
+  model_class: anthropic_model
   # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
-  model_name: claude-opus-4.5
+  model_name: claude-sonnet-4-5-20250929
   api_key: ""
   model_kwargs:
     temperature: 0.0
@@ -45,11 +45,11 @@ tools:
 # MCP model configuration
 # Resolution order: GEAK_MCP_MODEL env var > per-tool > default_model > hardcoded fallback
 mcp:
-  # default_model: "claude-sonnet-4-6"
-  # tools:
-  #   kernel-evolve:
-  #     model: "claude-haiku-4-5"
-  #   kernel-ercs:
-  #     model: "claude-sonnet-4-6"
-  #   automated-test-discovery:
-  #     model: "claude-haiku-4-5"
+  default_model: "claude-sonnet-4-5-20250929"
+  tools:
+     kernel-evolve:
+       model: "claude-sonnet-4-5-20250929"
+     kernel-ercs:
+       model: "claude-sonnet-4-5-20250929"
+     automated-test-discovery:
+       model: "claude-sonnet-4-5-20250929"

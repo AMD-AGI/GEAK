@@ -45,6 +45,7 @@ class KernelLanguage(Enum):
     CK = "ck"  # AMD Composable Kernel
     ASM = "asm"
     PYTORCH = "pytorch"
+    FLYDSL = "flydsl"  # FlyDSL: Python DSL, JIT-compiled via MLIR/ROCm
 
 
 class AMDArchitecture(Enum):
@@ -80,7 +81,7 @@ OPTIMIZATION_STRATEGIES = [
         name="hip_graph_capture",
         description="Capture kernel sequence into a graph for single-launch replay. Eliminates per-kernel launch overhead.",
         bottlenecks=[BottleneckType.LATENCY],
-        languages=[KernelLanguage.HIP, KernelLanguage.CUDA, KernelLanguage.TRITON, KernelLanguage.PYTORCH],
+        languages=[KernelLanguage.HIP, KernelLanguage.CUDA, KernelLanguage.TRITON, KernelLanguage.PYTORCH, KernelLanguage.FLYDSL],
         difficulty="easy",
         expected_speedup="1.5-10x for small kernels",
         code_pattern="""
@@ -174,7 +175,7 @@ torch.cuda.synchronize()
         name="kernel_fusion",
         description="Fuse multiple kernels into one to reduce launch overhead and memory traffic.",
         bottlenecks=[BottleneckType.LATENCY, BottleneckType.MEMORY_BANDWIDTH],
-        languages=[KernelLanguage.TRITON, KernelLanguage.HIP, KernelLanguage.CUDA, KernelLanguage.CK],
+        languages=[KernelLanguage.TRITON, KernelLanguage.HIP, KernelLanguage.CUDA, KernelLanguage.CK, KernelLanguage.FLYDSL],
         difficulty="medium",
         expected_speedup="1.2-3x",
         code_pattern="""
@@ -1395,7 +1396,7 @@ def my_function(x, y):
         name="mixed_precision",
         description="Use FP16/BF16 for compute, FP32 for accumulation. 2x memory bandwidth, tensor core access.",
         bottlenecks=[BottleneckType.MEMORY_BANDWIDTH, BottleneckType.COMPUTE],
-        languages=[KernelLanguage.TRITON, KernelLanguage.HIP, KernelLanguage.CUDA, KernelLanguage.PYTORCH],
+        languages=[KernelLanguage.TRITON, KernelLanguage.HIP, KernelLanguage.CUDA, KernelLanguage.PYTORCH, KernelLanguage.FLYDSL],
         difficulty="easy",
         expected_speedup="1.5-3x",
     ),
@@ -1407,6 +1408,218 @@ def my_function(x, y):
         languages=[KernelLanguage.TRITON, KernelLanguage.HIP, KernelLanguage.CUDA, KernelLanguage.CK],
         difficulty="medium",
         expected_speedup="2-4x",
+    ),
+
+    # =========================================================================
+    # FlyDSL-SPECIFIC OPTIMIZATIONS
+    # =========================================================================
+    OptimizationStrategy(
+        name="flydsl_buffer_tensor_reads",
+        description="Use fx.rocdl.make_buffer_tensor() for all input tensor reads. "
+                    "Hardware buffer descriptors provide faster access than raw pointer loads on AMD GPUs.",
+        bottlenecks=[BottleneckType.MEMORY_BANDWIDTH],
+        languages=[KernelLanguage.FLYDSL],
+        difficulty="easy",
+        expected_speedup="1.1-1.3x",
+        code_pattern="""
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+
+@flyc.kernel
+def my_kernel(A: fx.Tensor, B: fx.Tensor):
+    # Wrap inputs as buffer tensors for hardware-accelerated reads
+    A = fx.rocdl.make_buffer_tensor(A)
+    B = fx.rocdl.make_buffer_tensor(B)
+    # ... tile and process ...
+""",
+    ),
+
+    OptimizationStrategy(
+        name="flydsl_vectorized_buffer_copy",
+        description="Use BufferCopy128b (128-bit = 4xfloat32) copy atoms for vectorized memory access. "
+                    "Maximizes bandwidth utilization on MI300X HBM3 interface.",
+        bottlenecks=[BottleneckType.MEMORY_BANDWIDTH],
+        languages=[KernelLanguage.FLYDSL],
+        difficulty="easy",
+        expected_speedup="1.2-1.5x",
+        code_pattern="""
+import flydsl.expr as fx
+
+vec_width = 4  # 4xfloat32 = 128-bit
+copy_bits = vec_width * 32
+RegTy = fx.MemRefType.get(
+    fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
+)
+# 128-bit buffer copy for input (uses hardware buffer descriptors)
+copyAtomBuf = fx.make_copy_atom(fx.rocdl.BufferCopy(copy_bits), fx.Float32)
+# Universal copy for output
+copyAtom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
+
+rA = fx.memref_alloca(RegTy, fx.make_layout(vec_width, 1))
+fx.copy_atom_call(copyAtomBuf, fx.slice(tA, (None, tid)), rA)
+""",
+    ),
+
+    OptimizationStrategy(
+        name="flydsl_register_computation_fusion",
+        description="Load data into register memrefs, perform all fused arithmetic in registers, "
+                    "write back once. Eliminates intermediate global memory round-trips.",
+        bottlenecks=[BottleneckType.MEMORY_BANDWIDTH, BottleneckType.LATENCY],
+        languages=[KernelLanguage.FLYDSL],
+        difficulty="medium",
+        expected_speedup="1.5-3x",
+        code_pattern="""
+import flydsl.expr as fx
+
+# Allocate register memrefs
+rIn = fx.memref_alloca(RegTy, fx.make_layout(vec_width, 1))
+rOut = fx.memref_alloca(RegTy, fx.make_layout(vec_width, 1))
+
+# Load input to registers
+fx.copy_atom_call(copyAtomBuf, fx.slice(tIn, (None, tid)), rIn)
+
+# Fused computation entirely in registers (no global memory traffic)
+vals = fx.memref_load_vec(rIn)
+result = fx.arith.maximumf(
+    fx.arith.subf(one_const, fx.arith.mulf(vals, targets_vec)),
+    zero_const
+)
+fx.memref_store_vec(result, rOut)
+
+# Single write-back to global memory
+fx.copy_atom_call(copyAtom, rOut, fx.slice(tOut, (None, tid)))
+""",
+    ),
+
+    OptimizationStrategy(
+        name="flydsl_tile_based_processing",
+        description="Use fx.logical_divide and fx.zipped_divide for tile-based data processing. "
+                    "Maps naturally to GPU block/thread hierarchy for optimal parallelism.",
+        bottlenecks=[BottleneckType.OCCUPANCY, BottleneckType.MEMORY_BANDWIDTH],
+        languages=[KernelLanguage.FLYDSL],
+        difficulty="medium",
+        expected_speedup="1.2-2x",
+        code_pattern="""
+import flydsl.expr as fx
+
+block_dim = 256  # 4 wavefronts on MI300X
+vec_width = 4    # Process 4 elements per thread
+tile_elems = block_dim * vec_width  # 1024 elements per block
+
+# Tile the tensor: each block processes tile_elems elements
+tA = fx.logical_divide(A, fx.make_layout(tile_elems, 1))
+tA = fx.slice(tA, (None, bid))  # Select this block's tile
+
+# Further divide for per-thread vectorized access
+tA = fx.logical_divide(tA, fx.make_layout(vec_width, 1))
+# fx.slice(tA, (None, tid)) gives this thread's vec_width elements
+""",
+    ),
+
+    OptimizationStrategy(
+        name="flydsl_launch_config_tuning",
+        description="Tune block_dim and vec_width for MI300X: block_dim should be multiple of 64 "
+                    "(wavefront size), grid should have ≥304 blocks (1 per CU). "
+                    "Typical sweet spot: block_dim=256, vec_width=4.",
+        bottlenecks=[BottleneckType.OCCUPANCY, BottleneckType.BALANCED],
+        languages=[KernelLanguage.FLYDSL],
+        difficulty="easy",
+        expected_speedup="1.1-1.5x",
+        code_pattern="""
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+
+@flyc.jit
+def run_kernel(A: fx.Tensor, out, n: fx.Int32, const_n: fx.Constexpr[int],
+               stream: fx.Stream = fx.Stream(None)):
+    block_dim = 256    # 4 wavefronts per block (64 threads/wavefront on MI300X)
+    vec_width = 4      # 128-bit vectorized loads (4xfloat32)
+    tile_elems = block_dim * vec_width  # 1024 elements per block
+    grid_x = (n + tile_elems - 1) // tile_elems
+
+    my_kernel(A, out, const_n, block_dim, vec_width).launch(
+        grid=(grid_x, 1, 1), block=[block_dim, 1, 1], stream=stream
+    )
+""",
+    ),
+
+    OptimizationStrategy(
+        name="flydsl_tiled_copy_pattern",
+        description="Use fx.make_tiled_copy with thread/value layouts for structured data movement. "
+                    "Enables automatic tiling of copy operations across thread blocks.",
+        bottlenecks=[BottleneckType.MEMORY_BANDWIDTH, BottleneckType.LAYOUT],
+        languages=[KernelLanguage.FLYDSL],
+        difficulty="medium",
+        expected_speedup="1.2-1.8x",
+        code_pattern="""
+import flydsl.expr as fx
+
+thr_layout = fx.make_layout((4, 1), (1, 1))
+val_layout = fx.make_layout((1, 8), (1, 1))
+copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
+layout_thr_val = fx.raked_product(thr_layout, val_layout)
+tile_mn = fx.make_tile(4, 8)
+tiled_copy = fx.make_tiled_copy(copy_atom, layout_thr_val, tile_mn)
+thr_copy = tiled_copy.get_slice(tid)
+src = thr_copy.partition_S(bA)
+dst = thr_copy.partition_D(bB)
+frag = fx.make_fragment_like(src)
+fx.copy(copy_atom, src, frag)
+fx.copy(copy_atom, frag, dst)
+""",
+    ),
+
+    OptimizationStrategy(
+        name="flydsl_mfma_matrix_ops",
+        description="Use MFMA (Matrix Fused Multiply-Add) atoms for GEMM-like operations on MI300X. "
+                    "Leverages hardware matrix cores for peak FP16/BF16 throughput.",
+        bottlenecks=[BottleneckType.COMPUTE],
+        languages=[KernelLanguage.FLYDSL],
+        difficulty="hard",
+        expected_speedup="2-10x for GEMM-like ops",
+        code_pattern="""
+import flydsl.expr as fx
+
+mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
+tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
+thr_mma = tiled_mma.thr_slice(tid)
+
+frag_A = thr_mma.make_fragment_A(partition_A)
+frag_B = thr_mma.make_fragment_B(partition_B)
+frag_C = thr_mma.make_fragment_C(partition_C)
+fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
+""",
+        requirements="GEMM-like kernel structure (matmul, attention, etc.)",
+    ),
+
+    OptimizationStrategy(
+        name="flydsl_graph_capture",
+        description="Capture FlyDSL kernel launches into a CUDA/HIP graph for replay. "
+                    "Eliminates per-launch overhead for repeated kernel invocations.",
+        bottlenecks=[BottleneckType.LATENCY],
+        languages=[KernelLanguage.FLYDSL],
+        difficulty="easy",
+        expected_speedup="1.5-5x for small kernels",
+        code_pattern="""
+import torch
+import flydsl.compiler as flyc
+
+# Warmup (triggers JIT compilation)
+run_kernel(tA, out, n, n + 1, stream=torch.cuda.Stream())
+torch.cuda.synchronize()
+
+# Capture into graph
+graph = torch.cuda.CUDAGraph()
+capture_stream = torch.cuda.Stream()
+capture_stream.wait_stream(torch.cuda.current_stream())
+with torch.cuda.stream(capture_stream):
+    with torch.cuda.graph(graph, stream=capture_stream):
+        run_kernel(tA, out, n, n + 1, stream=capture_stream)
+
+# Replay without launch overhead
+graph.replay()
+torch.cuda.synchronize()
+""",
     ),
 ]
 

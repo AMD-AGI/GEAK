@@ -291,6 +291,8 @@ def create_validated_harness(
     discovery_context: str,
     max_retries: int = MAX_HARNESS_RETRIES,
     gpu_id: int = 0,
+    pytorch_translation: bool = False,
+    kernel_path: Path | None = None,
 ) -> tuple[str, list[dict]]:
     """Run UnitTestAgent with static + runtime validation and retry loop.
 
@@ -303,6 +305,17 @@ def create_validated_harness(
 
     If either step fails the errors are fed back into the discovery context
     and the agent is re-invoked, up to *max_retries* additional attempts.
+
+    Parameters
+    ----------
+    pytorch_translation:
+        When True, uses the PyTorch→FlyDSL translation agent variant which
+        creates a harness comparing PyTorch reference output against a
+        FlyDSL kernel that will be generated later by the optimizer.
+    kernel_path:
+        Absolute path to the kernel file.  Required when
+        *pytorch_translation* is True so the agent knows where to import
+        the PyTorch reference from.
 
     Returns ``(test_command, harness_results)`` on success where
     *harness_results* is the list of per-mode result dicts.
@@ -328,13 +341,25 @@ def create_validated_harness(
                 "See INSTRUCTIONS.md sections 1a and 1b."
             )
 
-        test_command = run_unit_test_agent(
-            model=model,
-            repo=repo,
-            kernel_name=kernel_name,
-            log_dir=log_dir,
-            discovery_context=ctx,
-        )
+        if pytorch_translation and kernel_path is not None:
+            from minisweagent.agents.unit_test_agent import run_pytorch_translation_agent
+
+            test_command = run_pytorch_translation_agent(
+                model=model,
+                repo=repo,
+                kernel_name=kernel_name,
+                kernel_path=kernel_path,
+                log_dir=log_dir,
+                discovery_context=ctx,
+            )
+        else:
+            test_command = run_unit_test_agent(
+                model=model,
+                repo=repo,
+                kernel_name=kernel_name,
+                log_dir=log_dir,
+                discovery_context=ctx,
+            )
         logger.info("UnitTestAgent test_command (attempt %d): %s", attempt, test_command)
 
         harness = extract_harness_path(test_command)

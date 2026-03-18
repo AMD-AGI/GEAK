@@ -102,6 +102,30 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- Use `torch.testing.assert_close` for correctness against a torch reference.\n"
         "- Benchmark the wrapper launch, not the assembly directly."
     ),
+    "pytorch": (
+        "This is a **PyTorch-to-FlyDSL translation** task. The input is pure PyTorch code "
+        "(nn.Module) that will be translated into a FlyDSL kernel by the optimizer.\n"
+        "- The PyTorch code is the REFERENCE implementation — it is correct by definition.\n"
+        "- A FlyDSL kernel will be generated LATER by the optimizer; it does NOT exist yet.\n"
+        "- The harness MUST accept `--flydsl-kernel <path>` as an optional CLI argument "
+        "to locate the FlyDSL candidate at runtime.\n"
+        "- When `--flydsl-kernel` is NOT provided or the file does not exist:\n"
+        "  - `--correctness`: validate that the PyTorch reference runs correctly, exit 0.\n"
+        "  - `--benchmark` / `--full-benchmark`: benchmark PyTorch only, print GEAK_RESULT_LATENCY_MS.\n"
+        "  - `--profile`: profile PyTorch only.\n"
+        "- When `--flydsl-kernel` IS provided and the file exists:\n"
+        "  - `--correctness`: run BOTH PyTorch and FlyDSL with identical inputs, compare outputs "
+        "with `torch.testing.assert_close`. Exit non-zero on mismatch.\n"
+        "  - `--benchmark` / `--full-benchmark`: benchmark BOTH, print PyTorch and FlyDSL latencies, "
+        "print speedup ratio, and GEAK_RESULT_LATENCY_MS=<FlyDSL latency>.\n"
+        "  - `--profile`: profile FlyDSL kernel only (for hardware analysis).\n"
+        "- Use `importlib.util` to dynamically load the FlyDSL kernel (path varies per evaluation).\n"
+        "- The FlyDSL module should expose a `forward(*args)` function or a `Model` class "
+        "matching the PyTorch interface.\n"
+        "- Use fixed random seed (`torch.manual_seed(42)`) and fixed tensor sizes.\n"
+        "- Generate tensors on CPU, then move to GPU.\n"
+        "- No build step needed (both PyTorch and FlyDSL are Python/JIT)."
+    ),
     "unknown": (
         "Kernel type could not be determined automatically.\n"
         "- Inspect the source file to determine if it is Triton, HIP, CUDA, CK, or FlyDSL.\n"
@@ -246,5 +270,170 @@ def run_unit_test_agent(
     exit_status, result = agent.run(task)
     if exit_status != "Submitted":
         raise RuntimeError(f"UnitTestAgent did not finish successfully: {exit_status}\n{result}")
+
+    return _extract_test_command(result)
+
+
+# ---------------------------------------------------------------------------
+# PyTorch-to-FlyDSL translation support
+# ---------------------------------------------------------------------------
+
+_PYTORCH_INDICATORS = (
+    "import torch",
+    "torch.nn",
+    "nn.Module",
+)
+
+_GPU_KERNEL_FRAMEWORKS = (
+    "@triton.jit",
+    "import triton",
+    "@flyc.kernel",
+    "@flyc.jit",
+    "import flyc",
+    "#include <hip/",
+    "hipcc",
+    "__global__",
+    "@cuda.jit",
+)
+
+
+def detect_pytorch_translation_task(kernel_path: Path) -> bool:
+    """Return True if *kernel_path* is pure PyTorch code suitable for FlyDSL translation.
+
+    A file qualifies when it imports torch **and** defines an ``nn.Module``
+    subclass but does NOT use any GPU kernel framework (Triton, FlyDSL, HIP,
+    CUDA).  This heuristic covers the standard ``Model(nn.Module)`` pattern
+    used by kernel evaluation benchmarks (e.g. ``hingeloss.py``).
+    """
+    if not kernel_path.exists() or kernel_path.suffix != ".py":
+        return False
+
+    try:
+        content = kernel_path.read_text(errors="replace")
+    except OSError:
+        return False
+
+    has_pytorch = all(indicator in content for indicator in _PYTORCH_INDICATORS)
+    has_gpu_framework = any(fw in content for fw in _GPU_KERNEL_FRAMEWORKS)
+
+    return has_pytorch and not has_gpu_framework
+
+
+def format_pytorch_translation_context(
+    kernel_path: Path,
+    kernel_name: str,
+) -> str:
+    """Build extra context describing the PyTorch→FlyDSL translation scenario.
+
+    This is appended to the discovery context so the agent understands
+    that the PyTorch code is the reference and the FlyDSL kernel will
+    appear later.
+    """
+    lines = [
+        "## PyTorch-to-FlyDSL Translation Task",
+        "",
+        f"The input kernel `{kernel_path.name}` is **pure PyTorch** code.",
+        "The optimizer will translate this into a FlyDSL kernel in subsequent steps.",
+        "",
+        "**Your harness must support two execution modes:**",
+        "",
+        "1. **Baseline mode** (no `--flydsl-kernel` argument):",
+        "   - Runs the PyTorch reference only.",
+        "   - `--correctness` validates that PyTorch produces reasonable outputs, exits 0.",
+        "   - `--benchmark` reports PyTorch latency as GEAK_RESULT_LATENCY_MS.",
+        "",
+        "2. **Comparison mode** (`--flydsl-kernel <path>` argument provided):",
+        "   - Dynamically loads the FlyDSL kernel from the given path.",
+        "   - `--correctness` runs BOTH implementations with identical inputs and compares "
+        "outputs using `torch.testing.assert_close`. Exits non-zero on mismatch.",
+        "   - `--benchmark` times BOTH implementations, prints per-implementation latencies, "
+        "speedup ratio, and GEAK_RESULT_LATENCY_MS=<FlyDSL latency in ms>.",
+        "",
+        "**FlyDSL kernel loading convention:**",
+        "- Use `importlib.util.spec_from_file_location` to load the candidate module "
+        "from the path given by `--flydsl-kernel`.",
+        "- The FlyDSL module must expose either:",
+        "  - A `Model` class with the same `forward()` signature as the PyTorch reference, OR",
+        "  - A `forward(*args)` function with the same signature.",
+        "- The harness should try `Model` first, then fall back to `forward()`.",
+        "",
+        f"**PyTorch reference interface** (from `{kernel_path.name}`):",
+    ]
+
+    try:
+        content = kernel_path.read_text(errors="replace")
+        # Extract get_inputs, get_init_inputs, batch_size, input_shape
+        for line in content.splitlines():
+            stripped = line.strip()
+            if any(
+                stripped.startswith(prefix)
+                for prefix in (
+                    "class Model",
+                    "def forward",
+                    "def get_inputs",
+                    "def get_init_inputs",
+                    "batch_size",
+                    "input_shape",
+                    "dim ",
+                )
+            ):
+                lines.append(f"  `{stripped}`")
+    except OSError:
+        lines.append("  (could not read file)")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def run_pytorch_translation_agent(
+    *,
+    model: Model,
+    repo: Path,
+    kernel_name: str,
+    kernel_path: Path,
+    log_dir: Path | None = None,
+    discovery_context: str = "",
+) -> str:
+    """Run UnitTestAgent configured for PyTorch→FlyDSL translation harness creation.
+
+    Uses the ``mini_unit_test_agent_pytorch_translation`` config which has a
+    system prompt tailored for creating a two-implementation comparison harness
+    where the PyTorch code is the reference and the FlyDSL kernel will be
+    generated later.
+
+    Parameters
+    ----------
+    kernel_path:
+        Absolute path to the PyTorch reference file.  Passed to the agent
+        so it knows where to import the reference from.
+    """
+    agent_config, _ = load_agent_config("mini_unit_test_agent_pytorch_translation")
+
+    env = LocalEnvironment(**LocalEnvironmentConfig(cwd=str(repo)).__dict__)
+    agent = UnitTestAgent(model, env, **agent_config)
+    if log_dir:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        agent.log_file = log_dir / "unit_test_agent.log"
+
+    translation_context = format_pytorch_translation_context(kernel_path, kernel_name)
+
+    task = (
+        f"Create a PyTorch-to-FlyDSL translation test harness for kernel: {kernel_name}\n"
+        f"Repository: {repo}\n"
+        f"PyTorch reference file: {kernel_path}\n\n"
+        f"The FlyDSL kernel does NOT exist yet. It will be generated by the optimizer.\n"
+        f"The harness must accept --flydsl-kernel <path> to load the FlyDSL candidate at runtime.\n\n"
+        f"IMPORTANT: Read INSTRUCTIONS.md in the repository for general test harness requirements\n"
+        f"and COMMANDMENT format rules before creating the harness.\n"
+    )
+    if discovery_context:
+        task += f"\n{discovery_context}"
+    task += f"\n{translation_context}"
+
+    exit_status, result = agent.run(task)
+    if exit_status != "Submitted":
+        raise RuntimeError(
+            f"UnitTestAgent (pytorch_translation) did not finish successfully: {exit_status}\n{result}"
+        )
 
     return _extract_test_command(result)

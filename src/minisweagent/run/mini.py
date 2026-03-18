@@ -627,7 +627,23 @@ def main(
         else:
             console.print("[dim]No discovery results — UnitTestAgent will search/create from scratch.[/dim]")
 
-        # Step 0b: Run UnitTestAgent with harness validation + retry
+        # Step 0b: Detect PyTorch→FlyDSL translation task
+        from minisweagent.agents.unit_test_agent import detect_pytorch_translation_task
+
+        _is_pytorch_translation = False
+        _effective_kernel_path: Path | None = None
+        if _resolved_kernel_path:
+            _effective_kernel_path = Path(_resolved_kernel_path)
+        elif repo and kernel_name and kernel_name != "unknown":
+            _candidate = repo / f"{kernel_name}.py"
+            if _candidate.exists():
+                _effective_kernel_path = _candidate
+
+        if _effective_kernel_path and detect_pytorch_translation_task(_effective_kernel_path):
+            _is_pytorch_translation = True
+            console.print("[bold magenta]Detected PyTorch-to-FlyDSL translation task[/bold magenta]")
+
+        # Step 0c: Run UnitTestAgent with harness validation + retry
         console.print(
             "[bold yellow]Running UnitTestAgent to create test harness...[/bold yellow]"
         )
@@ -638,6 +654,8 @@ def main(
             log_dir=patch_output,
             discovery_context=discovery_context,
             gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
+            pytorch_translation=_is_pytorch_translation,
+            kernel_path=_effective_kernel_path if _is_pytorch_translation else None,
         )
         console.print(f"[bold green]Using UnitTestAgent test_command:[/bold green] {test_command}")
         for _hr in (_harness_results or []):

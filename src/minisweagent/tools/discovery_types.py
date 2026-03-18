@@ -36,7 +36,7 @@ class KernelInfo:
 
     file_path: Path
     kernel_name: str
-    kernel_type: str  # triton, hip, cuda, ck, asm, flydsl
+    kernel_type: str  # triton, hip, cuda, ck, asm, flydsl, pytorch
     kernel_language: str = "python"  # "python", "cpp", "asm"
     function_names: list[str] = field(default_factory=list)
     has_jit_decorator: bool = False

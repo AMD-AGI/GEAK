@@ -175,7 +175,10 @@ def run_preprocessor(
             else "--- Step 3b/3c: UnitTestAgent (harness creation + execution) ---"
         )
         try:
-            from minisweagent.agents.unit_test_agent import format_discovery_for_agent
+            from minisweagent.agents.unit_test_agent import (
+                detect_pytorch_translation_task,
+                format_discovery_for_agent,
+            )
             from minisweagent.tools.discovery_types import DiscoveryResult
 
             disc_result = DiscoveryResult.from_dict(disc_dict, kernel_path)
@@ -191,6 +194,15 @@ def run_preprocessor(
                 "Do NOT use `cd` in the command. The profiler cannot handle compound shell commands."
             )
 
+            _is_pytorch_translation = detect_pytorch_translation_task(Path(kernel_path))
+            if _is_pytorch_translation:
+                _print(
+                    "[bold magenta]  Detected PyTorch-to-FlyDSL translation task[/bold magenta]"
+                    if console
+                    else "  Detected PyTorch-to-FlyDSL translation task"
+                )
+                ctx["pytorch_translation"] = True
+
             test_command, harness_results = create_validated_harness(
                 model=_uta_model,
                 repo=Path(repo_root),
@@ -198,6 +210,8 @@ def run_preprocessor(
                 log_dir=output_dir,
                 discovery_context=discovery_context,
                 gpu_id=gpu_id,
+                pytorch_translation=_is_pytorch_translation,
+                kernel_path=Path(kernel_path) if _is_pytorch_translation else None,
             )
             _print(f"  UnitTestAgent test_command: {test_command}")
             # Lock harness_path to the validated script so it is not overwritten by fallback (e.g. repo test_softmax.py without GEAK flags)
@@ -377,20 +391,33 @@ def run_preprocessor(
     commandment: str | None = None
     if test_command:
         try:
-            from minisweagent.tools.commandment import generate_commandment
-
-            from minisweagent.tools.discovery_types import _infer_kernel_language
-
             harness = ctx.get("harness_path") or extract_harness_path(test_command)
-            _ktype = (disc_dict.get("kernel") or {}).get("type", "")
-            _kl = _infer_kernel_language(Path(kernel_path), _ktype)
-            commandment = generate_commandment(
-                kernel_path=kernel_path,
-                harness_path=harness,
-                repo_root=repo_root,
-                kernel_language=_kl,
-            )
-            _print("  COMMANDMENT.md generated")
+
+            if ctx.get("pytorch_translation"):
+                from minisweagent.tools.commandment import generate_translation_commandment
+
+                _flydsl_filename = Path(kernel_path).stem + "_flydsl.py"
+                ctx["flydsl_kernel_filename"] = _flydsl_filename
+                commandment = generate_translation_commandment(
+                    kernel_path=kernel_path,
+                    harness_path=harness,
+                    repo_root=repo_root,
+                    flydsl_kernel_filename=_flydsl_filename,
+                )
+                _print(f"  Translation COMMANDMENT.md generated (FlyDSL target: {_flydsl_filename})")
+            else:
+                from minisweagent.tools.commandment import generate_commandment
+                from minisweagent.tools.discovery_types import _infer_kernel_language
+
+                _ktype = (disc_dict.get("kernel") or {}).get("type", "")
+                _kl = _infer_kernel_language(Path(kernel_path), _ktype)
+                commandment = generate_commandment(
+                    kernel_path=kernel_path,
+                    harness_path=harness,
+                    repo_root=repo_root,
+                    kernel_language=_kl,
+                )
+                _print("  COMMANDMENT.md generated")
         except Exception as exc:
             _print(f"  [yellow]Commandment failed: {exc}[/yellow]" if console else f"  Commandment failed: {exc}")
             logger.warning("Commandment generation failed: %s", exc, exc_info=True)

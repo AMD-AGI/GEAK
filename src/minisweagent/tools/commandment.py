@@ -133,6 +133,50 @@ def generate_commandment(
     return _validate_and_fix(content, harness_path=str(harness_path))
 
 
+def generate_translation_commandment(
+    kernel_path: str | Path,
+    harness_path: str | Path,
+    repo_root: str | Path | None = None,
+    *,
+    flydsl_kernel_filename: str = "kernel_flydsl.py",
+    warmup_runs: int = 2,
+    profile_replays: int = 5,
+) -> str:
+    """Generate a COMMANDMENT.md for PyTorch-to-FlyDSL translation tasks.
+
+    All test sections pass ``--flydsl-kernel ${GEAK_WORK_DIR}/<filename>``
+    so the harness compares the FlyDSL candidate against PyTorch output.
+    The agent creates the FlyDSL kernel file during optimization.
+
+    Args:
+        kernel_path: Absolute path to the **PyTorch reference** kernel.
+        harness_path: Absolute path to the translation test harness.
+        repo_root: Repository root for PYTHONPATH.
+        flydsl_kernel_filename: Name of the FlyDSL file the agent will create
+            inside ``${GEAK_WORK_DIR}``.
+        warmup_runs: Warm-up invocations before profiling.
+        profile_replays: Number of replay passes for kernel-profile.
+    """
+    kernel_path = Path(kernel_path).resolve()
+    harness_path = Path(harness_path).resolve()
+
+    if repo_root is not None:
+        repo_root = Path(repo_root).resolve()
+    else:
+        repo_root = kernel_path.parent
+
+    content = _generate_translation(
+        kernel_path=kernel_path,
+        harness_path=harness_path,
+        repo_root=repo_root,
+        flydsl_kernel_filename=flydsl_kernel_filename,
+        warmup_runs=warmup_runs,
+        profile_replays=profile_replays,
+    )
+
+    return _validate_and_fix(content, harness_path=str(harness_path))
+
+
 def _warmup_block(command: str, warmup_runs: int) -> str:
     """Build the warmup section for the PROFILE block.
 
@@ -217,6 +261,55 @@ ${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --benchmark ${{GEAK_BENCHMARK_EXTRA_
 
 ## FULL_BENCHMARK
 ${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+"""
+
+
+def _generate_translation(
+    kernel_path: Path,
+    harness_path: Path,
+    repo_root: Path,
+    flydsl_kernel_filename: str,
+    warmup_runs: int,
+    profile_replays: int,
+) -> str:
+    """Generate COMMANDMENT for a PyTorch-to-FlyDSL translation task.
+
+    The CORRECTNESS/BENCHMARK/PROFILE sections all pass
+    ``--flydsl-kernel ${GEAK_WORK_DIR}/<filename>`` so the harness
+    compares the agent's FlyDSL candidate against PyTorch output.
+    """
+    flydsl_arg = f"--flydsl-kernel ${{GEAK_WORK_DIR}}/{flydsl_kernel_filename}"
+
+    warmup_cmd = (
+        "${GEAK_WORK_DIR}/run.sh ${GEAK_HARNESS} "
+        f"{flydsl_arg} --profile > /dev/null 2>&1 || true"
+    )
+    warmup_block = _warmup_block(warmup_cmd, warmup_runs)
+
+    setup_section = (
+        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+        "export HIP_VISIBLE_DEVICES=%s\\n"
+        'exec python3 "$@"\\n\' '
+        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
+        "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
+    )
+
+    return f"""\
+## SETUP
+{setup_section}
+
+## CORRECTNESS
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} {flydsl_arg} --correctness
+
+## PROFILE
+{warmup_block}
+kernel-profile "${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} {flydsl_arg} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
+
+## BENCHMARK
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} {flydsl_arg} --benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+
+## FULL_BENCHMARK
+${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} {flydsl_arg} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
 """
 
 
