@@ -188,7 +188,11 @@ class MCPToolBridge:
 
         env = {"PYTHONPATH": pythonpath}
 
-        for key in ("GEAK_MCP_MODEL", "ANTHROPIC_API_KEY", "AMD_LLM_API_KEY", "LLM_GATEWAY_KEY"):
+        for key in (
+            "PATH", "HOME", "VIRTUAL_ENV",
+            "GEAK_MCP_MODEL", "ANTHROPIC_API_KEY", "AMD_LLM_API_KEY", "LLM_GATEWAY_KEY",
+            "GEAK_OE_ROOT", "GEAK_ENABLE_OPENEVOLVE_MCP",
+        ):
             val = os.environ.get(key)
             if val:
                 env[key] = val
