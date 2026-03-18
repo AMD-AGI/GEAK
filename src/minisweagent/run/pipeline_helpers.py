@@ -34,6 +34,8 @@ DEFAULT_EVAL_BENCHMARK_ITERATIONS = int(
     os.getenv("GEAK_EVAL_BENCHMARK_ITERATIONS", "30")
 )
 DEFAULT_AGENT_BENCHMARK_ITERATIONS = DEFAULT_EVAL_BENCHMARK_ITERATIONS
+DEFAULT_PIPELINE_OUTPUT_DIR = "geak_output"
+DEFAULT_HETEROGENEOUS = False
 
 
 # ── agent filtering ──────────────────────────────────────────────────
@@ -746,7 +748,7 @@ def _gpu_arch_context(profiling_path: str) -> list[str]:
     lds_per_cu = gpu_info.get("lds_per_cu_kb", 64)
     vgprs = gpu_info.get("vgprs_per_cu", 512)
 
-    lines = [
+    return [
         f"## GPU Architecture: {name} ({arch})",
         f"- Architecture: {arch}",
         f"- Compute Units: {cus}",
@@ -755,10 +757,9 @@ def _gpu_arch_context(profiling_path: str) -> list[str]:
         f"- VGPRs per CU: {vgprs}",
         "- Wavefront size: 64 (AMD default), some kernels can use 32",
         "- MFMA (Matrix Fused Multiply-Add) instructions available for dense math",
-        f"- Use these specs to guide your kernel optimizations (tile sizes, occupancy, LDS usage).",
+        "- Use these specs to guide your kernel optimizations (tile sizes, occupancy, LDS usage).",
         "",
     ]
-    return lines
 
 
 # ── pipeline context injection ───────────────────────────────────────

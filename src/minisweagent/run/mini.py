@@ -105,6 +105,8 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tu
 
 
 from minisweagent.run.pipeline_helpers import (
+    DEFAULT_HETEROGENEOUS,
+    DEFAULT_PIPELINE_OUTPUT_DIR,
     configure_agent_filter_env,
     create_validated_harness,
     extract_harness_path,
@@ -237,9 +239,10 @@ def main(
     kernel_url: str | None = typer.Option(None, "--kernel-url", help="Kernel as URL (e.g. https://github.com/.../file.py#L106). Resolved path/line/kernel name are injected into the task.", rich_help_panel="Kernel"),
     harness: str | None = typer.Option(None, "--harness", help="Exact harness URL/path to use for --kernel-url runs. Discovery/UnitTestAgent fallback is disabled.", rich_help_panel="Kernel"),
     max_rounds: int | None = typer.Option(None, "--max-rounds", help="Maximum optimisation rounds for the orchestrator (default: GEAK_MAX_ROUNDS env or 5).", rich_help_panel="Advanced"),
+    start_round: int = typer.Option(1, "--start-round", help="Round to resume from (1-based). Skips exploration and loads prior round evaluations.", rich_help_panel="Advanced"),
     allowed_agents: str | None = typer.Option(None, "--allowed-agents", help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS and overrides the default OpenEvolve exclusion.", rich_help_panel="Advanced"),
     excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS. Default: openevolve is excluded unless explicitly re-enabled.", rich_help_panel="Advanced"),
-    heterogeneous: bool = typer.Option(True, "--heterogeneous/--no-heterogeneous", help="Use LLM-generated diverse optimization tasks (requires preprocessing/discovery). Default: enabled.", rich_help_panel="Advanced"),
+    heterogeneous: bool = typer.Option(DEFAULT_HETEROGENEOUS, "--heterogeneous/--no-heterogeneous", help=f"Use LLM-generated diverse optimization tasks (requires preprocessing/discovery). Default: {DEFAULT_HETEROGENEOUS}.", rich_help_panel="Advanced"),
     from_task: Path | None = typer.Option(None, "--from-task", help="Deprecated: use --task with a YAML-frontmatter .md file instead.", hidden=True),
     rag: bool = typer.Option(False, "--rag", help="Enable RAG retrieval from AMD/NVIDIA knowledge base"),
     debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --rag)"),
@@ -557,7 +560,7 @@ def main(
         from minisweagent.run.orchestrator import run_orchestrator
         from minisweagent.run.preprocessor import run_preprocessor
 
-        _pipeline_output = patch_output or Path("geak_output")
+        _pipeline_output = patch_output or Path(DEFAULT_PIPELINE_OUTPUT_DIR)
         console.print("[bold cyan]--- GEAK Full Pipeline Mode ---[/bold cyan]")
         console.print(f"[dim]Kernel URL: {kernel_url}[/dim]")
         console.print(f"[dim]Output dir: {_pipeline_output}[/dim]")
@@ -582,6 +585,7 @@ def main(
             model_factory=lambda: get_model(model_name_resolved, model_cfg),
             output_dir=_pipeline_output,
             max_rounds=max_rounds,
+            start_round=start_round,
             heterogeneous=heterogeneous,
             console=console,
         )

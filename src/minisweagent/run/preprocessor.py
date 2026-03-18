@@ -41,6 +41,7 @@ def _ensure_mcp_importable() -> None:
 from minisweagent.benchmark_parsing import extract_latency_ms
 from minisweagent.run.pipeline_helpers import (
     DEFAULT_EVAL_BENCHMARK_ITERATIONS,
+    DEFAULT_PIPELINE_OUTPUT_DIR,
     _materialize_validated_harness,
     create_validated_harness,
     execute_harness_validation,
@@ -967,8 +968,8 @@ def main() -> None:
     parser.add_argument(
         "-o",
         "--output",
-        default="geak_preprocess_output",
-        help="Output directory for intermediate artefacts (default: geak_preprocess_output)",
+        default=DEFAULT_PIPELINE_OUTPUT_DIR,
+        help=f"Output directory for intermediate artefacts (default: {DEFAULT_PIPELINE_OUTPUT_DIR})",
     )
     parser.add_argument(
         "--gpu",

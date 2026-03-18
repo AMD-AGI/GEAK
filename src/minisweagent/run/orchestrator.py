@@ -51,6 +51,7 @@ from minisweagent.run.generated_artifacts import (
     apply_patch_with_generated_helper_fallback,
 )
 from minisweagent.run.git_safe_env import get_git_safe_env
+from minisweagent.run.pipeline_helpers import DEFAULT_HETEROGENEOUS, DEFAULT_PIPELINE_OUTPUT_DIR
 
 # ── System prompt for the orchestrator LLM ───────────────────────────
 
@@ -1693,7 +1694,7 @@ def run_orchestrator(
     output_dir: Path | None = None,
     max_rounds: int | None = None,
     start_round: int = 1,
-    heterogeneous: bool = False,
+    heterogeneous: bool = DEFAULT_HETEROGENEOUS,
     console=None,
 ) -> dict[str, Any]:
     """Run the orchestrator agent loop.
@@ -1725,7 +1726,7 @@ def run_orchestrator(
     """
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 
-    _out = output_dir or Path(preprocess_ctx.get("output_dir", "geak_output"))
+    _out = output_dir or Path(preprocess_ctx.get("output_dir", DEFAULT_PIPELINE_OUTPUT_DIR))
     _out = Path(_out)
     _out.mkdir(parents=True, exist_ok=True)
 
@@ -2143,6 +2144,7 @@ def main() -> None:
     """CLI: ``geak-orchestrate --preprocess-dir <dir> [--gpu-ids 0,1] [--max-rounds 3]``."""
     import argparse
 
+    from minisweagent.run.pipeline_helpers import DEFAULT_HETEROGENEOUS
 
     parser = argparse.ArgumentParser(
         description="GEAK orchestrator: LLM-driven task generation, dispatch, and iteration loop",
@@ -2173,7 +2175,7 @@ def main() -> None:
     parser.add_argument(
         "--heterogeneous",
         action="store_true",
-        default=False,
+        default=DEFAULT_HETEROGENEOUS,
         help="Use LLM-generated diverse tasks per round. Default: homogeneous (all agents get the same task).",
     )
     parser.add_argument(
