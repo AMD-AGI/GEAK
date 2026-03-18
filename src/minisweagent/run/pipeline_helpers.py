@@ -113,7 +113,7 @@ def load_geak_model(
     from minisweagent.config import get_config_path
     from minisweagent.models import get_model
 
-    resolved_name = model_name or os.environ.get("GEAK_MODEL")
+    resolved_name = model_name or os.environ.get("GEAK_MODEL") or "claude-opus-4.6"
     cfg_path = get_config_path(config_spec)
     model_config: dict[str, Any] = {}
     if cfg_path.exists():
@@ -134,7 +134,7 @@ def geak_model_factory(
     from minisweagent.config import get_config_path
     from minisweagent.models import get_model
 
-    resolved_name = model_name or os.environ.get("GEAK_MODEL")
+    resolved_name = model_name or os.environ.get("GEAK_MODEL") or "claude-opus-4.6"
     cfg_path = get_config_path(config_spec)
     model_config: dict[str, Any] = {}
     if cfg_path.exists():

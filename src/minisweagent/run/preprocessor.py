@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shlex
 import sys
@@ -1007,6 +1008,26 @@ def main() -> None:
     from minisweagent.run.pipeline_helpers import geak_model_factory
 
     _model_factory = geak_model_factory(args.model)
+
+    # Print effective configuration at startup
+    _sep = "=" * 60
+    print(_sep)
+    print("  GEAK-v3 Preprocessor Configuration")
+    print(_sep)
+    print(f"  kernel_url:           {args.url}")
+    print(f"  output_dir:           {args.output}")
+    print(f"  gpu:                  {args.gpu}")
+    print(f"  model:                {args.model}")
+    print(f"  harness:              {args.harness}")
+    print(f"  repo:                 {args.repo}")
+    print("-" * 60)
+    print(f"  GEAK_MODEL:                 {os.environ.get('GEAK_MODEL', '<not set>')}")
+    print(f"  GEAK_MODEL_ENSEMBLE:        {os.environ.get('GEAK_MODEL_ENSEMBLE', '<not set>')}")
+    print(f"  GEAK_EXCLUDED_AGENTS:       {os.environ.get('GEAK_EXCLUDED_AGENTS', '<not set>')}")
+    print(f"  GEAK_BENCHMARK_ITERATIONS:  {os.environ.get('GEAK_BENCHMARK_ITERATIONS', '<not set>')}")
+    print(f"  AITER_ROOT:                 {os.environ.get('AITER_ROOT', '<not set>')}")
+    print(_sep)
+    print(flush=True)
 
     ctx = run_preprocessor(
         args.url,

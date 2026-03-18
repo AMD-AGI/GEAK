@@ -77,7 +77,7 @@ def get_model_name(input_model_name: str | None = None, config: dict | None = No
         return from_env
     if from_env := os.getenv("MSWEA_MODEL_NAME"):
         return from_env
-    raise ValueError("No default model set. Please run `mini-extra config setup` to set one.")
+    return "claude-opus-4.6"  # GEAK default
 
 
 _MODEL_CLASS_MAPPING = {

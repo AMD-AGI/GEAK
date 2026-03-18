@@ -18,7 +18,7 @@ if [ -n "$AMD_LLM_API_KEY" ]; then
 AMD_LLM_API_KEY='$AMD_LLM_API_KEY'
 MSWEA_CONFIGURED='true'
 EOF
-    echo "✅ mini-swe-agent config created (model: amd/${GEAK_MODEL:-claude-sonnet-4.5})"
+    echo "✅ mini-swe-agent config created (model: amd/${GEAK_MODEL:-claude-opus-4.6})"
 else
     echo "⚠️  AMD_LLM_API_KEY not set - LLM features won't work"
     echo "   Set it with: export AMD_LLM_API_KEY=your-key"

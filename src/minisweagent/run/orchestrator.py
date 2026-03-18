@@ -2253,6 +2253,36 @@ def main() -> None:
     except ImportError:
         console = None
 
+    # Print effective configuration at startup
+    _sep = "=" * 60
+    print(_sep)
+    print("  GEAK-v3 Orchestrator Configuration")
+    print(_sep)
+    print(f"  preprocess_dir:       {pp_dir}")
+    print(f"  gpu_ids:              {gpu_ids}")
+    print(f"  max_rounds:           {args.max_rounds}")
+    print(f"  start_round:          {args.start_round}")
+    print(f"  heterogeneous:        {args.heterogeneous}")
+    print(f"  model (cli):          {args.model}")
+    print(f"  model (resolved):     {model.config if hasattr(model, 'config') else model}")
+    print("-" * 60)
+    print(f"  GEAK_MODEL:                 {os.environ.get('GEAK_MODEL', '<not set>')}")
+    print(f"  GEAK_MODEL_ENSEMBLE:        {os.environ.get('GEAK_MODEL_ENSEMBLE', '<not set>')}")
+    print(f"  GEAK_EXCLUDED_AGENTS:       {os.environ.get('GEAK_EXCLUDED_AGENTS', '<not set>')}")
+    print(f"  GEAK_EARLY_STOP_THRESHOLD:  {os.environ.get('GEAK_EARLY_STOP_THRESHOLD', '<not set>')}")
+    print(f"  GEAK_AGENT_STEP_LIMIT:      {os.environ.get('GEAK_AGENT_STEP_LIMIT', '<not set>')}")
+    print(f"  GEAK_TASKGEN_STEP_LIMIT:    {os.environ.get('GEAK_TASKGEN_STEP_LIMIT', '<not set>')}")
+    print(f"  GEAK_ORCHESTRATOR_STEP_LIMIT: {os.environ.get('GEAK_ORCHESTRATOR_STEP_LIMIT', '<not set>')}")
+    print(f"  GEAK_BENCHMARK_ITERATIONS:  {os.environ.get('GEAK_BENCHMARK_ITERATIONS', '<not set>')}")
+    print(f"  AITER_ROOT:                 {os.environ.get('AITER_ROOT', '<not set>')}")
+    print("-" * 60)
+    print(f"  kernel_path:          {ctx.get('kernel_path', '<unknown>')}")
+    print(f"  harness_path:         {ctx.get('harness_path', '<unknown>')}")
+    print(f"  test_command:         {ctx.get('test_command', '<unknown>')}")
+    print(f"  repo_root:            {ctx.get('repo_root', '<unknown>')}")
+    print(_sep)
+    print(flush=True)
+
     report = run_orchestrator(
         preprocess_ctx=ctx,
         gpu_ids=gpu_ids,

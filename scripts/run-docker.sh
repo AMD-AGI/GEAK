@@ -120,7 +120,8 @@ fi
 _exec_into_container() {
     if [[ ${#EXEC_CMD[@]} -gt 0 ]]; then
         echo "Running: ${EXEC_CMD[*]}"
-        exec docker exec -it ${CONTAINER_NAME} "${EXEC_CMD[@]}"
+        docker exec ${CONTAINER_NAME} "${EXEC_CMD[@]}"
+        exit $?
     else
         exec docker exec -it ${CONTAINER_NAME} bash
     fi
@@ -169,7 +170,7 @@ fi
 if [ -n "$GEAK_MODEL" ]; then
     echo "✅ GEAK_MODEL: $GEAK_MODEL"
 else
-    GEAK_MODEL="claude-sonnet-4.5"
+    GEAK_MODEL="claude-opus-4.6"
     echo "ℹ️  GEAK_MODEL: (using default: $GEAK_MODEL)"
 fi
 echo ""
