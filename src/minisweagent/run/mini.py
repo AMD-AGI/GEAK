@@ -105,6 +105,7 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tu
 
 
 from minisweagent.run.pipeline_helpers import (
+    configure_agent_filter_env,
     create_validated_harness,
     extract_harness_path,
     run_baseline_profile,
@@ -228,16 +229,18 @@ def main(
     metric: str | None = typer.Option(None, "--metric", help="Metric extraction task description for LLM"),
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents to run (only effective with --save-patch). If not specified, reads from config file."),
     repo: Path | None = typer.Option(None, "--repo", help="Repository path for parallel execution. Required when num_parallel > 1. Each agent will get an isolated workdir using git worktree."),
-    gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs for agents (e.g., '0,1,2,3'). For single agent, uses first GPU. Defaults to '0'."),
+    gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs for agents (e.g., '0,1,2,3'). Defaults to all detected GPUs."),
     # Runtime environment configuration (ported from MSA branch)
     runtime: str = typer.Option("local", "--runtime", help="Runtime environment: local, docker, or auto (auto-detects GPU availability).", rich_help_panel="Advanced"),
     docker_image: str | None = typer.Option(None, "--docker-image", help="Docker image to use when --runtime=docker.", rich_help_panel="Advanced"),
     workspace: Path | None = typer.Option(None, "--workspace", help="Workspace directory to mount in Docker.", rich_help_panel="Advanced"),
     kernel_url: str | None = typer.Option(None, "--kernel-url", help="Kernel as URL (e.g. https://github.com/.../file.py#L106). Resolved path/line/kernel name are injected into the task.", rich_help_panel="Kernel"),
+    deterministic: bool = typer.Option(False, "--deterministic", help="Require an explicit deterministic harness contract for --kernel-url runs.", rich_help_panel="Kernel"),
+    deterministic_harness: str | None = typer.Option(None, "--deterministic-harness", help="Exact harness URL/path to use for --kernel-url runs. Discovery/UnitTestAgent fallback is disabled.", rich_help_panel="Kernel"),
     max_rounds: int | None = typer.Option(None, "--max-rounds", help="Maximum optimisation rounds for the orchestrator (default: GEAK_MAX_ROUNDS env or 5).", rich_help_panel="Advanced"),
-    allowed_agents: str | None = typer.Option(None, "--allowed-agents", help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS.", rich_help_panel="Advanced"),
-    excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS.", rich_help_panel="Advanced"),
-    heterogeneous: bool = typer.Option(False, "--heterogeneous", help="Use LLM-generated diverse optimization tasks (requires preprocessing/discovery). Default: homogeneous.", rich_help_panel="Advanced"),
+    allowed_agents: str | None = typer.Option(None, "--allowed-agents", help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS and overrides the default OpenEvolve exclusion.", rich_help_panel="Advanced"),
+    excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS. Default: openevolve is excluded unless explicitly re-enabled.", rich_help_panel="Advanced"),
+    heterogeneous: bool = typer.Option(True, "--heterogeneous/--no-heterogeneous", help="Use LLM-generated diverse optimization tasks (requires preprocessing/discovery). Default: enabled.", rich_help_panel="Advanced"),
     from_task: Path | None = typer.Option(None, "--from-task", help="Deprecated: use --task with a YAML-frontmatter .md file instead.", hidden=True),
     rag: bool = typer.Option(False, "--rag", help="Enable RAG retrieval from AMD/NVIDIA knowledge base"),
     debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --rag)"),
@@ -245,10 +248,13 @@ def main(
     # fmt: on
     configure_if_first_time()
 
-    if allowed_agents:
-        os.environ["GEAK_ALLOWED_AGENTS"] = allowed_agents
-    if excluded_agents:
-        os.environ["GEAK_EXCLUDED_AGENTS"] = excluded_agents
+    configure_agent_filter_env(allowed_agents, excluded_agents)
+    if deterministic_harness and not kernel_url:
+        raise typer.BadParameter("--deterministic-harness requires --kernel-url")
+    if deterministic and not kernel_url:
+        raise typer.BadParameter("--deterministic requires --kernel-url")
+    if deterministic_harness:
+        deterministic = True
 
     # Deprecated --from-task: map to --task for backward compatibility
     _task_worktree: Path | None = None
@@ -502,7 +508,8 @@ def main(
         config.setdefault("model", {})["model_class"] = model_class
     # Set use_strategy_manager in model config based on enable_strategies flag
     config.setdefault("model", {})["use_strategy_manager"] = enable_strategies
-    model = get_model(model_name, config.get("model", {}))
+    model_name_resolved = model_name or os.getenv("GEAK_MODEL") or config.get("model", {}).get("model_name")
+    model = get_model(model_name_resolved, config.get("model", {}))
 
     _env_kwargs = config.get("env", {})
     if rag:
@@ -547,11 +554,12 @@ def main(
             output_dir=_pipeline_output,
             gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
             model=model,
-            model_factory=lambda: get_model(model_name, config.get("model", {})),
+            model_factory=lambda: get_model(model_name_resolved, config.get("model", {})),
             console=console,
+            deterministic=deterministic,
+            deterministic_harness=deterministic_harness,
         )
 
-        model_name_resolved = model_name or config.get("model", {}).get("model_name")
         model_cfg = config.get("model", {})
 
         report = run_orchestrator(
@@ -610,10 +618,11 @@ def main(
             "[bold yellow]Running UnitTestAgent to create test harness...[/bold yellow]"
         )
         test_command, _harness_results = create_validated_harness(
-            model=get_model(model_name, config.get("model", {})),
+            model=get_model(model_name_resolved, config.get("model", {})),
             repo=repo,
             kernel_name=kernel_name or "unknown",
             log_dir=patch_output,
+            kernel_path=Path(_resolved_kernel_path) if _resolved_kernel_path else None,
             discovery_context=discovery_context,
             gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
         )
@@ -816,7 +825,7 @@ def main(
             output=output,
             save_traj_fn=save_traj,
             console=console,
-            model_factory=lambda: get_model(model_name, config.get("model", {})),
+            model_factory=lambda: get_model(model_name_resolved, config.get("model", {})),
             env_factory=lambda _repo=repo: LocalEnvironment(
                 **{**copy.deepcopy(_env_kwargs), **({"cwd": str(Path(_repo).resolve())} if _repo else {})}
             ),

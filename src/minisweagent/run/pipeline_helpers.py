@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,9 +27,13 @@ REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-b
 
 MAX_HARNESS_RETRIES = 2
 
-DEFAULT_AGENT_BENCHMARK_ITERATIONS = int(os.getenv("GEAK_AGENT_BENCHMARK_ITERATIONS", "10"))
-
-DEFAULT_EVAL_BENCHMARK_ITERATIONS = DEFAULT_AGENT_BENCHMARK_ITERATIONS
+# Use one canonical benchmark definition everywhere. The legacy
+# GEAK_AGENT_BENCHMARK_ITERATIONS split is intentionally ignored so
+# agent-time patch testing and final verification stay apples-to-apples.
+DEFAULT_EVAL_BENCHMARK_ITERATIONS = int(
+    os.getenv("GEAK_EVAL_BENCHMARK_ITERATIONS", "30")
+)
+DEFAULT_AGENT_BENCHMARK_ITERATIONS = DEFAULT_EVAL_BENCHMARK_ITERATIONS
 
 
 # ── agent filtering ──────────────────────────────────────────────────
@@ -56,10 +61,35 @@ def add_agent_filter_args(parser: argparse.ArgumentParser) -> None:
 
 def apply_agent_filter_env(args: argparse.Namespace) -> None:
     """Propagate ``--allowed-agents`` / ``--excluded-agents`` to env vars."""
-    if getattr(args, "allowed_agents", None):
-        os.environ["GEAK_ALLOWED_AGENTS"] = args.allowed_agents
-    if getattr(args, "excluded_agents", None):
-        os.environ["GEAK_EXCLUDED_AGENTS"] = args.excluded_agents
+    configure_agent_filter_env(
+        getattr(args, "allowed_agents", None),
+        getattr(args, "excluded_agents", None),
+    )
+
+
+def configure_agent_filter_env(
+    allowed_agents: str | None,
+    excluded_agents: str | None,
+) -> None:
+    """Apply generic default agent filters.
+
+    Default behavior excludes ``openevolve`` unless the user explicitly
+    supplies an allowlist/excludelist or pre-sets ``GEAK_EXCLUDED_AGENTS``.
+    This keeps the default pipeline focused on the lighter-weight agents while
+    still allowing users to opt in deliberately.
+    """
+
+    if allowed_agents:
+        os.environ["GEAK_ALLOWED_AGENTS"] = allowed_agents
+        if excluded_agents is not None:
+            os.environ["GEAK_EXCLUDED_AGENTS"] = excluded_agents
+        return
+
+    if excluded_agents:
+        os.environ["GEAK_EXCLUDED_AGENTS"] = excluded_agents
+        return
+
+    os.environ.setdefault("GEAK_EXCLUDED_AGENTS", "openevolve")
 
 
 # ── model loading ────────────────────────────────────────────────────
@@ -153,6 +183,136 @@ def extract_harness_path(test_command: str) -> str:
             return token
 
     return tokens[-1] if tokens else test_command
+
+
+def _preferred_harness_path(log_dir: Path, kernel_path: Path | None) -> Path:
+    if kernel_path is not None:
+        stem = kernel_path.stem or "kernel"
+        return log_dir / f"test_{stem}_harness.py"
+    return log_dir / "geak_test_harness.py"
+
+
+def _materialized_harness_bootstrap(
+    *,
+    repo_root: Path,
+    kernel_path: Path | None,
+) -> str:
+    kernel_dir = kernel_path.resolve().parent if kernel_path is not None else None
+    rel_kernel_dir: Path | None = None
+    if kernel_dir is not None:
+        try:
+            rel_kernel_dir = kernel_dir.relative_to(repo_root.resolve())
+        except ValueError:
+            rel_kernel_dir = None
+
+    rel_kernel_dir_text = str(rel_kernel_dir).replace("\\", "/") if rel_kernel_dir is not None else ""
+    original_kernel_dir = str(kernel_dir) if kernel_dir is not None else ""
+    return (
+        "# GEAK materialized harness bootstrap\n"
+        "def _resolve_geak_kernel_dir():\n"
+        "    candidates = []\n"
+        "    work_dir = os.environ.get(\"GEAK_WORK_DIR\", \"\").strip()\n"
+        "    if work_dir:\n"
+        "        candidates.append(work_dir)\n"
+        "    repo_root = os.environ.get(\"GEAK_REPO_ROOT\", \"\").strip()\n"
+        f"    rel_kernel_dir = {rel_kernel_dir_text!r}\n"
+        "    if repo_root and rel_kernel_dir:\n"
+        "        candidates.append(os.path.join(repo_root, rel_kernel_dir))\n"
+        f"    original_kernel_dir = {original_kernel_dir!r}\n"
+        "    if original_kernel_dir:\n"
+        "        candidates.append(original_kernel_dir)\n"
+        "    for candidate in candidates:\n"
+        "        if candidate and os.path.isfile(os.path.join(candidate, \"kernel.py\")):\n"
+        "            return candidate\n"
+        "    return original_kernel_dir or os.getcwd()\n"
+        "\n"
+        "_KERNEL_DIR = _resolve_geak_kernel_dir()\n"
+        "if _KERNEL_DIR not in sys.path:\n"
+        "    sys.path.insert(0, _KERNEL_DIR)\n"
+    )
+
+
+def _rewrite_materialized_harness_source(
+    source_text: str,
+    *,
+    repo_root: Path,
+    kernel_path: Path | None,
+) -> str:
+    bootstrap = _materialized_harness_bootstrap(
+        repo_root=repo_root,
+        kernel_path=kernel_path,
+    )
+    legacy_patterns = [
+        re.compile(
+            r"(?ms)^# Ensure the kernel directory is importable\n"
+            r"_KERNEL_DIR = os\.path\.dirname\(os\.path\.abspath\(__file__\)\)\n"
+            r"if _KERNEL_DIR not in sys\.path:\n"
+            r"\s+sys\.path\.insert\(0, _KERNEL_DIR\)\n"
+        ),
+        re.compile(
+            r"(?ms)^_KERNEL_DIR = os\.path\.dirname\(os\.path\.abspath\(__file__\)\)\n"
+            r"if _KERNEL_DIR not in sys\.path:\n"
+            r"\s+sys\.path\.insert\(0, _KERNEL_DIR\)\n"
+        ),
+    ]
+    for pattern in legacy_patterns:
+        if pattern.search(source_text):
+            return pattern.sub(bootstrap, source_text, count=1)
+
+    import_block = re.compile(
+        r"(?ms)\A((?:from __future__ import annotations\n)?(?:import .+\n|from .+ import .+\n)+)"
+    )
+    match = import_block.match(source_text)
+    if match:
+        return source_text[: match.end()] + "\n" + bootstrap + source_text[match.end():]
+    return bootstrap + "\n" + source_text
+
+
+def _materialize_validated_harness(
+    *,
+    test_command: str,
+    harness_path: str,
+    repo_root: Path,
+    log_dir: Path | None,
+    kernel_path: Path | None,
+    gpu_id: int,
+) -> tuple[str, str, list[dict[str, Any]]] | None:
+    if log_dir is None:
+        return None
+
+    source_harness = Path(harness_path).resolve()
+    target_dir = log_dir.resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_harness = _preferred_harness_path(target_dir, kernel_path)
+    if source_harness == target_harness:
+        return None
+
+    rewritten_text = _rewrite_materialized_harness_source(
+        source_harness.read_text(),
+        repo_root=repo_root,
+        kernel_path=kernel_path,
+    )
+    target_harness.write_text(rewritten_text)
+    shutil.copymode(source_harness, target_harness)
+
+    materialized_command = test_command.replace(str(source_harness), str(target_harness))
+    valid, static_errors = validate_harness(str(target_harness))
+    if not valid:
+        raise RuntimeError(
+            "Materialized harness static validation failed: " + "; ".join(static_errors)
+        )
+
+    exec_ok, exec_errors, harness_results = execute_harness_validation(
+        str(target_harness),
+        repo_root=str(repo_root),
+        gpu_id=gpu_id,
+    )
+    if not exec_ok:
+        raise RuntimeError(
+            "Materialized harness runtime validation failed: "
+            + "; ".join(e.splitlines()[0] for e in exec_errors)
+        )
+    return materialized_command, str(target_harness), harness_results
 
 
 # ── harness validation ───────────────────────────────────────────────
@@ -285,6 +445,7 @@ def create_validated_harness(
     repo: Path,
     kernel_name: str,
     log_dir: Path | None,
+    kernel_path: Path | None,
     discovery_context: str,
     max_retries: int = MAX_HARNESS_RETRIES,
     gpu_id: int = 0,
@@ -330,6 +491,8 @@ def create_validated_harness(
             repo=repo,
             kernel_name=kernel_name,
             log_dir=log_dir,
+            preferred_harness_path=_preferred_harness_path(log_dir, kernel_path) if log_dir else None,
+            kernel_path=kernel_path,
             discovery_context=ctx,
         )
         logger.info("UnitTestAgent test_command (attempt %d): %s", attempt, test_command)
@@ -360,6 +523,31 @@ def create_validated_harness(
             harness, repo_root=repo_root, gpu_id=gpu_id,
         )
         if exec_ok:
+            try:
+                materialized = _materialize_validated_harness(
+                    test_command=test_command,
+                    harness_path=harness,
+                    repo_root=repo,
+                    log_dir=log_dir,
+                    kernel_path=kernel_path,
+                    gpu_id=gpu_id,
+                )
+            except Exception as exc:
+                harness_errors = [str(exc)]
+                logger.warning(
+                    "Harness materialization failed (attempt %d/%d): %s",
+                    attempt,
+                    max_attempts,
+                    harness_errors,
+                )
+                if attempt == max_attempts:
+                    raise RuntimeError(
+                        f"Harness materialization failed after {max_attempts} attempts: {exc}"
+                    )
+                continue
+            if materialized is not None:
+                test_command, harness, harness_results = materialized
+                logger.info("Materialized harness to %s", harness)
             logger.info("Harness runtime validation: ALL MODES PASSED")
             return test_command, harness_results
 
@@ -449,16 +637,79 @@ _BOTTLENECK_GUIDANCE: dict[str, str] = {
 }
 
 
+_SEARCH_WORKLOAD_HINTS = (
+    "binary_search",
+    "lower_bound",
+    "upper_bound",
+    "search_n",
+    "device_search",
+    "haystack",
+    "needle",
+)
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _search_workload_guidance(metrics: dict) -> list[str]:
+    """Add narrower guidance for latency-bound HIP search workloads."""
+    evidence_chunks = [str(metrics.get("kernel_name", ""))]
+    for top in metrics.get("top_kernels", []) or []:
+        evidence_chunks.append(str(top.get("name", "")))
+    haystack = " ".join(evidence_chunks).lower()
+    if not any(hint in haystack for hint in _SEARCH_WORKLOAD_HINTS):
+        return []
+
+    bottleneck = str(metrics.get("bottleneck", "")).lower()
+    if "latency" not in bottleneck:
+        return []
+
+    derived = metrics.get("metrics", {}) or {}
+    hbm_util = _safe_float(derived.get("memory.hbm_bandwidth_utilization"))
+    l2_hit = _safe_float(derived.get("memory.l2_hit_rate"))
+    if hbm_util is not None and hbm_util >= 10.0:
+        return []
+
+    hbm_text = f"{hbm_util:.1f}%" if hbm_util is not None else "unknown"
+    l2_text = f"{l2_hit:.1f}%" if l2_hit is not None else "unknown"
+    return [
+        "## Workload Guidance (HIP search / pointer-chasing)",
+        (
+            "Profiler evidence suggests a latency-bound search workload: "
+            f"HBM utilization={hbm_text}, L2 hit rate={l2_text}."
+        ),
+        "Prioritize branchless search logic, operation-specific specialization, and size-specialized variants.",
+        "Also consider wavefront-cooperative upper-level search and amortized pivot-table narrowing when correctness rules allow it.",
+        "Deprioritize generic vectorization or bandwidth-maximization ideas unless later profiling shows memory throughput is actually the limiter.",
+        "",
+    ]
+
+
 def _bottleneck_guidance(bottleneck: str, metrics: dict) -> list[str]:
     """Return actionable optimization guidance lines based on bottleneck type."""
     bn_lower = bottleneck.lower().strip()
+    bn_aliases = {
+        "latency": "latency-bound",
+        "memory": "memory-bound",
+        "compute": "compute-bound",
+        "lds": "lds-bound",
+    }
+    bn_lower = bn_aliases.get(bn_lower, bn_lower)
     for key, text in _BOTTLENECK_GUIDANCE.items():
         if key in bn_lower:
             lines = text.strip().splitlines()
+            lines.extend(_search_workload_guidance(metrics))
             lines.append("")
             return lines
 
     lines = _BOTTLENECK_GUIDANCE["balanced"].strip().splitlines()
+    lines.extend(_search_workload_guidance(metrics))
     lines.append("")
     return lines
 
@@ -590,8 +841,8 @@ def inject_pipeline_context(
 
     if benchmark_baseline:
         ctx.append("## Benchmark Baseline (compare your save_and_test output against this)")
-        ctx.append("This is the original kernel's --benchmark output on HARNESS_SHAPES (20-25 shapes).")
-        ctx.append("Your save_and_test output includes benchmark results -- compare against these numbers.")
+        ctx.append("This is the original kernel's canonical benchmark output from the same full benchmark contract used for patch testing.")
+        ctx.append("Your save_and_test output includes canonical benchmark results -- compare against these numbers.")
         ctx.append(f"```\n{benchmark_baseline.strip()}\n```")
         ctx.append("")
 
@@ -607,6 +858,21 @@ def inject_pipeline_context(
         "baseline run. Start optimizing immediately."
     )
     ctx.append("")
+
+    try:
+        from minisweagent.memory.integration import assemble_memory_context
+        _bm = baseline_metrics or {}
+        _mem_ctx = assemble_memory_context(
+            kernel_path=kernel_path,
+            bottleneck_type=_bm.get("bottleneck"),
+            profiling_metrics=_bm,
+        )
+        if _mem_ctx:
+            ctx.append("## Optimization Memory (from past kernel optimization runs)")
+            ctx.append(_mem_ctx.strip())
+            ctx.append("")
+    except Exception:
+        pass
 
     enriched = "\n".join(ctx) + "\n" + task_body
     return enriched, cfg

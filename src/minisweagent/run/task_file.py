@@ -19,6 +19,9 @@ from typing import Any
 
 import yaml
 
+from minisweagent.run.generated_artifacts import apply_patch_with_generated_helper_fallback
+from minisweagent.run.git_safe_env import get_git_safe_env
+
 # ============================================================================
 # Task file I/O
 # ============================================================================
@@ -101,14 +104,16 @@ def read_task_file(path: Path) -> tuple[dict[str, Any], str]:
 # ============================================================================
 
 
-def _ensure_safe_directory(repo_path: Path) -> None:
+def _ensure_safe_directory(repo_path: Path, env: dict[str, str] | None = None) -> None:
     """Ensure repository is in git's safe.directory list."""
     repo_path_str = str(repo_path.resolve())
+    run_env = env if env is not None else None
     try:
         result = subprocess.run(
             ["git", "config", "--global", "--get-all", "safe.directory"],
             capture_output=True,
             text=True,
+            env=run_env,
         )
         safe_dirs = result.stdout.strip().split("\n") if result.stdout.strip() else []
         if repo_path_str not in safe_dirs:
@@ -117,6 +122,7 @@ def _ensure_safe_directory(repo_path: Path) -> None:
                 check=True,
                 capture_output=True,
                 text=True,
+                env=run_env,
             )
     except subprocess.CalledProcessError:
         try:
@@ -125,13 +131,17 @@ def _ensure_safe_directory(repo_path: Path) -> None:
                 check=True,
                 capture_output=True,
                 text=True,
+                env=run_env,
             )
         except subprocess.CalledProcessError:
             pass
 
 
-def _copy_untracked_files(repo_path: Path, worktree_path: Path) -> None:
+def _copy_untracked_files(
+    repo_path: Path, worktree_path: Path, env: dict[str, str] | None = None
+) -> None:
     """Copy untracked files from repo to worktree."""
+    run_env = env if env is not None else None
     try:
         result = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard"],
@@ -139,6 +149,7 @@ def _copy_untracked_files(repo_path: Path, worktree_path: Path) -> None:
             check=True,
             capture_output=True,
             text=True,
+            env=run_env,
         )
         for rel_path in (f.strip() for f in result.stdout.splitlines() if f.strip()):
             src = repo_path / rel_path
@@ -148,6 +159,47 @@ def _copy_untracked_files(repo_path: Path, worktree_path: Path) -> None:
                 shutil.copy2(src, dst)
     except subprocess.CalledProcessError:
         pass
+
+
+def _apply_dirty_tracked_changes(
+    repo_path: Path, worktree_path: Path, env: dict[str, str] | None = None
+) -> None:
+    """Apply tracked-but-uncommitted repo changes to the fresh worktree.
+
+    `git worktree add` checks out `HEAD`, which omits local tracked edits in the
+    source repo. Apply that dirty diff so worker slots run the exact live code.
+    """
+    run_env = env if env is not None else None
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--no-ext-diff", "--binary", "HEAD"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=run_env,
+        )
+    except subprocess.CalledProcessError:
+        return
+
+    patch_text = result.stdout
+    if not patch_text.strip():
+        return
+
+    apply_result = subprocess.run(
+        ["git", "apply", "--whitespace=nowarn", "--binary", "-"],
+        cwd=worktree_path,
+        input=patch_text,
+        capture_output=True,
+        text=True,
+        env=run_env,
+    )
+    if apply_result.returncode != 0:
+        error_text = apply_result.stderr or apply_result.stdout or "unknown error"
+        raise RuntimeError(
+            "Failed to sync dirty tracked files into worktree: "
+            f"{error_text[:500]}"
+        )
 
 
 def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
@@ -163,6 +215,7 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
         The worktree path (same as input, for chaining).
     """
     worktree_str = str(worktree_path.resolve())
+    git_env = get_git_safe_env(worktree_path.parent)
 
     # Clean up any existing worktree at this path
     try:
@@ -172,6 +225,7 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
             check=True,
             capture_output=True,
             text=True,
+            env=git_env,
         )
         worktree_exists = any(worktree_str in line or str(worktree_path) in line for line in result.stdout.splitlines())
         if worktree_exists:
@@ -182,6 +236,7 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
                     check=True,
                     capture_output=True,
                     text=True,
+                    env=git_env,
                 )
             except subprocess.CalledProcessError:
                 subprocess.run(
@@ -190,6 +245,7 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
                     check=False,
                     capture_output=True,
                     text=True,
+                    env=git_env,
                 )
     except subprocess.CalledProcessError:
         subprocess.run(
@@ -198,6 +254,7 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
             check=False,
             capture_output=True,
             text=True,
+            env=git_env,
         )
     except Exception:
         pass
@@ -210,7 +267,7 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
             pass
 
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_safe_directory(repo_path)
+    _ensure_safe_directory(repo_path, git_env)
 
     # Create new worktree with detached HEAD
     try:
@@ -220,36 +277,40 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
             check=True,
             capture_output=True,
             text=True,
+            env=git_env,
         )
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr or e.stdout or str(e)
         if "missing but already registered worktree" in error_msg.lower():
-            subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
+            subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True, env=git_env)
             subprocess.run(
                 ["git", "worktree", "add", "--detach", "-f", str(worktree_path)],
                 cwd=repo_path,
                 check=True,
                 capture_output=True,
                 text=True,
+                env=git_env,
             )
         elif "dubious ownership" in error_msg.lower():
-            _ensure_safe_directory(repo_path)
-            _ensure_safe_directory(worktree_path)
+            _ensure_safe_directory(repo_path, git_env)
+            _ensure_safe_directory(worktree_path, git_env)
             subprocess.run(
                 ["git", "worktree", "add", "--detach", str(worktree_path)],
                 cwd=repo_path,
                 check=True,
                 capture_output=True,
                 text=True,
+                env=git_env,
             )
         elif "already used by worktree" in error_msg.lower():
-            subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
+            subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True, env=git_env)
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree_path)],
                 cwd=repo_path,
                 check=False,
                 capture_output=True,
                 text=True,
+                env=git_env,
             )
             subprocess.run(
                 ["git", "worktree", "add", "--detach", str(worktree_path)],
@@ -257,12 +318,14 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
                 check=True,
                 capture_output=True,
                 text=True,
+                env=git_env,
             )
         else:
             raise RuntimeError(f"Failed to create worktree: {error_msg}") from e
 
-    _ensure_safe_directory(worktree_path)
-    _copy_untracked_files(repo_path, worktree_path)
+    _ensure_safe_directory(worktree_path, git_env)
+    _apply_dirty_tracked_changes(repo_path, worktree_path, git_env)
+    _copy_untracked_files(repo_path, worktree_path, git_env)
     return worktree_path
 
 
@@ -277,16 +340,23 @@ def create_worktree_with_patch(
     patch_path = Path(patch_file)
     if not patch_path.exists() or patch_path.stat().st_size == 0:
         return wt
-    result = subprocess.run(
-        ["git", "apply", "--whitespace=nowarn", str(patch_path)],
-        cwd=str(wt),
-        capture_output=True,
-        text=True,
+    git_env = get_git_safe_env(worktree_path.parent)
+    patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+    result, removed_paths = apply_patch_with_generated_helper_fallback(
+        patch_text=patch_text,
+        cwd=wt,
+        env=git_env,
     )
     if result.returncode != 0:
         import logging
         logging.getLogger(__name__).warning(
             "Failed to apply starting patch %s: %s", patch_file, result.stderr[:500],
+        )
+    elif removed_paths:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Applied starting patch after stripping generated helper artifacts: %s",
+            ", ".join(removed_paths[:5]),
         )
     return wt
 
@@ -301,12 +371,15 @@ def replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
 def is_git_repo(path: Path) -> bool:
     """Check if a path is inside a git repository."""
     try:
+        base = path if path.is_dir() else path.parent
+        git_env = get_git_safe_env(base)
         result = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
             cwd=path,
             check=True,
             capture_output=True,
             text=True,
+            env=git_env,
         )
         return result.stdout.strip() == "true"
     except (subprocess.CalledProcessError, FileNotFoundError):

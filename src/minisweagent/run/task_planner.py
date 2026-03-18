@@ -8,10 +8,11 @@ handles the mapping of M tasks to N GPU slots.
 
 Priority scheme (lower = higher priority, runs first):
   0  -- OpenEvolve on the inner kernel (highest impact, automated)
-  5  -- Kernel fusion opportunities (one task per detected opportunity)
-  5  -- Language-specific advanced tuning (CK templates, HIP occupancy)
-  10 -- Wrapper / launch parameter tuning
-  10 -- Algorithmic memory optimization
+  1  -- Algorithmic kernel-body rewrites
+  3  -- Kernel fusion opportunities (one task per detected opportunity)
+  5  -- Kernel-body memory / pipeline restructuring
+  8  -- Language-specific advanced tuning (CK templates, autotune)
+  15 -- Wrapper / launch parameter tuning
   15 -- Profile-guided (generic fallback)
 """
 
@@ -245,7 +246,7 @@ def _triton_tasks(
                 f"or adding new configurations."
             ),
             label="triton-autotune",
-            priority=10,
+            priority=8,
             kernel_language="python",
         )
     )
@@ -263,7 +264,7 @@ def _triton_tasks(
                 f"use vectorized loads where possible."
             ),
             label="triton-algorithmic",
-            priority=10,
+            priority=1,
             kernel_language="python",
         )
     )
@@ -312,7 +313,7 @@ def _hip_tasks(
                 f"Target maximum occupancy using the occupancy calculator."
             ),
             label="hip-launch-config",
-            priority=5,
+            priority=15,
             kernel_language="cpp",
         )
     )
@@ -328,7 +329,7 @@ def _hip_tasks(
                 f"minimize bank conflicts, use __ldg for read-only data."
             ),
             label="hip-memory",
-            priority=10,
+            priority=5,
             kernel_language="cpp",
         )
     )
@@ -374,7 +375,7 @@ def _ck_tasks(
                 f"vector widths. Requires hipcc rebuild after changes."
             ),
             label="ck-template-tuning",
-            priority=5,
+            priority=8,
             kernel_language="cpp",
         )
     )
@@ -389,7 +390,7 @@ def _ck_tasks(
                 f"configurations for {wrapper}."
             ),
             label="ck-pipeline",
-            priority=10,
+            priority=5,
             kernel_language="cpp",
         )
     )
@@ -416,7 +417,7 @@ def _asm_tasks(
                 f"around it at {wrapper}."
             ),
             label="asm-launch-config",
-            priority=10,
+            priority=15,
             kernel_language="asm",
         )
     ]
@@ -441,7 +442,7 @@ def _generic_tasks(
                 f"Profile first, then apply targeted improvements."
             ),
             label="general-optimization",
-            priority=10,
+            priority=5,
             kernel_language=kernel.kernel_language,
         ),
     ]

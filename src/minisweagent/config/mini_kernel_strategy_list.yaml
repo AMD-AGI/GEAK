@@ -279,7 +279,8 @@ agent:
 
     ### sub_agent
     Spawn a child agent for focused sub-tasks (algorithm rewrites, cross-file edits).
-    - Parameters: task (required), step_limit (default 10), cost_limit (default 1.0), system_prompt
+    - Parameters: task (required), step_limit (default 150, minimum enforced 150), cost_limit (default 0.0 / disabled), system_prompt
+    - For major kernel rewrites, keep `cost_limit` at `0.0` so it does not terminate the child before the step budget is used.
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
     <output>

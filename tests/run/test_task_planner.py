@@ -94,6 +94,15 @@ def test_hip_generates_launch_and_memory_tasks():
     assert "profile-guided" in labels
 
 
+def test_hip_memory_is_prioritized_over_launch_config():
+    dr = _make_discovery("hip", "cpp")
+    tasks = build_optimization_tasks(dr, "ctx", FakeAgentClass)
+    priorities = {t.label: t.priority for t in tasks}
+
+    assert priorities["hip-memory"] < priorities["hip-launch-config"]
+    assert priorities["hip-launch-config"] == 15
+
+
 # ---- CK tasks ----
 
 
@@ -144,6 +153,14 @@ def test_tasks_sorted_by_priority():
     tasks = build_optimization_tasks(dr, "ctx", FakeAgentClass)
     priorities = [t.priority for t in tasks]
     assert priorities == sorted(priorities)
+
+
+def test_triton_algorithmic_is_prioritized_over_autotune():
+    dr = _make_discovery("triton", "python", inner_kernel_path=Path("/ws/inner.py"))
+    tasks = build_optimization_tasks(dr, "ctx", FakeAgentClass)
+    priorities = {t.label: t.priority for t in tasks}
+
+    assert priorities["triton-algorithmic"] < priorities["triton-autotune"]
 
 
 # ---- kernel_language set correctly ----

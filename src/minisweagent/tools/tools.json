@@ -454,7 +454,7 @@
   {
     "name": "sub_agent",
     "type": "function",
-    "description": "Spawn a child agent to perform a focused sub-task. The child runs independently with its own step/cost budget and returns the result. Use for algorithm rewrites, cross-file edits, or any task that benefits from dedicated agent reasoning.",
+    "description": "Spawn a child agent to perform a focused sub-task. The child runs independently with its own step/cost budget and returns the result. Use for algorithm rewrites, cross-file edits, or any task that benefits from dedicated agent reasoning. For substantial rewrites, keep step_limit at 150 or higher and leave cost_limit at 0.0 so the dollar cap does not stop the child first.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -464,11 +464,11 @@
         },
         "step_limit": {
           "type": "integer",
-          "description": "Max steps for the child agent (default: 10)"
+          "description": "Max steps for the child agent (default: 150, minimum enforced: 150)"
         },
         "cost_limit": {
           "type": "number",
-          "description": "Max cost in dollars for the child agent (default: 1.0)"
+          "description": "Max cost in dollars for the child agent (default: 0.0 / disabled; use only when you intentionally want an extra cap)"
         },
         "system_prompt": {
           "type": "string",

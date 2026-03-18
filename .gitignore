@@ -200,3 +200,8 @@ optimization_output/
 .vscode/
 examples/add_kernel/test_harness.py
 test_harness.py
+.geak_resolved/
+.geak_pristine/
+.geak_seed/
+geak_output/
+patches/

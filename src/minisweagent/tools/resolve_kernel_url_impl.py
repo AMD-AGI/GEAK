@@ -3,12 +3,16 @@ Resolve kernel specs: detect web links (e.g. GitHub) and clone repo to a local t
 Used by examples/resolve_kernel_url/resolve_kernel_url.py (script entrypoint).
 """
 
+import hashlib
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
+
+from minisweagent.run.git_safe_env import get_git_safe_env
 
 # Canonical name of the directory used to cache cloned repos.
 # Other modules (discovery, mini.py) import this constant to detect
@@ -87,6 +91,157 @@ def _parse_github_blob(url: str) -> tuple[str, str, str, str] | None:
     return None
 
 
+def _parse_github_source_parts(url: str) -> tuple[str, str, str] | None:
+    """Return ``(owner, repo, ref_and_path)`` for GitHub blob/raw URLs."""
+    parsed = urlparse(url)
+    if parsed.netloc == "github.com":
+        match = re.match(r"([^/]+)/([^/]+)/blob/(.+)", parsed.path.strip("/"))
+        if match:
+            return (match.group(1), match.group(2), match.group(3))
+        return None
+    if parsed.netloc == "raw.githubusercontent.com":
+        parts = parsed.path.strip("/").split("/", 2)
+        if len(parts) == 3:
+            return (parts[0], parts[1], parts[2])
+    return None
+
+
+def _looks_like_commitish(ref: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-fA-F]{7,40}", ref or ""))
+
+
+def _github_clone_urls(owner: str, repo: str) -> list[str]:
+    ssh_url = f"git@github.com:{owner}/{repo}.git"
+    https_url = f"https://github.com/{owner}/{repo}.git"
+    prefer_https = os.getenv("GEAK_GITHUB_PREFER_HTTPS", "").strip().lower() in {"1", "true", "yes"}
+    return [https_url, ssh_url] if prefer_https else [ssh_url, https_url]
+
+
+def _list_remote_refs(owner: str, repo: str) -> tuple[list[str], list[str]]:
+    """Return branch/tag names from the remote, trying SSH first."""
+    errors: list[str] = []
+    git_env = get_git_safe_env(None)
+    for clone_url in _github_clone_urls(owner, repo):
+        try:
+            result = subprocess.run(
+                ["git", "ls-remote", "--heads", "--tags", clone_url],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=git_env,
+            )
+        except subprocess.TimeoutExpired:
+            errors.append(f"git ls-remote timed out for {clone_url}")
+            continue
+        except FileNotFoundError:
+            errors.append("git not found")
+            continue
+        except Exception as exc:
+            errors.append(str(exc))
+            continue
+        if result.returncode != 0:
+            errors.append(result.stderr or result.stdout or f"git ls-remote failed for {clone_url}")
+            continue
+        refs: set[str] = set()
+        for line in result.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) != 2:
+                continue
+            refname = parts[1]
+            if refname.startswith("refs/heads/"):
+                refs.add(refname.removeprefix("refs/heads/"))
+            elif refname.startswith("refs/tags/"):
+                refs.add(refname.removeprefix("refs/tags/").removesuffix("^{}"))
+        return sorted(refs, key=len, reverse=True), errors
+    return [], errors
+
+
+def _split_github_ref_and_path(owner: str, repo: str, ref_and_path: str) -> tuple[str, str] | None:
+    if not ref_and_path or "/" not in ref_and_path:
+        return None
+
+    first, remainder = ref_and_path.split("/", 1)
+    if remainder and _looks_like_commitish(first):
+        return first, remainder
+
+    refs, _errors = _list_remote_refs(owner, repo)
+    for ref in refs:
+        prefix = f"{ref}/"
+        if ref_and_path.startswith(prefix):
+            file_path = ref_and_path[len(prefix):]
+            if file_path:
+                return ref, file_path
+
+    if remainder:
+        return first, remainder
+    return None
+
+
+def parse_github_source_url(url: str) -> dict[str, str] | None:
+    """Parse a GitHub blob/raw URL and resolve ``ref`` even when it contains ``/``."""
+    parts = _parse_github_source_parts(url)
+    if not parts:
+        return None
+    owner, repo, ref_and_path = parts
+    resolved = _split_github_ref_and_path(owner, repo, ref_and_path)
+    if not resolved:
+        return None
+    ref, file_path = resolved
+    return {
+        "owner": owner,
+        "repo": repo,
+        "ref": ref,
+        "file_path": file_path,
+    }
+
+
+def _resolved_clone_dir(base: Path, owner: str, repo: str, ref: str) -> Path:
+    ref_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", ref).strip("._-") or "ref"
+    ref_hash = hashlib.sha1(f"{owner}/{repo}@{ref}".encode("utf-8")).hexdigest()[:12]
+    return base / RESOLVED_DIR_NAME / f"{owner}_{repo}" / f"{ref_slug}-{ref_hash}"
+
+
+def _clone_remote_repo(owner: str, repo: str, ref: str, target_dir: str) -> tuple[str | None, str | None]:
+    """Clone the remote repo into ``target_dir`` and return ``(clone_url, error)``."""
+    errors: list[str] = []
+    git_env = get_git_safe_env(Path(target_dir).parent)
+    for clone_url in _github_clone_urls(owner, repo):
+        if _looks_like_commitish(ref):
+            clone_cmd = ["git", "clone", clone_url, target_dir]
+        else:
+            clone_cmd = ["git", "clone", "--depth", "1", "--branch", ref, clone_url, target_dir]
+
+        result = subprocess.run(
+            clone_cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=git_env,
+        )
+        if result.returncode != 0:
+            errors.append(result.stderr or result.stdout or f"git clone failed for {clone_url}")
+            shutil.rmtree(target_dir, ignore_errors=True)
+            continue
+
+        if _looks_like_commitish(ref):
+            checkout = subprocess.run(
+                ["git", "-C", target_dir, "checkout", ref],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=git_env,
+            )
+            if checkout.returncode != 0:
+                errors.append(checkout.stderr or checkout.stdout or f"git checkout failed for {ref}")
+                shutil.rmtree(target_dir, ignore_errors=True)
+                continue
+
+        return clone_url, None
+
+    error = " ; ".join(err for err in errors if err.strip()) or "git clone failed"
+    return None, error
+
+
 def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
     """
     If spec is a web link (e.g. GitHub file URL), clone the repo to a temp dir
@@ -107,6 +262,11 @@ def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
         "line_number": line_start,
         "line_end": line_end,
         "error": None,
+        "github_owner": None,
+        "github_repo": None,
+        "github_ref": None,
+        "github_file_path": None,
+        "remote_clone_url": None,
     }
     if not spec_no_frag:
         out["error"] = "Empty spec"
@@ -118,40 +278,37 @@ def resolve_kernel_url(spec: str, clone_into: str | Path | None = None) -> dict:
         return out
 
     out["is_weblink"] = True
-    parsed = _parse_github_blob(spec_no_frag)
+    parsed = parse_github_source_url(spec_no_frag)
     if not parsed:
         out["error"] = "Only GitHub blob or raw URLs are supported"
         return out
 
-    owner, repo, branch, file_path = parsed
-    clone_url = f"https://github.com/{owner}/{repo}.git"
+    owner = parsed["owner"]
+    repo = parsed["repo"]
+    branch = parsed["ref"]
+    file_path = parsed["file_path"]
+    out["github_owner"] = owner
+    out["github_repo"] = repo
+    out["github_ref"] = branch
+    out["github_file_path"] = file_path
     try:
         if clone_into is not None:
             base = Path(clone_into)
             base.mkdir(parents=True, exist_ok=True)
-            tmpdir_path = base / RESOLVED_DIR_NAME / f"{owner}_{repo}"
-            # If the target file already exists from a previous clone, reuse it
-            if tmpdir_path.exists() and (tmpdir_path / file_path).exists():
-                out["local_repo_path"] = str(tmpdir_path.resolve())
-                out["local_file_path"] = str((tmpdir_path / file_path).resolve())
-                out["line_number"] = line_start
-                out["line_end"] = line_end
-                return out
-            # Remove any leftover partial clone before re-cloning
+            tmpdir_path = _resolved_clone_dir(base, owner, repo, branch)
+            # Always refresh remote clones inside the target tree so a GitHub URL
+            # reflects the current remote ref rather than stale local resolver state.
             if tmpdir_path.exists():
                 shutil.rmtree(tmpdir_path, ignore_errors=True)
+            tmpdir_path.parent.mkdir(parents=True, exist_ok=True)
             tmpdir = str(tmpdir_path)
         else:
             tmpdir = tempfile.mkdtemp(prefix=f"geak_kernel_{repo}_")
-        result = subprocess.run(
-            ["git", "clone", "--depth", "1", "-b", branch, clone_url, tmpdir],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        if result.returncode != 0:
-            out["error"] = result.stderr or result.stdout or "git clone failed"
+        clone_url, clone_error = _clone_remote_repo(owner, repo, branch, tmpdir)
+        if clone_error:
+            out["error"] = clone_error
             return out
+        out["remote_clone_url"] = clone_url
         local_file = Path(tmpdir) / file_path
         if not local_file.exists():
             out["error"] = f"File not found in repo: {file_path}"
