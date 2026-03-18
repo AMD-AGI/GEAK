@@ -330,8 +330,8 @@ def resolve_kernel_url(
 
     logger = logging.getLogger(__name__)
 
-    spec = (str(spec) if spec else "").strip()
-    repo = (str(spec) if spec else "").strip() or None
+    spec = str(spec).strip() if spec else ""
+    repo = str(repo).strip() if repo else ""
 
     line_start, line_end = _parse_fragment(spec)
     spec_no_frag = _strip_fragment(spec)
