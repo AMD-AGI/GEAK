@@ -99,17 +99,23 @@ def extract_benchmark_config_lines(output: str) -> list[str] | None:
     Returns a sorted list of config identifiers, or None if no configs found.
     """
     configs: list[str] = []
-    # Match lines with at least one timing value (number followed by ms/us/s or x)
-    timing_pattern = re.compile(r"\d+\.\d+(?:ms|us|µs|s|x)")
+    # Match lines with at least one timing value: "0.0342ms", "0.0342 ms", or
+    # bare floats like "0.0342" in columns (common in table-formatted output).
+    timing_pattern = re.compile(r"\d+\.\d+(?:ms|us|µs|s|x)?")
     for line in output.splitlines():
         line = line.strip()
         if not line or line.startswith(("-", "=", "#", "Status", "Geometric", "GEAK_")):
             continue
         if not timing_pattern.search(line):
             continue
-        # Extract config prefix: everything before the first number that looks
-        # like a timing value (float followed by ms or similar)
-        config_part = re.split(r"\s+\d+\.\d+(?:ms|us|µs|s)", line)[0].strip()
+        # Skip header/summary lines
+        if any(kw in line.lower() for kw in ("comparing", "running", "warmup", "median", "geomean", "mean")):
+            continue
+        # Extract config prefix: everything before the first standalone float
+        # (a float preceded by whitespace, indicating the start of timing columns).
+        # This handles both "M=128, N=16  0.0747  0.0474  1.58x" and
+        # "B=1 H=32 ... 2.11ms 0.10ms 21.37x"
+        config_part = re.split(r"\s+\d+\.\d+", line)[0].strip()
         if config_part and len(config_part) > 3:
             configs.append(config_part)
     return sorted(configs) if configs else None
