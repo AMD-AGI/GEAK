@@ -183,6 +183,13 @@ class DefaultAgent:
 
         cwd = getattr(self.env.config, "cwd", None) or os.getcwd()
 
+        # source_file_paths: files the agent is allowed to modify.
+        # Loaded from task metadata (if available) to prevent agents from
+        # gaming benchmarks by modifying evaluation infrastructure.
+        source_file_paths = getattr(self.config, "source_file_paths", None)
+        if source_file_paths is None:
+            source_file_paths = getattr(self.config, "source_file_path", None)
+
         context = SaveAndTestContext(
             cwd=cwd,
             test_command=self.config.test_command,
@@ -192,6 +199,7 @@ class DefaultAgent:
             base_repo_path=self.base_repo_path,
             log_fn=self._log_message,
             patch_counter=self.patch_counter,
+            source_file_paths=source_file_paths,
         )
 
         save_and_test_tool = self.toolruntime._tool_table.get("save_and_test")

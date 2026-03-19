@@ -79,6 +79,42 @@ def parse_shape_latencies_ms(output: str) -> dict[str, float]:
     return shape_latencies
 
 
+def extract_benchmark_config_lines(output: str) -> list[str] | None:
+    """Extract benchmark config fingerprint lines from harness output.
+
+    Captures the config/shape identifiers from each benchmark line,
+    stripping timing numbers so only the problem description remains.
+    This allows comparing whether baseline and candidate ran on the
+    same benchmark configurations, regardless of kernel language or
+    variable naming conventions.
+
+    Works by finding lines that contain timing data (e.g. '0.0342ms')
+    and extracting the config prefix before the first timing number.
+
+    Examples of lines matched:
+        'B=1 H=32 NQ=16 N_CTX=[512] ...  2.11ms   0.10ms  21.37x *'
+        '(1, 16), k=2       0.0196ms   0.0335ms     0.58x'
+        'Config (B=256,H=1024)   0.072ms  ...'
+
+    Returns a sorted list of config identifiers, or None if no configs found.
+    """
+    configs: list[str] = []
+    # Match lines with at least one timing value (number followed by ms/us/s or x)
+    timing_pattern = re.compile(r"\d+\.\d+(?:ms|us|µs|s|x)")
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("-", "=", "#", "Status", "Geometric", "GEAK_")):
+            continue
+        if not timing_pattern.search(line):
+            continue
+        # Extract config prefix: everything before the first number that looks
+        # like a timing value (float followed by ms or similar)
+        config_part = re.split(r"\s+\d+\.\d+(?:ms|us|µs|s)", line)[0].strip()
+        if config_part and len(config_part) > 3:
+            configs.append(config_part)
+    return sorted(configs) if configs else None
+
+
 def _universal_latency_fallback(text: str) -> float | None:
     """Last-resort: find a number near latency-related keywords in the last
     30 lines of output. Handles formats like 'Overall Median: 0.052ms'."""

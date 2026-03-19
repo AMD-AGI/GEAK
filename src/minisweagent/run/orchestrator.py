@@ -44,6 +44,9 @@ from minisweagent.benchmark_parsing import (
     parse_shape_count as _parse_shape_count,
 )
 from minisweagent.benchmark_parsing import (
+    extract_benchmark_config_lines as _extract_benchmark_config_lines,
+)
+from minisweagent.benchmark_parsing import (
     parse_total_kernel_time_ms as _parse_total_kernel_time_ms,
 )
 from minisweagent.debug_runtime import emit_debug_log, model_tools_snapshot
@@ -1225,8 +1228,18 @@ def _evaluate_round_best(
             eval_path = output_dir / f"round_{round_num}_evaluation.json"
             eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
             return round_eval
-        
-        eval_env = _build_eval_env(eval_worktree, repo_root, harness_path, gpu_id)
+
+        # Use the harness from the eval worktree so that `from kernel import`
+        # picks up the patched kernel.py (configs, functions, etc.) rather
+        # than the original baseline kernel from the workspace.
+        eval_harness_path = harness_path
+        if harness_path and eval_worktree:
+            harness_name = Path(harness_path).name
+            eval_harness = eval_worktree / harness_name
+            if eval_harness.exists():
+                eval_harness_path = str(eval_harness)
+
+        eval_env = _build_eval_env(eval_worktree, repo_root, eval_harness_path, gpu_id)
         _print(f"  Eval worktree: {eval_worktree}")
 
         # Load baselines for comparison
@@ -1306,17 +1319,45 @@ def _evaluate_round_best(
                                 f"(reported speedup {baseline_reported_speedup:.4f}x "
                                 f"-> {candidate_reported_speedup:.4f}x)"
                             )
-                    # Shape count validation
-                    candidate_shapes = _parse_shape_count(fb_stdout)
-                    baseline_shapes = _parse_shape_count(baseline_ref) if baseline_ref else None
-                    if candidate_shapes and baseline_shapes and candidate_shapes != baseline_shapes:
-                        logger.warning(
-                            "Shape count mismatch: baseline=%d, candidate=%d",
-                            baseline_shapes, candidate_shapes,
-                        )
-                        round_eval["full_benchmark"]["shape_count_warning"] = (
-                            f"baseline={baseline_shapes}, candidate={candidate_shapes}"
-                        )
+                    # Benchmark config fingerprint validation:
+                    # Extract config lines from both baseline and candidate output
+                    # and verify they match. If the agent changed benchmark configs
+                    # (shapes, block sizes, etc.), the config fingerprints will differ
+                    # and we reject the result as invalid.
+                    candidate_configs = _extract_benchmark_config_lines(fb_stdout)
+                    baseline_configs = _extract_benchmark_config_lines(baseline_ref) if baseline_ref else None
+                    if candidate_configs and baseline_configs:
+                        if candidate_configs != baseline_configs:
+                            _print(
+                                f"  WARNING: Benchmark config mismatch detected! "
+                                f"Agent may have modified benchmark parameters. "
+                                f"Rejecting speedup."
+                            )
+                            logger.warning(
+                                "Benchmark config mismatch: agent modified benchmark configs. "
+                                "baseline_configs=%d lines, candidate_configs=%d lines",
+                                len(baseline_configs), len(candidate_configs),
+                            )
+                            round_eval["full_benchmark"]["config_mismatch"] = True
+                            round_eval["full_benchmark"]["config_mismatch_detail"] = (
+                                f"baseline={len(baseline_configs)} configs, "
+                                f"candidate={len(candidate_configs)} configs"
+                            )
+                            # Invalidate the verified speedup
+                            round_eval["full_benchmark"].pop("verified_speedup", None)
+                            _print("  Verified speedup INVALIDATED due to config mismatch")
+                    elif candidate_configs or baseline_configs:
+                        # Only one side has configs — warn but don't reject
+                        candidate_shapes = _parse_shape_count(fb_stdout)
+                        baseline_shapes = _parse_shape_count(baseline_ref) if baseline_ref else None
+                        if candidate_shapes and baseline_shapes and candidate_shapes != baseline_shapes:
+                            logger.warning(
+                                "Shape count mismatch: baseline=%d, candidate=%d",
+                                baseline_shapes, candidate_shapes,
+                            )
+                            round_eval["full_benchmark"]["shape_count_warning"] = (
+                                f"baseline={baseline_shapes}, candidate={candidate_shapes}"
+                            )
 
                 _print(f"  FULL_BENCHMARK: {'PASS' if fb_result.returncode == 0 else 'FAIL'}")
             except Exception as exc:
