@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import traceback
@@ -238,7 +239,11 @@ class ParallelAgent(DefaultAgent):
 
     @staticmethod
     def _create_copy_workdir(repo_path: Path, workdir_path: Path) -> Path:
-        """Create an isolated work directory by copying `repo_path` (for non-git repos)."""
+        """Create an isolated work directory by copying `repo_path` (for non-git repos).
+
+        Initializes the copy as a git repo so that ``git diff`` in
+        ``save_and_test`` and ``git apply`` in evaluation both work.
+        """
         if workdir_path.exists():
             try:
                 shutil.rmtree(workdir_path)
@@ -249,6 +254,12 @@ class ParallelAgent(DefaultAgent):
             repo_path,
             workdir_path,
             ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
+        )
+        subprocess.run(["git", "init", "-q"], cwd=str(workdir_path), capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=str(workdir_path), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "baseline", "--allow-empty"],
+            cwd=str(workdir_path), capture_output=True,
         )
         return workdir_path
 
@@ -439,6 +450,10 @@ class ParallelAgent(DefaultAgent):
                 agent.base_repo_path = repo_path_resolved
             if hasattr(agent, "log_file"):
                 agent.log_file = log_file
+            # Rebuild save_and_test context now that base_repo_path is set
+            # (it was None during __init__)
+            if hasattr(agent, "_setup_save_and_test_context"):
+                agent._setup_save_and_test_context()
 
             with open(log_file, "w", encoding="utf-8") as f:
                 f.write(f"Agent {agent_id} Conversation Log\n")
@@ -593,6 +608,9 @@ class ParallelAgent(DefaultAgent):
                 agent.base_repo_path = repo_path_resolved
             if hasattr(agent, "log_file"):
                 agent.log_file = log_file
+            # Rebuild save_and_test context now that base_repo_path is set
+            if hasattr(agent, "_setup_save_and_test_context"):
+                agent._setup_save_and_test_context()
 
             with open(log_file, "w", encoding="utf-8") as f:
                 f.write(f"Agent {agent_id} ({label}) Conversation Log\n")
@@ -776,6 +794,9 @@ class ParallelAgent(DefaultAgent):
                     agent.base_repo_path = repo_path_resolved
                 if hasattr(agent, "log_file"):
                     agent.log_file = log_file
+                # Rebuild save_and_test context now that base_repo_path is set
+                if hasattr(agent, "_setup_save_and_test_context"):
+                    agent._setup_save_and_test_context()
 
                 with open(log_file, "w", encoding="utf-8") as f:
                     f.write(f"Task {task_id} ({label}) Conversation Log\n")
