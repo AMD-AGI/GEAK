@@ -352,6 +352,7 @@ def run_preprocessor(
     console=None,
     harness: str | None = None,
     repo: str | Path | None = None,
+    eval_commands: dict[str, str | list[str]] | None = None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -369,6 +370,14 @@ def run_preprocessor(
         Callable returning a new model instance (used if model is None).
     console:
         Optional Rich console for progress messages.
+    harness:
+        Exact harness file path (Triton-style with --correctness/--benchmark modes).
+    repo:
+        Repository root path.
+    eval_commands:
+        HIP-style commands dict with keys: compile_command, correctness_command,
+        performance_command. When provided, COMMANDMENT is generated from these
+        commands instead of from a harness. Discovery and UnitTestAgent are skipped.
 
     Returns
     -------
@@ -487,7 +496,26 @@ def run_preprocessor(
         "harness": harness,
     }
 
-    if harness:
+    if eval_commands:
+        # Skip harness creation entirely — COMMANDMENT will be generated from commands in Step 7
+        _print("  Skipping harness creation (eval_commands provided)")
+        selected_harness_source = "eval_commands"
+        testcase_selection["selected_source"] = "eval_commands"
+        # Build test_command from eval_commands for compatibility (deduplicated)
+        _cmds = []
+        _seen = set()
+        for key in ("compile_command", "correctness_command", "performance_command"):
+            val = eval_commands.get(key)
+            if val:
+                items = val if isinstance(val, list) else [val]
+                for cmd in items:
+                    if cmd not in _seen:
+                        _seen.add(cmd)
+                        _cmds.append(cmd)
+        if _cmds:
+            test_command = " && ".join(_cmds)
+
+    elif harness:
         deterministic_path, deterministic_meta = _resolve_deterministic_harness(
             harness,
             kernel_url=kernel_url,
@@ -877,7 +905,36 @@ def run_preprocessor(
     _print("[bold cyan]--- Step 7/7: Commandment ---[/bold cyan]" if console else "--- Step 7/7: Commandment ---")
 
     commandment: str | None = None
-    if test_command:
+    if eval_commands:
+        # HIP-style: generate COMMANDMENT from explicit compile/correctness/perf commands
+        try:
+            from minisweagent.tools.commandment import generate_commandment_from_commands
+
+            commandment = generate_commandment_from_commands(
+                kernel_path=kernel_path,
+                compile_command=eval_commands.get("compile_command"),
+                correctness_command=eval_commands.get("correctness_command"),
+                performance_command=eval_commands.get("performance_command"),
+                repo_root=repo_root,
+            )
+            # Build a test_command from the commands for save_and_test compatibility
+            cmds = []
+            for key in ("compile_command", "correctness_command", "performance_command"):
+                val = eval_commands.get(key)
+                if val:
+                    if isinstance(val, list):
+                        cmds.extend(val)
+                    else:
+                        cmds.append(val)
+            if cmds:
+                test_command = " && ".join(cmds)
+                ctx["test_command"] = test_command
+            _print("  COMMANDMENT.md generated (from eval commands)")
+        except Exception as exc:
+            _print(f"  [yellow]Commandment from commands failed: {exc}[/yellow]" if console else f"  Commandment from commands failed: {exc}")
+            logger.warning("Commandment from commands failed: %s", exc, exc_info=True)
+    elif test_command:
+        # Triton-style: generate COMMANDMENT from harness
         try:
             from minisweagent.tools.commandment import generate_commandment
             from minisweagent.tools.discovery_types import _infer_kernel_language
@@ -891,12 +948,12 @@ def run_preprocessor(
                 repo_root=repo_root,
                 kernel_language=_kl,
             )
-            _print("  COMMANDMENT.md generated")
+            _print("  COMMANDMENT.md generated (from harness)")
         except Exception as exc:
             _print(f"  [yellow]Commandment failed: {exc}[/yellow]" if console else f"  Commandment failed: {exc}")
             logger.warning("Commandment generation failed: %s", exc, exc_info=True)
     else:
-        _print("  Skipping commandment (no test command)")
+        _print("  Skipping commandment (no test command or eval commands)")
 
     ctx["commandment"] = commandment
     if commandment:

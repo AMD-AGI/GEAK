@@ -203,6 +203,79 @@ More information about the usage: [bold green]https://mini-swe-agent.com/latest/
 """
 
 
+def _resolve_eval_spec(eval_spec: str, workspace: Path | None = None) -> tuple[str, str]:
+    """Auto-detect whether eval_spec is a harness file path or a shell command.
+
+    Returns (eval_type, value) where eval_type is 'harness' or 'command'.
+
+    Detection logic:
+    - If the value is an existing file → harness
+    - If it ends with .py/.sh and has no shell operators → harness
+    - If it contains &&, ;, | or starts with python3/make/bash → command
+    - Otherwise → command (default)
+    """
+    # Check if file exists
+    if workspace:
+        candidate = workspace / eval_spec
+        if candidate.is_file():
+            return ("harness", str(candidate.resolve()))
+    p = Path(eval_spec)
+    if p.is_file():
+        return ("harness", str(p.resolve()))
+
+    # Pattern detection
+    has_shell_ops = any(op in eval_spec for op in ("&&", ";", "|", ">"))
+    first_word = eval_spec.split()[0] if eval_spec.split() else ""
+    starts_with_cmd = first_word in ("python3", "python", "make", "bash", "sh", "./")
+    looks_like_path = eval_spec.endswith((".py", ".sh")) and not has_shell_ops
+
+    if looks_like_path:
+        return ("harness", eval_spec)
+    if has_shell_ops or starts_with_cmd:
+        return ("command", eval_spec)
+    return ("command", eval_spec)
+
+
+def _extract_kernel_from_task(task_text: str) -> str | None:
+    """Extract kernel URL or path from natural language task prompt.
+
+    Checks:
+    1. YAML frontmatter (kernel_path, kernel_url)
+    2. GitHub URLs ending in .py/.hip/.cu/.cpp
+    3. Local file paths ending in .py/.hip/.cu/.cpp
+    """
+    import re as _re
+
+    if not task_text:
+        return None
+
+    # Check YAML frontmatter
+    if task_text.strip().startswith("---"):
+        parts = task_text.strip().split("---", 2)
+        if len(parts) >= 3:
+            try:
+                import yaml
+                frontmatter = yaml.safe_load(parts[1])
+                if isinstance(frontmatter, dict):
+                    for key in ("kernel_path", "kernel_url", "kernel"):
+                        if frontmatter.get(key):
+                            return frontmatter[key]
+            except Exception:
+                pass
+
+    # Check for GitHub URLs
+    urls = _re.findall(r'https://github\.com/\S+\.(?:py|hip|cu|cpp|cuh)', task_text)
+    if urls:
+        return urls[0]
+
+    # Check for local file paths
+    paths = _re.findall(r'(?:^|\s)([./]\S+\.(?:py|hip|cu|cpp|cuh))', task_text, _re.MULTILINE)
+    if paths:
+        return paths[0].strip()
+
+    return None
+
+
 # fmt: off
 @app.command(help=_HELP_TEXT)
 def main(
@@ -218,8 +291,12 @@ def main(
     # Strategy mode configuration
     enable_strategies: bool = typer.Option(True, "--enable-strategies/--no-enable-strategies", help="Enable optimization strategy management (optool command). Auto-selects appropriate template.", rich_help_panel="Advanced"),
     strategy_file: str = typer.Option(".optimization_strategies.md", "--strategy-file", help="Path to strategy file (relative to workspace)", rich_help_panel="Advanced"),
-    # Patch mode configuration (always enabled)
-    test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command to run for patch validation"),
+    # Evaluation mode: accepts a harness file path OR a shell command string.
+    # Auto-detected: if the value is an existing file or ends with .py/.sh → harness.
+    # If it contains && or ; or starts with python3/make → shell command.
+    eval_spec: str | None = typer.Option(None, "--eval", help="Evaluation harness file or test command. Auto-detected: file path → harness, shell command → test command.", rich_help_panel="Kernel"),
+    # Legacy aliases (deprecated — use --eval instead)
+    test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="[Deprecated: use --eval] Test command to run for patch validation", hidden=True),
     create_test: bool = typer.Option(
         False,
         "--create-test",
@@ -251,8 +328,19 @@ def main(
     configure_if_first_time()
 
     configure_agent_filter_env(allowed_agents, excluded_agents)
-    if harness and not kernel_url:
-        raise typer.BadParameter("--harness requires --kernel-url")
+
+    # Merge --eval, --harness, --test-command into unified eval_spec
+    if eval_spec is None and harness:
+        eval_spec = harness  # legacy --harness → --eval
+    if eval_spec is None and test_command:
+        eval_spec = test_command  # legacy --test-command → --eval
+
+    # Extract kernel URL from task prompt if --kernel-url not given
+    if not kernel_url and task:
+        _extracted = _extract_kernel_from_task(task if not Path(task).is_file() else Path(task).read_text())
+        if _extracted:
+            kernel_url = _extracted
+            console.print(f"[bold cyan]Extracted kernel from task: {kernel_url}[/bold cyan]")
 
     # Deprecated --from-task: map to --task for backward compatibility
     _task_worktree: Path | None = None
@@ -556,8 +644,8 @@ def main(
 
     # ============ Full pipeline mode: geak <url> ============
     # When a kernel URL is provided (and we're not in a structured-task sub-agent mode),
-    # route through the preprocessor -> orchestrator pipeline instead of the
-    # legacy monolithic flow.
+    # route through the preprocessor -> orchestrator pipeline.
+    # This is the ONLY optimization path — always preprocess → orchestrate.
     if kernel_url and not _tf_meta:
         from minisweagent.run.orchestrator import run_orchestrator
         from minisweagent.run.preprocessor import run_preprocessor
@@ -567,6 +655,34 @@ def main(
         console.print(f"[dim]Kernel URL: {kernel_url}[/dim]")
         console.print(f"[dim]Output dir: {_pipeline_output}[/dim]")
 
+        # Resolve --eval: auto-detect harness vs command
+        _harness_arg: str | None = None
+        _eval_commands: dict | None = None
+        if eval_spec:
+            eval_type, eval_value = _resolve_eval_spec(eval_spec, workspace=repo)
+            if eval_type == "harness":
+                _harness_arg = eval_value
+                console.print(f"[dim]Eval mode: harness → {eval_value}[/dim]")
+            else:
+                # Shell command — parse into separate commands
+                # Split on && to identify compile/correctness/performance parts
+                parts = [p.strip() for p in eval_value.split("&&") if p.strip()]
+                _eval_commands = {}
+                if len(parts) >= 3:
+                    # Assume: compile && correctness && performance
+                    _eval_commands["compile_command"] = parts[0]
+                    _eval_commands["correctness_command"] = parts[1]
+                    _eval_commands["performance_command"] = parts[2]
+                elif len(parts) == 2:
+                    # Assume: correctness && performance
+                    _eval_commands["correctness_command"] = parts[0]
+                    _eval_commands["performance_command"] = parts[1]
+                else:
+                    # Single command — use for both
+                    _eval_commands["correctness_command"] = eval_value
+                    _eval_commands["performance_command"] = eval_value
+                console.print(f"[dim]Eval mode: command → {eval_value}[/dim]")
+
         preprocess_ctx = run_preprocessor(
             kernel_url,
             output_dir=_pipeline_output,
@@ -574,8 +690,9 @@ def main(
             model=model,
             model_factory=lambda: get_model(model_name_resolved, config.get("model", {})),
             console=console,
-            harness=harness,
+            harness=_harness_arg,
             repo=repo,
+            eval_commands=_eval_commands,
         )
 
         model_cfg = config.get("model", {})

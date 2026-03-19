@@ -86,11 +86,12 @@ Repository = "https://github.com/SWE-agent/mini-SWE-agent"
 "Bug Tracker" = "https://github.com/SWE-agent/mini-SWE-agent/issues"
 
 [project.scripts]
+# Legacy aliases (deprecated — use 'geak' instead)
 mini = "minisweagent.run.mini:app"
 mini-swe-agent = "minisweagent.run.mini:app"
 mini-extra = "minisweagent.run.mini_extra:main"
 mini-e= "minisweagent.run.mini_extra:main"
-# GEAK-specific entry points (ported from MSA branch)
+# Primary GEAK entry points
 geak = "minisweagent.run.mini:app"
 geak-preprocess = "minisweagent.run.preprocessor:main"
 geak-orchestrate = "minisweagent.run.orchestrator:main"
