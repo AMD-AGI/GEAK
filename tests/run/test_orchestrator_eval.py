@@ -4,10 +4,8 @@ and start_round resume behaviour."""
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -15,12 +13,11 @@ from minisweagent.run.orchestrator import (
     _auto_finalize,
     _evaluate_round_best,
     _merge_round_evaluation_into_final_report,
-    _parse_total_kernel_time_ms,
     _parse_reported_speedup,
+    _parse_total_kernel_time_ms,
     _setup_eval_worktree,
     run_orchestrator,
 )
-
 
 # ---------------------------------------------------------------------------
 # _parse_total_kernel_time_ms
@@ -317,7 +314,7 @@ class TestFinalReportVerification:
         assert merged["verified_speedup_raw"] == pytest.approx(0.998989)
         assert merged["verified_improvement"] is False
         assert "## Verified Final Selection" in merged["summary"]
-        assert "### Best Patch: dispatch-path-check/patch_9" in merged["summary"]
+        assert "- Best patch: dispatch-path-check/patch_9" in merged["summary"]
         mock_record.assert_called_once()
         assert mock_record.call_args.kwargs["speedup_achieved"] == pytest.approx(1.0)
         assert mock_record.call_args.kwargs["success"] is False
@@ -371,7 +368,7 @@ class TestFinalReportVerification:
         assert merged["best_patch"] == str(patch_file)
         assert merged["total_speedup"] == "1.1473x"
         assert merged["verified_improvement"] is True
-        assert "### Best Patch: split-k-reduction-rewrite/patch_7" in merged["summary"]
+        assert "- Best patch: split-k-reduction-rewrite/patch_7" in merged["summary"]
         mock_record.assert_called_once()
         assert mock_record.call_args.kwargs["speedup_achieved"] == pytest.approx(1.14731)
         assert mock_record.call_args.kwargs["success"] is True

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from minisweagent.debug_runtime import emit_debug_log
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 
@@ -36,6 +38,7 @@ def _ensure_mcp_importable() -> None:
             sys.path.insert(0, p)
 
 
+from minisweagent.benchmark_parsing import extract_latency_ms
 from minisweagent.run.pipeline_helpers import (
     DEFAULT_EVAL_BENCHMARK_ITERATIONS,
     _materialize_validated_harness,
@@ -52,7 +55,6 @@ from minisweagent.run.testcase_cache import (
     materialize_cached_harness,
     save_cached_harness,
 )
-from minisweagent.benchmark_parsing import extract_latency_ms
 
 # ── main entry point ─────────────────────────────────────────────────
 
@@ -105,7 +107,7 @@ def _resolve_deterministic_harness(
             )
         return str(harness_path), {"source": "same_fresh_remote_repo", **harness_remote}
 
-    resolved = resolve_kernel_url(spec, clone_into=output_dir / "_deterministic_harness")
+    resolved = resolve_kernel_url(spec, repo=repo_root, clone_into=output_dir / "_harness")
     if resolved.get("error"):
         raise RuntimeError(f"Deterministic harness resolve failed: {resolved['error']}")
 
@@ -123,7 +125,7 @@ def _resolve_deterministic_harness(
 
 
 _TRUSTED_IRRELEVANT_TOP_TEST_CACHE_SOURCES = {
-    "deterministic_harness",
+    "harness",
     "focused_test",
     "fallback_focused_test",
     "unit_test_agent",
@@ -162,8 +164,7 @@ def _normalize_candidate_identifier(value: str | Path) -> str:
     text = text.removeprefix("test_")
     text = text.removesuffix("_harness")
     text = text.removesuffix("_focused")
-    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
-    return text
+    return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
 
 
 def _kernel_identity_names(kernel_path: str | Path) -> list[str]:
@@ -347,8 +348,8 @@ def run_preprocessor(
     model=None,
     model_factory=None,
     console=None,
-    deterministic: bool = False,
-    deterministic_harness: str | None = None,
+    harness: str | None = None,
+    repo: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -384,9 +385,6 @@ def run_preprocessor(
             print(msg, file=sys.stderr)
 
     ctx: dict[str, Any] = {}
-    deterministic_requested = bool(deterministic or deterministic_harness)
-    if deterministic_requested and not deterministic_harness:
-        raise RuntimeError("--deterministic currently requires --deterministic-harness")
 
     # ── 1. resolve-kernel-url ────────────────────────────────────────
     _print(
@@ -397,7 +395,7 @@ def run_preprocessor(
 
     from minisweagent.tools.resolve_kernel_url_impl import resolve_kernel_url
 
-    resolved = resolve_kernel_url(kernel_url, clone_into=str(output_dir))
+    resolved = resolve_kernel_url(kernel_url, repo=repo, clone_into=str(output_dir))
     if resolved.get("error"):
         raise RuntimeError(f"resolve-kernel-url failed: {resolved['error']}")
 
@@ -435,15 +433,27 @@ def run_preprocessor(
 
     _discover_fn = getattr(atd_discover, "fn", atd_discover)
     disc_dict = {}  # Initialize to empty dict to avoid NameError if discovery fails
+    _discovery_kwargs: dict[str, Any] = {
+        "kernel_path": kernel_path,
+        "output_dir": str(output_dir),
+    }
+    if harness:
+        _discovery_kwargs["use_llm"] = False
+
     try:
-        disc_dict = _discover_fn(
-            kernel_path=kernel_path,
-            output_dir=str(output_dir),
-        )
+        disc_dict = _discover_fn(**_discovery_kwargs)
     except Exception as exc:
         logger.warning("Test discovery failed: %s", exc)
         _print(f"  [yellow]Warning: Test discovery failed: {exc}[/yellow]" if console else f"  Warning: Test discovery failed: {exc}")
-    
+
+    if harness:
+        disc_dict.setdefault("focused_test", {
+            "focused_test_file": harness,
+            "focused_command": f"python {harness} --correctness",
+            "top_test_is_relevant": True,
+            "reason": "User-provided harness",
+        })
+
     ctx["discovery"] = disc_dict
     (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))
 
@@ -466,7 +476,7 @@ def run_preprocessor(
     harness_results: list[dict] | None = None
     selected_harness_source: str | None = None
     _uta_model = model or (model_factory() if model_factory else None)
-    testcase_cache_dir = None if deterministic_requested else get_testcase_cache_dir()
+    testcase_cache_dir = None if harness else get_testcase_cache_dir()
     testcase_cache_key = build_testcase_cache_key(kernel_url, kernel_path)
     testcase_cache_entry = (
         get_testcase_cache_entry(testcase_cache_dir, testcase_cache_key)
@@ -479,13 +489,12 @@ def run_preprocessor(
         "reused_cache": False,
         "selected_source": None,
         "saved_cache_manifest": None,
-        "deterministic_requested": deterministic_requested,
-        "deterministic_harness": deterministic_harness,
+        "harness": harness,
     }
 
-    if deterministic_harness:
+    if harness:
         deterministic_path, deterministic_meta = _resolve_deterministic_harness(
-            deterministic_harness,
+            harness,
             kernel_url=kernel_url,
             repo_root=repo_root,
             output_dir=output_dir,
@@ -507,7 +516,7 @@ def run_preprocessor(
         test_command = _build_deterministic_test_command(deterministic_path)
         harness_results = candidate_results
         ctx["harness_path"] = deterministic_path
-        selected_harness_source = "deterministic_harness"
+        selected_harness_source = "harness"
         testcase_selection["selected_source"] = selected_harness_source
         testcase_selection["deterministic_resolution"] = deterministic_meta
         _print(f"  Using deterministic harness: {deterministic_path}")
@@ -876,7 +885,6 @@ def run_preprocessor(
     if test_command:
         try:
             from minisweagent.tools.commandment import generate_commandment
-
             from minisweagent.tools.discovery_types import _infer_kernel_language
 
             harness = ctx.get("harness_path") or extract_harness_path(test_command)
@@ -975,14 +983,16 @@ def main() -> None:
         help="Model name for UnitTestAgent harness creation (uses default if omitted)",
     )
     parser.add_argument(
-        "--deterministic",
-        action="store_true",
-        help="Require an explicit deterministic harness contract for this preprocessing run.",
+        "--harness",
+        default=None,
+        help="Path to an existing test harness. Skips LLM harness generation; "
+             "must support --correctness, --profile, --benchmark, --full-benchmark.",
     )
     parser.add_argument(
-        "--deterministic-harness",
+        "--repo",
         default=None,
-        help="Exact harness URL/path to use. Discovery and UnitTestAgent fallback are disabled.",
+        help="Repository root (local path or GitHub URL). "
+             "Kernel 'url' is resolved relative to this.",
     )
     args = parser.parse_args()
 
@@ -1003,8 +1013,8 @@ def main() -> None:
         gpu_id=args.gpu,
         model_factory=_model_factory,
         console=console,
-        deterministic=args.deterministic,
-        deterministic_harness=args.deterministic_harness,
+        harness=args.harness,
+        repo=args.repo,
     )
 
     print(json.dumps(ctx, indent=2, default=str))

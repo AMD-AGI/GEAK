@@ -126,21 +126,19 @@ def test_run_preprocessor_uses_explicit_deterministic_harness(tmp_path, monkeypa
             "https://github.com/AMD-AGI/AIG-Eval/blob/main/tasks/demo/kernel.py",
             output_dir=output_dir,
             gpu_id=0,
-            deterministic=True,
-            deterministic_harness=(
+            harness=(
                 "https://github.com/AMD-AGI/AIG-Eval/blob/main/tasks/demo/test_demo_harness.py"
             ),
         )
 
     assert ctx["harness_path"] == str(harness_path.resolve())
     assert ctx["test_command"].endswith(f"{harness_path.resolve()} --correctness")
-    assert ctx["testcase_selection"]["selected_source"] == "deterministic_harness"
-    assert ctx["testcase_selection"]["deterministic_requested"] is True
+    assert ctx["testcase_selection"]["selected_source"] == "harness"
     assert ctx["testcase_selection"]["reused_cache"] is False
     assert ctx["commandment"] == "COMMANDMENT"
 
     testcase_selection = json.loads((output_dir / "testcase_selection.json").read_text())
-    assert testcase_selection["selected_source"] == "deterministic_harness"
+    assert testcase_selection["selected_source"] == "harness"
     assert testcase_selection["harness_path"] == str(harness_path.resolve())
 
 
@@ -194,14 +192,12 @@ def test_run_preprocessor_accepts_local_deterministic_harness_path(tmp_path, mon
             "https://github.com/AMD-AGI/AIG-Eval/blob/main/tasks/demo/kernel.py",
             output_dir=output_dir,
             gpu_id=0,
-            deterministic=True,
-            deterministic_harness="tasks/demo/test_demo_harness.py",
+            harness="tasks/demo/test_demo_harness.py",
         )
 
     assert ctx["harness_path"] == str(harness_path.resolve())
     assert ctx["test_command"].endswith(f"{harness_path.resolve()} --correctness")
-    assert ctx["testcase_selection"]["selected_source"] == "deterministic_harness"
-    assert ctx["testcase_selection"]["deterministic_requested"] is True
+    assert ctx["testcase_selection"]["selected_source"] == "harness"
     assert ctx["testcase_selection"]["deterministic_resolution"]["source"] == "local_path"
     assert ctx["testcase_selection"]["deterministic_resolution"]["path"] == str(harness_path.resolve())
 

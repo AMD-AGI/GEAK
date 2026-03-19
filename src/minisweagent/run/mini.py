@@ -235,8 +235,7 @@ def main(
     docker_image: str | None = typer.Option(None, "--docker-image", help="Docker image to use when --runtime=docker.", rich_help_panel="Advanced"),
     workspace: Path | None = typer.Option(None, "--workspace", help="Workspace directory to mount in Docker.", rich_help_panel="Advanced"),
     kernel_url: str | None = typer.Option(None, "--kernel-url", help="Kernel as URL (e.g. https://github.com/.../file.py#L106). Resolved path/line/kernel name are injected into the task.", rich_help_panel="Kernel"),
-    deterministic: bool = typer.Option(False, "--deterministic", help="Require an explicit deterministic harness contract for --kernel-url runs.", rich_help_panel="Kernel"),
-    deterministic_harness: str | None = typer.Option(None, "--deterministic-harness", help="Exact harness URL/path to use for --kernel-url runs. Discovery/UnitTestAgent fallback is disabled.", rich_help_panel="Kernel"),
+    harness: str | None = typer.Option(None, "--harness", help="Exact harness URL/path to use for --kernel-url runs. Discovery/UnitTestAgent fallback is disabled.", rich_help_panel="Kernel"),
     max_rounds: int | None = typer.Option(None, "--max-rounds", help="Maximum optimisation rounds for the orchestrator (default: GEAK_MAX_ROUNDS env or 5).", rich_help_panel="Advanced"),
     allowed_agents: str | None = typer.Option(None, "--allowed-agents", help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS and overrides the default OpenEvolve exclusion.", rich_help_panel="Advanced"),
     excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS. Default: openevolve is excluded unless explicitly re-enabled.", rich_help_panel="Advanced"),
@@ -247,12 +246,8 @@ def main(
     configure_if_first_time()
 
     configure_agent_filter_env(allowed_agents, excluded_agents)
-    if deterministic_harness and not kernel_url:
-        raise typer.BadParameter("--deterministic-harness requires --kernel-url")
-    if deterministic and not kernel_url:
-        raise typer.BadParameter("--deterministic requires --kernel-url")
-    if deterministic_harness:
-        deterministic = True
+    if harness and not kernel_url:
+        raise typer.BadParameter("--harness requires --kernel-url")
 
     # Deprecated --from-task: map to --task for backward compatibility
     _task_worktree: Path | None = None
@@ -557,8 +552,8 @@ def main(
             model=model,
             model_factory=lambda: get_model(model_name_resolved, config.get("model", {})),
             console=console,
-            deterministic=deterministic,
-            deterministic_harness=deterministic_harness,
+            harness=harness,
+            repo=repo,
         )
 
         model_cfg = config.get("model", {})
