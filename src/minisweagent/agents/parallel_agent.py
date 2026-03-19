@@ -82,10 +82,66 @@ class ParallelAgent(DefaultAgent):
             base_patch_dir.mkdir(parents=True, exist_ok=True)
             prev_patch_output_dir = self.config.patch_output_dir
             self.config.patch_output_dir = str(base_patch_dir)
+
+            # Create an isolated worktree/copy if repo is specified
+            prev_env = None
+            prev_test_command = None
+            if self.config.repo:
+                repo_path = Path(self.config.repo).resolve()
+                if repo_path.exists():
+                    worktree_base = base_patch_dir / "worktrees"
+                    worktree_base.mkdir(parents=True, exist_ok=True)
+                    is_git_repo = (repo_path / ".git").exists()
+                    # Auto-increment: find next available agent_N index
+                    existing_ids = [
+                        int(d.name.split("_", 1)[1])
+                        for d in worktree_base.iterdir()
+                        if d.is_dir() and d.name.startswith("agent_") and d.name.split("_", 1)[1].isdigit()
+                    ]
+                    agent_idx = max(existing_ids, default=-1) + 1
+                    worktree_path = (
+                        self._create_worktree(repo_path, worktree_base / f"agent_{agent_idx}")
+                        if is_git_repo
+                        else self._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_idx}")
+                    )
+                    worktree_path_str = str(worktree_path.resolve())
+                    repo_path_str = str(repo_path)
+
+                    task = self._replace_paths(task, repo_path, worktree_path)
+                    if self.config.test_command:
+                        prev_test_command = self.config.test_command
+                        self.config.test_command = self._replace_paths(
+                            self.config.test_command, repo_path, worktree_path
+                        )
+
+                    prev_env = self.env
+                    env_config_dict = self.env.config.__dict__.copy() if hasattr(self.env, "config") else {}
+                    env_config_dict["cwd"] = worktree_path_str
+                    new_env_vars = dict(env_config_dict.get("env") or {})
+                    new_env_vars[repo_path_str] = worktree_path_str
+                    new_env_vars["GEAK_WORK_DIR"] = worktree_path_str
+                    new_env_vars["GEAK_REPO_ROOT"] = repo_path_str
+                    if self.config.gpu_ids:
+                        gpu_id = self.config.gpu_ids[0]
+                        new_env_vars["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+                        new_env_vars["GEAK_GPU_DEVICE"] = str(gpu_id)
+                    env_config_dict["env"] = new_env_vars
+                    self.env = type(prev_env)(**env_config_dict)
+
+                    if hasattr(self, "base_repo_path"):
+                        self.base_repo_path = repo_path
+
+                    if console:
+                        console.print(f"[bold green]Created worktree for single run: {worktree_path}[/bold green]")
+
             try:
                 exit_status, result = super().run(task, **(kwargs | {"_skip_select_patch": True}))
             finally:
                 self.config.patch_output_dir = prev_patch_output_dir
+                if prev_env is not None:
+                    self.env = prev_env
+                if prev_test_command is not None:
+                    self.config.test_command = prev_test_command
 
             metric = (
                 self.config.metric
