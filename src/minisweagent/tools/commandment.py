@@ -157,6 +157,16 @@ def _detect_build_command(repo_root: Path) -> str:
     return "cd ${GEAK_WORK_DIR} && pip install -e . --no-deps --no-build-isolation 2>&1 | tail -5"
 
 
+def _detect_flydsl_paths(repo_root: Path) -> tuple[str, str] | None:
+    """Return (build_packages_dir, mlir_libs_dir) if FlyDSL build artifacts exist."""
+    for candidate in (repo_root, repo_root.parent):
+        build_pkg = candidate / "build-fly" / "python_packages"
+        mlir_libs = build_pkg / "flydsl" / "_mlir" / "_mlir_libs"
+        if mlir_libs.is_dir():
+            return str(build_pkg), str(mlir_libs)
+    return None
+
+
 def _generate_simple(
     kernel_path: Path,
     harness_path: Path,
@@ -180,6 +190,8 @@ def _generate_simple(
         warmup_runs,
     )
 
+    flydsl_paths = _detect_flydsl_paths(repo_root)
+
     if kernel_language == "cpp":
         build_cmd = _detect_build_command(repo_root)
         setup_section = (
@@ -190,6 +202,16 @@ def _generate_simple(
             "export AITER_JIT_DIR=%s/.aiter_jit\\n"
             'exec python3 "$@"\\n\' '
             '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
+            "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
+        )
+    elif flydsl_paths:
+        build_pkg, mlir_libs = flydsl_paths
+        setup_section = (
+            f"printf '#!/bin/bash\\nexport PYTHONPATH={build_pkg}:%s:%s:${{PYTHONPATH}}\\n"
+            f"export LD_LIBRARY_PATH={mlir_libs}:${{LD_LIBRARY_PATH}}\\n"
+            "export HIP_VISIBLE_DEVICES=%s\\n"
+            'exec python3 "$@"\\n\' '
+            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
             "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
         )
     else:

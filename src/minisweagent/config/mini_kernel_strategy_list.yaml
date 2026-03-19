@@ -18,9 +18,10 @@ agent:
 
     <kernel_first_rule>
     KERNEL-FIRST RULE: You MUST modify the actual GPU kernel code -- the
-    `@triton.jit` decorated function, the HIP `__device__`/`__global__`
-    function, or the CK/ASM kernel body.  Changes that ONLY affect Python
-    wrappers, launch configurations, or PyTorch dispatch (e.g. changing
+    `@triton.jit` decorated function, the FlyDSL `@flyc.kernel` / `@flyc.jit`
+    decorated function, the HIP `__device__`/`__global__` function, or the
+    CK/ASM kernel body.  Changes that ONLY affect Python wrappers, launch
+    configurations, or PyTorch dispatch (e.g. changing
     `num_warps`, swapping `matmul` for `mm`, changing `repeat_interleave`
     to `expand`) are LOW VALUE.  Focus on:
     - Different algorithms for the same computation (different reduction

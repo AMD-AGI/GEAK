@@ -414,6 +414,16 @@ class ParallelAgent(DefaultAgent):
                         # Force flush to ensure output is written before redirection
                         if hasattr(sys.stdout, "flush"):
                             sys.stdout.flush()
+            # FlyDSL: propagate build-fly paths so agent shell can import flydsl
+            for _candidate in (repo_path_resolved, repo_path_resolved.parent):
+                _build_pkg = _candidate / "build-fly" / "python_packages"
+                _mlir_libs = _build_pkg / "flydsl" / "_mlir" / "_mlir_libs"
+                if _mlir_libs.is_dir():
+                    _pp = new_env.get("PYTHONPATH", "")
+                    new_env["PYTHONPATH"] = f"{_build_pkg}:{_candidate}:{_pp}" if _pp else f"{_build_pkg}:{_candidate}"
+                    _ld = new_env.get("LD_LIBRARY_PATH", "")
+                    new_env["LD_LIBRARY_PATH"] = f"{_mlir_libs}:{_ld}" if _ld else str(_mlir_libs)
+                    break
             env_config_dict["env"] = new_env
             parallel_env = type(base_env)(**env_config_dict)
 
@@ -552,13 +562,25 @@ class ParallelAgent(DefaultAgent):
             env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
             env_config_dict["cwd"] = worktree_path_str
             # Create a NEW dict to avoid shared-reference race across threads
-            env_config_dict["env"] = {
+            _new_env = {
                 **(env_config_dict.get("env") or {}),
                 "HIP_VISIBLE_DEVICES": spec.hip_visible_devices,
                 "GEAK_WORK_DIR": worktree_path_str,
                 "GEAK_REPO_ROOT": str(repo_path.resolve()),
                 "GEAK_GPU_DEVICE": spec.hip_visible_devices,
             }
+            # FlyDSL: propagate build-fly paths so agent shell can import flydsl
+            _repo_resolved = repo_path.resolve()
+            for _candidate in (_repo_resolved, _repo_resolved.parent):
+                _build_pkg = _candidate / "build-fly" / "python_packages"
+                _mlir_libs = _build_pkg / "flydsl" / "_mlir" / "_mlir_libs"
+                if _mlir_libs.is_dir():
+                    _pp = _new_env.get("PYTHONPATH", "")
+                    _new_env["PYTHONPATH"] = f"{_build_pkg}:{_candidate}:{_pp}" if _pp else f"{_build_pkg}:{_candidate}"
+                    _ld = _new_env.get("LD_LIBRARY_PATH", "")
+                    _new_env["LD_LIBRARY_PATH"] = f"{_mlir_libs}:{_ld}" if _ld else str(_mlir_libs)
+                    break
+            env_config_dict["env"] = _new_env
 
             parallel_env = type(base_env)(**env_config_dict)
 

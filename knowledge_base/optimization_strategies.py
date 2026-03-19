@@ -45,6 +45,7 @@ class KernelLanguage(Enum):
     CK = "ck"  # AMD Composable Kernel
     ASM = "asm"
     PYTORCH = "pytorch"
+    FLYDSL = "flydsl"  # FlyDSL (Python DSL, MLIR/ROCm JIT)
 
 
 class AMDArchitecture(Enum):

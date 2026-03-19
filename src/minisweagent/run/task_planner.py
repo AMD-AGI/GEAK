@@ -129,6 +129,17 @@ def build_optimization_tasks(
                 wrapper,
             )
         )
+    elif ktype == "flydsl":
+        tasks.extend(
+            _flydsl_tasks(
+                agent_class,
+                base_task_context,
+                build_ctx,
+                kernel,
+                inner,
+                wrapper,
+            )
+        )
     else:
         # Unknown type -- fall back to generic strategies
         tasks.extend(
@@ -425,6 +436,74 @@ def _asm_tasks(
     ]
 
 
+def _flydsl_tasks(
+    agent_class,
+    ctx,
+    build_ctx,
+    kernel,
+    inner,
+    wrapper,
+) -> list[AgentTask]:
+    tasks = []
+    target = inner or wrapper
+
+    if inner:
+        tasks.append(
+            AgentTask(
+                agent_class=agent_class,
+                task=(
+                    f"{ctx}\n\n{build_ctx}\n\n"
+                    f"## OpenEvolve on FlyDSL Kernel\n"
+                    f"Run OpenEvolve on the FlyDSL kernel at {inner}.\n"
+                    f"Follow the INSTRUCTIONS.md workflow: create COMMANDMENT.md "
+                    f"and baseline_metrics.json, then run OpenEvolve.\n"
+                    f"Wrapper file: {wrapper}\n\n"
+                    f"Use ${{GEAK_WORK_DIR}} and ${{GEAK_GPU_DEVICE}} variables.\n"
+                    f"Create a wrapper shell script in SETUP that sets env vars."
+                ),
+                label="openevolve-flydsl",
+                priority=0,
+                kernel_language="python",
+            )
+        )
+
+    tasks.append(
+        AgentTask(
+            agent_class=agent_class,
+            task=(
+                f"{ctx}\n\n{build_ctx}\n\n"
+                f"## FlyDSL Tile and Vectorization Tuning\n"
+                f"Optimize tile parameters and vectorization in {target}: "
+                f"BLOCK_THREADS, VEC_WIDTH, num_tiles. Widen fast-path conditions "
+                f"(e.g. allow N that is any multiple of tile_cols, not just a fixed value). "
+                f"Try non-temporal stores (cache_modifier) for write-only outputs."
+            ),
+            label="flydsl-tile-tuning",
+            priority=5,
+            kernel_language="python",
+        )
+    )
+
+    tasks.append(
+        AgentTask(
+            agent_class=agent_class,
+            task=(
+                f"{ctx}\n\n{build_ctx}\n\n"
+                f"## FlyDSL Memory and Wave-Level Optimization\n"
+                f"Optimize memory access and wave-level ops in {target}: "
+                f"use buffer_load/buffer_store for vectorized access, "
+                f"optimize shared memory layout, leverage wave_reduce_add / MFMA "
+                f"intrinsics, and enable fast math flags where safe."
+            ),
+            label="flydsl-memory-wave",
+            priority=10,
+            kernel_language="python",
+        )
+    )
+
+    return tasks
+
+
 def _generic_tasks(
     agent_class,
     ctx,
@@ -452,7 +531,7 @@ def _generic_tasks(
 
 def _pick_fusion_target_lang(languages: set[str]) -> str:
     """Choose the target language for a fused kernel."""
-    if "triton" in languages and "asm" not in languages:
+    if ("triton" in languages or "flydsl" in languages) and "asm" not in languages:
         return "python"
     elif "ck" in languages:
         return "cpp"
