@@ -577,6 +577,13 @@ def _setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> P
         )
     else:
         shutil.copytree(str(repo), str(eval_dir), dirs_exist_ok=True)
+        # Init as git repo so git-apply works for patches from non-git workdirs
+        subprocess.run(["git", "init", "-q"], cwd=str(eval_dir), capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=str(eval_dir), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "baseline", "--allow-empty"],
+            cwd=str(eval_dir), capture_output=True,
+        )
 
     patch_path = Path(patch_file)
     if patch_path.exists() and patch_path.stat().st_size > 0:
