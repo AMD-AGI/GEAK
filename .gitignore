@@ -205,3 +205,4 @@ test_harness.py
 .geak_seed/
 geak_output/
 patches/
+examples/matmul_kernel/

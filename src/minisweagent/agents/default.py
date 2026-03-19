@@ -161,6 +161,12 @@ class DefaultAgent:
         if self.config.codebase_context:
             self.toolruntime.set_codebase_context(self.config.codebase_context)
 
+        if hasattr(self.model, "set_tools"):
+            self.model.set_tools(self.toolruntime.get_tools_schema())
+        else:
+            model_impl = getattr(self.model, "_impl", self.model)
+            model_impl.tools = self.toolruntime.get_tools_schema()
+
     def _get_strategy_file(self) -> str:
         """Get the strategy file path.
 
