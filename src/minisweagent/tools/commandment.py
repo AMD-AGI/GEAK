@@ -336,6 +336,108 @@ def _auto_fix(content: str, errors: list[str]) -> str:
     return content
 
 
+def generate_commandment_from_commands(
+    kernel_path: str | Path,
+    compile_command: str | list[str] | None = None,
+    correctness_command: str | list[str] | None = None,
+    performance_command: str | list[str] | None = None,
+    repo_root: str | Path | None = None,
+    *,
+    warmup_runs: int = 2,
+    profile_replays: int = 5,
+) -> str:
+    """Generate a valid COMMANDMENT.md from explicit compile/correctness/performance commands.
+
+    This is the HIP/C++ equivalent of generate_commandment() which takes a harness.
+    Instead of a harness with --correctness/--profile/--benchmark modes, this function
+    builds COMMANDMENT sections from separate shell commands.
+
+    Args:
+        kernel_path: Path to the kernel file being optimized.
+        compile_command: Command(s) to compile the kernel (e.g. "make" or ["make clean", "make"]).
+        correctness_command: Command(s) to validate correctness.
+        performance_command: Command(s) to benchmark performance.
+        repo_root: Repository root for PYTHONPATH.
+        warmup_runs: Number of warm-up invocations before profiling.
+        profile_replays: Number of replay passes for kernel-profile.
+
+    Returns:
+        The content of a valid COMMANDMENT.md as a string.
+    """
+    kernel_path = Path(kernel_path).resolve()
+    if repo_root is not None:
+        repo_root = Path(repo_root).resolve()
+    else:
+        repo_root = kernel_path.parent
+
+    def _join_cmds(cmds):
+        if cmds is None:
+            return ""
+        if isinstance(cmds, str):
+            return cmds.strip()
+        return " && ".join(c.strip() for c in cmds if c.strip())
+
+    compile_cmd = _join_cmds(compile_command)
+    correctness_cmd = _join_cmds(correctness_command)
+    performance_cmd = _join_cmds(performance_command)
+
+    # SETUP: compile step (cd to workdir first)
+    setup_parts = []
+    setup_parts.append(
+        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+        "export HIP_VISIBLE_DEVICES=%s\\n"
+        'exec \"$@\"\\n\' '
+        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
+        "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
+    )
+    if compile_cmd:
+        setup_parts.append(f"cd ${{GEAK_WORK_DIR}} && {compile_cmd}")
+    setup_section = "\n".join(setup_parts)
+
+    # CORRECTNESS
+    if correctness_cmd:
+        correctness_section = f"cd ${{GEAK_WORK_DIR}} && {correctness_cmd}"
+    else:
+        correctness_section = "echo 'No correctness command specified'"
+
+    # PROFILE: use correctness command for profiling if no separate profile command
+    profile_target = correctness_cmd or performance_cmd or "echo 'no profile target'"
+    warmup_block = _warmup_block(
+        f"cd ${{GEAK_WORK_DIR}} && {profile_target} > /dev/null 2>&1 || true",
+        warmup_runs,
+    )
+    profile_section = (
+        f"{warmup_block}\n"
+        f'kernel-profile "cd ${{GEAK_WORK_DIR}} && {profile_target}" '
+        f"--gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}"
+    )
+
+    # BENCHMARK and FULL_BENCHMARK
+    if performance_cmd:
+        benchmark_section = f"cd ${{GEAK_WORK_DIR}} && {performance_cmd}"
+    else:
+        benchmark_section = correctness_section  # fallback to correctness
+
+    content = f"""\
+## SETUP
+{setup_section}
+
+## CORRECTNESS
+{correctness_section}
+
+## PROFILE
+{profile_section}
+
+## BENCHMARK
+{benchmark_section}
+
+## FULL_BENCHMARK
+{benchmark_section}
+"""
+
+    return _validate_and_fix(content, harness_path=None)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------

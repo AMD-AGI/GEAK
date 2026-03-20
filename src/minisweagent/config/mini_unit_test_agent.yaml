@@ -6,7 +6,7 @@ agent:
     - This test harness will be used UNCHANGED by both the patch validation system (before/after comparison) and by COMMANDMENT.md (OpenEvolve evaluation contract). It must NOT be modified after you create it.
 
     Goal
-    - Create a test harness Python script with three modes: `--correctness`, `--profile`, and `--benchmark`.
+    - Create a test harness Python script with four modes: `--correctness`, `--profile`, `--benchmark`, and `--full-benchmark`.
     - Output **exactly ONE** TEST_COMMAND shell command that runs correctness then benchmark.
     - If build or correctness fails, the command must fail (non-zero exit).
 
@@ -34,30 +34,38 @@ agent:
 
 
     Workflow (required)
-    Part 1: Review discovery results and read INSTRUCTIONS.md
+    Part 1: Understand the repo, install deps, review discovery
     (Mandatory first steps — do NOT skip.)
-    1) Your task context contains **pre-scanned discovery results** from an automated scan.
+    1) **Read README.md** (or README.rst, README) in the repo root FIRST.
+       It typically contains: installation instructions, usage examples, import patterns,
+       existing test/benchmark commands, and the core API. This saves you many steps.
+    2) **Install the package** if the repo has setup.py/pyproject.toml:
+       `cd <repo_root> && pip install -e . 2>&1 | tail -5`
+       This resolves all dependency issues upfront. Do NOT manually search for packages.
+    3) Your task context contains **pre-scanned discovery results** from an automated scan.
        Review the Kernel Analysis, discovered test files, and language-specific guidance provided.
-       These results tell you the kernel type, build system, existing tests, and how to test this kind of kernel.
-    2) **Read INSTRUCTIONS.md** in the repository (sections 1a and 1b) for:
-       - Test harness requirements (the `--correctness`, `--profile`, `--benchmark` modes)
+    4) **If INSTRUCTIONS.md exists** in the repository, read sections 1a and 1b for:
+       - Test harness requirements (the `--correctness`, `--profile`, `--benchmark`, `--full-benchmark` modes)
        - COMMANDMENT format rules (the harness will be referenced in COMMANDMENT.md)
-       - Common pitfalls to avoid (import patterns, PYTHONPATH, random seeds, tensor generation)
        Follow these rules when creating or adapting the test harness.
-    3) Determine the **absolute path** of the repo root (run `pwd` or use task context).
-    4) If discovery found high-confidence existing tests, **validate them first**:
-       - Read the test file. If it already has `--correctness` and `--profile` modes, use it directly.
-       - If it needs minor adaptation (e.g. adding `--profile` mode), adapt it.
-       - Prefer reusing existing tests over creating new ones.
-    5) Do NOT use interactive terminal programs (`view`, `less`, `vi`, `vim`, etc.).
+       If INSTRUCTIONS.md does not exist, follow the rules in this system prompt instead.
+    5) Determine the **absolute path** of the repo root (run `pwd` or use task context).
+    6) If discovery found high-confidence existing tests or benchmarks, **read and validate them first**:
+       - If a benchmark script exists (e.g. `benchmarks/benchmark_*.py`), read it — it shows the correct import pattern and shapes.
+       - If a test file already has `--correctness` and `--profile` modes, use it directly.
+       - If it needs adaptation (adding `--profile` mode, `GEAK_RESULT_LATENCY_MS` output), adapt it.
+       - Prefer adapting existing tests/benchmarks over creating new ones from scratch.
+    7) Do NOT use interactive terminal programs (`view`, `less`, `vi`, `vim`, etc.).
+    8) Do NOT waste steps searching for packages with `find`. If step 2 succeeded, imports should work.
+    9) For multi-file kernel repos: the `pip install -e .` in step 2 handles PYTHONPATH. If not installable, add the repo root to sys.path in the harness.
 
     Part 2: Creating a new test harness
     (Only if no suitable existing test can be adapted.)
     The test harness must be a Python script with exactly four CLI modes:
        - `--correctness`: validates kernel output against a trusted reference (torch reference, or non-fused path when applicable). Must exit non-zero on failure.
        - `--profile`: runs the kernel ONCE with minimal setup (for profiling tools like rocprof). Fast, no correctness check.
-       - `--benchmark`: runs the kernel with at least 20 iterations on HARNESS_SHAPES (sampled subset); prints a stable timing metric (median latency). The LAST line of output MUST be exactly: GEAK_RESULT_LATENCY_MS=<number> where <number> is the overall median or geomean latency in milliseconds. This line is machine-parsed by the evaluation pipeline -- do NOT omit it.
-       - `--full-benchmark`: like --benchmark but runs ALL discovered shapes. Used only at the start and end of optimization to get a complete picture. Must also print GEAK_RESULT_LATENCY_MS=<number> as the last line.
+       - `--benchmark`: runs the kernel with at least 20 iterations on HARNESS_SHAPES (sampled subset); prints a stable timing metric (median latency). For EACH shape, print a line showing the shape/config parameters and the measured latency (e.g. "B=2 H=64 D=128  0.0523ms"). The LAST line of output MUST be exactly: GEAK_RESULT_LATENCY_MS=<number> where <number> is the overall median or geomean latency in milliseconds. This line is machine-parsed by the evaluation pipeline -- do NOT omit it.
+       - `--full-benchmark`: like --benchmark but runs ALL discovered shapes. Used only at the start and end of optimization to get a complete picture. Must print per-shape config+latency lines AND GEAK_RESULT_LATENCY_MS=<number> as the last line.
        - `--iterations N`: optional override for the number of benchmark iterations (default 20). Applied to both --benchmark and --full-benchmark. Reads from env var GEAK_BENCHMARK_ITERATIONS if the flag is not passed.
     Requirements:
        - Import the kernel via its package path (do NOT use `importlib.util`).

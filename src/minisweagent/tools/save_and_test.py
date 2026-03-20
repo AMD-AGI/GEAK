@@ -33,6 +33,7 @@ class SaveAndTestContext:
     log_fn: Callable[[str], None] | None = None
     patch_counter: int = 0
     helper_harness_logged: bool = False
+    source_file_paths: list[str] | None = None  # files the agent is allowed to modify
 
 
 class SaveAndTestTool:
@@ -535,6 +536,199 @@ class SaveAndTestTool:
 
         return ""
 
+    # Evaluation infrastructure files that agents must never modify.
+    # These are restored from git baseline before every test run.
+    _PROTECTED_PATTERNS = {
+        # Exact filenames
+        "Makefile", "CMakeLists.txt", "config.yaml", "task_result.yaml",
+        # Prefixes / patterns checked via startswith or endswith
+    }
+    _PROTECTED_PREFIXES = ("test_", "eval_", "bench_", "benchmark_", "run_")
+    _PROTECTED_SUFFIXES = ("_harness.py", "_runner.py", "_test.py", "_benchmark.py")
+    _PROTECTED_DIRS = {"scripts", "eval_tools", "tests", "benchmarks"}
+
+    def _is_protected_file(self, filepath: str) -> bool:
+        """Check if a file is evaluation infrastructure that should not be modified."""
+        p = Path(filepath)
+        name = p.name
+        parts = p.parts
+
+        # Exact match
+        if name in self._PROTECTED_PATTERNS:
+            return True
+        # Prefix/suffix match
+        if any(name.startswith(pf) for pf in self._PROTECTED_PREFIXES):
+            return True
+        if any(name.endswith(sf) for sf in self._PROTECTED_SUFFIXES):
+            return True
+        # Inside protected directory
+        if any(d in parts for d in self._PROTECTED_DIRS):
+            return True
+        return False
+
+    def _restore_non_source_files(self) -> None:
+        """Restore evaluation infrastructure files and protect benchmark configs.
+
+        Two layers of protection:
+        1. File-level: restore known evaluation infrastructure files (harness,
+           task_runner, Makefile, scripts/, eval_tools/) that the agent modified.
+           Agent-created new files and modified helper files are left alone.
+        2. Config-level: for ANY modified file that contains benchmark config
+           variables (ALL_CONFIGS, TEST_SHAPES, etc.), restore those specific
+           assignments from the git baseline while keeping code changes.
+
+        This is universal — works for Triton (.py), HIP (.hip), and any language.
+        """
+        ctx = self.context
+        if not ctx:
+            return
+
+        cwd = Path(ctx.cwd)
+        if not (cwd / ".git").exists() and not (cwd / ".git").is_file():
+            return
+
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only"],
+                cwd=str(cwd), capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return
+
+            modified = [f.strip() for f in result.stdout.strip().splitlines() if f.strip()]
+            if not modified:
+                return
+
+            # Layer 1: restore protected evaluation infrastructure files
+            to_restore = [f for f in modified if self._is_protected_file(f)]
+            if to_restore:
+                self._log(
+                    f"[SaveAndTest] Restoring {len(to_restore)} protected eval file(s): "
+                    f"{', '.join(to_restore[:5])}"
+                )
+                subprocess.run(
+                    ["git", "checkout", "--"] + to_restore,
+                    cwd=str(cwd), capture_output=True, text=True, timeout=10,
+                )
+
+        except Exception as e:
+            self._log(f"[SaveAndTest] Warning: could not restore eval files: {e}")
+
+    def _restore_benchmark_configs_in_source(self, cwd: Path) -> None:
+        """Restore benchmark config variables in source files from baseline.
+
+        If a source file (e.g. kernel.py) originally defined variables like
+        ALL_CONFIGS, HARNESS_CONFIGS, etc., and the agent changed them,
+        restore those specific assignments from the baseline version.
+        """
+        import re as _re
+
+        config_var_pattern = _re.compile(
+            r"^((?:ALL_CONFIGS|HARNESS_CONFIGS|CORRECTNESS_CONFIGS|"
+            r"EVAL_CONFIGS|PROFILE_CONFIGS|PROFILE_SHAPES|TEST_SHAPES|"
+            r"BENCHMARK_CONFIGS)\s*=\s*\[)",
+            _re.MULTILINE,
+        )
+
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only"],
+                cwd=str(cwd), capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return
+
+            for fname in result.stdout.strip().splitlines():
+                fname = fname.strip()
+                if not fname:
+                    continue
+                fpath = cwd / fname
+                if not fpath.exists():
+                    continue
+
+                # Get baseline content
+                baseline_result = subprocess.run(
+                    ["git", "show", f"HEAD:{fname}"],
+                    cwd=str(cwd), capture_output=True, text=True, timeout=10,
+                )
+                if baseline_result.returncode != 0:
+                    continue
+
+                baseline_text = baseline_result.stdout
+                current_text = fpath.read_text()
+
+                # Check if baseline has config variables
+                if not config_var_pattern.search(baseline_text):
+                    continue
+
+                # Extract config blocks from baseline and current
+                restored = self._replace_config_blocks(
+                    current_text, baseline_text, config_var_pattern
+                )
+                if restored != current_text:
+                    fpath.write_text(restored)
+                    changed_vars = [
+                        m.group(1).split("=")[0].strip()
+                        for m in config_var_pattern.finditer(baseline_text)
+                    ]
+                    self._log(
+                        f"[SaveAndTest] Protected benchmark configs in {fname}: "
+                        f"{', '.join(changed_vars)}"
+                    )
+        except Exception as e:
+            self._log(f"[SaveAndTest] Warning: config protection failed: {e}")
+
+    @staticmethod
+    def _replace_config_blocks(
+        current: str, baseline: str, pattern
+    ) -> str:
+        """Replace config variable assignments in current with baseline versions.
+
+        Handles multi-line list assignments like:
+            ALL_CONFIGS = [
+                (1, 2, 3),
+                (4, 5, 6),
+            ]
+        """
+        import re as _re
+
+        def _extract_assignment(text: str, var_name: str) -> str | None:
+            """Extract a full variable assignment including multi-line lists."""
+            # Match: VAR_NAME = [ ... ]
+            pat = _re.compile(
+                rf"^({_re.escape(var_name)}\s*=\s*\[.*?\])\s*$",
+                _re.MULTILINE | _re.DOTALL,
+            )
+            m = pat.search(text)
+            if m:
+                return m.group(1)
+            # Try line-by-line bracket matching
+            start = text.find(f"{var_name} =")
+            if start == -1:
+                start = text.find(f"{var_name}=")
+            if start == -1:
+                return None
+            depth = 0
+            i = text.index("[", start)
+            for j in range(i, len(text)):
+                if text[j] == "[":
+                    depth += 1
+                elif text[j] == "]":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start : j + 1]
+            return None
+
+        result = current
+        for m in pattern.finditer(baseline):
+            var_name = m.group(1).split("=")[0].strip()
+            baseline_block = _extract_assignment(baseline, var_name)
+            current_block = _extract_assignment(current, var_name)
+            if baseline_block and current_block and baseline_block != current_block:
+                result = result.replace(current_block, baseline_block)
+
+        return result
+
     def _run_test(self) -> tuple[str, bool, int]:
         """Run test command and return (output, passed, returncode)."""
         ctx = self.context
@@ -543,6 +737,9 @@ class SaveAndTestTool:
             error_msg = "[SaveAndTest] ERROR: test_command is not configured."
             self._log(error_msg)
             return error_msg, False, -1
+
+        # Guardrail: restore any non-source files the agent modified
+        self._restore_non_source_files()
 
         test_env = self._build_test_env()
         self._restore_missing_harness_helper()
