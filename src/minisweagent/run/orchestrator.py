@@ -34,7 +34,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from minisweagent.debug_runtime import emit_debug_log, model_tools_snapshot
 from minisweagent.benchmark_parsing import (
     extract_latency_ms as _extract_latency_ms,
 )
@@ -47,6 +46,7 @@ from minisweagent.benchmark_parsing import (
 from minisweagent.benchmark_parsing import (
     parse_total_kernel_time_ms as _parse_total_kernel_time_ms,
 )
+from minisweagent.debug_runtime import emit_debug_log, model_tools_snapshot
 from minisweagent.run.generated_artifacts import (
     apply_patch_with_generated_helper_fallback,
 )
@@ -409,6 +409,16 @@ def _tool_dispatch_tasks(
     results_dir.mkdir(parents=True, exist_ok=True)
 
     task_paths = [Path(f) for f in task_files]
+
+    # Inject starting_patch from prior rounds into task files
+    sp = ctx.get("starting_patch")
+    if sp:
+        from minisweagent.run.task_file import read_task_file, write_task_file
+        for tf in task_paths:
+            meta, body = read_task_file(tf)
+            if not meta.get("starting_patch"):
+                meta["starting_patch"] = sp
+                write_task_file(tf, meta, body, relative_to=tf.parent)
 
     stage_gating_enabled = os.environ.get("GEAK_STAGE_PRIORITY_GATING", "1").strip().lower() not in (
         "0",
@@ -923,8 +933,8 @@ def _auto_finalize(
         return report
 
     try:
-        from minisweagent.memory.integration import record_optimization_outcome
         from minisweagent.memory.cross_session_memory import classify_kernel_category
+        from minisweagent.memory.integration import record_optimization_outcome
         _kpath = ctx.get("kernel_path", "")
         _kcat = classify_kernel_category(_kpath) if _kpath else "unknown"
         _bm = ctx.get("baseline_metrics") or {}
@@ -1810,8 +1820,8 @@ def run_orchestrator(
         from minisweagent.memory.integration import is_working_memory_enabled
 
         if is_working_memory_enabled():
-            from minisweagent.memory.working_memory import WorkingMemory
             from minisweagent.memory.cross_session_memory import classify_kernel_category
+            from minisweagent.memory.working_memory import WorkingMemory
 
             _kpath = str(preprocess_ctx.get("kernel_path", ""))
             _wm_notebook_dir = str(_out / "_working_memory")
@@ -1959,6 +1969,16 @@ def run_orchestrator(
                         "task-local speedups only as supporting evidence."
                     ),
                 })
+            # Warm-start: update starting_patch for next round
+            if round_eval and round_eval.get("best_patch"):
+                current_speedup_val = (
+                    round_eval.get("full_benchmark", {}).get("verified_speedup")
+                    or round_eval.get("benchmark_speedup", 0)
+                )
+                best_global_speedup = ctx.get("_best_global_speedup", 0)
+                if current_speedup_val >= best_global_speedup:
+                    ctx["starting_patch"] = round_eval["best_patch"]
+                    ctx["_best_global_speedup"] = current_speedup_val
 
             if finalize_result is not None:
                 if round_eval:

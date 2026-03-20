@@ -48,6 +48,7 @@ class ToolRuntime:
         on_strategy_change=None,
         patch_output_dir: str | None = None,
         tool_profile: str = "full",
+        rag_config: dict | None = None,
     ):
         self._tool_profile = tool_profile
         self._mcp_bridges: list = []
@@ -93,6 +94,9 @@ class ToolRuntime:
 
             self._register_mcp_tools()
 
+        if rag_config:
+            self._register_rag_mcp_tools(rag_config)
+
         self.use_strategy_manager = use_strategy_manager
         self._codebase_context: str | None = None
 
@@ -133,6 +137,38 @@ class ToolRuntime:
         openevolve = MCPToolBridge("openevolve-mcp", timeout=7200)
         self._mcp_bridges.append(openevolve)
         self._tool_table["openevolve"] = openevolve.tool("optimize_kernel")
+
+    def _register_rag_mcp_tools(self, rag_config: dict) -> None:
+        """Register RAG MCP server tools, optionally wrapped with subagent post-processing."""
+        try:
+            from minisweagent.tools.mcp_bridge import MCPToolBridge
+        except ImportError:
+            return
+
+        rag_bridge = MCPToolBridge("rag-mcp", timeout=120)
+        self._mcp_bridges.append(rag_bridge)
+
+        enable_subagent = rag_config.get("enable_subagent", False)
+        if enable_subagent:
+            from minisweagent.mcp_integration.subagent import RAGFilterSubAgent, SubAgentConfig
+
+            subagent = RAGFilterSubAgent(SubAgentConfig(enabled=True))
+
+            def _wrap_with_subagent(tool_callable, tool_name: str):
+                def wrapper(**kwargs):
+                    result = tool_callable(**kwargs)
+                    output = result.get("output", "")
+                    if output and result.get("returncode") == 0:
+                        query = kwargs.get("topic") or kwargs.get("code_type") or ""
+                        result["output"] = subagent.process(output, query=query)
+                    return result
+                return wrapper
+
+            self._tool_table["rag_query"] = _wrap_with_subagent(rag_bridge.tool("query"), "query")
+            self._tool_table["rag_optimize"] = _wrap_with_subagent(rag_bridge.tool("optimize"), "optimize")
+        else:
+            self._tool_table["rag_query"] = rag_bridge.tool("query")
+            self._tool_table["rag_optimize"] = rag_bridge.tool("optimize")
 
     def set_env(self, env: dict[str, str]) -> None:
         """Propagate environment overrides (e.g. HIP_VISIBLE_DEVICES) to tools."""

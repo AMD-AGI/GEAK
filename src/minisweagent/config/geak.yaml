@@ -31,6 +31,8 @@ tools:
   profiling: false
   profiling_type: profiling
   strategy_manager: true
+  rag: false
+  enable_llm_filter: false
   # MCP tools (registered via MCPToolBridge in ToolRuntime)
   # profile_kernel: unified profiler (metrix + rocprof-compute)
   # generate_optimization: kernel-evolve MCP

@@ -8,7 +8,6 @@ import pytest
 
 from minisweagent.tools.resolve_kernel_url_impl import (
     _parse_fragment,
-    _parse_github_blob,
     _resolved_clone_dir,
     _strip_fragment,
     cleanup_resolved_path,
@@ -39,24 +38,7 @@ class TestIsWeblink:
         assert is_weblink("  https://github.com/foo/bar  ") is True
 
 
-class TestParseGithubBlob:
-    def test_github_blob_url(self):
-        url = "https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/moe/moe_op_gelu.py"
-        got = _parse_github_blob(url)
-        assert got == ("ROCm", "aiter", "main", "aiter/ops/triton/moe/moe_op_gelu.py")
-
-    def test_raw_github_url(self):
-        url = "https://raw.githubusercontent.com/ROCm/aiter/main/aiter/ops/triton/moe/moe_op_gelu.py"
-        got = _parse_github_blob(url)
-        assert got == ("ROCm", "aiter", "main", "aiter/ops/triton/moe/moe_op_gelu.py")
-
-    def test_non_github_returns_none(self):
-        assert _parse_github_blob("https://gitlab.com/owner/repo/-/blob/main/file.py") is None
-        assert _parse_github_blob("https://example.com/file.py") is None
-
-    def test_short_raw_url_returns_none(self):
-        assert _parse_github_blob("https://raw.githubusercontent.com/owner/repo") is None
-
+class TestParseGithubSourceUrl:
     def test_parse_github_source_url_supports_refs_with_slashes(self):
         url = (
             "https://github.com/AMD-AGI/AIG-Eval/blob/"
@@ -130,10 +112,12 @@ class TestResolveKernelUrl:
         out = resolve_kernel_url(None)
         assert out["error"] == "Empty spec"
 
-    def test_local_path_returned_unchanged(self):
-        out = resolve_kernel_url("/path/to/local/kernel.py")
+    def test_local_path_returned_unchanged(self, tmp_path):
+        kernel = tmp_path / "kernel.py"
+        kernel.write_text("def kernel(): pass\n")
+        out = resolve_kernel_url(str(kernel))
         assert out["is_weblink"] is False
-        assert out["local_file_path"] == "/path/to/local/kernel.py"
+        assert out["local_file_path"] == str(kernel.resolve())
         assert out["local_repo_path"] is None
         assert out["error"] is None
 

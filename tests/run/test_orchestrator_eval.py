@@ -4,10 +4,8 @@ and start_round resume behaviour."""
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -15,12 +13,11 @@ from minisweagent.run.orchestrator import (
     _auto_finalize,
     _evaluate_round_best,
     _merge_round_evaluation_into_final_report,
-    _parse_total_kernel_time_ms,
     _parse_reported_speedup,
+    _parse_total_kernel_time_ms,
     _setup_eval_worktree,
     run_orchestrator,
 )
-
 
 # ---------------------------------------------------------------------------
 # _parse_total_kernel_time_ms

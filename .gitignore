@@ -198,6 +198,8 @@ optimization_output/
 # IDE
 .cursor/
 .vscode/
+examples/add_kernel/test_harness.py
+test_harness.py
 .geak_resolved/
 .geak_pristine/
 .geak_seed/
