@@ -185,28 +185,13 @@ def task_file_to_agent_task(task_file: Path):
     task_step_limit = int(meta.get("step_limit", 0) or 0)
     effective_step_limit = task_step_limit or inherited_step_limit
 
-    if agent_type == "openevolve":
-        # OpenEvolveWorker extends DefaultAgent (not InteractiveAgent),
-        # so it does not accept 'mode' or 'use_strategy_manager'.
-        cfg: dict = {
-            "save_patch": True,
-            "step_limit": effective_step_limit,
-            "cost_limit": 0.0,
-        }
-        if meta.get("kernel_path"):
-            cfg["kernel_path"] = meta["kernel_path"]
-        if meta.get("commandment"):
-            cfg["commandment_path"] = meta["commandment"]
-        if meta.get("baseline_metrics"):
-            cfg["baseline_metrics_path"] = meta["baseline_metrics"]
-    else:
-        cfg = {
-            "save_patch": True,
-            "step_limit": effective_step_limit,
-            "cost_limit": 0.0,
-            "mode": "yolo",
-            "use_strategy_manager": True,
-        }
+    cfg: dict = {
+        "save_patch": True,
+        "step_limit": effective_step_limit,
+        "cost_limit": 0.0,
+        "mode": "yolo",
+        "use_strategy_manager": True,
+    }
 
     # COMMANDMENT is the single source of truth for test commands.
     # Its SETUP + CORRECTNESS + BENCHMARK sections are executed verbatim.

@@ -6,13 +6,13 @@ task list via the ``submit`` tool.  No rule-based fallback: an LLM model
 is required.
 
 Priority scheme (lower = higher priority, runs first):
-  0  -- OpenEvolve on the inner kernel (highest impact, automated)
+  0  -- Algorithmic kernel-body rewrites (highest impact)
   5  -- Kernel fusion / advanced tuning
   10 -- Targeted optimization (autotune, memory, launch config)
   15 -- Profile-guided (generic fallback)
 
 Usage (Python):
-    from minisweagent.run.task_generator import generate_tasks
+    from minisweagent.agents.heterogeneous.task_generator import generate_tasks
     tasks = generate_tasks(
         discovery_result=result,
         base_task_context=task_text,
@@ -23,7 +23,7 @@ Usage (Python):
     )
 
 Usage (CLI):
-    python -m minisweagent.run.task_generator \\
+    python -m minisweagent.agents.heterogeneous.task_generator \\
         --kernel-path /path/to/kernel.py \\
         --profiling profiler_output.json \\
         --commandment COMMANDMENT.md \\
@@ -43,8 +43,8 @@ from typing import Any
 
 from minisweagent.agents.agent_spec import AgentTask
 from minisweagent.debug_runtime import emit_debug_log, model_tools_snapshot, tool_names
-from minisweagent.run.task_planner import _GPU_AND_PROFILER_RULES
-from minisweagent.tools.discovery_types import DiscoveryResult
+from minisweagent.agents.heterogeneous.task_planner import _GPU_AND_PROFILER_RULES
+from minisweagent.run.preprocess.discovery_types import DiscoveryResult
 
 logger = logging.getLogger(__name__)
 
@@ -76,40 +76,12 @@ optimization approach, then submit your task list as JSON via the
 
 ### Agents (task execution)
 
-1. **strategy_agent** (default) -- An LLM-guided agent with bash, editor,
-   profiling tools, AND LLM-powered MCP assistants (kernel-evolve,
-   kernel-ercs). It can delegate code generation, quality evaluation, and
-   reflection to these MCP tools. Best for complex optimizations where
-   LLM-generated mutations and quality evaluation help: kernel fusion,
-   advanced tuning, multi-step refactoring.
-
-2. **swe_agent** -- An LLM-guided agent with bash, editor, save_and_test,
-   submit, profile_kernel, baseline_metrics, and strategy_manager. It codes
-   manually -- reads code, reasons about bottlenecks, makes edits, then
-   tests and profiles. NO access to kernel-evolve or kernel-ercs MCP tools.
-   Best for targeted edits, autotune configs, and straightforward
-   optimizations where the agent should read-think-edit-test-profile
-   without LLM tool assistance.
-
-3. **openevolve** -- An LLM-guided evolutionary optimizer that mutates the
-   kernel and evaluates candidates automatically using COMMANDMENT.md and
-   baseline_metrics.json. Has its own internal orchestration loop. Best for
-   inner kernels where automated mutation + selection is effective.
-
-### Tools (available to strategy_agent via MCP)
-
-4. **kernel-evolve** -- LLM-guided mutation/crossover of kernel code.
-   Commands: `generate` (optimized variant from bottleneck + strategy),
-   `mutate` (improve existing kernel), `crossover` (combine two kernels),
-   `strategies` (list strategies for a bottleneck), `params` (suggest
-   parameters for a kernel type). Instruct the strategy_agent to use
-   kernel-evolve when the task involves generating new kernel variants.
-
-5. **kernel-ercs** -- LLM-based evaluation, reflection, compatibility
-   checking, and AMD GPU specs. Commands: `evaluate` (score kernel quality),
-   `reflect` (analyze test results, suggest next steps), `compat` (check
-   AMD compatibility), `specs` (AMD MI350X specs). Instruct the
-   strategy_agent to use kernel-ercs for quality assessment and reflection.
+1. **strategy_agent** (default and only agent type) -- An LLM-guided agent
+   with bash, editor, save_and_test, submit, profile_kernel,
+   baseline_metrics, and strategy_manager. It reads code, reasons about
+   bottlenecks, makes edits, then tests and profiles. Best for targeted
+   edits, autotune configs, algorithmic rewrites, and any optimization
+   where the agent should read-think-edit-test-profile on its own.
 
 ## PRIORITY DIRECTIVE -- KERNEL ALGORITHMIC IMPROVEMENT IS THE PRIMARY GOAL
 
@@ -189,13 +161,11 @@ them priority 15 behind kernel-body algorithmic work.
 
 When you are done analyzing, call the `submit` tool with the `summary`
 parameter containing a JSON array of task objects. Each task has:
-- "label": short kebab-case identifier (e.g. "openevolve-inner", "ck-tile-tuning")
+- "label": short kebab-case identifier (e.g. "ck-tile-tuning", "triton-tiling-rewrite")
 - "priority": integer 0-15
-- "agent_type": "strategy_agent", "swe_agent", or "openevolve"
+- "agent_type": "strategy_agent"
 - "kernel_language": "python", "cpp", or "asm"
-- "num_gpus": integer (default 1). How many GPUs this task needs.
-  OpenEvolve tasks benefit from 2-4 GPUs for parallel candidate evaluation.
-  strategy_agent and swe_agent tasks should use 1 GPU.
+- "num_gpus": integer (default 1). Each task uses 1 GPU.
 - "task_prompt": detailed instructions for the sub-agent (specific
   optimization focus, which tools to use, what to measure). This is
   the FULL prompt the agent will see.
@@ -231,15 +201,12 @@ to read and follow the COMMANDMENT file. The COMMANDMENT defines the
 correctness criteria and constraints. Any changes that violate the
 COMMANDMENT must be rejected by the sub-agent itself.
 
-**Verification for strategy_agent and swe_agent tasks**: Each task_prompt
-for strategy_agent or swe_agent tasks MUST include instructions to:
+**Verification**: Each task_prompt MUST include instructions to:
 1. Read the COMMANDMENT and follow its constraints
 2. Verify correctness after making changes (use the `save_and_test` tool)
 3. Profile the result to measure improvement (use the `profile_kernel` tool)
 4. Compare results against baseline metrics and report before/after numbers
 5. If correctness tests fail, revert changes and report failure
-
-OpenEvolve tasks handle verification automatically via COMMANDMENT.md.
 
 Submit ONLY the JSON array via the submit tool. No markdown fences, no explanation.
 """).format(gpu_rules=_GPU_AND_PROFILER_RULES.strip())
@@ -313,7 +280,7 @@ Available GPUs: {{ num_gpus }}
 Generate enough tasks so the total num_gpus across all tasks is close to {{ num_gpus }}.
 It is acceptable to leave some GPUs idle rather than padding the batch with
 low-priority wrapper / dispatch work.
-OpenEvolve tasks can use 2-4 GPUs each; strategy_agent and swe_agent tasks use 1 GPU each.
+Each task uses 1 GPU.
 {% endif %}
 ## Instructions
 
@@ -1000,13 +967,7 @@ def _parse_llm_response(
     commandment_path: str | None = None,
     baseline_metrics_path: str | None = None,
 ) -> list[AgentTask]:
-    """Parse JSON response into AgentTask objects.
-
-    When the LLM sets ``agent_type`` to ``"openevolve"``, the task is
-    assigned to :class:`OpenEvolveWorker` and the required config
-    (kernel_path, commandment_path, baseline_metrics_path) is populated
-    from the caller-supplied paths.
-    """
+    """Parse JSON response into AgentTask objects."""
     content = content.strip()
     if content.startswith("```"):
         lines = content.splitlines()
@@ -1049,13 +1010,6 @@ def _parse_llm_response(
         resolved_class = type_to_class.get(agent_type, agent_class)
 
         cfg: dict[str, Any] = {}
-        if agent_type == "openevolve":
-            if kernel_path:
-                cfg["kernel_path"] = kernel_path
-            if commandment_path:
-                cfg["commandment_path"] = commandment_path
-            if baseline_metrics_path:
-                cfg["baseline_metrics_path"] = baseline_metrics_path
 
         tasks.append(
             AgentTask(
@@ -1115,20 +1069,6 @@ def _scan_single_round_results(results_dir: Path) -> list[str]:
                     section.append(f"- {tf.name} (tail): {' | '.join(tail)}")
             except Exception:
                 section.append(f"- {tf.name}: (unreadable)")
-
-        oe_result = td / "openevolve_result.json"
-        if oe_result.is_file():
-            try:
-                import json as _json
-                oe_data = _json.loads(oe_result.read_text(errors="replace"))
-                section.append(
-                    f"- OpenEvolve: speedup={oe_data.get('speedup', '?')}x, "
-                    f"iterations={oe_data.get('iterations_completed', '?')}, "
-                    f"baseline={oe_data.get('baseline_latency_us', '?')}us, "
-                    f"best={oe_data.get('best_latency_us', '?')}us"
-                )
-            except Exception:
-                pass
 
         for lf in log_files[:1]:
             try:

@@ -31,7 +31,7 @@ class BaselineMetricsTool:
             {output: str, returncode: int}
         """
         try:
-            from minisweagent.baseline_metrics import build_baseline_metrics
+            from minisweagent.run.preprocess.baseline import build_baseline_metrics
         except ImportError as e:
             return {"output": f"baseline_metrics not available: {e}", "returncode": 1}
 

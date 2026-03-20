@@ -11,13 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from minisweagent.benchmark_parsing import (
+from minisweagent.run.postprocess.benchmark_parsing import (
     compute_shape_speedups,
     extract_latency_ms,
     parse_shape_latencies_ms,
 )
 from minisweagent.debug_runtime import emit_debug_log
-from minisweagent.run.generated_artifacts import generated_helper_excludes
+from minisweagent.run.utils.generated_artifacts import generated_helper_excludes
 
 
 @dataclass
@@ -367,7 +367,7 @@ class SaveAndTestTool:
         metrics: dict[str, Any] = {}
         if raw_result:
             try:
-                from minisweagent.baseline_metrics import build_baseline_metrics
+                from minisweagent.run.preprocess.baseline import build_baseline_metrics
 
                 metrics = build_baseline_metrics(raw_result, include_all=True)
             except Exception:

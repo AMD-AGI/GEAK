@@ -509,7 +509,7 @@ class DefaultAgent:
             return
 
         # Try deterministic benchmark parsing first -- avoids LLM cost
-        from minisweagent.benchmark_parsing import rewrite_best_results
+        from minisweagent.run.postprocess.benchmark_parsing import rewrite_best_results
         det_result = rewrite_best_results(base_patch_dir)
         if det_result:
             return

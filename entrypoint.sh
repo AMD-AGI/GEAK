@@ -30,22 +30,6 @@ echo "🔍 Running tool health checks..."
 
 FAILED_CHECKS=0
 
-# Check kernel-evolve (no LLM needed for 'strategies')
-if kernel-evolve strategies balanced > /dev/null 2>&1; then
-    echo "✅ kernel-evolve: OK"
-else
-    echo "❌ kernel-evolve: FAILED"
-    FAILED_CHECKS=$((FAILED_CHECKS + 1))
-fi
-
-# Check kernel-ercs (specs doesn't need LLM)
-if kernel-ercs specs > /dev/null 2>&1; then
-    echo "✅ kernel-ercs: OK"
-else
-    echo "❌ kernel-ercs: FAILED"
-    FAILED_CHECKS=$((FAILED_CHECKS + 1))
-fi
-
 # Check kernel-profile (MetrixTool profiler)
 if kernel-profile --help > /dev/null 2>&1; then
     echo "✅ kernel-profile: OK"
@@ -56,7 +40,7 @@ fi
 
 # Check modular pipeline CLIs
 for tool in resolve-kernel-url test-discovery commandment validate-commandment \
-            baseline-metrics task-generator openevolve-worker select-patch; do
+            baseline-metrics task-generator select-patch; do
     if command -v "$tool" > /dev/null 2>&1; then
         echo "✅ ${tool}: OK"
     else
@@ -73,23 +57,6 @@ else
     FAILED_CHECKS=$((FAILED_CHECKS + 1))
 fi
 
-# Check OpenEvolve installation
-if python3 -c "from openevolve import OpenEvolve; print('OK')" > /dev/null 2>&1; then
-    echo "✅ openevolve: OK"
-else
-    echo "❌ openevolve: Not importable"
-    FAILED_CHECKS=$((FAILED_CHECKS + 1))
-fi
-
-# Check run_openevolve.py exists
-GEAK_OE_ROOT="${GEAK_OE_ROOT:-/opt/geak-oe}"
-if [ -f "${GEAK_OE_ROOT}/examples/geak_eval/run_openevolve.py" ]; then
-    echo "✅ run_openevolve.py: OK (${GEAK_OE_ROOT})"
-else
-    echo "❌ run_openevolve.py: Not found at ${GEAK_OE_ROOT}/examples/geak_eval/"
-    FAILED_CHECKS=$((FAILED_CHECKS + 1))
-fi
-
 # Check MCP server bridges (verify they can start and list tools)
 echo ""
 echo "🔍 Checking MCP server bridges..."
@@ -103,9 +70,6 @@ sys.path.insert(0, '/workspace/src')
 
 servers = {
     'profiler-mcp': 'profile_kernel',
-    'kernel-evolve': 'generate_optimization',
-    'kernel-ercs': 'evaluate_kernel_quality',
-    'openevolve-mcp': 'optimize_kernel',
 }
 import asyncio
 from mcp_client import MCPClient

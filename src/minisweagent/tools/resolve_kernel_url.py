@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from minisweagent.tools.resolve_kernel_url_impl import get_kernel_name_at_line, resolve_kernel_url
+from minisweagent.run.preprocess.resolve_kernel_url import get_kernel_name_at_line, resolve_kernel_url
 
 
 class ResolveKernelUrlTool:

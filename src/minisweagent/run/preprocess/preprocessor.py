@@ -39,7 +39,7 @@ def _ensure_mcp_importable() -> None:
             sys.path.insert(0, p)
 
 
-from minisweagent.benchmark_parsing import extract_latency_ms
+from minisweagent.run.postprocess.benchmark_parsing import extract_latency_ms
 from minisweagent.run.pipeline_helpers import (
     DEFAULT_EVAL_BENCHMARK_ITERATIONS,
     DEFAULT_PIPELINE_OUTPUT_DIR,
@@ -50,7 +50,7 @@ from minisweagent.run.pipeline_helpers import (
     run_baseline_profile,
     validate_harness,
 )
-from minisweagent.run.testcase_cache import (
+from minisweagent.run.preprocess.testcase_cache import (
     build_testcase_cache_key,
     get_testcase_cache_dir,
     get_testcase_cache_entry,
@@ -73,7 +73,7 @@ def _resolve_deterministic_harness(
     repo_root: str | Path,
     output_dir: Path,
 ) -> tuple[str, dict[str, Any]]:
-    from minisweagent.tools.resolve_kernel_url_impl import (
+    from minisweagent.run.preprocess.resolve_kernel_url import (
         is_weblink,
         parse_github_source_url,
         resolve_kernel_url,
@@ -404,7 +404,7 @@ def run_preprocessor(
         else "--- Step 1/7: Resolve kernel URL ---"
     )
 
-    from minisweagent.tools.resolve_kernel_url_impl import resolve_kernel_url
+    from minisweagent.run.preprocess.resolve_kernel_url import resolve_kernel_url
 
     resolved = resolve_kernel_url(kernel_url, repo=repo, clone_into=str(output_dir))
     if resolved.get("error"):
@@ -426,7 +426,7 @@ def run_preprocessor(
         else "--- Step 2/7: Codebase context ---"
     )
 
-    from minisweagent.run.codebase_context import generate_codebase_context
+    from minisweagent.run.preprocess.codebase_context import generate_codebase_context
 
     codebase_context_path = generate_codebase_context(
         repo_root=Path(repo_root),
@@ -681,7 +681,7 @@ def run_preprocessor(
         )
         try:
             from minisweagent.agents.unit_test_agent import format_discovery_for_agent
-            from minisweagent.tools.discovery_types import DiscoveryResult
+            from minisweagent.run.preprocess.discovery_types import DiscoveryResult
 
             disc_result = DiscoveryResult.from_dict(disc_dict, kernel_path)
             discovery_context = format_discovery_for_agent(disc_result)
@@ -864,7 +864,7 @@ def run_preprocessor(
     baseline_metrics: dict[str, Any] | None = None
     if profiling and profiling.get("success", True):
         try:
-            from minisweagent.baseline_metrics import build_baseline_metrics
+            from minisweagent.run.preprocess.baseline import build_baseline_metrics
 
             baseline_metrics = build_baseline_metrics(profiling, include_all=True)
             dur = baseline_metrics.get("duration_us", "?")
@@ -908,7 +908,7 @@ def run_preprocessor(
     if eval_commands:
         # HIP-style: generate COMMANDMENT from explicit compile/correctness/perf commands
         try:
-            from minisweagent.tools.commandment import generate_commandment_from_commands
+            from minisweagent.run.preprocess.commandment import generate_commandment_from_commands
 
             commandment = generate_commandment_from_commands(
                 kernel_path=kernel_path,
@@ -936,8 +936,8 @@ def run_preprocessor(
     elif test_command:
         # Triton-style: generate COMMANDMENT from harness
         try:
-            from minisweagent.tools.commandment import generate_commandment
-            from minisweagent.tools.discovery_types import _infer_kernel_language
+            from minisweagent.run.preprocess.commandment import generate_commandment
+            from minisweagent.run.preprocess.discovery_types import _infer_kernel_language
 
             harness = ctx.get("harness_path") or extract_harness_path(test_command)
             _ktype = (disc_dict.get("kernel") or {}).get("type", "")

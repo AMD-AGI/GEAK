@@ -21,7 +21,7 @@ fixable issues are auto-corrected and re-validated, up to ``max_retries``
 times.  The generator returns only fully-valid content.
 
 Usage (Python):
-    from minisweagent.tools.commandment import generate_commandment
+    from minisweagent.run.preprocess.commandment import generate_commandment
     content = generate_commandment(
         kernel_path="/path/to/kernel.py",
         harness_path="/path/to/test_harness.py",

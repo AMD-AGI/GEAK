@@ -244,7 +244,7 @@ class ParallelAgent(DefaultAgent):
         _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
 
         # Override with deterministic benchmark parsing when possible
-        from minisweagent.benchmark_parsing import rewrite_best_results
+        from minisweagent.run.postprocess.benchmark_parsing import rewrite_best_results
         det_result = rewrite_best_results(base_patch_dir)
         if det_result:
             best_patch_id = det_result.get("best_patch_id", best_patch_id)
@@ -877,7 +877,6 @@ class ParallelAgent(DefaultAgent):
                 cfg.update(task.config)
                 cfg["patch_output_dir"] = str(task_patch_dir)
                 # Only set interactive-mode fields for agents that accept them
-                # (OpenEvolveWorker extends DefaultAgent, not InteractiveAgent)
                 from minisweagent.agents.interactive import InteractiveAgent
                 if issubclass(task.agent_class, InteractiveAgent):
                     cfg.setdefault("mode", "yolo")

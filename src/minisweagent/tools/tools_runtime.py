@@ -107,7 +107,7 @@ class ToolRuntime:
         self._tool_table["profile_kernel"] = profiler.tool("profile_kernel")
 
     def _register_mcp_tools(self):
-        """Register all MCP server tools via MCPToolBridge.
+        """Register MCP server tools via MCPToolBridge.
 
         Each bridge wraps one MCP server process. The `.tool(name)` factory
         returns a sync callable that ToolRuntime can dispatch like a native tool.
@@ -120,19 +120,6 @@ class ToolRuntime:
         profiler = MCPToolBridge("profiler-mcp", timeout=600)
         self._mcp_bridges.append(profiler)
         self._tool_table["profile_kernel"] = profiler.tool("profile_kernel")
-
-        evolve = MCPToolBridge("kernel-evolve", timeout=300)
-        self._mcp_bridges.append(evolve)
-        self._tool_table["generate_optimization"] = evolve.tool("generate_optimization")
-
-        ercs = MCPToolBridge("kernel-ercs", timeout=300)
-        self._mcp_bridges.append(ercs)
-        self._tool_table["evaluate_kernel_quality"] = ercs.tool("evaluate_kernel_quality")
-        self._tool_table["reflect_on_kernel_result"] = ercs.tool("reflect_on_kernel_result")
-
-        openevolve = MCPToolBridge("openevolve-mcp", timeout=7200)
-        self._mcp_bridges.append(openevolve)
-        self._tool_table["openevolve"] = openevolve.tool("optimize_kernel")
 
     def set_env(self, env: dict[str, str]) -> None:
         """Propagate environment overrides (e.g. HIP_VISIBLE_DEVICES) to tools."""

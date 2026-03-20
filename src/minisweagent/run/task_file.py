@@ -19,8 +19,8 @@ from typing import Any
 
 import yaml
 
-from minisweagent.run.generated_artifacts import apply_patch_with_generated_helper_fallback
-from minisweagent.run.git_safe_env import get_git_safe_env
+from minisweagent.run.utils.generated_artifacts import apply_patch_with_generated_helper_fallback
+from minisweagent.run.utils.git_safe_env import get_git_safe_env
 
 # ============================================================================
 # Task file I/O

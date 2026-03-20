@@ -48,7 +48,7 @@ def add_agent_filter_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Comma-separated list of allowed agent types "
-            "(e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS."
+            "(e.g. strategy_agent). Sets GEAK_ALLOWED_AGENTS."
         ),
     )
     parser.add_argument(
@@ -417,7 +417,7 @@ def execute_harness_validation(
     results : list[dict]
         Per-mode result dicts from :func:`run_harness`.
     """
-    from minisweagent.tools.run_harness import results_errors, run_harness
+    from minisweagent.run.preprocess.run_harness import results_errors, run_harness
 
     env_overrides: dict[str, str] | None = None
     if benchmark_extra_args:

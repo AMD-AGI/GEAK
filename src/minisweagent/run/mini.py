@@ -44,7 +44,7 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tu
     try:
         from automated_test_discovery.server import discover as atd_discover
 
-        from minisweagent.tools.discovery_types import DiscoveryResult
+        from minisweagent.run.preprocess.discovery_types import DiscoveryResult
     except ImportError:
         return ""
 
@@ -120,7 +120,7 @@ def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str, r
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     try:
-        from minisweagent.tools.resolve_kernel_url_impl import get_kernel_name_at_line, resolve_kernel_url
+        from minisweagent.run.preprocess.resolve_kernel_url import get_kernel_name_at_line, resolve_kernel_url
     except ImportError as e:
         raise SystemExit(f"Cannot resolve --kernel-url: resolve_kernel_url_impl not found ({e}).") from e
     clone_into = Path(workspace) if workspace else Path.cwd()
@@ -139,8 +139,6 @@ def _inject_resolved_kernel(kernel_url: str, workspace: str | None, task: str, r
         kernel_info = ""
         profile_hint = "Line number was not specified; discovery should identify the kernel(s) in the file."
     kernel_dir = str(Path(path).parent)
-    output_dir = f"{kernel_dir}/optimization_output"
-    oe_script = "${GEAK_OE_ROOT:-/opt/geak-oe}/examples/geak_eval/run_openevolve.py"
     block = f"""\n
 --- Resolved kernel (from --kernel-url) ---
 Kernel path: {path}{(" |" + line_info + kernel_info) if line_info else ""}
@@ -153,18 +151,14 @@ Step 1 - DISCOVER: Read and analyse the kernel file. Identify the kernel functio
 
 Step 2 - TEST GEN: Create a standalone test harness that can (a) verify correctness and (b) benchmark performance. Save it next to the kernel (e.g. {kernel_dir}/test_harness.py).
 
-Step 3 - BENCHMARK & COMMANDMENT: Profile the baseline kernel with kernel-profile and create two artifacts:
-  a) baseline_metrics.json -- latency/bandwidth numbers from profiling.
-  b) COMMANDMENT.md -- the evaluation contract for OpenEvolve.
+Step 3 - PROFILE: Profile the baseline kernel to understand performance bottlenecks.
   {profile_hint}
-  Profile command example: kernel-profile 'python3 {path} --profile'
+  Use the profile_kernel tool or: kernel-profile 'python3 {path} --profile'
 
-Step 4 - OPTIMIZE: Do NOT edit the kernel by hand. Run the OpenEvolve optimizer:
-  python3 {oe_script} {path} --iterations 10 --gpu 0 --output {output_dir}
-  If you created COMMANDMENT.md and baseline_metrics.json, add:
-  --commandment <path_to_COMMANDMENT.md> --baseline-metrics <path_to_baseline_metrics.json>
+Step 4 - OPTIMIZE: Edit the kernel to improve performance. Use save_and_test after each
+  change to verify correctness and measure speedup. Iterate until satisfied.
 
-Step 5 - REPORT: Summarise results (speedup, best score, any errors) and submit:
+Step 5 - REPORT: Summarise results (speedup, any errors) and submit:
   echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
 ---
 """
@@ -317,8 +311,8 @@ def main(
     harness: str | None = typer.Option(None, "--harness", help="Exact harness URL/path to use for --kernel-url runs. Discovery/UnitTestAgent fallback is disabled.", rich_help_panel="Kernel"),
     max_rounds: int | None = typer.Option(None, "--max-rounds", help="Maximum optimisation rounds for the orchestrator (default: GEAK_MAX_ROUNDS env or 5).", rich_help_panel="Advanced"),
     start_round: int = typer.Option(1, "--start-round", help="Round to resume from (1-based). Skips exploration and loads prior round evaluations.", rich_help_panel="Advanced"),
-    allowed_agents: str | None = typer.Option(None, "--allowed-agents", help="Comma-separated list of allowed agent types (e.g. swe_agent,strategy_agent). Sets GEAK_ALLOWED_AGENTS and overrides the default OpenEvolve exclusion.", rich_help_panel="Advanced"),
-    excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS. Default: openevolve is excluded unless explicitly re-enabled.", rich_help_panel="Advanced"),
+    allowed_agents: str | None = typer.Option(None, "--allowed-agents", help="Comma-separated list of allowed agent types (e.g. strategy_agent). Sets GEAK_ALLOWED_AGENTS.", rich_help_panel="Advanced"),
+    excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types. Sets GEAK_EXCLUDED_AGENTS.", rich_help_panel="Advanced"),
     heterogeneous: bool = typer.Option(DEFAULT_HETEROGENEOUS, "--heterogeneous/--no-heterogeneous", help=f"Use LLM-generated diverse optimization tasks (requires preprocessing/discovery). Default: {DEFAULT_HETEROGENEOUS}.", rich_help_panel="Advanced"),
     from_task: Path | None = typer.Option(None, "--from-task", help="Deprecated: use --task with a YAML-frontmatter .md file instead.", hidden=True),
     rag: bool = typer.Option(False, "--rag", help="Enable RAG retrieval from AMD/NVIDIA knowledge base"),
@@ -434,18 +428,6 @@ def main(
                     _tf_meta, _tf_body = _read_tf(task_path)
                     task_content = _tf_body
                     console.print(f"[bold cyan]Loading structured task file: {task_path}[/bold cyan]")
-
-                    _tf_agent_type = _tf_meta.get("agent_type", "strategy_agent")
-                    if _tf_agent_type == "openevolve":
-                        console.print(
-                            "[bold yellow]Task has agent_type=openevolve. "
-                            "Redirecting to openevolve-worker...[/bold yellow]"
-                        )
-                        _oe_args = ["openevolve-worker", "--from-task", str(task_path.resolve())]
-                        if gpu_ids:
-                            _oe_args += ["--gpu", gpu_ids.split(",")[0]]
-                        import subprocess
-                        raise SystemExit(subprocess.call(_oe_args))
 
                     if not repo and _tf_meta.get("kernel_path"):
                         repo = Path(_tf_meta["kernel_path"]).resolve().parent
@@ -648,7 +630,7 @@ def main(
     # This is the ONLY optimization path — always preprocess → orchestrate.
     if kernel_url and not _tf_meta:
         from minisweagent.run.orchestrator import run_orchestrator
-        from minisweagent.run.preprocessor import run_preprocessor
+        from minisweagent.run.preprocess.preprocessor import run_preprocessor
 
         _pipeline_output = patch_output or Path(DEFAULT_PIPELINE_OUTPUT_DIR)
         console.print("[bold cyan]--- GEAK Full Pipeline Mode ---[/bold cyan]")
@@ -787,7 +769,7 @@ def main(
         # -- Baseline metrics (from profiling) --
         if _pre_agent_profiling:
             try:
-                from minisweagent.baseline_metrics import build_baseline_metrics
+                from minisweagent.run.preprocess.baseline import build_baseline_metrics
                 _pre_agent_baseline_metrics = build_baseline_metrics(
                     _pre_agent_profiling, include_all=True,
                 )
@@ -800,8 +782,8 @@ def main(
         # -- Commandment generation --
         if _resolved_kernel_path:
             try:
-                from minisweagent.tools.commandment import generate_commandment
-                from minisweagent.tools.discovery_types import _infer_kernel_language
+                from minisweagent.run.preprocess.commandment import generate_commandment
+                from minisweagent.run.preprocess.discovery_types import _infer_kernel_language
                 _harness_path = extract_harness_path(test_command)
                 _kl = _infer_kernel_language(Path(_resolved_kernel_path), "")
                 _pre_agent_commandment = generate_commandment(
@@ -890,7 +872,7 @@ def main(
         if heterogeneous and discovery_result and discovery_result.kernels and model:
             try:
                 from minisweagent.run.pipeline_helpers import inject_pipeline_context
-                from minisweagent.run.task_generator import generate_tasks_from_content
+                from minisweagent.agents.heterogeneous.task_generator import generate_tasks_from_content
 
                 tasks = generate_tasks_from_content(
                     discovery_result=discovery_result,

@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from minisweagent.tools.resolve_kernel_url_impl import (
+from minisweagent.run.preprocess.resolve_kernel_url import (
     get_kernel_name_at_line,
     is_weblink,
     parse_github_source_url,

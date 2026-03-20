@@ -89,25 +89,22 @@ Repository = "https://github.com/SWE-agent/mini-SWE-agent"
 # Legacy aliases (deprecated — use 'geak' instead)
 mini = "minisweagent.run.mini:app"
 mini-swe-agent = "minisweagent.run.mini:app"
-mini-extra = "minisweagent.run.mini_extra:main"
-mini-e= "minisweagent.run.mini_extra:main"
 # Primary GEAK entry points
 geak = "minisweagent.run.mini:app"
-geak-preprocess = "minisweagent.run.preprocessor:main"
+geak-preprocess = "minisweagent.run.preprocess.preprocessor:main"
 geak-orchestrate = "minisweagent.run.orchestrator:main"
-kernel-profile = "minisweagent.kernel_profile:main"
-task-generator = "minisweagent.run.task_generator:main"
+kernel-profile = "minisweagent.run.preprocess.kernel_profile:main"
+task-generator = "minisweagent.agents.heterogeneous.task_generator:main"
 # Modular pipeline steps
-commandment = "minisweagent.tools.commandment:main"
+commandment = "minisweagent.run.preprocess.commandment:main"
 validate-commandment = "minisweagent.tools.validate_commandment:main"
-run-harness = "minisweagent.tools.run_harness:main"
-baseline-metrics = "minisweagent.baseline_metrics:main"
-codebase-context = "minisweagent.run.codebase_context:main"
+run-harness = "minisweagent.run.preprocess.run_harness:main"
+baseline-metrics = "minisweagent.run.preprocess.baseline:main"
+codebase-context = "minisweagent.run.preprocess.codebase_context:main"
 # test-discovery is provided by mcp_tools/automated-test-discovery (separate installable)
-openevolve-worker = "minisweagent.agents.openevolve_worker:main"
 run-tasks = "minisweagent.run.task_runner:main"
 select-patch = "minisweagent.agents.select_patch_agent:main"
-resolve-kernel-url = "minisweagent.tools.resolve_kernel_url_impl:main"
+resolve-kernel-url = "minisweagent.run.preprocess.resolve_kernel_url:main"
 
 [tool.setuptools]
 include-package-data = true

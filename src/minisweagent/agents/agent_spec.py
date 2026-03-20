@@ -23,13 +23,7 @@ def _agent_type_to_class() -> dict[str, type]:
 
     Lazy import to avoid circular dependencies at module level.
     """
-    from minisweagent.agents.openevolve_worker import OpenEvolveWorker
-    from minisweagent.agents.swe_agent import SweAgent
-
-    return {
-        "openevolve": OpenEvolveWorker,
-        "swe_agent": SweAgent,
-    }
+    return {}
 
 
 def _agent_class_to_type() -> dict[type, str]:
@@ -37,9 +31,9 @@ def _agent_class_to_type() -> dict[type, str]:
     return {cls: name for name, cls in _agent_type_to_class().items()}
 
 
-ALL_AGENT_TYPES: frozenset[str] = frozenset({"strategy_agent", "swe_agent", "openevolve"})
+ALL_AGENT_TYPES: frozenset[str] = frozenset({"strategy_agent"})
 
-_DEFAULT_FALLBACK_AGENT = "swe_agent"
+_DEFAULT_FALLBACK_AGENT = "strategy_agent"
 
 
 def get_allowed_agent_types() -> set[str] | None:
@@ -133,7 +127,7 @@ class AgentSpec:
     Prefer AgentTask + _run_pool() for new code.
 
     Attributes:
-        agent_class: The agent class to instantiate (e.g. StrategyAgent, OpenEvolveWorker).
+        agent_class: The agent class to instantiate (e.g. StrategyAgent).
         gpu_ids: List of GPU device IDs assigned to this agent.
         config: Config overrides merged into the base agent_config.
         step_limit: Per-agent step limit (0 = inherit from parent).
