@@ -1,0 +1,59 @@
+name: Lint & Format
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - "release/**"
+    paths-ignore:
+      - 'docs/**'
+      - 'knowledge-base/**'
+      - 'README.md'
+      - '.cursor/**'
+      - '.github/workflows/release.yaml'
+      - '.github/workflows/pytest.yaml'
+      - '.github/workflows/pylint.yaml'
+  pull_request:
+    branches:
+      - main
+      - dev
+      - "release/**"
+    paths-ignore:
+      - 'docs/**'
+      - 'knowledge-base/**'
+      - 'README.md'
+      - '.cursor/**'
+      - '.github/workflows/release.yaml'
+      - '.github/workflows/pytest.yaml'
+      - '.github/workflows/pylint.yaml'
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    name: Ruff lint & format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install ruff
+        run: uv pip install --python ${Python_ROOT_DIR} ruff
+
+      - name: Ruff check
+        run: ruff check --output-format=github src/
+
+      - name: Ruff format check
+        run: ruff format --check src/
