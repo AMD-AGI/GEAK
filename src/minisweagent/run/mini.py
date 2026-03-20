@@ -259,8 +259,6 @@ def main(
     excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS. Default: openevolve is excluded unless explicitly re-enabled.", rich_help_panel="Advanced"),
     heterogeneous: bool = typer.Option(True, "--heterogeneous/--no-heterogeneous", help="Use LLM-generated diverse optimization tasks (requires preprocessing/discovery). Default: enabled.", rich_help_panel="Advanced"),
     from_task: Path | None = typer.Option(None, "--from-task", help="Deprecated: use --task with a YAML-frontmatter .md file instead.", hidden=True),
-    rag: bool = typer.Option(False, "--rag", help="Enable RAG retrieval from AMD/NVIDIA knowledge base"),
-    debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --rag)"),
     rocm_expo: bool = typer.Option(
         False,
         "--rocm-expo",
@@ -835,10 +833,10 @@ def main(
         prompt_folder, _rocm_content = _setup_rocm_expo_prompt_folder(task, task_content)
         _task_paths = run_rocm_expo_prim_agent(prompt_folder, _rocm_content, model_name, yolo, console)
         _rocm_contents = [p.read_text(encoding="utf-8") for p in _task_paths]
-
     # run contents: top1/top2/top3 + main task or just main task if no rocm expo
     _run_contents = (_rocm_contents + [task_content]) if _rocm_contents else [task_content]
 
+    # Run agent for each content in _run_contents
     patch_output_dir = agent_config['patch_output_dir']
     for _run_idx, _content in enumerate(_run_contents):
         if rocm_expo and (_run_idx != len(_run_contents) - 1):
