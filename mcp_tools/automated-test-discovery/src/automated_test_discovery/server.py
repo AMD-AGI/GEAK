@@ -148,11 +148,22 @@ def _relevance_score(file_path: Path, kernel_path: Path, kernel_name: str, kerne
     elif kname_lower in fpath_lower:
         score += 2.0
 
-    # Partial name match (kernel parts in filename)
-    elif kernel_parts:
-        matches = sum(1 for p in kernel_parts if p in fname_lower)
-        if matches > 0:
-            score += 0.5 * matches
+    # Partial name match (bidirectional: kernel parts in filename OR
+    # filename subject parts in kernel name)
+    else:
+        # Forward: kernel parts in filename
+        fwd_matches = sum(1 for p in kernel_parts if p in fname_lower) if kernel_parts else 0
+        # Reverse: file subject parts in kernel name
+        file_parts = [p for p in subject.split("_") if len(p) > 2]
+        rev_matches = sum(1 for p in file_parts if p in kname_lower)
+        best = max(fwd_matches, rev_matches)
+        if best > 0:
+            score += 0.5 * best
+            # Bonus for bench_ prefixed files that partially match the kernel --
+            # a file named bench_<kernel_related>.py is very likely the right
+            # benchmark even if the name is abbreviated.
+            if fstem_lower.startswith("bench_") and best >= 1:
+                score += 1.0
 
     # Path proximity: same parent directory tree
     try:
@@ -212,7 +223,7 @@ def _score_as_bench(path: Path) -> float:
             score += points
 
     if "bench" in path.name.lower() or "perf" in path.name.lower():
-        score += 0.1
+        score += 0.5
 
     return score
 
