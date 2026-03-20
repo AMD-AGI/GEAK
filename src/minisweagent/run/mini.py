@@ -7,6 +7,7 @@ import copy
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.utils.config_editor import load_and_merge_configs
 from minisweagent.run.utils.save import save_traj
 from minisweagent.run.utils.task_parser import _resolve_path_case
+from minisweagent.agents.rocm_expo_prim_agent import run_rocm_expo_prim_agent
 from minisweagent.utils.log import logger
 
 
@@ -102,6 +104,22 @@ def _run_discovery(kernel_path: str, kernel_name: str | None = None) -> str | tu
     except Exception as e:
         console.print(f"[yellow]Discovery failed: {e}[/yellow]")
     return ""
+
+
+def _setup_rocm_expo_prompt_folder(
+    task: str | None,
+    task_content: str | None,
+) -> tuple[Path, str]:
+    """Create a timestamped prompt folder under /tmp, resolve task content from task file or task_content, write kernel_task.txt, and return (folder, content)."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    prompt_folder = Path("/tmp") / f"geak_{timestamp}_prompt"
+    prompt_folder.mkdir(parents=True, exist_ok=True)
+    if task and Path(task).resolve().is_file():
+        rocm_content = Path(task).resolve().read_text(encoding="utf-8")
+    else:
+        rocm_content = task_content or ""
+    (prompt_folder / "kernel_task.txt").write_text(rocm_content, encoding="utf-8")
+    return prompt_folder, rocm_content
 
 
 from minisweagent.run.pipeline_helpers import (
@@ -241,6 +259,12 @@ def main(
     excluded_agents: str | None = typer.Option(None, "--excluded-agents", help="Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS. Default: openevolve is excluded unless explicitly re-enabled.", rich_help_panel="Advanced"),
     heterogeneous: bool = typer.Option(True, "--heterogeneous/--no-heterogeneous", help="Use LLM-generated diverse optimization tasks (requires preprocessing/discovery). Default: enabled.", rich_help_panel="Advanced"),
     from_task: Path | None = typer.Option(None, "--from-task", help="Deprecated: use --task with a YAML-frontmatter .md file instead.", hidden=True),
+    rocm_expo: bool = typer.Option(
+        False,
+        "--rocm-expo",
+        "--rocm_expo",
+        help="Explore and enable AMD runtime library and intrinsic usage for implementation",
+    ),
 ) -> Any:
     # fmt: on
     configure_if_first_time()
@@ -734,21 +758,17 @@ def main(
         "GEAK_BENCHMARK_EXTRA_ARGS", _bench_extra,
     )
 
+    repo_path = repo or config.get("patch", {}).get("repo")
+    if repo_path:
+        p = Path(repo_path)
+        if not p.exists():
+            resolved = _resolve_path_case(p)
+            if resolved is not None:
+                p = resolved
+        agent_config["repo"] = str(p.resolve())
+
     if num_parallel and num_parallel > 1:
         console.print(f"[bold cyan]Using Parallel Mode: {num_parallel} agents on GPUs {parsed_gpu_ids}[/bold cyan]")
-        
-        # Configure repo path for parallel execution (preserve filesystem case)
-        repo_path = repo or config.get("patch", {}).get("repo")
-        if repo_path:
-            p = Path(repo_path)
-            if not p.exists():
-                resolved = _resolve_path_case(p)
-                if resolved is not None:
-                    p = resolved
-            agent_config["repo"] = str(p.resolve())
-            console.print(f"[dim]Repository: {agent_config['repo']}[/dim]")
-        else:
-            console.print("[bold yellow]Warning: No repo path specified for parallel execution[/bold yellow]")
 
         # Generate dynamic optimization tasks (LLM-assisted, heterogeneous mode only)
         discovery_result = getattr(_run_discovery, "_last_result", None)
@@ -794,14 +814,6 @@ def main(
         env.config.env = env.config.env or {}
         env.config.env["HIP_VISIBLE_DEVICES"] = str(parsed_gpu_ids[0])
         env.config.env.setdefault("GEAK_BENCHMARK_EXTRA_ARGS", _bench_extra)
-    
-    # Create and run agent
-    agent = agent_class(model, env, **agent_config)
-    agent.log_file = agent_log_file
-    if _tf_meta and _tf_meta.get("repo_root"):
-        agent.base_repo_path = Path(_tf_meta["repo_root"]).resolve()
-    console.print(f"[bold cyan]Agent log: {agent_log_file}[/bold cyan]")
-    console.print(f"[dim]Tip: tail -f {agent_log_file}[/dim]")
 
     # Load INSTRUCTIONS.md if available (pipeline reference for the agent)
     instructions_content = ""
@@ -815,21 +827,50 @@ def main(
             console.print(f"Loaded pipeline instructions from [bold green]'{instructions_candidate}'[/bold green]")
             break
 
-    try:
-        exit_status, result = agent.run(
-            task_content, instructions=instructions_content,
-            output=output,
-            save_traj_fn=save_traj,
-            console=console,
-            model_factory=lambda: get_model(model_name_resolved, config.get("model", {})),
-            env_factory=lambda _repo=repo: LocalEnvironment(
-                **{**copy.deepcopy(_env_kwargs), **({"cwd": str(Path(_repo).resolve())} if _repo else {})}
-            ),
-        )
-    except Exception as e:
-        logger.error(f"Error running agent: {e}", exc_info=True)
-        _exit_status, result = type(e).__name__, str(e)
-    
+    # ROCm expo: run prim agent first so we have top1/top2/top3 before creating the agent (agent_config can be changed per iteration below)
+    _rocm_contents: list[str] | None = None
+    if rocm_expo and task_content:
+        prompt_folder, _rocm_content = _setup_rocm_expo_prompt_folder(task, task_content)
+        _task_paths = run_rocm_expo_prim_agent(prompt_folder, _rocm_content, model_name, yolo, console)
+        _rocm_contents = [p.read_text(encoding="utf-8") for p in _task_paths]
+    # run contents: top1/top2/top3 + main task or just main task if no rocm expo
+    _run_contents = (_rocm_contents + [task_content]) if _rocm_contents else [task_content]
+
+    # Run agent for each content in _run_contents
+    patch_output_dir = agent_config['patch_output_dir']
+    for _run_idx, _content in enumerate(_run_contents):
+        if rocm_expo and (_run_idx != len(_run_contents) - 1):
+            console.print(f"\n[bold cyan]--- ROCm expo iteration {_run_idx + 1}/{len(_run_contents) - 1} ---[/bold cyan]")
+            # Change agent_config per iteration (e.g. patch_output_dir = optimization_logs/1/, 2/, 3/)
+            agent_config['patch_output_dir'] = os.path.join(patch_output_dir, f"rocm_expo_{_run_idx + 1}/")
+            agent_log_file = os.path.join(agent_config['patch_output_dir'], "mini_agent.log")
+        else:
+            console.print(f"\n[bold cyan]--- User specified task run---[/bold cyan]")
+            agent_config['patch_output_dir'] = patch_output_dir
+            agent_log_file = os.path.join(agent_config['patch_output_dir'], "mini_agent.log")
+        # Create and run agent
+        agent = agent_class(model, env, **agent_config)
+        agent.log_file = agent_log_file
+        if _tf_meta and _tf_meta.get("repo_root"):
+            agent.base_repo_path = Path(_tf_meta["repo_root"]).resolve()
+        console.print(f"[bold cyan]Agent log: {agent_log_file}[/bold cyan]")
+        console.print(f"[dim]Tip: tail -f {agent_log_file}[/dim]")
+
+        try:
+            exit_status, result = agent.run(
+                _content, instructions=instructions_content,
+                output=output,
+                save_traj_fn=save_traj,
+                console=console,
+                model_factory=lambda: get_model(model_name_resolved, config.get("model", {})),
+                env_factory=lambda _repo=repo: (MCPEnabledEnvironment if rag else LocalEnvironment)(
+                    **{**copy.deepcopy(_env_kwargs), **({"cwd": str(Path(_repo).resolve())} if _repo else {})}
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Error running agent (iteration {_run_idx + 1}): {e}", exc_info=True)
+            _exit_status, result = type(e).__name__, str(e)
+
     return agent
 
 

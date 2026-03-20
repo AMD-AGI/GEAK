@@ -1,0 +1,276 @@
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer.
+
+    Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
+    Include a THOUGHT section before your command where you explain your reasoning process.
+    Format your response as shown in <format_example>.
+
+    <format_example>
+    Your reasoning and analysis here. Explain why you want to perform the action.
+
+    ```bash
+    your_command_here
+    ```
+    </format_example>
+
+    Failure to follow these rules will cause your response to be rejected.
+  instance_template: |
+    Your job is to read and analyze the task in {{task}}, 
+    In the working directory mentioned inside the task description, there is a <kernel name>_prompt.txt file.
+    in which, you should see "<Insert detailed instructions here>".
+
+    You must:
+      Read and understand the workload.
+      Get GPU architecture from `rocm-smi` or `rocminfo`.
+      identify the most suitable ROCm acceleration approach, explore the hardware instructions/libraries under /opt/rocm for the workload and current hardware (without specification, focus only on the current hardware architecture).
+      Select the top 3 libraries/instructions best suited for the workload and hardware.
+      Estimate expected performance improvement vs current implementation.
+      Generate modified prompt files enforcing usage of those libraries.
+
+    Note: This is a performance-critical ROCm environment.
+
+    Core Analysis Requirements:
+
+    1.  Analyze the workload and identify the compute pattern (e.g., GEMM, convolution, attention, reduction, sparse compute, FFT, communication, etc.).
+    2.  Identify the data types used (fp4, fp8, bf16, fp16, fp32, int8, mixed precision, etc.).
+    3.  Determine the best acceleration strategy using:
+        -   ROCm libraries
+        -   Hardware instructions / GPU intrinsics
+        -   Custom kernels only if necessary.
+
+    You MUST prioritize ROCm libraries installed under /opt/rocm.
+
+    Examples include (but are not limited to):
+
+      Composable Kernel MIGraphX MIOpen MIVisionX rocAL rocDecode /
+      rocPyDecode rocJPEG ROCm Performance Primitives (RPP)
+
+      hipCUB / rocPRIM hipTensor rocThrust
+
+      RCCL rocSHMEM
+
+      hipBLAS / rocBLAS hipBLASLt hipFFT / rocFFT hipSOLVER / rocSOLVER
+      hipSPARSE / rocSPARSE hipSPARSELt rocALUTION rocWMMA Tensile hipRAND /
+      rocRAND
+
+      MFMA / WMMA intrinsics half hipfort
+
+      Other ROCm components under /opt/rocm.
+
+    Rules:
+
+    -   You MUST prefer ROCm libraries over custom kernels.
+    -   Complex APIs or required refactoring are NOT valid reasons to avoid
+        a library.
+    -   Use fused kernels or specialized libraries whenever possible.
+
+    Hardware Instruction Optimization
+
+    In addition to library evaluation, you MUST analyze whether the workload
+    can benefit from GPU hardware instruction-level optimization.
+
+    Check whether the implementation can utilize:
+
+    -   MFMA / WMMA matrix instructions
+    -   Packed datatype instructions (fp4, fp8, bf16, int8)
+    -   Vector ALU instructions
+    -   Wave-level primitives
+    -   LDS / shared memory optimizations
+    -   Specialized conversion instructions (e.g.,
+        V_CVT_SCALEF32_PK_FP4_F32)
+
+    If a library does not fully exploit these instructions, consider:
+
+    -   rocWMMA
+    -   Composable Kernel
+    -   MFMA / WMMA intrinsics
+    -   Inline GCN/CDNA assembly
+    -   Packed datatype conversion instructions
+
+    For low-precision workloads (fp4 / fp8 / bf16), you MUST check:
+
+    -   Packed conversion instructions
+    -   Scale/convert instructions that reduce instruction count
+    -   Tensor/matrix pipelines (MFMA) utilization
+
+    If instruction-level optimization can provide significant speedup
+    (e.g., >2x), it should be prioritized.
+
+    Custom HIP/Triton/etc. kernels that ignore MFMA or packed instructions are NOT
+    acceptable for performance-critical paths.
+
+    Output Requirements
+
+    You must produce:
+
+    1.  A report listing:
+
+    -   Top 3 selected libraries or optimization strategies
+    -   Why they are optimal
+    -   Expected performance improvement vs naïve HIP/Triton/etc. implementation
+
+    2.  Three prompt files in the working directory:
+      Copy the content from original <kernel name>_prompt.txt in the task's working directory, to the same working directory with names:
+      <kernel name>_prompt_top1.txt
+      <kernel name>_prompt_top2.txt
+      <kernel name>_prompt_top3.txt
+    and replace the "<Insert detailed instructions here>" part with strict enforcement instructions focus on the library you chose such as:
+    "You MUST use rocBLAS for implementation. Custom HIP/Triton/etc. kernels are NOT allowed. Ensure MFMA acceleration is enabled. Expected performance improvement: 15x over naïve implementation."
+    Use strong enforcement language (MUST, REQUIRED, NOT allowed).
+    Each files is a standalone prompt file.
+
+    3. Check your copied and modified files one-by-one once done. 
+    Note you should only modify the "<Insert detailed instructions here>" part from original <kernel name>_prompt.txt, do not change other parts and make sure other parts are not changed (i.e. the strings after "<Insert detailed instructions here>" in the original file).
+    If there is no "<Insert detailed instructions here>" part in the original _prompt.txt, simply add the strict enforcement instructions after the task description in the created top1, top2, and top3 prompt files. And make sure preserve the original task description and other parts in the original file.
+
+    <system_information>
+    {{system}} {{release}} {{version}} {{machine}}
+    </system_information>
+
+    ## Formatting your response
+
+    Here is an example of a correct response:
+
+    <example_response>
+    THOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.
+
+    ```bash
+    ls -la
+    ```
+    </example_response>
+
+    ## Useful command examples
+
+    ### Create a new file:
+
+    ```bash
+    cat <<'EOF' > newfile.py
+    import numpy as np
+    hello = "world"
+    print(hello)
+    EOF
+    ```
+    ### Create multiple files:
+ 
+    ```bash
+    cat <<'EOF' > newfile1.py && cat <<'EOF' > newfile2.py
+    import numpy as np
+    hello_file1 = "world1"
+    print(hello_file1)
+    EOF
+    import numpy as np
+    hello_file2 = "world2"
+    print(hello_file2)
+    EOF
+    ```
+
+    ### Edit files with sed:
+
+    {%- if system == "Darwin" -%}
+    <important>
+    You are on MacOS. For all the below examples, you need to use `sed -i ''` instead of `sed -i`.
+    </important>
+    {%- endif -%}
+
+    ```bash
+    # Replace all occurrences
+    sed -i 's/old_string/new_string/g' filename.py
+
+    # Replace only first occurrence
+    sed -i 's/old_string/new_string/' filename.py
+
+    # Replace first occurrence on line 1
+    sed -i '1s/old_string/new_string/' filename.py
+
+    # Replace all occurrences in lines 1-10
+    sed -i '1,10s/old_string/new_string/g' filename.py
+    ```
+
+    ### View file content:
+
+    ```bash
+    # View specific lines with numbers
+    nl -ba filename.py | sed -n '10,20p'
+    ```
+
+    ### Any other command you want to run
+
+    ```bash
+    anything
+    ```
+
+    ### Github clone command:
+    
+    Given the github repository link: https://github.com/Puyuan-Yang/gpu-agent-workspace.git
+    Clone the repository with non-interactive bash line:
+    ```bash
+    git clone https://<github_user_id>:<github_token>@github.com/Puyuan-Yang/gpu-agent-workspace.git
+    ```
+
+  action_observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 20000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 20000 -%}
+    <output>
+    {{ output.output[:20000] }}
+    </output>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    {%- endif -%}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+    If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+    without any other command.
+    Else, please format your response exactly as follows:
+
+    <response_example>
+    Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    Note: In rare cases, if you need to reference a similar format in your command, you might have
+    to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
+  step_limit: 0.
+  cost_limit: 0.
+  mode: confirm
+env:
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  timeout: 3600
+model:
+  model_class: amd_llm
+  # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
+  model_name: claude-opus-4.5
+  api_key: null
+  model_kwargs:
+    temperature: 0.0
+    max_tokens: 16000
+    # reasoning is only valid for gpt models, can be set to none, low, medium, high
+    reasoning:
+      effort: high
+    # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
+    text:
+      verbosity: low
+tools:
+  rag: false
+  enable_llm_filter: false
