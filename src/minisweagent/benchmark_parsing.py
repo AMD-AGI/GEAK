@@ -111,11 +111,17 @@ def extract_benchmark_config_lines(output: str) -> list[str] | None:
         # Skip header/summary lines
         if any(kw in line.lower() for kw in ("comparing", "running", "warmup", "median", "geomean", "mean")):
             continue
-        # Extract config prefix: everything before the first standalone float
-        # (a float preceded by whitespace, indicating the start of timing columns).
-        # This handles both "M=128, N=16  0.0747  0.0474  1.58x" and
-        # "B=1 H=32 ... 2.11ms 0.10ms 21.37x"
-        config_part = re.split(r"\s+\d+\.\d+", line)[0].strip()
+        # Extract config prefix: everything before the first timing value.
+        # Handles multiple output formats:
+        #   "M=128, N=16  0.0747  0.0474  1.58x"   → "M=128, N=16"
+        #   "B=1 H=32 ... 2.11ms 0.10ms 21.37x"    → "B=1 H=32 ..."
+        #   "(2, 4, 64): kernel=0.0411 ms | ref=..."→ "(2, 4, 64)"
+        # Split on: =<float>, :<whitespace><float>, or <whitespace><float>
+        config_part = re.split(r"(?<=[=:])\s*\d+\.\d+|\s+\d+\.\d+", line)[0].strip()
+        # Clean trailing separators and labels that precede timing values
+        config_part = re.sub(r"[\s:|]+$", "", config_part)
+        config_part = re.sub(r"\s*\|\s*\w+$", "", config_part)
+        config_part = re.sub(r":\s*\w+=$", "", config_part)
         if config_part and len(config_part) > 3:
             configs.append(config_part)
     return sorted(configs) if configs else None
