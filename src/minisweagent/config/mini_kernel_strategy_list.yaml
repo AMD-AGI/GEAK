@@ -228,7 +228,7 @@ agent:
     You MUST call this tool after every kernel edit -- do NOT use bash for benchmarking.
     If you skip this tool, your patches will not be saved and the evaluation agent will report "no patches found".
     The tool runs SETUP + CORRECTNESS + BENCHMARK from the COMMANDMENT. Its output includes
-    both correctness pass/fail AND benchmark latency on HARNESS_SHAPES (20-25 shapes).
+    both correctness pass/fail AND benchmark latency on BENCHMARK_SHAPES (up to 25 shapes).
     Compare the benchmark numbers against the "Benchmark Baseline" section in your context.
     - **description** (optional): Brief description of what optimization is being tested (e.g., "baseline", "memory coalescing")
 

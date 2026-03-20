@@ -721,6 +721,47 @@ def run_preprocessor(
                 status = "PASS" if r["success"] else "FAIL"
                 _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
             _print("  Harness execution: ALL MODES PASSED")
+
+            # ── 3d. Shape fixer: verify shapes match benchmark file ──
+            if benchmarks and _uta_model:
+                _print("--- Step 3d: Shape fixer (verify shapes vs benchmark) ---")
+                try:
+                    from minisweagent.agents.shape_fixer_agent import run_shape_fixer
+
+                    harness_file = Path(extract_harness_path(test_command))
+                    # Read the shape source file that UTA wrote
+                    _shapes_source_file = harness_file.parent / "harness_shapes_source.txt"
+                    if _shapes_source_file.is_file():
+                        bench_file = Path(_shapes_source_file.read_text().strip())
+                        _print(f"  Shape source (from UTA): {bench_file}")
+                    else:
+                        bench_file = Path(benchmarks[0]["file"])
+                        _print(f"  Shape source (fallback to top benchmark): {bench_file}")
+                    if harness_file.is_file() and bench_file.is_file():
+                        shapes_ok = run_shape_fixer(
+                            model=_uta_model,
+                            repo=Path(repo_root),
+                            harness_path=harness_file,
+                            benchmark_file=bench_file,
+                            kernel_path=Path(kernel_path),
+                            log_dir=output_dir,
+                        )
+                        if shapes_ok:
+                            _print("  Shape verification: OK")
+                            ok_revalidate, _, harness_results = execute_harness_validation(
+                                str(harness_file),
+                                repo_root=repo_root,
+                                gpu_id=gpu_id,
+                            )
+                            if ok_revalidate:
+                                _print("  Re-validation after shape fix: ALL MODES PASSED")
+                            else:
+                                _print("  Re-validation after shape fix: FAILED (reverting)")
+                        else:
+                            _print("  Shape fixer did not complete successfully")
+                except Exception as exc:
+                    _print(f"  Shape fixer failed: {exc}")
+                    logger.warning("Shape fixer failed: %s", exc, exc_info=True)
         except Exception as exc:
             _print(
                 f"  [yellow]UnitTestAgent failed ({exc}), falling back to discovery[/yellow]"
@@ -779,6 +820,14 @@ def run_preprocessor(
     (output_dir / "testcase_selection.json").write_text(
         json.dumps(testcase_selection, indent=2, default=str)
     )
+
+    # GEAK_HARNESS_ONLY=1 skips profiling, baseline, and commandment steps.
+    # Used by test_harness_variance.py to validate harness shapes quickly.
+    _harness_only = os.environ.get("GEAK_HARNESS_ONLY", "").strip() == "1"
+    if _harness_only:
+        _print("GEAK_HARNESS_ONLY=1 -- skipping profiling, baseline, commandment")
+        _print("Preprocessing complete (harness only). Artefacts written to: " + str(output_dir))
+        return ctx
 
     # Collect a canonical benchmark baseline using the same iteration count the
     # orchestrator evaluation will use, so every reported speedup is

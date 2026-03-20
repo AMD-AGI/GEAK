@@ -93,7 +93,8 @@ def format_discovery_for_agent(result) -> str:
     """Format a ``DiscoveryResult`` into an enriched context string for the UTA.
 
     Includes kernel analysis, language-specific testing guidance, discovered
-    tests/benchmarks with confidence scores, and extracted test patterns.
+    tests/benchmarks with confidence scores, and pointers to files the UTA
+    must read.
 
     Formats an already-available ``DiscoveryResult`` for agent consumption.
     """
@@ -130,47 +131,42 @@ def format_discovery_for_agent(result) -> str:
             lines.append(guidance)
             lines.append("")
 
-    # --- Discovered tests ---
-    if result.tests:
-        lines.append("## Discovered Test Files (ranked by confidence)")
-        for i, t in enumerate(result.tests[:5], 1):
-            conf_pct = min(int(t.confidence * 100), 100)
-            lines.append(f"  {i}. `{t.file_path}` — {t.test_type}, {conf_pct}% confidence")
-            lines.append(f"     Suggested command: `{t.command}`")
-        lines.append("")
-
-    # --- Extracted test patterns (from top-confidence tests) ---
-    patterns_found = False
+    # --- FILES YOU MUST READ ---
+    must_read: list[tuple[str, str]] = []
+    for b in result.benchmarks[:3]:
+        must_read.append((str(b.file_path), "benchmark"))
     for t in result.tests[:3]:
-        p = getattr(t, "patterns", None)
-        if p is None:
-            continue
-        if not patterns_found:
-            lines.append("## Extracted Test Patterns (reuse these in your harness)")
-            patterns_found = True
-        lines.append(f"From `{t.file_path.name}`:")
-        if p.tolerances:
-            lines.append(f"  Tolerances: {', '.join(p.tolerances)}")
-        if p.input_shapes:
-            lines.append(f"  Input shapes: {', '.join(p.input_shapes)}")
-        if p.dtypes:
-            lines.append(f"  Dtypes: {', '.join(p.dtypes)}")
-        if p.reference_impls:
-            lines.append(f"  Reference implementations: {', '.join(p.reference_impls)}")
-        if p.import_patterns:
-            lines.append("  Import patterns:")
-            for imp in p.import_patterns[:5]:
-                lines.append(f"    `{imp}`")
-    if patterns_found:
+        must_read.append((str(t.file_path), "test"))
+
+    if must_read:
+        lines.append("## FILES YOU MUST READ (mandatory before creating harness)")
+        lines.append("Read the kernel file AND each file below. Each serves a purpose:")
+        lines.append("- **benchmark** files → shapes/configs for ALL_SHAPES")
+        lines.append("- **test** files → correctness reference implementations, tolerances, assert logic")
+        lines.append("")
+        for fpath, kind in must_read:
+            lines.append(f"- **{kind}**: `{fpath}`")
+        lines.append("")
+    else:
+        lines.append("## WARNING: No test or benchmark files were discovered.")
+        lines.append("Read the kernel file and explore the repository to find shapes.")
         lines.append("")
 
-    # --- Discovered benchmarks ---
+    # --- Discovered files (full listing) ---
     if result.benchmarks:
         lines.append("## Discovered Benchmark Files (ranked by confidence)")
         for i, b in enumerate(result.benchmarks[:5], 1):
             conf_pct = min(int(b.confidence * 100), 100)
             lines.append(f"  {i}. `{b.file_path}` — {b.bench_type}, {conf_pct}% confidence")
             lines.append(f"     Suggested command: `{b.command}`")
+        lines.append("")
+
+    if result.tests:
+        lines.append("## Discovered Test Files (ranked by confidence)")
+        for i, t in enumerate(result.tests[:5], 1):
+            conf_pct = min(int(t.confidence * 100), 100)
+            lines.append(f"  {i}. `{t.file_path}` — {t.test_type}, {conf_pct}% confidence")
+            lines.append(f"     Suggested command: `{t.command}`")
         lines.append("")
 
     # --- Dependency graph summary ---

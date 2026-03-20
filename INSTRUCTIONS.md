@@ -151,21 +151,26 @@ script that imports the kernel, creates test inputs, and provides
 
 4. **Extract shapes from discovered test files, not hardcoded defaults.**
    The harness must define three shape lists at the top of the script:
-   - `ALL_SHAPES`: every unique shape from the discovered test files,
-     sorted by total element count.
-   - `HARNESS_SHAPES` (20-25): uniformly sampled from ALL_SHAPES. If
-     ALL_SHAPES has ≤25 entries, HARNESS_SHAPES = ALL_SHAPES.
-   - `PROFILE_SHAPES` (5): evenly-spaced from ALL_SHAPES, prevents OOM.
+   Import the config source (dimension lists or config list) directly from
+   the benchmark file. Do NOT materialize large shape lists -- use
+   `itertools.product` or the same loop the benchmark uses.  Subset at
+   runtime: up to 25 for benchmark/correctness, 5 for profile.
 
    Shape routing by CLI mode:
    - `--profile`        → PROFILE_SHAPES (5 shapes)
-   - `--benchmark`      → HARNESS_SHAPES (20-25 shapes)
-   - `--correctness`    → HARNESS_SHAPES
+   - `--benchmark`      → BENCHMARK_SHAPES (up to 25 shapes)
+   - `--correctness`    → BENCHMARK_SHAPES
    - `--full-benchmark` → ALL_SHAPES (every discovered shape)
 
-   The harness must also accept `--iterations N` (default 20) to override
-   the number of benchmark iterations for both `--benchmark` and
-   `--full-benchmark`.  If the flag is not passed, the harness should read
+   The harness must also accept `--warmup N` (default 50) and
+   `--iterations N` (default 200) to override the number of warmup and
+   timed iterations for both `--benchmark` and `--full-benchmark`.
+   Timing MUST use GPU events (`torch.cuda.Event(enable_timing=True)`,
+   `triton.testing.do_bench`, or `hipEventElapsedTime`) -- never CPU
+   wall-clock timing.  Report the MEDIAN latency across all timed
+   iterations for each shape, and the geometric mean of all per-shape
+   latencies as the final metric.
+   If the `--iterations` flag is not passed, the harness should read
    `GEAK_BENCHMARK_ITERATIONS` from the environment as a fallback.
    The pipeline sets `GEAK_BENCHMARK_EXTRA_ARGS` to `--iterations 50`
    during evaluation to reduce GPU timing noise.
@@ -434,7 +439,7 @@ Compare with the baseline to confirm the speedup is real and not an artefact.
 ### Apples-to-apples speedup comparison (CRITICAL)
 
 The test harness has two benchmark modes that use **different** shape sets:
-- `--benchmark` uses HARNESS_SHAPES (20-25 sampled shapes)
+- `--benchmark` uses BENCHMARK_SHAPES (up to 25 sampled shapes)
 - `--full-benchmark` uses ALL_SHAPES (every discovered shape)
 
 **You MUST compare matching modes.** Comparing `--full-benchmark` baseline
@@ -521,7 +526,7 @@ cd KERNEL_DIR && python3 /workspace/geak-oe/examples/geak_eval/run_openevolve.py
 
 OpenEvolve reads the `## BENCHMARK` section from COMMANDMENT.md for per-iteration
 fitness evaluation.  This runs the harness with `--benchmark` (wall-clock latency
-on 20-25 HARNESS_SHAPES) and produces a speedup ratio against the baseline.
+on up to 25 BENCHMARK_SHAPES) and produces a speedup ratio against the baseline.
 
 The `## PROFILE` section (deep hardware analysis via Metrix) is NOT run per-iteration
 by OpenEvolve.  It remains in COMMANDMENT for the orchestrator's per-round evaluation

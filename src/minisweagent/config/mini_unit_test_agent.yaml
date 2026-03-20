@@ -61,42 +61,83 @@ agent:
 
     Part 2: Creating a new test harness
     (Only if no suitable existing test can be adapted.)
-    The test harness must be a Python script with exactly four CLI modes:
-       - `--correctness`: validates kernel output against a trusted reference (torch reference, or non-fused path when applicable). Must exit non-zero on failure.
-       - `--profile`: runs the kernel ONCE with minimal setup (for profiling tools like rocprof). Fast, no correctness check.
-       - `--benchmark`: runs the kernel with at least 20 iterations on HARNESS_SHAPES (sampled subset); prints a stable timing metric (median latency). For EACH shape, print a line showing the shape/config parameters and the measured latency (e.g. "B=2 H=64 D=128  0.0523ms"). The LAST line of output MUST be exactly: GEAK_RESULT_LATENCY_MS=<number> where <number> is the overall median or geomean latency in milliseconds. This line is machine-parsed by the evaluation pipeline -- do NOT omit it.
-       - `--full-benchmark`: like --benchmark but runs ALL discovered shapes. Used only at the start and end of optimization to get a complete picture. Must print per-shape config+latency lines AND GEAK_RESULT_LATENCY_MS=<number> as the last line.
-       - `--iterations N`: optional override for the number of benchmark iterations (default 20). Applied to both --benchmark and --full-benchmark. Reads from env var GEAK_BENCHMARK_ITERATIONS if the flag is not passed.
-    Requirements:
-       - Import the kernel via its package path (do NOT use `importlib.util`).
-       - Use `torch.testing.assert_close` for correctness (Python/Triton) or host-side validation (C++/HIP).
-       - Use fixed random seed (`torch.manual_seed(42)`) and fixed tensor sizes.
-       - Generate tensors on CPU, then move to GPU.
-       - If discovery provided test patterns (tolerances, shapes, imports), reuse them.
-       - For (B) fused tasks: the harness must test BOTH unfused and fused paths.
-       - Keep the harness file outside the kernel directory (e.g. in repo root or a `tests/` dir).
 
-    CRITICAL - Shape extraction and usage rules:
-       You MUST read the top discovered test file(s) and extract ALL input
-       shapes / dimensions they use (look for size lists, dimension variables,
-       parametrize decorators, loops over m/n/k, EVAL_CONFIGS, etc.).
-       Collect every discovered shape into an ALL_SHAPES list, sorted small
-       to large. Then build three lists from it:
-       - **ALL_SHAPES**: every unique shape from the test files, sorted by
-         total element count. Used by `--full-benchmark`.
-       - **HARNESS_SHAPES** (20-25 shapes): uniformly sampled from ALL_SHAPES
-         covering smallest to largest. Used by `--correctness` and `--benchmark`.
-         If ALL_SHAPES has 25 or fewer entries, HARNESS_SHAPES = ALL_SHAPES.
-       - **PROFILE_SHAPES** (exactly 5 shapes): 5 evenly-spaced sizes from
-         ALL_SHAPES. Used by `--profile` mode ONLY to prevent OOM.
-       Define all three lists as Python lists at the top of the harness script.
-       Shape routing by mode:
-         --profile        → PROFILE_SHAPES
-         --benchmark      → HARNESS_SHAPES
-         --correctness    → HARNESS_SHAPES
-         --full-benchmark → ALL_SHAPES
-       Do NOT invent shapes that are not in the discovered test files.
-       Do NOT use ALL_SHAPES or HARNESS_SHAPES in `--profile` mode.
+    CORE PRINCIPLE: The harness is a THIN WRAPPER around the benchmark file.
+    The benchmark file already knows how to construct inputs and call the
+    kernel correctly. Do NOT reimplement what it already does. Import and
+    call its existing functions.
+
+    Structure of the harness:
+       1. Import the benchmark file's helper functions (input construction,
+          kernel invocation) and config variables/loops.
+       2. Import correctness logic from the test file (reference impl,
+          tolerances, assert patterns).
+       3. Wrap them in 4 CLI modes with our output format.
+
+    The four CLI modes:
+       - `--full-benchmark`: runs ALL configs from the benchmark file.
+         Print per-shape config + latency (e.g. "B=2 H=64 D=128  0.0523ms").
+         LAST line: GEAK_RESULT_LATENCY_MS=<geometric_mean_ms>
+       - `--benchmark`: runs up to 25 configs (uniformly picked from all).
+         Same output format. LAST line: GEAK_RESULT_LATENCY_MS=<number>
+       - `--correctness`: runs correctness check on up to 25 configs.
+         Must exit non-zero on failure.
+       - `--profile`: runs 5 configs for profiling. No correctness.
+
+    Fixed constants:
+       - WARMUP = 50
+       - ITERATIONS = int(os.environ.get("GEAK_BENCHMARK_ITERATIONS", "200"))
+
+    Timing:
+       - GPU event-based ONLY: `torch.cuda.Event(enable_timing=True)`
+         or `triton.testing.do_bench` or `hipEventElapsedTime`.
+         NEVER `time.time()` or wall-clock.
+       - Run WARMUP, then ITERATIONS, report MEDIAN per shape.
+
+    GEAK_SHAPES_USED (for determinism validation):
+       - In ALL modes, after the loop, print:
+           GEAK_SHAPES_USED=<sorted list of config tuples>
+         Use the EXACT same tuple format as the benchmark file's configs.
+
+    HOW TO BUILD THE HARNESS (follow this order):
+       1. Read the benchmark file. Identify:
+          - The config list or loop (e.g. x_vals_list, for-loops, product)
+          - The helper functions (e.g. input_helper, setup_inputs)
+          - The kernel call (how the benchmark invokes the kernel)
+       2. In your harness, IMPORT these:
+          - Config variables or copy the exact loop verbatim
+          - Helper functions that build inputs
+          - The kernel function
+       3. Your benchmark loop should be:
+            for config in configs:
+                fn = benchmark_file.build_kernel_call(config)  # imported helper
+                latency = do_bench(fn)  # GPU timing
+          NOT:
+            for config in configs:
+                # 50 lines of tensor construction you wrote yourself
+                result = kernel(args_you_guessed)
+       4. For correctness: read the test file for reference impl and tolerances.
+          Call the same imported helper to build inputs, run kernel, compare.
+
+    Subsetting (for --benchmark, --correctness, --profile):
+       def _pick(configs, count):
+           if len(configs) <= count:
+               return configs
+           n = len(configs)
+           return [configs[round(i * (n - 1) / (count - 1))] for i in range(count)]
+       --full-benchmark → all configs
+       --benchmark      → _pick(configs, 25)
+       --correctness    → _pick(configs, 25)
+       --profile        → _pick(configs, 5)
+
+    General rules:
+       - Import kernel via package path (not importlib.util).
+       - Fixed seed: torch.manual_seed(42).
+       - Keep harness outside kernel directory.
+       - For fused tasks: test BOTH unfused and fused paths.
+
+    After deciding which benchmark file to wrap, write its path:
+       echo "/absolute/path/to/bench_file.py" > harness_shapes_source.txt
 
     Output constraints
     - Your response must contain exactly ONE bash code block (```bash ... ```).

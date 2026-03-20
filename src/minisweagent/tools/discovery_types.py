@@ -109,11 +109,11 @@ class KernelDependencyGraph:
 
 @dataclass
 class TestPatterns:
-    """Patterns extracted from a discovered test file.
+    """Legacy dataclass kept for backward compatibility.
 
-    These help the UnitTestAgent (or main agent) create better test
-    harnesses by reusing tolerances, input shapes, and import patterns
-    from existing tests rather than inventing them from scratch.
+    The UTA now reads test/benchmark files directly rather than relying
+    on regex-extracted patterns.  These fields may still be populated by
+    older discovery dicts but are not used by the current pipeline.
     """
 
     tolerances: list[str] = field(default_factory=list)
@@ -121,6 +121,9 @@ class TestPatterns:
     dtypes: list[str] = field(default_factory=list)
     reference_impls: list[str] = field(default_factory=list)
     import_patterns: list[str] = field(default_factory=list)
+    shape_variables: list[str] = field(default_factory=list)
+    global_variables: list = field(default_factory=list)
+    line_count: int = 0
 
 
 def _parse_shape_size(shape_str: str) -> int | None:
@@ -196,6 +199,22 @@ class BenchmarkInfo:
     bench_type: str  # pytest, script, custom
     command: str
     confidence: float
+    patterns: TestPatterns | None = None
+
+
+def _patterns_from_dict(d: dict) -> TestPatterns:
+    """Build a ``TestPatterns`` from a raw discovery patterns dict."""
+    return TestPatterns(
+        import_patterns=d.get("import_patterns", []),
+        global_variables=d.get("global_variables", []),
+        line_count=d.get("line_count", 0),
+        # Legacy fields (older discovery dicts)
+        tolerances=d.get("tolerances", []),
+        input_shapes=d.get("input_shapes", []),
+        dtypes=d.get("dtypes", []),
+        reference_impls=d.get("reference_impls", []),
+        shape_variables=d.get("shape_variables", []),
+    )
 
 
 def _infer_kernel_language(kernel_path: Path, kernel_type: str) -> str:
@@ -265,6 +284,7 @@ class DiscoveryResult:
                 test_type=t.get("type", "script"),
                 command=t.get("command", ""),
                 confidence=t.get("confidence", 0.5),
+                patterns=_patterns_from_dict(t.get("patterns")) if t.get("patterns") else None,
             )
             for t in (disc_dict.get("tests") or [])
         ]
@@ -274,6 +294,7 @@ class DiscoveryResult:
                 bench_type=b.get("type", "script"),
                 command=b.get("command", ""),
                 confidence=b.get("confidence", 0.5),
+                patterns=_patterns_from_dict(b.get("patterns")) if b.get("patterns") else None,
             )
             for b in (disc_dict.get("benchmarks") or [])
         ]

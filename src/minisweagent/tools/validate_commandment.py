@@ -5,7 +5,7 @@ must contain exactly five section headers:
   ## SETUP          -- environment preparation
   ## CORRECTNESS    -- correctness gate
   ## PROFILE        -- deep hardware analysis (Metrix on PROFILE_SHAPES)
-  ## BENCHMARK      -- wall-clock latency (HARNESS_SHAPES, iterative feedback)
+  ## BENCHMARK      -- wall-clock latency (BENCHMARK_SHAPES, iterative feedback)
   ## FULL_BENCHMARK -- wall-clock latency (all shapes, final evaluation)
 
 Any other header (e.g., ``## Test Command``) is flagged as an error.
