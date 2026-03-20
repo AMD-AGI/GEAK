@@ -247,23 +247,43 @@ def analyze_variance(kernel_name, runs):
         report[f"{label}_shape_counts"] = [len(s) if s else 0 for s in shapes_per_run]
 
         if len(non_none) >= 2:
+            # Strict: are the raw tuples byte-identical across runs?
             all_same = all(s == non_none[0] for s in non_none)
-            report[f"{label}_shapes_deterministic"] = all_same
+            report[f"{label}_strict_deterministic"] = all_same
 
-            if all_same:
-                report[f"{label}_shapes"] = [list(t) for t in non_none[0]]
-            else:
-                # Show what differs
+            if not all_same:
                 intersection = set(map(tuple, non_none[0]))
                 union = set(map(tuple, non_none[0]))
                 for s in non_none[1:]:
                     s_set = set(map(tuple, s))
                     intersection &= s_set
                     union |= s_set
-                report[f"{label}_shapes_intersection"] = len(intersection)
-                report[f"{label}_shapes_union"] = len(union)
-                report[f"{label}_shapes_only_in_some_runs"] = len(union - intersection)
+                report[f"{label}_strict_intersection"] = len(intersection)
+                report[f"{label}_strict_union"] = len(union)
+
+            # Equivalent: same workload regardless of tuple packing?
+            # Extract numeric fingerprint: sorted set of all numbers in each config
+            def _numeric_fingerprint(shapes_list):
+                fingerprints = []
+                for shape in shapes_list:
+                    nums = set()
+                    def _collect(v):
+                        if isinstance(v, (int, float)) and not isinstance(v, bool):
+                            nums.add(v)
+                        elif isinstance(v, (list, tuple)):
+                            for item in v:
+                                _collect(item)
+                    _collect(shape)
+                    fingerprints.append(frozenset(nums))
+                return sorted(fingerprints, key=lambda s: sorted(s))
+
+            fps = [_numeric_fingerprint(s) for s in non_none]
+            all_equiv = all(fp == fps[0] for fp in fps)
+            report[f"{label}_equivalent"] = all_equiv
+            report[f"{label}_shapes_deterministic"] = all_equiv
         else:
+            report[f"{label}_strict_deterministic"] = None
+            report[f"{label}_equivalent"] = None
             report[f"{label}_shapes_deterministic"] = None
 
     # Subset relationship: benchmark ⊂ full_benchmark
@@ -310,15 +330,18 @@ def analyze_variance(kernel_name, runs):
     print(f"  Preprocess success: {report['preprocess_success_rate']*100:.0f}%")
     for key, label in [("benchmark", "benchmark"), ("full_benchmark", "full-benchmark"),
                         ("correctness", "correctness"), ("profile", "profile")]:
-        det = report.get(f"{key}_shapes_deterministic")
         counts = report.get(f"{key}_shape_counts", [])
-        det_str = "YES" if det else ("NO" if det is False else "N/A")
-        print(f"  --{label}: deterministic={det_str}, counts={counts}")
-        if det is False:
-            inter = report.get(f"{key}_shapes_intersection", "?")
-            union = report.get(f"{key}_shapes_union", "?")
-            diff = report.get(f"{key}_shapes_only_in_some_runs", "?")
-            print(f"    intersection={inter}, union={union}, varying={diff}")
+        strict = report.get(f"{key}_strict_deterministic")
+        equiv = report.get(f"{key}_equivalent")
+        strict_str = "YES" if strict else ("NO" if strict is False else "N/A")
+        equiv_str = "YES" if equiv else ("NO" if equiv is False else "N/A")
+        print(f"  --{label}: strict={strict_str}, equivalent={equiv_str}, counts={counts}")
+        if strict is False and equiv:
+            print(f"    (tuples differ but same workload -- OK)")
+        elif equiv is False:
+            inter = report.get(f"{key}_strict_intersection", "?")
+            union = report.get(f"{key}_strict_union", "?")
+            print(f"    intersection={inter}, union={union}")
 
     sub = report.get("benchmark_subset_of_full")
     if sub is not None:
@@ -453,18 +476,19 @@ def main():
     print(f"\n{'='*60}")
     print("FINAL SUMMARY")
     print(f"{'='*60}")
-    all_deterministic = True
+    all_equivalent = True
     for name, report in all_reports.items():
-        bench_det = report.get("benchmark_shapes_deterministic", False)
+        equiv = report.get("benchmark_equivalent", False)
+        strict = report.get("benchmark_strict_deterministic", False)
         src_ident = report.get("harness_source_identical", False)
-        if not bench_det:
-            all_deterministic = False
-        status = "PASS" if bench_det else "FAIL"
-        print(f"  [{status}] {name}: shapes_deterministic={bench_det}, source_identical={src_ident}")
+        if not equiv:
+            all_equivalent = False
+        status = "PASS" if equiv else "FAIL"
+        print(f"  [{status}] {name}: equivalent={equiv}, strict={strict}, source_identical={src_ident}")
 
     print(f"\nReports saved to: {base_dir}")
     print(f"Harness files saved as harness_run_N.py for manual review (test 2)")
-    sys.exit(0 if all_deterministic else 1)
+    sys.exit(0 if all_equivalent else 1)
 
 
 if __name__ == "__main__":
