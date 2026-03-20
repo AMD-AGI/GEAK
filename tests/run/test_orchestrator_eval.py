@@ -317,7 +317,7 @@ class TestFinalReportVerification:
         assert merged["verified_speedup_raw"] == pytest.approx(0.998989)
         assert merged["verified_improvement"] is False
         assert "## Verified Final Selection" in merged["summary"]
-        assert "### Best Patch: dispatch-path-check/patch_9" in merged["summary"]
+        assert "- Best patch: dispatch-path-check/patch_9" in merged["summary"]
         mock_record.assert_called_once()
         assert mock_record.call_args.kwargs["speedup_achieved"] == pytest.approx(1.0)
         assert mock_record.call_args.kwargs["success"] is False
@@ -371,7 +371,7 @@ class TestFinalReportVerification:
         assert merged["best_patch"] == str(patch_file)
         assert merged["total_speedup"] == "1.1473x"
         assert merged["verified_improvement"] is True
-        assert "### Best Patch: split-k-reduction-rewrite/patch_7" in merged["summary"]
+        assert "- Best patch: split-k-reduction-rewrite/patch_7" in merged["summary"]
         mock_record.assert_called_once()
         assert mock_record.call_args.kwargs["speedup_achieved"] == pytest.approx(1.14731)
         assert mock_record.call_args.kwargs["success"] is True

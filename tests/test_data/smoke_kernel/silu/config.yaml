@@ -1,0 +1,16 @@
+source_file_path:
+- silu.hip
+target_kernel_functions:
+- silu_mul_kernel
+compile_command:
+- make
+correctness_command:
+- ./applications_silu
+performance_command:
+- ./applications_silu
+task_type: hip2hip
+task_result_template: null
+prompt:
+  source_code: null
+  instructions: null
+  cheatsheet: null
