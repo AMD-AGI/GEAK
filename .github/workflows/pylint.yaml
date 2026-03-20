@@ -7,7 +7,7 @@ on:
   push:
     branches:
       - main
-      - dev
+      - dev-working
       - "release/**"
     paths-ignore:
       - 'docs/**'
@@ -19,7 +19,7 @@ on:
   pull_request:
     branches:
       - main
-      - dev
+      - dev-working
       - "release/**"
     paths-ignore:
       - 'docs/**'
