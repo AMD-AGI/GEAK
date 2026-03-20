@@ -234,7 +234,7 @@ class TestResolveKernelUrl:
         )
         calls: list[list[str]] = []
 
-        def _fake_run(cmd, capture_output, text, timeout, env=None):
+        def _fake_run(cmd, capture_output, text, timeout, **kwargs):
             calls.append(list(cmd))
             if cmd[:4] == ["git", "ls-remote", "--heads", "--tags"]:
                 return type("R", (), {"returncode": 0, "stderr": "", "stdout": ls_remote})()

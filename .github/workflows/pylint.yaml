@@ -7,23 +7,25 @@ on:
   push:
     branches:
       - main
+      - dev-working
+      - "release/**"
     paths-ignore:
       - 'docs/**'
+      - 'knowledge-base/**'
       - 'README.md'
-      - 'mkdocs.yml'
       - '.cursor/**'
-      - '.github/workflows/build-docs.yaml'
       - '.github/workflows/release.yaml'
       - '.github/workflows/pytest.yaml'
   pull_request:
     branches:
       - main
+      - dev-working
+      - "release/**"
     paths-ignore:
       - 'docs/**'
+      - 'knowledge-base/**'
       - 'README.md'
-      - 'mkdocs.yml'
       - '.cursor/**'
-      - '.github/workflows/build-docs.yaml'
       - '.github/workflows/release.yaml'
       - '.github/workflows/pytest.yaml'
 
@@ -50,4 +52,4 @@ jobs:
         run: |
           # Run pylint with errors-only flag to only fail on real errors (E and F level)
           # This will show all messages but only exit with error code for errors, not warnings/advice
-          pylint minisweagent/ --errors-only
+          pylint src/minisweagent/ --errors-only
