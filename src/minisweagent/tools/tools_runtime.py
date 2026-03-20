@@ -52,6 +52,7 @@ class ToolRuntime:
     ):
         self._tool_profile = tool_profile
         self._mcp_bridges: list = []
+        self._tool_schemas: list[dict] = list(_all_tools)
         allowed = _TOOL_PROFILES.get(tool_profile)
 
         self._tool_table = {
@@ -138,8 +139,71 @@ class ToolRuntime:
         self._mcp_bridges.append(openevolve)
         self._tool_table["openevolve"] = openevolve.tool("optimize_kernel")
 
+    _RAG_TOOL_SCHEMAS: list[dict] = [
+        {
+            "name": "rag_query",
+            "type": "function",
+            "description": "Search the GPU/ROCm/HIP knowledge base for relevant information. "
+            "Use this when you need architecture-specific optimization guidance, API references, "
+            "or best practices for AMD GPU programming.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "Search query describing the information you need. "
+                        "Be specific: include GPU model, APIs, data types, and optimization goals.",
+                    },
+                    "layer": {
+                        "type": "string",
+                        "description": "Optional layer filter (e.g. 'hip', 'rocm', 'ai_frameworks').",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results to return (default: from server config).",
+                    },
+                },
+                "required": ["topic"],
+            },
+        },
+        {
+            "name": "rag_optimize",
+            "type": "function",
+            "description": "Retrieve optimization suggestions for GPU kernels from the knowledge base. "
+            "Use this when you need specific optimization tips for a kernel type on a target GPU.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code_type": {
+                        "type": "string",
+                        "description": "Type of code/kernel to optimize "
+                        "(e.g. 'matrix multiplication', 'convolution', 'attention').",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Additional context about the optimization goal.",
+                    },
+                    "gpu_model": {
+                        "type": "string",
+                        "description": "Target GPU model (e.g. 'MI300X', 'MI250').",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results to return (default: from server config).",
+                    },
+                },
+                "required": ["code_type"],
+            },
+        },
+    ]
+
     def _register_rag_mcp_tools(self, rag_config: dict) -> None:
-        """Register RAG MCP server tools, optionally wrapped with subagent post-processing."""
+        """Register RAG MCP server tools, optionally wrapped with subagent post-processing.
+
+        Both the tool implementation (_tool_table) and schema (_tool_schemas) are
+        registered here so they stay in sync — the schema only exists when the
+        implementation is available.
+        """
         try:
             from minisweagent.tools.mcp_bridge import MCPToolBridge
         except ImportError:
@@ -170,6 +234,8 @@ class ToolRuntime:
             self._tool_table["rag_query"] = rag_bridge.tool("query")
             self._tool_table["rag_optimize"] = rag_bridge.tool("optimize")
 
+        self._tool_schemas.extend(self._RAG_TOOL_SCHEMAS)
+
     def set_env(self, env: dict[str, str]) -> None:
         """Propagate environment overrides (e.g. HIP_VISIBLE_DEVICES) to tools."""
         env = dict(env)  # defensive copy to avoid shared-reference mutation
@@ -197,8 +263,12 @@ class ToolRuntime:
         This makes ToolRuntime the single source of truth: the agent can set
         model.tools = self.toolruntime.get_tools_schema() and the LLM will
         only see tools that are actually dispatchable.
+
+        Uses the instance-level ``_tool_schemas`` (base from tools.json +
+        any dynamically registered schemas) so conditional tools like RAG
+        only appear when their implementation is also registered.
         """
-        return [t for t in _all_tools if t["name"] in self._tool_table]
+        return [t for t in self._tool_schemas if t["name"] in self._tool_table]
 
     def get_tools_list(self) -> list:
         """Get the tools list for API based on current settings."""
