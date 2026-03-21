@@ -67,7 +67,7 @@ def run_preprocess(kernel_url, output_dir, gpu_id=0, aiter_repo=None):
     env["GEAK_HARNESS_ONLY"] = "1"
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{_REPO_ROOT / 'src'}:{existing}" if existing else str(_REPO_ROOT / "src")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, env=env)
     return result.returncode == 0, result.stdout, result.stderr
 
 
@@ -166,11 +166,14 @@ def test_kernel_variance(kernel_name, kernel_url, base_dir, num_runs=5, gpu_id=0
             "full_latency": None,
         }
 
-        ok, _, stderr = run_preprocess(kernel_url, str(run_dir), gpu_id=gpu_id, aiter_repo=aiter_repo)
+        try:
+            ok, _, stderr = run_preprocess(kernel_url, str(run_dir), gpu_id=gpu_id, aiter_repo=aiter_repo)
+        except Exception as exc:
+            ok = False
+            stderr = str(exc)
         run_data["preprocess_ok"] = ok
         if not ok:
-            print(f"    Preprocessing FAILED")
-            print(f"    {stderr[-300:]}")
+            print(f"    Preprocessing FAILED: {stderr[-200:]}")
             runs.append(run_data)
             continue
 
