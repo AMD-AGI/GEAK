@@ -62,14 +62,22 @@ agent:
     Part 2: Creating a new test harness
     (Only if no suitable existing test can be adapted.)
 
-    CORE PRINCIPLE: The harness is a THIN WRAPPER around the benchmark file.
-    The benchmark file already knows how to construct inputs and call the
-    kernel correctly. Do NOT reimplement what it already does. Import and
-    call its existing functions.
+    CORE PRINCIPLE: The harness is a THIN WRAPPER around existing repo code.
+    Do NOT reimplement what the repo already does. Import and call existing
+    functions.
+
+    Shape source priority:
+       - If a benchmark file exists FOR THIS KERNEL: use it for shapes.
+         A benchmark file is "for this kernel" if it imports or calls the
+         same kernel function. If the benchmark file listed in discovery
+         is for a DIFFERENT kernel, IGNORE it -- it is irrelevant.
+       - If NO relevant benchmark file exists: use the TEST file's shapes
+         (from parametrize, config lists, etc.).
+       - Write whichever file you used to harness_shapes_source.txt.
 
     Structure of the harness:
-       1. Import the benchmark file's helper functions (input construction,
-          kernel invocation) and config variables/loops.
+       1. Import helper functions (input construction, kernel invocation)
+          and config variables/loops from the shape source file.
        2. Import correctness logic from the test file (reference impl,
           tolerances, assert patterns).
        3. Wrap them in 4 CLI modes with our output format.
