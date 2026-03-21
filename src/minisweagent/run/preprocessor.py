@@ -722,21 +722,25 @@ def run_preprocessor(
                 _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
             _print("  Harness execution: ALL MODES PASSED")
 
-            # ── 3d. Shape fixer: verify shapes match benchmark file ──
-            if benchmarks and _uta_model:
-                _print("--- Step 3d: Shape fixer (verify shapes vs benchmark) ---")
+            # ── 3d. Shape fixer: verify shapes match benchmark/test file ──
+            if (benchmarks or tests) and _uta_model:
+                _print("--- Step 3d: Shape fixer (verify shapes) ---")
                 try:
                     from minisweagent.agents.shape_fixer_agent import run_shape_fixer
 
                     harness_file = Path(extract_harness_path(test_command))
-                    # Read the shape source file that UTA wrote
+                    # Prefer UTA's declared source, then top benchmark, then top test
+                    bench_file = None
                     _shapes_source_file = harness_file.parent / "harness_shapes_source.txt"
                     if _shapes_source_file.is_file():
                         bench_file = Path(_shapes_source_file.read_text().strip())
                         _print(f"  Shape source (from UTA): {bench_file}")
-                    else:
+                    if (bench_file is None or not bench_file.is_file()) and benchmarks:
                         bench_file = Path(benchmarks[0]["file"])
-                        _print(f"  Shape source (fallback to top benchmark): {bench_file}")
+                        _print(f"  Shape source (top benchmark): {bench_file}")
+                    if (bench_file is None or not bench_file.is_file()) and tests:
+                        bench_file = Path(tests[0]["file"])
+                        _print(f"  Shape source (fallback to top test): {bench_file}")
                     if harness_file.is_file() and bench_file.is_file():
                         shapes_ok = run_shape_fixer(
                             model=_uta_model,
