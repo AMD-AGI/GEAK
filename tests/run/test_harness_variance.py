@@ -108,15 +108,14 @@ def run_mode(harness_path, mode, repo_root=None, gpu_id=0, timeout=300):
 def extract_shapes_used(stdout):
     """Parse GEAK_SHAPES_USED=[(a,b,c), ...] from stdout.
 
-    Returns a sorted list of tuples, or None if not found.
+    Returns the list exactly as printed (no re-sorting).
     """
     m = re.search(r"GEAK_SHAPES_USED=(\[.*\])", stdout)
     if not m:
         return None
     try:
         import ast
-        shapes = ast.literal_eval(m.group(1))
-        return sorted(tuple(s) for s in shapes)
+        return ast.literal_eval(m.group(1))
     except (ValueError, SyntaxError):
         return None
 
@@ -182,9 +181,9 @@ def test_kernel_variance(kernel_name, kernel_url, base_dir, num_runs=5, gpu_id=0
             continue
 
         run_data["harness_path"] = str(harness)
-        run_data["harness_source"] = harness.read_text()
         repo_root = get_repo_root(str(run_dir))
 
+        # Run each mode and capture GEAK_SHAPES_USED
         mode_to_key = {
             "correctness": "correctness_shapes",
             "profile": "profile_shapes",
@@ -209,6 +208,9 @@ def test_kernel_variance(kernel_name, kernel_url, base_dir, num_runs=5, gpu_id=0
             status = "OK" if ok else "FAIL"
             count = len(shapes) if shapes else "?"
             print(f"    --{mode}: {status} ({count} shapes)")
+
+        # Read harness source AFTER all modes ran (shape fixer may have edited it)
+        run_data["harness_source"] = harness.read_text()
 
         bc = len(run_data["bench_shapes"]) if run_data["bench_shapes"] else 0
         fc = len(run_data["full_shapes"]) if run_data["full_shapes"] else 0
@@ -247,43 +249,20 @@ def analyze_variance(kernel_name, runs):
         report[f"{label}_shape_counts"] = [len(s) if s else 0 for s in shapes_per_run]
 
         if len(non_none) >= 2:
-            # Strict: are the raw tuples byte-identical across runs?
-            all_same = all(s == non_none[0] for s in non_none)
-            report[f"{label}_strict_deterministic"] = all_same
+            # Same output: are GEAK_SHAPES_USED lists identical across runs?
+            all_same = all(str(s) == str(non_none[0]) for s in non_none)
+            report[f"{label}_deterministic"] = all_same
+            report[f"{label}_shapes_deterministic"] = all_same
+
+            # Same count: do all runs have the same number of shapes?
+            counts = [len(s) for s in non_none]
+            report[f"{label}_count_consistent"] = len(set(counts)) == 1
 
             if not all_same:
-                intersection = set(map(tuple, non_none[0]))
-                union = set(map(tuple, non_none[0]))
-                for s in non_none[1:]:
-                    s_set = set(map(tuple, s))
-                    intersection &= s_set
-                    union |= s_set
-                report[f"{label}_strict_intersection"] = len(intersection)
-                report[f"{label}_strict_union"] = len(union)
-
-            # Equivalent: same workload regardless of tuple packing?
-            # Extract numeric fingerprint: sorted set of all numbers in each config
-            def _numeric_fingerprint(shapes_list):
-                fingerprints = []
-                for shape in shapes_list:
-                    nums = set()
-                    def _collect(v):
-                        if isinstance(v, (int, float)) and not isinstance(v, bool):
-                            nums.add(v)
-                        elif isinstance(v, (list, tuple)):
-                            for item in v:
-                                _collect(item)
-                    _collect(shape)
-                    fingerprints.append(frozenset(nums))
-                return sorted(fingerprints, key=lambda s: sorted(s))
-
-            fps = [_numeric_fingerprint(s) for s in non_none]
-            all_equiv = all(fp == fps[0] for fp in fps)
-            report[f"{label}_equivalent"] = all_equiv
-            report[f"{label}_shapes_deterministic"] = all_equiv
+                report[f"{label}_run_0_sample"] = str(non_none[0][:3])
+                report[f"{label}_run_1_sample"] = str(non_none[1][:3])
         else:
-            report[f"{label}_strict_deterministic"] = None
-            report[f"{label}_equivalent"] = None
+            report[f"{label}_deterministic"] = None
             report[f"{label}_shapes_deterministic"] = None
 
     # Subset relationship: benchmark ⊂ full_benchmark
@@ -331,17 +310,12 @@ def analyze_variance(kernel_name, runs):
     for key, label in [("benchmark", "benchmark"), ("full_benchmark", "full-benchmark"),
                         ("correctness", "correctness"), ("profile", "profile")]:
         counts = report.get(f"{key}_shape_counts", [])
-        strict = report.get(f"{key}_strict_deterministic")
-        equiv = report.get(f"{key}_equivalent")
-        strict_str = "YES" if strict else ("NO" if strict is False else "N/A")
-        equiv_str = "YES" if equiv else ("NO" if equiv is False else "N/A")
-        print(f"  --{label}: strict={strict_str}, equivalent={equiv_str}, counts={counts}")
-        if strict is False and equiv:
-            print(f"    (tuples differ but same workload -- OK)")
-        elif equiv is False:
-            inter = report.get(f"{key}_strict_intersection", "?")
-            union = report.get(f"{key}_strict_union", "?")
-            print(f"    intersection={inter}, union={union}")
+        det = report.get(f"{key}_deterministic")
+        det_str = "YES" if det else ("NO" if det is False else "N/A")
+        print(f"  --{label}: deterministic={det_str}, counts={counts}")
+        if det is False:
+            print(f"    run_0: {report.get(f'{key}_run_0_sample', '?')}")
+            print(f"    run_1: {report.get(f'{key}_run_1_sample', '?')}")
 
     sub = report.get("benchmark_subset_of_full")
     if sub is not None:
@@ -476,19 +450,23 @@ def main():
     print(f"\n{'='*60}")
     print("FINAL SUMMARY")
     print(f"{'='*60}")
-    all_equivalent = True
+    all_pass = True
     for name, report in all_reports.items():
-        equiv = report.get("benchmark_equivalent", False)
-        strict = report.get("benchmark_strict_deterministic", False)
-        src_ident = report.get("harness_source_identical", False)
-        if not equiv:
-            all_equivalent = False
-        status = "PASS" if equiv else "FAIL"
-        print(f"  [{status}] {name}: equivalent={equiv}, strict={strict}, source_identical={src_ident}")
+        bench_det = report.get("benchmark_deterministic", False)
+        full_det = report.get("full_benchmark_deterministic", False)
+        all_modes_pass = all(
+            report.get(f"{m}_pass_rate", 0) == 1.0
+            for m in ["correctness", "profile", "benchmark", "full-benchmark"]
+        )
+        passed = bench_det and full_det and all_modes_pass
+        if not passed:
+            all_pass = False
+        status = "PASS" if passed else "FAIL"
+        print(f"  [{status}] {name}: bench_det={bench_det}, full_det={full_det}, modes_pass={all_modes_pass}")
 
     print(f"\nReports saved to: {base_dir}")
     print(f"Harness files saved as harness_run_N.py for manual review (test 2)")
-    sys.exit(0 if all_equivalent else 1)
+    sys.exit(0 if all_pass else 1)
 
 
 if __name__ == "__main__":
