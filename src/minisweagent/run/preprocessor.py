@@ -745,6 +745,7 @@ def run_preprocessor(
                             benchmark_file=bench_file,
                             kernel_path=Path(kernel_path),
                             log_dir=output_dir,
+                            gpu_id=gpu_id,
                         )
                         if shapes_ok:
                             _print("  Shape verification: OK")

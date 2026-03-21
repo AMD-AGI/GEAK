@@ -30,47 +30,48 @@ class ShapeFixerAgent(DefaultAgent):
 
 
 SYSTEM_PROMPT = """\
-You are ShapeFixerAgent. Your job is to ensure the harness uses the
-EXACT shapes from the benchmark file. You do this by RUNNING the
-benchmark's shape code, not by reading and interpreting it.
+You are ShapeFixerAgent -- a meta-validation agent. Your job is to
+verify the harness correctly wraps the benchmark file, and fix it if not.
 
 You have TWO files:
   1. SHAPE SOURCE FILE (benchmark file)
   2. HARNESS FILE
 
-Steps (follow exactly):
+You MUST follow these steps exactly:
 
-Step 1: Read the SHAPE SOURCE FILE. Find the code that builds configs
-  (look for x_vals_list, for-loops, itertools.product, config lists, etc.)
+Step 1: Read the SHAPE SOURCE FILE. Find the code that builds the
+  config list (for-loops, x_vals_list, itertools.product, etc.).
 
-Step 2: Write a small standalone Python script (e.g. /tmp/extract_shapes.py)
-  that executes ONLY the shape-building code from the source file and
-  prints the resulting config list as JSON. For example:
+Step 2: Write /tmp/extract_shapes.py that runs ONLY that shape-building
+  code and prints the config list as JSON. Copy the loop VERBATIM from
+  the source file. Do NOT import the full benchmark module. Example:
     import json
     configs = []
     for SEQ_LEN in [512, 1024, 2048, 4096, 8192, 16384, 32768]:
-        configs.append(("LeanAttentionPaged", 1, 32, 32, SEQ_LEN, 128))
+        configs.append((1, 32, 32, SEQ_LEN, 128))
     print(json.dumps(configs))
-  Copy the loop/product/list VERBATIM from the source file.
-  Do NOT import the full benchmark module (it may need GPU/args).
 
-Step 3: Run the extraction script. Capture the EXACT output.
-  These are the ground-truth shapes.
+Step 3: Run: python3 /tmp/extract_shapes.py
+  This output is GROUND TRUTH (Python is deterministic).
 
-Step 4: Read the HARNESS FILE. Find its shape configs.
+Step 4: Run the harness with --full-benchmark and capture GEAK_SHAPES_USED.
+  If the harness needs PYTHONPATH, set it.
 
-Step 5: Compare. If the harness configs match the ground truth:
-  print SHAPES_OK. STOP.
+Step 5: Compare GROUND TRUTH (step 3) with GEAK_SHAPES_USED (step 4).
+  - Same config count?
+  - Same values (ignore tuple packing differences, compare the actual
+    dimension values that vary)?
 
-Step 6: If different: replace the harness config definitions with the
-  exact values from step 3. Print SHAPES_FIXED. STOP.
+Step 6: If they match: print SHAPES_VERIFIED. STOP.
+
+Step 7: If they differ: edit the harness to use the EXACT ground truth
+  configs from step 3. Paste them as a literal list. Then re-run
+  --full-benchmark to confirm. Print SHAPES_FIXED. STOP.
 
 RULES:
-- The extraction script makes shapes DETERMINISTIC (Python is deterministic).
-- Do NOT interpret shapes by reading -- EXECUTE code to get them.
-- Do NOT read any file other than the two given.
-- Do NOT change anything except shape/config definitions in the harness.
-- STOP immediately after SHAPES_OK or SHAPES_FIXED.
+- EXECUTE code to get shapes, do NOT interpret by reading.
+- Do NOT explore other files.
+- STOP immediately after SHAPES_VERIFIED or SHAPES_FIXED.
 """
 
 
@@ -82,8 +83,9 @@ def run_shape_fixer(
     benchmark_file: Path,
     kernel_path: Path | None = None,
     log_dir: Path | None = None,
+    gpu_id: int = 0,
 ) -> bool:
-    """Run the shape fixer agent. Returns True if shapes were OK or fixed."""
+    """Run the shape fixer agent. Returns True if shapes were verified or fixed."""
     try:
         agent_config, _ = load_agent_config("mini_shape_fixer")
     except Exception:
@@ -115,16 +117,22 @@ def run_shape_fixer(
     task = (
         f"SHAPE SOURCE FILE: {benchmark_file}\n"
         f"HARNESS FILE: {harness_path}\n"
-        f"\n1. Read {benchmark_file} -- find the shape-building code\n"
-        f"2. Write /tmp/extract_shapes.py that runs ONLY that shape code and prints JSON\n"
-        f"3. Run: python3 /tmp/extract_shapes.py\n"
-        f"4. Compare output with shapes in {harness_path}\n"
-        f"5. If same: SHAPES_OK. If different: fix harness, SHAPES_FIXED.\n"
+        f"REPO ROOT: {repo}\n"
+        f"GPU: HIP_VISIBLE_DEVICES={gpu_id}\n"
+        f"\n"
+        f"1. Read {benchmark_file} -- find the shape-building code\n"
+        f"2. Write /tmp/extract_shapes.py -- copy that code, print JSON\n"
+        f"3. Run: python3 /tmp/extract_shapes.py  (ground truth)\n"
+        f"4. Run: PYTHONPATH={repo} HIP_VISIBLE_DEVICES={gpu_id} "
+        f"GEAK_BENCHMARK_ITERATIONS=2 "
+        f"python3 {harness_path} --full-benchmark 2>&1 | grep GEAK_SHAPES_USED\n"
+        f"5. Compare ground truth (step 3) with GEAK_SHAPES_USED (step 4)\n"
+        f"6. If same: SHAPES_VERIFIED. If different: fix harness, SHAPES_FIXED.\n"
     )
 
     exit_status, result = agent.run(task)
 
-    if "SHAPES_OK" in (result or ""):
+    if "SHAPES_VERIFIED" in (result or ""):
         return True
     if "SHAPES_FIXED" in (result or ""):
         return True
