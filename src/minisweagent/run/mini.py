@@ -309,31 +309,29 @@ def main(
     agent_config["num_parallel"] = num_parallel or 1
     agent_config["gpu_ids"] = parsed_gpu_ids
     
+    # Configure repo path for worktree management (unified for single and parallel)
+    repo_path = repo or config.get("patch", {}).get("repo")
+    if repo_path:
+        p = Path(repo_path)
+        if not p.exists():
+            resolved = _resolve_path_case(p)
+            if resolved is not None:
+                p = resolved
+        agent_config["repo"] = str(p.resolve())
+    
     if num_parallel and num_parallel > 1:
         console.print(f"[bold cyan]Using Parallel Mode: {num_parallel} agents[/bold cyan]")
         console.print(f"[dim]GPU IDs: {parsed_gpu_ids}[/dim]")
-        
-        # Configure repo path for parallel execution (preserve filesystem case)
-        repo_path = repo or config.get("patch", {}).get("repo")
-        if repo_path:
-            p = Path(repo_path)
-            if not p.exists():
-                resolved = _resolve_path_case(p)
-                if resolved is not None:
-                    p = resolved
-            agent_config["repo"] = str(p.resolve())
+        if agent_config.get("repo"):
             console.print(f"[dim]Repository: {agent_config['repo']}[/dim]")
         else:
             console.print("[bold yellow]Warning: No repo path specified for parallel execution[/bold yellow]")
     else:
         console.print(f"[bold cyan]Using Single Agent Mode[/bold cyan]")
         console.print(f"[dim]Using GPU: {parsed_gpu_ids[0]}[/dim]")
-        # Set HIP_VISIBLE_DEVICES for single agent GPU isolation
-        env.config.env = env.config.env or {}
-        env.config.env["HIP_VISIBLE_DEVICES"] = str(parsed_gpu_ids[0])
-        if repo:
-            env.config.cwd = str(Path(repo).resolve())
-            console.print(f"[dim]Working directory: {env.config.cwd}[/dim]")
+        # HIP_VISIBLE_DEVICES is set by parallel_agent.py in run_parallel
+        if agent_config.get("repo"):
+            console.print(f"[dim]Repository: {agent_config['repo']}[/dim]")
             
     # Create and run agent
     agent = agent_class(model, env, **agent_config)
