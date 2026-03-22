@@ -214,6 +214,7 @@ class DefaultAgent:
         self._traj_last_saved_idx = -1
         self.add_message("system", self.render_template(self.config.system_template))
         self.add_message("user", self.render_template(self.config.instance_template))
+        
         while True:
             try:
                 self.step()
@@ -221,7 +222,6 @@ class DefaultAgent:
                 self.add_message("user", str(e))
             except TerminatingException as e:
                 self.add_message("user", str(e))
-                self._run_select_patch_agent()
                 return type(e).__name__, str(e)
             finally:
                 self._save_traj()
@@ -344,45 +344,6 @@ class DefaultAgent:
         if hasattr(self, '_test_perf_context'):
             self.patch_counter = self._test_perf_context.patch_counter
         return result
-
-    def _run_select_patch_agent(self) -> None:
-        # Always try to run select patch agent if patch_output_dir is configured
-        if not self.config.patch_output_dir:
-            return
-
-        base_patch_dir = Path(self.config.patch_output_dir).resolve()
-        if not base_patch_dir.exists():
-            return
-
-        try:
-            import yaml
-            from minisweagent.config import get_config_path
-            from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
-            from minisweagent.agents.select_patch_agent import SelectPatchAgent
-
-            parallel_ids: list[int] = []
-            for d in base_patch_dir.glob("parallel_*"):
-                if d.is_dir():
-                    m = re.match(r"parallel_(\d+)$", d.name)
-                    if m:
-                        parallel_ids.append(int(m.group(1)))
-            num_parallel = (max(parallel_ids) + 1) if parallel_ids else 1
-
-            config_path = get_config_path("mini_select_patch")
-            config = yaml.safe_load(config_path.read_text())
-            agent_config = config.get("agent", {})
-
-            env_config = LocalEnvironmentConfig(cwd=str(base_patch_dir))
-            env = LocalEnvironment(**env_config.__dict__)
-            select_agent = SelectPatchAgent(self.model, env, **agent_config)
-            select_agent.log_file = base_patch_dir / "select_agent.log"
-
-            task = select_agent.setup_selection_task(base_patch_dir, num_parallel, self.config.metric)
-            if task:
-                select_agent.run(task, _skip_select_patch=True)
-        except Exception:
-            # Best-effort: selection should not block returning the agent's final output.
-            return
 
     def execute_action(self, action: dict) -> dict:
         try:

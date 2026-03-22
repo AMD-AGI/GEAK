@@ -62,45 +62,25 @@ class ParallelAgent(DefaultAgent):
         # patch_results, patch_counter, log_file, base_repo_path are now inherited from DefaultAgent
         self._last_action_hash: str | None = None
 
-    # _is_git_repo(), _diff_excludes(), add_message, _log_message are inherited from DefaultAgent
-
     def run(self, task: str, **kwargs) -> tuple[str, str] | Any:
         num_parallel = self.config.num_parallel or 1
         console = kwargs.get("console")
 
-        base_patch_dir = (Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")).resolve()
-        model_factory = kwargs.get("model_factory") or (lambda: self.model)
-        env_factory = kwargs.get("env_factory") or (lambda: self.env)
-
-        if num_parallel == 1:
-            # For single run, save patches directly to base_patch_dir (no parallel_0 subdirectory)
-            base_patch_dir.mkdir(parents=True, exist_ok=True)
-            prev_patch_output_dir = self.config.patch_output_dir
-            self.config.patch_output_dir = str(base_patch_dir)
-            try:
-                exit_status, result = super().run(task, **(kwargs | {"_skip_select_patch": True}))
-            finally:
-                self.config.patch_output_dir = prev_patch_output_dir
-
-            metric = self.config.metric or "Extract the performance metrics from the test output and calculate the best speedup."
-            if console:
-                console.print("\n[bold green]Selecting best patch from 1 run...[/bold green]")
-            best_result = self._select_best_from_parallel_runs(base_patch_dir, 1, metric, model_factory)
-            if best_result and console and best_result.llm_conclusion:
-                console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
-                console.print(best_result.llm_conclusion)
-            return exit_status, result
-
+        # Validate repo path (required for worktree management)
         if not self.config.repo:
             raise ValueError("Please specify the repository path.")
         repo_path = (Path(self.config.repo) if isinstance(self.config.repo, (str, Path)) else self.config.repo).resolve()
         if not repo_path.exists():
             raise ValueError(f"Repository path does not exist: {repo_path}")
 
+        base_patch_dir = (Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")).resolve()
+        model_factory = kwargs.get("model_factory") or (lambda: self.model)
+        env_factory = kwargs.get("env_factory") or (lambda: self.env)
         is_git_repo = (repo_path / ".git").exists()
         output = kwargs.get("output")
         save_traj_fn = kwargs.get("save_traj_fn")
 
+        # Unified logic: always use run_parallel with git worktree management
         results = self.run_parallel(
             num_parallel=num_parallel,
             repo_path=repo_path,
@@ -370,20 +350,113 @@ class ParallelAgent(DefaultAgent):
             pass  # If git command fails, skip copying untracked files
 
     @staticmethod
-    def _create_copy_workdir(repo_path: Path, workdir_path: Path) -> Path:
-        """Create an isolated work directory by copying `repo_path` (for non-git repos)."""
-        if workdir_path.exists():
+    def _neutralize_nested_git_repos(repo_path: Path) -> list[Path]:
+        """Rename .git directories in nested repos to .git.bak.
+        
+        This prevents git from treating nested directories as submodules,
+        allowing all content to be properly added to the parent repo.
+        
+        Returns list of paths that were renamed (for potential restoration).
+        """
+        renamed = []
+        for git_dir in repo_path.rglob(".git"):
+            # Skip the repo's own .git (if it exists)
+            if git_dir.parent == repo_path:
+                continue
+            # Only process directories (not .git files from worktrees)
+            if git_dir.is_dir():
+                backup_path = git_dir.parent / ".git.bak"
+                try:
+                    if backup_path.exists():
+                        shutil.rmtree(backup_path)
+                    git_dir.rename(backup_path)
+                    renamed.append(backup_path)
+                except Exception:
+                    pass  # Best effort
+        return renamed
+
+    @staticmethod
+    def _has_valid_head(repo_path: Path) -> bool:
+        """Check if the git repo has a valid HEAD (at least one commit)."""
+        try:
+            ParallelAgent._ensure_safe_directory(repo_path)
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _init_as_git_repo(repo_path: Path) -> None:
+        """Initialize a non-git repo as a git repository with an initial commit.
+        
+        This allows unified git diff management for both git and non-git repos.
+        Only initializes if the repo itself doesn't have a .git directory
+        (ignores parent directories that might be git repos).
+        
+        Also handles nested git repos by neutralizing their .git directories
+        so all content is properly included in the parent repo.
+        
+        If .git exists but has no valid HEAD (incomplete init), it will be removed
+        and re-initialized.
+        """
+        git_dir = repo_path / ".git"
+        
+        # Check if .git exists and has valid HEAD
+        if git_dir.exists():
+            if ParallelAgent._has_valid_head(repo_path):
+                return  # Already a valid git repo
+            # Invalid git repo (no HEAD) - remove and reinitialize
             try:
-                shutil.rmtree(workdir_path)
+                if git_dir.is_dir():
+                    shutil.rmtree(git_dir)
+                else:
+                    git_dir.unlink()
             except Exception:
                 pass
-        workdir_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(
-            repo_path,
-            workdir_path,
-            ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
-        )
-        return workdir_path
+        
+        try:
+            # Neutralize nested git repos first (rename .git -> .git.bak)
+            # This ensures nested content is added as regular files, not submodules
+            ParallelAgent._neutralize_nested_git_repos(repo_path)
+            
+            # Initialize git repo (use --initial-branch to ensure new repo creation)
+            subprocess.run(
+                ["git", "init", "--initial-branch=main"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            
+            # Add to safe.directory to avoid ownership issues
+            ParallelAgent._ensure_safe_directory(repo_path)
+            
+            # Add all files
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            
+            # Create initial commit with inline user config (avoids config issues when parent is git repo)
+            subprocess.run(
+                ["git", "-c", "user.email=agent@local", "-c", "user.name=Agent",
+                 "commit", "-m", "Initial commit (auto-generated for worktree management)"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr if e.stderr else (e.stdout if e.stdout else str(e))
+            raise RuntimeError(f"Failed to initialize git repo: {error_msg}") from e
 
     @staticmethod
     def _replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
@@ -446,16 +519,21 @@ class ParallelAgent(DefaultAgent):
         repo_path_resolved = repo_path.resolve()
         repo_path_str = str(repo_path_resolved)
         
+        # Initialize non-git repos as git repos for unified worktree management
+        if not is_git_repo:
+            if console:
+                console.print(f"[bold yellow]Initializing non-git repo as git for worktree management...[/bold yellow]")
+            cls._init_as_git_repo(repo_path_resolved)
+            is_git_repo = True  # Now it's a git repo
+        
         if gpu_ids and len(gpu_ids) < num_parallel:
             if console:
                 console.print(f"[bold yellow]Warning: Only {len(gpu_ids)} GPU IDs provided for {num_parallel} parallel agents. Some agents will not have GPU isolation.[/bold yellow]")
         
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
-            if is_git_repo:
-                worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
-            else:
-                worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
+            # All repos use git worktree (non-git repos are initialized as git above)
+            worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             worktree_path_str = str(worktree_path.resolve())
             
             if console:

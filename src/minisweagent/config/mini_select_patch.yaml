@@ -15,7 +15,7 @@ agent:
     - You MUST compute and report the FINAL speedup by reading:
       - the baseline test log, and
       - the selected patch's test log (prefer the log inside the patch's own `parallel_*` folder).
-    - If the same patch exists in multiple parallel folders, prefer `parallel_1`'s test log for the final speedup calculation.
+    - If the same patch exists in multiple parallel folders, prefer `parallel_0`'s test log for the final speedup calculation.
     - Some runs may store patch files directly under the work directory (no `parallel_*` folders). In that case, treat those files as belonging to agent id 0.
     - When parsing logs to compute the user metric, you MUST follow the user provided metric exactly:
     - You MUST only consider aligned points by benchmark entry (same benchmark line / same test name), and enforce equal counts:

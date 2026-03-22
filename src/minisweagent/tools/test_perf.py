@@ -75,33 +75,19 @@ class TestPerfTool:
             self.context.log_fn(message)
     
     def _get_patch_content(self) -> str:
-        """Get current changes as patch content."""
+        """Get current changes as patch content using git diff.
+        
+        All repos (including originally non-git ones) are managed as git repos,
+        so we always use git diff for unified diff management.
+        """
         ctx = self.context
         cwd = ctx.cwd
         
-        if self._is_git_repo(Path(cwd)):
-            result = subprocess.run(
-                "git add -N . && git diff",
-                cwd=cwd, capture_output=True, text=True, timeout=10, shell=True
-            )
-            return result.stdout
-        
-        if ctx.base_repo_path and ctx.base_repo_path.exists():
-            excludes = [".git", "__pycache__"]
-            if ctx.patch_output_dir:
-                run_dir_name = Path(ctx.patch_output_dir).resolve().parent.name
-                if run_dir_name:
-                    excludes.append(run_dir_name)
-            
-            result = subprocess.run(
-                ["diff", "-ruN", "--exclude=.git", "--exclude=__pycache__",
-                 *[f"--exclude={p}" for p in excludes if p not in (".git", "__pycache__")],
-                 str(ctx.base_repo_path), str(cwd)],
-                capture_output=True, text=True, timeout=30
-            )
-            return result.stdout
-        
-        return ""
+        result = subprocess.run(
+            "git add -N . && git diff",
+            cwd=cwd, capture_output=True, text=True, timeout=30, shell=True
+        )
+        return result.stdout
     
     def _run_test(self) -> tuple[str, bool, int]:
         """Run test command and return (output, passed, returncode)."""
@@ -205,14 +191,3 @@ class TestPerfTool:
         output_dir = Path(self.context.patch_output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / f"{patch_name}_test.txt").write_text(test_output)
-    
-    @staticmethod
-    def _is_git_repo(path: Path) -> bool:
-        try:
-            subprocess.run(
-                ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
-                check=True, capture_output=True, text=True
-            )
-            return True
-        except subprocess.CalledProcessError:
-            return False
