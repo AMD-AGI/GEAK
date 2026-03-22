@@ -53,7 +53,10 @@ class BashCommand:
             }
         else:
             result = subprocess.run(command, shell=True, capture_output=True, text=True)
+            output = result.stdout.strip() or result.stderr.strip()
+            if result.returncode != 0:
+                output = output or "Command failed with no output."
             return {
-                "output": result.stdout.strip() or result.stderr.strip(),
+                "output": output or "Bash command executed successfully.",
                 "returncode": result.returncode,
             }
