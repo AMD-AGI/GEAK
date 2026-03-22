@@ -142,6 +142,7 @@ agent:
   step_limit: 0.
   cost_limit: 0.
   mode: yolo
+  use_skills: True
 env:
   env:
     PAGER: cat
