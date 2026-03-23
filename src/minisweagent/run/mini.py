@@ -49,6 +49,7 @@ from minisweagent.run.utils.config_editor import load_and_merge_configs
 from minisweagent.run.utils.task_parser import _resolve_path_case
 from minisweagent.utils.log import logger
 from minisweagent.agents.unit_test_agent import run_unit_test_agent
+from minisweagent.agents.rocm_expo_prim_agent import run_rocm_expo_prim_agent
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
 DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
@@ -84,6 +85,20 @@ More information about the usage: [bold green]https://mini-swe-agent.com/latest/
 [/not dim]
 """
 
+def _setup_rocm_expo_prompt_folder(
+    task: str | None,
+    task_content: str | None,
+) -> tuple[Path, str]:
+    """Create a timestamped prompt folder under /tmp, resolve task content from task file or task_content, write kernel_task.txt, and return (folder, content)."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    prompt_folder = Path("/tmp") / f"geak_{timestamp}_prompt"
+    prompt_folder.mkdir(parents=True, exist_ok=True)
+    if task and Path(task).resolve().is_file():
+        rocm_content = Path(task).resolve().read_text(encoding="utf-8")
+    else:
+        rocm_content = task_content or ""
+    (prompt_folder / "kernel_task.txt").write_text(rocm_content, encoding="utf-8")
+    return prompt_folder, rocm_content
 
 # fmt: off
 @app.command(help=_HELP_TEXT)
@@ -334,24 +349,46 @@ def main(
         if repo:
             env.config.cwd = str(Path(repo).resolve())
             console.print(f"[dim]Working directory: {env.config.cwd}[/dim]")
-            
-    # Create and run agent
-    agent = agent_class(model, env, **agent_config)
-    agent.log_file = agent_log_file
-    console.print(f"[dim]Agent log: {agent_log_file}[/dim]")
-    
-    try:
-        exit_status, result = agent.run(
-            task_content,
-            output=output,
-            save_traj_fn=save_traj,
-            console=console,
-            model_factory=lambda: get_model(model_name, config.get("model", {})),
-            env_factory=lambda: (MCPEnabledEnvironment if rag else LocalEnvironment)(**copy.deepcopy(_env_kwargs)),
-        )
-    except Exception as e:
-        logger.error(f"Error running agent: {e}", exc_info=True)
-        exit_status, result = type(e).__name__, str(e)
+
+    # ROCm expo: run prim agent first so we have top1/top2/top3 before creating the agent (agent_config can be changed per iteration below)
+    _rocm_contents: list[str] | None = None
+    if rocm_expo and task_content:
+        prompt_folder, _rocm_content = _setup_rocm_expo_prompt_folder(task, task_content)
+        _task_paths = run_rocm_expo_prim_agent(prompt_folder, _rocm_content, model_name, yolo, console)
+        _rocm_contents = [p.read_text(encoding="utf-8") for p in _task_paths]
+    # run contents: top1/top2/top3 + main task or just main task if no rocm expo
+    _run_contents = (_rocm_contents + [task_content]) if _rocm_contents else [task_content]
+
+    # Run agent for each content in _run_contents
+    patch_output_dir = agent_config['patch_output_dir']
+    for _run_idx, _content in enumerate(_run_contents):
+        if rocm_expo and (_run_idx != len(_run_contents) - 1):
+            console.print(f"\n[bold cyan]--- ROCm expo iteration {_run_idx + 1}/{len(_run_contents) - 1} ---[/bold cyan]")
+            # Change agent_config per iteration (e.g. patch_output_dir = optimization_logs/1/, 2/, 3/)
+            agent_config['patch_output_dir'] = os.path.join(patch_output_dir, f"rocm_expo_{_run_idx + 1}/")
+            agent_log_file = os.path.join(agent_config['patch_output_dir'], "mini_agent.log")
+        else:
+            console.print(f"\n[bold cyan]--- User specified task run---[/bold cyan]")
+            agent_config['patch_output_dir'] = patch_output_dir
+            agent_log_file = os.path.join(agent_config['patch_output_dir'], "mini_agent.log")
+
+        # Create and run agent
+        agent = agent_class(model, env, **agent_config)
+        agent.log_file = agent_log_file
+        console.print(f"[dim]Agent log: {agent_log_file}[/dim]")
+        
+        try:
+            exit_status, result = agent.run(
+                task_content,
+                output=output,
+                save_traj_fn=save_traj,
+                console=console,
+                model_factory=lambda: get_model(model_name, config.get("model", {})),
+                env_factory=lambda: (MCPEnabledEnvironment if rag else LocalEnvironment)(**copy.deepcopy(_env_kwargs)),
+            )
+        except Exception as e:
+            logger.error(f"Error running agent: {e}", exc_info=True)
+            exit_status, result = type(e).__name__, str(e)
     
     return agent
 
