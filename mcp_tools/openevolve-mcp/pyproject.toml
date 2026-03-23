@@ -1,0 +1,14 @@
+[project]
+name = "openevolve-mcp"
+version = "0.1.0"
+description = "OpenEvolve Optimizer MCP Server"
+dependencies = [
+    "fastmcp>=0.1.0",
+]
+
+[project.scripts]
+openevolve-mcp = "openevolve_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
