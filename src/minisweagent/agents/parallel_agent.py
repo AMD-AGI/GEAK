@@ -62,7 +62,7 @@ class ParallelAgent(DefaultAgent):
         # patch_results, patch_counter, log_file, base_repo_path are now inherited from DefaultAgent
         self._last_action_hash: str | None = None
 
-    def run(self, task: str, **kwargs) -> tuple[str, str] | Any:
+    def run(self, task: str, **kwargs) -> BestPatchResult | None:
         num_parallel = self.config.num_parallel or 1
         console = kwargs.get("console")
 
@@ -105,9 +105,8 @@ class ParallelAgent(DefaultAgent):
             console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
             console.print(best_result.llm_conclusion)
 
-        if results:
-            return results[0][2], results[0][3]
-        return "Error", "All parallel agents failed"
+        # Return the best result object
+        return best_result
 
 
     @staticmethod
@@ -567,6 +566,7 @@ class ParallelAgent(DefaultAgent):
             if gpu_ids and agent_id < len(gpu_ids):
                 gpu_id = gpu_ids[agent_id]
                 env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+                env_config_dict["env"]["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
                 if console:
                     # Use lock to ensure console output completes before stdout redirection
                     with _stdout_lock:
