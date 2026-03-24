@@ -1,50 +1,62 @@
-name: Fire Test
+name: Smoke Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  smoke:
+    name: GEAK smoke test (silu kernel)
+    runs-on: geak-benchmark-5kh27
+    timeout-minutes: 60
+
+    env:
+      AMD_LLM_API_KEY: ${{ secrets.AMD_LLM_API_KEY }}
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v5
 
-    - name: Set up Python
-      uses: actions/setup-python@v6
-      with:
-        python-version: '3.11'
+      - name: Install GEAK
+        run: pip install -e '.[full]'
 
-    - name: Install package
-      run: |
-        pip install -e .
+      - name: Verify CLI
+        run: geak --help
 
-    - name: Configure mini-extra
-      run: |
-        mini-extra config set MSWEA_CONFIGURED 'true'
+      - name: Prepare workspace
+        run: |
+          WORK=/tmp/geak-smoke-$$
+          echo "SMOKE_DIR=$WORK" >> "$GITHUB_ENV"
+          mkdir -p "$WORK"
+          cp -r tests/test_data/smoke_kernel/silu/* "$WORK/"
 
-    - name: Clone test repository
-      run: |
-        git clone https://github.com/swe-agent/test-repo
+      - name: Verify kernel compiles
+        working-directory: ${{ env.SMOKE_DIR }}
+        run: |
+          make
+          ./applications_silu
 
-    - name: Change to test repo directory
-      run: cd test-repo
-    - name: Run mini with task
-      working-directory: test-repo
-      env:
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      run: |
-        mini --exit-immediately -y --model openai/gpt-5-mini -t "$(cat << 'EOF'
-        I'm running missing_colon.py as follows:
+      - name: Run GEAK optimization
+        working-directory: ${{ env.SMOKE_DIR }}
+        run: |
+          geak \
+            -c geak \
+            --repo "$SMOKE_DIR" \
+            --yolo \
+            --exit-immediately \
+            --max-rounds 1 \
+            --no-heterogeneous \
+            -t "Optimize the silu_mul_kernel in silu.hip for better performance on AMD MI300X. The kernel computes SiLU activation (x * sigmoid(x)) fused with element-wise multiplication on bf16 data."
 
-        division(23, 0)
+      - name: Verify output
+        run: |
+          echo "=== Smoke test completed ==="
+          if [ -f "$SMOKE_DIR/output.traj.json" ]; then
+            echo "Trajectory file found"
+          fi
+          ls -la "$SMOKE_DIR"/optimization_logs/*/best_results.json 2>/dev/null && \
+            echo "Best results found" || true
+          echo "=== Smoke test PASSED ==="
 
-        but I get the following error:
-
-          File "/Users/fuchur/Documents/24/git_sync/swe-agent-test-repo/tests/./missing_colon.py", line 4
-            def division(a: float, b: float) -> float
-                                                     ^
-        SyntaxError: invalid syntax
-        EOF
-        )"
+      - name: Cleanup
+        if: always()
+        run: rm -rf "$SMOKE_DIR"

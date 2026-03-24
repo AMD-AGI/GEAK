@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SubAgentConfig:
     """Configuration for sub-agent behavior."""
+
     model_name: str = "claude-opus-4.5"
     api_key: str | None = None
     system_prompt: str | None = None
@@ -27,13 +28,13 @@ class SubAgentConfig:
 class RAGFilterSubAgent:
     """
     Sub-agent for filtering and summarizing RAG database results.
-    
+
     This sub-agent processes retrieved chunks from RAG queries by:
     1. Evaluating relevance
     2. Removing duplicates
     3. Summarizing key points
     """
-    
+
     DEFAULT_SYSTEM_PROMPT = """You are a subagent in a code generation/optimization system. Your task is to process retrieved chunks from the RAG database based on the user's query.
 
 Input: 
@@ -92,11 +93,11 @@ Instructions:
    - If no relevant content remains, output exactly:
      "No relevant information found."
    """
-    
+
     def __init__(self, config: SubAgentConfig | None = None):
         self.config = config or SubAgentConfig()
         self._model = None
-    
+
     @property
     def model(self) -> AmdLlmModel:
         """Lazy initialization of the LLM model."""
@@ -108,38 +109,36 @@ Instructions:
             )
             self._model._impl.tools = []
         return self._model
-    
+
     def process(self, rag_result: str, query: str = "") -> str:
         """
         Process RAG database results through the sub-agent.
-        
+
         Args:
             rag_result: Raw result from RAG database query
             query: Optional original query for context
-            
+
         Returns:
             Filtered and summarized result
         """
         if not self.config.enabled:
             return rag_result
-        
+
         system_prompt = self.config.system_prompt or self.DEFAULT_SYSTEM_PROMPT
-        
+
         user_content = rag_result
         if query:
             user_content = f"Query: {query}\n\n{rag_result}"
-        
-        logger.debug("RAG filter sub-agent processing %d chars", len(rag_result))
-        
 
-        response = self.model.query([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content}
-        ])
-        
+        logger.debug("RAG filter sub-agent processing %d chars", len(rag_result))
+
+        response = self.model.query(
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}]
+        )
+
         result = response["content"]
         logger.debug("RAG filter sub-agent output %d chars", len(result))
-        
+
         return result
 
 
@@ -147,4 +146,3 @@ def create_rag_filter_subagent(**kwargs) -> RAGFilterSubAgent:
     """Convenience function to create a RAG filter sub-agent."""
     config = SubAgentConfig(**kwargs)
     return RAGFilterSubAgent(config)
-
