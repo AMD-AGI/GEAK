@@ -6,7 +6,7 @@ from rich.logging import RichHandler
 
 def _setup_root_logger() -> None:
     logger = logging.getLogger("minisweagent")
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     _handler = RichHandler(
         show_path=False,
         show_time=False,

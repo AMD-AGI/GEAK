@@ -431,6 +431,8 @@ def run_preprocessor(
         testcase_selection = {"selected_source": "eval_command"}
         testcase_cache_entry = None
         _seen_harnesses = set()
+        benchmark_baseline = None
+        full_benchmark_baseline = None
         # Jump directly to Step 5 (profiling) below
     else:
         (output_dir / "resolved.json").write_text(json.dumps(resolved, indent=2, default=str))
@@ -888,7 +890,18 @@ def run_preprocessor(
         if perf_cmd:
             if isinstance(perf_cmd, list):
                 perf_cmd = " && ".join(perf_cmd)
-            _print(f"  Profiling with performance_command: {perf_cmd}")
+            
+            # If perf_cmd is "a && b && c" format, extract only the last command for profiling
+            # (the earlier parts are typically build/setup steps, not the actual execution)
+            if " && " in perf_cmd:
+                perf_cmd_parts = perf_cmd.split(" && ")
+                perf_cmd_for_profiling = perf_cmd_parts[-1].strip()
+                _print(f"  Original eval_command: {perf_cmd}")
+                _print(f"  Extracted last command for profiling: {perf_cmd_for_profiling}")
+            else:
+                perf_cmd_for_profiling = perf_cmd
+            
+            _print(f"  Profiling with performance_command: {perf_cmd_for_profiling}")
             try:
                 _ensure_mcp_importable()
                 profiler_server = importlib.import_module("profiler_mcp.server")
@@ -896,7 +909,7 @@ def run_preprocessor(
 
                 _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
                 profiling = _profile_fn(
-                    command=perf_cmd,
+                    command=perf_cmd_for_profiling,
                     backend="metrix",
                     num_replays=3,
                     quick=True,
