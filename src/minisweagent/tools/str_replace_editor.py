@@ -1,8 +1,8 @@
 import os
 import subprocess
 from pathlib import Path
-from typing import List, Optional
 from tempfile import NamedTemporaryFile
+
 
 class str_replace_editor:
     def __init__(self):
@@ -13,11 +13,11 @@ class str_replace_editor:
         *,
         command: str,
         path: str,
-        file_text: Optional[str] = None,
-        view_range: Optional[List[int]] = None,
-        old_str: Optional[str] = None,
-        new_str: Optional[str] = None,
-        insert_line: Optional[int] = None,
+        file_text: str | None = None,
+        view_range: list[int] | None = None,
+        old_str: str | None = None,
+        new_str: str | None = None,
+        insert_line: int | None = None,
         **kwargs,
     ):
         if view_range:
@@ -36,9 +36,9 @@ class str_replace_editor:
                 new_file = f_old.name
         make_cmd = [f"python {str(self.tool_py)} {command} {path} --file_text {file_text} --view_range {view_range} --old_str {old_file} --new_str {new_file} --insert_line {insert_line}"]
         result = subprocess.run(make_cmd, shell=True, capture_output=True, text=True, timeout=3600)
-        if old_file and os.path.exists(old_file):
+        if old_file and Path(old_file).exists():
             os.remove(old_file)
-        if new_file and os.path.exists(new_file):
+        if new_file and Path(new_file).exists():
             os.remove(new_file)
         return {
             "output": result.stdout.strip() or result.stderr.strip(),
