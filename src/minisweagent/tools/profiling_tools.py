@@ -1,13 +1,14 @@
 import re
 import subprocess
-from pathlib import Path
-from typing import Dict, Tuple
+import tempfile
 from collections import defaultdict
+from pathlib import Path
+
 import pandas as pd
 from packaging.version import Version
-import tempfile
 
 from minisweagent.tools.prompt_for_profiling_analyzer import profiler_prompt
+
 
 class ProfilingAnalyzer:
     
@@ -18,16 +19,16 @@ class ProfilingAnalyzer:
             self.output_path = Path(tmpdir).resolve()
     
     def _check_rocprof_compute(self):
-        result_rocprof = subprocess.run([f'rocprof-compute --version'], capture_output=True, text=True, shell=True)
+        result_rocprof = subprocess.run(['rocprof-compute --version'], capture_output=True, text=True, shell=True)
         if result_rocprof.returncode !=0:
             print("ROCProf is not installed. Starting installing.....")
-            result = subprocess.run([f'sudo apt install rocprofiler-compute'], capture_output=True, text=True, shell=True)
-            result = subprocess.run([f'sudo update-alternatives --install /usr/bin/rocprofiler-compute rocprof-compute /opt/rocm/bin/rocprofiler-compute 0'], capture_output=True, text=True, shell=True)
-            result = subprocess.run([f'python3 -m pip install -r /opt/rocm/libexec/rocprofiler-compute/requirements.txt'], capture_output=True, text=True, shell=True)
+            result = subprocess.run(['sudo apt install rocprofiler-compute'], capture_output=True, text=True, shell=True)
+            result = subprocess.run(['sudo update-alternatives --install /usr/bin/rocprofiler-compute rocprof-compute /opt/rocm/bin/rocprofiler-compute 0'], capture_output=True, text=True, shell=True)
+            result = subprocess.run(['python3 -m pip install -r /opt/rocm/libexec/rocprofiler-compute/requirements.txt'], capture_output=True, text=True, shell=True)
             if result.returncode != 0:
                 return None
             else:
-                result_rocprof = subprocess.run([f'rocprof-compute --version'], capture_output=True, text=True, shell=True)
+                result_rocprof = subprocess.run(['rocprof-compute --version'], capture_output=True, text=True, shell=True)
                 pattern = r"rocprofiler-compute\s+version:\s*([0-9]+\.[0-9]+\.[0-9]+)"
                 match = re.search(pattern, result_rocprof.stdout)
                 return match.group(1) if match else None
@@ -41,13 +42,13 @@ class ProfilingAnalyzer:
         match = re.search(r'Kernel\s+\d+:\s*(.+?)\s*\.\.\.', self.content)
         return match.group(1) if match else "Unknown"
     
-    def parse_roofline_rates(self) -> Dict[str, Tuple[float, float, str]]:
+    def parse_roofline_rates(self) -> dict[str, tuple[float, float, str]]:
         rates = {}
         
         lines = self.content.split('\n')
         in_section = False
         
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '4.1 Roofline Rate Metrics' in line:
                 in_section = True
                 continue
@@ -59,7 +60,7 @@ class ProfilingAnalyzer:
                 parts = [p.strip() for p in line.split('│')]
                 if len(parts) >= 6:
                     try:
-                        metric_id = parts[1]
+                        parts[1]
                         metric_name = parts[2]
                         value = float(parts[3])
                         unit = parts[4]
@@ -74,7 +75,7 @@ class ProfilingAnalyzer:
         
         return rates
     
-    def parse_profiling_top_kernel(self) -> Dict[str, Tuple[float, float, str]]:
+    def parse_profiling_top_kernel(self) -> dict[str, tuple[float, float, str]]:
         kernel_names = []
         try:
             csv_path = self.output_path / "pmc_kernel_top.csv"
@@ -86,7 +87,7 @@ class ProfilingAnalyzer:
             print("Warning: Could not find top kernels")
         return kernel_names
     
-    def parse_profiling_sys_info(self) -> Dict[str, Tuple[float, float, str]]:
+    def parse_profiling_sys_info(self) -> dict[str, tuple[float, float, str]]:
         sys_info = {
             "gpu model": "gpu_model",
             "gpu architecture": "gpu_arch",
@@ -106,7 +107,7 @@ class ProfilingAnalyzer:
         lines = self.content.split('\n')
         in_section = False
         
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '1. System Info' in line:
                 in_section = True
                 continue
@@ -130,7 +131,7 @@ class ProfilingAnalyzer:
         
         return sys_info
     
-    def parse_profiling_sys_speed(self) -> Dict[str, Tuple[float, float, str]]:
+    def parse_profiling_sys_speed(self) -> dict[str, tuple[float, float, str]]:
         
         def safe_float(x):
             try:
@@ -182,7 +183,7 @@ class ProfilingAnalyzer:
         lines = self.content.split('\n')
         in_section = False
         rows=[]
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '2. System Speed-of-Light' in line:
                 in_section = True
                 continue
@@ -194,7 +195,7 @@ class ProfilingAnalyzer:
                 parts = [p.strip() for p in line.split('│')]
                 if len(parts) >= 6:
                     try:
-                        metric_id = parts[1]
+                        parts[1]
                         metric = parts[2]
                         avg = safe_float(parts[3])
                         unit = parts[4]
@@ -239,7 +240,7 @@ class ProfilingAnalyzer:
         
         return core
     
-    def parse_profiling_compute_units(self) -> Dict[str, Tuple[float, float, str]]:
+    def parse_profiling_compute_units(self) -> dict[str, tuple[float, float, str]]:
         
         def safe_float(x):
             try:
@@ -251,7 +252,7 @@ class ProfilingAnalyzer:
         in_section = False
         current_section = None
         tables = defaultdict(dict)
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '10. Compute Units - Instruction Mix' in line:
                 in_section = True
                 continue
@@ -327,7 +328,7 @@ class ProfilingAnalyzer:
         
         return features
     
-    def parse_profiling_l1_data(self) -> Dict[str, Tuple[float, float, str]]:
+    def parse_profiling_l1_data(self) -> dict[str, tuple[float, float, str]]:
         
         def safe_float(x):
             try:
@@ -339,7 +340,7 @@ class ProfilingAnalyzer:
         in_section = False
         feat = defaultdict(dict)
         reads = writes = atomics = total = 0
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '16. Vector L1 Data Cache' in line:
                 in_section = True
                 continue
@@ -422,7 +423,7 @@ class ProfilingAnalyzer:
         
         return feat
     
-    def parse_profiling_l2_data(self) -> Dict[str, Tuple[float, float, str]]:
+    def parse_profiling_l2_data(self) -> dict[str, tuple[float, float, str]]:
         
         def safe_float(x):
             try:
@@ -433,7 +434,7 @@ class ProfilingAnalyzer:
         lines = self.content.split('\n')
         in_section = False
         feat = defaultdict(dict)
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '17. L2' in line:
                 in_section = True
                 continue
@@ -490,7 +491,7 @@ class ProfilingAnalyzer:
         
         return feat
     
-    def parse_profiling_wavefront(self) -> Dict[str, Tuple[float, float, str]]:
+    def parse_profiling_wavefront(self) -> dict[str, tuple[float, float, str]]:
         
         def safe_float(x):
             try:
@@ -505,7 +506,7 @@ class ProfilingAnalyzer:
         lines = self.content.split('\n')
         in_section = False
         feat = defaultdict(list)
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '7.1 Wavefront Launch Stats' in line:
                 in_section = True
                 continue
@@ -526,13 +527,13 @@ class ProfilingAnalyzer:
             print("Warning: Could not find wavefront")
         return feat
 
-    def parse_roofline_ai(self) -> Dict[str, Tuple[float, str]]:
+    def parse_roofline_ai(self) -> dict[str, tuple[float, str]]:
         ai_metrics = {}
         
         lines = self.content.split('\n')
         in_section = False
         
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if '4.2 Roofline AI Plot Points' in line:
                 in_section = True
                 continue
@@ -544,7 +545,7 @@ class ProfilingAnalyzer:
                 parts = [p.strip() for p in line.split('│')]
                 if len(parts) >= 5:
                     try:
-                        metric_id = parts[1]
+                        parts[1]
                         metric_name = parts[2]
                         value = float(parts[3])
                         unit = parts[4]
@@ -564,7 +565,7 @@ class ProfilingAnalyzer:
         
         return ai_metrics
     
-    def categorize_metrics(self, rates: Dict) -> Dict:
+    def categorize_metrics(self, rates: dict) -> dict:
         categorized = {
             'bandwidth': {},
             'compute': {}
@@ -592,12 +593,12 @@ class ProfilingAnalyzer:
     def more_profiling(self):
         sys_info = self.parse_profiling_sys_info()
         more_profiler = "\nBelow are some more profiling information of this kernel, you can reference these info to analyze and generate better kernel."
-        more_profiler += f"\nSection 1.0: The following are GPU system information:\n"
+        more_profiler += "\nSection 1.0: The following are GPU system information:\n"
         for k,v in sys_info.items():
             more_profiler += f"- {k}: {v}\n"
         
         top_kernels = self.parse_profiling_top_kernel()
-        more_profiler += f"\nSection 2.0: The following are the top-performing kernels that need optimization:\n"
+        more_profiler += "\nSection 2.0: The following are the top-performing kernels that need optimization:\n"
         for k in top_kernels[:3]:
             more_profiler += f"- {k}\n"
         
@@ -657,10 +658,10 @@ class ProfilingAnalyzer:
         more_profiler += f"\n- Instructions per wavefront: {wavefront['Instructions per wavefront'][0]} {wavefront['Instructions per wavefront'][1]}"
         return more_profiler
     
-    def roofline_summary(self, categorized: Dict, ai_metrics: Dict):
+    def roofline_summary(self, categorized: dict, ai_metrics: dict):
         top_kernels = self.parse_profiling_top_kernel()        
         roofline = "\nBelow is the roofline information of the kernel:"
-        roofline += f"\nkernel function name:\n"
+        roofline += "\nkernel function name:\n"
         for k in top_kernels[:3]:
             roofline += f"- {k}\n"
         if categorized['bandwidth']:
