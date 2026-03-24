@@ -16,7 +16,6 @@ from typing import Any
 
 import numpy as np
 
-
 # Default paths
 DEFAULT_INDEX_PATH = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
@@ -274,13 +273,11 @@ class HybridRetriever:
                 rrf_scores[doc_hash] = (doc, source, orig_score, bm25_score)
         
         # Sort by RRF score (descending)
-        sorted_results = sorted(
+        return sorted(
             rrf_scores.values(),
-            key=lambda x: x[3],  # Sort by rrf_score
-            reverse=True
+            key=lambda x: x[3],
+            reverse=True,
         )
-        
-        return sorted_results
 
     def _rerank(self, query: str, docs_with_source: list[tuple[Any, str, float]], k: int) -> list[tuple[Any, float, str, float]]:
         """Rerank documents using BGE reranker.
@@ -542,7 +539,7 @@ class KnowledgeTools:
             return f"No compatibility information found for ROCm {rocm_version}"
 
         output = f"Compatibility information for ROCm {rocm_version}:\n\n"
-        for i, r in enumerate(results, 1):
+        for r in results:
             output += f"## {r['title']}\n\n"
             output += f"{r['content']}\n\n"
 

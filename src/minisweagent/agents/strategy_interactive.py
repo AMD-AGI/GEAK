@@ -3,11 +3,9 @@
 This agent extends StrategyAgent for command-line usage with rich console output.
 """
 
-import sys
 from rich.console import Console
 
 from minisweagent.agents.strategy_agent import StrategyAgent
-
 
 console = Console(highlight=False)
 

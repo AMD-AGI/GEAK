@@ -19,19 +19,16 @@ import asyncio
 import json
 import logging
 import re
-import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import yaml
 
 from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
 from minisweagent.mcp_integration.langchain_retrieval import HybridRetriever, KnowledgeTools
 from minisweagent.mcp_integration.subagent import RAGFilterSubAgent, SubAgentConfig
-
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +118,10 @@ class MCPEnabledEnvironment(LocalEnvironment):
             "rag_subagent_api_key": rag_subagent_api_key,
         }
         super().__init__(config_class=config_class, **kwargs)
-        self._knowledge_tools: Optional[KnowledgeTools] = None
-        self._retriever: Optional[HybridRetriever] = None
+        self._knowledge_tools: KnowledgeTools | None = None
+        self._retriever: HybridRetriever | None = None
         self._tool_map = None
-        self._rag_subagent: Optional[RAGFilterSubAgent] = None
+        self._rag_subagent: RAGFilterSubAgent | None = None
         
         # Check semantic index exists
         if auto_build_index:
@@ -218,7 +215,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
         cwd: str = "", 
         *, 
         timeout: int | None = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Execute a command - either RAG tool or bash command.
         
@@ -235,7 +232,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
         # Verbose: print command before execution
         if self._verbose:
             print(f"\n{'='*60}")
-            print(f"🔧 [ENV] Executing command:")
+            print("🔧 [ENV] Executing command:")
             print(f"{'='*60}")
             print(command)
             print(f"{'='*60}")
@@ -244,16 +241,16 @@ class MCPEnabledEnvironment(LocalEnvironment):
         prefix = self.config.mcp_prefix
         if command.startswith(prefix):
             if self._verbose:
-                print(f"✅ [ENV] This is a RAG command! Will route to RAG retrieval.")
+                print("✅ [ENV] This is a RAG command! Will route to RAG retrieval.")
             result = self._execute_mcp(command[len(prefix):])
         else:
             if self._verbose:
-                print(f"⚠️  [ENV] This is a BASH command, not RAG.")
+                print("⚠️  [ENV] This is a BASH command, not RAG.")
             result = super().execute(command, cwd, timeout=timeout)
         
         # Verbose: print result after execution
         if self._verbose:
-            print(f"\n📤 [ENV] Command output (first 500 chars):")
+            print("\n📤 [ENV] Command output (first 500 chars):")
             print(f"{'-'*60}")
             print(result.get("output", "")[:500])
             print(f"{'-'*60}")
@@ -261,7 +258,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
         
         return result
     
-    def _execute_mcp(self, command: str) -> Dict[str, Any]:
+    def _execute_mcp(self, command: str) -> dict[str, Any]:
         """
         Execute a RAG tool call.
         
@@ -315,7 +312,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
             preview = preview[:max_len] + "..."
         return preview
 
-    def _print_mcp_stats(self, tool_name: str, args: Dict[str, Any]) -> None:
+    def _print_mcp_stats(self, tool_name: str, args: dict[str, Any]) -> None:
         """Output RAG tool stats to stderr for logging with query results, retrieval method, and content."""
         print(f"[RAG-STATS] Calling {tool_name} with LangChain retrieval (embed_top_k={self._embed_top_k}, bm25_top_k={self._bm25_top_k})", file=sys.stderr)
         print(f"[RAG-STATS] Args: {args}", file=sys.stderr)
@@ -411,12 +408,12 @@ class MCPEnabledEnvironment(LocalEnvironment):
                 print(f"[RAG-STATS] compat check for ROCm {args.get('rocm_version', 'unknown')}", file=sys.stderr)
             
             elif tool_name in ("docs", "get_documentation_urls"):
-                print(f"[RAG-STATS] docs returned document URL list", file=sys.stderr)
+                print("[RAG-STATS] docs returned document URL list", file=sys.stderr)
         
         except Exception as e:
             print(f"[RAG-STATS] Error getting stats: {e}", file=sys.stderr)
 
-    def _parse_mcp_command(self, command: str) -> tuple[str, Dict[str, Any]]:
+    def _parse_mcp_command(self, command: str) -> tuple[str, dict[str, Any]]:
         """
         Parse RAG command into tool name and arguments.
         
@@ -446,7 +443,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
     async def _async_call_tool(
         self, 
         tool_name: str, 
-        args: Dict[str, Any]
+        args: dict[str, Any]
     ) -> str:
         """
         Asynchronously call a RAG tool using LangChain retrieval.
@@ -488,7 +485,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
         
         return result
     
-    def get_template_vars(self) -> Dict[str, Any]:
+    def get_template_vars(self) -> dict[str, Any]:
         """Get template variables including RAG info."""
         base_vars = super().get_template_vars()
         base_vars["mcp_available"] = True
