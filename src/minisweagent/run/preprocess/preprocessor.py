@@ -877,7 +877,8 @@ def run_preprocessor(
             _print(f"  Profiling with performance_command: {perf_cmd}")
             try:
                 _ensure_mcp_importable()
-                from profiler_mcp.server import profile_kernel
+                profiler_server = importlib.import_module("profiler_mcp.server")
+                profile_kernel = profiler_server.profile_kernel
 
                 _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
                 profiling = _profile_fn(
