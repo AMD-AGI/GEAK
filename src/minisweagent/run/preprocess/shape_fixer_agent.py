@@ -91,12 +91,10 @@ def run_shape_fixer(
             "cost_limit": 0.0,
             "instance_template": "Your task is: {{task}}",
             "action_observation_template": (
-                "<returncode>{{output.returncode}}</returncode>\n"
-                "<output>\n{{ output.output -}}\n</output>"
+                "<returncode>{{output.returncode}}</returncode>\n<output>\n{{ output.output -}}\n</output>"
             ),
             "format_error_template": (
-                "Please always provide EXACTLY ONE action in triple backticks, "
-                "found {{actions|length}} actions."
+                "Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions."
             ),
         }
 

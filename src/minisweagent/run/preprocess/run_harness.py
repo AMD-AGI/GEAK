@@ -111,7 +111,9 @@ def _run_single(
             "mode": mode,
             "success": False,
             "returncode": -1,
-            "stdout": (exc.stdout or b"").decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
+            "stdout": (exc.stdout or b"").decode(errors="replace")
+            if isinstance(exc.stdout, bytes)
+            else (exc.stdout or ""),
             "stderr": f"TIMEOUT after {timeout}s",
             "duration_s": duration_s,
         }
@@ -186,9 +188,7 @@ def run_harness(
             results.append(result)
 
             if result["success"]:
-                logger.info(
-                    "run_harness: --%s passed (%.1fs)", m, result["duration_s"]
-                )
+                logger.info("run_harness: --%s passed (%.1fs)", m, result["duration_s"])
             else:
                 logger.warning(
                     "run_harness: --%s FAILED (rc=%d, %.1fs)",
@@ -224,9 +224,7 @@ def format_results(results: dict | list[dict]) -> str:
         status = "PASS" if r["success"] else "FAIL"
         if not r["success"]:
             all_passed = False
-        lines.append(
-            f"  --{r['mode']}: {status}  (rc={r['returncode']}, {r['duration_s']}s)"
-        )
+        lines.append(f"  --{r['mode']}: {status}  (rc={r['returncode']}, {r['duration_s']}s)")
         if not r["success"] and r["stderr"]:
             tail = r["stderr"].strip().splitlines()[-_STDERR_TAIL_LINES:]
             for line in tail:
@@ -244,9 +242,7 @@ def results_errors(results: list[dict]) -> list[str]:
             continue
         stderr_tail = r["stderr"].strip().splitlines()[-_STDERR_TAIL_LINES:]
         stderr_summary = "\n".join(stderr_tail)
-        errors.append(
-            f"--{r['mode']} mode failed (exit code {r['returncode']}):\n{stderr_summary}"
-        )
+        errors.append(f"--{r['mode']} mode failed (exit code {r['returncode']}):\n{stderr_summary}")
     return errors
 
 

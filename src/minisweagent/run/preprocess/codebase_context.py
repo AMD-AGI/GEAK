@@ -42,9 +42,9 @@ _SKIP_DIRS: set[str] = {
     "env",
 }
 
-_MAX_TREE_DEPTH = 4       # Max directory nesting in the repo layout tree (kernel ancestors always expand)
-_MAX_TREE_ENTRIES = 300   # Max total entries in the repo layout tree before truncation
-_MAX_DEP_FILES = 30       # Max resolved in-repo files in the dependency BFS
+_MAX_TREE_DEPTH = 4  # Max directory nesting in the repo layout tree (kernel ancestors always expand)
+_MAX_TREE_ENTRIES = 300  # Max total entries in the repo layout tree before truncation
+_MAX_DEP_FILES = 30  # Max resolved in-repo files in the dependency BFS
 
 
 # ── Directory tree ────────────────────────────────────────────────────
@@ -148,6 +148,7 @@ _CPP_INCLUDE_RE = re.compile(r'^\s*#include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
 @dataclass
 class _ImportEntry:
     """A single import statement with the module path and imported names."""
+
     module: str
     names: list[str]
 
@@ -202,8 +203,7 @@ def _extract_imports(kernel_path: Path) -> list[_ImportEntry]:
     if suffix == ".py":
         return _extract_py_imports(source)
     if suffix in (".cpp", ".cc", ".cu", ".hip", ".cuh", ".h", ".hpp"):
-        return [_ImportEntry(module=m.group(1), names=[])
-                for m in _CPP_INCLUDE_RE.finditer(source)]
+        return [_ImportEntry(module=m.group(1), names=[]) for m in _CPP_INCLUDE_RE.finditer(source)]
     return []
 
 
@@ -271,7 +271,9 @@ def _resolve_import_to_path(
 
 
 # Patterns used by _describe_file to auto-detect file descriptions
-_DOCSTRING_RE = re.compile(r'^(?:[ \t]*#[^\n]*\n)*[ \t]*(?:\'\'\'|""")(.+?)(?:\'\'\'|""")', re.DOTALL)  # Python module docstring
+_DOCSTRING_RE = re.compile(
+    r'^(?:[ \t]*#[^\n]*\n)*[ \t]*(?:\'\'\'|""")(.+?)(?:\'\'\'|""")', re.DOTALL
+)  # Python module docstring
 _TRITON_JIT_RE = re.compile(r"@triton\.(?:jit|autotune)")  # Triton kernel decorator
 _GLOBAL_RE = re.compile(r"__global__\s+void\s+(\w+)")  # HIP/CUDA kernel function
 
@@ -376,6 +378,7 @@ def _build_dependency_tree(
 
     return resolved
 
+
 # ── Main entry point ──────────────────────────────────────────────────
 
 
@@ -434,21 +437,15 @@ def generate_codebase_context(
             sections.append("|------|---------|-------------|")
             for dep in by_depth[depth]:
                 names = ", ".join(f"`{n}`" for n in dep["names"]) if dep["names"] else "*module*"
-                sections.append(
-                    f"| `{dep['file']}` | {names} | {dep['description']} |"
-                )
+                sections.append(f"| `{dep['file']}` | {names} | {dep['description']} |")
         else:
             sections.append(f"\n### Transitive dependencies (depth {depth})\n")
-            sections.append(
-                "Improving these may improve the target kernel's performance.\n"
-            )
+            sections.append("Improving these may improve the target kernel's performance.\n")
             sections.append("| File | Imports | Used by | Description |")
             sections.append("|------|---------|---------|-------------|")
             for dep in by_depth[depth]:
                 names = ", ".join(f"`{n}`" for n in dep["names"]) if dep["names"] else "*module*"
-                sections.append(
-                    f"| `{dep['file']}` | {names} | `{dep['imported_by']}` | {dep['description']} |"
-                )
+                sections.append(f"| `{dep['file']}` | {names} | `{dep['imported_by']}` | {dep['description']} |")
         sections.append("")
 
     if not deps:

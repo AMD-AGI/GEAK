@@ -68,12 +68,7 @@ def _validate_harness_flags(harness_path: str) -> list[str]:
         return warnings
 
     source = harness.read_text()
-    has_parser = (
-        "argparse" in source
-        or "ArgumentParser" in source
-        or "click" in source
-        or "typer" in source
-    )
+    has_parser = "argparse" in source or "ArgumentParser" in source or "click" in source or "typer" in source
     if not has_parser:
         warnings.append(
             f"Harness '{harness.name}' does not use argparse/click/typer -- "
@@ -81,10 +76,7 @@ def _validate_harness_flags(harness_path: str) -> list[str]:
         )
     for flag in _REQUIRED_HARNESS_FLAGS:
         if flag not in source:
-            warnings.append(
-                f"Harness '{harness.name}' does not define '{flag}' flag "
-                "but COMMANDMENT references it"
-            )
+            warnings.append(f"Harness '{harness.name}' does not define '{flag}' flag but COMMANDMENT references it")
     return warnings
 
 

@@ -94,9 +94,7 @@ def _resolve_deterministic_harness(
         raise RuntimeError(f"Unsupported deterministic harness URL: {spec}")
 
     kernel_remote = parse_github_source_url(kernel_url) if is_weblink(kernel_url) else None
-    if kernel_remote and all(
-        kernel_remote[key] == harness_remote[key] for key in ("owner", "repo", "ref")
-    ):
+    if kernel_remote and all(kernel_remote[key] == harness_remote[key] for key in ("owner", "repo", "ref")):
         harness_path = (repo_root_path / harness_remote["file_path"]).resolve()
         if not harness_path.is_file():
             raise RuntimeError(
@@ -158,7 +156,7 @@ def _normalize_candidate_identifier(value: str | Path) -> str:
     text = Path(str(value)).stem.lower()
     for prefix in ("benchmark_", "bench_", "test_", "focused_", "example_"):
         if text.startswith(prefix):
-            text = text[len(prefix):]
+            text = text[len(prefix) :]
     text = text.removeprefix("test_")
     text = text.removesuffix("_harness")
     text = text.removesuffix("_focused")
@@ -225,7 +223,9 @@ def _build_repo_native_reference_context(
                 continue
             # Prefer benchmarks over tests for non-Python kernels when identity matches.
             source_rank = 0 if source_name == "benchmark" else 1
-            ranked.append(((tier, source_rank, idx), {"path": path, "command": cmd, "source": source_name, "overlap": overlap}))
+            ranked.append(
+                ((tier, source_rank, idx), {"path": path, "command": cmd, "source": source_name, "overlap": overlap})
+            )
 
     if not ranked:
         return ""
@@ -263,10 +263,7 @@ def _build_harness_candidates(
     focused_candidate = _focused_harness_candidate(disc_dict)
     focused = disc_dict.get("focused_test") or {}
     kernel_suffix = Path(kernel_path).suffix.lower()
-    prefer_repo_native = (
-        kernel_suffix in _NONPY_KERNEL_SUFFIXES
-        and focused.get("top_test_is_relevant") is False
-    )
+    prefer_repo_native = kernel_suffix in _NONPY_KERNEL_SUFFIXES and focused.get("top_test_is_relevant") is False
     if focused_candidate is not None and not prefer_repo_native:
         focused_cmd, focused_harness = focused_candidate
         candidates.append((focused_cmd, focused_harness, "focused_test"))
@@ -294,7 +291,9 @@ def _build_harness_candidates(
                 continue
             same_directory = candidate_parent == kernel_parent
             common_depth = _common_path_depth(candidate_parent, kernel_parent)
-            duplicate_focused = focused_harness is not None and Path(harness_path).resolve() == Path(focused_harness).resolve()
+            duplicate_focused = (
+                focused_harness is not None and Path(harness_path).resolve() == Path(focused_harness).resolve()
+            )
             semantic_tier, semantic_overlap = _candidate_identity_rank(path, kernel_path)
             source_rank = 0 if (prefer_repo_native and source == "discovery_benchmark") else 1
             rank = (
@@ -417,9 +416,7 @@ def run_preprocessor(
 
     # ── 2. codebase context ──────────────────────────────────────────
     _print(
-        "[bold cyan]--- Step 2/7: Codebase context ---[/bold cyan]"
-        if console
-        else "--- Step 2/7: Codebase context ---"
+        "[bold cyan]--- Step 2/7: Codebase context ---[/bold cyan]" if console else "--- Step 2/7: Codebase context ---"
     )
 
     from minisweagent.run.preprocess.codebase_context import generate_codebase_context
@@ -452,7 +449,11 @@ def run_preprocessor(
         disc_dict = _discover_fn(**_discovery_kwargs)
     except Exception as exc:
         logger.warning("Test discovery failed: %s", exc)
-        _print(f"  [yellow]Warning: Test discovery failed: {exc}[/yellow]" if console else f"  Warning: Test discovery failed: {exc}")
+        _print(
+            f"  [yellow]Warning: Test discovery failed: {exc}[/yellow]"
+            if console
+            else f"  Warning: Test discovery failed: {exc}"
+        )
 
     ctx["discovery"] = disc_dict
     (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))
@@ -479,9 +480,7 @@ def run_preprocessor(
     testcase_cache_dir = None if harness else get_testcase_cache_dir()
     testcase_cache_key = build_testcase_cache_key(kernel_url, kernel_path)
     testcase_cache_entry = (
-        get_testcase_cache_entry(testcase_cache_dir, testcase_cache_key)
-        if testcase_cache_dir is not None
-        else None
+        get_testcase_cache_entry(testcase_cache_dir, testcase_cache_key) if testcase_cache_dir is not None else None
     )
     testcase_selection: dict[str, Any] = {
         "cache_key": testcase_cache_key,
@@ -520,18 +519,14 @@ def run_preprocessor(
         )
         ok_static, static_errors = validate_harness(deterministic_path)
         if not ok_static:
-            raise RuntimeError(
-                "Deterministic harness validation failed: " + "; ".join(static_errors)
-            )
+            raise RuntimeError("Deterministic harness validation failed: " + "; ".join(static_errors))
         ok_runtime, runtime_errors, candidate_results = execute_harness_validation(
             deterministic_path,
             repo_root=repo_root,
             gpu_id=gpu_id,
         )
         if not ok_runtime:
-            raise RuntimeError(
-                "Deterministic harness execution failed: " + "; ".join(runtime_errors)
-            )
+            raise RuntimeError("Deterministic harness execution failed: " + "; ".join(runtime_errors))
         test_command = _build_deterministic_test_command(deterministic_path)
         harness_results = candidate_results
         ctx["harness_path"] = deterministic_path
@@ -676,8 +671,8 @@ def run_preprocessor(
             else "--- Step 3b/3c: UnitTestAgent (harness creation + execution) ---"
         )
         try:
-            from minisweagent.run.preprocess.unit_test_agent import format_discovery_for_agent
             from minisweagent.run.preprocess.discovery_types import DiscoveryResult
+            from minisweagent.run.preprocess.unit_test_agent import format_discovery_for_agent
 
             disc_result = DiscoveryResult.from_dict(disc_dict, kernel_path)
             discovery_context = format_discovery_for_agent(disc_result)
@@ -795,9 +790,7 @@ def run_preprocessor(
     ctx["harness_results"] = harness_results
     ctx["testcase_selection"] = testcase_selection
     if harness_results:
-        (output_dir / "harness_results.json").write_text(
-            json.dumps(harness_results, indent=2, default=str)
-        )
+        (output_dir / "harness_results.json").write_text(json.dumps(harness_results, indent=2, default=str))
     if test_command and not ctx.get("harness_path"):
         ctx["harness_path"] = extract_harness_path(test_command)
     if testcase_cache_entry is not None and test_command and harness_results and ctx.get("harness_path"):
@@ -818,9 +811,7 @@ def run_preprocessor(
             testcase_selection["cache_save_error"] = str(exc)
     testcase_selection["test_command"] = test_command
     testcase_selection["harness_path"] = ctx.get("harness_path")
-    (output_dir / "testcase_selection.json").write_text(
-        json.dumps(testcase_selection, indent=2, default=str)
-    )
+    (output_dir / "testcase_selection.json").write_text(json.dumps(testcase_selection, indent=2, default=str))
 
     # GEAK_HARNESS_ONLY=1 skips profiling, baseline, and commandment steps.
     # Used by test_harness_variance.py to validate harness shapes quickly.
@@ -842,9 +833,7 @@ def run_preprocessor(
     )
     if harness_path_for_baseline and harness_results:
         extra = f"--iterations {eval_iters}"
-        _print(
-            f"  Re-running all modes with {extra} for baselines..."
-        )
+        _print(f"  Re-running all modes with {extra} for baselines...")
         bl_ok, bl_errors, baseline_results = execute_harness_validation(
             harness_path_for_baseline,
             repo_root=repo_root,
@@ -981,7 +970,11 @@ def run_preprocessor(
                 ctx["test_command"] = test_command
             _print("  COMMANDMENT.md generated (from eval commands)")
         except Exception as exc:
-            _print(f"  [yellow]Commandment from commands failed: {exc}[/yellow]" if console else f"  Commandment from commands failed: {exc}")
+            _print(
+                f"  [yellow]Commandment from commands failed: {exc}[/yellow]"
+                if console
+                else f"  Commandment from commands failed: {exc}"
+            )
             logger.warning("Commandment from commands failed: %s", exc, exc_info=True)
     elif test_command:
         # Triton-style: generate COMMANDMENT from harness
@@ -1088,13 +1081,12 @@ def main() -> None:
         "--harness",
         default=None,
         help="Path to an existing test harness. Skips LLM harness generation; "
-             "must support --correctness, --profile, --benchmark, --full-benchmark.",
+        "must support --correctness, --profile, --benchmark, --full-benchmark.",
     )
     parser.add_argument(
         "--repo",
         default=None,
-        help="Repository root (local path or GitHub URL). "
-             "Kernel 'url' is resolved relative to this.",
+        help="Repository root (local path or GitHub URL). Kernel 'url' is resolved relative to this.",
     )
     args = parser.parse_args()
 

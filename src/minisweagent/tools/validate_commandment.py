@@ -1,4 +1,5 @@
 """Compatibility shim -- redirects to canonical location."""
+
 import importlib
 import sys
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib
 import logging
 import os
 import re
@@ -30,9 +31,7 @@ MAX_HARNESS_RETRIES = 2
 # Use one canonical benchmark definition everywhere. The legacy
 # GEAK_AGENT_BENCHMARK_ITERATIONS split is intentionally ignored so
 # agent-time patch testing and final verification stay apples-to-apples.
-DEFAULT_EVAL_BENCHMARK_ITERATIONS = int(
-    os.getenv("GEAK_EVAL_BENCHMARK_ITERATIONS", "30")
-)
+DEFAULT_EVAL_BENCHMARK_ITERATIONS = int(os.getenv("GEAK_EVAL_BENCHMARK_ITERATIONS", "30"))
 DEFAULT_AGENT_BENCHMARK_ITERATIONS = DEFAULT_EVAL_BENCHMARK_ITERATIONS
 DEFAULT_PIPELINE_OUTPUT_DIR = "geak_output"
 DEFAULT_HETEROGENEOUS = False
@@ -46,18 +45,12 @@ def add_agent_filter_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--allowed-agents",
         default=None,
-        help=(
-            "Comma-separated list of allowed agent types "
-            "(e.g. strategy_agent). Sets GEAK_ALLOWED_AGENTS."
-        ),
+        help=("Comma-separated list of allowed agent types (e.g. strategy_agent). Sets GEAK_ALLOWED_AGENTS."),
     )
     parser.add_argument(
         "--excluded-agents",
         default=None,
-        help=(
-            "Comma-separated list of excluded agent types "
-            "(e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS."
-        ),
+        help=("Comma-separated list of excluded agent types (e.g. openevolve). Sets GEAK_EXCLUDED_AGENTS."),
     )
 
 
@@ -213,10 +206,10 @@ def _materialized_harness_bootstrap(
         "# GEAK materialized harness bootstrap\n"
         "def _resolve_geak_kernel_dir():\n"
         "    candidates = []\n"
-        "    work_dir = os.environ.get(\"GEAK_WORK_DIR\", \"\").strip()\n"
+        '    work_dir = os.environ.get("GEAK_WORK_DIR", "").strip()\n'
         "    if work_dir:\n"
         "        candidates.append(work_dir)\n"
-        "    repo_root = os.environ.get(\"GEAK_REPO_ROOT\", \"\").strip()\n"
+        '    repo_root = os.environ.get("GEAK_REPO_ROOT", "").strip()\n'
         f"    rel_kernel_dir = {rel_kernel_dir_text!r}\n"
         "    if repo_root and rel_kernel_dir:\n"
         "        candidates.append(os.path.join(repo_root, rel_kernel_dir))\n"
@@ -224,7 +217,7 @@ def _materialized_harness_bootstrap(
         "    if original_kernel_dir:\n"
         "        candidates.append(original_kernel_dir)\n"
         "    for candidate in candidates:\n"
-        "        if candidate and os.path.isfile(os.path.join(candidate, \"kernel.py\")):\n"
+        '        if candidate and os.path.isfile(os.path.join(candidate, "kernel.py")):\n'
         "            return candidate\n"
         "    return original_kernel_dir or os.getcwd()\n"
         "\n"
@@ -261,12 +254,10 @@ def _rewrite_materialized_harness_source(
         if pattern.search(source_text):
             return pattern.sub(bootstrap, source_text, count=1)
 
-    import_block = re.compile(
-        r"(?ms)\A((?:from __future__ import annotations\n)?(?:import .+\n|from .+ import .+\n)+)"
-    )
+    import_block = re.compile(r"(?ms)\A((?:from __future__ import annotations\n)?(?:import .+\n|from .+ import .+\n)+)")
     match = import_block.match(source_text)
     if match:
-        return source_text[: match.end()] + "\n" + bootstrap + source_text[match.end():]
+        return source_text[: match.end()] + "\n" + bootstrap + source_text[match.end() :]
     return bootstrap + "\n" + source_text
 
 
@@ -300,9 +291,7 @@ def _materialize_validated_harness(
     materialized_command = test_command.replace(str(source_harness), str(target_harness))
     valid, static_errors = validate_harness(str(target_harness))
     if not valid:
-        raise RuntimeError(
-            "Materialized harness static validation failed: " + "; ".join(static_errors)
-        )
+        raise RuntimeError("Materialized harness static validation failed: " + "; ".join(static_errors))
 
     exec_ok, exec_errors, harness_results = execute_harness_validation(
         str(target_harness),
@@ -311,8 +300,7 @@ def _materialize_validated_harness(
     )
     if not exec_ok:
         raise RuntimeError(
-            "Materialized harness runtime validation failed: "
-            + "; ".join(e.splitlines()[0] for e in exec_errors)
+            "Materialized harness runtime validation failed: " + "; ".join(e.splitlines()[0] for e in exec_errors)
         )
     return materialized_command, str(target_harness), harness_results
 
@@ -346,12 +334,7 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
 
     source = harness.read_text()
 
-    has_parser = (
-        "argparse" in source
-        or "ArgumentParser" in source
-        or "click" in source
-        or "typer" in source
-    )
+    has_parser = "argparse" in source or "ArgumentParser" in source or "click" in source or "typer" in source
     if not has_parser:
         errors.append(
             "Harness does not use argparse/click/typer -- "
@@ -524,8 +507,7 @@ def create_validated_harness(
             )
             if attempt == max_attempts:
                 raise RuntimeError(
-                    f"Harness validation failed after {max_attempts} attempts: "
-                    + "; ".join(harness_errors)
+                    f"Harness validation failed after {max_attempts} attempts: " + "; ".join(harness_errors)
                 )
             continue
 
@@ -534,7 +516,9 @@ def create_validated_harness(
         # Phase 2: runtime execution of all modes
         repo_root = str(repo) if repo else None
         exec_ok, exec_errors, harness_results = execute_harness_validation(
-            harness, repo_root=repo_root, gpu_id=gpu_id,
+            harness,
+            repo_root=repo_root,
+            gpu_id=gpu_id,
         )
         if exec_ok:
             try:
@@ -555,9 +539,7 @@ def create_validated_harness(
                     harness_errors,
                 )
                 if attempt == max_attempts:
-                    raise RuntimeError(
-                        f"Harness materialization failed after {max_attempts} attempts: {exc}"
-                    )
+                    raise RuntimeError(f"Harness materialization failed after {max_attempts} attempts: {exc}")
                 continue
             if materialized is not None:
                 test_command, harness, harness_results = materialized
@@ -730,6 +712,7 @@ def _bottleneck_guidance(bottleneck: str, metrics: dict) -> list[str]:
 
 # ── GPU architecture context from profiling data ─────────────────────
 
+
 def _gpu_arch_context(profiling_path: str) -> list[str]:
     """Extract GPU architecture info from profile.json and format it."""
     import json as _json
@@ -838,8 +821,7 @@ def inject_pipeline_context(
             for k in top[:5]:
                 bn_tag = f" [{k['bottleneck']}]" if k.get("bottleneck") else ""
                 ctx.append(
-                    f"  - {k.get('name', '?')}: {k.get('duration_us', '?')} us "
-                    f"({k.get('pct_of_total', '?')}%){bn_tag}"
+                    f"  - {k.get('name', '?')}: {k.get('duration_us', '?')} us ({k.get('pct_of_total', '?')}%){bn_tag}"
                 )
         ctx.append("")
 
@@ -854,7 +836,9 @@ def inject_pipeline_context(
 
     if benchmark_baseline:
         ctx.append("## Benchmark Baseline (compare your save_and_test output against this)")
-        ctx.append("This is the original kernel's canonical benchmark output from the same full benchmark contract used for patch testing.")
+        ctx.append(
+            "This is the original kernel's canonical benchmark output from the same full benchmark contract used for patch testing."
+        )
         ctx.append("Your save_and_test output includes canonical benchmark results -- compare against these numbers.")
         ctx.append(f"```\n{benchmark_baseline.strip()}\n```")
         ctx.append("")
@@ -878,17 +862,19 @@ def inject_pipeline_context(
     ctx.append("")
 
     try:
-        from minisweagent.memory.integration import assemble_memory_context
-        _bm = baseline_metrics or {}
-        _mem_ctx = assemble_memory_context(
-            kernel_path=kernel_path,
-            bottleneck_type=_bm.get("bottleneck"),
-            profiling_metrics=_bm,
-        )
-        if _mem_ctx:
-            ctx.append("## Optimization Memory (from past kernel optimization runs)")
-            ctx.append(_mem_ctx.strip())
-            ctx.append("")
+        integration = importlib.import_module("minisweagent.memory.integration")
+        assemble_memory_context = getattr(integration, "assemble_memory_context", None)
+        if assemble_memory_context is not None:
+            _bm = baseline_metrics or {}
+            _mem_ctx = assemble_memory_context(
+                kernel_path=kernel_path,
+                bottleneck_type=_bm.get("bottleneck"),
+                profiling_metrics=_bm,
+            )
+            if _mem_ctx:
+                ctx.append("## Optimization Memory (from past kernel optimization runs)")
+                ctx.append(_mem_ctx.strip())
+                ctx.append("")
     except Exception:
         pass
 
@@ -906,7 +892,8 @@ def run_baseline_profile(test_command: str, gpu_id: int = 0) -> dict:
     warmup runs before the actual instrumented profiling pass.
     """
     _ensure_mcp_importable()
-    from profiler_mcp.server import profile_kernel
+    profile_server = importlib.import_module("profiler_mcp.server")
+    profile_kernel = profile_server.profile_kernel
 
     harness = extract_harness_path(test_command)
     profile_cmd = f"python {harness} --profile"
