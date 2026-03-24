@@ -2,12 +2,10 @@
 
 import concurrent.futures
 import json
-import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import traceback
 from contextlib import contextmanager
@@ -17,7 +15,6 @@ from typing import Any
 
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent
-from minisweagent.models import get_model
 from minisweagent.agents.select_patch_agent import SelectPatchAgent
 
 
@@ -133,9 +130,10 @@ class ParallelAgent(DefaultAgent):
     @staticmethod
     def _select_best_from_parallel_runs(base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory) -> BestPatchResult | None:
         """Select the best patch from multiple parallel runs using SelectPatchAgent."""
-        from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
-        from minisweagent.config import get_config_path
         import yaml
+
+        from minisweagent.config import get_config_path
+        from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
         
         print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
         
@@ -411,12 +409,11 @@ class ParallelAgent(DefaultAgent):
 
         # Keep agent id in any remaining /worktrees/agent_<id> segments aligned
         # with this worktree.
-        text = re.sub(
+        return re.sub(
             r"/worktrees/agent_\d+",
             f"/worktrees/agent_{worktree_path.name.split('_')[-1]}",
             text,
         )
-        return text
 
     @classmethod
     def run_parallel(
