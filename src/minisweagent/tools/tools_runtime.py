@@ -1,17 +1,16 @@
-import os
 import json
 from pathlib import Path
-from typing import Dict, Any
-from minisweagent.tools.bash_command import BashCommand
-from minisweagent.tools.strategy_manager import StrategyManagerTool
-from minisweagent.tools.str_replace_editor import str_replace_editor
-from minisweagent.tools.test_perf import TestPerfTool
-from minisweagent.tools.submit import SubmitTool
-from minisweagent.tools.mcp_bridge import collect_mcp_tools
+from typing import Any
 
-current_dir = os.path.dirname(__file__)
-json_path = os.path.join(current_dir, "tools.json")
-with open(json_path,"r",encoding="utf-8") as f:
+from minisweagent.tools.bash_command import BashCommand
+from minisweagent.tools.mcp_bridge import collect_mcp_tools
+from minisweagent.tools.str_replace_editor import str_replace_editor
+from minisweagent.tools.strategy_manager import StrategyManagerTool
+from minisweagent.tools.submit import SubmitTool
+from minisweagent.tools.test_perf import TestPerfTool
+
+json_path = Path(__file__).parent / "tools.json"
+with open(json_path,encoding="utf-8") as f:
     _all_tools = json.load(f)
 _mcp_bridges, _mcp_tools = collect_mcp_tools()
 _all_tools.extend(_mcp_tools)
@@ -93,7 +92,7 @@ class ToolRuntime:
         """
         return [t for t in _all_tools if t["name"] in self._tool_table]
 
-    def dispatch(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    def dispatch(self, tool_call: dict[str, Any]) -> dict[str, Any]:
         """
         tool_call format:
         {

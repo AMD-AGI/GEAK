@@ -4,12 +4,14 @@ This module provides a structured way to manage optimization strategies,
 avoiding manual markdown editing and ensuring consistent formatting.
 """
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-import re
+from typing import Annotated
+
 import typer
-from typing_extensions import Annotated
+
 
 class StrategyStatus(Enum):
     """Strategy status enumeration."""
@@ -666,10 +668,14 @@ class StrategyManagerTool:
                 if index is not None:
                     strategy = manager.get_strategy(index)
                     lines = [f"Strategy {index}: {strategy.name}", f"Status: [{strategy.status.value}]", f"Description: {strategy.description}"]
-                    if strategy.expected: lines.append(f"Expected: {strategy.expected}")
-                    if strategy.target: lines.append(f"Target: {strategy.target}")
-                    if strategy.result: lines.append(f"Result: {strategy.result}")
-                    if strategy.details: lines.append(f"Details: {strategy.details}")
+                    if strategy.expected:
+                        lines.append(f"Expected: {strategy.expected}")
+                    if strategy.target:
+                        lines.append(f"Target: {strategy.target}")
+                    if strategy.result:
+                        lines.append(f"Result: {strategy.result}")
+                    if strategy.details:
+                        lines.append(f"Details: {strategy.details}")
                     return {"output": "\n".join(lines), "returncode": 0}
                 return {"output": manager.get_full_content(), "returncode": 0}
             

@@ -3,9 +3,10 @@
 import os
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass
@@ -47,7 +48,7 @@ class TestPerfTool:
             patch_content = self._get_patch_content()
             
             if not patch_content.strip():
-                self._log(f"[TestPerf] No changes detected, baseline running.")
+                self._log("[TestPerf] No changes detected, baseline running.")
             else:
                 self._log(f"[TestPerf] Patch {patch_name} captured, running test...")
             
@@ -170,7 +171,7 @@ class TestPerfTool:
             patch_file = output_dir / f"{patch_name}.patch"
             test_log_file = output_dir / f"{patch_name}_test.txt"
             lines.extend([
-                f"\nFiles saved to:",
+                "\nFiles saved to:",
                 f"  - Patch: {patch_file}",
                 f"  - Test log: {test_log_file}",
             ])
