@@ -106,7 +106,7 @@ Here is the task content:
         
         return result
         
-    except (json.JSONDecodeError, Exception) as e:
+    except (json.JSONDecodeError, Exception):
         # If parsing fails, return all None
         return {
             "kernel_name": None,
