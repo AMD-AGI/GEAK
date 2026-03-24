@@ -348,7 +348,7 @@ def run_preprocessor(
     console=None,
     harness: str | None = None,
     repo: str | Path | None = None,
-    eval_commands: dict[str, str | list[str]] | None = None,
+    eval_command: str | None = None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -370,10 +370,10 @@ def run_preprocessor(
         Exact harness file path (Triton-style with --correctness/--benchmark modes).
     repo:
         Repository root path.
-    eval_commands:
-        HIP-style commands dict with keys: compile_command, correctness_command,
-        performance_command. When provided, COMMANDMENT is generated from these
-        commands instead of from a harness. Discovery and UnitTestAgent are skipped.
+    eval_command:
+        Single eval command string (e.g. "python test.py") that handles compile,
+        correctness, and performance testing. When provided, COMMANDMENT is generated
+        from this command instead of from a harness. Discovery and UnitTestAgent are skipped.
 
     Returns
     -------
@@ -493,24 +493,12 @@ def run_preprocessor(
         "harness": harness,
     }
 
-    if eval_commands:
-        # Skip harness creation entirely — COMMANDMENT will be generated from commands in Step 7
-        _print("  Skipping harness creation (eval_commands provided)")
-        selected_harness_source = "eval_commands"
-        testcase_selection["selected_source"] = "eval_commands"
-        # Build test_command from eval_commands for compatibility (deduplicated)
-        _cmds = []
-        _seen = set()
-        for key in ("compile_command", "correctness_command", "performance_command"):
-            val = eval_commands.get(key)
-            if val:
-                items = val if isinstance(val, list) else [val]
-                for cmd in items:
-                    if cmd not in _seen:
-                        _seen.add(cmd)
-                        _cmds.append(cmd)
-        if _cmds:
-            test_command = " && ".join(_cmds)
+    if eval_command:
+        # Skip harness creation entirely — COMMANDMENT will be generated from command in Step 7
+        _print("  Skipping harness creation (eval_command provided)")
+        selected_harness_source = "eval_command"
+        testcase_selection["selected_source"] = "eval_command"
+        test_command = eval_command
 
     elif harness:
         deterministic_path, deterministic_meta = _resolve_deterministic_harness(
@@ -880,7 +868,58 @@ def run_preprocessor(
     )
 
     profiling: dict[str, Any] | None = None
-    if test_command:
+    if eval_command:
+        # HIP-style: use performance_command directly for profiling
+        perf_cmd = eval_command
+        if perf_cmd:
+            if isinstance(perf_cmd, list):
+                perf_cmd = " && ".join(perf_cmd)
+            _print(f"  Profiling with performance_command: {perf_cmd}")
+            try:
+                _ensure_mcp_importable()
+                from profiler_mcp.server import profile_kernel
+
+                _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
+                profiling = _profile_fn(
+                    command=perf_cmd,
+                    backend="metrix",
+                    num_replays=3,
+                    quick=True,
+                    gpu_devices=str(gpu_id),
+                    workdir=str(repo_root) if repo_root else None,
+                )
+            except Exception as exc:
+                _print(f"  [yellow]Profiling failed: {exc}[/yellow]" if console else f"  Profiling failed: {exc}")
+                logger.warning("Profiling failed: %s", exc, exc_info=True)
+
+            # Fallback: if profiling failed or returned unsuccessful, run performance_command directly
+            profiling_ok = profiling is not None and profiling.get("success", False)
+            if not profiling_ok:
+                _print("  Running performance_command directly as fallback for baseline...")
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        perf_cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        cwd=str(repo_root) if repo_root else None,
+                    )
+                    if result.returncode == 0:
+                        (output_dir / "benchmark_baseline.txt").write_text(result.stdout)
+                        (output_dir / "full_benchmark_baseline.txt").write_text(result.stdout)
+                        _print(f"  Fallback baseline saved to benchmark_baseline.txt ({len(result.stdout)} bytes)")
+                    else:
+                        _print(f"  Fallback baseline capture: FAILED (returncode={result.returncode})")
+                        if result.stderr:
+                            _print(f"  stderr: {result.stderr[:500]}")
+                except Exception as fallback_exc:
+                    _print(f"  Fallback baseline capture failed: {fallback_exc}")
+                    logger.warning("Fallback baseline capture failed: %s", fallback_exc, exc_info=True)
+        else:
+            _print("  Skipping profiling (no performance_command in eval_command)")
+    elif test_command:
         ctx["harness_path"] = extract_harness_path(test_command)
         (output_dir / "harness_path.txt").write_text(ctx["harness_path"])
 
@@ -946,38 +985,27 @@ def run_preprocessor(
     _print("[bold cyan]--- Step 7/7: Commandment ---[/bold cyan]" if console else "--- Step 7/7: Commandment ---")
 
     commandment: str | None = None
-    if eval_commands:
-        # HIP-style: generate COMMANDMENT from explicit compile/correctness/perf commands
+    if eval_command:
+        # Single eval command handles compile/correctness/performance
         try:
             from minisweagent.run.preprocess.commandment import generate_commandment_from_commands
 
             commandment = generate_commandment_from_commands(
                 kernel_path=kernel_path,
-                compile_command=eval_commands.get("compile_command"),
-                correctness_command=eval_commands.get("correctness_command"),
-                performance_command=eval_commands.get("performance_command"),
+                compile_command=None,
+                correctness_command=None,
+                performance_command=eval_command,
                 repo_root=repo_root,
             )
-            # Build a test_command from the commands for save_and_test compatibility
-            cmds = []
-            for key in ("compile_command", "correctness_command", "performance_command"):
-                val = eval_commands.get(key)
-                if val:
-                    if isinstance(val, list):
-                        cmds.extend(val)
-                    else:
-                        cmds.append(val)
-            if cmds:
-                test_command = " && ".join(cmds)
-                ctx["test_command"] = test_command
-            _print("  COMMANDMENT.md generated (from eval commands)")
+            ctx["test_command"] = eval_command
+            _print("  COMMANDMENT.md generated (from eval command)")
         except Exception as exc:
             _print(
-                f"  [yellow]Commandment from commands failed: {exc}[/yellow]"
+                f"  [yellow]Commandment from command failed: {exc}[/yellow]"
                 if console
-                else f"  Commandment from commands failed: {exc}"
+                else f"  Commandment from command failed: {exc}"
             )
-            logger.warning("Commandment from commands failed: %s", exc, exc_info=True)
+            logger.warning("Commandment from command failed: %s", exc, exc_info=True)
     elif test_command:
         # Triton-style: generate COMMANDMENT from harness
         try:
@@ -998,7 +1026,7 @@ def run_preprocessor(
             _print(f"  [yellow]Commandment failed: {exc}[/yellow]" if console else f"  Commandment failed: {exc}")
             logger.warning("Commandment generation failed: %s", exc, exc_info=True)
     else:
-        _print("  Skipping commandment (no test command or eval commands)")
+        _print("  Skipping commandment (no test command or eval command)")
 
     ctx["commandment"] = commandment
     if commandment:
@@ -1090,6 +1118,11 @@ def main() -> None:
         default=None,
         help="Repository root (local path or GitHub URL). Kernel 'url' is resolved relative to this.",
     )
+    parser.add_argument(
+        "--eval-command",
+        default=None,
+        help='Single command string (e.g. "python test.py") that handles compile, correctness, and performance testing. Skips harness creation.',
+    )
     args = parser.parse_args()
 
     try:
@@ -1131,6 +1164,7 @@ def main() -> None:
         console=console,
         harness=args.harness,
         repo=args.repo,
+        eval_command=args.eval_command,
     )
 
     print(json.dumps(ctx, indent=2, default=str))
