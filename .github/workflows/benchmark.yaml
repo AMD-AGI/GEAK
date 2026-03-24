@@ -1,0 +1,214 @@
+name: Benchmark
+
+on:
+  # Uncomment the schedule when GPU runner (geak-benchmark-5kh27) is available:
+  # schedule:
+  #   - cron: "0 5 1,15 * *"
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    name: Run AgentKernelArena benchmark
+    runs-on: geak-benchmark-5kh27
+    timeout-minutes: 720
+
+    env:
+      AMD_LLM_API_KEY: ${{ secrets.AMD_LLM_API_KEY }}
+
+    steps:
+      - name: Checkout GEAK_v3
+        uses: actions/checkout@v5
+        with:
+          ref: dev
+          path: geak
+
+      - name: Checkout AgentKernelArena
+        uses: actions/checkout@v5
+        with:
+          repository: AMD-AGI/AgentKernelArena
+          ref: geak_benchmark
+          path: arena
+
+      - name: Install GEAK
+        working-directory: geak
+        run: pip install -e '.[full]'
+
+      - name: Verify GEAK CLI
+        run: geak --help
+
+      - name: Configure AgentKernelArena for geak_v3
+        working-directory: arena
+        run: |
+          python3 -c "
+          import yaml, pathlib
+          cfg = yaml.safe_load(pathlib.Path('config.yaml').read_text())
+          cfg['agent']['template'] = 'geak_v3'
+          pathlib.Path('config.yaml').write_text(yaml.dump(cfg, default_flow_style=False, sort_keys=False))
+          "
+
+      - name: Run benchmark
+        working-directory: arena
+        run: python3 main.py
+
+      - name: Collect results
+        id: results
+        working-directory: arena
+        run: |
+          python3 -c "
+          import yaml, json, glob, pathlib
+
+          results = []
+          for f in sorted(glob.glob('workspace_*/run_*/*/task_result.yaml')):
+              with open(f) as fh:
+                  r = yaml.safe_load(fh)
+                  results.append(r)
+
+          summary = {
+              'total_tasks': len(results),
+              'passed_compilation': sum(1 for r in results if r.get('pass_compilation')),
+              'passed_correctness': sum(1 for r in results if r.get('pass_correctness')),
+              'tasks': []
+          }
+
+          speedups = []
+          for r in results:
+              task = {
+                  'name': r.get('task_name', 'unknown'),
+                  'pass_compilation': r.get('pass_compilation', False),
+                  'pass_correctness': r.get('pass_correctness', False),
+                  'base_time_ms': r.get('base_execution_time', 0.0),
+                  'optimized_time_ms': r.get('best_optimized_execution_time', 0.0),
+                  'speedup': r.get('speedup_ratio', 0.0),
+              }
+              summary['tasks'].append(task)
+              if task['speedup'] > 0:
+                  speedups.append(task['speedup'])
+
+          summary['avg_speedup'] = sum(speedups) / len(speedups) if speedups else 0.0
+          summary['num_improved'] = sum(1 for s in speedups if s > 1.0)
+
+          out = pathlib.Path('benchmark-results.json')
+          out.write_text(json.dumps(summary, indent=2))
+          print(f'Collected {len(results)} task results, avg speedup: {summary[\"avg_speedup\"]:.2f}x')
+          "
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ github.run_id }}
+          path: arena/benchmark-results.json
+          retention-days: 90
+
+      - name: Download previous benchmark
+        id: prev
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: benchmark.yaml
+          branch: dev
+          name_is_regexp: true
+          name: benchmark-.*
+          path: previous-benchmarks
+          if_no_artifact_found: warn
+          search_artifacts: true
+
+      - name: Detect regression and open issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            let latest;
+            try {
+              latest = JSON.parse(fs.readFileSync('arena/benchmark-results.json', 'utf8'));
+            } catch {
+              core.info('No benchmark results found — skipping regression check.');
+              return;
+            }
+
+            // Find previous benchmark
+            let previous = null;
+            try {
+              const files = fs.readdirSync('previous-benchmarks', { recursive: true })
+                .filter(f => f.endsWith('.json'))
+                .sort()
+                .reverse();
+              if (files.length > 0) {
+                previous = JSON.parse(
+                  fs.readFileSync(`previous-benchmarks/${files[0]}`, 'utf8')
+                );
+              }
+            } catch {
+              core.info('No previous benchmark to compare against. First run — skipping.');
+              return;
+            }
+
+            if (!previous) return;
+
+            const THRESHOLD = 10; // percentage drop in avg speedup
+
+            const latestAvg = latest.avg_speedup || 0;
+            const prevAvg = previous.avg_speedup || 0;
+
+            core.info(`Previous avg speedup: ${prevAvg.toFixed(2)}x`);
+            core.info(`Current  avg speedup: ${latestAvg.toFixed(2)}x`);
+
+            if (prevAvg <= 0) {
+              core.info('Previous avg speedup is 0 — nothing to compare.');
+              return;
+            }
+
+            const dropPct = (prevAvg - latestAvg) / prevAvg * 100;
+
+            if (dropPct <= THRESHOLD) {
+              core.info(`No regression detected (change: ${dropPct > 0 ? '-' : '+'}${Math.abs(dropPct).toFixed(1)}%).`);
+              return;
+            }
+
+            // Build per-task comparison table
+            const prevTasks = Object.fromEntries(
+              (previous.tasks || []).map(t => [t.name, t])
+            );
+
+            let table = '| Task | Previous Speedup | Current Speedup | Change |\n';
+            table += '|------|-----------------|-----------------|--------|\n';
+
+            const regressions = [];
+            for (const task of latest.tasks || []) {
+              const prev = prevTasks[task.name];
+              if (prev && prev.speedup > 0 && task.speedup > 0) {
+                const change = ((task.speedup - prev.speedup) / prev.speedup * 100).toFixed(1);
+                const icon = change < -10 ? '🔴' : change > 10 ? '🟢' : '⚪';
+                table += `| ${task.name} | ${prev.speedup.toFixed(2)}x | ${task.speedup.toFixed(2)}x | ${change}% ${icon} |\n`;
+                if (change < -10) regressions.push(task.name);
+              }
+            }
+
+            const title = `Benchmark regression detected on \`dev\` — ${new Date().toISOString().slice(0, 10)}`;
+            const body = [
+              '## Benchmark Regression Report',
+              '',
+              `The biweekly benchmark detected a **${dropPct.toFixed(1)}%** drop in average speedup (${prevAvg.toFixed(2)}x → ${latestAvg.toFixed(2)}x), exceeding the ${THRESHOLD}% threshold.`,
+              '',
+              `**${regressions.length} task(s) regressed >10%:**`,
+              '',
+              table,
+              '',
+              `> 🟢 >10% faster &nbsp; ⚪ within 10% &nbsp; 🔴 >10% slower`,
+              '',
+              `| Metric | Previous | Current |`,
+              `|--------|----------|---------|`,
+              `| Avg speedup | ${prevAvg.toFixed(2)}x | ${latestAvg.toFixed(2)}x |`,
+              `| Tasks passed | ${previous.passed_correctness}/${previous.total_tasks} | ${latest.passed_correctness}/${latest.total_tasks} |`,
+              '',
+              `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'Please investigate the performance-sensitive changes merged since the last benchmark.',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['fix'],
+            });
