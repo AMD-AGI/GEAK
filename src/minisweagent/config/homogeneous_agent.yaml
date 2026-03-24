@@ -62,17 +62,19 @@ agent:
        - For complex tasks: Use `strategy_manager` tool to create `.optimization_strategies.md` with 3-5 potential optimization strategies
 
     3. **Establish Baseline Performance** 
-       - **CRITICAL**: Measure original implementation performance BEFORE any optimization
-       - **ALWAYS use the `test_perf` tool** to measure baseline performance:
-         Call `test_perf` tool with description: "baseline"
+       - **CRITICAL**: You need baseline performance data BEFORE any optimization
+       - **First, check if `baseline_metrics.json` exists in the repo workspace**:
+         - If `baseline_metrics.json` EXISTS: Use the metrics from this file as your baseline. No need to run baseline again.
+         - If `baseline_metrics.json` does NOT exist: Use the `test_perf` tool to measure baseline performance:
+           Call `test_perf` tool with description: "baseline"
        - **DO NOT construct manual test commands or benchmarks.**
-       - The system will automatically run tests and save results
-       - Record key metrics summary in your strategy file (bandwidth, throughput, latency, occupancy, etc.)
-       - Include reference to the detailed log file
        - This baseline is your reference point - all strategy results will be compared against it
        
-    4. **ALWAYS** use the `profiling` tool before listing strategies to identify the bottleneck of the current kernel:
-       - Call the `profiling` tool with the appropriate working directory and command used during performance testing.
+    4. **Identify Performance Bottlenecks** before listing strategies:
+       - **First, check if `profile.json` exists in the repo workspace**:
+         - If `profile.json` EXISTS: Use the profiling data from this file to understand performance bottlenecks.
+         - If `profile.json` does NOT exist: You may use the `profiling` tool to identify bottlenecks:
+           Call `profiling` tool with the appropriate working directory and command used during performance testing.
 
     5. **Analyze and Prioritize Strategies**
        - Analyze computational complexity, memory access patterns, and parallelization opportunities
