@@ -57,10 +57,7 @@ def _build_kernel_identity(kernel_spec: str, kernel_path: str | Path) -> tuple[s
     if spec_no_fragment and is_weblink(spec_no_fragment):
         parsed = parse_github_source_url(spec_no_fragment)
         if parsed:
-            location = (
-                f"github:{parsed['owner']}/{parsed['repo']}"
-                f"@{parsed['ref']}/{parsed['file_path']}"
-            )
+            location = f"github:{parsed['owner']}/{parsed['repo']}@{parsed['ref']}/{parsed['file_path']}"
         else:
             location = f"weblink:{spec_no_fragment}"
     else:

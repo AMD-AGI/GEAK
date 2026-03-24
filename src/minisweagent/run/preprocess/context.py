@@ -8,7 +8,7 @@ read files as needed.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +78,7 @@ class PreprocessContext:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> PreprocessContext:
-        known = {f.name for f in cls.__dataclass_fields__.values()}
+        known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in d.items() if k in known}
         return cls(**filtered)
 
@@ -87,9 +87,7 @@ class PreprocessContext:
         return cls.from_dict(json.loads(Path(path).read_text()))
 
     @classmethod
-    def from_preprocessor_output(
-        cls, ctx: dict[str, Any], output_dir: str | Path
-    ) -> PreprocessContext:
+    def from_preprocessor_output(cls, ctx: dict[str, Any], output_dir: str | Path) -> PreprocessContext:
         """Convert the raw preprocessor output dict into a PreprocessContext."""
         out = Path(output_dir)
         return cls(
@@ -99,7 +97,9 @@ class PreprocessContext:
             preprocess_dir=str(out),
             commandment_path=str(out / "COMMANDMENT.md") if (out / "COMMANDMENT.md").exists() else None,
             codebase_context_path=ctx.get("codebase_context_path"),
-            baseline_metrics_path=str(out / "baseline_metrics.json") if (out / "baseline_metrics.json").exists() else None,
+            baseline_metrics_path=str(out / "baseline_metrics.json")
+            if (out / "baseline_metrics.json").exists()
+            else None,
             profiling_result_path=str(out / "profile.json") if (out / "profile.json").exists() else None,
             test_command=ctx.get("test_command"),
             discovery=ctx.get("discovery"),

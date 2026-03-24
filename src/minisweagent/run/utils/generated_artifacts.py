@@ -11,8 +11,6 @@ from __future__ import annotations
 import subprocess
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
-from typing import Any
-
 
 _ROOT_GENERATED_DIRS = {
     "build",
@@ -113,7 +111,7 @@ def _parse_git_diff_paths(header: str) -> tuple[str, str] | None:
     prefix = "diff --git a/"
     if not header.startswith(prefix):
         return None
-    remainder = header[len(prefix):].rstrip("\n")
+    remainder = header[len(prefix) :].rstrip("\n")
     separator = " b/"
     if separator not in remainder:
         return None

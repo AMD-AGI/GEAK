@@ -148,7 +148,7 @@ def _split_github_ref_and_path(owner: str, repo: str, ref_and_path: str) -> tupl
     for ref in refs:
         prefix = f"{ref}/"
         if ref_and_path.startswith(prefix):
-            file_path = ref_and_path[len(prefix):]
+            file_path = ref_and_path[len(prefix) :]
             if file_path:
                 return ref, file_path
 
@@ -294,6 +294,7 @@ def _clone_github_and_find(
         out["error"] = str(e)
         return out
 
+
 def resolve_kernel_url(
     spec: str,
     repo: str | None = None,
@@ -362,10 +363,7 @@ def resolve_kernel_url(
 
     # ── validate impossible combinations ──────────────────────────
     if repo_is_url and not spec_is_url and not spec_is_relative:
-        out["error"] = (
-            "Cannot combine a remote --repo URL with an absolute local "
-            f"kernel path: {spec_no_frag}"
-        )
+        out["error"] = f"Cannot combine a remote --repo URL with an absolute local kernel path: {spec_no_frag}"
         return out
 
     if repo_is_url and spec_is_url:
@@ -376,18 +374,21 @@ def resolve_kernel_url(
     # ── Case 1: spec is a URL ────────────────────────────────────
     if spec_is_url:
         if repo and not repo_is_url:
-            logger.warning(
-                "--repo is a local path but kernel spec is a remote URL; "
-                "ignoring --repo for resolution"
-            )
+            logger.warning("--repo is a local path but kernel spec is a remote URL; ignoring --repo for resolution")
         out["is_weblink"] = True
         parsed = parse_github_source_url(spec_no_frag)
         if not parsed:
             out["error"] = "Only GitHub blob or raw URLs are supported"
             return out
         return _clone_github_and_find(
-            out, parsed["owner"], parsed["repo"], parsed["ref"],
-            parsed["file_path"], clone_into, line_start, line_end,
+            out,
+            parsed["owner"],
+            parsed["repo"],
+            parsed["ref"],
+            parsed["file_path"],
+            clone_into,
+            line_start,
+            line_end,
         )
 
     # ── Case 2: repo is a URL, spec is relative ──────────────────
@@ -397,9 +398,14 @@ def resolve_kernel_url(
             out["error"] = f"Unsupported --repo URL: {repo}"
             return out
         return _clone_github_and_find(
-            out, parsed_repo["owner"], parsed_repo["repo"],
-            parsed_repo["ref"], spec_no_frag, clone_into,
-            line_start, line_end,
+            out,
+            parsed_repo["owner"],
+            parsed_repo["repo"],
+            parsed_repo["ref"],
+            spec_no_frag,
+            clone_into,
+            line_start,
+            line_end,
         )
 
     # ── Case 3: both local ───────────────────────────────────────
@@ -416,7 +422,9 @@ def resolve_kernel_url(
                 kernel_path.relative_to(base)
             except ValueError:
                 logger.warning(
-                    "Kernel %s is outside --repo %s", kernel_path, base,
+                    "Kernel %s is outside --repo %s",
+                    kernel_path,
+                    base,
                 )
     else:
         kernel_path = (base / kernel_path).resolve()

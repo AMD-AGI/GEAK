@@ -196,12 +196,14 @@ def _format_baseline(selected: list[dict]) -> dict:
     top_kernels = []
     for k in selected:
         k_dur = k.get("duration_us", k.get("metrics", {}).get("duration_us", 0))
-        top_kernels.append({
-            "name": k["name"],
-            "duration_us": round(k_dur, 3),
-            "pct_of_total": round(100.0 * k_dur / total_dur, 1),
-            "bottleneck": k.get("bottleneck", "unknown"),
-        })
+        top_kernels.append(
+            {
+                "name": k["name"],
+                "duration_us": round(k_dur, 3),
+                "pct_of_total": round(100.0 * k_dur / total_dur, 1),
+                "bottleneck": k.get("bottleneck", "unknown"),
+            }
+        )
 
     result = {
         "duration_us": canonical_dur,

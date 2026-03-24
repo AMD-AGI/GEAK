@@ -177,8 +177,7 @@ def _generate_simple(
     if kernel_language == "cpp":
         build_cmd = _detect_build_command(repo_root)
         setup_section = (
-            "rm -rf ${GEAK_WORK_DIR}/.aiter_jit\n"
-            + build_cmd + "\n"
+            "rm -rf ${GEAK_WORK_DIR}/.aiter_jit\n" + build_cmd + "\n"
             "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
             "export HIP_VISIBLE_DEVICES=%s\\n"
             "export AITER_JIT_DIR=%s/.aiter_jit\\n"
@@ -383,7 +382,7 @@ def generate_commandment_from_commands(
     setup_parts.append(
         "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
         "export HIP_VISIBLE_DEVICES=%s\\n"
-        'exec \"$@\"\\n\' '
+        'exec "$@"\\n\' '
         '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
         "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
     )

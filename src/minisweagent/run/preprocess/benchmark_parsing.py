@@ -254,7 +254,9 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
     if original_bl is not None:
         baseline_ms = original_bl
         baseline_source = "benchmark_baseline.txt"
-        baseline_file_path = next((p for p in [patch_dir, *patch_dir.parents] if (p / "benchmark_baseline.txt").is_file()), None)
+        baseline_file_path = next(
+            (p for p in [patch_dir, *patch_dir.parents] if (p / "benchmark_baseline.txt").is_file()), None
+        )
         if baseline_file_path is not None:
             baseline_text = (baseline_file_path / "benchmark_baseline.txt").read_text()
             baseline_shape_latencies = parse_shape_latencies_ms(baseline_text)
@@ -357,9 +359,8 @@ def rewrite_best_results(patch_dir: Path) -> dict[str, Any] | None:
             if pf and Path(pf).exists() and Path(pf).stat().st_size == 0:
                 existing["best_patch_speedup"] = 1.0
                 existing["llm_selection_analysis"] = (
-                    (existing.get("llm_selection_analysis") or "")
-                    + " [Overridden: patch is empty (0 bytes), speedup clamped to 1.0]"
-                )
+                    existing.get("llm_selection_analysis") or ""
+                ) + " [Overridden: patch is empty (0 bytes), speedup clamped to 1.0]"
                 existing_path.write_text(json.dumps(existing, indent=2))
                 return existing
 
@@ -368,9 +369,8 @@ def rewrite_best_results(patch_dir: Path) -> dict[str, Any] | None:
                 existing["baseline_latency_ms"] = original_bl
                 existing["baseline_source"] = "benchmark_baseline.txt"
                 existing["llm_selection_analysis"] = (
-                    (existing.get("llm_selection_analysis") or "")
-                    + f" [Clamped: no patch beat true baseline {original_bl:.4f}ms]"
-                )
+                    existing.get("llm_selection_analysis") or ""
+                ) + f" [Clamped: no patch beat true baseline {original_bl:.4f}ms]"
                 existing_path.write_text(json.dumps(existing, indent=2))
                 return existing
 

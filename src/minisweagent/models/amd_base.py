@@ -123,10 +123,9 @@ class AmdLlmModelBase:
         usage = getattr(response, "usage", None)
         if usage:
             try:
-                cost = (
-                    (usage.input_tokens / 1000) * self.config.cost_per_1k_input_tokens
-                    + (usage.output_tokens / 1000) * self.config.cost_per_1k_output_tokens
-                )
+                cost = (usage.input_tokens / 1000) * self.config.cost_per_1k_input_tokens + (
+                    usage.output_tokens / 1000
+                ) * self.config.cost_per_1k_output_tokens
             except (AttributeError, TypeError):
                 logger.debug("Usage information available but format unexpected")
                 cost = 0.0

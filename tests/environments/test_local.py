@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -21,7 +22,7 @@ def test_local_environment_basic_execution():
     """Test basic command execution in local environment."""
     env = LocalEnvironment()
 
-    result = env.execute({"command": "echo 'hello world'"})
+    result = env.execute("echo 'hello world'")
     assert result["returncode"] == 0
     assert "hello world" in result["output"]
 
@@ -30,13 +31,11 @@ def test_local_environment_set_env_variables():
     """Test setting environment variables in the local environment."""
     env = LocalEnvironment(env={"TEST_VAR": "test_value", "ANOTHER_VAR": "another_value"})
 
-    # Test single environment variable
-    result = env.execute({"command": "echo $TEST_VAR"})
+    result = env.execute("echo $TEST_VAR")
     assert result["returncode"] == 0
     assert "test_value" in result["output"]
 
-    # Test multiple environment variables
-    result = env.execute({"command": "echo $TEST_VAR $ANOTHER_VAR"})
+    result = env.execute("echo $TEST_VAR $ANOTHER_VAR")
     assert result["returncode"] == 0
     assert "test_value another_value" in result["output"]
 
@@ -46,8 +45,7 @@ def test_local_environment_existing_env_variables():
     with patch.dict(os.environ, {"EXISTING_VAR": "existing_value"}):
         env = LocalEnvironment(env={"NEW_VAR": "new_value"})
 
-        # Test that both existing and new variables are available
-        result = env.execute({"command": "echo $EXISTING_VAR $NEW_VAR"})
+        result = env.execute("echo $EXISTING_VAR $NEW_VAR")
         assert result["returncode"] == 0
         assert "existing_value new_value" in result["output"]
 
@@ -57,7 +55,7 @@ def test_local_environment_env_variable_override():
     with patch.dict(os.environ, {"CONFLICT_VAR": "original_value"}):
         env = LocalEnvironment(env={"CONFLICT_VAR": "override_value"})
 
-        result = env.execute({"command": "echo $CONFLICT_VAR"})
+        result = env.execute("echo $CONFLICT_VAR")
         assert result["returncode"] == 0
         assert "override_value" in result["output"]
 
@@ -67,7 +65,7 @@ def test_local_environment_custom_cwd():
     with tempfile.TemporaryDirectory() as temp_dir:
         env = LocalEnvironment(cwd=temp_dir)
 
-        result = env.execute({"command": "pwd"})
+        result = env.execute("pwd")
         assert result["returncode"] == 0
         assert temp_dir in result["output"]
 
@@ -77,8 +75,7 @@ def test_local_environment_cwd_parameter_override():
     with tempfile.TemporaryDirectory() as temp_dir1, tempfile.TemporaryDirectory() as temp_dir2:
         env = LocalEnvironment(cwd=temp_dir1)
 
-        # Execute with different cwd parameter
-        result = env.execute({"command": "pwd"}, cwd=temp_dir2)
+        result = env.execute("pwd", cwd=temp_dir2)
         assert result["returncode"] == 0
         assert temp_dir2 in result["output"]
 
@@ -88,7 +85,7 @@ def test_local_environment_default_cwd():
     env = LocalEnvironment()
     current_dir = os.getcwd()
 
-    result = env.execute({"command": "pwd"})
+    result = env.execute("pwd")
     assert result["returncode"] == 0
     assert current_dir in result["output"]
 
@@ -97,7 +94,7 @@ def test_local_environment_command_failure():
     """Test that command failures are properly captured."""
     env = LocalEnvironment()
 
-    result = env.execute({"command": "exit 1"})
+    result = env.execute("exit 1")
     assert result["returncode"] == 1
     assert result["output"] == ""
 
@@ -106,7 +103,7 @@ def test_local_environment_nonexistent_command():
     """Test execution of non-existent command."""
     env = LocalEnvironment()
 
-    result = env.execute({"command": "nonexistent_command_12345"})
+    result = env.execute("nonexistent_command_12345")
     assert result["returncode"] != 0
     assert "nonexistent_command_12345" in result["output"] or "command not found" in result["output"]
 
@@ -115,19 +112,17 @@ def test_local_environment_stderr_capture():
     """Test that stderr is properly captured."""
     env = LocalEnvironment()
 
-    result = env.execute({"command": "echo 'error message' >&2"})
+    result = env.execute("echo 'error message' >&2")
     assert result["returncode"] == 0
     assert "error message" in result["output"]
 
 
 def test_local_environment_timeout():
-    """Test timeout functionality returns structured output instead of raising."""
+    """Test that TimeoutExpired is raised for long-running commands."""
     env = LocalEnvironment(timeout=1)
 
-    result = env.execute({"command": "sleep 2"})
-    assert result["returncode"] == -1
-    assert "timed out" in result["exception_info"]
-    assert result["extra"]["exception_type"] == "TimeoutExpired"
+    with pytest.raises(subprocess.TimeoutExpired):
+        env.execute("sleep 10")
 
 
 def test_local_environment_custom_timeout():
@@ -150,7 +145,7 @@ def test_local_environment_return_codes(command, expected_returncode):
     """Test that various return codes are properly captured."""
     env = LocalEnvironment()
 
-    result = env.execute({"command": command})
+    result = env.execute(command)
     assert result["returncode"] == expected_returncode
 
 
@@ -158,7 +153,7 @@ def test_local_environment_multiline_output():
     """Test handling of multiline command output."""
     env = LocalEnvironment()
 
-    result = env.execute({"command": "echo -e 'line1\\nline2\\nline3'"})
+    result = env.execute("echo -e 'line1\\nline2\\nline3'")
     assert result["returncode"] == 0
     output_lines = result["output"].strip().split("\n")
     assert len(output_lines) == 3
@@ -172,16 +167,13 @@ def test_local_environment_file_operations():
     with tempfile.TemporaryDirectory() as temp_dir:
         env = LocalEnvironment(cwd=temp_dir)
 
-        # Create a file
-        result = env.execute({"command": "echo 'test content' > test.txt"})
+        result = env.execute("echo 'test content' > test.txt")
         assert result["returncode"] == 0
 
-        # Read the file
-        result = env.execute({"command": "cat test.txt"})
+        result = env.execute("cat test.txt")
         assert result["returncode"] == 0
         assert "test content" in result["output"]
 
-        # Verify file exists
         test_file = Path(temp_dir) / "test.txt"
         assert test_file.exists()
         assert test_file.read_text().strip() == "test content"
@@ -191,12 +183,10 @@ def test_local_environment_shell_features():
     """Test that shell features like pipes and redirects work."""
     env = LocalEnvironment()
 
-    # Test pipe
-    result = env.execute({"command": "echo 'hello world' | grep 'world'"})
+    result = env.execute("echo 'hello world' | grep 'world'")
     assert result["returncode"] == 0
     assert "hello world" in result["output"]
 
-    # Test command substitution
-    result = env.execute({"command": "echo $(echo 'nested')"})
+    result = env.execute("echo $(echo 'nested')")
     assert result["returncode"] == 0
     assert "nested" in result["output"]
