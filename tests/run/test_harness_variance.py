@@ -76,6 +76,13 @@ KERNELS = {**TRITON_KERNELS, **HIP_KERNELS}
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+def test_kernel_registry_nonempty():
+    """Keep this module as a real pytest target and sanity-check the fixtures."""
+    assert KERNELS
+    assert set(TRITON_KERNELS).issubset(KERNELS)
+    assert set(HIP_KERNELS).issubset(KERNELS)
+
+
 def run_preprocess(kernel_url, output_dir, gpu_id=0, repo=None):
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -162,7 +169,7 @@ def get_repo_root(output_dir):
     return None
 
 
-def test_kernel_variance(kernel_name, kernel_url, base_dir, num_runs=5, gpu_id=0, repo=None):
+def run_kernel_variance(kernel_name, kernel_url, base_dir, num_runs=5, gpu_id=0, repo=None):
     """Run preprocessing N times and collect variance data."""
     print(f"\n{'='*60}")
     print(f"  {kernel_name} ({num_runs} runs)")
@@ -370,7 +377,7 @@ def _run_kernel_batch(kernel_names, resolve_fn, base_dir, num_runs, gpu_id):
     results = {}
     for name in kernel_names:
         kernel_ref, repo = resolve_fn(name)
-        runs, report = test_kernel_variance(
+        runs, report = run_kernel_variance(
             name, kernel_ref, base_dir, num_runs=num_runs, gpu_id=gpu_id,
             repo=repo,
         )
@@ -443,7 +450,7 @@ def main():
     if parallel <= 1:
         for name in args.kernel:
             kernel_ref, repo = _resolve_kernel(name)
-            runs, report = test_kernel_variance(
+            runs, report = run_kernel_variance(
                 name, kernel_ref, base_dir, num_runs=args.runs, gpu_id=gpu_ids[0],
                 repo=repo,
             )
