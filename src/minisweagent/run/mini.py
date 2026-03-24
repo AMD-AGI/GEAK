@@ -41,7 +41,6 @@ from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.agents.interactive_textual import TextualAgent
 from minisweagent.agents.parallel_agent import ParallelAgent
 from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
-from minisweagent.agents.homogeneous_agent import run_homogeneous_agent
 from minisweagent.agents.unit_test_agent import run_unit_test_agent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.local import LocalEnvironment
@@ -50,7 +49,6 @@ from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.utils.config_editor import load_and_merge_configs
 from minisweagent.run.utils.save import save_traj
 from minisweagent.run.utils.task_parser import _resolve_path_case
-from minisweagent.run.preprocess.preprocessor import run_preprocessor
 from minisweagent.utils.log import logger
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
@@ -122,10 +120,6 @@ def main(
     # RAG knowledge retrieval
     rag: bool = typer.Option(False, "--rag", help="Enable RAG retrieval from AMD/NVIDIA knowledge base"),
     debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --rag)"),
-    # Preprocessing
-    kernel_url: str | None = typer.Option(None, "--kernel-url", help="Kernel URL/path to preprocess (runs full preprocessing pipeline)"),
-    harness: str | None = typer.Option(None, "--harness", help="Harness file path for preprocessing"),
-    eval_command: str | None = typer.Option(None, "--eval-command", help="Eval command for preprocessing (skips discovery)"),
 ) -> Any:
     # fmt: on
     # Capture all print output to trajectory
@@ -140,7 +134,11 @@ def main(
     config = yaml.safe_load(base_config_path.read_text())
     
     # 2. Select and merge template based on enable_strategies flag
-    template_name = "homogeneous_agent.yaml"
+    if enable_strategies:
+        template_name = "mini_kernel_strategy_list.yaml"
+    else:
+        template_name = "mini_system_prompt.yaml"
+    
     template_path = builtin_config_dir / template_name
     console.print(f"Applying template: [bold green]'{template_name}'[/bold green] (save_patch always enabled)")
     template_config = yaml.safe_load(template_path.read_text())
@@ -219,7 +217,7 @@ def main(
         _api_key = os.getenv("AMD_LLM_API_KEY") or os.getenv("LLM_GATEWAY_KEY") or os.getenv("ANTHROPIC_API_KEY")
     _api_key_display = f"{_api_key[:8]}..." if _api_key and len(_api_key) > 8 else _api_key or "Not set"
     console.print(f"\\[mini-swe-agent] Using model: [bold cyan]{_model_name}[/bold cyan], API key: [bold cyan]{_api_key_display}[/bold cyan]")
-    
+
     # ============ Environment setup: RAG or Local ============
     _env_kwargs = config.get("env", {})
     if rag:
@@ -256,32 +254,35 @@ def main(
     else:
         repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name = result
 
-    # ============ Preprocessing (if kernel_url provided) ============
-    preprocess_ctx = None
-    console.print(f"[bold cyan]Running preprocessing pipeline for: {kernel_url}[/bold cyan]")
-    preprocess_output_dir = patch_output or (global_config_dir / "preprocess")
-    preprocess_ctx = run_preprocessor(
-        kernel_url=kernel_url,
-        repo=repo,
-        output_dir=Path(preprocess_output_dir),
-        gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
-        model_factory=lambda: get_model(model_name, config.get("model", {})),
-        console=console,
-        harness=harness,
-        eval_command=test_command,
-    )
-    # Use preprocessing results
-    if preprocess_ctx.get("test_command") and not test_command:
-        test_command = preprocess_ctx["test_command"]
-        console.print(f"[bold green]Using test_command from preprocessing:[/bold green] {test_command}")
-    if preprocess_ctx.get("repo_root") and not repo:
-        repo = preprocess_ctx["repo_root"]
-    # Prepend COMMANDMENT to task if available
-    commandment = preprocess_ctx.get("commandment")
-    if commandment:
-        task_content = f"{commandment}\n\n---\n\n{task_content}"
-        console.print("[bold green]Prepended COMMANDMENT to task content[/bold green]")
+    if create_test or not test_command:
+        if not repo:
+            raise ValueError("repo is required for --create-test or when test_command is missing. Please pass --repo.")
+        console.print(
+            "[bold yellow]No test_command provided (or --create-test enabled). "
+            "Will auto-create/search unit tests and infer a test command via UnitTestAgent...[/bold yellow]"
+        )
+        test_command = run_unit_test_agent(
+            model=get_model(model_name, config.get("model", {})),
+            repo=repo,
+            kernel_name=kernel_name or "unknown",
+            log_dir=patch_output,
+        )
+        console.print(f"[bold green]Using UnitTestAgent test_command:[/bold green] {test_command}")
     
+    # ============ Step 1: Choose base agent class ============
+    # Based on enable_strategies flag, select appropriate agent and template
+    if enable_strategies:
+        # Use strategy agent with mini_kernel_strategy_list.yaml template
+        base_agent_class = StrategyInteractiveAgent
+        console.print(f"[bold cyan]Using Strategy Agent with strategy file: {strategy_file}[/bold cyan]")
+    else:
+        # Use interactive agent with mini_system_prompt.yaml template
+        # Choose between visual (Textual) and non-visual (Interactive) mode
+        if visual == (os.getenv("MSWEA_VISUAL_MODE_DEFAULT", "false") == "false"):
+            base_agent_class = TextualAgent
+        else:
+            base_agent_class = InteractiveAgent
+        console.print(f"[bold cyan]Using Interactive Agent (visual={'on' if base_agent_class == TextualAgent else 'off'})[/bold cyan]")
     
     # Mode (yolo/confirm/human) is set via config and applies to all InteractiveAgent subclasses
     
@@ -303,61 +304,58 @@ def main(
     # Create log directory and prepare log file path
     log_dir = Path(patch_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
+    agent_log_file = log_dir / "mini_agent.log"
     
-    # ============ Step 3: Use Homogeneous Agent ============
-    # Configure repo path
-    repo_path = repo or config.get("patch", {}).get("repo")
-    if repo_path:
-        p = Path(repo_path)
-        if not p.exists():
-            resolved = _resolve_path_case(p)
-            if resolved is not None:
-                p = resolved
-        repo_path = p.resolve()
+    # ============ Step 3: Use ParallelAgent (supports both single and parallel execution) ============
+    agent_class = ParallelAgent
+    agent_config["agent_class"] = base_agent_class
+    agent_config["num_parallel"] = num_parallel or 1
+    agent_config["gpu_ids"] = parsed_gpu_ids
     
-    # Tools settings for homogeneous agent
-    tools_settings = {
-        "strategy_manager": enable_strategies,
-        "strategy_file": strategy_file,
-    }
-    
-    # Environment class for factory
-    if rag:
-        try:
-            from minisweagent.mcp_integration.mcp_environment import MCPEnabledEnvironment
-            env_class = MCPEnabledEnvironment
-        except ImportError:
-            env_class = LocalEnvironment
+    if num_parallel and num_parallel > 1:
+        console.print(f"[bold cyan]Using Parallel Mode: {num_parallel} agents[/bold cyan]")
+        console.print(f"[dim]GPU IDs: {parsed_gpu_ids}[/dim]")
+        
+        # Configure repo path for parallel execution (preserve filesystem case)
+        repo_path = repo or config.get("patch", {}).get("repo")
+        if repo_path:
+            p = Path(repo_path)
+            if not p.exists():
+                resolved = _resolve_path_case(p)
+                if resolved is not None:
+                    p = resolved
+            agent_config["repo"] = str(p.resolve())
+            console.print(f"[dim]Repository: {agent_config['repo']}[/dim]")
+        else:
+            console.print("[bold yellow]Warning: No repo path specified for parallel execution[/bold yellow]")
     else:
-        env_class = LocalEnvironment
-    
-    console.print(f"[bold cyan]Using Homogeneous Agent Mode[/bold cyan]")
-    console.print(f"[dim]Parallel agents: {num_parallel or 1}[/dim]")
-    console.print(f"[dim]GPU IDs: {parsed_gpu_ids}[/dim]")
-    if repo_path:
-        console.print(f"[dim]Repository: {repo_path}[/dim]")
+        console.print("[bold cyan]Using Single Agent Mode[/bold cyan]")
+        console.print(f"[dim]Using GPU: {parsed_gpu_ids[0]}[/dim]")
+        # Set HIP_VISIBLE_DEVICES for single agent GPU isolation
+        env.config.env = env.config.env or {}
+        env.config.env["HIP_VISIBLE_DEVICES"] = str(parsed_gpu_ids[0])
+        if repo:
+            env.config.cwd = str(Path(repo).resolve())
+            console.print(f"[dim]Working directory: {env.config.cwd}[/dim]")
+            
+    # Create and run agent
+    agent = agent_class(model, env, **agent_config)
+    agent.log_file = agent_log_file
+    console.print(f"[dim]Agent log: {agent_log_file}[/dim]")
     
     try:
-        best_result = run_homogeneous_agent(
-            config=config,
-            task_content=task_content,
-            model=model,
-            env=env,
-            env_class=env_class,
-            env_kwargs=_env_kwargs,
-            tools_settings=tools_settings,
-            agent_config=agent_config,
-            repo=repo_path,
-            num_parallel=num_parallel,
-            gpu_ids=gpu_ids,
-            output_dir=log_dir,
-            model_name=model_name,
+        exit_status, result = agent.run(
+            task_content,
+            output=output,
+            save_traj_fn=save_traj,
             console=console,
+            model_factory=lambda: get_model(model_name, config.get("model", {})),
+            env_factory=lambda: (MCPEnabledEnvironment if rag else LocalEnvironment)(**copy.deepcopy(_env_kwargs)),
         )
-        return best_result
     except Exception as e:
-        logger.error(f"Error running homogeneous agent: {e}", exc_info=True)
-        raise
+        logger.error(f"Error running agent: {e}", exc_info=True)
+
+    return agent
 
 
 if __name__ == "__main__":
