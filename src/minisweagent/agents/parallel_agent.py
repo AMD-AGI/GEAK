@@ -533,7 +533,7 @@ class ParallelAgent(DefaultAgent):
         # Initialize non-git repos as git repos for unified worktree management
         if not is_git_repo:
             if console:
-                console.print(f"[bold yellow]Initializing non-git repo as git for worktree management...[/bold yellow]")
+                console.print("[bold yellow]Initializing non-git repo as git for worktree management...[/bold yellow]")
             cls._init_as_git_repo(repo_path_resolved)
             is_git_repo = True  # Now it's a git repo
         
