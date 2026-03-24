@@ -356,7 +356,17 @@ def finalize_run(
                 round_eval_dict,
             )
             return _dict_to_final_report(merged)
+        # No verified round evaluations found — write final_report.json
+        # with the LLM's summary so the report always exists on disk.
         record_final_outcome(ctx, finalize_result)
+        output_dir = Path(ctx.get("output_dir", "."))
+        report_path = output_dir / "final_report.json"
+        if not report_path.exists():
+            finalize_result.setdefault("status", "complete")
+            finalize_result.setdefault("best_speedup", 1.0)
+            finalize_result.setdefault("best_speedup_verified", 1.0)
+            report_path.write_text(json.dumps(finalize_result, indent=2, default=str))
+            logger.info("Wrote final_report.json (no verified round evaluations)")
         return _dict_to_final_report(finalize_result)
     report_dict = auto_finalize(ctx, _print)
     return _dict_to_final_report(report_dict)

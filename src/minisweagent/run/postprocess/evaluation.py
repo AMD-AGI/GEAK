@@ -236,6 +236,18 @@ def evaluate_round_best(
 
     if not candidates:
         _print(f"  Round {round_num}: no valid candidates for evaluation")
+        # Still write a round evaluation so finalize_run() can find it.
+        # Without this, finalize_run() has no round data and may skip
+        # writing final_report.json entirely.
+        no_improvement_eval = {
+            "round": round_num,
+            "best_patch": None,
+            "best_task": None,
+            "benchmark_speedup": 1.0,
+            "status": "no_candidates",
+        }
+        eval_path = output_dir / f"round_{round_num}_evaluation.json"
+        eval_path.write_text(json.dumps(no_improvement_eval, indent=2))
         return None
 
     all_have_kernel_time = all(c["kernel_time_ms"] is not None for c in candidates)
