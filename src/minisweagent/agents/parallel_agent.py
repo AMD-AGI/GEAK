@@ -54,6 +54,8 @@ class ParallelAgentConfig(AgentConfig):
     agent_class: type | None = None
     # Strategy agent compatibility
     strategy_file_path: str | None = None
+    # Interactive/exit behaviour (passed through from --exit-immediately)
+    confirm_exit: bool = True
 
 
 class ParallelAgent(DefaultAgent):
