@@ -263,7 +263,7 @@ def profile_kernel(
                 auto_select=auto_select,
                 quick=quick,
                 gpu_devices=gpu_devices,
-                cwd=cwd,
+                cwd=workdir or str(Path.cwd()),
             )
         elif backend == "rocprof-compute":
             return _profile_with_rocprof(
