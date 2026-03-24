@@ -6,7 +6,6 @@
 import copy
 import os
 import sys
-import traceback
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -14,6 +13,7 @@ from typing import Any
 
 class TeeOutput:
     """Capture stdout/stderr to buffer while keeping terminal output."""
+
     def __init__(self, original):
         self.terminal = original
         self.buffer = StringIO()
@@ -28,6 +28,7 @@ class TeeOutput:
     def getvalue(self):
         return self.buffer.getvalue()
 
+
 import typer
 import yaml
 from prompt_toolkit.formatted_text import HTML
@@ -36,19 +37,19 @@ from prompt_toolkit.shortcuts import PromptSession
 from rich.console import Console
 
 from minisweagent import global_config_dir
-from minisweagent.agents.interactive import InteractiveAgent, InteractiveAgentConfig
+from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.agents.interactive_textual import TextualAgent
-from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 from minisweagent.agents.parallel_agent import ParallelAgent
+from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+from minisweagent.agents.unit_test_agent import run_unit_test_agent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
-from minisweagent.run.utils.save import save_traj
 from minisweagent.run.utils.config_editor import load_and_merge_configs
+from minisweagent.run.utils.save import save_traj
 from minisweagent.run.utils.task_parser import _resolve_path_case
 from minisweagent.utils.log import logger
-from minisweagent.agents.unit_test_agent import run_unit_test_agent
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
 DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
@@ -67,6 +68,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
 _HELP_TEXT = """Run mini-SWE-agent in your local environment.
 
 [not dim]
@@ -326,7 +329,7 @@ def main(
         else:
             console.print("[bold yellow]Warning: No repo path specified for parallel execution[/bold yellow]")
     else:
-        console.print(f"[bold cyan]Using Single Agent Mode[/bold cyan]")
+        console.print("[bold cyan]Using Single Agent Mode[/bold cyan]")
         console.print(f"[dim]Using GPU: {parsed_gpu_ids[0]}[/dim]")
         # Set HIP_VISIBLE_DEVICES for single agent GPU isolation
         env.config.env = env.config.env or {}
@@ -351,8 +354,7 @@ def main(
         )
     except Exception as e:
         logger.error(f"Error running agent: {e}", exc_info=True)
-        exit_status, result = type(e).__name__, str(e)
-    
+
     return agent
 
 
