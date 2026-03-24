@@ -19,8 +19,17 @@ jobs:
       - name: Install GEAK
         run: pip install -e '.[full]'
 
+      - name: Check API key is set
+        run: |
+          if [ -z "$AMD_LLM_API_KEY" ]; then
+            echo "::error::AMD_LLM_API_KEY is NOT set. Please add it as a repository secret."
+            exit 1
+          else
+            echo "AMD_LLM_API_KEY is set (length: ${#AMD_LLM_API_KEY})"
+          fi
+
       - name: Verify CLI
-        run: geak --help
+        run: mini --help
 
       - name: Prepare workspace
         run: |
@@ -38,7 +47,7 @@ jobs:
       - name: Run GEAK optimization
         working-directory: ${{ env.SMOKE_DIR }}
         run: |
-          geak \
+          mini \
             -c geak \
             --repo "$SMOKE_DIR" \
             --yolo \
