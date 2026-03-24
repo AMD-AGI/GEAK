@@ -1,5 +1,7 @@
 import pytest
 
+swerex = pytest.importorskip("swerex", reason="swerex package not installed")
+
 from minisweagent.environments.extra.swerex_docker import SwerexDockerEnvironment
 
 
