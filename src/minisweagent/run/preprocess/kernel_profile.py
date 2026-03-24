@@ -15,6 +15,7 @@ The heavy lifting is done by profiler-mcp; this module adds:
 """
 
 import argparse
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -270,7 +271,8 @@ def _build_rocprof_result(structured: dict, gpu_device: str = "0") -> dict:
 
 def _profile_with_metrix(command: str, gpu_devices, replays: int, quick: bool) -> dict:
     """Profile using MetrixTool and return backend-neutral JSON."""
-    from metrix_mcp.core import MetrixTool
+    metrix_core = importlib.import_module("metrix_mcp.core")
+    MetrixTool = metrix_core.MetrixTool
 
     tool = MetrixTool(gpu_devices=gpu_devices)
     result = tool.profile(
@@ -381,7 +383,8 @@ def main():
     use_json = args.output_json or args.output is not None
 
     # Dispatch via profiler-mcp (single code path for both backends)
-    from profiler_mcp.server import profile_kernel
+    profiler_server = importlib.import_module("profiler_mcp.server")
+    profile_kernel = profiler_server.profile_kernel
 
     _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
     result = _profile_fn(

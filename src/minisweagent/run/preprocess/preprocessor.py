@@ -11,6 +11,7 @@ shell.
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import os
@@ -433,7 +434,8 @@ def run_preprocessor(
     _print("[bold cyan]--- Step 3/7: Test discovery ---[/bold cyan]" if console else "--- Step 3/7: Test discovery ---")
 
     _ensure_mcp_importable()
-    from automated_test_discovery.server import discover as atd_discover
+    atd_server = importlib.import_module("automated_test_discovery.server")
+    atd_discover = atd_server.discover
 
     _discover_fn = getattr(atd_discover, "fn", atd_discover)
     disc_dict = {}
