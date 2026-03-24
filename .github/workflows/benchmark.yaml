@@ -101,7 +101,7 @@ jobs:
 
       - name: Download previous benchmark
         id: prev
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v19
         with:
           workflow: benchmark.yaml
           branch: dev
