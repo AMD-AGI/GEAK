@@ -16,7 +16,7 @@ from typing import List, Optional, Tuple
 import io
 import ast
 
-from registry import registry as REGISTRY
+from minisweagent.tools.registry import registry as REGISTRY
 
 
 # There are some super strange "ascii can't decode x" errors,

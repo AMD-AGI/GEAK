@@ -11,12 +11,10 @@ from pathlib import Path
 
 import yaml
 
-from minisweagent.agents.default import DefaultAgent, AgentConfig, FormatError, Submitted
-from minisweagent.models import get_model
-
+from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.mcp_integration.mcp_environment import MCPEnabledEnvironment
-from minisweagent.mcp_integration.prompts import SYSTEM_TEMPLATE, INSTANCE_TEMPLATE
-
+from minisweagent.mcp_integration.prompts import INSTANCE_TEMPLATE, SYSTEM_TEMPLATE
+from minisweagent.models import get_model
 
 # Default config path
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "mini.yaml"
@@ -34,20 +32,20 @@ class DebugMCPEnvironment(MCPEnabledEnvironment):
     
     def execute(self, command: str, cwd: str = "", *, timeout: int | None = None):
         print(f"\n{'='*60}")
-        print(f"🔧 [ENV] Executing command:")
+        print("🔧 [ENV] Executing command:")
         print(f"{'='*60}")
         print(command)
         print(f"{'='*60}")
         
         # Check if it's RAG or bash
         if command.strip().startswith(self.config.mcp_prefix):
-            print(f"✅ [ENV] This is a RAG command! Will route to RAG retrieval.")
+            print("✅ [ENV] This is a RAG command! Will route to RAG retrieval.")
         else:
-            print(f"⚠️  [ENV] This is a BASH command, not RAG.")
+            print("⚠️  [ENV] This is a BASH command, not RAG.")
         
         result = super().execute(command, cwd, timeout=timeout)
         
-        print(f"\n📤 [ENV] Command output (first 500 chars):")
+        print("\n📤 [ENV] Command output (first 500 chars):")
         print(f"{'-'*60}")
         print(result.get("output", "")[:500])
         print(f"{'-'*60}")
@@ -61,7 +59,7 @@ class DebugAgent(DefaultAgent):
     
     def run(self, task: str, **kwargs):
         print(f"\n{'#'*60}")
-        print(f"# DEBUG: Starting agent run")
+        print("# DEBUG: Starting agent run")
         print(f"{'#'*60}")
         print(f"\n📝 [AGENT] Task: {task}")
         return super().run(task, **kwargs)
@@ -73,7 +71,7 @@ class DebugAgent(DefaultAgent):
         
         response = super().query()
         
-        print(f"\n📥 [AGENT] LLM Response (content):")
+        print("\n📥 [AGENT] LLM Response (content):")
         print(f"{'-'*60}")
         content = response.get("content", "")
         print(content[:1000] + ("..." if len(content) > 1000 else ""))
@@ -85,7 +83,7 @@ class DebugAgent(DefaultAgent):
         content = response.get("content", "")
         actions = re.findall(r"```bash\s*\n(.*?)\n```", content, re.DOTALL)
         
-        print(f"\n🔍 [AGENT] Parsing actions from response...")
+        print("\n🔍 [AGENT] Parsing actions from response...")
         print(f"   Found {len(actions)} action(s) in triple backticks")
         
         if actions:
@@ -170,11 +168,11 @@ def main():
         print(f"\n{'#'*60}")
         print("# DEBUG: Loaded Prompts")
         print(f"{'#'*60}")
-        print(f"\n📄 SYSTEM_TEMPLATE (first 300 chars):")
+        print("\n📄 SYSTEM_TEMPLATE (first 300 chars):")
         print(f"{'-'*60}")
         print(SYSTEM_TEMPLATE[:300])
         print(f"{'-'*60}")
-        print(f"\n📄 INSTANCE_TEMPLATE (first 300 chars):")
+        print("\n📄 INSTANCE_TEMPLATE (first 300 chars):")
         print(f"{'-'*60}")
         print(INSTANCE_TEMPLATE[:300])
         print(f"{'-'*60}")
@@ -187,7 +185,7 @@ def main():
     
     # Debug: verify agent config
     if args.debug:
-        print(f"\n📄 Agent's system_template (first 200 chars):")
+        print("\n📄 Agent's system_template (first 200 chars):")
         print(f"{'-'*60}")
         print(agent.config.system_template[:200])
         print(f"{'-'*60}")

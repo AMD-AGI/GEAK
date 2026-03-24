@@ -718,12 +718,14 @@ class ProfilingAnalyzer:
             }
         result = subprocess.run(make_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600*6)
         if result.returncode == 0:
-            if self.profiling_type == 'profiling'  or use_profiling:
-                analysis_cmd =[f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
+            if self.profiling_type == 'profiling' or use_profiling:
+                analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
             elif self.profiling_type == 'roofline':
-                analysis_cmd =[f"rocprof-compute analyze -p {self.output_path} -b 4"]
+                analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 4"]
             elif self.profiling_type == 'profiler_analyzer':
-                analysis_cmd =[f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 11 16 17"]
+                analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 11 16 17"]
+            else:
+                analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
             result = subprocess.run(analysis_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600*6)
             if result.returncode == 0:
                 

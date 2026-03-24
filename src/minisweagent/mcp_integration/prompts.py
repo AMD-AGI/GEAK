@@ -5,6 +5,7 @@ Merged version: combines v1's multi-round strategy with v2's specific query guid
 """
 
 from pathlib import Path
+
 _MINI_SWE_ROOT = Path(__file__).resolve().parents[3]
 _ENV_INSTALL_DOC = str(_MINI_SWE_ROOT / "docs" / "env_install.md")
 

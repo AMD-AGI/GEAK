@@ -193,7 +193,7 @@ class AmdGeminiModel(AmdLlmModelBase):
     # ------------------------------------------------------------------
 
     def _parse_response(self, response) -> dict:
-        output_dict: dict = {"content": "", "tools": ""}
+        output_dict: dict = {"content": "", "tools": None}
         content = ""
         try:
             if hasattr(response, "candidates") and response.candidates:
@@ -236,8 +236,8 @@ class AmdGeminiModel(AmdLlmModelBase):
                                 break
                     if thought_signature is None and hasattr(part, "thought_signature"):
                         thought_signature = getattr(part, "thought_signature", None)
-                    output_dict["tools"] = {
-                        "id": str(uuid.uuid4()),  # Gemini doesn't provide call IDs
+                    tools_dict = {
+                        "id": str(uuid.uuid4()),
                         "function": {
                             "arguments": getattr(fc, "args", None) or {},
                             "name": getattr(fc, "name", None) or "",
@@ -250,7 +250,8 @@ class AmdGeminiModel(AmdLlmModelBase):
                         # value survives JSON / Pydantic round-trips later.
                         if isinstance(thought_signature, (bytes, bytearray)):
                             thought_signature = base64.b64encode(thought_signature).decode("ascii")
-                        output_dict["tools"]["thought_signature"] = thought_signature
+                        tools_dict["thought_signature"] = thought_signature
+                    output_dict["tools"] = tools_dict
                     break
             else:
                 text = getattr(response, "text", "")
