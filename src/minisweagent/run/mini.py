@@ -140,11 +140,7 @@ def main(
     config = yaml.safe_load(base_config_path.read_text())
     
     # 2. Select and merge template based on enable_strategies flag
-    if enable_strategies:
-        template_name = "mini_kernel_strategy_list.yaml"
-    else:
-        template_name = "mini_system_prompt.yaml"
-    
+    template_name = "homogeneous_agent.yaml"
     template_path = builtin_config_dir / template_name
     console.print(f"Applying template: [bold green]'{template_name}'[/bold green] (save_patch always enabled)")
     template_config = yaml.safe_load(template_path.read_text())
