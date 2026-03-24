@@ -7,11 +7,14 @@ from minisweagent.tools.strategy_manager import StrategyManagerTool
 from minisweagent.tools.str_replace_editor import str_replace_editor
 from minisweagent.tools.test_perf import TestPerfTool
 from minisweagent.tools.submit import SubmitTool
+from minisweagent.tools.mcp_bridge import collect_mcp_tools
 
 current_dir = os.path.dirname(__file__)
 json_path = os.path.join(current_dir, "tools.json")
 with open(json_path,"r",encoding="utf-8") as f:
     _all_tools = json.load(f)
+_mcp_bridges, _mcp_tools = collect_mcp_tools()
+_all_tools.extend(_mcp_tools)
 
 def get_tools_list(use_strategy_manager: bool = False) -> list:
     """Get filtered tools list based on settings.
@@ -51,12 +54,44 @@ class ToolRuntime:
                 on_change_callback=on_strategy_change
             )
         
+        self._mcp_bridges = _mcp_bridges
+        # Add MCP tools into tool table, No filter here.
+        for bridge in self._mcp_bridges:
+            _mcp_server_name = bridge.server_name
+            for _mcp_tool in _mcp_tools:
+                if f"[MCP: {_mcp_server_name}]" in _mcp_tool["description"]:
+                    base_name = _mcp_tool["name"].split("__")[0] if f"__{_mcp_server_name}" in _mcp_tool["name"] else _mcp_tool["name"]
+                    self._tool_table[_mcp_tool["name"]] = bridge.tool(base_name)
         # Store settings for tools list generation
         self.use_strategy_manager = use_strategy_manager
     
     def get_tools_list(self) -> list:
         """Get the tools list for API based on current settings."""
         return get_tools_list(self.use_strategy_manager)
+
+    def set_env(self, env: dict[str, str]) -> None:
+            """Propagate environment overrides (e.g. HIP_VISIBLE_DEVICES) to tools."""
+            env = dict(env)  # defensive copy to avoid shared-reference mutation
+            bash = self._tool_table.get("bash")
+            if bash is not None:
+                bash._env_override = env
+            for bridge in self._mcp_bridges:
+                bridge.set_env(env)
+
+    def set_cwd(self, cwd: str | None) -> None:
+        """Propagate working directory to the bash tool so commands run in the correct worktree."""
+        bash = self._tool_table.get("bash")
+        if bash is not None:
+            bash._cwd = cwd
+
+    def get_tools_schema(self) -> list[dict]:
+        """Return JSON tool schemas for only the tools registered in _tool_table.
+
+        This makes ToolRuntime the single source of truth: the agent can set
+        model.tools = self.toolruntime.get_tools_schema() and the LLM will
+        only see tools that are actually dispatchable.
+        """
+        return [t for t in _all_tools if t["name"] in self._tool_table]
 
     def dispatch(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
         """
