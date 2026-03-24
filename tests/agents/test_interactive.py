@@ -7,19 +7,12 @@ import yaml
 
 from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.environments.local import LocalEnvironment
-from minisweagent.models.test_models import (
-    DeterministicModel,
-    DeterministicResponseAPIToolcallModel,
-    DeterministicToolcallModel,
-    make_output,
-    make_response_api_output,
-    make_toolcall_output,
-)
+from minisweagent.models.test_models import DeterministicModel
 
 
 @contextmanager
 def mock_prompts(side_effect):
-    """Patch both single-line and multiline prompt sessions with shared side_effect."""
+    """Patch prompt session with the given side_effect."""
     if callable(side_effect):
         se = side_effect
     else:
@@ -28,9 +21,8 @@ def mock_prompts(side_effect):
         def se(*args, **kwargs):
             return next(it)
 
-    with patch("minisweagent.agents.interactive._prompt_session.prompt", side_effect=se):
-        with patch("minisweagent.agents.interactive._multiline_prompt_session.prompt", side_effect=se):
-            yield
+    with patch("minisweagent.agents.interactive.prompt_session.prompt", side_effect=se):
+        yield
 
 
 # --- Helper functions to abstract message format differences ---
@@ -48,54 +40,22 @@ def get_text(msg: dict) -> str:
     return ""
 
 
-# --- Model factory functions ---
+# --- Helpers ---
 
 
-def make_text_model(outputs_spec: list[tuple[str, list[dict]]], **kwargs) -> DeterministicModel:
+def make_output(content: str | None, actions: list[dict]) -> str:
+    """Build a deterministic model output string with embedded bash code blocks."""
+    parts = []
+    if content:
+        parts.append(content)
+    for action in actions:
+        parts.append(f"```bash\n{action['command']}\n```")
+    return "\n".join(parts)
+
+
+def _make_model(outputs_spec: list[tuple[str, list[dict]]], **kwargs) -> DeterministicModel:
     """Create a DeterministicModel from a list of (content, actions) tuples."""
     return DeterministicModel(outputs=[make_output(content, actions) for content, actions in outputs_spec], **kwargs)
-
-
-def make_tc_model(outputs_spec: list[tuple[str, list[dict]]], **kwargs) -> DeterministicToolcallModel:
-    """Create a DeterministicToolcallModel from a list of (content, actions) tuples."""
-    outputs = []
-    for i, (content, actions) in enumerate(outputs_spec):
-        tc_actions = []
-        tool_calls = []
-        for j, action in enumerate(actions):
-            tool_call_id = f"call_{i}_{j}"
-            tc_actions.append({"command": action["command"], "tool_call_id": tool_call_id})
-            tool_calls.append(
-                {
-                    "id": tool_call_id,
-                    "type": "function",
-                    "function": {"name": "bash", "arguments": f'{{"command": "{action["command"]}"}}'},
-                }
-            )
-        outputs.append(make_toolcall_output(content, tool_calls, tc_actions))
-    return DeterministicToolcallModel(outputs=outputs, **kwargs)
-
-
-def make_response_api_model(
-    outputs_spec: list[tuple[str, list[dict]]], **kwargs
-) -> DeterministicResponseAPIToolcallModel:
-    """Create a DeterministicResponseAPIToolcallModel from a list of (content, actions) tuples."""
-    outputs = []
-    for i, (content, actions) in enumerate(outputs_spec):
-        api_actions = []
-        for j, action in enumerate(actions):
-            tool_call_id = f"call_resp_{i}_{j}"
-            api_actions.append({"command": action["command"], "tool_call_id": tool_call_id})
-        outputs.append(make_response_api_output(content, api_actions))
-    return DeterministicResponseAPIToolcallModel(outputs=outputs, **kwargs)
-
-
-def _make_model(outputs: list[tuple[str, list[dict]]], **kwargs) -> DeterministicModel:
-    """Create a DeterministicModel from a list of (content, actions) tuples.
-
-    Kept for backward compatibility with tests that don't need parametrization.
-    """
-    return make_text_model(outputs, **kwargs)
 
 
 # --- Fixtures ---
@@ -111,23 +71,9 @@ def default_config():
 
 
 @pytest.fixture
-def toolcall_config():
-    """Load toolcall agent config from config/mini.yaml"""
-    config_path = Path("src/minisweagent/config/mini.yaml")
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    return config["agent"]
-
-
-@pytest.fixture(params=["text", "toolcall", "response_api"])
-def model_factory(request, default_config, toolcall_config):
-    """Parametrized fixture that returns (factory_fn, config) for all three model types."""
-    if request.param == "text":
-        return make_text_model, default_config
-    elif request.param == "toolcall":
-        return make_tc_model, toolcall_config
-    else:  # response_api
-        return make_response_api_model, toolcall_config
+def model_factory(default_config):
+    """Returns (factory_fn, config) for creating test models."""
+    return _make_model, default_config
 
 
 def test_successful_completion_with_confirmation(model_factory):
@@ -144,10 +90,10 @@ def test_successful_completion_with_confirmation(model_factory):
             **config,
         )
 
-        info = agent.run("Test completion with confirmation")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "completed\n"
-        assert agent.n_calls == 1
+        exit_status, submission = agent.run("Test completion with confirmation")
+        assert exit_status == "Submitted"
+        assert submission == "completed\n"
+        assert agent.model.n_calls == 1
 
 
 def test_action_rejection_and_recovery(model_factory):
@@ -171,10 +117,10 @@ def test_action_rejection_and_recovery(model_factory):
             **config,
         )
 
-        info = agent.run("Test action rejection")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "recovered\n"
-        assert agent.n_calls == 2
+        exit_status, submission = agent.run("Test action rejection")
+        assert exit_status == "Submitted"
+        assert submission == "recovered\n"
+        assert agent.model.n_calls == 2
         # Should have rejection message in conversation
         rejection_messages = [msg for msg in agent.messages if "User rejected this action" in get_text(msg)]
         assert len(rejection_messages) == 1
@@ -200,9 +146,9 @@ def test_yolo_mode_activation(model_factory):
             **config,
         )
 
-        info = agent.run("Test yolo mode")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "yolo works\n"
+        exit_status, submission = agent.run("Test yolo mode")
+        assert exit_status == "Submitted"
+        assert submission == "yolo works\n"
         assert agent.config.mode == "yolo"
 
 
@@ -227,9 +173,9 @@ def test_help_command(model_factory):
                 **config,
             )
 
-            info = agent.run("Test help command")
-            assert info["exit_status"] == "Submitted"
-            assert info["submission"] == "help shown\n"
+            exit_status, submission = agent.run("Test help command")
+            assert exit_status == "Submitted"
+            assert submission == "help shown\n"
             # Check that help was printed
             help_calls = [call for call in mock_print.call_args_list if "/y" in str(call)]
             assert len(help_calls) > 0
@@ -255,9 +201,9 @@ def test_whitelisted_actions_skip_confirmation(model_factory):
             },
         )
 
-        info = agent.run("Test whitelisted actions")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "no confirmation needed\n"
+        exit_status, submission = agent.run("Test whitelisted actions")
+        assert exit_status == "Submitted"
+        assert submission == "no confirmation needed\n"
 
 
 def _test_interruption_helper(
@@ -301,10 +247,10 @@ def _test_interruption_helper(
 
     with mock_prompts(mock_input):
         with patch.object(agent, "query", side_effect=mock_query):
-            info = agent.run(problem_statement)
+            exit_status, submission = agent.run(problem_statement)
 
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "recovered from interrupt\n"
+    assert exit_status == "Submitted"
+    assert submission == "recovered from interrupt\n"
     # Check that the expected interruption message was added
     interrupt_messages = [msg for msg in agent.messages if expected_message_fragment in get_text(msg)]
     assert len(interrupt_messages) == 1
@@ -353,11 +299,11 @@ def test_multiple_confirmations_and_commands(model_factory):
             **config,
         )
 
-        info = agent.run("Test complex interaction flow")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "complex flow completed\n"
+        exit_status, submission = agent.run("Test complex interaction flow")
+        assert exit_status == "Submitted"
+        assert submission == "complex flow completed\n"
         assert agent.config.mode == "yolo"  # Should be in yolo mode
-        assert agent.n_calls == 2
+        assert agent.model.n_calls == 2
 
 
 def test_non_whitelisted_action_requires_confirmation(model_factory):
@@ -380,9 +326,9 @@ def test_non_whitelisted_action_requires_confirmation(model_factory):
             },
         )
 
-        info = agent.run("Test non-whitelisted action")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "confirmed\n"
+        exit_status, submission = agent.run("Test non-whitelisted action")
+        assert exit_status == "Submitted"
+        assert submission == "confirmed\n"
 
 
 # New comprehensive mode switching tests
@@ -407,11 +353,11 @@ def test_human_mode_basic_functionality(model_factory):
             },
         )
 
-        info = agent.run("Test human mode")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "human mode works\n"
+        exit_status, submission = agent.run("Test human mode")
+        assert exit_status == "Submitted"
+        assert submission == "human mode works\n"
         assert agent.config.mode == "human"
-        assert agent.n_calls == 0  # LM should not be called
+        assert agent.model.n_calls == 0  # LM should not be called
 
 
 def test_human_mode_switch_to_yolo(model_factory):
@@ -440,11 +386,11 @@ def test_human_mode_switch_to_yolo(model_factory):
             },
         )
 
-        info = agent.run("Test human to yolo switch")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "switched to yolo\n"
+        exit_status, submission = agent.run("Test human to yolo switch")
+        assert exit_status == "Submitted"
+        assert submission == "switched to yolo\n"
         assert agent.config.mode == "yolo"
-        assert agent.n_calls == 1
+        assert agent.model.n_calls == 1
 
 
 def test_human_mode_switch_to_confirm(model_factory):
@@ -473,11 +419,11 @@ def test_human_mode_switch_to_confirm(model_factory):
             },
         )
 
-        info = agent.run("Test human to confirm switch")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "switched to confirm\n"
+        exit_status, submission = agent.run("Test human to confirm switch")
+        assert exit_status == "Submitted"
+        assert submission == "switched to confirm\n"
         assert agent.config.mode == "confirm"
-        assert agent.n_calls == 1
+        assert agent.model.n_calls == 1
 
 
 def test_confirmation_mode_switch_to_human_with_rejection(model_factory):
@@ -504,9 +450,9 @@ def test_confirmation_mode_switch_to_human_with_rejection(model_factory):
             },
         )
 
-        info = agent.run("Test confirm to human switch")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "human command after rejection\n"
+        exit_status, submission = agent.run("Test confirm to human switch")
+        assert exit_status == "Submitted"
+        assert submission == "human command after rejection\n"
         assert agent.config.mode == "human"
         # Should have rejection message
         rejection_messages = [msg for msg in agent.messages if "Switching to human mode" in get_text(msg)]
@@ -538,9 +484,9 @@ def test_confirmation_mode_switch_to_yolo_and_continue(model_factory):
             },
         )
 
-        info = agent.run("Test confirm to yolo switch")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "switched and continued\n"
+        exit_status, submission = agent.run("Test confirm to yolo switch")
+        assert exit_status == "Submitted"
+        assert submission == "switched and continued\n"
         assert agent.config.mode == "yolo"
 
 
@@ -582,10 +528,10 @@ def test_mode_switch_during_keyboard_interrupt(model_factory):
         ]
     ):
         with patch.object(agent, "query", side_effect=mock_query):
-            info = agent.run("Test interrupt mode switch")
+            exit_status, submission = agent.run("Test interrupt mode switch")
 
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "recovered after mode switch\n"
+    assert exit_status == "Submitted"
+    assert submission == "recovered after mode switch\n"
     assert agent.config.mode == "yolo"
     # Should have interruption message
     interrupt_messages = [msg for msg in agent.messages if "Temporary interruption caught" in get_text(msg)]
@@ -618,9 +564,9 @@ def test_already_in_mode_behavior(model_factory):
             },
         )
 
-        info = agent.run("Test already in mode")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "already in mode\n"
+        exit_status, submission = agent.run("Test already in mode")
+        assert exit_status == "Submitted"
+        assert submission == "already in mode\n"
         assert agent.config.mode == "confirm"
 
 
@@ -664,10 +610,10 @@ def test_all_mode_transitions_yolo_to_others(model_factory):
             return original_query(*args, **kwargs)
 
         with patch.object(agent, "query", side_effect=mock_query):
-            info = agent.run("Test yolo to confirm transition")
+            exit_status, submission = agent.run("Test yolo to confirm transition")
 
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "confirm action\n"
+        assert exit_status == "Submitted"
+        assert submission == "confirm action\n"
         assert agent.config.mode == "confirm"
 
 
@@ -690,9 +636,9 @@ def test_all_mode_transitions_confirm_to_human(model_factory):
             },
         )
 
-        info = agent.run("Test confirm to human transition")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "human command\n"
+        exit_status, submission = agent.run("Test confirm to human transition")
+        assert exit_status == "Submitted"
+        assert submission == "human command\n"
         assert agent.config.mode == "human"
 
 
@@ -724,9 +670,9 @@ def test_help_command_from_different_contexts(model_factory):
                 },
             )
 
-            info = agent.run("Test help from confirmation")
-            assert info["exit_status"] == "Submitted"
-            assert info["submission"] == "help works\n"
+            exit_status, submission = agent.run("Test help from confirmation")
+            assert exit_status == "Submitted"
+            assert submission == "help works\n"
             # Verify help was shown
             help_calls = [call for call in mock_print.call_args_list if "Current mode: " in str(call)]
             assert len(help_calls) > 0
@@ -752,9 +698,9 @@ def test_help_command_from_human_mode(model_factory):
                 },
             )
 
-            info = agent.run("Test help from human mode")
-            assert info["exit_status"] == "Submitted"
-            assert info["submission"] == "help in human mode\n"
+            exit_status, submission = agent.run("Test help from human mode")
+            assert exit_status == "Submitted"
+            assert submission == "help in human mode\n"
             # Verify help was shown
             help_calls = [call for call in mock_print.call_args_list if "Current mode: " in str(call)]
             assert len(help_calls) > 0
@@ -801,10 +747,10 @@ def test_complex_mode_switching_sequence(model_factory):
         ]
     ):
         with patch.object(agent, "query", side_effect=mock_query):
-            info = agent.run("Test complex mode switching")
+            exit_status, submission = agent.run("Test complex mode switching")
 
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "final action\n"
+    assert exit_status == "Submitted"
+    assert submission == "final action\n"
     assert agent.config.mode == "confirm"  # Should end in confirm mode
 
 
@@ -841,11 +787,11 @@ def test_limits_exceeded_with_user_continuation(model_factory):
     with patch("builtins.input", side_effect=["10", "5.0"]):  # New step_limit=10, cost_limit=5.0
         with mock_prompts([""]):  # No new task
             with patch("minisweagent.agents.interactive.console.print"):  # Suppress console output
-                info = agent.run("Test limits exceeded with continuation")
+                exit_status, submission = agent.run("Test limits exceeded with continuation")
 
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "completed after limit increase\n"
-    assert agent.n_calls == 3  # Should complete all 3 steps
+    assert exit_status == "Submitted"
+    assert submission == "completed after limit increase\n"
+    assert agent.model.n_calls == 3  # Should complete all 3 steps
     assert agent.config.step_limit == 10  # Should have updated step limit
     assert agent.config.cost_limit == 5.0  # Should have updated cost limit
 
@@ -885,11 +831,11 @@ def test_limits_exceeded_multiple_times_with_continuation(model_factory):
     with patch("builtins.input", side_effect=["2", "100.0", "10", "100.0"]):
         with mock_prompts([""]):  # No new task
             with patch("minisweagent.agents.interactive.console.print"):
-                info = agent.run("Test multiple limit increases")
+                exit_status, submission = agent.run("Test multiple limit increases")
 
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "completed after multiple increases\n"
-    assert agent.n_calls == 5  # Should complete all 5 steps
+    assert exit_status == "Submitted"
+    assert submission == "completed after multiple increases\n"
+    assert agent.model.n_calls == 5  # Should complete all 5 steps
     assert agent.config.step_limit == 10  # Should have final updated step limit
 
 
@@ -921,10 +867,10 @@ def test_continue_after_completion_with_new_task(model_factory):
             **config,
         )
 
-        info = agent.run("Complete the initial task")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "new task completed\n"
-        assert agent.n_calls == 2
+        exit_status, submission = agent.run("Complete the initial task")
+        assert exit_status == "Submitted"
+        assert submission == "new task completed\n"
+        assert agent.model.n_calls == 2
         # Should have the new task message in conversation
         new_task_messages = [
             msg for msg in agent.messages if "The user added a new task: Create a new file" in get_text(msg)
@@ -954,10 +900,10 @@ def test_continue_after_completion_without_new_task(model_factory):
             **config,
         )
 
-        info = agent.run("Complete the task")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "original task completed\n"
-        assert agent.n_calls == 1
+        exit_status, submission = agent.run("Complete the task")
+        assert exit_status == "Submitted"
+        assert submission == "original task completed\n"
+        assert agent.model.n_calls == 1
         # Should not have any new task messages
         new_task_messages = [msg for msg in agent.messages if "The user added a new task" in get_text(msg)]
         assert len(new_task_messages) == 0
@@ -988,10 +934,10 @@ def test_continue_after_completion_multiple_cycles(model_factory):
             **config,
         )
 
-        info = agent.run("Initial task")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "third completed\n"
-        assert agent.n_calls == 3
+        exit_status, submission = agent.run("Initial task")
+        assert exit_status == "Submitted"
+        assert submission == "third completed\n"
+        assert agent.model.n_calls == 3
         # Should have both new task messages
         new_task_messages = [msg for msg in agent.messages if "The user added a new task" in get_text(msg)]
         assert len(new_task_messages) == 2
@@ -1000,39 +946,31 @@ def test_continue_after_completion_multiple_cycles(model_factory):
 
 
 def test_continue_after_completion_in_yolo_mode(model_factory):
-    """Test continuation when starting in yolo mode (no confirmations needed)."""
+    """Test that yolo mode exits immediately on completion (confirm_exit=False)."""
     factory, config = model_factory
-    with mock_prompts(
-        [
-            "Create a second task",  # Provide new task when agent wants to finish
-            "",  # Don't provide another task after second completion (finish)
-        ]
-    ):
-        agent = InteractiveAgent(
-            model=factory(
-                [
-                    ("First", [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'first completed'"}]),
-                    (
-                        "Second",
-                        [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'second task completed'"}],
-                    ),
-                ]
-            ),
-            env=LocalEnvironment(),
-            **{
-                **config,
-                "mode": "yolo",  # Start in yolo mode
-            },
-        )
+    agent = InteractiveAgent(
+        model=factory(
+            [
+                ("First", [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'first completed'"}]),
+                (
+                    "Second",
+                    [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'second task completed'"}],
+                ),
+            ]
+        ),
+        env=LocalEnvironment(),
+        **{
+            **config,
+            "mode": "yolo",
+        },
+    )
 
-        info = agent.run("Initial task")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "second task completed\n"
-        assert agent.config.mode == "yolo"
-        assert agent.n_calls == 2
-        # Should have the new task message
-        new_task_messages = [msg for msg in agent.messages if "Create a second task" in get_text(msg)]
-        assert len(new_task_messages) == 1
+    exit_status, submission = agent.run("Initial task")
+    assert exit_status == "Submitted"
+    assert submission == "first completed\n"
+    assert agent.config.mode == "yolo"
+    assert not agent.config.confirm_exit
+    assert agent.model.n_calls == 1
 
 
 def test_confirm_exit_enabled_asks_for_confirmation(model_factory):
@@ -1052,10 +990,10 @@ def test_confirm_exit_enabled_asks_for_confirmation(model_factory):
             },
         )
 
-        info = agent.run("Test confirm exit enabled")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "completed\n"
-        assert agent.n_calls == 1
+        exit_status, submission = agent.run("Test confirm exit enabled")
+        assert exit_status == "Submitted"
+        assert submission == "completed\n"
+        assert agent.model.n_calls == 1
 
 
 def test_confirm_exit_disabled_exits_immediately(model_factory):
@@ -1075,10 +1013,10 @@ def test_confirm_exit_disabled_exits_immediately(model_factory):
             },
         )
 
-        info = agent.run("Test confirm exit disabled")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "completed\n"
-        assert agent.n_calls == 1
+        exit_status, submission = agent.run("Test confirm exit disabled")
+        assert exit_status == "Submitted"
+        assert submission == "completed\n"
+        assert agent.model.n_calls == 1
 
 
 def test_confirm_exit_with_new_task_continues_execution(model_factory):
@@ -1109,10 +1047,10 @@ def test_confirm_exit_with_new_task_continues_execution(model_factory):
             },
         )
 
-        info = agent.run("Test exit with new task")
-        assert info["exit_status"] == "Submitted"
-        assert info["submission"] == "additional done\n"
-        assert agent.n_calls == 2
+        exit_status, submission = agent.run("Test exit with new task")
+        assert exit_status == "Submitted"
+        assert submission == "additional done\n"
+        assert agent.model.n_calls == 2
         # Check that the new task was added to the conversation
         new_task_messages = [msg for msg in agent.messages if "Please do one more thing" in get_text(msg)]
         assert len(new_task_messages) == 1

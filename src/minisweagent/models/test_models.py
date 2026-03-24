@@ -40,3 +40,13 @@ class DeterministicModel:
 
     def get_template_vars(self) -> dict[str, Any]:
         return asdict(self.config) | {"n_model_calls": self.n_calls, "model_cost": self.cost}
+
+
+def make_output(content: str | None, actions: list[dict]) -> str:
+    """Build a deterministic model output string with embedded bash code blocks."""
+    parts = []
+    if content:
+        parts.append(content)
+    for action in actions:
+        parts.append(f"```bash\n{action['command']}\n```")
+    return "\n".join(parts)

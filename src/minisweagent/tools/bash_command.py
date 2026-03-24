@@ -34,7 +34,7 @@ class BashCommand:
             "mkfs",
             "rm -rf /",
         ]
-    
+
     def __call__(
         self,
         *,

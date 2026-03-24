@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metrix-mcp"
+version = "0.1.0"
+description = "GPU kernel profiling MCP server using AMD Metrix"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=0.2.0",
+    "metrix>=0.1.0",
+]
+
+[project.scripts]
+metrix-mcp = "metrix_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

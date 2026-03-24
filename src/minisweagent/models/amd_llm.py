@@ -39,12 +39,15 @@ class AmdLlmModel:
 
         if "gpt" in config.model_name:
             from minisweagent.models.amd_openai import AmdOpenAIModel
+
             self._impl = AmdOpenAIModel(config)
         elif "claude" in config.model_name:
             from minisweagent.models.amd_claude import AmdClaudeModel
+
             self._impl = AmdClaudeModel(config)
         elif "gemini" in config.model_name:
             from minisweagent.models.amd_gemini import AmdGeminiModel
+
             self._impl = AmdGeminiModel(config)
         else:
             raise ValueError(f"Unsupported model: {config.model_name}")
@@ -96,7 +99,10 @@ if __name__ == "__main__":
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What is the capital of France?"},
         {"role": "assistant", "content": "Paris"},
-        {"role": "user", "content": "Use tool named as str_replace_editor to view file '/home/chaox/kernel_agent/read_mini.py' and output your thinking"},
+        {
+            "role": "user",
+            "content": "Use tool named as str_replace_editor to view file '/home/chaox/kernel_agent/read_mini.py' and output your thinking",
+        },
     ]
     for model_name in model_list:
         print(f"Testing {model_name}...")
