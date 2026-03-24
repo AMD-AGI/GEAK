@@ -215,12 +215,12 @@ class Filemap:
         ]
         # Note that tree-sitter line numbers are 0-indexed, but we display 1-indexed.
         elide_lines = {line for start, end in elide_line_ranges for line in range(start, end + 1)}
-        elide_messages = [(start, f"... eliding lines {start+1}-{end+1} ...") for start, end in elide_line_ranges]
+        elide_messages = [(start, f"... eliding lines {start + 1}-{end + 1} ...") for start, end in elide_line_ranges]
         out = []
         for i, line in sorted(
             elide_messages + [(i, line) for i, line in enumerate(file_contents.splitlines()) if i not in elide_lines]
         ):
-            out.append(f"{i+1:6d} {line}")
+            out.append(f"{i + 1:6d} {line}")
         return "\n".join(out)
 
 
@@ -677,25 +677,19 @@ class EditTool:
         file_content = "\n".join([f"{i + init_line:6}\t{line}" for i, line in enumerate(file_content.split("\n"))])
         return f"Here's the result of running `cat -n` on {file_descriptor}:\n" + file_content + "\n"
 
+
 def parse_int_pair(s):
     if s == "None":
         return None
     try:
         v = ast.literal_eval(s)
     except Exception as e:
-        raise argparse.ArgumentTypeError(
-            f"view_range must be in form [int, int]: {e} s:{type(s)} {s}"
-        )
+        raise argparse.ArgumentTypeError(f"view_range must be in form [int, int]: {e} s:{type(s)} {s}")
 
-    if (
-        not isinstance(v, (list, tuple))
-        or len(v) != 2
-        or not all(isinstance(x, int) for x in v)
-    ):
-        raise argparse.ArgumentTypeError(
-            "view_range must be a list of two ints, e.g. [10, 20]"
-        )
+    if not isinstance(v, (list, tuple)) or len(v) != 2 or not all(isinstance(x, int) for x in v):
+        raise argparse.ArgumentTypeError("view_range must be a list of two ints, e.g. [10, 20]")
     return list(v)
+
 
 def int_or_none(s):
     if s == "None":
@@ -704,6 +698,7 @@ def int_or_none(s):
         return int(s)
     except ValueError:
         raise argparse.ArgumentTypeError(f"Expected int or None, got {s}")
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -729,7 +724,7 @@ def main():
         if new_path.is_file():
             with new_path.open("r", encoding="utf-8") as f:
                 new_str = f.read()
-    
+
     tool = EditTool()
     tool(
         command=args.command,

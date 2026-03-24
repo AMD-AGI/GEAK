@@ -13,6 +13,7 @@ from typing import Any
 
 class TeeOutput:
     """Capture stdout/stderr to buffer while keeping terminal output."""
+
     def __init__(self, original):
         self.terminal = original
         self.buffer = StringIO()
@@ -26,6 +27,7 @@ class TeeOutput:
 
     def getvalue(self):
         return self.buffer.getvalue()
+
 
 import typer
 import yaml
@@ -66,6 +68,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
 _HELP_TEXT = """Run mini-SWE-agent in your local environment.
 
 [not dim]
