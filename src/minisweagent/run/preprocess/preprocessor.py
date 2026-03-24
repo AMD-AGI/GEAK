@@ -898,6 +898,7 @@ def run_preprocessor(
                 _print("  Running performance_command directly as fallback for baseline...")
                 try:
                     import subprocess
+
                     result = subprocess.run(
                         perf_cmd,
                         shell=True,
