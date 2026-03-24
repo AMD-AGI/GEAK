@@ -5,6 +5,9 @@ import logging
 import os
 import uuid
 
+from google import genai
+from google.genai import types
+from google.genai.types import HttpOptions
 from tenacity import (
     before_sleep_log,
     retry,
@@ -13,12 +16,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from google import genai
-from google.genai import types
-from google.genai.types import HttpOptions
-
 from minisweagent.models.amd_base import AmdLlmModelBase, logger
-
 
 
 def convert_openai_tools_to_gemini(tools: list[dict]) -> list[dict]:
@@ -180,13 +178,11 @@ class AmdGeminiModel(AmdLlmModelBase):
             **config_params,
         )
 
-        response = self.client.models.generate_content(
+        return self.client.models.generate_content(
             model=self.config.model_name,
             contents=contents,
             **filtered_kwargs,
         )
-
-        return response
 
     # ------------------------------------------------------------------
     # Response parsing

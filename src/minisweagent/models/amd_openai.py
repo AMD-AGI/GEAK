@@ -101,13 +101,11 @@ class AmdOpenAIModel(AmdLlmModelBase):
         formatted_messages = self.format_messages(messages)
 
         logger.debug("OpenAI formatted messages: %s", formatted_messages)
-        response = self.client.responses.create(
+        return self.client.responses.create(
             model=self.config.model_name,
             input=formatted_messages,
             **filtered_kwargs,
         )
-
-        return response
 
     # ------------------------------------------------------------------
     # Response parsing

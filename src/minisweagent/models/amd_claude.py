@@ -14,7 +14,6 @@ from tenacity import (
 
 from minisweagent.models.amd_base import AmdLlmModelBase, logger
 
-
 CACHE_CONTROL_EPHEMERAL = {"type": "ephemeral"}
 
 
@@ -174,13 +173,11 @@ class AmdClaudeModel(AmdLlmModelBase):
             if system_message and "system" not in filtered_kwargs:
                 filtered_kwargs["system"] = system_message
 
-        response = self.client.messages.create(
+        return self.client.messages.create(
             model=self.config.model_name,
             messages=anthropic_messages,
             **filtered_kwargs,
         )
-
-        return response
 
     # ------------------------------------------------------------------
     # Response parsing
