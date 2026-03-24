@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
-import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -27,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _GEAK_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _MCP_TOOLS_ROOT = _GEAK_ROOT / "mcp_tools"
+
 
 class MCPToolBridge:
     """Wraps an MCP server so its tools can be called synchronously.
@@ -78,7 +78,7 @@ class MCPToolBridge:
         except Exception as e:
             logger.exception(f"MCPToolBridge({self.server_name}).{tool_name} failed: {e!r}")
             return {"output": f"MCP tool error: {e!r}", "returncode": 1}
-    
+
     def tool_list(self) -> list[dict[str, Any]]:
         """List tools from the MCP server (same protocol as ``tools/list``). Uses the bridge's
         persistent event loop so the client stays consistent with :meth:`call_tool`."""
@@ -211,6 +211,7 @@ class _BoundTool:
     def __repr__(self) -> str:
         return f"MCPTool({self._bridge.server_name}::{self._tool_name})"
 
+
 def _discover_mcp_server_names() -> list[str]:
     """Return directory names under *mcp_tools_root* that ship a runnable ``<module>.server`` package.
 
@@ -229,6 +230,7 @@ def _discover_mcp_server_names() -> list[str]:
             names.append(p.name)
     return names
 
+
 def _normalize_parameters(schema: dict[str, Any]) -> dict[str, Any]:
     """Ensure a JSON-schema-shaped dict suitable for ``tools.json`` ``parameters`` field."""
     if not schema:
@@ -241,6 +243,7 @@ def _normalize_parameters(schema: dict[str, Any]) -> dict[str, Any]:
         out["required"] = []
     return out
 
+
 def _coerce_mcp_tool_list(raw: Any) -> list[dict[str, Any]]:
     """Normalize :meth:`MCPToolBridge.tool_list` return value to a list of tool dicts."""
     if isinstance(raw, list):
@@ -250,6 +253,7 @@ def _coerce_mcp_tool_list(raw: Any) -> list[dict[str, Any]]:
         if isinstance(inner, list):
             return [t for t in inner if isinstance(t, dict)]
     return []
+
 
 def _populate_mcp_bridges() -> None:
     _mcp_bridges: list[MCPToolBridge] = []
@@ -262,6 +266,7 @@ def _populate_mcp_bridges() -> None:
             logger.warning("Could not create MCPToolBridge for %r: %s", name, e)
     return _mcp_bridges
 
+
 def _mcp_tool_to_tools_json_entry(
     tool: dict[str, Any],
     server_name: str,
@@ -273,9 +278,7 @@ def _mcp_tool_to_tools_json_entry(
         raise ValueError(f"Invalid MCP tool entry (missing name): {tool!r}")
 
     base_desc = (tool.get("description") or "").strip()
-    desc = (
-        f"{base_desc} [MCP: {server_name}]" if base_desc else f"MCP tool from server [MCP: {server_name}]."
-    )
+    desc = f"{base_desc} [MCP: {server_name}]" if base_desc else f"MCP tool from server [MCP: {server_name}]."
 
     schema = tool.get("inputSchema") or tool.get("input_schema") or {}
     if not isinstance(schema, dict):
@@ -290,6 +293,7 @@ def _mcp_tool_to_tools_json_entry(
         "parameters": _normalize_parameters(schema),
     }
 
+
 def _allocate_unique_openai_name(base: str, server_name: str, registry: set[str]) -> str:
     if base not in registry:
         registry.add(base)
@@ -301,6 +305,7 @@ def _allocate_unique_openai_name(base: str, server_name: str, registry: set[str]
         candidate = f"{base}__{server_name}_{n}"
     registry.add(candidate)
     return candidate
+
 
 def collect_mcp_tools() -> tuple[list[MCPToolBridge], list[dict[str, Any]]]:
     """Discover bridges, call :meth:`MCPToolBridge.tool_list` on each.

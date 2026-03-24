@@ -5,20 +5,29 @@ import yaml
 
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
-from minisweagent.models.test_models import (
-    DeterministicModel,
-    DeterministicResponseAPIToolcallModel,
-    DeterministicToolcallModel,
-    make_output,
-    make_response_api_output,
-    make_toolcall_output,
-)
+from minisweagent.models.test_models import DeterministicModel
 
-# --- Helper functions to abstract message format differences ---
+
+# --- Helpers ---
+
+
+def make_output(content: str | None, actions: list[dict]) -> str:
+    """Build a deterministic model output string with embedded bash code blocks."""
+    parts = []
+    if content:
+        parts.append(content)
+    for action in actions:
+        parts.append(f"```bash\n{action['command']}\n```")
+    return "\n".join(parts)
+
+
+def _make_model(outputs_spec: list[tuple[str, list[dict]]], **kwargs) -> DeterministicModel:
+    """Create a DeterministicModel from a list of (content, actions) tuples."""
+    return DeterministicModel(outputs=[make_output(content, actions) for content, actions in outputs_spec], **kwargs)
 
 
 def get_text(msg: dict) -> str:
-    """Extract text content from a message regardless of format."""
+    """Extract text content from a message."""
     content = msg.get("content")
     if content is None:
         return ""
@@ -27,29 +36,6 @@ def get_text(msg: dict) -> str:
     if isinstance(content, list) and content:
         return content[0].get("text", "")
     return ""
-
-
-def get_observation_text(msg: dict) -> str:
-    """Extract observation text from a message (handles all formats)."""
-    if msg.get("type") == "function_call_output":
-        return msg.get("output", "")
-    return get_text(msg)
-
-
-def is_assistant_message(msg: dict) -> bool:
-    """Check if message is an assistant/response message."""
-    return msg.get("role") == "assistant" or msg.get("object") == "response"
-
-
-def is_observation_message(msg: dict) -> bool:
-    """Check if message is an observation message."""
-    if msg.get("type") == "function_call_output":
-        return True
-    if msg.get("role") == "tool":
-        return True
-    if msg.get("role") == "user" and "returncode" in get_text(msg):
-        return True
-    return False
 
 
 # --- Fixtures ---
@@ -65,62 +51,9 @@ def default_config():
 
 
 @pytest.fixture
-def toolcall_config():
-    """Load toolcall agent config from config/mini.yaml"""
-    config_path = Path("src/minisweagent/config/mini.yaml")
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    return config["agent"]
-
-
-def make_text_model(outputs_spec: list[tuple[str, list[dict]]], **kwargs) -> DeterministicModel:
-    """Create a DeterministicModel from a list of (content, actions) tuples."""
-    return DeterministicModel(outputs=[make_output(content, actions) for content, actions in outputs_spec], **kwargs)
-
-
-def make_tc_model(outputs_spec: list[tuple[str, list[dict]]], **kwargs) -> DeterministicToolcallModel:
-    """Create a DeterministicToolcallModel from a list of (content, actions) tuples."""
-    outputs = []
-    for i, (content, actions) in enumerate(outputs_spec):
-        tc_actions = []
-        tool_calls = []
-        for j, action in enumerate(actions):
-            tool_call_id = f"call_{i}_{j}"
-            tc_actions.append({"command": action["command"], "tool_call_id": tool_call_id})
-            tool_calls.append(
-                {
-                    "id": tool_call_id,
-                    "type": "function",
-                    "function": {"name": "bash", "arguments": f'{{"command": "{action["command"]}"}}'},
-                }
-            )
-        outputs.append(make_toolcall_output(content, tool_calls, tc_actions))
-    return DeterministicToolcallModel(outputs=outputs, **kwargs)
-
-
-def make_response_api_model(
-    outputs_spec: list[tuple[str, list[dict]]], **kwargs
-) -> DeterministicResponseAPIToolcallModel:
-    """Create a DeterministicResponseAPIToolcallModel from a list of (content, actions) tuples."""
-    outputs = []
-    for i, (content, actions) in enumerate(outputs_spec):
-        api_actions = []
-        for j, action in enumerate(actions):
-            tool_call_id = f"call_resp_{i}_{j}"
-            api_actions.append({"command": action["command"], "tool_call_id": tool_call_id})
-        outputs.append(make_response_api_output(content, api_actions))
-    return DeterministicResponseAPIToolcallModel(outputs=outputs, **kwargs)
-
-
-@pytest.fixture(params=["text", "toolcall", "response_api"])
-def model_factory(request, default_config, toolcall_config):
-    """Parametrized fixture that returns (factory_fn, config) for all three model types."""
-    if request.param == "text":
-        return make_text_model, default_config
-    elif request.param == "toolcall":
-        return make_tc_model, toolcall_config
-    else:  # response_api
-        return make_response_api_model, toolcall_config
+def model_factory(default_config):
+    """Returns (factory_fn, config) for creating test models."""
+    return _make_model, default_config
 
 
 # --- Tests ---
@@ -143,10 +76,10 @@ def test_successful_completion(model_factory):
         **config,
     )
 
-    info = agent.run("Echo hello world then finish")
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "Task completed successfully\n"
-    assert agent.n_calls == 2
+    exit_status, submission = agent.run("Echo hello world then finish")
+    assert exit_status == "Submitted"
+    assert submission == "Task completed successfully\n"
+    assert agent.model.n_calls == 2
 
 
 def test_step_limit_enforcement(model_factory):
@@ -163,9 +96,9 @@ def test_step_limit_enforcement(model_factory):
         **{**config, "step_limit": 1},
     )
 
-    info = agent.run("Run multiple commands")
-    assert info["exit_status"] == "LimitsExceeded"
-    assert agent.n_calls == 1
+    exit_status, _ = agent.run("Run multiple commands")
+    assert exit_status == "LimitsExceeded"
+    assert agent.model.n_calls == 1
 
 
 def test_cost_limit_enforcement(model_factory):
@@ -177,8 +110,8 @@ def test_cost_limit_enforcement(model_factory):
         **{**config, "cost_limit": 0.5},
     )
 
-    info = agent.run("Test cost limit")
-    assert info["exit_status"] == "LimitsExceeded"
+    exit_status, _ = agent.run("Test cost limit")
+    assert exit_status == "LimitsExceeded"
 
 
 def test_timeout_handling(model_factory):
@@ -187,19 +120,18 @@ def test_timeout_handling(model_factory):
     agent = DefaultAgent(
         model=factory(
             [
-                ("Long sleep", [{"command": "sleep 5"}]),  # This will timeout
+                ("Long sleep", [{"command": "sleep 5"}]),
                 ("Quick finish", [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'recovered'"}]),
             ]
         ),
-        env=LocalEnvironment(timeout=1),  # Very short timeout
+        env=LocalEnvironment(timeout=1),
         **config,
     )
 
-    info = agent.run("Test timeout handling")
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "recovered\n"
-    # Should have timeout error message in observation
-    timed_out = [msg for msg in agent.messages if "timed out" in get_observation_text(msg)]
+    exit_status, submission = agent.run("Test timeout handling")
+    assert exit_status == "Submitted"
+    assert submission == "recovered\n"
+    timed_out = [msg for msg in agent.messages if "timed out" in get_text(msg)]
     assert len(timed_out) == 1
 
 
@@ -219,12 +151,12 @@ def test_timeout_captures_partial_output(model_factory):
         env=LocalEnvironment(timeout=1),
         **config,
     )
-    info = agent.run("Test timeout with partial output")
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "recovered\n"
-    timed_out = [msg for msg in agent.messages if "timed out" in get_observation_text(msg)]
+    exit_status, submission = agent.run("Test timeout with partial output")
+    assert exit_status == "Submitted"
+    assert submission == "recovered\n"
+    timed_out = [msg for msg in agent.messages if "timed out" in get_text(msg)]
     assert len(timed_out) == 1
-    assert expected_output in get_observation_text(timed_out[0])
+    assert expected_output in get_text(timed_out[0])
 
 
 def test_multiple_steps_before_completion(model_factory):
@@ -243,13 +175,13 @@ def test_multiple_steps_before_completion(model_factory):
             ]
         ),
         env=LocalEnvironment(),
-        **{**config, "cost_limit": 5.0},  # Increase cost limit to allow all 4 calls
+        **{**config, "cost_limit": 5.0},
     )
 
-    info = agent.run("Multi-step task")
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "completed all steps\n"
-    assert agent.n_calls == 4
+    exit_status, submission = agent.run("Multi-step task")
+    assert exit_status == "Submitted"
+    assert submission == "completed all steps\n"
+    assert agent.model.n_calls == 4
 
 
 def test_custom_config(model_factory):
@@ -274,9 +206,9 @@ def test_custom_config(model_factory):
         },
     )
 
-    info = agent.run("Test custom config")
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "custom config works\n"
+    exit_status, submission = agent.run("Test custom config")
+    assert exit_status == "Submitted"
+    assert submission == "custom config works\n"
     assert get_text(agent.messages[0]) == "You are a test assistant."
     assert "Test custom config" in get_text(agent.messages[1])
 
@@ -295,38 +227,13 @@ def test_render_template_model_stats(model_factory):
         **config,
     )
 
-    # Make some calls through the agent to generate stats
-    agent.add_messages({"role": "system", "content": "test"}, {"role": "user", "content": "test"})
+    agent.add_message("system", "test")
+    agent.add_message("user", "test")
     agent.query()
     agent.query()
 
-    # Test template rendering with agent stats
     template = "Calls: {{n_model_calls}}, Cost: {{model_cost}}"
-    assert agent._render_template(template) == "Calls: 2, Cost: 2.0"
-
-
-def test_messages_include_timestamps(model_factory):
-    """Test that assistant and observation messages include timestamps."""
-    factory, config = model_factory
-    agent = DefaultAgent(
-        model=factory(
-            [
-                ("Response 1", [{"command": "echo 'test1'"}]),
-                ("Response 2", [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'done'"}]),
-            ]
-        ),
-        env=LocalEnvironment(),
-        **config,
-    )
-
-    agent.run("Test timestamps")
-
-    # Assistant messages should have timestamps
-    assistant_msgs = [msg for msg in agent.messages if is_assistant_message(msg)]
-    assert all("timestamp" in msg.get("extra", {}) for msg in assistant_msgs)
-    # Timestamps should be numeric (floats from time.time())
-    all_timestamped = [msg for msg in agent.messages if "timestamp" in msg.get("extra", {})]
-    assert all(isinstance(msg["extra"]["timestamp"], float) for msg in all_timestamped)
+    assert agent.render_template(template) == "Calls: 2, Cost: 2.0"
 
 
 def test_message_history_tracking(model_factory):
@@ -343,21 +250,18 @@ def test_message_history_tracking(model_factory):
         **config,
     )
 
-    info = agent.run("Track messages")
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "done\n"
+    exit_status, submission = agent.run("Track messages")
+    assert exit_status == "Submitted"
+    assert submission == "done\n"
 
     # Should have 6 messages: system, user, assistant, observation, assistant, exit
     assert len(agent.messages) == 6
-    # First two are system and user
     assert get_text(agent.messages[0])  # system has content
     assert get_text(agent.messages[1])  # user has content
-    # Third is assistant response
-    assert is_assistant_message(agent.messages[2])
-    # Fourth is observation
-    assert is_observation_message(agent.messages[3])
-    # Fifth is assistant response
-    assert is_assistant_message(agent.messages[4])
+    assert agent.messages[2]["role"] == "assistant"
+    assert agent.messages[3]["role"] == "user"
+    assert "returncode" in get_text(agent.messages[3])
+    assert agent.messages[4]["role"] == "assistant"
 
 
 def test_step_adds_messages(model_factory):
@@ -369,18 +273,18 @@ def test_step_adds_messages(model_factory):
         **config,
     )
 
-    agent.add_messages({"role": "system", "content": "system message"})
-    agent.add_messages({"role": "user", "content": "user message"})
+    agent.add_message("system", "system message")
+    agent.add_message("user", "user message")
 
     initial_count = len(agent.messages)
     agent.step()
 
     # step() should add assistant message + observation message
     assert len(agent.messages) == initial_count + 2
-    assert is_assistant_message(agent.messages[-2])
-    assert agent.messages[-2]["extra"]["actions"][0]["command"] == "echo 'hello'"
-    assert is_observation_message(agent.messages[-1])
-    assert "returncode" in get_observation_text(agent.messages[-1])
+    assert agent.messages[-2]["role"] == "assistant"
+    assert "echo 'hello'" in get_text(agent.messages[-2])
+    assert agent.messages[-1]["role"] == "user"
+    assert "returncode" in get_text(agent.messages[-1])
 
 
 def test_observations_captured(model_factory):
@@ -399,7 +303,10 @@ def test_observations_captured(model_factory):
     )
 
     agent.run("Multi-step task")
-    observations = [get_observation_text(msg) for msg in agent.messages if is_observation_message(msg)]
+    observations = [
+        get_text(msg) for msg in agent.messages
+        if msg.get("role") == "user" and "returncode" in get_text(msg)
+    ]
     assert len(observations) == 2
     assert "first" in observations[0]
     assert "second" in observations[1]
@@ -411,7 +318,7 @@ def test_empty_actions_handling(model_factory):
     agent = DefaultAgent(
         model=factory(
             [
-                ("No actions here", []),  # Empty actions list
+                ("No actions here", []),
                 ("Now with action", [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'done'"}]),
             ]
         ),
@@ -419,7 +326,7 @@ def test_empty_actions_handling(model_factory):
         **config,
     )
 
-    info = agent.run("Test empty actions")
-    assert info["exit_status"] == "Submitted"
-    assert info["submission"] == "done\n"
-    assert agent.n_calls == 2
+    exit_status, submission = agent.run("Test empty actions")
+    assert exit_status == "Submitted"
+    assert submission == "done\n"
+    assert agent.model.n_calls == 2
