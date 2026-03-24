@@ -323,7 +323,6 @@ def collect_mcp_tools() -> tuple[list[MCPToolBridge], list[dict[str, Any]]]:
             raw = bridge.tool_list()
         except Exception as e:
             logger.warning("tool_list failed for %r: %s", bridge.server_name, e)
-            tool_lists.append([])
             continue
 
         tools = _coerce_mcp_tool_list(raw)
