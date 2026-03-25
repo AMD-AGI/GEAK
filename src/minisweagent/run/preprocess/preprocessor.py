@@ -439,7 +439,9 @@ def run_preprocessor(
 
         # ── 2. codebase context ──────────────────────────────────────────
         _print(
-            "[bold cyan]--- Step 2/7: Codebase context ---[/bold cyan]" if console else "--- Step 2/7: Codebase context ---"
+            "[bold cyan]--- Step 2/7: Codebase context ---[/bold cyan]"
+            if console
+            else "--- Step 2/7: Codebase context ---"
         )
 
         from minisweagent.run.preprocess.codebase_context import generate_codebase_context
@@ -453,7 +455,9 @@ def run_preprocessor(
         _print(f"  CODEBASE_CONTEXT.md written ({codebase_context_path.stat().st_size} bytes)")
 
         # ── 3. test-discovery (automated_test_discovery MCP) ────────────
-        _print("[bold cyan]--- Step 3/7: Test discovery ---[/bold cyan]" if console else "--- Step 3/7: Test discovery ---")
+        _print(
+            "[bold cyan]--- Step 3/7: Test discovery ---[/bold cyan]" if console else "--- Step 3/7: Test discovery ---"
+        )
 
         _ensure_mcp_importable()
         atd_server = importlib.import_module("automated_test_discovery.server")
@@ -890,7 +894,7 @@ def run_preprocessor(
         if perf_cmd:
             if isinstance(perf_cmd, list):
                 perf_cmd = " && ".join(perf_cmd)
-            
+
             # If perf_cmd is "a && b && c" format, extract only the last command for profiling
             # (the earlier parts are typically build/setup steps, not the actual execution)
             if " && " in perf_cmd:
@@ -900,7 +904,7 @@ def run_preprocessor(
                 _print(f"  Extracted last command for profiling: {perf_cmd_for_profiling}")
             else:
                 perf_cmd_for_profiling = perf_cmd
-            
+
             _print(f"  Profiling with performance_command: {perf_cmd_for_profiling}")
             try:
                 _ensure_mcp_importable()

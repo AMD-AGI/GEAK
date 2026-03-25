@@ -75,7 +75,9 @@ class ParallelAgent(DefaultAgent):
         if not repo_path.exists():
             raise ValueError(f"Repository path does not exist: {repo_path}")
 
-        base_patch_dir = (Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")).resolve()
+        base_patch_dir = (
+            Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")
+        ).resolve()
         model_factory = kwargs.get("model_factory") or (lambda: self.model)
         env_factory = kwargs.get("env_factory") or (lambda: self.env)
         is_git_repo = (repo_path / ".git").exists()
@@ -365,10 +367,10 @@ class ParallelAgent(DefaultAgent):
     @staticmethod
     def _neutralize_nested_git_repos(repo_path: Path) -> list[Path]:
         """Rename .git directories in nested repos to .git.bak.
-        
+
         This prevents git from treating nested directories as submodules,
         allowing all content to be properly added to the parent repo.
-        
+
         Returns list of paths that were renamed (for potential restoration).
         """
         renamed = []
@@ -406,19 +408,19 @@ class ParallelAgent(DefaultAgent):
     @staticmethod
     def _init_as_git_repo(repo_path: Path) -> None:
         """Initialize a non-git repo as a git repository with an initial commit.
-        
+
         This allows unified git diff management for both git and non-git repos.
         Only initializes if the repo itself doesn't have a .git directory
         (ignores parent directories that might be git repos).
-        
+
         Also handles nested git repos by neutralizing their .git directories
         so all content is properly included in the parent repo.
-        
+
         If .git exists but has no valid HEAD (incomplete init), it will be removed
         and re-initialized.
         """
         git_dir = repo_path / ".git"
-        
+
         # Check if .git exists and has valid HEAD
         if git_dir.exists():
             if ParallelAgent._has_valid_head(repo_path):
@@ -431,12 +433,12 @@ class ParallelAgent(DefaultAgent):
                     git_dir.unlink()
             except Exception:
                 pass
-        
+
         try:
             # Neutralize nested git repos first (rename .git -> .git.bak)
             # This ensures nested content is added as regular files, not submodules
             ParallelAgent._neutralize_nested_git_repos(repo_path)
-            
+
             # Initialize git repo (use --initial-branch to ensure new repo creation)
             subprocess.run(
                 ["git", "init", "--initial-branch=main"],
@@ -445,10 +447,10 @@ class ParallelAgent(DefaultAgent):
                 capture_output=True,
                 text=True,
             )
-            
+
             # Add to safe.directory to avoid ownership issues
             ParallelAgent._ensure_safe_directory(repo_path)
-            
+
             # Add all files
             subprocess.run(
                 ["git", "add", "-A"],
@@ -457,11 +459,19 @@ class ParallelAgent(DefaultAgent):
                 capture_output=True,
                 text=True,
             )
-            
+
             # Create initial commit with inline user config (avoids config issues when parent is git repo)
             subprocess.run(
-                ["git", "-c", "user.email=agent@local", "-c", "user.name=Agent",
-                 "commit", "-m", "Initial commit (auto-generated for worktree management)"],
+                [
+                    "git",
+                    "-c",
+                    "user.email=agent@local",
+                    "-c",
+                    "user.name=Agent",
+                    "commit",
+                    "-m",
+                    "Initial commit (auto-generated for worktree management)",
+                ],
                 cwd=repo_path,
                 check=True,
                 capture_output=True,
@@ -528,14 +538,14 @@ class ParallelAgent(DefaultAgent):
         worktree_base.mkdir(parents=True, exist_ok=True)
         repo_path_resolved = repo_path.resolve()
         repo_path_str = str(repo_path_resolved)
-        
+
         # Initialize non-git repos as git repos for unified worktree management
         if not is_git_repo:
             if console:
                 console.print("[bold yellow]Initializing non-git repo as git for worktree management...[/bold yellow]")
             cls._init_as_git_repo(repo_path_resolved)
             is_git_repo = True  # Now it's a git repo
-        
+
         if gpu_ids and len(gpu_ids) < num_parallel:
             if console:
                 console.print(

@@ -216,7 +216,7 @@ class DefaultAgent:
         self._traj_last_saved_idx = -1
         self.add_message("system", self.render_template(self.config.system_template))
         self.add_message("user", self.render_template(self.config.instance_template))
-        
+
         while True:
             try:
                 self.step()

@@ -78,19 +78,18 @@ class TestPerfTool:
 
     def _get_patch_content(self) -> str:
         """Get current changes as patch content using git diff.
-        
+
         All repos (including originally non-git ones) are managed as git repos,
         so we always use git diff for unified diff management.
         """
         ctx = self.context
         cwd = ctx.cwd
-        
+
         result = subprocess.run(
-            "git add -N . && git diff",
-            cwd=cwd, capture_output=True, text=True, timeout=30, shell=True
+            "git add -N . && git diff", cwd=cwd, capture_output=True, text=True, timeout=30, shell=True
         )
         return result.stdout
-    
+
     def _run_test(self) -> tuple[str, bool, int]:
         """Run test command and return (output, passed, returncode)."""
         ctx = self.context
