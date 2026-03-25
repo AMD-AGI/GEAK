@@ -138,6 +138,62 @@ class TestDiscoveryScoring:
 
 
 # ===================================================================
+# Test 2b: KernelMeta contract
+# ===================================================================
+
+class TestKernelMetaContract:
+
+    @pytest.fixture(autouse=True)
+    def _setup_path(self):
+        import sys
+        repo = Path(__file__).resolve().parent.parent.parent
+        if str(repo / "src") not in sys.path:
+            sys.path.insert(0, str(repo / "src"))
+
+    def test_kernel_meta_defaults(self):
+        from minisweagent.run.preprocess.discovery_types import KernelMeta
+
+        meta = KernelMeta()
+        assert meta.kernel_path == ""
+        assert meta.kernel_name == ""
+        assert meta.kernel_type == "unknown"
+        assert meta.kernel_language == "python"
+        assert meta.function_names == []
+        assert meta.workspace_path == ""
+
+    def test_discovery_result_populates_kernel_meta_fields(self):
+        from minisweagent.run.preprocess.discovery_types import DiscoveryResult, KernelMeta
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kernel = tmp_path / "topk.py"
+            kernel.write_text("# kernel")
+
+            disc = {
+                "kernel": {
+                    "file": str(kernel),
+                    "name": "topk",
+                    "type": "triton",
+                    "functions": ["topk_kernel"],
+                },
+                "workspace": str(tmp_path),
+                "tests": [],
+                "benchmarks": [],
+            }
+
+            result = DiscoveryResult.from_dict(disc, kernel)
+
+            assert len(result.kernels) == 1
+            meta = result.kernels[0]
+            assert isinstance(meta, KernelMeta)
+            assert meta.kernel_path == str(kernel.resolve())
+            assert meta.kernel_name == "topk"
+            assert meta.kernel_type == "triton"
+            assert meta.kernel_language == "python"
+            assert meta.function_names == ["topk_kernel"]
+            assert meta.workspace_path == str(tmp_path.resolve())
+
+# ===================================================================
 # Test 3: Harness validation
 # ===================================================================
 
