@@ -286,6 +286,7 @@ class DefaultAgent:
                         pass
                     finally:
                         self._allow_one_summary_step = False
+                self._run_select_patch_agent()
                 return e_type.__name__, e_msg
             finally:
                 self._save_traj()
@@ -501,6 +502,51 @@ class DefaultAgent:
                 pass
 
         return result
+
+    def _run_select_patch_agent(self) -> None:
+        if not self.config.patch_output_dir:
+            return
+
+        base_patch_dir = Path(self.config.patch_output_dir).resolve()
+        if not base_patch_dir.exists():
+            return
+
+        # Try deterministic benchmark parsing first -- avoids LLM cost
+        from minisweagent.run.postprocess.benchmark_parsing import rewrite_best_results
+
+        det_result = rewrite_best_results(base_patch_dir)
+        if det_result:
+            return
+
+        # Fall back to LLM-based selection only if deterministic parsing failed
+        try:
+            from minisweagent.agents.select_patch_agent import SelectPatchAgent
+            from minisweagent.config import load_agent_config
+            from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
+
+            parallel_ids: list[int] = []
+            for d in base_patch_dir.glob("parallel_*"):
+                if d.is_dir():
+                    m = re.match(r"parallel_(\d+)$", d.name)
+                    if m:
+                        parallel_ids.append(int(m.group(1)))
+            num_parallel = (max(parallel_ids) + 1) if parallel_ids else 1
+
+            agent_config, _ = load_agent_config("mini_select_patch")
+
+            env_config = LocalEnvironmentConfig(cwd=str(base_patch_dir))
+            env = LocalEnvironment(**env_config.__dict__)
+            select_agent = SelectPatchAgent(self.model, env, **agent_config)
+            select_agent.log_file = base_patch_dir / "select_agent.log"
+
+            task = select_agent.setup_selection_task(base_patch_dir, num_parallel, self.config.metric)
+            if task:
+                select_agent.run(task, _skip_select_patch=True)
+
+            # Final deterministic override as safety net
+            rewrite_best_results(base_patch_dir)
+        except Exception:
+            return
 
     def execute_action(self, action: dict) -> dict:
         try:
