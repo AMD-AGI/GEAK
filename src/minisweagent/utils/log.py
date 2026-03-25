@@ -1,12 +1,19 @@
 import logging
+import os
 from pathlib import Path
 
 from rich.logging import RichHandler
 
 
+def _get_log_level_from_env() -> int:
+    # Default to INFO unless explicitly overridden by env.
+    level_name = os.getenv("MINISWEAGENT_LOG_LEVEL", "INFO").strip().upper()
+    return logging._nameToLevel.get(level_name, logging.INFO)
+
+
 def _setup_root_logger() -> None:
     logger = logging.getLogger("minisweagent")
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(_get_log_level_from_env())
     _handler = RichHandler(
         show_path=False,
         show_time=False,
@@ -18,10 +25,10 @@ def _setup_root_logger() -> None:
     logger.addHandler(_handler)
 
 
-def add_file_handler(path: Path | str, level: int = logging.DEBUG, *, print_path: bool = True) -> None:
+def add_file_handler(path: Path | str, level: int | None = None, *, print_path: bool = True) -> None:
     logger = logging.getLogger("minisweagent")
     handler = logging.FileHandler(path)
-    handler.setLevel(level)
+    handler.setLevel(level if level is not None else _get_log_level_from_env())
     formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
