@@ -153,10 +153,8 @@ def test_singularity_environment_command_failure():
 @pytest.mark.slow
 @pytest.mark.skipif(not is_singularity_available(), reason="Singularity not available")
 def test_singularity_environment_timeout():
-    """Test timeout functionality returns structured output instead of raising."""
+    """Test that TimeoutExpired is raised for long-running commands."""
     env = SingularityEnvironment(image="docker://python:3.11-slim", timeout=1)
 
-    result = env.execute("sleep 5")
-    assert result["returncode"] == -1
-    assert "timed out" in result["exception_info"]
-    assert result["extra"]["exception_type"] == "TimeoutExpired"
+    with pytest.raises(subprocess.TimeoutExpired):
+        env.execute("sleep 10")
