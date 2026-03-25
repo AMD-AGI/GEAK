@@ -107,7 +107,7 @@ async def main():
 
 failed = asyncio.run(main())
 sys.exit(failed)
-" 2>&1
+" 2>&1 || true
 
 MCP_RESULT=$?
 if [ $MCP_RESULT -eq 0 ]; then

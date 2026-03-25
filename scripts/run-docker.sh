@@ -21,12 +21,10 @@
 #   task-generator ... --from-results results/round_1/ --round 2 -o tasks/round_2/
 #
 # Run individual tasks:
-#   openevolve-worker --from-task tasks/round_1/00_openevolve-inner.md --gpu 0
 #   geak --from-task tasks/round_1/10_triton-autotune.md --gpu-ids 2
 #
 # Other tools:
 #   validate-commandment <path>              Validate a COMMANDMENT.md
-#   openevolve-worker --kernel-path <p> ...  Run OpenEvolve optimizer (manual)
 #   select-patch --patch-dir <dir> ...       Select best patch from runs
 #   geak <github_url>                        Full optimization pipeline
 
@@ -80,12 +78,10 @@ while [[ $# -gt 0 ]]; do
             echo "  task-generator ... --from-results results/round_1/ --round 2 -o tasks/round_2/"
             echo ""
             echo "Run individual tasks:"
-            echo "  openevolve-worker --from-task tasks/round_1/00_openevolve-inner.md --gpu 0"
             echo "  geak --from-task tasks/round_1/10_triton-autotune.md --gpu-ids 2"
             echo ""
             echo "Other tools:"
             echo "  validate-commandment <path>            Validate COMMANDMENT.md"
-            echo "  openevolve-worker --kernel-path <p> ...  Run OpenEvolve optimizer (manual)"
             echo "  select-patch --patch-dir <dir> ...     Select best patch from runs"
             echo "  geak <github_url>                      Full optimization pipeline"
             echo ""
@@ -112,7 +108,7 @@ if [ "$REBUILD" = true ]; then
         docker rm ${CONTAINER_NAME}
     fi
     echo "Rebuilding image ${IMAGE_NAME} (--no-cache)..."
-    docker build --no-cache -t ${IMAGE_NAME} .
+    docker build --network=host --no-cache -t ${IMAGE_NAME} .
     echo ""
 fi
 
@@ -178,7 +174,7 @@ echo ""
 # Check if image exists, build if not (unless we already rebuilt)
 if [[ "$(docker images -q ${IMAGE_NAME} 2> /dev/null)" == "" ]]; then
     echo "Image ${IMAGE_NAME} not found. Building..."
-    docker build -t ${IMAGE_NAME} .
+    docker build --network=host -t ${IMAGE_NAME} .
 elif [ "$REBUILD" != true ]; then
     echo "Using existing image ${IMAGE_NAME}"
     echo "To rebuild from scratch, run: $0 --rebuild"
