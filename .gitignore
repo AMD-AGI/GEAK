@@ -189,3 +189,6 @@ optimization_logs/*
 .optimization_strategies.md
 .cursor/
 .vscode/
+
+# MkDocs build output (deployed via GitHub Actions, not committed)
+site/
