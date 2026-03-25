@@ -8,12 +8,11 @@ homogeneous configuration (all agents run the same task with identical settings)
 
 import copy
 from pathlib import Path
-from typing import Any
 
 from rich.console import Console
 
-from minisweagent.agents.parallel_agent import ParallelAgent, BestPatchResult
 from minisweagent.agents.interactive import InteractiveAgent
+from minisweagent.agents.parallel_agent import BestPatchResult, ParallelAgent
 from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 from minisweagent.models import get_model
 from minisweagent.run.utils.save import save_traj

@@ -83,7 +83,7 @@ class ParallelAgent(DefaultAgent):
         save_traj_fn = kwargs.get("save_traj_fn")
 
         # Unified logic: always use run_parallel with git worktree management
-        results = self.run_parallel(
+        self.run_parallel(
             num_parallel=num_parallel,
             repo_path=repo_path,
             is_git_repo=is_git_repo,
@@ -532,7 +532,7 @@ class ParallelAgent(DefaultAgent):
         # Initialize non-git repos as git repos for unified worktree management
         if not is_git_repo:
             if console:
-                console.print(f"[bold yellow]Initializing non-git repo as git for worktree management...[/bold yellow]")
+                console.print("[bold yellow]Initializing non-git repo as git for worktree management...[/bold yellow]")
             cls._init_as_git_repo(repo_path_resolved)
             is_git_repo = True  # Now it's a git repo
         
