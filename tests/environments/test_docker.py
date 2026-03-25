@@ -60,7 +60,7 @@ def test_docker_environment_basic_execution(executable):
     env = DockerEnvironment(image="python:3.11", executable=executable)
 
     try:
-        result = env.execute({"command": "echo 'hello world'"})
+        result = env.execute("echo 'hello world'")
         assert result["returncode"] == 0
         assert "hello world" in result["output"]
     finally:
@@ -76,13 +76,11 @@ def test_docker_environment_set_env_variables(executable):
     )
 
     try:
-        # Test single environment variable
-        result = env.execute({"command": "echo $TEST_VAR"})
+        result = env.execute("echo $TEST_VAR")
         assert result["returncode"] == 0
         assert "test_value" in result["output"]
 
-        # Test multiple environment variables
-        result = env.execute({"command": "echo $TEST_VAR $ANOTHER_VAR"})
+        result = env.execute("echo $TEST_VAR $ANOTHER_VAR")
         assert result["returncode"] == 0
         assert "test_value another_value" in result["output"]
     finally:
@@ -99,13 +97,11 @@ def test_docker_environment_forward_env_variables(executable):
         )
 
         try:
-            # Test single forwarded environment variable
-            result = env.execute({"command": "echo $HOST_VAR"})
+            result = env.execute("echo $HOST_VAR")
             assert result["returncode"] == 0
             assert "host_value" in result["output"]
 
-            # Test multiple forwarded environment variables
-            result = env.execute({"command": "echo $HOST_VAR $ANOTHER_HOST_VAR"})
+            result = env.execute("echo $HOST_VAR $ANOTHER_HOST_VAR")
             assert result["returncode"] == 0
             assert "host_value another_host_value" in result["output"]
         finally:
@@ -119,9 +115,9 @@ def test_docker_environment_forward_nonexistent_env_variables(executable):
     env = DockerEnvironment(image="python:3.11", executable=executable, forward_env=["NONEXISTENT_VAR"])
 
     try:
-        result = env.execute({"command": 'echo "[$NONEXISTENT_VAR]"'})
+        result = env.execute('echo "[$NONEXISTENT_VAR]"')
         assert result["returncode"] == 0
-        assert "[]" in result["output"]  # Empty variable should result in empty string
+        assert "[]" in result["output"]
     finally:
         env.cleanup()
 
@@ -136,7 +132,7 @@ def test_docker_environment_combined_env_and_forward(executable):
         )
 
         try:
-            result = env.execute({"command": "echo $SET_VAR $HOST_VAR"})
+            result = env.execute("echo $SET_VAR $HOST_VAR")
             assert result["returncode"] == 0
             assert "from_config from_host" in result["output"]
         finally:
@@ -156,9 +152,8 @@ def test_docker_environment_env_override_forward(executable):
         )
 
         try:
-            result = env.execute({"command": "echo $CONFLICT_VAR"})
+            result = env.execute("echo $CONFLICT_VAR")
             assert result["returncode"] == 0
-            # The explicitly set env should take precedence (comes first in docker exec command)
             assert "from_config" in result["output"]
         finally:
             env.cleanup()
@@ -171,7 +166,7 @@ def test_docker_environment_custom_cwd(executable):
     env = DockerEnvironment(image="python:3.11", executable=executable, cwd="/tmp")
 
     try:
-        result = env.execute({"command": "pwd"})
+        result = env.execute("pwd")
         assert result["returncode"] == 0
         assert "/tmp" in result["output"]
     finally:
@@ -185,7 +180,7 @@ def test_docker_environment_cwd_parameter_override(executable):
     env = DockerEnvironment(image="python:3.11", executable=executable, cwd="/")
 
     try:
-        result = env.execute({"command": "pwd"}, cwd="/tmp")
+        result = env.execute("pwd", cwd="/tmp")
         assert result["returncode"] == 0
         assert "/tmp" in result["output"]
     finally:
@@ -199,7 +194,7 @@ def test_docker_environment_command_failure(executable):
     env = DockerEnvironment(image="python:3.11", executable=executable)
 
     try:
-        result = env.execute({"command": "exit 42"})
+        result = env.execute("exit 42")
         assert result["returncode"] == 42
     finally:
         env.cleanup()
@@ -214,12 +209,11 @@ def test_docker_environment_custom_container_timeout(executable):
     env = DockerEnvironment(image="python:3.11", executable=executable, container_timeout="3s")
 
     try:
-        result = env.execute({"command": "echo 'container is running'"})
+        result = env.execute("echo 'container is running'")
         assert result["returncode"] == 0
         assert "container is running" in result["output"]
         time.sleep(5)
         with pytest.raises((subprocess.CalledProcessError, subprocess.TimeoutExpired)):
-            # This command should fail because the container has stopped
             subprocess.run(
                 [executable, "exec", env.container_id, "echo", "still running"],
                 check=True,
