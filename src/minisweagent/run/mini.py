@@ -342,7 +342,7 @@ def main(
     console.print(f"[dim]Agent log: {agent_log_file}[/dim]")
     
     try:
-        exit_status, result = agent.run(
+        run_result = agent.run(
             task_content,
             output=output,
             save_traj_fn=save_traj,
@@ -350,6 +350,12 @@ def main(
             model_factory=lambda: get_model(model_name, config.get("model", {})),
             env_factory=lambda: (MCPEnabledEnvironment if rag else LocalEnvironment)(**copy.deepcopy(_env_kwargs)),
         )
+        # ParallelAgent.run() returns BestPatchResult | None;
+        # sub-agents return (exit_status, result) tuples.
+        if isinstance(run_result, tuple):
+            exit_status, result = run_result
+        else:
+            exit_status, result = "Completed", run_result
     except Exception as e:
         logger.error(f"Error running agent: {e}", exc_info=True)
 
