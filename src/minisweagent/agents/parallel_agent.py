@@ -1150,6 +1150,17 @@ class ParallelAgent(DefaultAgent):
                                 agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info
                             )
 
+                # Auto-extract final patch from worktree if agent didn't save any
+                if not list(task_patch_dir.glob("patch_*.patch")) and wt_path.exists():
+                    try:
+                        import subprocess as _sp
+                        _diff = _sp.run(["git", "diff", "HEAD"], cwd=str(wt_path),
+                                        capture_output=True, text=True, timeout=30)
+                        if _diff.returncode == 0 and _diff.stdout.strip():
+                            (task_patch_dir / "patch_0.patch").write_text(_diff.stdout)
+                    except Exception:
+                        pass
+
                 # region agent log
                 emit_debug_log(
                     "parallel_agent.py:execute_task:after_run",

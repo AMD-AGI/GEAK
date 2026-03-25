@@ -17,14 +17,12 @@ RUN git clone https://github.com/AMDResearch/intellikit.git /tmp/intellikit \
     && pip install -e . \
     && cd /workspace
 
-# Install MCP tools (metrix-mcp needs metrix installed first)
-RUN pip install -e mcp_tools/mcp-client/ && \
-    pip install -e mcp_tools/metrix-mcp/ && \
-    pip install -e mcp_tools/automated-test-discovery/ && \
+# Install MCP tools (only those with pyproject.toml; mcp-client removed from this branch)
+RUN pip install -e mcp_tools/metrix-mcp/ && \
     pip install -e mcp_tools/profiler-mcp/
 
-# Verify core imports (metrix is ROCm runtime dependency)
-RUN python3 -c "from mcp_client import MCPClient; from profiler_mcp.server import profile_kernel; print('✅ Core imports verified')"
+# Verify core imports
+RUN python3 -c "from profiler_mcp.server import profile_kernel; print('Core imports verified')"
 
 # Verify metrix is available
 RUN python3 -c "from metrix import Metrix; print('✅ Metrix installed')" || echo "⚠️  Metrix not available (will be needed for profiling)"
