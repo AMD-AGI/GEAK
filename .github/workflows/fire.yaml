@@ -52,8 +52,6 @@ jobs:
             --repo "$SMOKE_DIR" \
             --yolo \
             --exit-immediately \
-            --max-rounds 1 \
-            --no-heterogeneous \
             -t "Optimize the silu_mul_kernel in silu.hip for better performance on AMD MI300X. The kernel computes SiLU activation (x * sigmoid(x)) fused with element-wise multiplication on bf16 data."
 
       - name: Verify output
