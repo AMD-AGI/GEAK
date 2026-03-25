@@ -11,6 +11,8 @@ jobs:
 
     env:
       AMD_LLM_API_KEY: ${{ secrets.AMD_LLM_API_KEY }}
+      # Skip mini's interactive global config wizard in non-TTY CI (configure_if_first_time)
+      MSWEA_CONFIGURED: "true"
 
     steps:
       - name: Checkout repository
