@@ -1070,8 +1070,15 @@ class ParallelAgent(DefaultAgent):
                                 _wm_notebook_dir = str(Path(_wm_bm_path).resolve().parent / "_working_memory")
                             except Exception:
                                 _wm_notebook_dir = None
+                        # Extract kernel name from baseline_metrics path
+                        _wm_kernel_cat = "unknown"
+                        if _wm_bm_path:
+                            import re as _re2
+                            _km = _re2.search(r"geak_eval_L\d+_(.+?)_\d{8}_\d{6}", _wm_bm_path)
+                            if _km:
+                                _wm_kernel_cat = _km.group(1)
                         _wm = WorkingMemory(
-                            kernel_category=cfg.get("kernel_name", "unknown"),
+                            kernel_category=_wm_kernel_cat,
                             max_steps=cfg.get("step_limit", int(os.environ.get("GEAK_AGENT_STEP_LIMIT", "100"))),
                             notebook_dir=_wm_notebook_dir,
                             notebook_writer_id=f"{task.label or f'task_{task_id}'}-slot-{slot_idx}",
