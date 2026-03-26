@@ -349,6 +349,9 @@ def run_preprocessor(
     harness: str | None = None,
     repo: str | Path | None = None,
     eval_command: str | None = None,
+    compile_command: str | list[str] | None = None,
+    correctness_command: str | list[str] | None = None,
+    performance_command: str | list[str] | None = None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -371,9 +374,17 @@ def run_preprocessor(
     repo:
         Repository root path.
     eval_command:
-        Single eval command string (e.g. "python test.py") that handles compile,
-        correctness, and performance testing. When provided, COMMANDMENT is generated
-        from this command instead of from a harness. Discovery and UnitTestAgent are skipped.
+        Legacy single command string. Prefer the structured triple
+        (compile_command, correctness_command, performance_command) instead.
+        When only eval_command is given the preprocessor must guess which
+        part is build vs. execution — the structured form avoids that.
+    compile_command:
+        Build/setup step(s), e.g. ``"make"`` or ``["make clean", "make"]``.
+    correctness_command:
+        Correctness-validation command(s), e.g. ``"./test"``.
+    performance_command:
+        Benchmark/performance command(s), e.g. ``"./benchmark"``.  Used
+        directly for profiling and baseline capture — no ``&&`` guessing.
 
     Returns
     -------
@@ -392,6 +403,26 @@ def run_preprocessor(
             print(msg, file=sys.stderr)
 
     ctx: dict[str, Any] = {}
+
+    # ── Normalise structured commands ────────────────────────────────
+    def _join(cmd: str | list[str] | None) -> str | None:
+        if cmd is None:
+            return None
+        if isinstance(cmd, list):
+            return " && ".join(c.strip() for c in cmd if c.strip()) or None
+        return cmd.strip() or None
+
+    compile_cmd = _join(compile_command)
+    correctness_cmd = _join(correctness_command)
+    perf_cmd = _join(performance_command)
+
+    has_structured = any(c is not None for c in (compile_cmd, correctness_cmd, perf_cmd))
+    if has_structured and not eval_command:
+        eval_command = " && ".join(
+            c for c in (compile_cmd, correctness_cmd, perf_cmd) if c
+        )
+    elif eval_command and not has_structured:
+        perf_cmd = eval_command
 
     # ── 1. resolve-kernel-url ────────────────────────────────────────
     _print(
@@ -889,23 +920,24 @@ def run_preprocessor(
 
     profiling: dict[str, Any] | None = None
     if eval_command:
-        # HIP-style: use performance_command directly for profiling
-        perf_cmd = eval_command
-        if perf_cmd:
-            if isinstance(perf_cmd, list):
-                perf_cmd = " && ".join(perf_cmd)
+        if not perf_cmd:
+            _print("  Skipping profiling (no performance_command in eval_command)")
+        else:
+            _cwd = str(repo_root) if repo_root else None
 
-            # If perf_cmd is "a && b && c" format, extract only the last command for profiling
-            # (the earlier parts are typically build/setup steps, not the actual execution)
-            if " && " in perf_cmd:
-                perf_cmd_parts = perf_cmd.split(" && ")
-                perf_cmd_for_profiling = perf_cmd_parts[-1].strip()
-                _print(f"  Original eval_command: {perf_cmd}")
-                _print(f"  Extracted last command for profiling: {perf_cmd_for_profiling}")
-            else:
-                perf_cmd_for_profiling = perf_cmd
+            if compile_cmd:
+                _print(f"  Running build step: {compile_cmd}")
+                import subprocess
+                _build = subprocess.run(
+                    compile_cmd, shell=True, capture_output=True, text=True,
+                    timeout=120, cwd=_cwd,
+                )
+                if _build.returncode != 0:
+                    _print(f"  Build FAILED (rc={_build.returncode})")
+                    if _build.stderr:
+                        _print(f"  stderr: {_build.stderr[:500]}")
 
-            _print(f"  Profiling with performance_command: {perf_cmd_for_profiling}")
+            _print(f"  Profiling with performance_command: {perf_cmd}")
             try:
                 _ensure_mcp_importable()
                 profiler_server = importlib.import_module("profiler_mcp.server")
@@ -913,45 +945,45 @@ def run_preprocessor(
 
                 _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
                 profiling = _profile_fn(
-                    command=perf_cmd_for_profiling,
+                    command=perf_cmd,
                     backend="metrix",
                     num_replays=3,
                     quick=True,
                     gpu_devices=str(gpu_id),
-                    workdir=str(repo_root) if repo_root else None,
+                    workdir=_cwd,
                 )
             except Exception as exc:
                 _print(f"  [yellow]Profiling failed: {exc}[/yellow]" if console else f"  Profiling failed: {exc}")
                 logger.warning("Profiling failed: %s", exc, exc_info=True)
 
-            # Fallback: if profiling failed or returned unsuccessful, run performance_command directly
-            profiling_ok = profiling is not None and profiling.get("success", False)
-            if not profiling_ok:
-                _print("  Running performance_command directly as fallback for baseline...")
-                try:
-                    import subprocess
+            _print("  Capturing benchmark baseline from performance_command...")
+            try:
+                import subprocess
 
-                    result = subprocess.run(
-                        perf_cmd,
-                        shell=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=300,
-                        cwd=str(repo_root) if repo_root else None,
-                    )
-                    if result.returncode == 0:
-                        (output_dir / "benchmark_baseline.txt").write_text(result.stdout)
-                        (output_dir / "full_benchmark_baseline.txt").write_text(result.stdout)
-                        _print(f"  Fallback baseline saved to benchmark_baseline.txt ({len(result.stdout)} bytes)")
-                    else:
-                        _print(f"  Fallback baseline capture: FAILED (returncode={result.returncode})")
-                        if result.stderr:
-                            _print(f"  stderr: {result.stderr[:500]}")
-                except Exception as fallback_exc:
-                    _print(f"  Fallback baseline capture failed: {fallback_exc}")
-                    logger.warning("Fallback baseline capture failed: %s", fallback_exc, exc_info=True)
-        else:
-            _print("  Skipping profiling (no performance_command in eval_command)")
+                result = subprocess.run(
+                    perf_cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    cwd=_cwd,
+                )
+                if result.returncode == 0:
+                    benchmark_baseline = result.stdout
+                    full_benchmark_baseline = result.stdout
+                    (output_dir / "benchmark_baseline.txt").write_text(result.stdout)
+                    (output_dir / "full_benchmark_baseline.txt").write_text(result.stdout)
+                    _print(f"  Baseline saved to benchmark_baseline.txt ({len(result.stdout)} bytes)")
+                else:
+                    _print(f"  Baseline capture: FAILED (returncode={result.returncode})")
+                    if result.stderr:
+                        _print(f"  stderr: {result.stderr[:500]}")
+            except Exception as baseline_exc:
+                _print(f"  Baseline capture failed: {baseline_exc}")
+                logger.warning("Baseline capture failed: %s", baseline_exc, exc_info=True)
+
+        ctx["benchmark_baseline"] = benchmark_baseline
+        ctx["full_benchmark_baseline"] = full_benchmark_baseline
     elif test_command:
         ctx["harness_path"] = extract_harness_path(test_command)
         (output_dir / "harness_path.txt").write_text(ctx["harness_path"])
@@ -1030,15 +1062,14 @@ def run_preprocessor(
 
     commandment: str | None = None
     if eval_command:
-        # Single eval command handles compile/correctness/performance
         try:
             from minisweagent.run.preprocess.commandment import generate_commandment_from_commands
 
             commandment = generate_commandment_from_commands(
                 kernel_path=kernel_path,
-                compile_command=None,
-                correctness_command=None,
-                performance_command=eval_command,
+                compile_command=compile_cmd,
+                correctness_command=correctness_cmd,
+                performance_command=perf_cmd or eval_command,
                 repo_root=repo_root,
             )
             ctx["test_command"] = eval_command
@@ -1165,7 +1196,22 @@ def main() -> None:
     parser.add_argument(
         "--eval-command",
         default=None,
-        help='Single command string (e.g. "python test.py") that handles compile, correctness, and performance testing. Skips harness creation.',
+        help='Legacy single command string. Prefer --compile-command / --correctness-command / --performance-command.',
+    )
+    parser.add_argument(
+        "--compile-command",
+        default=None,
+        help='Build/setup command (e.g. "make"). Used in COMMANDMENT SETUP.',
+    )
+    parser.add_argument(
+        "--correctness-command",
+        default=None,
+        help='Correctness validation command (e.g. "./test").',
+    )
+    parser.add_argument(
+        "--performance-command",
+        default=None,
+        help='Benchmark command (e.g. "./benchmark"). Used for profiling and baseline capture.',
     )
     args = parser.parse_args()
 
@@ -1191,6 +1237,9 @@ def main() -> None:
     print(f"  model:                {args.model}")
     print(f"  harness:              {args.harness}")
     print(f"  repo:                 {args.repo}")
+    print(f"  compile_command:      {args.compile_command}")
+    print(f"  correctness_command:  {args.correctness_command}")
+    print(f"  performance_command:  {args.performance_command}")
     print("-" * 60)
     print(f"  GEAK_MODEL:                 {os.environ.get('GEAK_MODEL', '<not set>')}")
     print(f"  GEAK_MODEL_ENSEMBLE:        {os.environ.get('GEAK_MODEL_ENSEMBLE', '<not set>')}")
@@ -1209,6 +1258,9 @@ def main() -> None:
         harness=args.harness,
         repo=args.repo,
         eval_command=args.eval_command,
+        compile_command=args.compile_command,
+        correctness_command=args.correctness_command,
+        performance_command=args.performance_command,
     )
 
     print(json.dumps(ctx, indent=2, default=str))
