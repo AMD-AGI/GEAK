@@ -49,9 +49,7 @@ class PatchApplyError(Exception):
     pass
 
 
-def _find_agent_worktree_slot(
-    results_dir: Path, best_task: str, repo_root: str, output_dir: Path
-) -> Path | None:
+def _find_agent_worktree_slot(results_dir: Path, best_task: str, repo_root: str, output_dir: Path) -> Path | None:
     """Find the agent's worktree slot that contains the best task's kernel.
 
     The agent worktrees live at ``results_dir/worktrees/slot_N/``.
@@ -71,6 +69,7 @@ def _find_agent_worktree_slot(
     # e.g. "triton2triton_geak_eval_L1_llama_ff_triton_20260326_091118_logs"
     # -> "tasks/triton2triton/geak_eval/L1/llama_ff_triton"
     import re
+
     dir_name = output_dir.name.replace("_logs", "")
     m = re.match(r"(triton2triton_geak_eval_L\d+_\w+?)_\d{8}_\d+", dir_name)
     if m:

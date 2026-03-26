@@ -417,9 +417,7 @@ def run_preprocessor(
 
     has_structured = any(c is not None for c in (correctness_cmd, perf_cmd))
     if has_structured and not eval_command:
-        eval_command = " && ".join(
-            c for c in (correctness_cmd, perf_cmd) if c
-        )
+        eval_command = " && ".join(c for c in (correctness_cmd, perf_cmd) if c)
     elif eval_command and not has_structured:
         perf_cmd = eval_command
 
@@ -1209,7 +1207,7 @@ def main() -> None:
     parser.add_argument(
         "--eval-command",
         default=None,
-        help='Legacy single command string. Prefer --correctness-command / --performance-command.',
+        help="Legacy single command string. Prefer --correctness-command / --performance-command.",
     )
     parser.add_argument(
         "--correctness-command",
