@@ -50,37 +50,75 @@ class PatchApplyError(Exception):
 
 
 def _find_agent_worktree_slot(
-    results_dir: Path, best_task: str, repo_root: str
+    results_dir: Path, best_task: str, repo_root: str, output_dir: Path
 ) -> Path | None:
     """Find the agent's worktree slot that contains the best task's kernel.
 
     The agent worktrees live at ``results_dir/worktrees/slot_N/``.
-    We look for one that has a modified kernel.py (different from baseline).
-    This avoids creating a clean worktree and ensures FULL_BENCHMARK
-    measures the exact same kernel that save_and_test benchmarked.
+    Each slot contains the full repo tree, so kernel.py is at e.g.
+    ``slot_0/tasks/triton2triton/geak_eval/L1/llama_ff_triton/kernel.py``.
+
+    We identify the correct kernel by extracting the task path from
+    ``output_dir`` (which contains the kernel name like
+    ``triton2triton_geak_eval_L1_llama_ff_triton_...``), then look for
+    a slot with a modified kernel.py at that specific task path.
     """
     worktrees_dir = results_dir / "worktrees"
     if not worktrees_dir.is_dir():
         return None
 
-    # Read the baseline kernel to compare against
-    repo = Path(repo_root)
-    baseline_kernel = None
-    for kf in repo.rglob("kernel.py"):
-        baseline_kernel = kf.read_text()
-        break
+    # Extract kernel task path from output_dir name
+    # e.g. "triton2triton_geak_eval_L1_llama_ff_triton_20260326_091118_logs"
+    # -> "tasks/triton2triton/geak_eval/L1/llama_ff_triton"
+    import re
+    dir_name = output_dir.name.replace("_logs", "")
+    m = re.match(r"(triton2triton_geak_eval_L\d+_\w+?)_\d{8}_\d+", dir_name)
+    if m:
+        # Convert underscores back to path separators for the task path
+        # triton2triton_geak_eval_L1_llama_ff_triton -> tasks/triton2triton/geak_eval/L1/llama_ff_triton
+        parts = m.group(1)
+        # Split on known structure: triton2triton / geak_eval / L{N} / kernel_name
+        tm = re.match(r"(triton2triton)_(geak_eval)_(L\d+)_(.*)", parts)
+        if tm:
+            task_rel = Path("tasks") / tm.group(1) / tm.group(2) / tm.group(3) / tm.group(4)
+        else:
+            task_rel = None
+    else:
+        task_rel = None
 
-    # Find the slot with a MODIFIED kernel.py (different from baseline)
+    # Read baseline kernel for comparison
+    baseline_kernel = None
+    if task_rel:
+        repo = Path(repo_root)
+        baseline_path = repo / task_rel / "kernel.py"
+        if baseline_path.exists():
+            baseline_kernel = baseline_path.read_text()
+
     for slot_dir in sorted(worktrees_dir.glob("slot_*")):
         if not slot_dir.is_dir() or "_logs" in slot_dir.name:
             continue
-        for kernel_file in slot_dir.rglob("kernel.py"):
+
+        # Look for kernel.py at the specific task path first
+        if task_rel:
+            specific_kernel = slot_dir / task_rel / "kernel.py"
+            if specific_kernel.exists():
+                try:
+                    content = specific_kernel.read_text()
+                    if baseline_kernel is None or content != baseline_kernel:
+                        logger.info("Found modified kernel at %s", specific_kernel.parent)
+                        return specific_kernel.parent
+                except OSError:
+                    pass
+
+        # Fallback: look for any kernel.py directly in slot root
+        root_kernel = slot_dir / "kernel.py"
+        if root_kernel.exists():
             try:
-                content = kernel_file.read_text()
+                content = root_kernel.read_text()
                 if baseline_kernel is None or content != baseline_kernel:
-                    return kernel_file.parent
+                    return root_kernel.parent
             except OSError:
-                continue
+                pass
 
     return None
 
@@ -342,7 +380,7 @@ def evaluate_round_best(
         # This ensures FULL_BENCHMARK measures the EXACT same kernel.py
         # that save_and_test benchmarked — no discrepancies from patch
         # application, CUDA graph warm state, or missing runtime files.
-        agent_slot_dir = _find_agent_worktree_slot(results_dir, best_task, repo_root)
+        agent_slot_dir = _find_agent_worktree_slot(results_dir, best_task, repo_root, output_dir)
         if agent_slot_dir:
             eval_worktree = agent_slot_dir
             _print(f"  Using agent worktree slot: {eval_worktree.name}")
