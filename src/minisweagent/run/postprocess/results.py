@@ -212,29 +212,25 @@ def merge_round_evaluation_into_final_report(
         merged["best_round"] = label
 
     verified_speedup_raw = extract_verified_speedup(round_eval)
-    benchmark_speedup = float(round_eval.get("benchmark_speedup", 0) or 0)
     if verified_speedup_raw is not None:
-        # Use the higher of verified and benchmark speedup as the canonical result.
-        # FULL_BENCHMARK can undercount on tiny kernels due to measurement noise
-        # (GPU contention, cold dispatch). The agent's benchmark is a valid
-        # measurement done in a real subprocess with the same harness.
-        canonical_speedup_raw = max(float(verified_speedup_raw), benchmark_speedup)
+        # FULL_BENCHMARK verified_speedup is the canonical result — it's what
+        # anyone gets by independently running the harness on the patched kernel.
+        # The agent's benchmark_speedup may be higher due to non-reproducible
+        # warm state (CUDA graphs, JIT caches) but that's not independently
+        # verifiable, so we don't use it.
         verified_speedup = max(1.0, float(verified_speedup_raw))
-        canonical_speedup = max(1.0, canonical_speedup_raw)
-        merged["best_speedup"] = round(canonical_speedup_raw, 6)
+        merged["best_speedup"] = round(float(verified_speedup_raw), 6)
         merged["best_speedup_verified"] = round(float(verified_speedup_raw), 6)
-        merged["best_speedup_benchmark"] = round(benchmark_speedup, 6)
         merged["verified_speedup_raw"] = round(float(verified_speedup_raw), 6)
         merged["verified_speedup"] = round(verified_speedup, 6)
-        merged["verified_improvement"] = canonical_speedup_raw > 1.0
-        merged["total_speedup"] = f"{canonical_speedup:.4f}x"
+        merged["verified_improvement"] = verified_speedup_raw > 1.0
+        merged["total_speedup"] = f"{verified_speedup:.4f}x"
         merged["verification_note"] = (
             f"Verified FULL_BENCHMARK speedup {verified_speedup_raw:.4f}x."
             if verified_speedup_raw > 1.0
             else (
-                f"FULL_BENCHMARK {verified_speedup_raw:.4f}x; "
-                f"benchmark {benchmark_speedup:.4f}x; "
-                f"using max={canonical_speedup_raw:.4f}x."
+                "No verified FULL_BENCHMARK improvement "
+                f"({verified_speedup_raw:.4f}x raw); clamped to {verified_speedup:.4f}x."
             )
         )
         best_patch_path = str(merged.get("best_patch") or round_eval.get("best_patch") or "")
