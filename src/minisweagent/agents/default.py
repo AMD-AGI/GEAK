@@ -5,7 +5,7 @@ import os
 import re
 import subprocess
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from jinja2 import StrictUndefined, Template
@@ -50,6 +50,7 @@ class AgentConfig:
     starting_patch: str | None = None
     # Interactive/exit behaviour (set by --exit-immediately)
     confirm_exit: bool = True
+    disabled_tools: list[str] = field(default_factory=list)
 
 
 # Unified observation truncation for both bash output and tool call results (head + tail).
@@ -128,6 +129,8 @@ class DefaultAgent:
             on_strategy_change=self._get_strategy_callback(),
             patch_output_dir=self.config.patch_output_dir,
         )
+        if self.config.disabled_tools:
+            self.toolruntime.disable_tools(self.config.disabled_tools)
         # Propagate agent's env vars (HIP_VISIBLE_DEVICES etc.) to tools
         agent_env = getattr(self.env.config, "env", None)
         if agent_env:

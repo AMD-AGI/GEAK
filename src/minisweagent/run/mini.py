@@ -24,7 +24,7 @@ from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.orchestrator import run_orchestrator
 from minisweagent.run.preprocess.preprocessor import run_preprocessor
-from minisweagent.run.utils.task_parser import _resolve_path_case, parse_task_info
+from minisweagent.run.utils.task_parser import _resolve_path_case, display_parsed_config, parse_task_info
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
 DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
@@ -86,6 +86,23 @@ def _normalize_kernel_type(value: Any) -> str:
     return "other"
 
 
+def _derive_output_dir_and_traj(output: Path | None) -> tuple[Path, Path]:
+    """Unify patch_output_dir and -o/--output location.
+
+    - If output is a file path: output_dir = output.parent, traj = output
+    - If output is a directory: output_dir = output, traj = output/trajectory.json
+    - If output is not provided: use ./Optimization_logs as output_dir
+    """
+    if output is None:
+        output_dir = Path.cwd() / "Optimization_logs"
+        return output_dir, output_dir / "trajectory.json"
+
+    if output.suffix:
+        return output.parent, output
+
+    return output, output / "trajectory.json"
+
+
 def _final_report_to_bestpatchresult(report: Any) -> BestPatchResult | None:
     if report is None:
         return None
@@ -131,7 +148,7 @@ def main(
     yolo: bool = typer.Option(False, "-y", "--yolo", help="Run without confirmation"),
     cost_limit: float | None = typer.Option(None, "-l", "--cost-limit", help="Cost limit. Set to 0 to disable."),
     config_spec: Path | None = typer.Option(None, "-c", "--config", help="Path to config file"),
-    output: Path | None = typer.Option(DEFAULT_OUTPUT, "-o", "--output", help="Output trajectory file"),
+    output: Path | None = typer.Option(None, "-o", "--output", help="Output trajectory file or directory"),
     exit_immediately: bool = typer.Option(False, "--exit-immediately", help="Exit immediately", rich_help_panel="Advanced"),
     repo: Path | None = typer.Option(None, "--repo", help="Target Repository path."),
     kernel_url: str | None = typer.Option(None, "--kernel-url", help="Target Kernel URL."),
@@ -166,16 +183,19 @@ def main(
         config.setdefault("model", {})["model_class"] = model_class
 
     tools_cfg = config.get("tools") or {}
-    if "bash" in tools_cfg:
-        config.setdefault("model", {}).setdefault("bash_tool", tools_cfg["bash"])
-    if "profiling" in tools_cfg:
-        config.setdefault("model", {}).setdefault("profiling", tools_cfg["profiling"])
-    if "rag" in tools_cfg:
-        config.setdefault("model", {}).setdefault("rag", tools_cfg["rag"])
+    disabled_tools: list[str] = []
+    if tools_cfg.get("bash") is False:
+        disabled_tools.append("bash")
+    if tools_cfg.get("profiling") is False:
+        disabled_tools.append("profiling")
+
+    if disabled_tools:
+        config.setdefault("agent", {}).setdefault("disabled_tools", [])
+        config["agent"]["disabled_tools"] = list(set(config["agent"]["disabled_tools"]) | set(disabled_tools))
 
     model = get_model(model_name, config.get("model", {}))
     _model_name = getattr(model.config, "model_name", "unknown")
-    console.print(f"\\[mini-swe-agent] Using model: [bold cyan]{_model_name}[/bold cyan]")
+    console.print(f"\\Using model: [bold cyan]{_model_name}[/bold cyan]")
 
     task_content = task
     if task:
@@ -221,6 +241,16 @@ def main(
     parsed_gpu_ids = parse_gpu_ids(gpu_ids)
     metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
 
+    preprocess_output_dir, traj_output_path = _derive_output_dir_and_traj(output)
+    preprocess_output_dir.mkdir(parents=True, exist_ok=True)
+    config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
+
+    _display_cfg = dict(parsed_config)
+    _display_cfg["kernel_type"] = kernel_type
+    if kernel_url and not _display_cfg.get("kernel_url"):
+        _display_cfg["kernel_url"] = kernel_url
+    console.print(display_parsed_config(_display_cfg, str(preprocess_output_dir)))
+
     _env_kwargs = dict(config.get("env", {}))
     env_type = str(_env_kwargs.pop("type", _env_kwargs.pop("environment_class", "local"))).strip().lower() or "local"
     try:
@@ -230,8 +260,6 @@ def main(
         console.print(f"[red]Error: failed to initialize env.type={env_type}: {e}[/red]")
         raise typer.Exit(1)
 
-    preprocess_output_dir = Path(config.get("patch", {}).get("patch_output_dir") or (output.parent if output and output.suffix else output or (global_config_dir / "optimization_logs")))
-    preprocess_output_dir.mkdir(parents=True, exist_ok=True)
     preprocess_ctx = run_preprocessor(
         kernel_url=kernel_target,
         repo=repo,
@@ -305,6 +333,7 @@ def main(
         num_parallel=num_parallel,
         gpu_ids=gpu_ids,
         output_dir=preprocess_output_dir,
+        traj_output=traj_output_path,
         model_name=model_name,
         console=console,
     )

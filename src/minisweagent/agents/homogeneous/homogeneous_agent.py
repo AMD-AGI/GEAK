@@ -38,6 +38,7 @@ def run_homogeneous_agent(
     num_parallel: int | None = None,
     gpu_ids: str | None = None,
     output_dir: Path | None = None,
+    traj_output: Path | None = None,
     model_name: str | None = None,
     console: Console | None = None,
 ) -> BestPatchResult | None:
@@ -60,6 +61,7 @@ def run_homogeneous_agent(
         num_parallel: Number of parallel agents
         gpu_ids: Comma-separated GPU IDs
         output_dir: Output directory
+        traj_output: Trajectory output file path (optional)
         model_name: Model name for factory
         console: Rich console for output
 
@@ -114,7 +116,8 @@ def run_homogeneous_agent(
 
     # Setup logging
     log_file = final_output_dir / "homogeneous_agent.log"
-    traj_output = final_output_dir / "trajectory.json"
+    final_traj_output = Path(traj_output) if traj_output is not None else (final_output_dir / "trajectory.json")
+    final_traj_output.parent.mkdir(parents=True, exist_ok=True)
 
     # Print configuration summary
     console.print("\n[bold]Configuration Summary:[/bold]")
@@ -137,7 +140,7 @@ def run_homogeneous_agent(
     try:
         best_result = agent.run(
             task_content,
-            output=traj_output,
+            output=final_traj_output,
             save_traj_fn=save_traj,
             console=console,
             model_factory=lambda: get_model(model_name, model_config.copy()),

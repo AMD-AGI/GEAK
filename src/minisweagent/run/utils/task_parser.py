@@ -159,13 +159,21 @@ def display_parsed_config(parsed_info: dict, patch_output_dir: str) -> str:
         "\n" + "=" * 70,
         "Auto-detected Configuration:",
         "=" * 70,
-        "  Note: no input for 60s will default to 'y' (proceed).",
     ]
 
     fields: list[tuple[str, str]] = [
         (
+            "kernel_type",
+            parsed_info.get("kernel_type") or "Not detected. Default to other.",
+        ),
+        (
             "kernel_name",
-            parsed_info["kernel_name"] or "Not detected. Please use --kernel-name to specify the kernel name",
+            parsed_info.get("kernel_name")
+            or "Not detected. Please provide --kernel-url or include kernel name in the task",
+        ),
+        (
+            "kernel_url",
+            parsed_info.get("kernel_url") or "Not detected. Please use --kernel-url to specify the kernel target",
         ),
         ("repo", parsed_info["repo"] or "Not detected. Please use --repo to specify the repository path"),
         (
