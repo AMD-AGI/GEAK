@@ -349,7 +349,6 @@ def run_preprocessor(
     harness: str | None = None,
     repo: str | Path | None = None,
     eval_command: str | None = None,
-    compile_command: str | list[str] | None = None,
     correctness_command: str | list[str] | None = None,
     performance_command: str | list[str] | None = None,
 ) -> dict[str, Any]:
@@ -374,14 +373,15 @@ def run_preprocessor(
     repo:
         Repository root path.
     eval_command:
-        Legacy single command string. Prefer the structured triple
-        (compile_command, correctness_command, performance_command) instead.
+        Legacy single command string. Prefer the structured pair
+        (correctness_command, performance_command) instead.
         When only eval_command is given the preprocessor must guess which
         part is build vs. execution — the structured form avoids that.
-    compile_command:
-        Build/setup step(s), e.g. ``"make"`` or ``["make clean", "make"]``.
     correctness_command:
-        Correctness-validation command(s), e.g. ``"./test"``.
+        Compile + correctness validation command(s), e.g.
+        ``"make && ./test"`` or ``["make", "./test"]``.  Compilation
+        should be folded in so that a build failure is a correctness
+        failure.
     performance_command:
         Benchmark/performance command(s), e.g. ``"./benchmark"``.  Used
         directly for profiling and baseline capture — no ``&&`` guessing.
@@ -412,14 +412,13 @@ def run_preprocessor(
             return " && ".join(c.strip() for c in cmd if c.strip()) or None
         return cmd.strip() or None
 
-    compile_cmd = _join(compile_command)
     correctness_cmd = _join(correctness_command)
     perf_cmd = _join(performance_command)
 
-    has_structured = any(c is not None for c in (compile_cmd, correctness_cmd, perf_cmd))
+    has_structured = any(c is not None for c in (correctness_cmd, perf_cmd))
     if has_structured and not eval_command:
         eval_command = " && ".join(
-            c for c in (compile_cmd, correctness_cmd, perf_cmd) if c
+            c for c in (correctness_cmd, perf_cmd) if c
         )
     elif eval_command and not has_structured:
         perf_cmd = eval_command
@@ -925,18 +924,6 @@ def run_preprocessor(
         else:
             _cwd = str(repo_root) if repo_root else None
 
-            if compile_cmd:
-                _print(f"  Running build step: {compile_cmd}")
-                import subprocess
-                _build = subprocess.run(
-                    compile_cmd, shell=True, capture_output=True, text=True,
-                    timeout=120, cwd=_cwd,
-                )
-                if _build.returncode != 0:
-                    _print(f"  Build FAILED (rc={_build.returncode})")
-                    if _build.stderr:
-                        _print(f"  stderr: {_build.stderr[:500]}")
-
             _print(f"  Profiling with performance_command: {perf_cmd}")
             try:
                 _ensure_mcp_importable()
@@ -1067,7 +1054,7 @@ def run_preprocessor(
 
             commandment = generate_commandment_from_commands(
                 kernel_path=kernel_path,
-                compile_command=compile_cmd,
+                compile_command=None,
                 correctness_command=correctness_cmd,
                 performance_command=perf_cmd or eval_command,
                 repo_root=repo_root,
@@ -1196,17 +1183,12 @@ def main() -> None:
     parser.add_argument(
         "--eval-command",
         default=None,
-        help='Legacy single command string. Prefer --compile-command / --correctness-command / --performance-command.',
-    )
-    parser.add_argument(
-        "--compile-command",
-        default=None,
-        help='Build/setup command (e.g. "make"). Used in COMMANDMENT SETUP.',
+        help='Legacy single command string. Prefer --correctness-command / --performance-command.',
     )
     parser.add_argument(
         "--correctness-command",
         default=None,
-        help='Correctness validation command (e.g. "./test").',
+        help='Compile + correctness command (e.g. "make && ./test"). Build should be folded in.',
     )
     parser.add_argument(
         "--performance-command",
@@ -1237,7 +1219,6 @@ def main() -> None:
     print(f"  model:                {args.model}")
     print(f"  harness:              {args.harness}")
     print(f"  repo:                 {args.repo}")
-    print(f"  compile_command:      {args.compile_command}")
     print(f"  correctness_command:  {args.correctness_command}")
     print(f"  performance_command:  {args.performance_command}")
     print("-" * 60)
@@ -1258,7 +1239,6 @@ def main() -> None:
         harness=args.harness,
         repo=args.repo,
         eval_command=args.eval_command,
-        compile_command=args.compile_command,
         correctness_command=args.correctness_command,
         performance_command=args.performance_command,
     )
