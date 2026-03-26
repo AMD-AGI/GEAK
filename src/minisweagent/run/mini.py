@@ -86,15 +86,17 @@ def _normalize_kernel_type(value: Any) -> str:
     return "other"
 
 
-def _derive_output_dir_and_traj(output: Path | None) -> tuple[Path, Path]:
+def _derive_output_dir_and_traj(output: Path | None, kernel_name: str | None) -> tuple[Path, Path]:
     """Unify patch_output_dir and -o/--output location.
 
     - If output is a file path: output_dir = output.parent, traj = output
     - If output is a directory: output_dir = output, traj = output/trajectory.json
-    - If output is not provided: use ./Optimization_logs as output_dir
+    - If output is not provided: use ./optimization_logs/<kernel_name>_<timestamp> as output_dir
     """
     if output is None:
-        output_dir = Path.cwd() / "Optimization_logs"
+        from minisweagent.run.utils.task_parser import generate_patch_output_dir
+
+        output_dir = (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
         return output_dir, output_dir / "trajectory.json"
 
     if output.suffix:
@@ -250,8 +252,18 @@ def main(
 
     # 2b) Detect configs from task
     parsed_config = parse_task_info(task_content, model)
-    kernel_type = _normalize_kernel_type(parsed_config.get("kernel_type"))
-    console.print(f"[bold cyan]Detected kernel_type:[/bold cyan] {kernel_type}")
+    task_kernel_type = _normalize_kernel_type(parsed_config.get("kernel_type"))
+    kernel_type = task_kernel_type
+    if kernel_url:
+        kp = Path(kernel_url)
+        if kp.exists() and kp.is_file():
+            from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
+
+            inferred = _normalize_kernel_type(_infer_kernel_type(kp))
+            if inferred in {"hip", "triton"}:
+                kernel_type = inferred
+
+    # Keep kernel_type resolution internal; avoid exposing routing details in logs.
 
     if repo is None and parsed_config.get("repo"):
         repo = Path(parsed_config["repo"])
@@ -270,14 +282,33 @@ def main(
     parsed_gpu_ids = parse_gpu_ids(gpu_ids)
     metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
 
-    preprocess_output_dir, traj_output_path = _derive_output_dir_and_traj(output)
+    kernel_name_for_output = parsed_config.get("kernel_name")
+    if not kernel_name_for_output and kernel_url:
+        kernel_name_for_output = Path(kernel_url).stem
+    if not kernel_name_for_output and isinstance(kernel_target, str):
+        kernel_name_for_output = Path(kernel_target).stem
+
+    preprocess_output_dir, traj_output_path = _derive_output_dir_and_traj(output, kernel_name_for_output)
     preprocess_output_dir.mkdir(parents=True, exist_ok=True)
     config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
+    console.print(
+        f"[dim]Logs and artifacts for this run are under '{preprocess_output_dir}' "
+        f"(e.g. optimization_logs/<kernel>_<timestamp>/).[/dim]"
+    )
 
+    # Display the *resolved* configuration (CLI overrides auto-detection).
     _display_cfg = dict(parsed_config)
     _display_cfg["kernel_type"] = kernel_type
-    if kernel_url and not _display_cfg.get("kernel_url"):
+    if kernel_url:
         _display_cfg["kernel_url"] = kernel_url
+    if repo is not None:
+        _display_cfg["repo"] = str(repo)
+    if test_command is not None:
+        _display_cfg["test_command"] = test_command
+    if num_parallel is not None:
+        _display_cfg["num_parallel"] = num_parallel
+    if gpu_ids is not None:
+        _display_cfg["gpu_ids"] = gpu_ids
     console.print(display_parsed_config(_display_cfg, str(preprocess_output_dir)))
 
     _env_kwargs = dict(config.get("env", {}))
@@ -305,10 +336,6 @@ def main(
     if preprocess_ctx.get("repo_root") and repo is None:
         repo = Path(preprocess_ctx["repo_root"])
 
-    commandment = preprocess_ctx.get("commandment")
-    if commandment:
-        task_content = f"{commandment}\n\n---\n\n{task_content}"
-
     # kernel_type routing:
     # - hip/other -> homogeneous agent
     # - triton -> heterogeneous orchestrator
@@ -324,16 +351,15 @@ def main(
 
         if _auto_kernel_type == "triton":
             heterogeneous = True
-            console.print(f"[bold cyan]Auto-detected kernel type: {_auto_kernel_type} -> heterogeneous mode[/bold cyan]")
         else:
             heterogeneous = False
-            _ktype_display = _auto_kernel_type or kernel_type or "unknown"
-            console.print(f"[bold cyan]Auto-detected kernel type: {_ktype_display} -> homogeneous mode[/bold cyan]")
     else:
-        _mode_label = "heterogeneous" if heterogeneous else "homogeneous"
-        console.print(f"[bold cyan]Mode override: {_mode_label}[/bold cyan]")
+        pass
 
     if heterogeneous:
+        commandment = preprocess_ctx.get("commandment")
+        if commandment:
+            task_content = f"{commandment}\n\n---\n\n{task_content}"
         report = run_orchestrator(
             preprocess_ctx=preprocess_ctx,
             gpu_ids=parsed_gpu_ids,

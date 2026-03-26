@@ -50,6 +50,10 @@ class InteractiveAgent(DefaultAgent):
     def add_message(self, role: str, content: str, **kwargs):
         # Extend supermethod to print messages
         super().add_message(role, content, **kwargs)
+        # When a log file is configured (e.g. parallel runs with thread-local stdout/stderr
+        # redirection), printing here would duplicate entries in the same log.
+        if self.log_file:
+            return
         if role == "assistant":
             console.print(
                 f"\n[red][bold]mini-swe-agent[/bold] (step [bold]{self.model.n_calls}[/bold], [bold]${self.model.cost:.2f}[/bold]):[/red]\n",

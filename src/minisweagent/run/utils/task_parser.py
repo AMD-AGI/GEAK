@@ -263,7 +263,7 @@ def display_parsed_config(parsed_info: dict, patch_output_dir: str) -> str:
     """Display parsed configuration in a formatted way for user confirmation."""
     lines = [
         "\n" + "=" * 70,
-        "Auto-detected Configuration:",
+        "Resolved Configuration (CLI overrides auto-detection):",
         "=" * 70,
     ]
 
