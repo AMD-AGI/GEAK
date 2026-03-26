@@ -919,11 +919,37 @@ def run_preprocessor(
 
     profiling: dict[str, Any] | None = None
     if eval_command:
+        _cwd = str(repo_root) if repo_root else None
+
+        if correctness_cmd:
+            _print(f"  Running correctness_command: {correctness_cmd}")
+            import subprocess
+
+            result = subprocess.run(
+                correctness_cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=3600,
+                cwd=_cwd,
+            )
+            (output_dir / "correctness_stdout.txt").write_text(result.stdout or "")
+            (output_dir / "correctness_stderr.txt").write_text(result.stderr or "")
+            ctx["correctness"] = {
+                "command": correctness_cmd,
+                "returncode": result.returncode,
+                "stdout_path": str(output_dir / "correctness_stdout.txt"),
+                "stderr_path": str(output_dir / "correctness_stderr.txt"),
+            }
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"correctness_command failed (returncode={result.returncode}). "
+                    f"See {output_dir / 'correctness_stderr.txt'}"
+                )
+
         if not perf_cmd:
             _print("  Skipping profiling (no performance_command in eval_command)")
         else:
-            _cwd = str(repo_root) if repo_root else None
-
             _print(f"  Profiling with performance_command: {perf_cmd}")
             try:
                 _ensure_mcp_importable()

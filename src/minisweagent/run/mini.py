@@ -370,10 +370,16 @@ def main(
                 raise
     else:
         if isinstance(test_command, str) and "&&" in test_command:
-            performance_command = test_command.split("&&")[-1].strip()
+            left, right = test_command.rsplit("&&", 1)
+            correctness_command = left.strip() or None
+            performance_command = right.strip() or None
+            preprocess_ctx = run_preprocessor(
+                **_preprocess_kwargs,
+                correctness_command=correctness_command,
+                performance_command=performance_command,
+            )
         else:
-            performance_command = test_command
-        preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=performance_command)
+            preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
 
     if preprocess_ctx.get("test_command") and not test_command:
         test_command = preprocess_ctx["test_command"]
