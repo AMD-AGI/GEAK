@@ -155,6 +155,7 @@ def main(
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs."),
     test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command"),
+    heterogeneous_flag: bool | None = typer.Option(None, "--heterogeneous/--no-heterogeneous", "--hetero/--no-hetero", help="Force heterogeneous or homogeneous mode. Auto-detects if not set."),
 ):
     # fmt: on
     del visual
@@ -220,30 +221,32 @@ def main(
         console.print("[bold green]Got that, thanks![/bold green]")
 
     # 2a) LLM-driven pipeline param extraction
-    # Only run if CLI flags haven't already set pipeline triggers
-    heterogeneous = None
+    # CLI --heterogeneous/--no-heterogeneous flag takes highest priority
+    heterogeneous = heterogeneous_flag
     max_rounds = None
-    if task_content and kernel_url is None:
-        from minisweagent.run.utils.config_editor import prompt_missing_pipeline_params
+    if task_content:
         from minisweagent.run.utils.task_parser import parse_pipeline_params
 
         console.print("[bold cyan]Checking task for pipeline parameters...[/bold cyan]")
         pipeline_params = parse_pipeline_params(task_content, model)
 
         # Apply non-None extracted values (CLI flags still take priority)
-        if pipeline_params.get("heterogeneous") is not None:
+        if pipeline_params.get("heterogeneous") is not None and heterogeneous is None:
             heterogeneous = pipeline_params["heterogeneous"]
         if pipeline_params.get("max_rounds") is not None:
             max_rounds = pipeline_params["max_rounds"]
 
-        # Prompt for missing required params (kernel_url)
-        pipeline_params, should_use_pipeline = prompt_missing_pipeline_params(
-            pipeline_params, console, yolo
-        )
+        # Prompt for missing required params (kernel_url) — only if not already set
+        if kernel_url is None:
+            from minisweagent.run.utils.config_editor import prompt_missing_pipeline_params
 
-        if should_use_pipeline:
-            if pipeline_params.get("kernel_url"):
-                kernel_url = pipeline_params["kernel_url"]
+            pipeline_params, should_use_pipeline = prompt_missing_pipeline_params(
+                pipeline_params, console, yolo
+            )
+
+            if should_use_pipeline:
+                if pipeline_params.get("kernel_url"):
+                    kernel_url = pipeline_params["kernel_url"]
 
     # 2b) Detect configs from task
     parsed_config = parse_task_info(task_content, model)
@@ -330,7 +333,7 @@ def main(
         _mode_label = "heterogeneous" if heterogeneous else "homogeneous"
         console.print(f"[bold cyan]Mode override: {_mode_label}[/bold cyan]")
 
-    if heterogeneous or kernel_type == "triton":
+    if heterogeneous:
         report = run_orchestrator(
             preprocess_ctx=preprocess_ctx,
             gpu_ids=parsed_gpu_ids,
