@@ -174,6 +174,13 @@ class ToolRuntime:
         """Get the tools list for API based on current settings."""
         return get_tools_list(self.use_strategy_manager)
 
+    def disable_tools(self, names) -> None:
+        """Disable tools by name (removes from schema + dispatch)."""
+        if not names:
+            return
+        for n in list(names):
+            self._tool_table.pop(n, None)
+
     def dispatch(self, tool_call: dict[str, Any]) -> dict[str, Any]:
         """
         tool_call format:
