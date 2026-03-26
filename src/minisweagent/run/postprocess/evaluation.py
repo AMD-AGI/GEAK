@@ -49,6 +49,42 @@ class PatchApplyError(Exception):
     pass
 
 
+def _find_agent_worktree_slot(
+    results_dir: Path, best_task: str, repo_root: str
+) -> Path | None:
+    """Find the agent's worktree slot that contains the best task's kernel.
+
+    The agent worktrees live at ``results_dir/worktrees/slot_N/``.
+    We look for one that has a modified kernel.py (different from baseline).
+    This avoids creating a clean worktree and ensures FULL_BENCHMARK
+    measures the exact same kernel that save_and_test benchmarked.
+    """
+    worktrees_dir = results_dir / "worktrees"
+    if not worktrees_dir.is_dir():
+        return None
+
+    # Read the baseline kernel to compare against
+    repo = Path(repo_root)
+    baseline_kernel = None
+    for kf in repo.rglob("kernel.py"):
+        baseline_kernel = kf.read_text()
+        break
+
+    # Find the slot with a MODIFIED kernel.py (different from baseline)
+    for slot_dir in sorted(worktrees_dir.glob("slot_*")):
+        if not slot_dir.is_dir() or "_logs" in slot_dir.name:
+            continue
+        for kernel_file in slot_dir.rglob("kernel.py"):
+            try:
+                content = kernel_file.read_text()
+                if baseline_kernel is None or content != baseline_kernel:
+                    return kernel_file.parent
+            except OSError:
+                continue
+
+    return None
+
+
 def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Path:
     """Create a temporary worktree and apply the best patch.
 
@@ -302,24 +338,35 @@ def evaluate_round_best(
 
     eval_worktree: Path | None = None
     try:
-        try:
-            eval_worktree = setup_eval_worktree(repo_root, best_patch_file, output_dir)
-        except PatchApplyError as exc:
-            _print(f"  Patch apply failed: {exc}")
-            round_eval["patch_apply_error"] = str(exc)
-            round_eval["status"] = "patch_failed"
-            eval_path = output_dir / f"round_{round_num}_evaluation.json"
-            eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
-            from minisweagent.run.pipeline_types import FullBenchmarkResult as _FB
-            from minisweagent.run.pipeline_types import RoundEvaluation as _RE
+        # Prefer the agent's actual worktree slot over a clean worktree.
+        # This ensures FULL_BENCHMARK measures the EXACT same kernel.py
+        # that save_and_test benchmarked — no discrepancies from patch
+        # application, CUDA graph warm state, or missing runtime files.
+        agent_slot_dir = _find_agent_worktree_slot(results_dir, best_task, repo_root)
+        if agent_slot_dir:
+            eval_worktree = agent_slot_dir
+            _print(f"  Using agent worktree slot: {eval_worktree.name}")
+        else:
+            # Fallback to clean worktree + patch
+            try:
+                eval_worktree = setup_eval_worktree(repo_root, best_patch_file, output_dir)
+                _print(f"  Using clean eval worktree (agent slot not found)")
+            except PatchApplyError as exc:
+                _print(f"  Patch apply failed: {exc}")
+                round_eval["patch_apply_error"] = str(exc)
+                round_eval["status"] = "patch_failed"
+                eval_path = output_dir / f"round_{round_num}_evaluation.json"
+                eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
+                from minisweagent.run.pipeline_types import FullBenchmarkResult as _FB
+                from minisweagent.run.pipeline_types import RoundEvaluation as _RE
 
-            return _RE(
-                round=round_num,
-                best_patch=best_patch_file or "",
-                best_task=best_task,
-                benchmark_speedup=best_speedup,
-                full_benchmark=_FB(failure_reason=f"patch apply failed: {exc}"),
-            )
+                return _RE(
+                    round=round_num,
+                    best_patch=best_patch_file or "",
+                    best_task=best_task,
+                    benchmark_speedup=best_speedup,
+                    full_benchmark=_FB(failure_reason=f"patch apply failed: {exc}"),
+                )
 
         eval_harness_path = harness_path
         if harness_path and eval_worktree:
@@ -504,7 +551,9 @@ def evaluate_round_best(
             round_eval["profile_comparison"] = {"error": str(exc)}
 
     finally:
-        if eval_worktree:
+        # Only clean up if we created a temporary eval worktree, not if
+        # we reused an agent's existing slot directory.
+        if eval_worktree and not agent_slot_dir:
             cleanup_eval_worktree(repo_root, eval_worktree)
 
     # Write full detail dict for backward compatibility and debugging
