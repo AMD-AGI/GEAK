@@ -350,16 +350,26 @@ def main(
             harness_spec = promoted
             console.print(f"[bold cyan]Promoted test command to validated harness: {promoted}[/bold cyan]")
 
-    preprocess_ctx = run_preprocessor(
+    _preprocess_kwargs = dict(
         kernel_url=kernel_target,
         repo=repo,
         output_dir=preprocess_output_dir,
         gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
         model_factory=lambda: get_model(model_name, config.get("model", {})),
         console=console,
-        harness=harness_spec,
-        eval_command=test_command if not harness_spec else None,
     )
+
+    if harness_spec:
+        try:
+            preprocess_ctx = run_preprocessor(**_preprocess_kwargs, harness=harness_spec)
+        except RuntimeError as exc:
+            if "harness" in str(exc).lower():
+                console.print(f"[yellow]Harness validation failed, falling back to eval_command: {exc}[/yellow]")
+                preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
+            else:
+                raise
+    else:
+        preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
 
     if preprocess_ctx.get("test_command") and not test_command:
         test_command = preprocess_ctx["test_command"]
