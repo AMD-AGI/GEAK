@@ -3,6 +3,7 @@
 """Backup mini entry with kernel-type routing."""
 
 import os
+import shlex
 import sys
 from io import StringIO
 from pathlib import Path
@@ -125,6 +126,28 @@ def _final_report_to_bestpatchresult(report: Any) -> BestPatchResult | None:
         patch_dir=patch_path.parent if patch_path else None,
         llm_conclusion=str(report_dict.get("summary") or ""),
     )
+
+
+def _try_promote_to_harness(test_command: str) -> str | None:
+    """Check if test_command points to a harness with argparse modes.
+
+    If so, return the harness path (to pass as harness= to the preprocessor,
+    which automatically uses --profile for profiling).
+    Otherwise return None (keep using eval_command= as-is).
+    """
+    parts = shlex.split(test_command)
+    script = None
+    for part in parts:
+        if part.endswith(".py") and Path(part).is_file():
+            script = part
+            break
+    if not script:
+        return None
+
+    from minisweagent.run.preprocess.harness_utils import validate_harness
+
+    valid, _errors = validate_harness(script)
+    return script if valid else None
 
 
 _HELP_TEXT = """Run mini-SWE-agent in your local environment.
@@ -289,6 +312,13 @@ def main(
         console.print(f"[red]Error: failed to initialize env.type={env_type}: {e}[/red]")
         raise typer.Exit(1)
 
+    harness_spec = config.get("patch", {}).get("harness")
+    if not harness_spec and test_command:
+        promoted = _try_promote_to_harness(test_command)
+        if promoted:
+            harness_spec = promoted
+            console.print(f"[bold cyan]Promoted test command to validated harness: {promoted}[/bold cyan]")
+
     preprocess_ctx = run_preprocessor(
         kernel_url=kernel_target,
         repo=repo,
@@ -296,8 +326,8 @@ def main(
         gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
         model_factory=lambda: get_model(model_name, config.get("model", {})),
         console=console,
-        harness=config.get("patch", {}).get("harness"),
-        eval_command=test_command,
+        harness=harness_spec,
+        eval_command=test_command if not harness_spec else None,
     )
 
     if preprocess_ctx.get("test_command") and not test_command:
