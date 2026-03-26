@@ -136,6 +136,112 @@ Here is the task content:
         }
 
 
+def _normalize_path(path_str: str) -> str | None:
+    """Normalize a path string: resolve if exists, try case-insensitive resolution otherwise."""
+    if not path_str:
+        return None
+    p = Path(path_str)
+    if p.exists():
+        return str(p.resolve())
+    resolved = _resolve_path_case(p)
+    if resolved is not None:
+        return str(resolved.resolve())
+    return path_str  # return as-is if can't resolve
+
+
+def parse_pipeline_params(task_content: str, model) -> dict:
+    """Extract pipeline orchestration parameters from task text via LLM.
+
+    Extracts:
+    - kernel_url: Path or URL to the specific kernel file to optimize
+    - preprocess_dir: Path to existing preprocessing artifacts
+    - heterogeneous: Whether to use heterogeneous (diverse strategy) mode
+    - max_rounds: Maximum optimization rounds
+    - start_round: Round to resume from
+    - pipeline_intent: Whether the task describes kernel optimization work
+
+    Returns dict with extracted values (None if not found).
+    """
+    prompt = f"""Analyze the following task and extract GPU kernel optimization pipeline parameters.
+
+Extract the following (return null if not found or not applicable):
+1. kernel_url: The path or URL to the SPECIFIC KERNEL FILE to optimize (e.g., "/path/to/silu.hip", "/workspace/kernels/matmul.py", "https://github.com/org/repo/blob/main/kernel.py"). This is the kernel source file itself, NOT the repository root directory.
+2. preprocess_dir: Path to a directory containing existing preprocessing artifacts (e.g., "/path/to/geak_output"). Only set if the user explicitly mentions reusing existing artifacts.
+3. heterogeneous: Whether to use heterogeneous mode (diverse optimization strategies across GPUs). Set true if the user mentions "heterogeneous", false if they mention "homogeneous", null if not mentioned.
+4. max_rounds: Maximum number of optimization rounds (integer). Only set if explicitly mentioned.
+5. start_round: Round number to resume from (integer, 1-based). Only set if explicitly mentioned.
+6. pipeline_intent: true if the task describes kernel optimization, performance improvement, GPU kernel work, or profiling. false if it describes general coding tasks like bug fixes, refactoring, or feature additions.
+
+Return ONLY a valid JSON object. Example:
+{{{{
+  "kernel_url": "/workspace/repo/kernels/silu.hip",
+  "preprocess_dir": null,
+  "heterogeneous": null,
+  "max_rounds": 5,
+  "start_round": null,
+  "pipeline_intent": true
+}}}}
+
+Here is the task content:
+{task_content}
+
+"""
+
+    try:
+        response = model.query(
+            [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that extracts structured pipeline configuration from task descriptions. Always respond with valid JSON. Don't use tools, you must return the JSON results in one query.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+        )
+        content = response.get("content", "").strip()
+
+        # Extract JSON from markdown code blocks if present
+        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+
+        parsed = json.loads(content)
+
+        result = {
+            "kernel_url": parsed.get("kernel_url"),
+            "preprocess_dir": parsed.get("preprocess_dir"),
+            "heterogeneous": parsed.get("heterogeneous"),
+            "max_rounds": parsed.get("max_rounds"),
+            "start_round": parsed.get("start_round"),
+            "pipeline_intent": bool(parsed.get("pipeline_intent", False)),
+        }
+
+        # Normalize paths
+        if result["kernel_url"]:
+            result["kernel_url"] = _normalize_path(result["kernel_url"])
+        if result["preprocess_dir"]:
+            result["preprocess_dir"] = _normalize_path(result["preprocess_dir"])
+
+        # Validate integer fields
+        for field in ("max_rounds", "start_round"):
+            if result[field] is not None:
+                try:
+                    result[field] = int(result[field])
+                except (ValueError, TypeError):
+                    result[field] = None
+
+        return result
+
+    except (json.JSONDecodeError, Exception):
+        return {
+            "kernel_url": None,
+            "preprocess_dir": None,
+            "heterogeneous": None,
+            "max_rounds": None,
+            "start_round": None,
+            "pipeline_intent": False,
+        }
+
+
 def generate_patch_output_dir(kernel_name: str | None, base_dir: str = "optimization_logs") -> str:
     """Generate patch output directory based on kernel name and timestamp.
 

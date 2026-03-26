@@ -219,7 +219,33 @@ def main(
         )
         console.print("[bold green]Got that, thanks![/bold green]")
 
-    # 2) Detect configs from task
+    # 2a) LLM-driven pipeline param extraction
+    # Only run if CLI flags haven't already set pipeline triggers
+    heterogeneous = None
+    max_rounds = None
+    if task_content and kernel_url is None:
+        from minisweagent.run.utils.config_editor import prompt_missing_pipeline_params
+        from minisweagent.run.utils.task_parser import parse_pipeline_params
+
+        console.print("[bold cyan]Checking task for pipeline parameters...[/bold cyan]")
+        pipeline_params = parse_pipeline_params(task_content, model)
+
+        # Apply non-None extracted values (CLI flags still take priority)
+        if pipeline_params.get("heterogeneous") is not None:
+            heterogeneous = pipeline_params["heterogeneous"]
+        if pipeline_params.get("max_rounds") is not None:
+            max_rounds = pipeline_params["max_rounds"]
+
+        # Prompt for missing required params (kernel_url)
+        pipeline_params, should_use_pipeline = prompt_missing_pipeline_params(
+            pipeline_params, console, yolo
+        )
+
+        if should_use_pipeline:
+            if pipeline_params.get("kernel_url"):
+                kernel_url = pipeline_params["kernel_url"]
+
+    # 2b) Detect configs from task
     parsed_config = parse_task_info(task_content, model)
     kernel_type = _normalize_kernel_type(parsed_config.get("kernel_type"))
     console.print(f"[bold cyan]Detected kernel_type:[/bold cyan] {kernel_type}")
@@ -283,14 +309,35 @@ def main(
     # kernel_type routing:
     # - hip/other -> homogeneous agent
     # - triton -> heterogeneous orchestrator
-    if kernel_type == "triton":
+    # Auto-detect kernel type if heterogeneous flag was not set by LLM extraction or task parser
+    if heterogeneous is None:
+        _discovery = preprocess_ctx.get("discovery") or {}
+        _kernel_info = _discovery.get("kernel") or {}
+        _auto_kernel_type = _kernel_info.get("type")
+
+        if not _auto_kernel_type and preprocess_ctx.get("kernel_path"):
+            from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
+            _auto_kernel_type = _infer_kernel_type(Path(preprocess_ctx["kernel_path"]))
+
+        if _auto_kernel_type == "triton":
+            heterogeneous = True
+            console.print(f"[bold cyan]Auto-detected kernel type: {_auto_kernel_type} -> heterogeneous mode[/bold cyan]")
+        else:
+            heterogeneous = False
+            _ktype_display = _auto_kernel_type or kernel_type or "unknown"
+            console.print(f"[bold cyan]Auto-detected kernel type: {_ktype_display} -> homogeneous mode[/bold cyan]")
+    else:
+        _mode_label = "heterogeneous" if heterogeneous else "homogeneous"
+        console.print(f"[bold cyan]Mode override: {_mode_label}[/bold cyan]")
+
+    if heterogeneous or kernel_type == "triton":
         report = run_orchestrator(
             preprocess_ctx=preprocess_ctx,
             gpu_ids=parsed_gpu_ids,
             model=model,
             model_factory=lambda: get_model(model_name, config.get("model", {})),
             output_dir=preprocess_output_dir,
-            max_rounds=config.get("orchestrator", {}).get("max_rounds"),
+            max_rounds=max_rounds or config.get("orchestrator", {}).get("max_rounds"),
             heterogeneous=True,
             console=console,
         )

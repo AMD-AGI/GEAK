@@ -92,6 +92,7 @@ Repository = "https://github.com/SWE-agent/mini-SWE-agent"
 "Bug Tracker" = "https://github.com/SWE-agent/mini-SWE-agent/issues"
 
 [project.scripts]
+geak = "minisweagent.run.mini:app"
 mini = "minisweagent.run.mini:app"
 mini-swe-agent = "minisweagent.run.mini:app"
 geak-preprocess = "minisweagent.run.preprocess.preprocessor:main"
