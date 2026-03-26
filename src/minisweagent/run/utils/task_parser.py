@@ -34,6 +34,8 @@ def parse_task_info(task_content: str, model) -> dict:
 
     Extracts:
     - kernel_name: Name of the kernel being optimized
+    - kernel_url: URL/path of the kernel being optimized
+    - kernel_type: One of hip/triton/other
     - repo: Repository path
     - test_command: Command to test the optimization
     - metric: Performance metric to extract
@@ -46,15 +48,19 @@ def parse_task_info(task_content: str, model) -> dict:
 
 Extract the following information (return null if not found):
 1. kernel_name: The name of the kernel/function being optimized (e.g., "gemm", "matmul", "conv2d")
-2. repo: The repository path mentioned in the task (absolute path or relative path)
-3. test_command: The command to run tests or benchmarks
-4. metric: The performance metric to measure (e.g., "bandwidth in GB/s", "latency in ms", "throughput")
-5. num_parallel: Number of parallel optimization agents to run (integer)
-6. gpu_ids: Comma-separated GPU IDs for parallel execution (e.g., "0,1,2,3")
+2. kernel_url: The kernel URL or local path if provided
+3. kernel_type: Kernel type, strictly one of "hip", "triton", or "other"
+4. repo: The repository path mentioned in the task (absolute path or relative path)
+5. test_command: The command to run tests or benchmarks
+6. metric: The performance metric to measure (e.g., "bandwidth in GB/s", "latency in ms", "throughput")
+7. num_parallel: Number of parallel optimization agents to run (integer)
+8. gpu_ids: Comma-separated GPU IDs for parallel execution (e.g., "0,1,2,3")
 
 Return ONLY a valid JSON object with these keys. Example:
 {{
   "kernel_name": "matmul",
+  "kernel_url": "https://github.com/org/repo/blob/main/kernel.py",
+  "kernel_type": "triton",
   "repo": "/path/to/repo",
   "test_command": "python test.py",
   "metric": "Extract throughput in GFLOPS",
@@ -89,8 +95,13 @@ Here is the task content:
         parsed = json.loads(content)
 
         # Validate and normalize the parsed data
+        kernel_type = str(parsed.get("kernel_type") or "").strip().lower()
+        if kernel_type not in {"hip", "triton", "other"}:
+            kernel_type = "other"
         result = {
             "kernel_name": parsed.get("kernel_name"),
+            "kernel_url": parsed.get("kernel_url"),
+            "kernel_type": kernel_type,
             "repo": parsed.get("repo"),
             "test_command": parsed.get("test_command"),
             "metric": parsed.get("metric"),
@@ -115,6 +126,8 @@ Here is the task content:
         # If parsing fails, return all None
         return {
             "kernel_name": None,
+            "kernel_url": None,
+            "kernel_type": "other",
             "repo": None,
             "test_command": None,
             "metric": None,
