@@ -388,7 +388,7 @@ def evaluate_round_best(
             # Fallback to clean worktree + patch
             try:
                 eval_worktree = setup_eval_worktree(repo_root, best_patch_file, output_dir)
-                _print(f"  Using clean eval worktree (agent slot not found)")
+                _print("  Using clean eval worktree (agent slot not found)")
             except PatchApplyError as exc:
                 _print(f"  Patch apply failed: {exc}")
                 round_eval["patch_apply_error"] = str(exc)

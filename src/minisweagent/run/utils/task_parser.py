@@ -41,6 +41,9 @@ def parse_task_info(task_content: str, model) -> dict:
     - metric: Performance metric to extract
     - num_parallel: Number of parallel agents
     - gpu_ids: GPU IDs for parallel execution
+    - output_dir: Output directory for logs/artifacts
+    - model: Model name/identifier to use
+    - config: Path to a config YAML file
 
     Returns dict with extracted values (None if not found).
     """
@@ -55,6 +58,9 @@ Extract the following information (return null if not found):
 6. metric: The performance metric to measure (e.g., "bandwidth in GB/s", "latency in ms", "throughput")
 7. num_parallel: Number of parallel optimization agents to run (integer)
 8. gpu_ids: Comma-separated GPU IDs for parallel execution (e.g., "0,1,2,3")
+9. output_dir: Directory path where output logs and artifacts should be saved (e.g., "outputs/topk_run", "/workspace/results")
+10. model: Model name or identifier to use (e.g., "claude-sonnet-4-20250514", "gpt-4o")
+11. config: Path to a YAML configuration file (e.g., "configs/my_setup.yaml", "/path/to/config.yaml")
 
 Return ONLY a valid JSON object with these keys. Example:
 {{
@@ -65,7 +71,10 @@ Return ONLY a valid JSON object with these keys. Example:
   "test_command": "python test.py",
   "metric": "Extract throughput in GFLOPS",
   "num_parallel": 4,
-  "gpu_ids": "0,1,2,3"
+  "gpu_ids": "0,1,2,3",
+  "output_dir": "outputs/matmul_run",
+  "model": null,
+  "config": null
 }}
 
 If any field cannot be determined from the task, set it to null.
@@ -107,6 +116,9 @@ Here is the task content:
             "metric": parsed.get("metric"),
             "num_parallel": parsed.get("num_parallel"),
             "gpu_ids": parsed.get("gpu_ids"),
+            "output_dir": parsed.get("output_dir"),
+            "model": parsed.get("model"),
+            "config": parsed.get("config"),
         }
 
         # Normalize repo path and preserve filesystem case (LLM often returns lowercase)
@@ -119,6 +131,12 @@ Here is the task content:
                 resolved = _resolve_path_case(repo_path)
                 if resolved is not None:
                     result["repo"] = str(resolved.resolve())
+
+        # Normalize output_dir and config paths
+        if result["output_dir"]:
+            result["output_dir"] = _normalize_path(result["output_dir"])
+        if result["config"]:
+            result["config"] = _normalize_path(result["config"])
 
         return result
 
@@ -133,6 +151,9 @@ Here is the task content:
             "metric": None,
             "num_parallel": None,
             "gpu_ids": None,
+            "output_dir": None,
+            "model": None,
+            "config": None,
         }
 
 
@@ -293,6 +314,8 @@ def display_parsed_config(parsed_info: dict, patch_output_dir: str) -> str:
         ),
         ("num_parallel", str(parsed_info["num_parallel"] or "Not detected. Default to 1.")),
         ("gpu_ids", parsed_info["gpu_ids"] or "Not detected. Default to 0."),
+        ("model", parsed_info.get("model") or "Not detected. Using default."),
+        ("config", parsed_info.get("config") or "Not detected. Using default."),
         ("patch_output_dir", patch_output_dir),
     ]
     key_width = max(len(k) for k, _ in fields)

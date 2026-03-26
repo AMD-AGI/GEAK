@@ -176,7 +176,7 @@ def main(
     output: Path | None = typer.Option(None, "-o", "--output", help="Output trajectory file or directory"),
     exit_immediately: bool = typer.Option(False, "--exit-immediately", help="Exit immediately", rich_help_panel="Advanced"),
     repo: Path | None = typer.Option(None, "--repo", help="Target Repository path."),
-    kernel_url: str | None = typer.Option(None, "--kernel-url", help="Target Kernel URL."),
+    kernel_url: str | None = typer.Option(None, "--kernel-url", "--kernel-path", help="Target kernel source (path or URL)."),
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs."),
     test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command"),
@@ -297,6 +297,22 @@ def main(
     if gpu_ids is None and parsed_config.get("gpu_ids"):
         gpu_ids = parsed_config["gpu_ids"]
 
+    # Apply config/model/output_dir extracted from task (CLI flags take priority)
+    if config_spec is None and parsed_config.get("config"):
+        _task_config_path = get_config_path(Path(parsed_config["config"]))
+        if _task_config_path and _task_config_path.exists():
+            console.print(f"[dim]Applying config from task: '{_task_config_path}'[/dim]")
+            _task_user_config = yaml.safe_load(_task_config_path.read_text()) or {}
+            config = _deep_merge(config, _task_user_config)
+
+    if model_name is None and parsed_config.get("model"):
+        model_name = parsed_config["model"]
+        model = get_model(model_name, config.get("model", {}))
+        console.print(f"\\Using model (from task): [bold cyan]{model_name}[/bold cyan]")
+
+    if output is None and parsed_config.get("output_dir"):
+        output = Path(parsed_config["output_dir"])
+
     kernel_target = kernel_url or parsed_config.get("kernel_url") or parsed_config.get("kernel_name")
     if not kernel_target:
         console.print("[red]Error: missing kernel target. Provide --kernel-url or include kernel info in task.[/red]")
@@ -332,6 +348,10 @@ def main(
         _display_cfg["num_parallel"] = num_parallel
     if gpu_ids is not None:
         _display_cfg["gpu_ids"] = gpu_ids
+    if model_name is not None:
+        _display_cfg["model"] = model_name
+    if config_spec is not None:
+        _display_cfg["config"] = str(config_spec)
     console.print(display_parsed_config(_display_cfg, str(preprocess_output_dir)))
 
     _env_kwargs = dict(config.get("env", {}))
