@@ -541,10 +541,18 @@ def evaluate_round_best(
             failure_reason=failure,
         )
 
+    # Use FULL_BENCHMARK verified_speedup as the canonical benchmark_speedup
+    # when available. The save_and_test benchmark_speedup can be inflated by
+    # CUDA graph warm state or dispatch bypass tricks that don't survive
+    # clean-worktree evaluation.
+    canonical_speedup = round_eval.get("benchmark_speedup", 1.0)
+    if fb_typed and fb_typed.verified_speedup and fb_typed.verified_speedup > 0:
+        canonical_speedup = fb_typed.verified_speedup
+
     return RoundEvaluation(
         round=round_num,
         best_patch=round_eval.get("best_patch", ""),
         best_task=round_eval.get("best_task", ""),
-        benchmark_speedup=round_eval.get("benchmark_speedup", 1.0),
+        benchmark_speedup=canonical_speedup,
         full_benchmark=fb_typed,
     )
