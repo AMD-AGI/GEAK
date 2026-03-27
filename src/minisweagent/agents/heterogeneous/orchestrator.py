@@ -120,7 +120,9 @@ def run_llm_steps(
 
         if _wm:
             try:
-                from minisweagent.memory.working_memory import extract_insight_from_tool_result
+                from minisweagent.memory.working_memory import (  # pylint: disable=import-error,no-name-in-module
+                    extract_insight_from_tool_result,
+                )
 
                 insight = extract_insight_from_tool_result(tool_name, result_str, 0)
                 if insight:
@@ -231,7 +233,9 @@ def run_heterogeneous_orchestrator(
 
     _memory_context = ""
     try:
-        from minisweagent.memory.integration import assemble_memory_context
+        from minisweagent.memory.integration import (  # pylint: disable=import-error,no-name-in-module
+            assemble_memory_context,
+        )
 
         _bm = preprocess_ctx.get("baseline_metrics") or {}
         _memory_context = assemble_memory_context(
@@ -246,11 +250,17 @@ def run_heterogeneous_orchestrator(
 
     _working_mem = None
     try:
-        from minisweagent.memory.integration import is_working_memory_enabled
+        from minisweagent.memory.integration import (  # pylint: disable=import-error,no-name-in-module
+            is_working_memory_enabled,
+        )
 
         if is_working_memory_enabled():
-            from minisweagent.memory.cross_session_memory import classify_kernel_category
-            from minisweagent.memory.working_memory import WorkingMemory
+            from minisweagent.memory.cross_session_memory import (  # pylint: disable=import-error,no-name-in-module
+                classify_kernel_category,
+            )
+            from minisweagent.memory.working_memory import (  # pylint: disable=import-error,no-name-in-module
+                WorkingMemory,
+            )
 
             _kpath = str(preprocess_ctx.get("kernel_path", ""))
             _wm_notebook_dir = str(output_dir / "_working_memory")

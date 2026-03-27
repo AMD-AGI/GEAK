@@ -105,7 +105,7 @@ class BashCommand:
             p = Path(path_str)
             if p.exists():
                 try:
-                    from minisweagent.tools.validate_commandment import (
+                    from minisweagent.tools.validate_commandment import (  # pylint: disable=no-name-in-module
                         format_validation_message,
                         validate_commandment,
                     )

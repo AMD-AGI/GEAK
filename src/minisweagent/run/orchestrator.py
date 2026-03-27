@@ -3,8 +3,10 @@
 This module is the thin entry point for ``geak-orchestrate``.  It reads
 preprocessor artefacts, resolves configuration, and delegates to:
 
-- ``agents.homogeneous.orchestrator`` -- identical task on all GPUs
 - ``agents.heterogeneous.orchestrator`` -- LLM-generated diverse tasks
+
+Note: homogeneous mode is handled directly by ``mini`` CLI via
+``agents.homogeneous.homogeneous_agent`` and is not supported here.
 
 All heavy lifting lives in those modules and in the shared postprocess
 package (``run.postprocess.evaluation``, ``run.postprocess.results``).
@@ -73,18 +75,7 @@ def run_orchestrator(
             print(msg, file=sys.stderr)
 
     if not heterogeneous:
-        from minisweagent.agents.homogeneous.orchestrator import run_homogeneous_orchestrator
-
-        return run_homogeneous_orchestrator(
-            preprocess_ctx,
-            gpu_ids,
-            _out,
-            max_rounds,
-            start_round,
-            _print,
-            console,
-            model_factory=model_factory,
-        )
+        raise NotImplementedError("Homogeneous mode is not supported via geak-orchestrate. Use the 'mini' CLI instead.")
 
     from minisweagent.agents.heterogeneous.orchestrator import run_heterogeneous_orchestrator
 
