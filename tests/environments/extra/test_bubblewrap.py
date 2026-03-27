@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -13,8 +14,7 @@ def test_bubblewrap_environment_basic_execution():
     env = BubblewrapEnvironment()
 
     try:
-        result = env.execute({"command": "echo 'hello world'"})
-        print(f"test_bubblewrap_environment_basic_execution result: {result}")
+        result = env.execute("echo 'hello world'")
         assert result["returncode"] == 0
         assert "hello world" in result["output"]
     finally:
@@ -27,15 +27,11 @@ def test_bubblewrap_environment_set_env_variables():
     env = BubblewrapEnvironment(env={"TEST_VAR": "test_value", "ANOTHER_VAR": "another_value"})
 
     try:
-        # Test single environment variable
-        result = env.execute({"command": "echo $TEST_VAR"})
-        print(f"test_bubblewrap_environment_set_env_variables result (single var): {result}")
+        result = env.execute("echo $TEST_VAR")
         assert result["returncode"] == 0
         assert "test_value" in result["output"]
 
-        # Test multiple environment variables
-        result = env.execute({"command": "echo $TEST_VAR $ANOTHER_VAR"})
-        print(f"test_bubblewrap_environment_set_env_variables result (multiple vars): {result}")
+        result = env.execute("echo $TEST_VAR $ANOTHER_VAR")
         assert result["returncode"] == 0
         assert "test_value another_value" in result["output"]
     finally:
@@ -49,8 +45,7 @@ def test_bubblewrap_environment_custom_cwd():
         env = BubblewrapEnvironment(cwd=temp_dir)
 
         try:
-            result = env.execute({"command": "pwd"})
-            print(f"test_bubblewrap_environment_custom_cwd result: {result}")
+            result = env.execute("pwd")
             assert result["returncode"] == 0
             assert temp_dir in result["output"]
         finally:
@@ -64,9 +59,7 @@ def test_bubblewrap_environment_cwd_parameter_override():
         env = BubblewrapEnvironment(cwd=temp_dir1)
 
         try:
-            # Execute with different cwd parameter
-            result = env.execute({"command": "pwd"}, cwd=temp_dir2)
-            print(f"test_bubblewrap_environment_cwd_parameter_override result: {result}")
+            result = env.execute("pwd", cwd=temp_dir2)
             assert result["returncode"] == 0
             assert temp_dir2 in result["output"]
         finally:
@@ -79,8 +72,7 @@ def test_bubblewrap_environment_command_failure():
     env = BubblewrapEnvironment()
 
     try:
-        result = env.execute({"command": "exit 1"})
-        print(f"test_bubblewrap_environment_command_failure result: {result}")
+        result = env.execute("exit 1")
         assert result["returncode"] == 1
         assert result["output"] == ""
     finally:
@@ -93,8 +85,7 @@ def test_bubblewrap_environment_nonexistent_command():
     env = BubblewrapEnvironment()
 
     try:
-        result = env.execute({"command": "nonexistent_command_12345"})
-        print(f"test_bubblewrap_environment_nonexistent_command result: {result}")
+        result = env.execute("nonexistent_command_12345")
         assert result["returncode"] != 0
         assert "nonexistent_command_12345" in result["output"] or "command not found" in result["output"]
     finally:
@@ -107,8 +98,7 @@ def test_bubblewrap_environment_stderr_capture():
     env = BubblewrapEnvironment()
 
     try:
-        result = env.execute({"command": "echo 'error message' >&2"})
-        print(f"test_bubblewrap_environment_stderr_capture result: {result}")
+        result = env.execute("echo 'error message' >&2")
         assert result["returncode"] == 0
         assert "error message" in result["output"]
     finally:
@@ -117,14 +107,12 @@ def test_bubblewrap_environment_stderr_capture():
 
 @pytest.mark.skipif(not shutil.which("bwrap"), reason="bubblewrap not available")
 def test_bubblewrap_environment_timeout():
-    """Test timeout functionality returns structured output instead of raising."""
+    """Test that TimeoutExpired is raised for long-running commands."""
     env = BubblewrapEnvironment(timeout=1)
 
     try:
-        result = env.execute({"command": "sleep 2"})
-        assert result["returncode"] == -1
-        assert "timed out" in result["exception_info"]
-        assert result["extra"]["exception_type"] == "TimeoutExpired"
+        with pytest.raises(subprocess.TimeoutExpired):
+            env.execute("sleep 10")
     finally:
         env.cleanup()
 
@@ -143,8 +131,7 @@ def test_bubblewrap_environment_return_codes(command, expected_returncode):
     env = BubblewrapEnvironment()
 
     try:
-        result = env.execute({"command": command})
-        print(f"test_bubblewrap_environment_return_codes result (cmd: {command}): {result}")
+        result = env.execute(command)
         assert result["returncode"] == expected_returncode
     finally:
         env.cleanup()
@@ -156,8 +143,7 @@ def test_bubblewrap_environment_multiline_output():
     env = BubblewrapEnvironment()
 
     try:
-        result = env.execute({"command": "echo -e 'line1\\nline2\\nline3'"})
-        print(f"test_bubblewrap_environment_multiline_output result: {result}")
+        result = env.execute("echo -e 'line1\\nline2\\nline3'")
         assert result["returncode"] == 0
         output_lines = result["output"].strip().split("\n")
 
@@ -176,20 +162,14 @@ def test_bubblewrap_environment_file_operations():
         env = BubblewrapEnvironment(cwd=temp_dir)
 
         try:
-            # Create a file
-            result = env.execute({"command": "echo 'test content' > test.txt"})
-            print(f"test_bubblewrap_environment_file_operations result (create file): {result}")
+            result = env.execute("echo 'test content' > test.txt")
             assert result["returncode"] == 0
 
-            # Read the file
-            result = env.execute({"command": "cat test.txt"})
-            print(f"test_bubblewrap_environment_file_operations result (read file): {result}")
+            result = env.execute("cat test.txt")
             assert result["returncode"] == 0
             assert "test content" in result["output"]
 
-            # Verify file exists (should be in the working directory)
             test_file = Path(temp_dir) / "test.txt"
-
             assert test_file.exists()
             assert test_file.read_text().strip() == "test content"
         finally:
@@ -250,15 +230,12 @@ def test_bubblewrap_environment_get_template_vars():
 
     try:
         template_vars = env.get_template_vars()
-        print(f"test_bubblewrap_environment_get_template_vars template_vars: {template_vars}")
 
-        # Should contain config data
         assert "env" in template_vars
         assert template_vars["env"]["TEST_VAR"] == "test_value"
         assert "timeout" in template_vars
         assert template_vars["timeout"] == 30
 
-        # Should contain platform info
         assert "system" in template_vars
         assert "machine" in template_vars
     finally:

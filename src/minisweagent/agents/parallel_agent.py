@@ -6,16 +6,22 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
 import traceback
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent
-from minisweagent.agents.select_patch_agent import SelectPatchAgent
+from minisweagent.agents.select_patch_agent import run_select_patch
+from minisweagent.run.utils.parallel_helpers import (
+    _stdout_lock as _stdout_lock,
+)
+from minisweagent.run.utils.parallel_helpers import (
+    redirect_output_to_file,
+    run_parallel_heterogeneous,
+    run_pool,
+)
 
 
 @dataclass
@@ -30,18 +36,6 @@ class BestPatchResult:
     llm_conclusion: str | None = None
 
 
-_stdout_lock = threading.Lock()
-
-
-@contextmanager
-def redirect_output_to_file(log_file: Path):
-    """No-op context manager. Agent writes to log file directly via add_message/log_message.
-
-    Stdout/stderr redirection doesn't work for parallel threads since sys.stdout is global.
-    """
-    yield
-
-
 @dataclass
 class ParallelAgentConfig(AgentConfig):
     # save_patch, test_command, patch_output_dir, metric are now inherited from AgentConfig
@@ -50,6 +44,8 @@ class ParallelAgentConfig(AgentConfig):
     repo: Path | None = None
     gpu_ids: list[int] | None = None
     agent_class: type | None = None
+    agent_specs: list | None = None  # list[AgentSpec] for heterogeneous parallel
+    tasks: list | None = None  # list[AgentTask] for GPU pool mode
     # Strategy agent compatibility
     strategy_file_path: str | None = None
     # Interactive/exit behaviour (passed through from --exit-immediately)
@@ -62,40 +58,11 @@ class ParallelAgent(DefaultAgent):
         # patch_results, patch_counter, log_file, base_repo_path are now inherited from DefaultAgent
         self._last_action_hash: str | None = None
 
-    # _is_git_repo(), _diff_excludes(), add_message, _log_message are inherited from DefaultAgent
-
-    def run(self, task: str, **kwargs) -> tuple[str, str] | Any:
+    def run(self, task: str, **kwargs) -> BestPatchResult | None:
         num_parallel = self.config.num_parallel or 1
         console = kwargs.get("console")
 
-        base_patch_dir = (
-            Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")
-        ).resolve()
-        model_factory = kwargs.get("model_factory") or (lambda: self.model)
-        env_factory = kwargs.get("env_factory") or (lambda: self.env)
-
-        if num_parallel == 1:
-            # For single run, save patches directly to base_patch_dir (no parallel_0 subdirectory)
-            base_patch_dir.mkdir(parents=True, exist_ok=True)
-            prev_patch_output_dir = self.config.patch_output_dir
-            self.config.patch_output_dir = str(base_patch_dir)
-            try:
-                exit_status, result = super().run(task, **(kwargs | {"_skip_select_patch": True}))
-            finally:
-                self.config.patch_output_dir = prev_patch_output_dir
-
-            metric = (
-                self.config.metric
-                or "Extract the performance metrics from the test output and calculate the best speedup."
-            )
-            if console:
-                console.print("\n[bold green]Selecting best patch from 1 run...[/bold green]")
-            best_result = self._select_best_from_parallel_runs(base_patch_dir, 1, metric, model_factory)
-            if best_result and console and best_result.llm_conclusion:
-                console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
-                console.print(best_result.llm_conclusion)
-            return exit_status, result
-
+        # Validate repo path (required for worktree management)
         if not self.config.repo:
             raise ValueError("Please specify the repository path.")
         repo_path = (
@@ -104,11 +71,17 @@ class ParallelAgent(DefaultAgent):
         if not repo_path.exists():
             raise ValueError(f"Repository path does not exist: {repo_path}")
 
+        base_patch_dir = (
+            Path(self.config.patch_output_dir) if self.config.patch_output_dir else Path("patches")
+        ).resolve()
+        model_factory = kwargs.get("model_factory") or (lambda: self.model)
+        env_factory = kwargs.get("env_factory") or (lambda: self.env)
         is_git_repo = (repo_path / ".git").exists()
         output = kwargs.get("output")
         save_traj_fn = kwargs.get("save_traj_fn")
 
-        results = self.run_parallel(
+        # Unified logic: always use run_parallel with git worktree management
+        self.run_parallel(
             num_parallel=num_parallel,
             repo_path=repo_path,
             is_git_repo=is_git_repo,
@@ -117,7 +90,7 @@ class ParallelAgent(DefaultAgent):
             agent_config={
                 k: v
                 for k, v in self.config.__dict__.items()
-                if k not in ("num_parallel", "repo", "gpu_ids", "agent_class")
+                if k not in ("num_parallel", "repo", "gpu_ids", "agent_class", "agent_specs", "tasks")
             },
             model_factory=model_factory,
             env_factory=env_factory,
@@ -126,6 +99,8 @@ class ParallelAgent(DefaultAgent):
             gpu_ids=self.config.gpu_ids,
             save_traj_fn=save_traj_fn,
             console=console,
+            agent_specs=self.config.agent_specs,
+            tasks=self.config.tasks,
         )
 
         metric = (
@@ -138,60 +113,33 @@ class ParallelAgent(DefaultAgent):
             console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
             console.print(best_result.llm_conclusion)
 
-        if results:
-            return results[0][2], results[0][3]
-        return "Error", "All parallel agents failed"
+        # Return the best result object
+        return best_result
 
     @staticmethod
     def _select_best_from_parallel_runs(
         base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory
     ) -> BestPatchResult | None:
         """Select the best patch from multiple parallel runs using SelectPatchAgent."""
-        import yaml
-
-        from minisweagent.config import get_config_path
-        from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
-
         print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
 
-        # Load SelectPatchAgent config
-        config_path = get_config_path("mini_select_patch")
-        config = yaml.safe_load(config_path.read_text())
-        agent_config = config.get("agent", {})
-
-        # Create model and environment for the SelectPatchAgent
         model = model_factory()
-        env_config = LocalEnvironmentConfig(cwd=str(base_patch_dir))
-        env = LocalEnvironment(**env_config.__dict__)
+        _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
 
-        # Create SelectPatchAgent with config
-        select_agent = SelectPatchAgent(model, env, **agent_config)
+        # Override with deterministic benchmark parsing when possible
+        from minisweagent.run.postprocess.benchmark_parsing import rewrite_best_results
 
-        # Setup the selection task
-        task = select_agent.setup_selection_task(base_patch_dir, num_parallel, metric)
+        det_result = rewrite_best_results(base_patch_dir)
+        if det_result:
+            best_patch_id = det_result.get("best_patch_id", best_patch_id)
+            print(
+                f"[ParallelAgent] Deterministic override: {best_patch_id} "
+                f"({det_result.get('best_patch_speedup', '?')}x)",
+                flush=True,
+            )
 
-        if task is None:
-            print("[ParallelAgent] Failed to setup selection task", flush=True)
-            return None
-
-        # Save agent conversation log
-        log_file = base_patch_dir / "select_agent.log"
-        select_agent.log_file = log_file
-
-        print(f"[ParallelAgent] Running SelectPatchAgent (log: {log_file})...", flush=True)
-
-        # Run the agent
-        try:
-            exit_status, result = select_agent.run(task)
-            print(f"[ParallelAgent] SelectPatchAgent finished with status: {exit_status}", flush=True)
-        except Exception as e:
-            print(f"[ParallelAgent] SelectPatchAgent failed: {e}", flush=True)
-            traceback.print_exc()
-
-        # Read best_results.json saved by SelectPatchAgent
-        best_patch_id = select_agent.extract_final_result()
         if not best_patch_id:
-            print("[ParallelAgent] SelectPatchAgent did not save best_results.json", flush=True)
+            print("[ParallelAgent] SelectPatchAgent did not produce best_results.json", flush=True)
             return None
 
         print(f"[ParallelAgent] Selected best patch: {best_patch_id}", flush=True)
@@ -200,12 +148,13 @@ class ParallelAgent(DefaultAgent):
             # Read the best_results.json for additional details
             best_results = json.loads((base_patch_dir / "best_results.json").read_text())
 
-            # Parse best_patch_id: either "parallel_X/patch_Y" (multi-run) or "patch_Y" (single run)
+            # Parse best_patch_id: "parallel_X/patch_Y", "task_X/patch_Y", or "patch_Y"
             if "/" in best_patch_id:
-                # Multi-run format: "parallel_X/patch_Y"
-                parallel_dir_name, patch_name = best_patch_id.split("/")
-                agent_id = int(parallel_dir_name.replace("parallel_", ""))
-                patch_dir = base_patch_dir / parallel_dir_name
+                dir_name, patch_name = best_patch_id.split("/", 1)
+                patch_dir = base_patch_dir / dir_name
+                # Extract numeric ID from either "parallel_X" or "task_X"
+                id_match = re.search(r"(\d+)", dir_name)
+                agent_id = int(id_match.group(1)) if id_match else 0
             else:
                 # Single run format: "patch_Y" (directly in base_patch_dir)
                 patch_name = best_patch_id
@@ -389,20 +338,121 @@ class ParallelAgent(DefaultAgent):
             pass  # If git command fails, skip copying untracked files
 
     @staticmethod
-    def _create_copy_workdir(repo_path: Path, workdir_path: Path) -> Path:
-        """Create an isolated work directory by copying `repo_path` (for non-git repos)."""
-        if workdir_path.exists():
+    def _neutralize_nested_git_repos(repo_path: Path) -> list[Path]:
+        """Rename .git directories in nested repos to .git.bak.
+
+        This prevents git from treating nested directories as submodules,
+        allowing all content to be properly added to the parent repo.
+
+        Returns list of paths that were renamed (for potential restoration).
+        """
+        renamed = []
+        for git_dir in repo_path.rglob(".git"):
+            # Skip the repo's own .git (if it exists)
+            if git_dir.parent == repo_path:
+                continue
+            # Only process directories (not .git files from worktrees)
+            if git_dir.is_dir():
+                backup_path = git_dir.parent / ".git.bak"
+                try:
+                    if backup_path.exists():
+                        shutil.rmtree(backup_path)
+                    git_dir.rename(backup_path)
+                    renamed.append(backup_path)
+                except Exception:
+                    pass  # Best effort
+        return renamed
+
+    @staticmethod
+    def _has_valid_head(repo_path: Path) -> bool:
+        """Check if the git repo has a valid HEAD (at least one commit)."""
+        try:
+            ParallelAgent._ensure_safe_directory(repo_path)
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _init_as_git_repo(repo_path: Path) -> None:
+        """Initialize a non-git repo as a git repository with an initial commit.
+
+        This allows unified git diff management for both git and non-git repos.
+        Only initializes if the repo itself doesn't have a .git directory
+        (ignores parent directories that might be git repos).
+
+        Also handles nested git repos by neutralizing their .git directories
+        so all content is properly included in the parent repo.
+
+        If .git exists but has no valid HEAD (incomplete init), it will be removed
+        and re-initialized.
+        """
+        git_dir = repo_path / ".git"
+
+        # Check if .git exists and has valid HEAD
+        if git_dir.exists():
+            if ParallelAgent._has_valid_head(repo_path):
+                return  # Already a valid git repo
+            # Invalid git repo (no HEAD) - remove and reinitialize
             try:
-                shutil.rmtree(workdir_path)
+                if git_dir.is_dir():
+                    shutil.rmtree(git_dir)
+                else:
+                    git_dir.unlink()
             except Exception:
                 pass
-        workdir_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(
-            repo_path,
-            workdir_path,
-            ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
-        )
-        return workdir_path
+
+        try:
+            # Neutralize nested git repos first (rename .git -> .git.bak)
+            # This ensures nested content is added as regular files, not submodules
+            ParallelAgent._neutralize_nested_git_repos(repo_path)
+
+            # Initialize git repo (use --initial-branch to ensure new repo creation)
+            subprocess.run(
+                ["git", "init", "--initial-branch=main"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            # Add to safe.directory to avoid ownership issues
+            ParallelAgent._ensure_safe_directory(repo_path)
+
+            # Add all files
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            # Create initial commit with inline user config (avoids config issues when parent is git repo)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.email=agent@local",
+                    "-c",
+                    "user.name=Agent",
+                    "commit",
+                    "-m",
+                    "Initial commit (auto-generated for worktree management)",
+                ],
+                cwd=repo_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr if e.stderr else (e.stdout if e.stdout else str(e))
+            raise RuntimeError(f"Failed to initialize git repo: {error_msg}") from e
 
     @staticmethod
     def _replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
@@ -451,8 +501,52 @@ class ParallelAgent(DefaultAgent):
         redirect_output_fn=redirect_output_to_file,
         save_traj_fn=None,
         console=None,
+        agent_specs: list | None = None,
+        tasks: list | None = None,
     ) -> list[tuple[int, Any, Any, Any]]:
-        """Run multiple parallel agents and return their results."""
+        """Run multiple parallel agents and return their results.
+
+        Supports three modes (checked in priority order):
+        - Pool (preferred): pass tasks (list[AgentTask]) for M tasks on N GPUs.
+        - Heterogeneous (legacy): pass agent_specs (list[AgentSpec]).
+        - Homogeneous (default): num_parallel identical agents, each with 1 GPU.
+        """
+        # Pool mode: M tasks on N GPU slots (preferred)
+        if tasks:
+            return run_pool(
+                tasks=tasks,
+                gpu_ids=gpu_ids or [0],
+                repo_path=repo_path,
+                is_git_repo=is_git_repo,
+                base_task_content=task_content,
+                agent_config=agent_config,
+                model_factory=model_factory,
+                env_factory=env_factory,
+                base_patch_dir=base_patch_dir,
+                output=output,
+                redirect_output_fn=redirect_output_fn,
+                save_traj_fn=save_traj_fn,
+                console=console,
+            )
+
+        # Heterogeneous mode: use agent_specs if provided (legacy)
+        if agent_specs:
+            return run_parallel_heterogeneous(
+                agent_specs=agent_specs,
+                repo_path=repo_path,
+                is_git_repo=is_git_repo,
+                task_content=task_content,
+                agent_config=agent_config,
+                model_factory=model_factory,
+                env_factory=env_factory,
+                base_patch_dir=base_patch_dir,
+                output=output,
+                redirect_output_fn=redirect_output_fn,
+                save_traj_fn=save_traj_fn,
+                console=console,
+            )
+
+        # Homogeneous mode (original behavior)
         if console:
             console.print(f"[bold green]Running {num_parallel} parallel patch agents...[/bold green]")
 
@@ -462,6 +556,13 @@ class ParallelAgent(DefaultAgent):
         repo_path_resolved = repo_path.resolve()
         repo_path_str = str(repo_path_resolved)
 
+        # Initialize non-git repos as git repos for unified worktree management
+        if not is_git_repo:
+            if console:
+                console.print("[bold yellow]Initializing non-git repo as git for worktree management...[/bold yellow]")
+            cls._init_as_git_repo(repo_path_resolved)
+            is_git_repo = True  # Now it's a git repo
+
         if gpu_ids and len(gpu_ids) < num_parallel:
             if console:
                 console.print(
@@ -470,10 +571,8 @@ class ParallelAgent(DefaultAgent):
 
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
-            if is_git_repo:
-                worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
-            else:
-                worktree_path = cls._create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
+            # All repos use git worktree (non-git repos are initialized as git above)
+            worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             worktree_path_str = str(worktree_path.resolve())
 
             if console:
@@ -503,10 +602,16 @@ class ParallelAgent(DefaultAgent):
             base_env = env_factory()
             env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
             env_config_dict["cwd"] = worktree_path_str
-            env_config_dict.setdefault("env", {})[repo_path_str] = worktree_path_str
+            # Create a NEW dict to avoid shared-reference race across threads
+            new_env = dict(env_config_dict.get("env") or {})
+            new_env[repo_path_str] = worktree_path_str
+            new_env["GEAK_WORK_DIR"] = worktree_path_str
+            new_env["GEAK_REPO_ROOT"] = repo_path_str
             if gpu_ids and agent_id < len(gpu_ids):
                 gpu_id = gpu_ids[agent_id]
-                env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+                new_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+                new_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+                new_env["GEAK_GPU_DEVICE"] = str(gpu_id)
                 if console:
                     # Use lock to ensure console output completes before stdout redirection
                     with _stdout_lock:
@@ -514,6 +619,7 @@ class ParallelAgent(DefaultAgent):
                         # Force flush to ensure output is written before redirection
                         if hasattr(sys.stdout, "flush"):
                             sys.stdout.flush()
+            env_config_dict["env"] = new_env
             parallel_env = type(base_env)(**env_config_dict)
 
             parallel_output = None
@@ -527,8 +633,8 @@ class ParallelAgent(DefaultAgent):
             if hasattr(agent, "base_repo_path"):
                 agent.base_repo_path = repo_path_resolved
                 # Re-initialize test_perf context with updated base_repo_path
-                if hasattr(agent, "_setup_test_perf_context"):
-                    agent._setup_test_perf_context()
+                if hasattr(agent, "_setup_save_and_test_context"):
+                    agent._setup_save_and_test_context()
             if hasattr(agent, "log_file"):
                 agent.log_file = log_file
 

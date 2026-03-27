@@ -238,7 +238,7 @@ mini --config geak.yaml \
 | --- | --- | --- |
 | `profiling` | Profile workload to identify bottlenecks | rocprofiler-compute summary |
 | `strategy_manager` | Track optimization strategies | `.optimization_strategies.md` |
-| `test_perf` | Save patch and run test_command | `patch_N.patch`, `patch_N_test.txt` |
+| `save_and_test` | Save patch and run test_command | `patch_N.patch`, `patch_N_test.txt` |
 
 ### Best patch selection
 

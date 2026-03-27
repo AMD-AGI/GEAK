@@ -28,20 +28,47 @@ class BuildInfo:
 
 
 @dataclass
-class KernelInfo:
-    """Information about a discovered kernel."""
+class KernelMeta:
+    """Cross-module contract for discovered kernel metadata."""
 
-    file_path: Path
-    kernel_name: str
-    kernel_type: str  # triton, hip, cuda, ck, asm
-    kernel_language: str = "python"  # "python", "cpp", "asm"
+    kernel_path: str = ""
+    kernel_name: str = ""
+    kernel_type: str = "unknown"  # triton, hip, ck, asm, unknown
+    kernel_language: str = "python"  # python, cpp, asm
     function_names: list[str] = field(default_factory=list)
+    workspace_path: str = ""
+
+
+@dataclass
+class KernelInfo(KernelMeta):
+    """Richer internal kernel record that still satisfies ``KernelMeta``."""
+
+    file_path: Path | None = None
     has_jit_decorator: bool = False
     has_autotune: bool = False
     inner_kernel_path: Path | None = None
     inner_kernel_language: str | None = None
     build_info: BuildInfo | None = None
     fusion_opportunities: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.file_path is None and self.kernel_path:
+            self.file_path = Path(self.kernel_path)
+        if self.file_path is not None:
+            self.file_path = self.file_path.resolve()
+            if not self.kernel_path:
+                self.kernel_path = str(self.file_path)
+
+    def to_meta(self) -> KernelMeta:
+        """Return the explicit contract view of this kernel."""
+        return KernelMeta(
+            kernel_path=self.kernel_path,
+            kernel_name=self.kernel_name,
+            kernel_type=self.kernel_type,
+            kernel_language=self.kernel_language,
+            function_names=list(self.function_names),
+            workspace_path=self.workspace_path,
+        )
 
 
 @dataclass
@@ -247,11 +274,13 @@ class DiscoveryResult:
         points should use this instead of inline dict unpacking.
         """
         kp = Path(kernel_path)
+        workspace = Path(disc_dict.get("workspace", kp.parent)).resolve()
         kernel_info = disc_dict.get("kernel") or {}
         kernels: list[KernelInfo] = []
         if kernel_info.get("file"):
             ktype = kernel_info.get("type", "unknown")
             klang = _infer_kernel_language(kp, ktype)
+            resolved_kernel_path = Path(kernel_info["file"]).resolve()
 
             _build_info: BuildInfo | None = None
             if klang == "cpp":
@@ -270,11 +299,13 @@ class DiscoveryResult:
 
             kernels.append(
                 KernelInfo(
-                    file_path=Path(kernel_info["file"]),
+                    kernel_path=str(resolved_kernel_path),
                     kernel_name=kernel_info.get("name", kp.stem),
                     kernel_type=ktype,
                     kernel_language=klang,
                     function_names=kernel_info.get("functions", []),
+                    workspace_path=str(workspace),
+                    file_path=resolved_kernel_path,
                     build_info=_build_info,
                 )
             )
@@ -302,5 +333,5 @@ class DiscoveryResult:
             kernels=kernels,
             tests=tests,
             benchmarks=benchmarks,
-            workspace_path=Path(disc_dict.get("workspace", kp.parent)),
+            workspace_path=workspace,
         )

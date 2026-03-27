@@ -13,13 +13,10 @@ agent:
     - Prioritize the user-provided metric (if any). The user metric (shown in the task) is the SOURCE OF TRUTH for how to compute speedup.
     - Prefer patches that pass tests and improve the prioritized metric.
     - You MUST compute and report the FINAL speedup by reading:
-      - the baseline test log, and
+      - the baseline test log, please use patch_0 in parallel_0 folders as baseline. If no data, use patch_0 in other parallel folders as baseline.
       - the selected patch's test log (prefer the log inside the patch's own `parallel_*` folder).
-    - If the same patch exists in multiple parallel folders, prefer `parallel_1`'s test log for the final speedup calculation.
-    - Some runs may store patch files directly under the work directory (no `parallel_*` folders). In that case, treat those files as belonging to agent id 0.
-    - When parsing logs to compute the user metric, you MUST follow the user provided metric exactly:
     - You MUST only consider aligned points by benchmark entry (same benchmark line / same test name), and enforce equal counts:
-      - The number of extracted metric points MUST match between baseline and patch (e.g. both have 20 values).
+      - The number of extracted metric points MUST match between baseline and patch
       - If the counts do not match, the patch's test is INVALID and MUST be excluded from consideration.
 
     ## Speedup definition
