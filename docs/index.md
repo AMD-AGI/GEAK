@@ -4,6 +4,8 @@ GEAK is an AI-driven GPU kernel optimization framework. The main user-facing ove
 
 ## In this folder
 
+- **[Quick start](quick_start.md)** — install, model setup, and first `geak` runs.
+- **[Configuration files](configuration.md)** — YAML merge order, **`--config`** resolution, **`rag_config.yaml`**.
 - **[Development guidelines](development_guidelines.md)** — branches, PR workflow, CI, coding standards.
 - **[Developer guide](developer/index.md)** — extend prompts, add MCP servers, native tools.
 - **[ROCm environment reference](env_install.md)** — ROCm layout and library source paths useful for kernel work.

@@ -32,6 +32,8 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Quick start: quick_start.md
+  - Configuration files: configuration.md
   - Development guidelines: development_guidelines.md
   - Developer guide:
       - Overview: developer/index.md
