@@ -1,6 +1,5 @@
 site_name: GEAK documentation
 site_description: GEAK v3 — GPU kernel optimization (internal docs)
-site_url: https://amd-agi.github.io/GEAK/
 repo_url: https://github.com/AMD-AGI/GEAK
 
 theme:
@@ -34,6 +33,10 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Development guidelines: development_guidelines.md
+  - Developer guide:
+      - Overview: developer/index.md
+      - System & instance prompts: developer/prompts.md
+      - MCP and native tools: developer/mcp-tools.md
   - ROCm environment: env_install.md
   - RAG sub-agent: subagent_guide.md
 
