@@ -44,11 +44,11 @@ agent:
        This resolves all dependency issues upfront. Do NOT manually search for packages.
     3) Your task context contains **pre-scanned discovery results** from an automated scan.
        Review the Kernel Analysis, discovered test files, and language-specific guidance provided.
-    4) **If INSTRUCTIONS.md exists** in the repository, read sections 1a and 1b for:
+    4) **If `src/minisweagent/run/preprocess/INSTRUCTIONS.md` exists** in the repository, read sections 1a and 1b for:
        - Test harness requirements (the `--correctness`, `--profile`, `--benchmark`, `--full-benchmark` modes)
        - COMMANDMENT format rules (the harness will be referenced in COMMANDMENT.md)
        Follow these rules when creating or adapting the test harness.
-       If INSTRUCTIONS.md does not exist, follow the rules in this system prompt instead.
+       If `src/minisweagent/run/preprocess/INSTRUCTIONS.md` does not exist, follow the rules in this system prompt instead.
     5) Determine the **absolute path** of the repo root (run `pwd` or use task context).
     6) If discovery found high-confidence existing tests or benchmarks, **read and validate them first**:
        - If a benchmark script exists (e.g. `benchmarks/benchmark_*.py`), read it — it shows the correct import pattern and shapes.

@@ -357,7 +357,7 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
                 f"Line {lineno}: GPU tensor allocation inside profile function "
                 f"(device='cuda'). Use device='cpu' then .to('cuda') to avoid "
                 f"polluting the profiler trace with RNG/memset kernels. "
-                f"See INSTRUCTIONS.md point 8."
+                f"See src/minisweagent/run/preprocess/INSTRUCTIONS.md point 8."
             )
             break  # one warning is enough
 
@@ -476,7 +476,7 @@ def create_validated_harness(
                 + "\n".join(f"- {e}" for e in harness_errors)
                 + "\n\nYou MUST fix the harness so that ALL modes work: "
                 "--correctness, --profile, --benchmark, --full-benchmark. "
-                "See INSTRUCTIONS.md sections 1a and 1b."
+                "See src/minisweagent/run/preprocess/INSTRUCTIONS.md sections 1a and 1b."
             )
 
         test_command = run_unit_test_agent(
