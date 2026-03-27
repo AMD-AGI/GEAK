@@ -6,16 +6,22 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
 import traceback
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent
-from minisweagent.agents.select_patch_agent import SelectPatchAgent
+from minisweagent.agents.select_patch_agent import run_select_patch
+from minisweagent.run.utils.parallel_helpers import (
+    _stdout_lock as _stdout_lock,
+)
+from minisweagent.run.utils.parallel_helpers import (
+    redirect_output_to_file,
+    run_parallel_heterogeneous,
+    run_pool,
+)
 
 
 @dataclass
@@ -30,18 +36,6 @@ class BestPatchResult:
     llm_conclusion: str | None = None
 
 
-_stdout_lock = threading.Lock()
-
-
-@contextmanager
-def redirect_output_to_file(log_file: Path):
-    """No-op context manager. Agent writes to log file directly via add_message/log_message.
-
-    Stdout/stderr redirection doesn't work for parallel threads since sys.stdout is global.
-    """
-    yield
-
-
 @dataclass
 class ParallelAgentConfig(AgentConfig):
     # save_patch, test_command, patch_output_dir, metric are now inherited from AgentConfig
@@ -50,6 +44,8 @@ class ParallelAgentConfig(AgentConfig):
     repo: Path | None = None
     gpu_ids: list[int] | None = None
     agent_class: type | None = None
+    agent_specs: list | None = None  # list[AgentSpec] for heterogeneous parallel
+    tasks: list | None = None  # list[AgentTask] for GPU pool mode
     # Strategy agent compatibility
     strategy_file_path: str | None = None
     # Interactive/exit behaviour (passed through from --exit-immediately)
@@ -94,7 +90,7 @@ class ParallelAgent(DefaultAgent):
             agent_config={
                 k: v
                 for k, v in self.config.__dict__.items()
-                if k not in ("num_parallel", "repo", "gpu_ids", "agent_class")
+                if k not in ("num_parallel", "repo", "gpu_ids", "agent_class", "agent_specs", "tasks")
             },
             model_factory=model_factory,
             env_factory=env_factory,
@@ -103,6 +99,8 @@ class ParallelAgent(DefaultAgent):
             gpu_ids=self.config.gpu_ids,
             save_traj_fn=save_traj_fn,
             console=console,
+            agent_specs=self.config.agent_specs,
+            tasks=self.config.tasks,
         )
 
         metric = (
@@ -123,51 +121,25 @@ class ParallelAgent(DefaultAgent):
         base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory
     ) -> BestPatchResult | None:
         """Select the best patch from multiple parallel runs using SelectPatchAgent."""
-        import yaml
-
-        from minisweagent.config import get_config_path
-        from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
-
         print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
 
-        # Load SelectPatchAgent config
-        config_path = get_config_path("mini_select_patch")
-        config = yaml.safe_load(config_path.read_text())
-        agent_config = config.get("agent", {})
-
-        # Create model and environment for the SelectPatchAgent
         model = model_factory()
-        env_config = LocalEnvironmentConfig(cwd=str(base_patch_dir))
-        env = LocalEnvironment(**env_config.__dict__)
+        _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
 
-        # Create SelectPatchAgent with config
-        select_agent = SelectPatchAgent(model, env, **agent_config)
+        # Override with deterministic benchmark parsing when possible
+        from minisweagent.run.postprocess.benchmark_parsing import rewrite_best_results
 
-        # Setup the selection task
-        task = select_agent.setup_selection_task(base_patch_dir, num_parallel, metric)
+        det_result = rewrite_best_results(base_patch_dir)
+        if det_result:
+            best_patch_id = det_result.get("best_patch_id", best_patch_id)
+            print(
+                f"[ParallelAgent] Deterministic override: {best_patch_id} "
+                f"({det_result.get('best_patch_speedup', '?')}x)",
+                flush=True,
+            )
 
-        if task is None:
-            print("[ParallelAgent] Failed to setup selection task", flush=True)
-            return None
-
-        # Save agent conversation log
-        log_file = base_patch_dir / "select_agent.log"
-        select_agent.log_file = log_file
-
-        print(f"[ParallelAgent] Running SelectPatchAgent (log: {log_file})...", flush=True)
-
-        # Run the agent
-        try:
-            exit_status, result = select_agent.run(task)
-            print(f"[ParallelAgent] SelectPatchAgent finished with status: {exit_status}", flush=True)
-        except Exception as e:
-            print(f"[ParallelAgent] SelectPatchAgent failed: {e}", flush=True)
-            traceback.print_exc()
-
-        # Read best_results.json saved by SelectPatchAgent
-        best_patch_id = select_agent.extract_final_result()
         if not best_patch_id:
-            print("[ParallelAgent] SelectPatchAgent did not save best_results.json", flush=True)
+            print("[ParallelAgent] SelectPatchAgent did not produce best_results.json", flush=True)
             return None
 
         print(f"[ParallelAgent] Selected best patch: {best_patch_id}", flush=True)
@@ -176,12 +148,13 @@ class ParallelAgent(DefaultAgent):
             # Read the best_results.json for additional details
             best_results = json.loads((base_patch_dir / "best_results.json").read_text())
 
-            # Parse best_patch_id: either "parallel_X/patch_Y" (multi-run) or "patch_Y" (single run)
+            # Parse best_patch_id: "parallel_X/patch_Y", "task_X/patch_Y", or "patch_Y"
             if "/" in best_patch_id:
-                # Multi-run format: "parallel_X/patch_Y"
-                parallel_dir_name, patch_name = best_patch_id.split("/")
-                agent_id = int(parallel_dir_name.replace("parallel_", ""))
-                patch_dir = base_patch_dir / parallel_dir_name
+                dir_name, patch_name = best_patch_id.split("/", 1)
+                patch_dir = base_patch_dir / dir_name
+                # Extract numeric ID from either "parallel_X" or "task_X"
+                id_match = re.search(r"(\d+)", dir_name)
+                agent_id = int(id_match.group(1)) if id_match else 0
             else:
                 # Single run format: "patch_Y" (directly in base_patch_dir)
                 patch_name = best_patch_id
@@ -528,8 +501,52 @@ class ParallelAgent(DefaultAgent):
         redirect_output_fn=redirect_output_to_file,
         save_traj_fn=None,
         console=None,
+        agent_specs: list | None = None,
+        tasks: list | None = None,
     ) -> list[tuple[int, Any, Any, Any]]:
-        """Run multiple parallel agents and return their results."""
+        """Run multiple parallel agents and return their results.
+
+        Supports three modes (checked in priority order):
+        - Pool (preferred): pass tasks (list[AgentTask]) for M tasks on N GPUs.
+        - Heterogeneous (legacy): pass agent_specs (list[AgentSpec]).
+        - Homogeneous (default): num_parallel identical agents, each with 1 GPU.
+        """
+        # Pool mode: M tasks on N GPU slots (preferred)
+        if tasks:
+            return run_pool(
+                tasks=tasks,
+                gpu_ids=gpu_ids or [0],
+                repo_path=repo_path,
+                is_git_repo=is_git_repo,
+                base_task_content=task_content,
+                agent_config=agent_config,
+                model_factory=model_factory,
+                env_factory=env_factory,
+                base_patch_dir=base_patch_dir,
+                output=output,
+                redirect_output_fn=redirect_output_fn,
+                save_traj_fn=save_traj_fn,
+                console=console,
+            )
+
+        # Heterogeneous mode: use agent_specs if provided (legacy)
+        if agent_specs:
+            return run_parallel_heterogeneous(
+                agent_specs=agent_specs,
+                repo_path=repo_path,
+                is_git_repo=is_git_repo,
+                task_content=task_content,
+                agent_config=agent_config,
+                model_factory=model_factory,
+                env_factory=env_factory,
+                base_patch_dir=base_patch_dir,
+                output=output,
+                redirect_output_fn=redirect_output_fn,
+                save_traj_fn=save_traj_fn,
+                console=console,
+            )
+
+        # Homogeneous mode (original behavior)
         if console:
             console.print(f"[bold green]Running {num_parallel} parallel patch agents...[/bold green]")
 
@@ -585,11 +602,16 @@ class ParallelAgent(DefaultAgent):
             base_env = env_factory()
             env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
             env_config_dict["cwd"] = worktree_path_str
-            env_config_dict.setdefault("env", {})[repo_path_str] = worktree_path_str
+            # Create a NEW dict to avoid shared-reference race across threads
+            new_env = dict(env_config_dict.get("env") or {})
+            new_env[repo_path_str] = worktree_path_str
+            new_env["GEAK_WORK_DIR"] = worktree_path_str
+            new_env["GEAK_REPO_ROOT"] = repo_path_str
             if gpu_ids and agent_id < len(gpu_ids):
                 gpu_id = gpu_ids[agent_id]
-                env_config_dict.setdefault("env", {})["HIP_VISIBLE_DEVICES"] = str(gpu_id)
-                env_config_dict["env"]["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+                new_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+                new_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+                new_env["GEAK_GPU_DEVICE"] = str(gpu_id)
                 if console:
                     # Use lock to ensure console output completes before stdout redirection
                     with _stdout_lock:
@@ -597,6 +619,7 @@ class ParallelAgent(DefaultAgent):
                         # Force flush to ensure output is written before redirection
                         if hasattr(sys.stdout, "flush"):
                             sys.stdout.flush()
+            env_config_dict["env"] = new_env
             parallel_env = type(base_env)(**env_config_dict)
 
             parallel_output = None
@@ -610,8 +633,8 @@ class ParallelAgent(DefaultAgent):
             if hasattr(agent, "base_repo_path"):
                 agent.base_repo_path = repo_path_resolved
                 # Re-initialize test_perf context with updated base_repo_path
-                if hasattr(agent, "_setup_test_perf_context"):
-                    agent._setup_test_perf_context()
+                if hasattr(agent, "_setup_save_and_test_context"):
+                    agent._setup_save_and_test_context()
             if hasattr(agent, "log_file"):
                 agent.log_file = log_file
 

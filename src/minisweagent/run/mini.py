@@ -1,14 +1,38 @@
 #!/usr/bin/env python3
 
-"""Run mini-SWE-agent in your local environment. This is the default executable `mini`."""
-# Read this first: https://mini-swe-agent.com/latest/usage/mini/  (usage)
+"""Backup mini entry with kernel-type routing."""
 
-import copy
 import os
+import shlex
 import sys
 from io import StringIO
 from pathlib import Path
 from typing import Any
+
+import typer
+import yaml
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.shortcuts import PromptSession
+from rich.console import Console
+
+from minisweagent import global_config_dir
+from minisweagent.agents.homogeneous.homogeneous_agent import parse_gpu_ids, run_homogeneous_agent
+from minisweagent.agents.parallel_agent import BestPatchResult
+from minisweagent.config import builtin_config_dir, get_config_path
+from minisweagent.environments import get_environment_class
+from minisweagent.models import get_model
+from minisweagent.run.extra.config import configure_if_first_time
+from minisweagent.run.orchestrator import run_orchestrator
+from minisweagent.run.preprocess.preprocessor import run_preprocessor
+from minisweagent.run.utils.task_parser import _resolve_path_case, display_parsed_config, parse_task_info
+
+DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
+DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
+
+console = Console(highlight=False)
+app = typer.Typer(rich_markup_mode="rich")
+prompt_session = PromptSession(history=FileHistory(global_config_dir / "mini_task_history.txt"))
 
 
 class TeeOutput:
@@ -29,38 +53,7 @@ class TeeOutput:
         return self.buffer.getvalue()
 
 
-import typer
-import yaml
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.shortcuts import PromptSession
-from rich.console import Console
-
-from minisweagent import global_config_dir
-from minisweagent.agents.interactive import InteractiveAgent
-from minisweagent.agents.interactive_textual import TextualAgent
-from minisweagent.agents.parallel_agent import ParallelAgent
-from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
-from minisweagent.agents.unit_test_agent import run_unit_test_agent
-from minisweagent.config import builtin_config_dir, get_config_path
-from minisweagent.environments.local import LocalEnvironment
-from minisweagent.models import get_model
-from minisweagent.run.extra.config import configure_if_first_time
-from minisweagent.run.utils.config_editor import load_and_merge_configs
-from minisweagent.run.utils.save import save_traj
-from minisweagent.run.utils.task_parser import _resolve_path_case
-from minisweagent.utils.log import logger
-
-DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
-DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
-
-console = Console(highlight=False)
-app = typer.Typer(rich_markup_mode="rich")
-prompt_session = PromptSession(history=FileHistory(global_config_dir / "mini_task_history.txt"))
-
-
 def _deep_merge(base: dict, override: dict) -> dict:
-    """Deep merge two dictionaries, override takes precedence."""
     result = base.copy()
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
@@ -70,6 +63,95 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_kernel_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text == "triton":
+        return "triton"
+    if text in {"hip", "rocm", "rocblas"}:
+        return "hip"
+    return "other"
+
+
+def _derive_output_dir_and_traj(output: Path | None, kernel_name: str | None) -> tuple[Path, Path]:
+    """Unify patch_output_dir and -o/--output location.
+
+    - If output is a file path: output_dir = output.parent, traj = output
+    - If output is a directory: output_dir = output, traj = output/trajectory.json
+    - If output is not provided: use ./optimization_logs/<kernel_name>_<timestamp> as output_dir
+    """
+    if output is None:
+        from minisweagent.run.utils.task_parser import generate_patch_output_dir
+
+        output_dir = (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
+        return output_dir, output_dir / "trajectory.json"
+
+    if output.suffix:
+        return output.parent, output
+
+    return output, output / "trajectory.json"
+
+
+def _final_report_to_bestpatchresult(report: Any) -> BestPatchResult | None:
+    if report is None:
+        return None
+    report_dict = report.to_dict() if hasattr(report, "to_dict") else report
+    if not isinstance(report_dict, dict):
+        return None
+
+    best_patch = report_dict.get("best_patch")
+    patch_path = Path(best_patch) if best_patch else None
+    return BestPatchResult(
+        agent_id=0,
+        patch_id=patch_path.stem if patch_path else "unknown",
+        test_output="",
+        metric_result={
+            "best_speedup": report_dict.get("best_speedup"),
+            "best_round": report_dict.get("best_round"),
+            "best_task": report_dict.get("best_task"),
+            "status": report_dict.get("status"),
+        },
+        patch_dir=patch_path.parent if patch_path else None,
+        llm_conclusion=str(report_dict.get("summary") or ""),
+    )
+
+
+def _try_promote_to_harness(test_command: str) -> str | None:
+    """Check if test_command points to a harness with argparse modes.
+
+    If so, return the harness path (to pass as harness= to the preprocessor,
+    which automatically uses --profile for profiling).
+    Otherwise return None (keep using eval_command= as-is).
+    """
+    parts = shlex.split(test_command)
+    script = None
+    for part in parts:
+        if part.endswith(".py") and Path(part).is_file():
+            script = part
+            break
+    if not script:
+        return None
+
+    from minisweagent.run.preprocess.harness_utils import validate_harness
+
+    valid, _errors = validate_harness(script)
+    return script if valid else None
+
+
 _HELP_TEXT = """Run mini-SWE-agent in your local environment.
 
 [not dim]
@@ -77,13 +159,6 @@ There are two different user interfaces:
 
 [bold green]mini[/bold green] Simple REPL-style interface
 [bold green]mini -v[/bold green] Pager-style interface (Textual)
-
-RAG knowledge retrieval:
-
-[bold green]mini --rag[/bold green] Enable RAG retrieval from AMD/NVIDIA knowledge base
-[bold green]mini --rag -d[/bold green] Enable RAG retrieval with debug output
-
-More information about the usage: [bold green]https://mini-swe-agent.com/latest/usage/mini/[/bold green]
 [/not dim]
 """
 
@@ -91,100 +166,72 @@ More information about the usage: [bold green]https://mini-swe-agent.com/latest/
 # fmt: off
 @app.command(help=_HELP_TEXT)
 def main(
-    visual: bool = typer.Option(False, "-v", "--visual", help="Toggle (pager-style) UI (Textual) depending on the MSWEA_VISUAL_MODE_DEFAULT environment setting",),
-    model_name: str | None = typer.Option( None, "-m", "--model", help="Model to use",),
-    model_class: str | None = typer.Option(None, "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),
+    visual: bool = typer.Option(False, "-v", "--visual", help="Toggle UI",),
+    model_name: str | None = typer.Option(None, "-m", "--model", help="Model to use",),
+    model_class: str | None = typer.Option(None, "--model-class", help="Model class to use", rich_help_panel="Advanced"),
     task: str | None = typer.Option(None, "-t", "--task", help="Task/problem statement", show_default=False),
     yolo: bool = typer.Option(False, "-y", "--yolo", help="Run without confirmation"),
     cost_limit: float | None = typer.Option(None, "-l", "--cost-limit", help="Cost limit. Set to 0 to disable."),
-    config_spec: Path | None = typer.Option(None, "-c", "--config", help="Path to config file (overrides template selection)"),
-    output: Path | None = typer.Option(DEFAULT_OUTPUT, "-o", "--output", help="Output trajectory file"),
-    exit_immediately: bool = typer.Option( False, "--exit-immediately", help="Exit immediately when the agent wants to finish instead of prompting.", rich_help_panel="Advanced"),
-    # Strategy mode configuration
-    enable_strategies: bool = typer.Option(True, "--enable-strategies/--no-enable-strategies", help="Enable optimization strategy management (optool command). Auto-selects appropriate template.", rich_help_panel="Advanced"),
-    strategy_file: str = typer.Option(".optimization_strategies.md", "--strategy-file", help="Path to strategy file (relative to workspace)", rich_help_panel="Advanced"),
-    # Patch mode configuration (always enabled)
-    test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command to run for patch validation"),
-    create_test: bool = typer.Option(
-        False,
-        "--create-test",
-        "--create_test",
-        help="Auto-create/search unit tests and infer test_command when missing (or to override it).",
-        rich_help_panel="Advanced",
-    ),
-    patch_output: Path | None = typer.Option(None, "--patch-output", help="Output directory for patch files and test results"),
-    metric: str | None = typer.Option(None, "--metric", help="Metric extraction task description for LLM"),
-    num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents to run (only effective with --save-patch). If not specified, reads from config file."),
-    repo: Path | None = typer.Option(None, "--repo", help="Repository path for parallel execution. Required when num_parallel > 1. Each agent will get an isolated workdir using git worktree."),
-    gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs for agents (e.g., '0,1,2,3'). For single agent, uses first GPU. Defaults to '0'."),
-    # RAG knowledge retrieval
-    rag: bool = typer.Option(False, "--rag", help="Enable RAG retrieval from AMD/NVIDIA knowledge base"),
-    debug: bool = typer.Option(False, "-d", "--debug", help="Enable debug output (only with --rag)"),
-) -> Any:
+    config_spec: Path | None = typer.Option(None, "-c", "--config", help="Path to config file"),
+    output: Path | None = typer.Option(None, "-o", "--output", help="Output trajectory file or directory"),
+    exit_immediately: bool = typer.Option(False, "--exit-immediately", help="Exit immediately", rich_help_panel="Advanced"),
+    repo: Path | None = typer.Option(None, "--repo", help="Target Repository path."),
+    kernel_url: str | None = typer.Option(None, "--kernel-url", "--kernel-path", help="Target kernel source (path or URL)."),
+    num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
+    gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs."),
+    test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command"),
+    heterogeneous_flag: bool | None = typer.Option(None, "--heterogeneous/--no-heterogeneous", "--hetero/--no-hetero", help="Force heterogeneous or homogeneous mode. Auto-detects if not set."),
+):
     # fmt: on
-    # Capture all print output to trajectory
+    del visual
     tee_out, tee_err = TeeOutput(sys.stdout), TeeOutput(sys.stderr)
     sys.stdout, sys.stderr = tee_out, tee_err
 
     configure_if_first_time()
-    
-    # 1. Load base config (mini.yaml - always loaded as foundation)
-    base_config_path = builtin_config_dir / "mini.yaml"
+
+    # 1) Config merge
+    base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
     console.print(f"Loading base config: [bold green]'{base_config_path.name}'[/bold green]")
-    config = yaml.safe_load(base_config_path.read_text())
-    
-    # 2. Select and merge template based on enable_strategies flag
-    if enable_strategies:
-        template_name = "mini_kernel_strategy_list.yaml"
-    else:
-        template_name = "mini_system_prompt.yaml"
-    
-    template_path = builtin_config_dir / template_name
-    console.print(f"Applying template: [bold green]'{template_name}'[/bold green] (save_patch always enabled)")
-    template_config = yaml.safe_load(template_path.read_text())
-    config = _deep_merge(config, template_config)
-    
-    # 3. Load user config if explicitly specified (final override)
+    config = yaml.safe_load(base_config_path.read_text()) or {}
     if config_spec:
         config_path = get_config_path(config_spec)
         console.print(f"[dim]Applying user config from '{config_path}' (final override)[/dim]")
-        user_config = yaml.safe_load(config_path.read_text())
+        user_config = yaml.safe_load(config_path.read_text()) or {}
         config = _deep_merge(config, user_config)
 
+    if yolo:
+        config.setdefault("agent", {})["mode"] = "yolo"
+    if cost_limit is not None:
+        config.setdefault("agent", {})["cost_limit"] = cost_limit
+    if exit_immediately:
+        config.setdefault("agent", {})["confirm_exit"] = False
+    if model_class is not None:
+        config.setdefault("model", {})["model_class"] = model_class
+
     tools_cfg = config.get("tools") or {}
-    if tools_cfg:
-        if "bash" in tools_cfg:
-            config.setdefault("model", {}).setdefault("bash_tool", tools_cfg["bash"])
-        if "profiling" in tools_cfg:
-            config.setdefault("model", {}).setdefault("profiling", tools_cfg["profiling"])
-        if "profiling_type" in tools_cfg:
-            config.setdefault("agent", {}).setdefault("profiling_type", tools_cfg["profiling_type"])
-        if tools_cfg.get("profiling") and "profiling_type" not in tools_cfg:
-            config.setdefault("agent", {}).setdefault("profiling_type", "profiling")
-        if "strategy_manager" in tools_cfg:
-            config.setdefault("agent", {}).setdefault("use_strategy_manager", tools_cfg["strategy_manager"])
-            config.setdefault("model", {}).setdefault("use_strategy_manager", tools_cfg["strategy_manager"])
+    disabled_tools: list[str] = []
+    if tools_cfg.get("bash") is False:
+        disabled_tools.append("bash")
+    if tools_cfg.get("profiling") is False:
+        disabled_tools.append("profiling")
 
-    # Backward compatibility: legacy top-level tool flags
-    if "profiling" in config:
-        config.setdefault("model", {}).setdefault("profiling", config["profiling"])
-    if "profiling_type" in config:
-        config.setdefault("agent", {}).setdefault("profiling_type", config["profiling_type"])
-    if config.get("model", {}).get("profiling") and not config.get("agent", {}).get("profiling_type"):
-        config.setdefault("agent", {})["profiling_type"] = "profiling"
+    if disabled_tools:
+        config.setdefault("agent", {}).setdefault("disabled_tools", [])
+        config["agent"]["disabled_tools"] = list(set(config["agent"]["disabled_tools"]) | set(disabled_tools))
 
-    # Read task content - if task is a file path, read its content; otherwise use task as-is
+    model = get_model(model_name, config.get("model", {}))
+    _model_name = getattr(model.config, "model_name", "unknown")
+    console.print(f"\\Using model: [bold cyan]{_model_name}[/bold cyan]")
+
     task_content = task
     if task:
         task_path = Path(task)
         if task_path.exists() and task_path.is_file():
-            # Read file content regardless of extension (txt, md, etc.)
             task_content = task_path.read_text(encoding="utf-8")
             console.print(f"[bold green]Read task from file: {task_path}[/bold green]")
         elif not task.strip():
-            # Empty task, prompt user
             task_content = None
-    
+
     if not task_content:
         console.print("[bold yellow]What do you want to do?")
         task_content = prompt_session.prompt(
@@ -198,121 +245,213 @@ def main(
         )
         console.print("[bold green]Got that, thanks![/bold green]")
 
-    if yolo:
-        config.setdefault("agent", {})["mode"] = "yolo"
-    if cost_limit is not None:
-        config.setdefault("agent", {})["cost_limit"] = cost_limit
-    if exit_immediately:
-        config.setdefault("agent", {})["confirm_exit"] = False
-    if model_class is not None:
-        config.setdefault("model", {})["model_class"] = model_class
-    # Set use_strategy_manager in model config based on enable_strategies flag
-    config.setdefault("model", {})["use_strategy_manager"] = enable_strategies
-    model = get_model(model_name, config.get("model", {}))
+    # 2a) LLM-driven pipeline param extraction
+    # CLI --heterogeneous/--no-heterogeneous flag takes highest priority
+    heterogeneous = heterogeneous_flag
+    max_rounds = None
+    if task_content:
+        from minisweagent.run.utils.task_parser import parse_pipeline_params
 
-    # Print model info
-    _model_name = getattr(model.config, "model_name", "unknown")
-    _api_key = getattr(model.config, "api_key", None)
-    if not _api_key:
-        _api_key = os.getenv("AMD_LLM_API_KEY") or os.getenv("LLM_GATEWAY_KEY") or os.getenv("ANTHROPIC_API_KEY")
-    _api_key_display = f"{_api_key[:8]}..." if _api_key and len(_api_key) > 8 else _api_key or "Not set"
-    console.print(f"\\[mini-swe-agent] Using model: [bold cyan]{_model_name}[/bold cyan], API key: [bold cyan]{_api_key_display}[/bold cyan]")
+        console.print("[bold cyan]Checking task for pipeline parameters...[/bold cyan]")
+        pipeline_params = parse_pipeline_params(task_content, model)
 
-    # ============ Environment setup: RAG or Local ============
-    _env_kwargs = config.get("env", {})
-    if rag:
-        try:
-            from minisweagent.mcp_integration.mcp_environment import MCPEnabledEnvironment
-            from minisweagent.mcp_integration.prompts import INSTANCE_TEMPLATE, SYSTEM_TEMPLATE
-            from minisweagent.mcp_integration.run_agent import DebugMCPEnvironment
-        except ImportError as e:
-            console.print("[red]Error: RAG retrieval requires langchain dependencies. Run: pip install -e '.[langchain]'[/red]")
-            console.print(f"[red]Import error: {e}[/red]")
-            raise typer.Exit(1)
+        # Apply non-None extracted values (CLI flags still take priority)
+        if pipeline_params.get("heterogeneous") is not None and heterogeneous is None:
+            heterogeneous = pipeline_params["heterogeneous"]
+        if pipeline_params.get("max_rounds") is not None:
+            max_rounds = pipeline_params["max_rounds"]
 
-        if debug:
-            env = DebugMCPEnvironment(**_env_kwargs)
-            console.print("[bold yellow]🐛 Debug mode enabled[/bold yellow]")
-        else:
-            env = MCPEnabledEnvironment(**_env_kwargs)
+        # Prompt for missing required params (kernel_url) — only if not already set
+        if kernel_url is None:
+            from minisweagent.run.utils.config_editor import prompt_missing_pipeline_params
 
-        config.setdefault("agent", {})["system_template"] = SYSTEM_TEMPLATE
-        config.setdefault("agent", {})["instance_template"] = INSTANCE_TEMPLATE
-        console.print("[bold green]🔌 RAG knowledge retrieval enabled[/bold green]")
-    else:
-        env = LocalEnvironment(**_env_kwargs)
+            pipeline_params, should_use_pipeline = prompt_missing_pipeline_params(
+                pipeline_params, console, yolo
+            )
 
-    # Load and merge configurations: Command-line > extra_config from yaml > auto-detect
-    result = load_and_merge_configs(
-        config, repo, test_command, metric, num_parallel, gpu_ids, patch_output,
-        task_content, yolo, model, console
+            if should_use_pipeline:
+                if pipeline_params.get("kernel_url"):
+                    kernel_url = pipeline_params["kernel_url"]
+
+    # 2b) Detect configs from task
+    parsed_config = parse_task_info(task_content, model)
+    task_kernel_type = _normalize_kernel_type(parsed_config.get("kernel_type"))
+    kernel_type = task_kernel_type
+    if kernel_url:
+        kp = Path(kernel_url)
+        if kp.exists() and kp.is_file():
+            from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
+
+            inferred = _normalize_kernel_type(_infer_kernel_type(kp))
+            if inferred in {"hip", "triton"}:
+                kernel_type = inferred
+
+    # Keep kernel_type resolution internal; avoid exposing routing details in logs.
+
+    if repo is None and parsed_config.get("repo"):
+        repo = Path(parsed_config["repo"])
+    if test_command is None and parsed_config.get("test_command"):
+        test_command = parsed_config["test_command"]
+    if num_parallel is None:
+        num_parallel = _as_int(parsed_config.get("num_parallel"))
+    if gpu_ids is None and parsed_config.get("gpu_ids"):
+        gpu_ids = parsed_config["gpu_ids"]
+
+    # Apply config/model/output_dir extracted from task (CLI flags take priority)
+    if config_spec is None and parsed_config.get("config"):
+        _task_config_path = get_config_path(Path(parsed_config["config"]))
+        if _task_config_path and _task_config_path.exists():
+            console.print(f"[dim]Applying config from task: '{_task_config_path}'[/dim]")
+            _task_user_config = yaml.safe_load(_task_config_path.read_text()) or {}
+            config = _deep_merge(config, _task_user_config)
+
+    if model_name is None and parsed_config.get("model"):
+        model_name = parsed_config["model"]
+        model = get_model(model_name, config.get("model", {}))
+        console.print(f"\\Using model (from task): [bold cyan]{model_name}[/bold cyan]")
+
+    if output is None and parsed_config.get("output_dir"):
+        output = Path(parsed_config["output_dir"])
+
+    kernel_target = kernel_url or parsed_config.get("kernel_url") or parsed_config.get("kernel_name")
+    if not kernel_target:
+        console.print("[red]Error: missing kernel target. Provide --kernel-url or include kernel info in task.[/red]")
+        raise typer.Exit(1)
+
+    parsed_gpu_ids = parse_gpu_ids(gpu_ids)
+    metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
+
+    kernel_name_for_output = parsed_config.get("kernel_name")
+    if not kernel_name_for_output and kernel_url:
+        kernel_name_for_output = Path(kernel_url).stem
+    if not kernel_name_for_output and isinstance(kernel_target, str):
+        kernel_name_for_output = Path(kernel_target).stem
+
+    preprocess_output_dir, traj_output_path = _derive_output_dir_and_traj(output, kernel_name_for_output)
+    preprocess_output_dir.mkdir(parents=True, exist_ok=True)
+    config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
+    console.print(
+        f"[dim]Logs and artifacts for this run are under '{preprocess_output_dir}' "
+        f"(e.g. optimization_logs/<kernel>_<timestamp>/).[/dim]"
     )
-    if result == (None, None, None, None, None, None, None):
-        console.print("[bold yellow]Continuing without automatic patch saving. You can still interact with the agent.[/bold yellow]")
-        # Keep original None values since user aborted
-        repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name = None, None, None, None, [0], None, None
-    else:
-        repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name = result
 
-    if create_test or not test_command:
-        if not repo:
-            raise ValueError("repo is required for --create-test or when test_command is missing. Please pass --repo.")
-        console.print(
-            "[bold yellow]No test_command provided (or --create-test enabled). "
-            "Will auto-create/search unit tests and infer a test command via UnitTestAgent...[/bold yellow]"
-        )
-        test_command = run_unit_test_agent(
-            model=get_model(model_name, config.get("model", {})),
-            repo=repo,
-            kernel_name=kernel_name or "unknown",
-            log_dir=patch_output,
-        )
-        console.print(f"[bold green]Using UnitTestAgent test_command:[/bold green] {test_command}")
-    
-    # ============ Step 1: Choose base agent class ============
-    # Based on enable_strategies flag, select appropriate agent and template
-    if enable_strategies:
-        # Use strategy agent with mini_kernel_strategy_list.yaml template
-        base_agent_class = StrategyInteractiveAgent
-        console.print(f"[bold cyan]Using Strategy Agent with strategy file: {strategy_file}[/bold cyan]")
+    # Display the *resolved* configuration (CLI overrides auto-detection).
+    _display_cfg = dict(parsed_config)
+    _display_cfg["kernel_type"] = kernel_type
+    if kernel_url:
+        _display_cfg["kernel_url"] = kernel_url
+    if repo is not None:
+        _display_cfg["repo"] = str(repo)
+    if test_command is not None:
+        _display_cfg["test_command"] = test_command
+    if num_parallel is not None:
+        _display_cfg["num_parallel"] = num_parallel
+    if gpu_ids is not None:
+        _display_cfg["gpu_ids"] = gpu_ids
+    if model_name is not None:
+        _display_cfg["model"] = model_name
+    if config_spec is not None:
+        _display_cfg["config"] = str(config_spec)
+    console.print(display_parsed_config(_display_cfg, str(preprocess_output_dir)))
+
+    _env_kwargs = dict(config.get("env", {}))
+    env_type = str(_env_kwargs.pop("type", _env_kwargs.pop("environment_class", "local"))).strip().lower() or "local"
+    try:
+        env_class = get_environment_class(env_type)
+        env = env_class(**_env_kwargs)
+    except Exception as e:
+        console.print(f"[red]Error: failed to initialize env.type={env_type}: {e}[/red]")
+        raise typer.Exit(1)
+
+    harness_spec = config.get("patch", {}).get("harness")
+    if not harness_spec and test_command:
+        promoted = _try_promote_to_harness(test_command)
+        if promoted:
+            harness_spec = promoted
+            console.print(f"[bold cyan]Promoted test command to validated harness: {promoted}[/bold cyan]")
+
+    _preprocess_kwargs = dict(
+        kernel_url=kernel_target,
+        repo=repo,
+        output_dir=preprocess_output_dir,
+        gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
+        model_factory=lambda: get_model(model_name, config.get("model", {})),
+        console=console,
+    )
+
+    if harness_spec:
+        try:
+            preprocess_ctx = run_preprocessor(**_preprocess_kwargs, harness=harness_spec)
+        except RuntimeError as exc:
+            if "harness" in str(exc).lower():
+                console.print(f"[yellow]Harness validation failed, falling back to eval_command: {exc}[/yellow]")
+                preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
+            else:
+                raise
     else:
-        # Use interactive agent with mini_system_prompt.yaml template
-        # Choose between visual (Textual) and non-visual (Interactive) mode
-        if visual == (os.getenv("MSWEA_VISUAL_MODE_DEFAULT", "false") == "false"):
-            base_agent_class = TextualAgent
+        if isinstance(test_command, str) and "&&" in test_command:
+            left, right = test_command.rsplit("&&", 1)
+            correctness_command = left.strip() or None
+            performance_command = right.strip() or None
+            preprocess_ctx = run_preprocessor(
+                **_preprocess_kwargs,
+                correctness_command=correctness_command,
+                performance_command=performance_command,
+            )
         else:
-            base_agent_class = InteractiveAgent
-        console.print(f"[bold cyan]Using Interactive Agent (visual={'on' if base_agent_class == TextualAgent else 'off'})[/bold cyan]")
-    
-    # Mode (yolo/confirm/human) is set via config and applies to all InteractiveAgent subclasses
-    
-    # ============ Step 2: Configure agent settings ============
-    agent_config = config.get("agent", {})
-    
-    # Add strategy manager settings
-    agent_config["use_strategy_manager"] = enable_strategies
-    if enable_strategies:
+            preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
+
+    if preprocess_ctx.get("test_command") and not test_command:
+        test_command = preprocess_ctx["test_command"]
+    if preprocess_ctx.get("repo_root") and repo is None:
+        repo = Path(preprocess_ctx["repo_root"])
+
+    # kernel_type routing:
+    # - hip/other -> homogeneous agent
+    # - triton -> heterogeneous orchestrator
+    # Auto-detect kernel type if heterogeneous flag was not set by LLM extraction or task parser
+    if heterogeneous is None:
+        _discovery = preprocess_ctx.get("discovery") or {}
+        _kernel_info = _discovery.get("kernel") or {}
+        _auto_kernel_type = _kernel_info.get("type")
+
+        if not _auto_kernel_type and preprocess_ctx.get("kernel_path"):
+            from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
+            _auto_kernel_type = _infer_kernel_type(Path(preprocess_ctx["kernel_path"]))
+
+        if _auto_kernel_type == "triton":
+            heterogeneous = True
+        else:
+            heterogeneous = False
+    else:
+        pass
+
+    if heterogeneous:
+        commandment = preprocess_ctx.get("commandment")
+        if commandment:
+            task_content = f"{commandment}\n\n---\n\n{task_content}"
+        report = run_orchestrator(
+            preprocess_ctx=preprocess_ctx,
+            gpu_ids=parsed_gpu_ids,
+            model=model,
+            model_factory=lambda: get_model(model_name, config.get("model", {})),
+            output_dir=preprocess_output_dir,
+            max_rounds=max_rounds or config.get("orchestrator", {}).get("max_rounds"),
+            heterogeneous=True,
+            console=console,
+        )
+        return _final_report_to_bestpatchresult(report)
+
+    agent_config = dict(config.get("agent", {}))
+    enable_strategies = _as_bool(tools_cfg.get("strategy_manager", False))
+    strategy_file = tools_cfg.get("strategy_file")
+    if enable_strategies and strategy_file:
         agent_config["strategy_file_path"] = strategy_file
-    
-    # Configure save_patch settings (always enabled)
     agent_config["save_patch"] = True
     agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
-    patch_dir = patch_output or config.get("patch", {}).get("patch_output_dir") or (global_config_dir / "patches")
-    agent_config["patch_output_dir"] = str(patch_dir)
-    agent_config["metric"] = metric or config.get("patch", {}).get("metric")
-    
-    # Create log directory and prepare log file path
-    log_dir = Path(patch_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    agent_log_file = log_dir / "mini_agent.log"
-    
-    # ============ Step 3: Use ParallelAgent (supports both single and parallel execution) ============
-    agent_class = ParallelAgent
-    agent_config["agent_class"] = base_agent_class
-    agent_config["num_parallel"] = num_parallel or 1
-    agent_config["gpu_ids"] = parsed_gpu_ids
-    
-    # Configure repo path for worktree management (unified for single and parallel)
+    agent_config["metric"] = metric
+    agent_config["patch_output_dir"] = str(preprocess_output_dir)
+
     repo_path = repo or config.get("patch", {}).get("repo")
     if repo_path:
         p = Path(repo_path)
@@ -320,40 +459,30 @@ def main(
             resolved = _resolve_path_case(p)
             if resolved is not None:
                 p = resolved
-        agent_config["repo"] = str(p.resolve())
-    
-    if num_parallel and num_parallel > 1:
-        console.print(f"[bold cyan]Using Parallel Mode: {num_parallel} agents[/bold cyan]")
-        console.print(f"[dim]GPU IDs: {parsed_gpu_ids}[/dim]")
-        if agent_config.get("repo"):
-            console.print(f"[dim]Repository: {agent_config['repo']}[/dim]")
-        else:
-            console.print("[bold yellow]Warning: No repo path specified for parallel execution[/bold yellow]")
-    else:
-        console.print("[bold cyan]Using Single Agent Mode[/bold cyan]")
-        console.print(f"[dim]Using GPU: {parsed_gpu_ids[0]}[/dim]")
-        # HIP_VISIBLE_DEVICES is set by parallel_agent.py in run_parallel
-        if agent_config.get("repo"):
-            console.print(f"[dim]Repository: {agent_config['repo']}[/dim]")
-            
-    # Create and run agent
-    agent = agent_class(model, env, **agent_config)
-    agent.log_file = agent_log_file
-    console.print(f"[dim]Agent log: {agent_log_file}[/dim]")
-    
-    try:
-        exit_status, result = agent.run(
-            task_content,
-            output=output,
-            save_traj_fn=save_traj,
-            console=console,
-            model_factory=lambda: get_model(model_name, config.get("model", {})),
-            env_factory=lambda: (MCPEnabledEnvironment if rag else LocalEnvironment)(**copy.deepcopy(_env_kwargs)),
-        )
-    except Exception as e:
-        logger.error(f"Error running agent: {e}", exc_info=True)
+        repo_path = p.resolve()
 
-    return agent
+    tools_settings = {
+        "strategy_manager": enable_strategies,
+        "strategy_file": strategy_file,
+    }
+
+    return run_homogeneous_agent(
+        config=config,
+        task_content=task_content,
+        model=model,
+        env=env,
+        env_class=env.__class__,
+        env_kwargs=_env_kwargs,
+        tools_settings=tools_settings,
+        agent_config=agent_config,
+        repo=repo_path,
+        num_parallel=num_parallel,
+        gpu_ids=gpu_ids,
+        output_dir=preprocess_output_dir,
+        traj_output=traj_output_path,
+        model_name=model_name,
+        console=console,
+    )
 
 
 if __name__ == "__main__":
