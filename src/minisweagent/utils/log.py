@@ -11,6 +11,13 @@ def _get_log_level_from_env() -> int:
     return logging._nameToLevel.get(level_name, logging.INFO)
 
 
+def _silence_noisy_loggers() -> None:
+    # Prevent third-party HTTP client INFO logs (e.g. "HTTP Request: POST ...")
+    # from cluttering our file logs when root handlers are configured elsewhere.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def _setup_root_logger() -> None:
     logger = logging.getLogger("minisweagent")
     logger.setLevel(_get_log_level_from_env())
@@ -23,6 +30,7 @@ def _setup_root_logger() -> None:
     _formatter = logging.Formatter("%(name)s: %(levelname)s: %(message)s")
     _handler.setFormatter(_formatter)
     logger.addHandler(_handler)
+    _silence_noisy_loggers()
 
 
 def add_file_handler(path: Path | str, level: int | None = None, *, print_path: bool = True) -> None:

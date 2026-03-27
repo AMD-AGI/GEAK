@@ -63,8 +63,8 @@ agent:
 
     3. **Establish Baseline Performance** 
        - **CRITICAL**: Measure original implementation performance BEFORE any optimization
-       - **ALWAYS use the `test_perf` tool** to measure baseline performance:
-         Call `test_perf` tool with description: "baseline"
+       - **ALWAYS use the `save_and_test` tool** to measure baseline performance:
+         Call `save_and_test` tool with description: "baseline"
        - **DO NOT construct manual test commands or benchmarks.**
        - The system will automatically run tests and save results
        - Record key metrics summary in your strategy file (bandwidth, throughput, latency, occupancy, etc.)
@@ -93,8 +93,8 @@ agent:
        - Use `strategy_manager` tool to mark selected strategy as "exploring"
        - Implement the optimization (e.g., memory coalescing, vectorization, shared memory)
        - Verify correctness with tests after implementation
-       - **ALWAYS use `test_perf` tool** to measure performance:
-         Call `test_perf` tool with description: "strategy name or brief description"
+       - **ALWAYS use `save_and_test` tool** to measure performance:
+         Call `save_and_test` tool with description: "strategy name or brief description"
        - **DO NOT construct manual test commands, benchmarks, or compile commands.**
        - The system will automatically save patch, run tests, and report results
        - **Calculate relative change** compared to baseline (e.g., +21.1% improvement or -4.7% regression)
@@ -173,7 +173,7 @@ agent:
     - **str_replace**: Replace old_str with new_str in file
     - **insert**: Insert new_str at insert_line
     
-    ### test_perf
+    ### save_and_test
     Save patch and run performance test. Use after implementing optimizations to measure impact.
     - **description** (optional): Brief description of what optimization is being tested (e.g., "baseline", "memory coalescing")
 
@@ -205,14 +205,41 @@ agent:
     <available_tools>
     - **bash**: Execute shell commands
     - **str_replace_editor**: File editor (commands: view, create, str_replace, insert)
-    - **test_perf**: Save patch and run performance test
+    - **save_and_test**: Save patch and run performance test
     - **submit**: Submit final result and complete task
     - **strategy_manager**: Track optimization strategies
     - **profiling**: Profile GPU kernel with rocprof
     </available_tools>
-
+  step_limit: 0.
+  cost_limit: 0.
+  mode: yolo
+env:
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  timeout: 3600
+model:
+  model_class: amd_llm
+  # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
+  model_name: claude-opus-4.5
+  # API key is read from AMD_LLM_API_KEY environment variable
+  # Set it in .env file or: export AMD_LLM_API_KEY=your_key_here
+  api_key: ""
+  model_kwargs:
+    temperature: 0.0
+    max_tokens: 16000
+    # reasoning is only valid for gpt models, can be set to none, low, medium, high
+    reasoning:
+      effort: high
+    # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
+    text:
+      verbosity: low
 tools:
   profiling: false
   profiling_type: profiling
   strategy_manager: true
-
+  strategy_file: ".optimization_strategies.md"
+  rag: false
