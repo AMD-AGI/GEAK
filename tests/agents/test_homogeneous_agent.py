@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from minisweagent.agents.homogeneous_agent import (
+from minisweagent.agents.homogeneous.homogeneous_agent import (
     parse_gpu_ids,
     run_homogeneous_agent,
 )
@@ -194,7 +194,7 @@ class TestRunHomogeneousAgent:
         """Test that strategy agent is used when strategy_manager is enabled."""
         base_config["tools"]["strategy_manager"] = True
 
-        with patch("minisweagent.agents.homogeneous_agent.ParallelAgent") as mock_parallel:
+        with patch("minisweagent.agents.homogeneous.homogeneous_agent.ParallelAgent") as mock_parallel:
             mock_agent = MagicMock()
             mock_agent.run.return_value = BestPatchResult(
                 agent_id=0,
@@ -232,7 +232,7 @@ class TestRunHomogeneousAgent:
         """Test that interactive agent is used when strategy_manager is disabled."""
         base_config["tools"]["strategy_manager"] = False
 
-        with patch("minisweagent.agents.homogeneous_agent.ParallelAgent") as mock_parallel:
+        with patch("minisweagent.agents.homogeneous.homogeneous_agent.ParallelAgent") as mock_parallel:
             mock_agent = MagicMock()
             mock_agent.run.return_value = BestPatchResult(
                 agent_id=0,
@@ -268,7 +268,7 @@ class TestRunHomogeneousAgent:
 
     def test_run_homogeneous_agent_num_parallel_from_param(self, mock_model, mock_env, base_config, temp_repo):
         """Test that num_parallel parameter takes precedence."""
-        with patch("minisweagent.agents.homogeneous_agent.ParallelAgent") as mock_parallel:
+        with patch("minisweagent.agents.homogeneous.homogeneous_agent.ParallelAgent") as mock_parallel:
             mock_agent = MagicMock()
             mock_agent.run.return_value = None
             mock_parallel.return_value = mock_agent
@@ -296,7 +296,7 @@ class TestRunHomogeneousAgent:
 
     def test_run_homogeneous_agent_gpu_ids_from_param(self, mock_model, mock_env, base_config, temp_repo):
         """Test that gpu_ids parameter is parsed correctly."""
-        with patch("minisweagent.agents.homogeneous_agent.ParallelAgent") as mock_parallel:
+        with patch("minisweagent.agents.homogeneous.homogeneous_agent.ParallelAgent") as mock_parallel:
             mock_agent = MagicMock()
             mock_agent.run.return_value = None
             mock_parallel.return_value = mock_agent
@@ -327,7 +327,7 @@ class TestRunHomogeneousAgent:
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir) / "test_output"
 
-            with patch("minisweagent.agents.homogeneous_agent.ParallelAgent") as mock_parallel:
+            with patch("minisweagent.agents.homogeneous.homogeneous_agent.ParallelAgent") as mock_parallel:
                 mock_agent = MagicMock()
                 mock_agent.run.return_value = None
                 mock_parallel.return_value = mock_agent
@@ -354,7 +354,7 @@ class TestRunHomogeneousAgent:
 
     def test_run_homogeneous_agent_mode_yolo(self, mock_model, mock_env, base_config, temp_repo):
         """Test that agent is configured in yolo mode."""
-        with patch("minisweagent.agents.homogeneous_agent.ParallelAgent") as mock_parallel:
+        with patch("minisweagent.agents.homogeneous.homogeneous_agent.ParallelAgent") as mock_parallel:
             mock_agent = MagicMock()
             mock_agent.run.return_value = None
             mock_parallel.return_value = mock_agent
@@ -627,7 +627,7 @@ class TestHomogeneousAgentConsoleOutput:
             "model": {},
         }
 
-        with patch("minisweagent.agents.homogeneous_agent.ParallelAgent") as mock_parallel:
+        with patch("minisweagent.agents.homogeneous.homogeneous_agent.ParallelAgent") as mock_parallel:
             mock_agent = MagicMock()
             mock_agent.run.return_value = None
             mock_parallel.return_value = mock_agent

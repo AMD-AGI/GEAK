@@ -31,18 +31,11 @@ class TestGetModelName:
         with patch.dict(os.environ, {}, clear=True):
             assert get_model_name(None, self.CONFIG_WITH_MODEL_NAME) == "config-model"
 
-    def test_raises_error_when_no_model_configured(self):
-        """Test that ValueError is raised when no model is configured anywhere."""
+    def test_returns_default_when_no_model_configured(self):
+        """Test that a hardcoded default is returned when no model is configured anywhere."""
         with patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(
-                ValueError, match="No default model set. Please run `mini-extra config setup` to set one."
-            ):
-                get_model_name(None, {})
-
-            with pytest.raises(
-                ValueError, match="No default model set. Please run `mini-extra config setup` to set one."
-            ):
-                get_model_name(None, None)
+            assert get_model_name(None, {}) == "claude-opus-4.6"
+            assert get_model_name(None, None) == "claude-opus-4.6"
 
 
 class TestGetModelClass:
