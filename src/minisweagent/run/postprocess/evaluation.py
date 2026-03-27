@@ -422,6 +422,24 @@ def evaluate_round_best(
         benchmark_baseline_path = pp_dir / "benchmark_baseline.txt"
         benchmark_baseline = benchmark_baseline_path.read_text().strip() if benchmark_baseline_path.exists() else None
 
+        # Fallback: if no baseline files exist, run baseline benchmark now
+        if not full_benchmark_baseline and not benchmark_baseline:
+            try:
+                _print("  No baseline files found — running baseline benchmark...")
+                baseline_env = build_eval_env(eval_worktree, repo_root, eval_harness_path, gpu_id)
+                bl_result = subprocess.run(
+                    ["python3", eval_harness_path, "--full-benchmark"],
+                    capture_output=True, text=True, timeout=600,
+                    cwd=str(eval_worktree), env=baseline_env,
+                )
+                if bl_result.returncode == 0 and bl_result.stdout.strip():
+                    full_benchmark_baseline = bl_result.stdout.strip()
+                    (pp_dir / "full_benchmark_baseline.txt").write_text(full_benchmark_baseline)
+                    _bl_ms = _extract_latency_ms(full_benchmark_baseline)
+                    _print(f"  Generated baseline: {_bl_ms}ms")
+            except Exception as exc:
+                _print(f"  WARNING: baseline generation failed: {exc}")
+
         # --- FULL_BENCHMARK ---
         fb_script = build_eval_script(str(commandment_path), ["SETUP", "FULL_BENCHMARK"])
         if fb_script:

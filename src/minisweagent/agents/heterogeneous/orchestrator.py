@@ -130,6 +130,13 @@ def run_llm_steps(
                     _wm.insights.append(insight)
                     if len(_wm.insights) > 15:
                         _wm.insights = _wm.insights[-15:]
+                    # Update bottleneck_type from profiling insights
+                    if "bottleneck=" in (insight.message or ""):
+                        import re as _re_bn
+
+                        _bn = _re_bn.search(r"bottleneck=(\w+)", insight.message)
+                        if _bn:
+                            _wm.bottleneck_type = _bn.group(1)
                     if "speedup" in (insight.message or "").lower():
                         import re as _re
 

@@ -438,6 +438,12 @@ class DefaultAgent:
                     _wm.add_insight(insight.tag, insight.message)
                     import re as _re
 
+                    # Update bottleneck_type from profiling insights
+                    if "bottleneck=" in (insight.message or ""):
+                        _bn = _re.search(r"bottleneck=(\w+)", insight.message)
+                        if _bn:
+                            _wm.bottleneck_type = _bn.group(1)
+
                     _lat = _re.search(r"latency:\s*(\d+\.\d+)ms", insight.message, _re.IGNORECASE)
                     if _lat:
                         _wm.update_latency(float(_lat.group(1)))
