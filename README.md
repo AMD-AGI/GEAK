@@ -4,7 +4,7 @@ GEAK is an AI-powered framework for automated GPU kernel optimization, built on 
 
 It enables systematic, profiling-driven, and scalable optimization of GPU kernels — evolving from single-kernel tuning (v1/v2) to full repository-level autonomous optimization (v3).
 
-**Documentation:** Markdown under [`docs/`](docs/) — browse on GitHub or open files locally.
+**Documentation:** Markdown under [`docs/`](docs/) — start with **[Quick start](docs/quick_start.md)** if you want to run `geak` immediately (`mini` is the same CLI).
 
 ## Table of Contents
 
@@ -60,44 +60,6 @@ GEAK v3 evolves into a unified platform supporting the full optimization stack.
 
 ---
 
-## Core Architecture
-
-### End-to-End Optimization Engine
-
-At its core, GEAK runs a fully autonomous optimization loop:
-
-**Test Detection → Baseline → Profiling → Strategy Planning → (Patch Generation → Validation) × N → Best-performing Kernel**
-
-Each optimization step is:
-
-- Correctness-verified
-- Performance-measured
-- Version-tracked
-
-### Tool-Augmented Intelligence Layer
-
-GEAK v3 introduces a structured tool ecosystem that enhances agent reasoning and execution quality.
-
-The system integrates:
-
-- **Profiling** for quantitative bottleneck identification
-  (memory bandwidth, occupancy, register pressure, execution stalls)
-
-- **Optimization Strategy Management** for tracking explored techniques, marking successful/failed strategies, and prioritizing high-impact directions
-
-- **Version & Patch Management** for automatic diff tracking, benchmarking history, regression detection, and best-patch selection
-
-- **Knowledge Retrieval** for on-demand AMD/NVIDIA GPU knowledge retrieval during optimization
-
-### Parallel Exploration & Scaling
-
-GEAK v3 supports parallel optimization agents. This parallel scaling:
-
-- Raises the optimization ceiling
-- Increases robustness of exploration
-- Reduces dependence on single optimization trajectories
-
----
 
 ## Getting Started
 
@@ -107,9 +69,6 @@ GEAK v3 supports parallel optimization agents. This parallel scaling:
 git clone https://github.com/AMD-AGI/GEAK
 cd GEAK
 pip install -e .
-
-# To use the Knowledge feature, also install the langchain dependencies
-pip install -e '.[langchain]'
 
 # Set model name and key
 
@@ -131,34 +90,26 @@ export AMD_LLM_API_KEY="YOUR_KEY"
 
 ```bash
 # Interactive REPL
-mini
+geak
 
-# Run with a specific task
-mini -t "fix the bug in main.py"
+# Typical kernel optimization (single agent)
+geak --kernel-path /path/to/kernel/file \
+  --repo /path/to/kernel/repo \
+  --task "Optimize the block_reduce kernel"
 
-# Auto-execute mode (no confirmation needed)
-mini --yolo
 
-# Use specific config.yaml
-mini --config geak.yaml \
-  --task "Optimize the kernel in src/kernel.cpp" \
-  --yolo
-```
-
-#### Parallel optimization (multiple agents + best patch selection)
+#### Parallel optimization (multiple agents)
 
 - Each agent works in an isolated git workspace
 - Patches and test results are saved separately
 - After all runs finish, GEAK automatically selects the best patch based on the specified metric
 
 ```bash
-mini --config geak.yaml \
-  --num-parallel 4 \
+mini --num-parallel 4 \
   --repo /path/to/kernel/repo \
-  --task "Optimize block_reduce kernel" \
+  --task "Optimize block_reduce kernel. Kernel path is xxx" \
   --gpu-ids 0,1,2,3 \
   --metric "Extract Bandwidth in GB/s (higher is better)" \
-  --yolo
 ```
 
 **Notes:**
@@ -169,30 +120,22 @@ mini --config geak.yaml \
 - `--metric`: natural-language instruction for extracting/comparing metrics from test logs
 - `--yolo`: run end-to-end without interactive confirmation
 
+For more options and examples, see **[Quick start](docs/quick_start.md)**.
+
+
+
 ### Configuration
 
 #### Loading Configurations
-`mini` loads configs in layers:
+`geak` loads configs in layers:
 
-1. base config: `mini.yaml`
+1. base config: `geak.yaml`
 2. template: `mini_kernel_strategy_list.yaml` (default)
-3. user override: `--config geak.yaml` (**final override**)
+3. user override: `--config xxx.yaml`
+4. cli override: cli args (**final override**)
 
-This means you can configure tools and parallel defaults directly in `geak.yaml`.
+For more options and examples, see **[Configuration](docs/configuration.md)**
 
-#### RAG Configuration
-
-File: `rag_config.yaml` — controls the RAG retrieval pipeline:
-
-| Parameter | Description |
-|-----------|-------------|
-| `retrieval.embed_top_k` / `bm25_top_k` | Number of candidates from Embedding / BM25 retrieval |
-| `retrieval.enable_bm25` | Whether to enable BM25 dual-path recall |
-| `retrieval.mcp_top_k` | Number of final results returned |
-| `reranker.enable_reranker` | Whether to enable re-ranking |
-| `fusion.semantic_weight` / `bm25_weight` | Fusion weights for Embedding and BM25 |
-| `summary.enable_rag_subagent` | Whether to enable LLM summarization |
-| `debug.verbose` | Whether to print verbose RAG tool logs |
 
 ### Output & Artifacts
 
@@ -222,12 +165,11 @@ optimization_logs/<kernel>_<timestamp>/
 
 ### Unit test discovery
 
-If you pass `--create-test`, or you **do not** provide `--test-command`, GEAK will run a **UnitTestAgent** that tries to discover or create tests:
+If `--test-command` is not provided, GEAK will run a **UnitTestAgent** that tries to discover or create tests:
 
 ```bash
-mini --config geak.yaml \
-  --repo /path/to/kernel/repo \
-  --create-test \
+mini --repo /path/to/kernel/repo \
+  --kernel-path /path/to/kernel/file \
   --task "Optimize device_batch_memcpy kernel"
 ```
 
@@ -243,93 +185,6 @@ mini --config geak.yaml \
 
 After parallel runs finish, GEAK runs a selection agent that reads all test logs, extracts metrics, and writes `best_results.json` + `select_agent.log`.
 
-### Knowledge Base Retrieval
-
-Integrates AMD AI DevTool for hybrid knowledge base retrieval (BGE Embedding + BM25 + Reranking), with built-in AMD GPU and NVIDIA GPU knowledge bases.
-
-**Knowledge Base Structure**
-```
-knowledge-base/
-├── amd-knowledge-base/
-│   ├── layer-1-hardware/         # Hardware architecture
-│   ├── layer-2-compute-stack/    # HIP, ROCm
-│   ├── layer-3-libraries/        # rocBLAS, MIOpen, etc.
-│   ├── layer-4-frameworks/       # PyTorch, TensorFlow
-│   ├── layer-5-llm/              # LLM related
-│   ├── layer-6-extended/         # Optimization guides
-│   └── best-practices/
-├── nvidia-knowledge-base/
-├── comparisons/
-└── INDEX.md
-```
-
-**Knowledge Retrieval Architecture**
-
-```
-Semantic + BM25 → RRF Fusion → BGE Reranker → Top K
-```
-
-- **Embedding**: BAAI/bge-large-en-v1.5 (semantic recall)
-- **BM25**: Keyword-based recall
-- **Fusion**: RRF (Reciprocal Rank Fusion)
-- **Reranker**: BAAI/bge-reranker-large
-
-**Usage**
-
-**1. Pre-download ROCm Library Source (Recommended)**
-
-```bash
-git clone --depth 1 https://github.com/ROCm/rocm-libraries.git ~/.cache/rocm-libraries
-```
-
-**2. Build Semantic Index (Required for First Use)**
-
-```bash
-# Build index for all documents under knowledge-base/
-python scripts/build_index.py --force
-```
-
-Index saved to `~/.cache/amd-ai-devtool/semantic-index/` by default:
-- `index.faiss` + `index.pkl` — FAISS semantic search index
-- `bm25_index.pkl` — BM25 keyword search index
-
-**Rebuild** when: knowledge base documents are added/modified, or indexing logic changes.
-
-**Adding New Documents**
-
-1. **Location**: Place the file under the appropriate subdirectory (e.g., `layer-6-extended/optimize-guides/*.md`)
-2. **Format**: Every `.md` file must include a YAML frontmatter:
-   ```yaml
-   ---
-   tags: ["category1", "category2"]   # Required
-   priority: "L1-important"           # Required
-   source_url: "https://..."          # Required
-   rocm_version: "6.0+"              # Required
-   last_updated: 2026-01-14           # Required
-   ---
-   ```
-3. **Filename**: Use English, make it descriptive (e.g., `bf16-vector-load-store.md`)
-4. **Quality**: 800–1200 words, with at least 2 syntactically correct code examples
-5. **Rebuild index after adding**: `python scripts/build_index.py --force`
-
-**3. Test Retrieval**
-
-```bash
-python scripts/test_embedding_search.py      # Test FAISS semantic search
-python scripts/test_hybrid_retrieval.py      # Test hybrid retrieval (Embedding + BM25 + Reranker)
-python scripts/test_rrf_fusion.py            # Test RRF fusion algorithm
-```
-
-**4. Enable Knowledge Retrieval**
-
-```bash
-mini --rag        # Enable RAG knowledge retrieval
-mini --rag -d     # Enable RAG with debug output
-```
-
-Inside the agent, use `@amd:your query` to invoke retrieval.
-
----
 
 ## Summary
 
