@@ -1,4 +1,4 @@
-# Development Guidelines
+# Contribution Guidelines
 
 This document describes best practices for contributing to GEAK. It covers the branching model, pull request workflow, release process, code quality standards, and CI expectations. Following these guidelines keeps the codebase healthy and makes reviews faster.
 
@@ -109,6 +109,23 @@ Use GitHub **Draft PRs** when your work is not yet ready for formal review:
 - Delete the feature branch.
 - If the change needs a release note, add an entry to the changelog (see [Releases](#release-process)).
 
+## Code standards
+
+- Follow existing patterns in `src/minisweagent/` (naming, typing, error handling).
+- Run **Ruff** before pushing; fix new lint issues in touched files.
+- Prefer small, reviewable PRs; avoid drive-by refactors outside the stated goal.
+
+## Local checks
+
+Approximate what CI runs locally before you push:
+
+```bash
+ruff check src/minisweagent/ tests/
+ruff format --check src/minisweagent/ tests/
+pytest
+```
+
+Adjust paths if your change is narrow. See [CI/CD](#cicd) for the full matrix on GitHub.
 
 ---
 
@@ -239,7 +256,7 @@ Every PR and issue must carry exactly one type label. This keeps each PR focused
 
 ## License
 
-All contributions must be compatible with the project's [MIT License](../LICENSE.md). By opening a pull request, you agree that your contribution is licensed under the same terms.
+All contributions must be compatible with the project's [LICENSE](https://github.com/AMD-AGI/GEAK/blob/main/LICENSE.md). By opening a pull request, you agree that your contribution is licensed under the same terms.
 
 Every new source file should include the SPDX header:
 
