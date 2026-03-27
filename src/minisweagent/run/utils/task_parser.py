@@ -34,11 +34,16 @@ def parse_task_info(task_content: str, model) -> dict:
 
     Extracts:
     - kernel_name: Name of the kernel being optimized
+    - kernel_url: URL/path of the kernel being optimized
+    - kernel_type: One of hip/triton/other
     - repo: Repository path
     - test_command: Command to test the optimization
     - metric: Performance metric to extract
     - num_parallel: Number of parallel agents
     - gpu_ids: GPU IDs for parallel execution
+    - output_dir: Output directory for logs/artifacts
+    - model: Model name/identifier to use
+    - config: Path to a config YAML file
 
     Returns dict with extracted values (None if not found).
     """
@@ -46,20 +51,30 @@ def parse_task_info(task_content: str, model) -> dict:
 
 Extract the following information (return null if not found):
 1. kernel_name: The name of the kernel/function being optimized (e.g., "gemm", "matmul", "conv2d")
-2. repo: The repository path mentioned in the task (absolute path or relative path)
-3. test_command: The command to run tests or benchmarks
-4. metric: The performance metric to measure (e.g., "bandwidth in GB/s", "latency in ms", "throughput")
-5. num_parallel: Number of parallel optimization agents to run (integer)
-6. gpu_ids: Comma-separated GPU IDs for parallel execution (e.g., "0,1,2,3")
+2. kernel_url: The kernel URL or local path if provided
+3. kernel_type: Kernel type, strictly one of "hip", "triton", or "other"
+4. repo: The repository path mentioned in the task (absolute path or relative path)
+5. test_command: The command to run tests or benchmarks
+6. metric: The performance metric to measure (e.g., "bandwidth in GB/s", "latency in ms", "throughput")
+7. num_parallel: Number of parallel optimization agents to run (integer)
+8. gpu_ids: Comma-separated GPU IDs for parallel execution (e.g., "0,1,2,3")
+9. output_dir: Directory path where output logs and artifacts should be saved (e.g., "outputs/topk_run", "/workspace/results")
+10. model: Model name or identifier to use (e.g., "claude-sonnet-4-20250514", "gpt-4o")
+11. config: Path to a YAML configuration file (e.g., "configs/my_setup.yaml", "/path/to/config.yaml")
 
 Return ONLY a valid JSON object with these keys. Example:
 {{
   "kernel_name": "matmul",
+  "kernel_url": "https://github.com/org/repo/blob/main/kernel.py",
+  "kernel_type": "triton",
   "repo": "/path/to/repo",
   "test_command": "python test.py",
   "metric": "Extract throughput in GFLOPS",
   "num_parallel": 4,
-  "gpu_ids": "0,1,2,3"
+  "gpu_ids": "0,1,2,3",
+  "output_dir": "outputs/matmul_run",
+  "model": null,
+  "config": null
 }}
 
 If any field cannot be determined from the task, set it to null.
@@ -89,13 +104,21 @@ Here is the task content:
         parsed = json.loads(content)
 
         # Validate and normalize the parsed data
+        kernel_type = str(parsed.get("kernel_type") or "").strip().lower()
+        if kernel_type not in {"hip", "triton", "other"}:
+            kernel_type = "other"
         result = {
             "kernel_name": parsed.get("kernel_name"),
+            "kernel_url": parsed.get("kernel_url"),
+            "kernel_type": kernel_type,
             "repo": parsed.get("repo"),
             "test_command": parsed.get("test_command"),
             "metric": parsed.get("metric"),
             "num_parallel": parsed.get("num_parallel"),
             "gpu_ids": parsed.get("gpu_ids"),
+            "output_dir": parsed.get("output_dir"),
+            "model": parsed.get("model"),
+            "config": parsed.get("config"),
         }
 
         # Normalize repo path and preserve filesystem case (LLM often returns lowercase)
@@ -109,17 +132,134 @@ Here is the task content:
                 if resolved is not None:
                     result["repo"] = str(resolved.resolve())
 
+        # Normalize output_dir and config paths
+        if result["output_dir"]:
+            result["output_dir"] = _normalize_path(result["output_dir"])
+        if result["config"]:
+            result["config"] = _normalize_path(result["config"])
+
         return result
 
     except (json.JSONDecodeError, Exception):
         # If parsing fails, return all None
         return {
             "kernel_name": None,
+            "kernel_url": None,
+            "kernel_type": "other",
             "repo": None,
             "test_command": None,
             "metric": None,
             "num_parallel": None,
             "gpu_ids": None,
+            "output_dir": None,
+            "model": None,
+            "config": None,
+        }
+
+
+def _normalize_path(path_str: str) -> str | None:
+    """Normalize a path string: resolve if exists, try case-insensitive resolution otherwise."""
+    if not path_str:
+        return None
+    p = Path(path_str)
+    if p.exists():
+        return str(p.resolve())
+    resolved = _resolve_path_case(p)
+    if resolved is not None:
+        return str(resolved.resolve())
+    return path_str  # return as-is if can't resolve
+
+
+def parse_pipeline_params(task_content: str, model) -> dict:
+    """Extract pipeline orchestration parameters from task text via LLM.
+
+    Extracts:
+    - kernel_url: Path or URL to the specific kernel file to optimize
+    - preprocess_dir: Path to existing preprocessing artifacts
+    - heterogeneous: Whether to use heterogeneous (diverse strategy) mode
+    - max_rounds: Maximum optimization rounds
+    - start_round: Round to resume from
+    - pipeline_intent: Whether the task describes kernel optimization work
+
+    Returns dict with extracted values (None if not found).
+    """
+    prompt = f"""Analyze the following task and extract GPU kernel optimization pipeline parameters.
+
+Extract the following (return null if not found or not applicable):
+1. kernel_url: The path or URL to the SPECIFIC KERNEL FILE to optimize (e.g., "/path/to/silu.hip", "/workspace/kernels/matmul.py", "https://github.com/org/repo/blob/main/kernel.py"). This is the kernel source file itself, NOT the repository root directory.
+2. preprocess_dir: Path to a directory containing existing preprocessing artifacts (e.g., "/path/to/geak_output"). Only set if the user explicitly mentions reusing existing artifacts.
+3. heterogeneous: Whether to use heterogeneous mode (diverse optimization strategies across GPUs). Set true if the user mentions "heterogeneous", false if they mention "homogeneous", null if not mentioned.
+4. max_rounds: Maximum number of optimization rounds (integer). Only set if explicitly mentioned.
+5. start_round: Round number to resume from (integer, 1-based). Only set if explicitly mentioned.
+6. pipeline_intent: true if the task describes kernel optimization, performance improvement, GPU kernel work, or profiling. false if it describes general coding tasks like bug fixes, refactoring, or feature additions.
+
+Return ONLY a valid JSON object. Example:
+{{{{
+  "kernel_url": "/workspace/repo/kernels/silu.hip",
+  "preprocess_dir": null,
+  "heterogeneous": null,
+  "max_rounds": 5,
+  "start_round": null,
+  "pipeline_intent": true
+}}}}
+
+Here is the task content:
+{task_content}
+
+"""
+
+    try:
+        response = model.query(
+            [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that extracts structured pipeline configuration from task descriptions. Always respond with valid JSON. Don't use tools, you must return the JSON results in one query.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+        )
+        content = response.get("content", "").strip()
+
+        # Extract JSON from markdown code blocks if present
+        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+
+        parsed = json.loads(content)
+
+        result = {
+            "kernel_url": parsed.get("kernel_url"),
+            "preprocess_dir": parsed.get("preprocess_dir"),
+            "heterogeneous": parsed.get("heterogeneous"),
+            "max_rounds": parsed.get("max_rounds"),
+            "start_round": parsed.get("start_round"),
+            "pipeline_intent": bool(parsed.get("pipeline_intent", False)),
+        }
+
+        # Normalize paths
+        if result["kernel_url"]:
+            result["kernel_url"] = _normalize_path(result["kernel_url"])
+        if result["preprocess_dir"]:
+            result["preprocess_dir"] = _normalize_path(result["preprocess_dir"])
+
+        # Validate integer fields
+        for field in ("max_rounds", "start_round"):
+            if result[field] is not None:
+                try:
+                    result[field] = int(result[field])
+                except (ValueError, TypeError):
+                    result[field] = None
+
+        return result
+
+    except (json.JSONDecodeError, Exception):
+        return {
+            "kernel_url": None,
+            "preprocess_dir": None,
+            "heterogeneous": None,
+            "max_rounds": None,
+            "start_round": None,
+            "pipeline_intent": False,
         }
 
 
@@ -144,15 +284,23 @@ def display_parsed_config(parsed_info: dict, patch_output_dir: str) -> str:
     """Display parsed configuration in a formatted way for user confirmation."""
     lines = [
         "\n" + "=" * 70,
-        "Auto-detected Configuration:",
+        "Resolved Configuration (CLI overrides auto-detection):",
         "=" * 70,
-        "  Note: no input for 60s will default to 'y' (proceed).",
     ]
 
     fields: list[tuple[str, str]] = [
         (
+            "kernel_type",
+            parsed_info.get("kernel_type") or "Not detected. Default to other.",
+        ),
+        (
             "kernel_name",
-            parsed_info["kernel_name"] or "Not detected. Please use --kernel-name to specify the kernel name",
+            parsed_info.get("kernel_name")
+            or "Not detected. Please provide --kernel-url or include kernel name in the task",
+        ),
+        (
+            "kernel_url",
+            parsed_info.get("kernel_url") or "Not detected. Please use --kernel-url to specify the kernel target",
         ),
         ("repo", parsed_info["repo"] or "Not detected. Please use --repo to specify the repository path"),
         (
@@ -166,6 +314,8 @@ def display_parsed_config(parsed_info: dict, patch_output_dir: str) -> str:
         ),
         ("num_parallel", str(parsed_info["num_parallel"] or "Not detected. Default to 1.")),
         ("gpu_ids", parsed_info["gpu_ids"] or "Not detected. Default to 0."),
+        ("model", parsed_info.get("model") or "Not detected. Using default."),
+        ("config", parsed_info.get("config") or "Not detected. Using default."),
         ("patch_output_dir", patch_output_dir),
     ]
     key_width = max(len(k) for k, _ in fields)
