@@ -30,7 +30,7 @@ from minisweagent.memory.working_notebook import WorkingNotebook, summarize_work
 
 
 MAX_WORKING_MEMORY_TOKENS = 800
-MAX_INSIGHTS = 5
+MAX_INSIGHTS = 15
 
 
 @dataclass
@@ -199,16 +199,25 @@ class WorkingMemory:
                 self.best_strategy = self.pending_strategy
                 self.best_change_category = self.pending_change_category
 
-        # Fallback: extract latency from GEAK_RESULT_LATENCY_MS and compute speedup
+        # Fallback: extract latency from various benchmark formats
         if not overall and self.baseline_latency_ms > 0:
+            lat_ms = None
             lat_match = re.search(r"GEAK_RESULT_LATENCY_MS=(\d+\.?\d*)", output)
             if lat_match:
                 lat_ms = float(lat_match.group(1))
-                if lat_ms > 0:
-                    self.update_latency(lat_ms)
-                    if self.baseline_latency_ms / lat_ms > self.best_speedup:
-                        self.best_strategy = self.pending_strategy
-                        self.best_change_category = self.pending_change_category
+            if lat_ms is None:
+                geo_match = re.search(r'[Gg]eo\s*mean:\s*(\d+\.\d+)\s*ms', output)
+                if geo_match:
+                    lat_ms = float(geo_match.group(1))
+            if lat_ms is None:
+                shape_lats = re.findall(r':\s*(\d+\.\d+)\s*ms', output)
+                if len(shape_lats) >= 2:
+                    lat_ms = float(shape_lats[-1])
+            if lat_ms is not None and lat_ms > 0:
+                self.update_latency(lat_ms)
+                if self.baseline_latency_ms / lat_ms > self.best_speedup:
+                    self.best_strategy = self.pending_strategy
+                    self.best_change_category = self.pending_change_category
 
         # Track consecutive errors for crash loop detection
         if returncode != 0:
@@ -307,11 +316,28 @@ class WorkingMemory:
         parts = []
 
         parts.append(f"--- Working Memory (step {self.current_step}) ---")
-        parts.append(
-            "PRIORITY: (1) Algorithmic kernel rewrites > (2) Operation fusion > "
-            "(3) Dispatch-path optimization (eliminate overhead, bypass slow paths) > "
-            "(4) Memory restructuring > (5) Parameter tuning."
-        )
+        # Adaptive priorities based on bottleneck type
+        bt = (self.bottleneck_type or "").lower()
+        if bt == "latency":
+            parts.append(
+                "PRIORITY: (1) Dispatch-path optimization (eliminate launch overhead, bypass slow paths) > "
+                "(2) Operation fusion > (3) Parameter tuning > (4) Algorithmic rewrites > (5) Memory restructuring."
+            )
+        elif bt == "memory":
+            parts.append(
+                "PRIORITY: (1) Memory restructuring (reduce bandwidth, improve locality) > "
+                "(2) Operation fusion > (3) Algorithmic rewrites > (4) Parameter tuning > (5) Dispatch-path optimization."
+            )
+        elif bt == "compute":
+            parts.append(
+                "PRIORITY: (1) Algorithmic kernel rewrites > (2) Parameter tuning (tile sizes, warps) > "
+                "(3) Operation fusion > (4) Memory restructuring > (5) Dispatch-path optimization."
+            )
+        else:
+            parts.append(
+                "PRIORITY: (1) Algorithmic kernel rewrites > (2) Operation fusion > "
+                "(3) Dispatch-path optimization > (4) Memory restructuring > (5) Parameter tuning."
+            )
 
         if self.best_speedup > 0 and self.best_latency_ms > 0:
             best_str = f"Best: {self.best_speedup:.2f}x ({self.best_latency_ms:.4f}ms vs baseline {self.baseline_latency_ms:.4f}ms)"
@@ -327,6 +353,11 @@ class WorkingMemory:
             parts.append(f"Tried: {', '.join(self.strategies_tried[-5:])}")
         if self.strategies_failed:
             parts.append(f"Failed: {', '.join(self.strategies_failed[-3:])}")
+        if self.steps_since_improvement > 15 and self.current_step > 20:
+            parts.append(
+                f"WARNING: No improvement in {self.steps_since_improvement} steps. "
+                "Try a fundamentally different approach or save your best patch."
+            )
 
         # Path reminder: agents often use wrong paths in first steps
         if self.current_step <= 2:
@@ -436,7 +467,14 @@ class WorkingMemory:
             parts.append(budget)
 
         parts.append("---")
-        return "\n".join(parts)
+
+        # Conditional injection: skip if nothing changed since last injection
+        result = "\n".join(parts)
+        _state_key = f"{self.best_speedup:.4f}:{len(self.insights)}:{self.current_step // 5}"
+        if hasattr(self, '_last_injection_hash') and self._last_injection_hash == _state_key:
+            return ""
+        self._last_injection_hash = _state_key
+        return result
 
 
 def classify_change(text: str) -> str:
@@ -591,6 +629,24 @@ def extract_insight_from_tool_result(tool_name: str, output: str, returncode: in
         sp = float(oe_match.group(1))
         tag = "WIN" if sp > 1.0 else "OK"
         return Insight(step=0, tag=tag, message=f"OpenEvolve best: {sp:.2f}x")
+
+    # Custom benchmark: "Geo mean: 0.024120ms" or "geo mean: X.XXms"
+    geo_match = re.search(r'[Gg]eo\s*mean:\s*(\d+\.\d+)\s*ms', output)
+    if geo_match:
+        lat = float(geo_match.group(1))
+        return Insight(step=0, tag="OK", message=f"Benchmark latency: {lat:.4f}ms")
+
+    # Shape-specific latencies: "hd=256 tn=1: 0.0238ms" — take last as summary
+    shape_lats = re.findall(r':\s*(\d+\.\d+)\s*ms', output)
+    if len(shape_lats) >= 2:
+        lat = float(shape_lats[-1])
+        return Insight(step=0, tag="OK", message=f"Benchmark latency: {lat:.4f}ms")
+
+    # Generic latency after keywords: "latency: X.XXms", "time: X.XXms"
+    lat_generic = re.search(r'(?:latency|result|time)[:\s]+(\d+\.\d+)\s*ms', output, re.IGNORECASE)
+    if lat_generic:
+        lat = float(lat_generic.group(1))
+        return Insight(step=0, tag="OK", message=f"Benchmark latency: {lat:.4f}ms")
 
     # BrokenPipeError (common OE failure)
     if "brokenpipeerror" in output_lower:

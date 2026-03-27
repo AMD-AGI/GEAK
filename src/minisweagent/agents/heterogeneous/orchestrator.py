@@ -128,14 +128,20 @@ def run_llm_steps(
                 if insight:
                     insight.step = step
                     _wm.insights.append(insight)
-                    if len(_wm.insights) > 5:
-                        _wm.insights = _wm.insights[-5:]
+                    if len(_wm.insights) > 15:
+                        _wm.insights = _wm.insights[-15:]
                     if "speedup" in (insight.message or "").lower():
                         import re as _re
 
                         _sp = _re.search(r"(\d+\.\d+)x", insight.message)
                         if _sp:
                             _wm.update_speedup(float(_sp.group(1)))
+                    elif "latency" in (insight.message or "").lower():
+                        import re as _re
+
+                        _lat = _re.search(r"(\d+\.\d+)\s*ms", insight.message)
+                        if _lat:
+                            _wm.update_latency(float(_lat.group(1)))
             except Exception:
                 pass
 
