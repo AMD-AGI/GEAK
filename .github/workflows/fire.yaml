@@ -6,7 +6,7 @@ on:
 jobs:
   smoke:
     name: GEAK smoke test (silu kernel)
-    runs-on: geak-benchmark-5kh27
+    runs-on: geak-benchmark
     timeout-minutes: 60
 
     env:
@@ -31,7 +31,7 @@ jobs:
           fi
 
       - name: Verify CLI
-        run: mini --help
+        run: geak --help
 
       - name: Prepare workspace
         run: |
@@ -49,12 +49,11 @@ jobs:
       - name: Run GEAK optimization
         working-directory: ${{ env.SMOKE_DIR }}
         run: |
-          mini \
-            -c geak \
-            --repo "$SMOKE_DIR" \
+          geak --repo "$SMOKE_DIR" \
             --yolo \
             --exit-immediately \
-            -t "Optimize the silu_mul_kernel in silu.hip for better performance on AMD MI300X. The kernel computes SiLU activation (x * sigmoid(x)) fused with element-wise multiplication on bf16 data."
+            --kernel-path "$SMOKE_DIR/silu.hip" \
+            -t "Optimize the silu_mul_kernel in silu.hip for better performance."
 
       - name: Verify output
         run: |
