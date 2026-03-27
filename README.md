@@ -4,6 +4,8 @@ GEAK is an AI-powered framework for automated GPU kernel optimization, built on 
 
 It enables systematic, profiling-driven, and scalable optimization of GPU kernels — evolving from single-kernel tuning (v1/v2) to full repository-level autonomous optimization (v3).
 
+**Documentation (GitHub Pages):** https://amd-agi.github.io/GEAK/
+
 ## Table of Contents
 
 - [Evolution: From Kernel-Level to Repo-Level Automation](#evolution-from-kernel-level-to-repo-level-automation)

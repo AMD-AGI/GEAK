@@ -14,3 +14,6 @@ To build these pages locally (optional):
 pip install mkdocs-material
 mkdocs serve
 ```
+
+**Published site:** after [.github/workflows/pages.yaml](https://github.com/AMD-AGI/GEAK/blob/main/.github/workflows/pages.yaml) runs, the site is at **https://amd-agi.github.io/GEAK/** .  
+In the repository, set **Settings → Pages → Build and deployment → Source: GitHub Actions** (once per repo).
