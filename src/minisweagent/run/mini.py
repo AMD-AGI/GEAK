@@ -180,7 +180,6 @@ def main(
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs."),
     test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command"),
-    heterogeneous_flag: bool | None = typer.Option(None, "--heterogeneous/--no-heterogeneous", "--hetero/--no-hetero", help="Force heterogeneous or homogeneous mode. Auto-detects if not set."),
 ):
     # fmt: on
     del visual
@@ -193,11 +192,11 @@ def main(
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
     console.print(f"Loading base config: [bold green]'{base_config_path.name}'[/bold green]")
     config = yaml.safe_load(base_config_path.read_text()) or {}
-    if config_spec:
-        config_path = get_config_path(config_spec)
-        console.print(f"[dim]Applying user config from '{config_path}' (final override)[/dim]")
-        user_config = yaml.safe_load(config_path.read_text()) or {}
-        config = _deep_merge(config, user_config)
+    if not config_spec:
+        config_path = builtin_config_dir / "geak.yaml"
+    console.print(f"[dim]Applying user config from '{config_path}' (final override)[/dim]")
+    user_config = yaml.safe_load(config_path.read_text()) or {}
+    config = _deep_merge(config, user_config)
 
     if yolo:
         config.setdefault("agent", {})["mode"] = "yolo"
@@ -246,8 +245,7 @@ def main(
         console.print("[bold green]Got that, thanks![/bold green]")
 
     # 2a) LLM-driven pipeline param extraction
-    # CLI --heterogeneous/--no-heterogeneous flag takes highest priority
-    heterogeneous = heterogeneous_flag
+    heterogeneous = None
     max_rounds = None
     if task_content:
         from minisweagent.run.utils.task_parser import parse_pipeline_params
@@ -443,10 +441,6 @@ def main(
         return _final_report_to_bestpatchresult(report)
 
     agent_config = dict(config.get("agent", {}))
-    enable_strategies = _as_bool(tools_cfg.get("strategy_manager", False))
-    strategy_file = tools_cfg.get("strategy_file")
-    if enable_strategies and strategy_file:
-        agent_config["strategy_file_path"] = strategy_file
     agent_config["save_patch"] = True
     agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
     agent_config["metric"] = metric
@@ -461,11 +455,6 @@ def main(
                 p = resolved
         repo_path = p.resolve()
 
-    tools_settings = {
-        "strategy_manager": enable_strategies,
-        "strategy_file": strategy_file,
-    }
-
     return run_homogeneous_agent(
         config=config,
         task_content=task_content,
@@ -473,7 +462,6 @@ def main(
         env=env,
         env_class=env.__class__,
         env_kwargs=_env_kwargs,
-        tools_settings=tools_settings,
         agent_config=agent_config,
         repo=repo_path,
         num_parallel=num_parallel,

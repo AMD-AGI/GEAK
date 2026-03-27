@@ -24,3 +24,6 @@ model:
     # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
     text:
       verbosity: low
+tools:
+  profiling: false
+  profiling_type: profiling
