@@ -476,6 +476,21 @@ class ParallelAgent(DefaultAgent):
         if str(repo_path) != repo_path_str:
             text = text.replace(str(repo_path), worktree_path_str)
 
+        # After remapping, revert script paths that became double-nested.
+        # When worktree is inside the repo (e.g. <repo>/ws_foo/.../worktrees/slot_0),
+        # paths like <repo>/ws_foo/logs/cmd.sh become <worktree>/ws_foo/logs/cmd.sh
+        # which doubles the nesting. Detect by checking if a .sh/.py path starts
+        # with worktree_path and the suffix after worktree_path also starts with
+        # a workspace-like segment. Revert to repo_path + suffix.
+        _wt_rel = worktree_path_str[len(repo_path_str):]  # e.g. /ws_foo/.../worktrees/slot_0
+        if _wt_rel:
+            _first_seg = _wt_rel.split("/")[1] if len(_wt_rel.split("/")) > 1 else ""
+            if _first_seg:
+                for m in re.finditer(r'(/\S+\.(?:sh|py))\b', text):
+                    p = m.group(1)
+                    if p.startswith(worktree_path_str + "/" + _first_seg):
+                        original = repo_path_str + p[len(worktree_path_str):]
+                        text = text.replace(p, original)
 
         # Keep agent id in any remaining /worktrees/agent_<id> segments aligned
         # with this worktree.
