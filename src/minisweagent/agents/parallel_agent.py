@@ -476,17 +476,6 @@ class ParallelAgent(DefaultAgent):
         if str(repo_path) != repo_path_str:
             text = text.replace(str(repo_path), worktree_path_str)
 
-        # After remapping, revert double-nested paths.
-        # When worktree is inside repo, paths into workspace dirs get the
-        # worktree prefix prepended, doubling the nesting.  Detect by
-        # looking for the worktree's first directory segment appearing
-        # twice in any path, and revert the outer nesting.
-        _wt_rel = worktree_path_str[len(repo_path_str):]
-        _wt_segs = [s for s in _wt_rel.split("/") if s]
-        if _wt_segs:
-            _nested = worktree_path_str + "/" + _wt_segs[0]
-            if _nested in text:
-                text = text.replace(_nested, repo_path_str + "/" + _wt_segs[0])
 
         # Keep agent id in any remaining /worktrees/agent_<id> segments aligned
         # with this worktree.
@@ -605,12 +594,6 @@ class ParallelAgent(DefaultAgent):
             # which are set to point to the worktree at lines below.
 
             task_with_repo = cls._replace_paths(task_content, repo_path, worktree_path)
-            # Restore test_command to original path — it uses env vars, not hardcoded paths.
-            _orig_test_cmd = parallel_agent_config.get("test_command", "")
-            if _orig_test_cmd:
-                _remapped_cmd = cls._replace_paths(_orig_test_cmd, repo_path, worktree_path)
-                if _remapped_cmd != _orig_test_cmd:
-                    task_with_repo = task_with_repo.replace(_remapped_cmd, _orig_test_cmd)
 
             # Create model and environment
             parallel_model = model_factory()
