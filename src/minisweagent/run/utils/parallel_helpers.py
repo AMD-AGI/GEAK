@@ -574,10 +574,14 @@ def run_pool(
                 agent.log_file = log_file
 
             try:
-                from minisweagent.memory.integration import is_working_memory_enabled
+                from minisweagent.memory.integration import (  # pylint: disable=import-error,no-name-in-module
+                    is_working_memory_enabled,
+                )
 
                 if is_working_memory_enabled():
-                    from minisweagent.memory.working_memory import WorkingMemory
+                    from minisweagent.memory.working_memory import (  # pylint: disable=import-error,no-name-in-module
+                        WorkingMemory,
+                    )
 
                     _wm_notebook_dir = None
                     if _wm_bm_path:
