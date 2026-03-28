@@ -317,26 +317,25 @@ class WorkingMemory:
 
         parts.append(f"--- Working Memory (step {self.current_step}) ---")
         # Adaptive priorities based on bottleneck type
+        # Dispatch-path optimization is ALWAYS last resort
         bt = (self.bottleneck_type or "").lower()
-        if bt == "latency":
+        if bt == "memory":
             parts.append(
-                "PRIORITY: (1) Dispatch-path optimization (eliminate launch overhead, bypass slow paths) > "
-                "(2) Operation fusion > (3) Parameter tuning > (4) Algorithmic rewrites > (5) Memory restructuring."
-            )
-        elif bt == "memory":
-            parts.append(
-                "PRIORITY: (1) Memory restructuring (reduce bandwidth, improve locality) > "
-                "(2) Operation fusion > (3) Algorithmic rewrites > (4) Parameter tuning > (5) Dispatch-path optimization."
+                "PRIORITY: (1) Memory coalescing (vectorized loads, reduce bandwidth, improve locality) > "
+                "(2) Algorithmic kernel rewrites > (3) Operation fusion > "
+                "(4) Parameter tuning (tile sizes, warps) > (5) Dispatch-path optimization (last resort)."
             )
         elif bt == "compute":
             parts.append(
-                "PRIORITY: (1) Algorithmic kernel rewrites > (2) Parameter tuning (tile sizes, warps) > "
-                "(3) Operation fusion > (4) Memory restructuring > (5) Dispatch-path optimization."
+                "PRIORITY: (1) Algorithmic kernel rewrites (reduce FLOPs, better math) > "
+                "(2) Parameter tuning (tile sizes, warps, split-K) > "
+                "(3) Operation fusion > (4) Memory coalescing > (5) Dispatch-path optimization (last resort)."
             )
-        else:
+        else:  # latency, balanced, unknown
             parts.append(
                 "PRIORITY: (1) Algorithmic kernel rewrites > (2) Operation fusion > "
-                "(3) Dispatch-path optimization > (4) Memory restructuring > (5) Parameter tuning."
+                "(3) Memory coalescing (vectorized loads, reduce global memory traffic) > "
+                "(4) Parameter tuning (tile sizes, warps) > (5) Dispatch-path optimization (last resort)."
             )
 
         if self.best_speedup > 0 and self.best_latency_ms > 0:
@@ -358,6 +357,13 @@ class WorkingMemory:
                 f"WARNING: No improvement in {self.steps_since_improvement} steps. "
                 "Try a fundamentally different approach or save your best patch."
             )
+        # Dead-end detection: when 3+ attempts of same strategy category failed
+        if self.strategies_failed and len(self.strategies_failed) >= 3:
+            from collections import Counter
+            _fail_cats = Counter(s.split("(")[0].strip() for s in self.strategies_failed)
+            for _cat, _cnt in _fail_cats.items():
+                if _cnt >= 3:
+                    parts.append(f"DEAD END: {_cat} tried {_cnt}x without gain. Switch to a different approach.")
 
         # Path reminder: agents often use wrong paths in first steps
         if self.current_step <= 2:
@@ -470,7 +476,7 @@ class WorkingMemory:
 
         # Conditional injection: skip if nothing changed since last injection
         result = "\n".join(parts)
-        _state_key = f"{self.best_speedup:.4f}:{len(self.insights)}:{self.current_step // 5}"
+        _state_key = f"{self.best_speedup:.4f}:{len(self.insights)}:{len(self.strategies_tried)}"
         if hasattr(self, '_last_injection_hash') and self._last_injection_hash == _state_key:
             return ""
         self._last_injection_hash = _state_key

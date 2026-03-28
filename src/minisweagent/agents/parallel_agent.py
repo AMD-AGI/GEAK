@@ -2,7 +2,6 @@
 
 import concurrent.futures
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -477,18 +476,6 @@ class ParallelAgent(DefaultAgent):
         if str(repo_path) != repo_path_str:
             text = text.replace(str(repo_path), worktree_path_str)
 
-        # Revert file paths that became too long after remapping.
-        # Worktree nesting can create 300+ char paths that exceed the
-        # Linux shebang limit (128 chars for #! interpreter path) and
-        # cause "not found" errors.  When a remapped path exceeds 255
-        # chars and a shorter original exists, use the original — scripts
-        # use env vars (GEAK_WORK_DIR, GEAK_HARNESS) so absolute paths work.
-        for m in re.finditer(r'(/\S+\.(?:sh|py))\b', text):
-            remapped = m.group(1)
-            if len(remapped) > 255:
-                original = remapped.replace(worktree_path_str, repo_path_str, 1)
-                if original != remapped and os.path.exists(original):
-                    text = text.replace(remapped, original)
 
         # Keep agent id in any remaining /worktrees/agent_<id> segments aligned
         # with this worktree.
@@ -602,12 +589,9 @@ class ParallelAgent(DefaultAgent):
 
             log_file = parallel_patch_dir / f"agent_{agent_id}.log"
 
-            # test_command should use relative paths, executed from worktree cwd
-            # Path replacement kept for backward compatibility with absolute paths
-            if parallel_agent_config.get("test_command"):
-                parallel_agent_config["test_command"] = cls._replace_paths(
-                    parallel_agent_config["test_command"], repo_path, worktree_path
-                )
+            # Keep test_command at its original absolute path — don't remap.
+            # The script uses env vars (GEAK_WORK_DIR, GEAK_HARNESS, GEAK_GPU_DEVICE)
+            # which are set to point to the worktree at lines below.
 
             task_with_repo = cls._replace_paths(task_content, repo_path, worktree_path)
 
