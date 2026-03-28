@@ -355,7 +355,9 @@ class WorkingMemory:
         if self.steps_since_improvement > 15 and self.current_step > 20:
             parts.append(
                 f"WARNING: No improvement in {self.steps_since_improvement} steps. "
-                "Try a fundamentally different approach or save your best patch."
+                "Try a RADICALLY different approach: bypass the current kernel entirely "
+                "(use PyTorch ops, restructure the call graph, eliminate unnecessary operations), "
+                "or save your best patch and submit."
             )
         # Dead-end detection: when 3+ attempts of same strategy category failed
         if self.strategies_failed and len(self.strategies_failed) >= 3:
@@ -371,6 +373,12 @@ class WorkingMemory:
                 "IMPORTANT: Use ABSOLUTE paths from the task context (KERNEL FILE TO EDIT, REPO ROOT). "
                 "Do NOT use relative paths with sed/cat. Use str_replace_editor or "
                 "write the full file with cat > file << 'EOF'."
+            )
+        # Remind to save after edits
+        if self.current_step > 3 and self.best_speedup <= 1.0 and self.current_step % 10 < 2:
+            parts.append(
+                "REMINDER: After editing kernel.py, run save_and_test to capture your speedup. "
+                "Unsaved improvements are lost."
             )
 
         # Architecture diagnosis: full detail for first 5 steps, then brief reminder

@@ -304,6 +304,12 @@ class WorkingNotebook:
             category_suffix = f" [{best_category}]" if best_category else ""
             lines.append(f"Best so far: {best_speedup:.4f}x via {best_strategy}{category_suffix}")
 
+        # Show what WORKED (positive signals for cross-round learning)
+        winners = [(s, info) for s, info in tried.items() if float(info.get("best_speedup", 0)) > 1.01]
+        if winners:
+            winner_strs = [f"{s} ({float(info['best_speedup']):.2f}x)" for s, info in sorted(winners, key=lambda x: -float(x[1]["best_speedup"]))]
+            lines.append("WHAT WORKED: " + "; ".join(winner_strs[:3]))
+
         if tried:
             ranked = sorted(
                 tried.items(),
