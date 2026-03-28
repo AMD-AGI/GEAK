@@ -605,6 +605,12 @@ class ParallelAgent(DefaultAgent):
             # which are set to point to the worktree at lines below.
 
             task_with_repo = cls._replace_paths(task_content, repo_path, worktree_path)
+            # Restore test_command to original path — it uses env vars, not hardcoded paths.
+            _orig_test_cmd = parallel_agent_config.get("test_command", "")
+            if _orig_test_cmd:
+                _remapped_cmd = cls._replace_paths(_orig_test_cmd, repo_path, worktree_path)
+                if _remapped_cmd != _orig_test_cmd:
+                    task_with_repo = task_with_repo.replace(_remapped_cmd, _orig_test_cmd)
 
             # Create model and environment
             parallel_model = model_factory()
