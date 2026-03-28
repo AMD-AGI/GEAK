@@ -6,7 +6,7 @@ on:
 jobs:
   smoke:
     name: GEAK smoke test (silu kernel)
-    runs-on: geak-benchmark
+    runs-on: geak-benchmark-7vhgm
     timeout-minutes: 60
 
     env:
