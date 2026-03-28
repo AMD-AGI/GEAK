@@ -425,7 +425,7 @@ class DefaultAgent:
         _wm = getattr(self, "_working_memory", None)
         if _wm and result:
             try:
-                from minisweagent.memory.working_memory import (
+                from minisweagent.memory.working_memory import (  # pylint: disable=import-error,no-name-in-module
                     extract_insight_from_tool_result,
                     extract_strategy_from_edit,
                 )
@@ -454,7 +454,9 @@ class DefaultAgent:
                 else:
                     _wm.note_tool_result(output_str, rc)
                 if "has been edited" in output_str:
-                    from minisweagent.memory.working_memory import classify_change
+                    from minisweagent.memory.working_memory import (  # pylint: disable=import-error,no-name-in-module
+                        classify_change,
+                    )
 
                     last_assistant = ""
                     for m in reversed(self.messages):
