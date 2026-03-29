@@ -65,14 +65,18 @@ Parallel runs add multiple isolated workspaces and a **best-patch** selection st
 - [Getting Started](#getting-started)
   - [Installation](#installation)
   - [Usage](#usage)
+    - [Basic (single-agent) GPU kernel optimization](#basic-single-agent-gpu-kernel-optimization)
+    - [Parallel optimization (multiple agents)](#parallel-optimization-multiple-agents)
   - [Configuration](#configuration)
-  - [Output & Artifacts](#output--artifacts)
+    - [Loading Configurations](#loading-configurations)
+  - [Output & Artifacts](#output-artifacts)
 - [Features](#features)
-  - [Unit Test Discovery](#unit-test-discovery)
-  - [System Tools (Built-in)](#system-tools-built-in)
-  - [Best Patch Selection](#best-patch-selection)
-  - [Knowledge Base Retrieval](#knowledge-base-retrieval)
+  - [Preprocess](#preprocess)
+  - [Best patch selection](#best-patch-selection)
 - [Evolution: From Foundation to Platform](#evolution-from-foundation-to-platform)
+  - [GEAK v1 — Foundation (Triton)](#geak-v1-foundation-triton)
+  - [GEAK v2 — Expansion (Agent Family)](#geak-v2-expansion-agent-family)
+  - [GEAK v3 — Platform (L1 → L3)](#geak-v3-platform-l1-l3)
 - [Summary](#summary)
 - [Acknowledgments](#acknowledgments)
 
@@ -114,6 +118,7 @@ geak --kernel-path /path/to/kernel/file \
   --repo /path/to/kernel/repo \
   --task "Optimize the block_reduce kernel"
 
+```
 
 #### Parallel optimization (multiple agents)
 
@@ -124,9 +129,8 @@ geak --kernel-path /path/to/kernel/file \
 ```bash
 geak --num-parallel 4 \
   --repo /path/to/kernel/repo \
-  --task "Optimize block_reduce kernel. Kernel path is xxx" \
-  --gpu-ids 0,1,2,3 \
-  --metric "Extract Bandwidth in GB/s (higher is better)" \
+  --task "Optimize block_reduce kernel. Kernel path is xxx. Extract Bandwidth in GB/s (higher is better) as the metric" \
+  --gpu-ids 0,1,2,3
 ```
 
 **Notes:**
@@ -134,7 +138,6 @@ geak --num-parallel 4 \
 - `--num-parallel`: number of optimization agents
 - `--repo`: required when `--num-parallel > 1` (each agent uses an isolated git worktree)
 - `--gpu-ids`: comma-separated GPU IDs for agents
-- `--metric`: natural-language instruction for extracting/comparing metrics from test logs
 - `--yolo`: run end-to-end without interactive confirmation
 
 For more options and examples, see **[Quick start](docs/quick_start.md)**.
@@ -181,6 +184,21 @@ optimization_logs/<kernel>_<timestamp>/
 ## Features
 
 
+### Preprocess
+
+Every **`geak`** run starts with **preprocessing**. It anchors the rest of the run in **measured facts** instead of whatever the LLM “believes,” which makes kernel optimization outcomes **more reliable** and **less sensitive to hallucination**: paths, repos, and commands are resolved and recorded up front.
+
+The pipeline chains steps such as **kernel URL resolution**, **codebase context**, **automated test discovery**, **harness execution / validation**, **kernel profiling**, **baseline metrics**, and **commandment** generation (order and fallbacks match the implementation). Critically, **baseline performance is exercised before the main optimization loop starts**, so reported **speedups are always against that same frozen baseline**—not a moving target the model might invent mid-run. The **test harness stays fixed** for the lifetime of the run (same entrypoints and modes from preprocess through patch evaluation), so comparisons stay apples-to-apples and **final speedup numbers are not reinterpreted** by the LLM.
+
+**Unit-test discovery / harness creation** is one stage inside that preprocess: if you **do not** pass **`--test-command`**, the preprocessor can invoke the **UnitTestAgent** to **find** an existing harness or **materialize** a validated one (correctness / profile / benchmark modes). If discovery already yields a good harness, the preprocessor may skip or fall back from UnitTestAgent as appropriate. The resulting command is what the later optimization loop uses so patches are still checked against a real correctness signal before chasing performance.
+
+
+
+### Best patch selection
+
+**`--num-parallel`** runs several agents in **isolated git worktrees** (optionally pinned with **`--gpu-ids`**). Each run writes patches and test logs under **`optimization_logs/<kernel>_<timestamp>/parallel_*`**. When the batch finishes, a **selection** step reads those artifacts, applies your **metric** (from task text or **`patch.metric`** in YAML), and produces **`best_results.json`** plus **`select_agent.log`**.
+
+
 ---
 
 ## Evolution: From Foundation to Platform
@@ -203,7 +221,8 @@ GEAK v2 expanded into a multi-agent system for HIP kernel optimization.
 - **OpenEvolve:** genetic optimization for kernel evolution
 - support HIP → HIP kernel optimization
 
-**Outcome:** Scalable multi-agent system
+**Outcome:** Scalable multi-agent system.
+
 
 ### GEAK v3 — Platform (L1 → L3)
 
@@ -219,10 +238,7 @@ GEAK v3 evolves into a unified platform supporting the full optimization stack.
 
 ## Summary
 
-GEAK v3 enables reproducible, measurable, and scalable GPU kernel optimization at repository scale. It integrates:
-
-- **Profiling** + **Strategy Management** + **Parallel Exploration** for autonomous optimization
-- **Knowledge Retrieval** with AMD/NVIDIA knowledge bases for informed decision-making
+**GEAK v3** is built to **automatically optimize HIP and Triton GPU kernels end to end** in real repositories: **`geak`** drives the full loop—measurement, iteration, patch application, and validation—so you are not stitching shell steps by hand. Runs are **reproducible and auditable**: everything lands under **`optimization_logs/`**, and **parallel** mode adds isolated **worktrees** plus **best-patch selection** when you want broader search without sacrificing traceability.
 
 Contributions, experiments, and feedback are welcome.
 
