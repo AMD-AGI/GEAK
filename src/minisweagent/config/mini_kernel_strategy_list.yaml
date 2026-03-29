@@ -73,7 +73,7 @@ agent:
        
     4. Before listing strategies, identify the bottleneck of the current kernel:
        - If `profile.json` exists in the workspace, use it as the primary profiling reference for optimization planning.
-       - If `profile.json` is not available, call the `profiling` tool with the appropriate working directory and command used during performance testing.
+       - If `profile.json` is not available, call the `profile_kernel` tool with the appropriate working directory and command used during performance testing.
 
     5. **Analyze and Prioritize Strategies**
        - Analyze computational complexity, memory access patterns, and parallelization opportunities
@@ -101,7 +101,7 @@ agent:
        - **Calculate relative change** compared to baseline (e.g., +21.1% improvement or -4.7% regression)
        - Record ONLY the relative change (percentage) in strategy file, not absolute values
        - Include reference to detailed log file for full metrics
-       - **RECOMMENDED**: Use `profiling` tool to profile the kernel after implementation to identify the bottleneck of the current kernel.
+       - **RECOMMENDED**: Use `profile_kernel` tool to profile the kernel after implementation to identify the bottleneck of the current kernel.
        - **Decision**: If successful (performance improved), keep it. If failed (regression), revert the changes.
 
     8. **Explore Additional Strategies**
@@ -149,7 +149,8 @@ agent:
     ## Important Rules
 
     1. Every response must contain exactly one tool call
-    2. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+    2. NOTE: This rule applies to `bash` tool only, NOT to `profile_kernel.performance_cmd`.
+       For `bash` tool, directory or environment variable changes are not persistent. Every action is executed in a new subshell.
        However, you can prefix any bash command with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
     3. Ignore policy: When analyzing logs / drawing conclusions / optimizing, IGNORE all information related to parallel execution or hardware assignment (e.g., "parallel X runs", "gpu idx N", "device id", multi-GPU, threads, streams, scheduling, affinity). This information is already handled by the backend; it MUST NOT enter your reasoning, MUST NOT influence decisions, and MUST NOT be mentioned in the final answer.
 
@@ -194,8 +195,14 @@ agent:
     - **note**: Add documentation note
     - **summary**: Show statistics
 
-    ### profiling
-    Profile GPU kernel with rocprof to identify bottlenecks. Parameters: profiling_workdir, profiling_cmd
+    ### profile_kernel
+    Profile GPU kernel with rocprof to identify bottlenecks. Parameters: command, workdir
+    - **command**: Must be a single executable invocation.
+    - **workdir**: Use this for the working directory instead of `cd` in the command.
+    - Forbidden in `command`: `&&`, `cd`, `|`, `;`, `$VAR`, inline env assignments (e.g. `VAR=val cmd`)
+    - Good example: `command="python3 scripts/task_runner.py performance", workdir="/path/to/project"`
+    - Bad example: `command="cd /path && python3 scripts/task_runner.py performance"`
+  
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
     <output>
@@ -209,5 +216,5 @@ agent:
     - **save_and_test**: Save patch and run performance test
     - **submit**: Submit final result and complete task
     - **strategy_manager**: Track optimization strategies
-    - **profiling**: Profile GPU kernel with rocprof
+    - **profile_kernel**: Profile GPU kernel with rocprof
     </available_tools>

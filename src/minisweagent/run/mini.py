@@ -213,6 +213,7 @@ def main(
         disabled_tools.append("bash")
     if tools_cfg.get("profiling") is False:
         disabled_tools.append("profiling")
+        disabled_tools.append("profile_kernel")
 
     if disabled_tools:
         config.setdefault("agent", {}).setdefault("disabled_tools", [])
