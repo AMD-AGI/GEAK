@@ -13,7 +13,7 @@
 Simplified data flow for a typical **`geak`** run:
 
 ```mermaid
-%%{init: {"theme": "neutral", "flowchart": {"curve": "basis", "padding": 16}}}%%
+%%{init: {"theme": "neutral", "flowchart": {"curve": "basis", "padding": 6, "nodeSpacing": 28, "rankSpacing": 32}, "themeVariables": {"fontSize": "11px", "fontFamily": "ui-sans-serif, system-ui, sans-serif"}}}%%
 flowchart TB
   subgraph Inputs
     direction LR
@@ -50,11 +50,11 @@ flowchart TB
   OptRun --> POSTPROC
   POSTPROC --> OUT
 
-  style Inputs fill:#eff6ff,stroke:#2563eb,stroke-width:1.5px,color:#1e40af
-  style Setup fill:#fffbeb,stroke:#d97706,stroke-width:1.5px,color:#92400e
-  style OptRun fill:#ecfdf5,stroke:#059669,stroke-width:1.5px,color:#065f46
-  style POSTPROC fill:#faf5ff,stroke:#7c3aed,stroke-width:1.5px,color:#5b21b6
-  style OUT fill:#fef2f2,stroke:#dc2626,stroke-width:1.5px,color:#991b1b
+  style Inputs fill:#eff6ff,stroke:#2563eb,stroke-width:1px,color:#1e40af
+  style Setup fill:#fffbeb,stroke:#d97706,stroke-width:1px,color:#92400e
+  style OptRun fill:#ecfdf5,stroke:#059669,stroke-width:1px,color:#065f46
+  style POSTPROC fill:#faf5ff,stroke:#7c3aed,stroke-width:1px,color:#5b21b6
+  style OUT fill:#fef2f2,stroke:#dc2626,stroke-width:1px,color:#991b1b
 ```
 
 Parallel runs add multiple isolated workspaces and a **best-patch** selection step on top of the same **optimization run** pattern.
