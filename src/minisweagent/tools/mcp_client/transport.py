@@ -46,13 +46,28 @@ class StdioTransport:
         Returns:
             JSON-RPC response dict
         """
-        line = await self.process.stdout.readline()
-        if not line:
-            raise EOFError("MCP server closed connection")
+        while True:
+            line = await self.process.stdout.readline()
+            if not line:
+                raise ConnectionError(
+                    "MCP server closed connection without sending a response. "
+                    "This may indicate the profiler subprocess exited prematurely."
+                )
 
-        response = json.loads(line.decode())
-        logger.debug(f"Received response: {response}")
-        return response
+            decoded = line.decode().strip()
+            if not decoded:
+                # Skip blank lines emitted by rocprof/rocprofv2 progress output
+                continue
+
+            try:
+                response = json.loads(decoded)
+            except json.JSONDecodeError:
+                # Non-JSON lines (stderr bleed, warnings, headers) — log and keep waiting
+                logger.debug("Skipping non-JSON line from MCP server: %r", decoded)
+                continue
+
+            logger.debug(f"Received response: {response}")
+            return response
 
     async def send_and_receive(self, request: dict[str, Any]) -> dict[str, Any]:
         """

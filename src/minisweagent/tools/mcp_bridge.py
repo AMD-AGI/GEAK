@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import json
 import logging
 import threading
 from pathlib import Path
@@ -75,6 +76,16 @@ class MCPToolBridge:
         try:
             raw = self._run_async(self._async_call(tool_name, arguments or {}))
             return self._format_result(raw)
+        except json.JSONDecodeError as e:
+            msg = (
+                f"MCPToolBridge({self.server_name}).{tool_name} received malformed JSON from the "
+                f"MCP server. This typically means the profiler (rocprof/rocprofv2) printed "
+                f"non-JSON output (warnings, headers, progress lines) to stdout. "
+                f"Ensure the profiler server redirects stderr with stderr=subprocess.PIPE. "
+                f"Original error: {e}"
+            )
+            logger.exception(msg)
+            return {"output": msg, "returncode": 1}
         except Exception as e:
             logger.exception(f"MCPToolBridge({self.server_name}).{tool_name} failed: {e!r}")
             return {"output": f"MCP tool error: {e!r}", "returncode": 1}
