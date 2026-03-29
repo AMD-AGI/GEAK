@@ -1,18 +1,60 @@
 # GEAK-v3
 
-GEAK is an AI-powered framework for automated GPU kernel optimization, built on top of mini-SWE-agent.
+**For teams shipping GPU kernels in real repositories** — GEAK is an agent-driven framework that turns profiling, tests, and LLM reasoning into **reviewable patches**, from one file to repo-wide runs.
 
-It enables systematic, profiling-driven, and scalable optimization of GPU kernels — evolving from single-kernel tuning (v1/v2) to full repository-level autonomous optimization (v3).
+- **Stack-aware** — **HIP** and **Triton** are the primary optimization targets today; support for additional languages and stacks (including ASM, Gluon, and others) is on the roadmap.
+- **Closed-loop / end-to-end** — **`geak`** can carry a run from start to finish: generate or discover **test/harness scripts** when needed, **run profiling**, iterate with the LLM, **save every patch** on disk, and **pick the best result** against your metrics—artifacts land under `optimization_logs/` for reproducibility.  
+- **Scales with hardware** — Multi-agent parallel search with isolated git workspaces and best-patch selection when you explore competing strategies.
 
-**Documentation:** Markdown under [`docs/`](docs/) — start with **[Quick start](docs/quick_start.md)** if you want to run `geak` immediately (`mini` is the same CLI).
+**Documentation:** Markdown under [`docs/`](docs/) — start with **[Quick start](docs/quick_start.md)** if you want to run `geak` immediately.
+
+## Architecture
+
+Simplified data flow for a typical **`geak`** run (homogeneous path; heterogeneous / RAG entrypoints omit details):
+
+```mermaid
+flowchart TB
+  subgraph Inputs
+    R[Git repository]
+    K[Kernel path or URL]
+    T[Task description]
+  end
+
+  subgraph GeakCLI["geak CLI"]
+    CFG[Config merge + model]
+    PRE[Preprocessor]
+    RUN[Agent runtime]
+  end
+
+  subgraph Loop["Optimization loop"]
+    LLM[LLM]
+    TOOL[Built-in tools]
+    ENV[Environment / subprocess]
+  end
+
+  subgraph Optional["Optional"]
+    MCP[MCP tool servers]
+  end
+
+  subgraph Outputs
+    ART["optimization_logs/ · patches · trajectories"]
+  end
+
+  Inputs --> GeakCLI
+  CFG --> RUN
+  PRE --> RUN
+  RUN --> Loop
+  LLM --> TOOL
+  TOOL --> ENV
+  TOOL --> MCP
+  RUN --> Outputs
+```
+
+Parallel runs add multiple isolated workspaces and a **best-patch** selection step on top of the same building blocks.
 
 ## Table of Contents
 
-- [Evolution: From Kernel-Level to Repo-Level Automation](#evolution-from-kernel-level-to-repo-level-automation)
-- [Core Architecture](#core-architecture)
-  - [End-to-End Optimization Engine](#end-to-end-optimization-engine)
-  - [Tool-Augmented Intelligence Layer](#tool-augmented-intelligence-layer)
-  - [Parallel Exploration & Scaling](#parallel-exploration--scaling)
+- [Architecture](#architecture)
 - [Getting Started](#getting-started)
   - [Installation](#installation)
   - [Usage](#usage)
@@ -23,43 +65,11 @@ It enables systematic, profiling-driven, and scalable optimization of GPU kernel
   - [System Tools (Built-in)](#system-tools-built-in)
   - [Best Patch Selection](#best-patch-selection)
   - [Knowledge Base Retrieval](#knowledge-base-retrieval)
+- [Evolution: From Foundation to Platform](#evolution-from-foundation-to-platform)
 - [Summary](#summary)
+- [Acknowledgments](#acknowledgments)
 
 ---
-
-## Evolution: From Foundation to Platform
-
-### GEAK v1 — Foundation (Triton)
-
-GEAK v1 established the foundation with Triton-based kernel generation.
-
-- Reflexion-based kernel generation
-- Instruction → Triton kernels
-- TritonBench / ROCmBench improvements
-
-**Outcome:** AI viability proven — LLM-based agents can generate and improve GPU kernels.
-
-### GEAK v2 — Expansion (Agent Family)
-
-GEAK v2 expanded into a multi-agent system for HIP kernel optimization.
-
-- **OptimAgent:** profiling-driven optimization with multi-offspring exploration
-- **OpenEvolve:** genetic optimization for kernel evolution
-- support HIP → HIP kernel optimization
-
-**Outcome:** Scalable multi-agent system
-### GEAK v3 — Platform (L1 → L3)
-
-GEAK v3 evolves into a unified platform supporting the full optimization stack.
-
-- Support **L3** kernel optimization (repository-level, full lifecycle)
-- Reduce human intervention via closed-loop automation
-- Unified kernel optimization (test discovery, baselines, profiling, strategy execution, validation)
-
-**Outcome:** Anyone can optimize kernels — from single-kernel tuning to autonomous repo-level optimization.
-
----
-
 
 ## Getting Started
 
@@ -105,7 +115,7 @@ geak --kernel-path /path/to/kernel/file \
 - After all runs finish, GEAK automatically selects the best patch based on the specified metric
 
 ```bash
-mini --num-parallel 4 \
+geak --num-parallel 4 \
   --repo /path/to/kernel/repo \
   --task "Optimize block_reduce kernel. Kernel path is xxx" \
   --gpu-ids 0,1,2,3 \
@@ -163,28 +173,42 @@ optimization_logs/<kernel>_<timestamp>/
 
 ## Features
 
-### Unit test discovery
 
-If `--test-command` is not provided, GEAK will run a **UnitTestAgent** that tries to discover or create tests:
+---
 
-```bash
-mini --repo /path/to/kernel/repo \
-  --kernel-path /path/to/kernel/file \
-  --task "Optimize device_batch_memcpy kernel"
-```
+## Evolution: From Foundation to Platform
 
-### System Tools (built-in)
+### GEAK v1 — Foundation (Triton)
 
-| Tool | Purpose | Key outputs |
-| --- | --- | --- |
-| `profiling` | Profile workload to identify bottlenecks | rocprofiler-compute summary |
-| `strategy_manager` | Track optimization strategies | `.optimization_strategies.md` |
-| `save_and_test` | Save patch and run test_command | `patch_N.patch`, `patch_N_test.txt` |
+GEAK v1 established the foundation with Triton-based kernel generation.
 
-### Best patch selection
+- Reflexion-based kernel generation
+- Instruction → Triton kernels
+- TritonBench / ROCmBench improvements
 
-After parallel runs finish, GEAK runs a selection agent that reads all test logs, extracts metrics, and writes `best_results.json` + `select_agent.log`.
+**Outcome:** AI viability proven — LLM-based agents can generate and improve GPU kernels.
 
+### GEAK v2 — Expansion (Agent Family)
+
+GEAK v2 expanded into a multi-agent system for HIP kernel optimization.
+
+- **OptimAgent:** profiling-driven optimization with multi-offspring exploration
+- **OpenEvolve:** genetic optimization for kernel evolution
+- support HIP → HIP kernel optimization
+
+**Outcome:** Scalable multi-agent system
+
+### GEAK v3 — Platform (L1 → L3)
+
+GEAK v3 evolves into a unified platform supporting the full optimization stack.
+
+- Support **L3** kernel optimization (repository-level, full lifecycle)
+- Reduce human intervention via closed-loop automation
+- Unified kernel optimization (test discovery, baselines, profiling, strategy execution, validation)
+
+**Outcome:** Anyone can optimize kernels — from single-kernel tuning to autonomous repo-level optimization.
+
+---
 
 ## Summary
 
@@ -194,3 +218,17 @@ GEAK v3 enables reproducible, measurable, and scalable GPU kernel optimization a
 - **Knowledge Retrieval** with AMD/NVIDIA knowledge bases for informed decision-making
 
 Contributions, experiments, and feedback are welcome.
+
+## Acknowledgments
+
+GEAK extends **[mini-SWE-agent](https://github.com/SWE-agent/mini-SWE-agent)** — agent loop, environment tooling, and SWE-style workflows — for upstream behavior and APIs, see the **[mini-SWE-agent documentation](https://mini-swe-agent.com/latest/)**.
+
+We also thank:
+
+- **[LiteLLM](https://github.com/BerriAI/litellm)** — unified LLM routing used by model backends  
+- **[Typer](https://github.com/tiangolo/typer)** & **[Rich](https://github.com/Textualize/rich)** — CLI and terminal UX  
+- **[Model Context Protocol (MCP)](https://modelcontextprotocol.io/)** ecosystem (e.g. `mcp`, **FastMCP**) — tool servers for profiling, metrics, and discovery  
+- **[LangChain](https://github.com/langchain-ai/langchain)** (optional `[langchain]` extra) — hybrid retrieval for the GPU knowledge path  
+- **AMD Research [IntelliKit](https://github.com/AMDResearch/intellikit)** (`metrix`) — GPU profiling metrics integration  
+
+Dependencies and versions are listed in `pyproject.toml`; all third-party software remains under their respective licenses.
