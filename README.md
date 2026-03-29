@@ -10,47 +10,54 @@
 
 ## Architecture
 
-Simplified data flow for a typical **`geak`** run (homogeneous path; heterogeneous / RAG entrypoints omit details):
+Simplified data flow for a typical **`geak`** run:
 
 ```mermaid
+%%{init: {"theme": "neutral", "flowchart": {"curve": "basis", "padding": 16}}}%%
 flowchart TB
   subgraph Inputs
+    direction LR
     R[Git repository]
-    K[Kernel path or URL]
+    K[Kernel path / URL]
     T[Task description]
   end
 
-  subgraph GeakCLI["geak CLI"]
+  subgraph Setup["Setup in geak"]
+    direction TB
     CFG[Config merge + model]
-    PRE[Preprocessor]
-    RUN[Agent runtime]
+    PRE[Preprocessor → harness · metrics · discovery]
   end
 
-  subgraph Loop["Optimization loop"]
+  subgraph OptRun["Optimization run"]
+    direction LR
     LLM[LLM]
     TOOL[Built-in tools]
     ENV[Environment / subprocess]
+    LLM --> TOOL --> ENV
   end
 
-  subgraph Optional["Optional"]
-    MCP[MCP tool servers]
+  subgraph POSTPROC["Postprocess"]
+    SEL[Validation + best patch selection]
   end
 
-  subgraph Outputs
-    ART["optimization_logs/ · patches · trajectories"]
+  subgraph OUT["Output"]
+    OP[(optimization_logs · patches · trajectories)]
   end
 
-  Inputs --> GeakCLI
-  CFG --> RUN
-  PRE --> RUN
-  RUN --> Loop
-  LLM --> TOOL
-  TOOL --> ENV
-  TOOL --> MCP
-  RUN --> Outputs
+  Inputs --> Setup
+  CFG --> OptRun
+  PRE --> OptRun
+  OptRun --> POSTPROC
+  POSTPROC --> OUT
+
+  style Inputs fill:#eff6ff,stroke:#2563eb,stroke-width:1.5px,color:#1e40af
+  style Setup fill:#fffbeb,stroke:#d97706,stroke-width:1.5px,color:#92400e
+  style OptRun fill:#ecfdf5,stroke:#059669,stroke-width:1.5px,color:#065f46
+  style POSTPROC fill:#faf5ff,stroke:#7c3aed,stroke-width:1.5px,color:#5b21b6
+  style OUT fill:#fef2f2,stroke:#dc2626,stroke-width:1.5px,color:#991b1b
 ```
 
-Parallel runs add multiple isolated workspaces and a **best-patch** selection step on top of the same building blocks.
+Parallel runs add multiple isolated workspaces and a **best-patch** selection step on top of the same **optimization run** pattern.
 
 ## Table of Contents
 
