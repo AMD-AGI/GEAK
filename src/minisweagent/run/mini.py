@@ -1,31 +1,13 @@
 #!/usr/bin/env python3
 
-"""Run mini-SWE-agent in your local environment. This is the default executable `mini`."""
-# Read this first: https://mini-swe-agent.com/latest/usage/mini/  (usage)
+"""Backup mini entry with kernel-type routing."""
 
 import os
+import shlex
 import sys
-import traceback
 from io import StringIO
 from pathlib import Path
 from typing import Any
-
-
-class TeeOutput:
-    """Capture stdout/stderr to a buffer while preserving terminal output."""
-    def __init__(self, original):
-        self.terminal = original
-        self.buffer = StringIO()
-    
-    def write(self, message):
-        self.terminal.write(message)
-        self.buffer.write(message)
-    
-    def flush(self):
-        self.terminal.flush()
-    
-    def getvalue(self):
-        return self.buffer.getvalue()
 
 import typer
 import yaml
@@ -35,22 +17,141 @@ from prompt_toolkit.shortcuts import PromptSession
 from rich.console import Console
 
 from minisweagent import global_config_dir
-from minisweagent.agents.interactive import InteractiveAgent, InteractiveAgentConfig
-from minisweagent.agents.interactive_textual import TextualAgent
+from minisweagent.agents.homogeneous.homogeneous_agent import parse_gpu_ids, run_homogeneous_agent
+from minisweagent.agents.parallel_agent import BestPatchResult
 from minisweagent.config import builtin_config_dir, get_config_path
-from minisweagent.environments.local import LocalEnvironment
+from minisweagent.environments import get_environment_class
 from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
-from minisweagent.run.utils.save import save_traj
-from minisweagent.utils.log import logger
+from minisweagent.run.orchestrator import run_orchestrator
+from minisweagent.run.preprocess.preprocessor import run_preprocessor
+from minisweagent.run.utils.task_parser import _resolve_path_case, display_parsed_config, parse_task_info
 
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
-_logs_dir = Path(__file__).parent.parent.parent.parent / "logs"
-_logs_dir.mkdir(parents=True, exist_ok=True)
-DEFAULT_OUTPUT = _logs_dir / "last_mini_run.traj.json"
+DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
+
 console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich")
 prompt_session = PromptSession(history=FileHistory(global_config_dir / "mini_task_history.txt"))
+
+
+class TeeOutput:
+    """Capture stdout/stderr to buffer while keeping terminal output."""
+
+    def __init__(self, original):
+        self.terminal = original
+        self.buffer = StringIO()
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.buffer.write(message)
+
+    def flush(self):
+        self.terminal.flush()
+
+    def getvalue(self):
+        return self.buffer.getvalue()
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_kernel_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text == "triton":
+        return "triton"
+    if text in {"hip", "rocm", "rocblas"}:
+        return "hip"
+    return "other"
+
+
+def _derive_output_dir_and_traj(output: Path | None, kernel_name: str | None) -> tuple[Path, Path]:
+    """Unify patch_output_dir and -o/--output location.
+
+    - If output is a file path: output_dir = output.parent, traj = output
+    - If output is a directory: output_dir = output, traj = output/trajectory.json
+    - If output is not provided: use ./optimization_logs/<kernel_name>_<timestamp> as output_dir
+    """
+    if output is None:
+        from minisweagent.run.utils.task_parser import generate_patch_output_dir
+
+        output_dir = (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
+        return output_dir, output_dir / "trajectory.json"
+
+    if output.suffix:
+        return output.parent, output
+
+    return output, output / "trajectory.json"
+
+
+def _final_report_to_bestpatchresult(report: Any) -> BestPatchResult | None:
+    if report is None:
+        return None
+    report_dict = report.to_dict() if hasattr(report, "to_dict") else report
+    if not isinstance(report_dict, dict):
+        return None
+
+    best_patch = report_dict.get("best_patch")
+    patch_path = Path(best_patch) if best_patch else None
+    return BestPatchResult(
+        agent_id=0,
+        patch_id=patch_path.stem if patch_path else "unknown",
+        test_output="",
+        metric_result={
+            "best_speedup": report_dict.get("best_speedup"),
+            "best_round": report_dict.get("best_round"),
+            "best_task": report_dict.get("best_task"),
+            "status": report_dict.get("status"),
+        },
+        patch_dir=patch_path.parent if patch_path else None,
+        llm_conclusion=str(report_dict.get("summary") or ""),
+    )
+
+
+def _try_promote_to_harness(test_command: str) -> str | None:
+    """Check if test_command points to a harness with argparse modes.
+
+    If so, return the harness path (to pass as harness= to the preprocessor,
+    which automatically uses --profile for profiling).
+    Otherwise return None (keep using eval_command= as-is).
+    """
+    parts = shlex.split(test_command)
+    script = None
+    for part in parts:
+        if part.endswith(".py") and Path(part).is_file():
+            script = part
+            break
+    if not script:
+        return None
+
+    from minisweagent.run.preprocess.harness_utils import validate_harness
+
+    valid, _errors = validate_harness(script)
+    return script if valid else None
+
+
 _HELP_TEXT = """Run mini-SWE-agent in your local environment.
 
 [not dim]
@@ -58,12 +159,6 @@ There are two different user interfaces:
 
 [bold green]mini[/bold green] Simple REPL-style interface
 [bold green]mini -v[/bold green] Pager-style interface (Textual)
-
-RAG MCP:
-
-[bold green]mini -c mini_rag[/bold green] Enable RAG MCP knowledge base retrieval
-
-More information about the usage: [bold green]https://mini-swe-agent.com/latest/usage/mini/[/bold green]
 [/not dim]
 """
 
@@ -71,30 +166,80 @@ More information about the usage: [bold green]https://mini-swe-agent.com/latest/
 # fmt: off
 @app.command(help=_HELP_TEXT)
 def main(
-    visual: bool = typer.Option(False, "-v", "--visual", help="Toggle (pager-style) UI (Textual) depending on the MSWEA_VISUAL_MODE_DEFAULT environment setting",),
-    model_name: str | None = typer.Option( None, "-m", "--model", help="Model to use",),
-    model_class: str | None = typer.Option(None, "--model-class", help="Model class to use (e.g., 'anthropic' or 'minisweagent.models.anthropic.AnthropicModel')", rich_help_panel="Advanced"),
+    visual: bool = typer.Option(False, "-v", "--visual", help="Toggle UI",),
+    model_name: str | None = typer.Option(None, "-m", "--model", help="Model to use",),
+    model_class: str | None = typer.Option(None, "--model-class", help="Model class to use", rich_help_panel="Advanced"),
     task: str | None = typer.Option(None, "-t", "--task", help="Task/problem statement", show_default=False),
     yolo: bool = typer.Option(False, "-y", "--yolo", help="Run without confirmation"),
     cost_limit: float | None = typer.Option(None, "-l", "--cost-limit", help="Cost limit. Set to 0 to disable."),
-    config_spec: Path = typer.Option(DEFAULT_CONFIG, "-c", "--config", help="Path to config file"),
-    output: Path | None = typer.Option(DEFAULT_OUTPUT, "-o", "--output", help="Output trajectory file"),
-    exit_immediately: bool = typer.Option( False, "--exit-immediately", help="Exit immediately when the agent wants to finish instead of prompting.", rich_help_panel="Advanced"),
-    test_command: str | None = typer.Option(None, "--test-command", help="Test command to run after agent finishes"),
-) -> Any:
+    config_spec: Path | None = typer.Option(None, "-c", "--config", help="Path to config file"),
+    output: Path | None = typer.Option(None, "-o", "--output", help="Output trajectory file or directory"),
+    exit_immediately: bool = typer.Option(False, "--exit-immediately", help="Exit immediately", rich_help_panel="Advanced"),
+    repo: Path | None = typer.Option(None, "--repo", help="Target Repository path."),
+    kernel_url: str | None = typer.Option(None, "--kernel-url", "--kernel-path", help="Target kernel source (path or URL)."),
+    num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
+    gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs."),
+    test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command"),
+):
     # fmt: on
-    # Capture all print output for trajectory
+    del visual
     tee_out, tee_err = TeeOutput(sys.stdout), TeeOutput(sys.stderr)
     sys.stdout, sys.stderr = tee_out, tee_err
-    
-    configure_if_first_time()
-    config_path = get_config_path(config_spec)
-    console.print(f"Loading agent config from [bold green]'{config_path}'[/bold green]")
-    config = yaml.safe_load(config_path.read_text())
 
-    if not task:
+    configure_if_first_time()
+
+    # 1) Config merge
+    base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
+    console.print(f"Loading base config: [bold green]'{base_config_path.name}'[/bold green]")
+    config = yaml.safe_load(base_config_path.read_text()) or {}
+    config_path = config_spec or (builtin_config_dir / "geak.yaml")
+    console.print(f"[dim]Applying user config from '{config_path}' (final override)[/dim]")
+    user_config = yaml.safe_load(config_path.read_text()) or {}
+    config = _deep_merge(config, user_config)
+
+    if yolo:
+        config.setdefault("agent", {})["mode"] = "yolo"
+    if cost_limit is not None:
+        config.setdefault("agent", {})["cost_limit"] = cost_limit
+    if exit_immediately:
+        config.setdefault("agent", {})["confirm_exit"] = False
+    if model_class is not None:
+        config.setdefault("model", {})["model_class"] = model_class
+
+    tools_cfg = config.get("tools") or {}
+    disabled_tools: list[str] = []
+    if tools_cfg.get("bash") is False:
+        disabled_tools.append("bash")
+    if tools_cfg.get("profiling") is False:
+        disabled_tools.append("profiling")
+        disabled_tools.append("profile_kernel")
+
+    # RAG MCP toggle: disable RAG tools when rag config is absent
+    rag_cfg = config.get("rag")
+    if not rag_cfg:
+        disabled_tools.append("rag_query")
+        disabled_tools.append("rag_optimize")
+
+    if disabled_tools:
+        config.setdefault("agent", {}).setdefault("disabled_tools", [])
+        config["agent"]["disabled_tools"] = list(set(config["agent"]["disabled_tools"]) | set(disabled_tools))
+
+    model = get_model(model_name, config.get("model", {}))
+    _model_name = getattr(model.config, "model_name", "unknown")
+    console.print(f"\\Using model: [bold cyan]{_model_name}[/bold cyan]")
+
+    task_content = task
+    if task:
+        task_path = Path(task)
+        if task_path.exists() and task_path.is_file():
+            task_content = task_path.read_text(encoding="utf-8")
+            console.print(f"[bold green]Read task from file: {task_path}[/bold green]")
+        elif not task.strip():
+            task_content = None
+
+    if not task_content:
         console.print("[bold yellow]What do you want to do?")
-        task = prompt_session.prompt(
+        task_content = prompt_session.prompt(
             "",
             multiline=True,
             bottom_toolbar=HTML(
@@ -105,65 +250,236 @@ def main(
         )
         console.print("[bold green]Got that, thanks![/bold green]")
 
-    if yolo:
-        config.setdefault("agent", {})["mode"] = "yolo"
-    if cost_limit is not None:
-        config.setdefault("agent", {})["cost_limit"] = cost_limit
-    if exit_immediately:
-        config.setdefault("agent", {})["confirm_exit"] = False
-    if model_class is not None:
-        config.setdefault("model", {})["model_class"] = model_class
-    model = get_model(model_name, config.get("model", {}))
-    
-    # Print model info
-    _model_name = getattr(model.config, 'model_name', 'unknown')
-    _api_key = getattr(model.config, 'api_key', None)
-    if not _api_key:
-        # Try to get the actual API key used (for amd_llm model)
-        import os as _os
-        _api_key = _os.getenv("AMD_LLM_API_KEY") or _os.getenv("LLM_GATEWAY_KEY") or _os.getenv("ANTHROPIC_API_KEY")
-    _api_key_display = f"{_api_key[:8]}..." if _api_key and len(_api_key) > 8 else _api_key or "Not set"
-    console.print(f"\\[mini-swe-agent] Using model: [bold cyan]{_model_name}[/bold cyan], API key: [bold cyan]{_api_key_display}[/bold cyan]")
-    
-    extra_agent_kwargs = {}
-    env = LocalEnvironment(**config.get("env", {}))
-    agent_config = config.get("agent", {})
+    # 2a) LLM-driven pipeline param extraction
+    heterogeneous = None
+    max_rounds = None
+    if task_content:
+        from minisweagent.run.utils.task_parser import parse_pipeline_params
 
-    # RAG MCP integration (activated via config, e.g. -c mini_rag)
-    rag_cfg = config.get("rag") or config.get("tools", {}).get("rag")
-    if rag_cfg and rag_cfg is not True:
-        agent_config["rag_config"] = rag_cfg
-        console.print("[bold green]RAG: enabled (MCP)[/bold green]")
-    elif rag_cfg is True:
-        agent_config["rag_config"] = {"enable_subagent": False}
-        console.print("[bold green]RAG: enabled (MCP, default config)[/bold green]")
-    else:
-        console.print("[dim]RAG: disabled[/dim]")
+        console.print("[bold cyan]Checking task for pipeline parameters...[/bold cyan]")
+        pipeline_params = parse_pipeline_params(task_content, model)
 
-    # Both visual flag and the MSWEA_VISUAL_MODE_DEFAULT flip the mode, so it's essentially a XOR
-    agent_class = InteractiveAgent
-    if visual == (os.getenv("MSWEA_VISUAL_MODE_DEFAULT", "false") == "false"):
-        agent_class = TextualAgent
-        if rag_cfg:
-            console.print("[yellow]Warning: MCP integration with -v (Textual UI) is not fully supported yet.[/yellow]")
+        # Apply non-None extracted values (CLI flags still take priority)
+        if pipeline_params.get("heterogeneous") is not None and heterogeneous is None:
+            heterogeneous = pipeline_params["heterogeneous"]
+        if pipeline_params.get("max_rounds") is not None:
+            max_rounds = pipeline_params["max_rounds"]
 
-    agent = agent_class(model, env, **agent_config, **extra_agent_kwargs)
-    exit_status, result, extra_info = None, None, None
+        # Prompt for missing required params (kernel_url) — only if not already set
+        if kernel_url is None:
+            from minisweagent.run.utils.config_editor import prompt_missing_pipeline_params
+
+            pipeline_params, should_use_pipeline = prompt_missing_pipeline_params(
+                pipeline_params, console, yolo
+            )
+
+            if should_use_pipeline:
+                if pipeline_params.get("kernel_url"):
+                    kernel_url = pipeline_params["kernel_url"]
+
+    # 2b) Detect configs from task
+    parsed_config = parse_task_info(task_content, model)
+    task_kernel_type = _normalize_kernel_type(parsed_config.get("kernel_type"))
+    kernel_type = task_kernel_type
+    if kernel_url:
+        kp = Path(kernel_url)
+        if kp.exists() and kp.is_file():
+            from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
+
+            inferred = _normalize_kernel_type(_infer_kernel_type(kp))
+            if inferred in {"hip", "triton"}:
+                kernel_type = inferred
+
+    # Keep kernel_type resolution internal; avoid exposing routing details in logs.
+
+    if repo is None and parsed_config.get("repo"):
+        repo = Path(parsed_config["repo"])
+    if test_command is None and parsed_config.get("test_command"):
+        test_command = parsed_config["test_command"]
+    if num_parallel is None:
+        num_parallel = _as_int(parsed_config.get("num_parallel"))
+    if gpu_ids is None and parsed_config.get("gpu_ids"):
+        gpu_ids = parsed_config["gpu_ids"]
+
+    # Apply config/model/output_dir extracted from task (CLI flags take priority)
+    if config_spec is None and parsed_config.get("config"):
+        _task_config_path = get_config_path(Path(parsed_config["config"]))
+        if _task_config_path and _task_config_path.exists():
+            console.print(f"[dim]Applying config from task: '{_task_config_path}'[/dim]")
+            _task_user_config = yaml.safe_load(_task_config_path.read_text()) or {}
+            config = _deep_merge(config, _task_user_config)
+
+    if model_name is None and parsed_config.get("model"):
+        model_name = parsed_config["model"]
+        model = get_model(model_name, config.get("model", {}))
+        console.print(f"\\Using model (from task): [bold cyan]{model_name}[/bold cyan]")
+
+    if output is None and parsed_config.get("output_dir"):
+        output = Path(parsed_config["output_dir"])
+
+    kernel_target = kernel_url or parsed_config.get("kernel_url") or parsed_config.get("kernel_name")
+    if not kernel_target:
+        console.print("[red]Error: missing kernel target. Provide --kernel-url or include kernel info in task.[/red]")
+        raise typer.Exit(1)
+
+    parsed_gpu_ids = parse_gpu_ids(gpu_ids)
+    metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
+
+    kernel_name_for_output = parsed_config.get("kernel_name")
+    if not kernel_name_for_output and kernel_url:
+        kernel_name_for_output = Path(kernel_url).stem
+    if not kernel_name_for_output and isinstance(kernel_target, str):
+        kernel_name_for_output = Path(kernel_target).stem
+
+    preprocess_output_dir, traj_output_path = _derive_output_dir_and_traj(output, kernel_name_for_output)
+    preprocess_output_dir.mkdir(parents=True, exist_ok=True)
+    config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
+    console.print(
+        f"[dim]Logs and artifacts for this run are under '{preprocess_output_dir}' "
+        f"(e.g. optimization_logs/<kernel>_<timestamp>/).[/dim]"
+    )
+
+    # Display the *resolved* configuration (CLI overrides auto-detection).
+    _display_cfg = dict(parsed_config)
+    _display_cfg["kernel_type"] = kernel_type
+    if kernel_url:
+        _display_cfg["kernel_url"] = kernel_url
+    if repo is not None:
+        _display_cfg["repo"] = str(repo)
+    if test_command is not None:
+        _display_cfg["test_command"] = test_command
+    if num_parallel is not None:
+        _display_cfg["num_parallel"] = num_parallel
+    if gpu_ids is not None:
+        _display_cfg["gpu_ids"] = gpu_ids
+    if model_name is not None:
+        _display_cfg["model"] = model_name
+    if config_spec is not None:
+        _display_cfg["config"] = str(config_spec)
+    console.print(display_parsed_config(_display_cfg, str(preprocess_output_dir)))
+
+    _env_kwargs = dict(config.get("env", {}))
+    env_type = str(_env_kwargs.pop("type", _env_kwargs.pop("environment_class", "local"))).strip().lower() or "local"
     try:
-        exit_status, result = agent.run(task)  # type: ignore[arg-type]
+        env_class = get_environment_class(env_type)
+        env = env_class(**_env_kwargs)
     except Exception as e:
-        logger.error(f"Error running agent: {e}", exc_info=True)
-        exit_status, result = type(e).__name__, str(e)
-        extra_info = {"traceback": traceback.format_exc()}
-    finally:
-        if output:
-            # Collect console logs
-            console_logs = tee_out.getvalue() + tee_err.getvalue()
-            if console_logs:
-                extra_info = extra_info or {}
-                extra_info["console_logs"] = console_logs
-            save_traj(agent, output, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
-    return agent
+        console.print(f"[red]Error: failed to initialize env.type={env_type}: {e}[/red]")
+        raise typer.Exit(1)
+
+    harness_spec = config.get("patch", {}).get("harness")
+    if not harness_spec and test_command:
+        promoted = _try_promote_to_harness(test_command)
+        if promoted:
+            harness_spec = promoted
+            console.print(f"[bold cyan]Promoted test command to validated harness: {promoted}[/bold cyan]")
+
+    _preprocess_kwargs = dict(
+        kernel_url=kernel_target,
+        repo=repo,
+        output_dir=preprocess_output_dir,
+        gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
+        model_factory=lambda: get_model(model_name, config.get("model", {})),
+        console=console,
+    )
+
+    if harness_spec:
+        try:
+            preprocess_ctx = run_preprocessor(**_preprocess_kwargs, harness=harness_spec)
+        except RuntimeError as exc:
+            if "harness" in str(exc).lower():
+                console.print(f"[yellow]Harness validation failed, falling back to eval_command: {exc}[/yellow]")
+                preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
+            else:
+                raise
+    else:
+        if isinstance(test_command, str) and "&&" in test_command:
+            left, right = test_command.rsplit("&&", 1)
+            correctness_command = left.strip() or None
+            performance_command = right.strip() or None
+            preprocess_ctx = run_preprocessor(
+                **_preprocess_kwargs,
+                correctness_command=correctness_command,
+                performance_command=performance_command,
+            )
+        else:
+            preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
+
+    if preprocess_ctx.get("test_command") and not test_command:
+        test_command = preprocess_ctx["test_command"]
+    if preprocess_ctx.get("repo_root") and repo is None:
+        repo = Path(preprocess_ctx["repo_root"])
+
+    # kernel_type routing:
+    # - hip/other -> homogeneous agent
+    # - triton -> heterogeneous orchestrator
+    # Auto-detect kernel type if heterogeneous flag was not set by LLM extraction or task parser
+    if heterogeneous is None:
+        _discovery = preprocess_ctx.get("discovery") or {}
+        _kernel_info = _discovery.get("kernel") or {}
+        _auto_kernel_type = _kernel_info.get("type")
+
+        if not _auto_kernel_type and preprocess_ctx.get("kernel_path"):
+            from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
+            _auto_kernel_type = _infer_kernel_type(Path(preprocess_ctx["kernel_path"]))
+
+        if _auto_kernel_type == "triton":
+            heterogeneous = True
+        else:
+            heterogeneous = False
+    else:
+        pass
+
+    if heterogeneous:
+        commandment = preprocess_ctx.get("commandment")
+        if commandment:
+            task_content = f"{commandment}\n\n---\n\n{task_content}"
+        report = run_orchestrator(
+            preprocess_ctx=preprocess_ctx,
+            gpu_ids=parsed_gpu_ids,
+            model=model,
+            model_factory=lambda: get_model(model_name, config.get("model", {})),
+            output_dir=preprocess_output_dir,
+            max_rounds=max_rounds or config.get("orchestrator", {}).get("max_rounds"),
+            heterogeneous=True,
+            console=console,
+        )
+        return _final_report_to_bestpatchresult(report)
+
+    agent_config = dict(config.get("agent", {}))
+    # Pass RAG subagent config to agent
+    if rag_cfg and rag_cfg.get("enable_subagent"):
+        agent_config["rag_enable_subagent"] = True
+    agent_config["save_patch"] = True
+    agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
+    agent_config["metric"] = metric
+    agent_config["patch_output_dir"] = str(preprocess_output_dir)
+
+    repo_path = repo or config.get("patch", {}).get("repo")
+    if repo_path:
+        p = Path(repo_path)
+        if not p.exists():
+            resolved = _resolve_path_case(p)
+            if resolved is not None:
+                p = resolved
+        repo_path = p.resolve()
+
+    return run_homogeneous_agent(
+        config=config,
+        task_content=task_content,
+        model=model,
+        env=env,
+        env_class=env.__class__,
+        env_kwargs=_env_kwargs,
+        agent_config=agent_config,
+        repo=repo_path,
+        num_parallel=num_parallel,
+        gpu_ids=gpu_ids,
+        output_dir=preprocess_output_dir,
+        traj_output=traj_output_path,
+        model_name=model_name,
+        console=console,
+    )
 
 
 if __name__ == "__main__":

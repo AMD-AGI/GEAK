@@ -4,12 +4,19 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from minisweagent.environments.protected_files import (
+    blocked_message,
+    would_write_protected_file,
+)
+
 
 @dataclass
 class LocalEnvironmentConfig:
     cwd: str = ""
     env: dict[str, str] = field(default_factory=dict)
     timeout: int = 30
+    protected_files: list[str] = field(default_factory=list)
+    """Basename(s) of files that must not be modified (e.g. ['kernel.py'])."""
 
 
 class LocalEnvironment:
@@ -20,6 +27,11 @@ class LocalEnvironment:
     def execute(self, command: str, cwd: str = "", *, timeout: int | None = None):
         """Execute a command in the local environment and return the result as a dict."""
         cwd = cwd or self.config.cwd or os.getcwd()
+        protected = getattr(self.config, "protected_files", None) or []
+        if protected:
+            blocked = would_write_protected_file(command, protected)
+            if blocked:
+                return {"output": blocked_message(blocked), "returncode": 1}
         result = subprocess.run(
             command,
             shell=True,

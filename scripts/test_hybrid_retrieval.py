@@ -339,7 +339,7 @@ def build_bm25_index(documents: List[Document], save_path: Path) -> BM25Okapi:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(message)s')
     
-    # 硬编码测试用例
+    # Hardcoded test cases
     test_queries = [
         "HIP kernel shared memory optimization",
         "How to install ROCm?",

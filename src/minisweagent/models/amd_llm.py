@@ -1,7 +1,11 @@
 """AMD LLM Model Router.
 
-Routes to the appropriate model implementation based on ``model_name``.
-Currently supports Claude models via the AMD LLM gateway.
+Routes to the appropriate model implementation (OpenAI / Claude / Gemini)
+based on ``model_name``.  All heavy lifting lives in the per-vendor modules:
+
+- :mod:`minisweagent.models.amd_openai`
+- :mod:`minisweagent.models.amd_claude`
+- :mod:`minisweagent.models.amd_gemini`
 """
 
 import logging
@@ -14,20 +18,37 @@ logger = logging.getLogger("amd_llm")
 class AmdLlmModel:
     """Thin router that delegates to the correct vendor model implementation.
 
-    Currently supports Claude models (``"claude*"``) via the AMD LLM gateway.
+    Instantiation inspects ``model_name`` and creates the matching backend:
+
+    - ``"gpt*"``    → :class:`~minisweagent.models.amd_openai.AmdOpenAIModel`
+    - ``"claude*"`` → :class:`~minisweagent.models.amd_claude.AmdClaudeModel`
+    - ``"gemini*"`` → :class:`~minisweagent.models.amd_gemini.AmdGeminiModel`
+
+    Every public attribute (``cost``, ``n_calls``, ``config``, …) is
+    transparently forwarded to the underlying implementation so that calling
+    code does not need to know which vendor is active.
     """
 
     def __init__(self, **kwargs):
+        # Extract api_key from model_kwargs if present (backward compat)
         model_kwargs = kwargs.get("model_kwargs", {})
         if "api_key" in model_kwargs and model_kwargs["api_key"] is not None and "api_key" not in kwargs:
             kwargs["api_key"] = model_kwargs["api_key"]
 
         config = AmdLlmModelConfig(**kwargs)
 
-        if "claude" in config.model_name:
+        if "gpt" in config.model_name:
+            from minisweagent.models.amd_openai import AmdOpenAIModel
+
+            self._impl = AmdOpenAIModel(config)
+        elif "claude" in config.model_name:
             from minisweagent.models.amd_claude import AmdClaudeModel
 
             self._impl = AmdClaudeModel(config)
+        elif "gemini" in config.model_name:
+            from minisweagent.models.amd_gemini import AmdGeminiModel
+
+            self._impl = AmdGeminiModel(config)
         else:
             raise ValueError(f"Unsupported model: {config.model_name}")
 
@@ -59,10 +80,6 @@ class AmdLlmModel:
     # Forwarded methods
     # ------------------------------------------------------------------
 
-    def set_tools(self, tools: list[dict]) -> None:
-        """Replace the tool schemas visible to the LLM."""
-        self._impl.set_tools(tools)
-
     def query(self, messages: list[dict], **kwargs) -> dict:
         return self._impl.query(messages, **kwargs)
 
@@ -73,8 +90,10 @@ class AmdLlmModel:
 if __name__ == "__main__":
     # Quick smoke test
     model_list = [
+        "gpt-5",
         "claude-opus-4.5",
         "claude-sonnet-4.5",
+        "gemini-3-pro-preview",
     ]
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},

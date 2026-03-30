@@ -148,11 +148,10 @@ class AmdClaudeModel(AmdLlmModelBase):
 
         all_kwargs = self.config.model_kwargs | kwargs
         filtered_kwargs = {k: v for k, v in all_kwargs.items() if k in supported_params}
-        if self.tools:
-            filtered_kwargs["tools"] = convert_openai_tools_to_claude(
-                self.tools,
-                cache_control=True,
-            )
+        filtered_kwargs["tools"] = convert_openai_tools_to_claude(
+            self.tools,
+            cache_control=True,
+        )
 
         system_message, anthropic_messages = self.format_messages(messages)
 

@@ -76,12 +76,10 @@ def test_docker_environment_set_env_variables(executable):
     )
 
     try:
-        # Test single environment variable
         result = env.execute("echo $TEST_VAR")
         assert result["returncode"] == 0
         assert "test_value" in result["output"]
 
-        # Test multiple environment variables
         result = env.execute("echo $TEST_VAR $ANOTHER_VAR")
         assert result["returncode"] == 0
         assert "test_value another_value" in result["output"]
@@ -99,12 +97,10 @@ def test_docker_environment_forward_env_variables(executable):
         )
 
         try:
-            # Test single forwarded environment variable
             result = env.execute("echo $HOST_VAR")
             assert result["returncode"] == 0
             assert "host_value" in result["output"]
 
-            # Test multiple forwarded environment variables
             result = env.execute("echo $HOST_VAR $ANOTHER_HOST_VAR")
             assert result["returncode"] == 0
             assert "host_value another_host_value" in result["output"]
@@ -121,7 +117,7 @@ def test_docker_environment_forward_nonexistent_env_variables(executable):
     try:
         result = env.execute('echo "[$NONEXISTENT_VAR]"')
         assert result["returncode"] == 0
-        assert "[]" in result["output"]  # Empty variable should result in empty string
+        assert "[]" in result["output"]
     finally:
         env.cleanup()
 
@@ -158,7 +154,6 @@ def test_docker_environment_env_override_forward(executable):
         try:
             result = env.execute("echo $CONFLICT_VAR")
             assert result["returncode"] == 0
-            # The explicitly set env should take precedence (comes first in docker exec command)
             assert "from_config" in result["output"]
         finally:
             env.cleanup()
@@ -219,7 +214,6 @@ def test_docker_environment_custom_container_timeout(executable):
         assert "container is running" in result["output"]
         time.sleep(5)
         with pytest.raises((subprocess.CalledProcessError, subprocess.TimeoutExpired)):
-            # This command should fail because the container has stopped
             subprocess.run(
                 [executable, "exec", env.container_id, "echo", "still running"],
                 check=True,

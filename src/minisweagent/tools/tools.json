@@ -11,9 +11,22 @@
           "description": "The bash command to execute."
         }
       },
-      "required": [
-        "command"
-      ]
+      "required": ["command"]
+    }
+  },
+  {
+    "name": "save_and_test",
+    "type": "function",
+    "description": "Save current changes as patch and run performance test. Use this after implementing optimizations to measure performance impact. The system will automatically save your changes, run the configured test command, and report results.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Brief description of what optimization is being tested (e.g., 'baseline', 'memory coalescing', 'vectorization')"
+        }
+      },
+      "required": []
     }
   },
   {
@@ -40,12 +53,7 @@
       "properties": {
         "command": {
           "type": "string",
-          "enum": [
-            "view",
-            "create",
-            "str_replace",
-            "insert"
-          ],
+          "enum": ["view", "create", "str_replace", "insert"],
           "description": "The editor command to execute."
         },
         "path": {
@@ -58,9 +66,7 @@
         },
         "view_range": {
           "type": "array",
-          "items": {
-            "type": "integer"
-          },
+          "items": {"type": "integer"},
           "description": "Line range [start, end] to view. Optional for: view."
         },
         "old_str": {
@@ -76,64 +82,98 @@
           "description": "Line number to insert at. Required for: insert."
         }
       },
-      "required": [
-        "command",
-        "path"
-      ]
+      "required": ["command", "path"]
     }
   },
   {
-    "name": "rag_query",
+    "name": "profiling",
     "type": "function",
-    "description": "Search the GPU/ROCm/HIP knowledge base for relevant information. Use this when you need architecture-specific optimization guidance, API references, or best practices for AMD GPU programming.",
+    "description": "Profile code with rocprof to identify kernel bottlenecks. After test, run profiling to get bottlenecks for further optimization.",
     "parameters": {
       "type": "object",
       "properties": {
-        "topic": {
+        "profiling_workdir": {
           "type": "string",
-          "description": "Search query describing the information you need. Be specific: include GPU model, APIs, data types, and optimization goals."
+          "description": "Absolute path to directory, used to as working directory to running profiling command."
         },
-        "layer": {
+        "profiling_cmd": {
           "type": "string",
-          "description": "Optional layer filter (e.g. 'hip', 'rocm', 'ai_frameworks')."
-        },
-        "top_k": {
-          "type": "integer",
-          "description": "Number of results to return (default: from server config)."
+          "description": "The command to execute the kernel during profiling, e.g. execution command using in performance test."
         }
       },
-      "required": [
-        "topic"
-      ]
+      "required": ["profiling_workdir", "profiling_cmd"]
     }
   },
   {
-    "name": "rag_optimize",
+    "name": "strategy_manager",
     "type": "function",
-    "description": "Retrieve optimization suggestions for GPU kernels from the knowledge base. Use this when you need specific optimization tips for a kernel type on a target GPU.",
+    "description": "Manage optimization strategies. Commands: create (initialize strategy list), show (view strategies), next (get next pending strategy), mark (update status), add (add new strategy), remove (skip/delete strategy), update (modify strategy), note (add note), summary (show statistics).",
     "parameters": {
       "type": "object",
       "properties": {
-        "code_type": {
+        "command": {
           "type": "string",
-          "description": "Type of code/kernel to optimize (e.g. 'matrix multiplication', 'convolution', 'attention')."
+          "enum": ["create", "show", "next", "mark", "add", "remove", "update", "note", "summary"],
+          "description": "The operation to perform."
         },
-        "context": {
-          "type": "string",
-          "description": "Additional context about the optimization goal."
-        },
-        "gpu_model": {
-          "type": "string",
-          "description": "Target GPU model (e.g. 'MI300X', 'MI250')."
-        },
-        "top_k": {
+        "index": {
           "type": "integer",
-          "description": "Number of results to return (default: from server config)."
+          "description": "Strategy index (1-based). Required for: mark, remove, update. Optional for: show."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "exploring", "successful", "failed", "partial", "skipped", "combined"],
+          "description": "Strategy status. Required for: mark. Optional for: update."
+        },
+        "result": {
+          "type": "string",
+          "description": "Result description (e.g., '+21.1% improvement'). Optional for: mark, update."
+        },
+        "details": {
+          "type": "string",
+          "description": "Additional details or log file path. Optional for: mark, update."
+        },
+        "name": {
+          "type": "string",
+          "description": "Strategy name. Required for: add."
+        },
+        "description": {
+          "type": "string",
+          "description": "Strategy description. Required for: add."
+        },
+        "expected": {
+          "type": "string",
+          "description": "Expected improvement (e.g., '+20-30%'). Required for: add."
+        },
+        "target": {
+          "type": "string",
+          "description": "Optimization target. Optional for: add."
+        },
+        "baseline_metrics": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Baseline metrics in 'Key:Value' format. Required for: create."
+        },
+        "baseline_log": {
+          "type": "string",
+          "description": "Path to baseline benchmark log. Optional for: create."
+        },
+        "strategies": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Initial strategies in 'Name|Description|Expected|Target' format. Optional for: create."
+        },
+        "method": {
+          "type": "string",
+          "enum": ["skip", "delete"],
+          "description": "Remove method. Default: skip. For: remove."
+        },
+        "note": {
+          "type": "string",
+          "description": "Note message. Required for: note."
         }
       },
-      "required": [
-        "code_type"
-      ]
+      "required": ["command"]
     }
   }
 ]

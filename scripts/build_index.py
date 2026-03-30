@@ -40,10 +40,6 @@ from rank_bm25 import BM25Okapi
 DEFAULT_KB_PATH = Path(__file__).parent.parent / "knowledge-base"
 DEFAULT_OUTPUT_PATH = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
 DEFAULT_MODEL = "BAAI/bge-large-en-v1.5"
-DEFAULT_CHUNK_SIZE = 1500
-DEFAULT_CHUNK_OVERLAP = 200
-DEFAULT_MIN_CHUNK_SIZE = 200
-DEFAULT_ENABLE_HEADER_SPLIT = False
 
 
 def _resolve_embedding_device(device: str) -> str:
@@ -77,10 +73,9 @@ class DocType(Enum):
 @dataclass
 class SplitterConfig:
     """Configuration for document splitting."""
-    chunk_size: int = DEFAULT_CHUNK_SIZE
-    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP
-    min_chunk_size: int = DEFAULT_MIN_CHUNK_SIZE
-    enable_header_split: bool = DEFAULT_ENABLE_HEADER_SPLIT
+    chunk_size: int = 1000
+    chunk_overlap: int = 200
+    min_chunk_size: int = 200
 
 
 # File extension to document type mapping
@@ -137,7 +132,7 @@ def get_markdown_splitter(config: SplitterConfig) -> Callable[[Document], list[D
     
     markdown_splitter = MarkdownHeaderTextSplitter(
         headers_to_split_on=headers_to_split_on,
-        strip_headers=True,  # 不保留 header，后续统一添加完整 header 链
+        strip_headers=True,  # Strip headers; full header chain is prepended later
     )
     
     # Secondary splitter for large sections
@@ -149,21 +144,13 @@ def get_markdown_splitter(config: SplitterConfig) -> Callable[[Document], list[D
     
     def split_markdown(doc: Document) -> list[Document]:
         """Split markdown document preserving structure."""
-        if not config.enable_header_split:
-            chunks = text_splitter.split_text(doc.page_content)
-            return [
-                Document(page_content=chunk, metadata={**doc.metadata, "chunk_idx": i})
-                for i, chunk in enumerate(chunks)
-                if len(chunk) >= config.min_chunk_size
-            ]
-
         header_splits = markdown_splitter.split_text(doc.page_content)
         
         chunks = []
         for split in header_splits:
             chunk_metadata = {**doc.metadata}
             
-            # 构建完整的 header 层级链
+            # Build full header hierarchy chain
             header_prefix = ""
             for level in ["header_1", "header_2", "header_3", "header_4"]:
                 if level in split.metadata:
@@ -171,19 +158,19 @@ def get_markdown_splitter(config: SplitterConfig) -> Callable[[Document], list[D
                     header_prefix += f"{prefix_marker} {split.metadata[level]}\n"
                     chunk_metadata["section"] = split.metadata[level]
             
-            # 判断是否需要二次切分
+            # Check if secondary splitting is needed
             if len(split.page_content) > config.chunk_size:
                 sub_chunks = text_splitter.split_text(split.page_content)
                 for i, sub_chunk in enumerate(sub_chunks):
                     if len(sub_chunk) >= config.min_chunk_size:
-                        # 统一添加完整 header 前缀
+                        # Prepend full header prefix
                         content = header_prefix + sub_chunk
                         chunks.append(Document(
                             page_content=content,
                             metadata={**chunk_metadata, "sub_chunk": i}
                         ))
             elif len(split.page_content) >= config.min_chunk_size:
-                # 统一添加完整 header 前缀
+                # Prepend full header prefix
                 content = header_prefix + split.page_content
                 chunks.append(Document(
                     page_content=content,
@@ -530,10 +517,9 @@ def chunk_documents(
     documents: list[Document],
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
-    enable_header_split: bool = True,
 ) -> list[Document]:
     """Chunk documents using LangChain text splitter (legacy, uses markdown splitter)."""
-    config = SplitterConfig(chunk_size=chunk_size, chunk_overlap=chunk_overlap, enable_header_split=enable_header_split)
+    config = SplitterConfig(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     splitter = get_markdown_splitter(config)
     
     all_chunks = []
@@ -581,20 +567,18 @@ def build_index(
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
     min_chunk_size: int = 200,
-    enable_header_split: bool = True,
     exclude_patterns: list[str] | None = None,
     device: str = "auto",
 ):
     """Build semantic search index from knowledge base using LangChain."""
     embedding_device = _resolve_embedding_device(device)
-    
+
     print("\n🔍 LangChain Semantic Index Builder\n")
     print(f"Knowledge base: {kb_path}")
     print(f"Output path: {output_path}")
     print(f"Embedding model: {model_name}")
     print(f"Embedding device: {embedding_device}")
     print(f"Chunk config: size={chunk_size}, overlap={chunk_overlap}, min={min_chunk_size}")
-    print(f"Markdown header split: {'enabled' if enable_header_split else 'disabled'}")
     if exclude_patterns:
         print(f"Exclude patterns: {exclude_patterns}")
     print()
@@ -610,7 +594,6 @@ def build_index(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         min_chunk_size=min_chunk_size,
-        enable_header_split=enable_header_split,
     )
     
     # Step 1: Load all files with type detection
@@ -732,35 +715,21 @@ def main():
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=DEFAULT_CHUNK_SIZE,
-        help=f"Maximum chunk size in characters (default: {DEFAULT_CHUNK_SIZE})",
+        default=1000,
+        help="Maximum chunk size in characters (default: 1000)",
     )
     parser.add_argument(
         "--chunk-overlap",
         type=int,
-        default=DEFAULT_CHUNK_OVERLAP,
-        help=f"Overlap between chunks in characters (default: {DEFAULT_CHUNK_OVERLAP})",
+        default=200,
+        help="Overlap between chunks in characters (default: 200)",
     )
     parser.add_argument(
         "--min-chunk-size",
         type=int,
-        default=DEFAULT_MIN_CHUNK_SIZE,
-        help=f"Minimum chunk size to keep (default: {DEFAULT_MIN_CHUNK_SIZE})",
+        default=200,
+        help="Minimum chunk size to keep (default: 200)",
     )
-    header_split_group = parser.add_mutually_exclusive_group()
-    header_split_group.add_argument(
-        "--enable-header-split",
-        dest="enable_header_split",
-        action="store_true",
-        help="Enable Stage 1 markdown header splitting",
-    )
-    header_split_group.add_argument(
-        "--no-header-split",
-        dest="enable_header_split",
-        action="store_false",
-        help="Disable Stage 1 markdown header splitting",
-    )
-    parser.set_defaults(enable_header_split=DEFAULT_ENABLE_HEADER_SPLIT)
     parser.add_argument(
         "--exclude",
         type=str,
@@ -786,7 +755,6 @@ def main():
         chunk_size=args.chunk_size,
         chunk_overlap=args.chunk_overlap,
         min_chunk_size=args.min_chunk_size,
-        enable_header_split=args.enable_header_split,
         exclude_patterns=args.exclude,
         device=args.device,
     )

@@ -3,17 +3,14 @@ import re
 import subprocess
 from pathlib import Path
 
-# Regex to extract the path of a COMMANDMENT.md file being written by a bash command.
-# Matches patterns like:
-#   cat > /path/to/COMMANDMENT.md
-#   > /path/to/COMMANDMENT.md
-#   tee /path/to/COMMANDMENT.md
-#   ... > /path/to/COMMANDMENT.md (redirect)
+# Matches shell redirect / heredoc patterns that write to COMMANDMENT.md,
+# e.g. ``cat > path/COMMANDMENT.md``, ``tee path/COMMANDMENT.md``,
+# ``> path/COMMANDMENT.md << 'EOF'``.
 _COMMANDMENT_WRITE_RE = re.compile(
-    r"""(?:cat\s+>|>\s*|tee\s+)"""  # write indicators
-    r"""\s*([^\s<|&]+COMMANDMENT\.md)"""  # capture the file path
-    r"""|"""  # OR
-    r"""(?:>\s*|\s+)([^\s<|&]+COMMANDMENT\.md)\s*<<""",  # heredoc target
+    r"""(?:cat\s+>|>\s*|tee\s+)"""
+    r"""\s*([^\s<|&]+COMMANDMENT\.md)"""
+    r"""|"""
+    r"""(?:>\s*|\s+)([^\s<|&]+COMMANDMENT\.md)\s*<<""",
     re.VERBOSE,
 )
 
@@ -72,11 +69,10 @@ class BashCommand:
             }
         else:
             env = os.environ | self._env_override if self._env_override else None
-            cwd = self._cwd if self._cwd and os.path.isdir(self._cwd) else None
+            cwd = self._cwd if self._cwd and Path(self._cwd).is_dir() else None
             result = subprocess.run(command, shell=True, capture_output=True, text=True, env=env, cwd=cwd)
             output_text = result.stdout.strip() or result.stderr.strip()
 
-            # Auto-validate COMMANDMENT.md if the command wrote one
             if "COMMANDMENT.md" in command:
                 output_text = self._maybe_validate_commandment(command, output_text)
 
@@ -87,38 +83,38 @@ class BashCommand:
 
     @staticmethod
     def _maybe_validate_commandment(command: str, output_text: str) -> str:
-        """If the bash command wrote a COMMANDMENT.md, validate it."""
-        # Try regex first, fall back to scanning for any COMMANDMENT.md path
-        paths: list[str] = []
-        for m in _COMMANDMENT_WRITE_RE.finditer(command):
-            p = m.group(1) or m.group(2)
-            if p:
-                paths.append(p)
+        """Validate COMMANDMENT.md if the bash command wrote one.
 
-        # Fallback: if no regex match but command contains COMMANDMENT.md and
-        # a write indicator, try to find the path in the command tokens
-        if not paths:
+        COMMANDMENT.md is the evaluation contract between sub-agents and the
+        orchestrator.  Sub-agents must not silently produce an invalid one, so
+        every bash command that touches the file is validated on the spot and
+        any errors are appended to the command output as immediate feedback.
+        """
+        path_str: str | None = None
+
+        m = _COMMANDMENT_WRITE_RE.search(command)
+        if m:
+            path_str = m.group(1) or m.group(2)
+        else:
             for token in command.split():
                 if token.endswith("COMMANDMENT.md") and "/" in token:
-                    paths.append(token)
+                    path_str = token
                     break
 
-        for path_str in paths:
+        if path_str:
             p = Path(path_str)
             if p.exists():
                 try:
-                    from minisweagent.tools.validate_commandment import (
+                    from minisweagent.tools.validate_commandment import (  # pylint: disable=no-name-in-module
                         format_validation_message,
                         validate_commandment,
                     )
 
-                    content = p.read_text()
-                    result = validate_commandment(content)
+                    result = validate_commandment(p.read_text())
                     msg = format_validation_message(result)
                     if msg:
                         output_text += f"\n\n{msg}"
                 except Exception:
                     pass
-                break
 
         return output_text

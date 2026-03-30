@@ -42,7 +42,13 @@ dependencies = [
     "platformdirs",
     "textual",
     "prompt_toolkit",
+    "tree_sitter_languages",
+    "anthropic",
+    "google-genai",
     "openai != 1.100.0,!=1.100.1",  # https://github.com/SWE-agent/mini-swe-agent/issues/446
+    "mcp[cli]>=1.2.0",  # required by automated test discovery MCP server
+    "fastmcp>=0.2.0",  # required by profiler-mcp and metrix-mcp
+    "metrix @ git+https://github.com/AMDResearch/intellikit.git#subdirectory=metrix",  # AMD GPU profiling
 ]
 
 [project.optional-dependencies]
@@ -86,10 +92,17 @@ Repository = "https://github.com/SWE-agent/mini-SWE-agent"
 "Bug Tracker" = "https://github.com/SWE-agent/mini-SWE-agent/issues"
 
 [project.scripts]
-mini = "minisweagent.run.mini:app"
-mini-swe-agent = "minisweagent.run.mini:app"
-mini-extra = "minisweagent.run.mini_extra:main"
-mini-e= "minisweagent.run.mini_extra:main"
+geak = "minisweagent.run.mini:app"
+geak-preprocess = "minisweagent.run.preprocess.preprocessor:main"
+kernel-profile = "minisweagent.run.preprocess.kernel_profile:main"
+commandment = "minisweagent.run.preprocess.commandment:main"
+validate-commandment = "minisweagent.tools.validate_commandment:main"
+run-harness = "minisweagent.run.preprocess.run_harness:main"
+baseline-metrics = "minisweagent.run.preprocess.baseline:main"
+codebase-context = "minisweagent.run.preprocess.codebase_context:main"
+resolve-kernel-url = "minisweagent.run.preprocess.resolve_kernel_url:main"
+geak-orchestrate = "minisweagent.run.orchestrator:main"
+task-generator = "minisweagent.agents.heterogeneous.task_generator:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -102,7 +115,7 @@ where = ["src"]
 include = ["minisweagent*"]
 
 [tool.setuptools.package-data]
-minisweagent = ["config/**/*"]
+minisweagent = ["config/**/*", "run/preprocess/config/**/*"]
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.
@@ -270,6 +283,7 @@ disable = [
 ]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [

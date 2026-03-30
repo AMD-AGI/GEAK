@@ -89,7 +89,7 @@ def main():
     """Run embedding search tests with hardcoded queries."""
     vectorstore = load_index()
     
-    # 硬编码测试用例
+    # Hardcoded test cases
     test_queries = [
         "HIP kernel shared memory optimization",
         "How to install ROCm?",

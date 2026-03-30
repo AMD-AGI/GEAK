@@ -42,35 +42,10 @@ class str_replace_editor:
             os.remove(old_file)
         if new_file and Path(new_file).exists():
             os.remove(new_file)
-
-        output_text = result.stdout.strip() or result.stderr.strip()
-
-        # Auto-validate COMMANDMENT.md files after create/edit
-        if path.endswith("COMMANDMENT.md") and command in ("create", "str_replace", "insert"):
-            output_text = self._validate_commandment_file(path, output_text)
-
         return {
-            "output": output_text,
+            "output": result.stdout.strip() or result.stderr.strip(),
             "returncode": result.returncode,
         }
-
-    @staticmethod
-    def _validate_commandment_file(path: str, output_text: str) -> str:
-        """Run COMMANDMENT validation and append results to editor output."""
-        try:
-            from minisweagent.tools.validate_commandment import (
-                format_validation_message,
-                validate_commandment,
-            )
-
-            content = Path(path).read_text()
-            result = validate_commandment(content)
-            msg = format_validation_message(result)
-            if msg:
-                output_text += f"\n\n{msg}"
-        except Exception:
-            pass  # Don't break the editor if validation fails
-        return output_text
 
 
 if __name__ == "__main__":

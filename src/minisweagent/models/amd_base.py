@@ -23,6 +23,8 @@ class AmdLlmModelConfig:
     set_cache_control: Literal["default_end"] | None = "default_end"
     reasoning: dict[str, Any] = field(default_factory=dict)
     bash_tool: bool = True
+    profiling: bool = False
+    use_strategy_manager: bool = False
 
 
 class AmdLlmModelBase:
@@ -60,7 +62,9 @@ class AmdLlmModelBase:
         self.cost = 0.0
         self.n_calls = 0
         # Load tools list
-        self.tools = get_tools_list()
+        self.tools = get_tools_list(use_strategy_manager=self.config.use_strategy_manager)
+        if not self.config.profiling:
+            self.tools = [tool for tool in self.tools if tool["name"] != "profiling"]
         if not self.config.bash_tool:
             self.tools = [tool for tool in self.tools if tool["name"] != "bash"]
         self._init_client()
@@ -109,10 +113,6 @@ class AmdLlmModelBase:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
-    def set_tools(self, tools: list[dict]) -> None:
-        """Replace the tool schemas visible to the LLM."""
-        self.tools = tools
 
     def query(self, messages: list[dict], **kwargs) -> dict:
         """Query the model and return a standardised response dict."""

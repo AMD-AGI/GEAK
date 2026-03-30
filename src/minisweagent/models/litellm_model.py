@@ -34,8 +34,10 @@ class LitellmModel:
         self.config = config_class(**kwargs)
         self.cost = 0.0
         self.n_calls = 0
-        if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
-            litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
+        if self.config.litellm_model_registry:
+            _p = Path(self.config.litellm_model_registry)
+            if _p.is_file():
+                litellm.utils.register_model(json.loads(_p.read_text()))
 
     @retry(
         stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "10"))),
