@@ -1,7 +1,4 @@
-"""LiteLLM-backed model (refactored drop-in for :mod:`litellm_model`).
-
-This module mirrors :class:`~minisweagent.models.litellm_model.LitellmModel` with
-engineering fixes and optional parity features with :mod:`amd_llm` / vendor paths.
+"""LiteLLM-backed model 
 
 Swap usage (when ready)::
 

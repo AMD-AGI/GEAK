@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
-"""Standalone editor CLI (fork of ``editor_tool``; does not import it).
+"""Standalone editor CLI.
 
 Adds ``--file_text_path`` so large file bodies can be passed via a UTF-8 file
-instead of the shell (used by :mod:`new_str_replace_editor`).
+instead of the shell (used by :mod:`str_replace_editor`).
 Original: Anthropic Text Editor tool; Python 3.6+ compatible, stateless (JSON registry).
 """
 
