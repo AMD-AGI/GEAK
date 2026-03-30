@@ -342,13 +342,13 @@ class LitellmModel:
                 model=self.config.litellm_model_name_override or None,
             )
         except Exception as e:
-            logger.critical(
+            logger.warning(
                 "Error calculating cost for model %s: %s. "
                 "See 'Updating the model registry' at https://klieret.short.gy/litellm-model-registry",
                 self.config.model_name,
                 e,
             )
-            raise
+            cost = 0.0
 
         self.n_calls += 1
         assert cost >= 0.0, f"Cost is negative: {cost}"
