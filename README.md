@@ -115,7 +115,7 @@ export AMD_LLM_API_KEY="YOUR_KEY"
 geak
 
 # Typical kernel optimization using natural language input
-geak -t "Optimize the kernel from /path/to/aiter, specifically aiter/ops/triton/topk.py. Use the harness at /path/to/test_topk_harness.py. Use four GPU with IDs 0-3 simultaneously."
+geak -t "Optimize the kernel from /path/to/aiter, specifically aiter/ops/triton/topk.py. Use the harness at /path/to/test_topk_harness.py. Use four GPUs with IDs 0-3 simultaneously."
 
 # Typical kernel optimization (single agent)
 geak --kernel-path /path/to/kernel/file \
