@@ -192,8 +192,7 @@ def main(
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
     console.print(f"Loading base config: [bold green]'{base_config_path.name}'[/bold green]")
     config = yaml.safe_load(base_config_path.read_text()) or {}
-    if not config_spec:
-        config_path = builtin_config_dir / "geak.yaml"
+    config_path = config_spec or (builtin_config_dir / "geak.yaml")
     console.print(f"[dim]Applying user config from '{config_path}' (final override)[/dim]")
     user_config = yaml.safe_load(config_path.read_text()) or {}
     config = _deep_merge(config, user_config)

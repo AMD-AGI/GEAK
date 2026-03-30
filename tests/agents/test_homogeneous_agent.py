@@ -70,7 +70,7 @@ class TestHomogeneousAgentConfig:
     @pytest.fixture
     def homogeneous_config(self):
         """Load the homogeneous agent config."""
-        config_path = Path("src/minisweagent/config/homogeneous_agent.yaml")
+        config_path = Path("src/minisweagent/config/mini_kernel_strategy_list.yaml")
         with open(config_path) as f:
             return yaml.safe_load(f)
 

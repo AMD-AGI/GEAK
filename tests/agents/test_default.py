@@ -43,8 +43,8 @@ def get_text(msg: dict) -> str:
 
 @pytest.fixture
 def default_config():
-    """Load default agent config from config/default.yaml"""
-    config_path = Path("src/minisweagent/config/default.yaml")
+    """Load default agent config from config/mini.yaml"""
+    config_path = Path("src/minisweagent/config/mini.yaml")
     with open(config_path) as f:
         config = yaml.safe_load(f)
     return config["agent"]
