@@ -76,7 +76,7 @@ class ParallelAgent(DefaultAgent):
         ).resolve()
         model_factory = kwargs.get("model_factory") or (lambda: self.model)
         env_factory = kwargs.get("env_factory") or (lambda: self.env)
-        is_git_repo = (repo_path / ".git").exists()
+        is_git_repo = (repo_path / ".git").exists() and ParallelAgent._has_valid_head(repo_path)
         output = kwargs.get("output")
         save_traj_fn = kwargs.get("save_traj_fn")
 

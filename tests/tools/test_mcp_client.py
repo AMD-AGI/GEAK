@@ -81,7 +81,7 @@ class TestStdioTransport:
             proc.stdout = AsyncMock()
             proc.stdout.readline = AsyncMock(return_value=b"")
             t = StdioTransport(proc)
-            with pytest.raises(EOFError, match="closed connection"):
+            with pytest.raises(ConnectionError, match="closed connection"):
                 await t.receive()
 
         asyncio.run(_run())

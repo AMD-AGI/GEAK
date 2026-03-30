@@ -71,8 +71,9 @@ agent:
        - Include reference to the detailed log file
        - This baseline is your reference point - all strategy results will be compared against it
        
-    4. **ALWAYS** use the `profiling` tool before listing strategies to identify the bottleneck of the current kernel:
-       - Call the `profiling` tool with the appropriate working directory and command used during performance testing.
+    4. Before listing strategies, identify the bottleneck of the current kernel:
+       - If `profile.json` exists in the workspace, use it as the primary profiling reference for optimization planning.
+       - If `profile.json` is not available, call the `profile_kernel` tool with the appropriate working directory and command used during performance testing.
 
     5. **Analyze and Prioritize Strategies**
        - Analyze computational complexity, memory access patterns, and parallelization opportunities
@@ -100,7 +101,7 @@ agent:
        - **Calculate relative change** compared to baseline (e.g., +21.1% improvement or -4.7% regression)
        - Record ONLY the relative change (percentage) in strategy file, not absolute values
        - Include reference to detailed log file for full metrics
-       - **RECOMMENDED**: Use `profiling` tool to profile the kernel after implementation to identify the bottleneck of the current kernel.
+       - **RECOMMENDED**: Use `profile_kernel` tool to profile the kernel after implementation to identify the bottleneck of the current kernel.
        - **Decision**: If successful (performance improved), keep it. If failed (regression), revert the changes.
 
     8. **Explore Additional Strategies**
@@ -148,7 +149,8 @@ agent:
     ## Important Rules
 
     1. Every response must contain exactly one tool call
-    2. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+    2. NOTE: This rule applies to `bash` tool only, NOT to `profile_kernel`.
+       For `bash` tool, directory or environment variable changes are not persistent. Every action is executed in a new subshell.
        However, you can prefix any bash command with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
     3. Ignore policy: When analyzing logs / drawing conclusions / optimizing, IGNORE all information related to parallel execution or hardware assignment (e.g., "parallel X runs", "gpu idx N", "device id", multi-GPU, threads, streams, scheduling, affinity). This information is already handled by the backend; it MUST NOT enter your reasoning, MUST NOT influence decisions, and MUST NOT be mentioned in the final answer.
 
@@ -193,8 +195,15 @@ agent:
     - **note**: Add documentation note
     - **summary**: Show statistics
 
-    ### profiling
-    Profile GPU kernel with rocprof to identify bottlenecks. Parameters: profiling_workdir, profiling_cmd
+    ### profile_kernel
+    Profile GPU kernel with rocprof to identify bottlenecks. Parameters: command, workdir
+    - **command**: Must be a single executable invocation (no shell operators). If you use relative paths (e.g. `scripts/...`), they are resolved relative to **workdir**.
+    - **workdir**: Working directory for the command. Set this to your repo/project root so relative paths work (recommended). If you don't set it, the command may run from the profiler tool's own directory and relative paths can break.
+    - Forbidden in `command`: `&&`, `cd`, `|`, `;`, `$VAR`, inline env assignments (e.g. `VAR=val cmd`)
+    - Good example: `command="python3 scripts/task_runner.py performance", workdir="/path/to/project"`
+    - Also ok: `command="python3 /absolute/path/to/scripts/task_runner.py performance"`
+    - Bad example: `command="cd /path && python3 scripts/task_runner.py performance"`
+  
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
     <output>
@@ -208,38 +217,5 @@ agent:
     - **save_and_test**: Save patch and run performance test
     - **submit**: Submit final result and complete task
     - **strategy_manager**: Track optimization strategies
-    - **profiling**: Profile GPU kernel with rocprof
+    - **profile_kernel**: Profile GPU kernel with rocprof
     </available_tools>
-  step_limit: 0.
-  cost_limit: 0.
-  mode: yolo
-env:
-  env:
-    PAGER: cat
-    MANPAGER: cat
-    LESS: -R
-    PIP_PROGRESS_BAR: 'off'
-    TQDM_DISABLE: '1'
-  timeout: 3600
-model:
-  model_class: amd_llm
-  # claude-opus-4.5, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
-  model_name: claude-opus-4.5
-  # API key is read from AMD_LLM_API_KEY environment variable
-  # Set it in .env file or: export AMD_LLM_API_KEY=your_key_here
-  api_key: ""
-  model_kwargs:
-    temperature: 0.0
-    max_tokens: 16000
-    # reasoning is only valid for gpt models, can be set to none, low, medium, high
-    reasoning:
-      effort: high
-    # text is only valid for gpt models, can be set to low or high. determines how many output tokens are generated
-    text:
-      verbosity: low
-tools:
-  profiling: false
-  profiling_type: profiling
-  strategy_manager: true
-  strategy_file: ".optimization_strategies.md"
-  rag: false

@@ -11,7 +11,6 @@ from pathlib import Path
 
 from rich.console import Console
 
-from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.agents.parallel_agent import BestPatchResult, ParallelAgent
 from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 from minisweagent.models import get_model
@@ -32,7 +31,6 @@ def run_homogeneous_agent(
     env,
     env_class,
     env_kwargs: dict,
-    tools_settings: dict,
     agent_config: dict,
     repo: Path | None = None,
     num_parallel: int | None = None,
@@ -91,13 +89,8 @@ def run_homogeneous_agent(
     if not final_repo.exists():
         raise ValueError(f"Repository path does not exist: {final_repo}")
 
-    # Select agent class based on tools.strategy_manager config
-    if tools_settings["strategy_manager"]:
-        base_agent_class = StrategyInteractiveAgent
-        console.print(f"[bold cyan]Using Strategy Agent[/bold cyan] (strategy file: {tools_settings['strategy_file']})")
-    else:
-        base_agent_class = InteractiveAgent
-        console.print("[bold cyan]Using Interactive Agent[/bold cyan]")
+    # GEAK homogeneous flow always uses strategy interactive agent.
+    base_agent_class = StrategyInteractiveAgent
 
     # Configure agent for homogeneous mode
     agent_config["mode"] = "yolo"
@@ -114,28 +107,14 @@ def run_homogeneous_agent(
     # Set patch_output_dir to output_dir so patches are saved alongside logs
     agent_config["patch_output_dir"] = str(final_output_dir)
 
-    # Setup logging
-    log_file = final_output_dir / "homogeneous_agent.log"
     final_traj_output = Path(traj_output) if traj_output is not None else (final_output_dir / "trajectory.json")
     final_traj_output.parent.mkdir(parents=True, exist_ok=True)
-
-    # Print configuration summary
-    console.print("\n[bold]Configuration Summary:[/bold]")
-    console.print(f"  Parallel agents: [cyan]{final_num_parallel}[/cyan]")
-    console.print(f"  GPU IDs: [cyan]{final_gpu_ids}[/cyan]")
-    console.print(f"  Repository: [cyan]{final_repo}[/cyan]")
-    console.print(f"  Output: [cyan]{final_output_dir}[/cyan]")
-    if agent_config.get("test_command"):
-        console.print(f"  Test command: [cyan]{agent_config['test_command']}[/cyan]")
-    console.print(f"  Log file: [cyan]{log_file}[/cyan]")
-    console.print()
 
     # Get model config for factory
     model_config = config.get("model", {})
 
     # Create and run ParallelAgent
     agent = ParallelAgent(model, env, **agent_config)
-    agent.log_file = log_file
 
     try:
         best_result = agent.run(

@@ -1,9 +1,10 @@
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 import yaml
 
-from minisweagent.agents.default import DefaultAgent
+from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models.test_models import DeterministicModel
 
@@ -43,11 +44,14 @@ def get_text(msg: dict) -> str:
 
 @pytest.fixture
 def default_config():
-    """Load default agent config from config/default.yaml"""
-    config_path = Path("src/minisweagent/config/default.yaml")
+    """Load default agent config from config/mini.yaml"""
+    config_path = Path("src/minisweagent/config/mini.yaml")
     with open(config_path) as f:
         config = yaml.safe_load(f)
-    return config["agent"]
+    # mini.yaml may include InteractiveAgent-only keys (e.g. `mode`).
+    # Keep only keys accepted by AgentConfig for DefaultAgent tests.
+    allowed = {f.name for f in fields(AgentConfig)}
+    return {k: v for k, v in config["agent"].items() if k in allowed}
 
 
 @pytest.fixture
