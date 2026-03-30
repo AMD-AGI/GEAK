@@ -142,7 +142,7 @@ class ToolRuntime:
             return wrapper
 
         for name in list(self._tool_table):
-            if name.startswith("rag_") or name in ("query", "optimize"):
+            if name in ("query", "optimize"):
                 self._tool_table[name] = _wrap(self._tool_table[name])
 
     def _register_profiler_mcp(self):

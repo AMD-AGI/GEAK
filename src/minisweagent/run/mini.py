@@ -217,8 +217,8 @@ def main(
     # RAG MCP toggle: disable RAG tools when rag config is absent
     rag_cfg = config.get("rag")
     if not rag_cfg:
-        disabled_tools.append("rag_query")
-        disabled_tools.append("rag_optimize")
+        disabled_tools.append("query")
+        disabled_tools.append("optimize")
 
     if disabled_tools:
         config.setdefault("agent", {}).setdefault("disabled_tools", [])
