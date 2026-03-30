@@ -116,9 +116,8 @@ Pass **`--gpu-ids`** as a comma-separated list of device indices (**`0,1,2,3`**)
 geak --num-parallel 4 \
   --repo /path/to/kernel/repo \
   --kernel-path /path/to/kernel/file \
-  --task "Optimize block_reduce" \
-  --gpu-ids 0,1,2,3 \
-  --metric "Extract Bandwidth in GB/s (higher is better)"
+  --task "Optimize block_reduce. Metric: Extract Bandwidth in GB/s (higher is better)" \
+  --gpu-ids 0,1,2,3 
 ```
 
 
