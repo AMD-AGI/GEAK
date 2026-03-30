@@ -239,7 +239,13 @@ def _merge_completion_kwargs(
     call_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     merged = config.model_kwargs | call_kwargs | asdict(config)
-    return {k: v for k, v in merged.items() if k in LITELLM_COMPLETION_PARAM_KEYS}
+    filtered = {k: v for k, v in merged.items() if k in LITELLM_COMPLETION_PARAM_KEYS}
+    # Omit api_key from the completion call when unset so LiteLLM can read provider keys
+    # from the environment (e.g. OPENAI_API_KEY, AZURE_API_KEY); passing None/"" would override that.
+    ak = filtered.get("api_key")
+    if ak is None or (isinstance(ak, str) and not ak.strip()):
+        filtered.pop("api_key", None)
+    return filtered
 
 
 class LitellmModel:
@@ -306,7 +312,7 @@ class LitellmModel:
                 **filtered,
             )
         except litellm.exceptions.AuthenticationError as e:
-            hint = " You can permanently set your API key with `mini-extra config set KEY VALUE`."
+            hint = " You can permanently set your API key with `config set KEY VALUE`."
             msg = getattr(e, "message", None)
             if isinstance(msg, str):
                 e.message = msg + hint
