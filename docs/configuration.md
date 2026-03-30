@@ -4,8 +4,8 @@ How GEAK loads **YAML** for **`geak`**, where builtin files live, and how **`--c
 
 ## Main CLI
 
-1. **Base** — **`src/minisweagent/config/geak.yaml`** is always loaded first.
-2. **Override** — If you pass **`-c` / `--config`**, that file is **deep-merged** on top. Keys you set in the user file replace or merge into the result.
+1. **Base** — **`src/minisweagent/config/mini_kernel_strategy_list.yaml`** (strategy template) is loaded first.
+2. **Override** — **`geak.yaml`** is deep-merged on top; if you pass **`-c` / `--config`**, that file is used instead of **`geak.yaml`**. Keys you set in the override file replace or merge into the result.
 
 
 ## What’s in the default config file (**`src/minisweagent/config/geak.yaml`**)
