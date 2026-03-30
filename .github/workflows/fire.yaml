@@ -76,7 +76,7 @@ jobs:
             cd "${SMOKE_DIR_SILU:?}" && \
             geak --repo "$SMOKE_DIR_SILU" \
               --yolo \
-              -c geak.yaml \
+              -c src/minisweagent/config/geak.yaml \
               --exit-immediately \
               --num-parallel=2 \
               --gpu-ids=0,1 \
@@ -88,7 +88,7 @@ jobs:
             cd "${SMOKE_DIR_FP8:?}" && \
             geak --repo "$SMOKE_DIR_FP8" \
               --yolo \
-              -c geak.yaml \
+              -c src/minisweagent/config/geak.yaml \
               --exit-immediately \
               --num-parallel=2 \
               --gpu-ids=2,3 \
