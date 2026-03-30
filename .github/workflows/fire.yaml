@@ -2,10 +2,14 @@ name: Smoke Test
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - dev
+      - main
 
 jobs:
   smoke:
-    name: GEAK smoke test (silu kernel)
+    name: GEAK smoke test (silu + fused_rms_fp8)
     runs-on: geak-benchmark-7vhgm
     timeout-minutes: 60
 
@@ -17,6 +21,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Record smoke start time
+        run: echo "SMOKE_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: Install GEAK
         run: pip install -e '.[full]'
@@ -35,36 +42,102 @@ jobs:
 
       - name: Prepare workspace
         run: |
-          WORK=/tmp/geak-smoke-$$
-          echo "SMOKE_DIR=$WORK" >> "$GITHUB_ENV"
-          mkdir -p "$WORK"
-          cp -r tests/test_data/smoke_kernel/silu/* "$WORK/"
+          BASE=/tmp/geak-smoke-$$
+          SILU="$BASE/silu"
+          FP8="$BASE/fused_rms_fp8"
+          echo "SMOKE_BASE=$BASE" >> "$GITHUB_ENV"
+          echo "SMOKE_DIR_SILU=$SILU" >> "$GITHUB_ENV"
+          echo "SMOKE_DIR_FP8=$FP8" >> "$GITHUB_ENV"
+          mkdir -p "$SILU" "$FP8"
+          cp -r tests/test_data/smoke_kernel/silu/* "$SILU/"
+          cp -r tests/test_data/smoke_kernel/fused_rms_fp8/* "$FP8/"
+          cd "$FP8"
+          git init
+          git config user.email "smoke@ci.local"
+          git config user.name "Smoke CI"
+          git add -A
+          git commit -m "smoke workspace" --quiet
 
-      - name: Verify kernel compiles
-        working-directory: ${{ env.SMOKE_DIR }}
+      - name: Verify silu kernel compiles
+        working-directory: ${{ env.SMOKE_DIR_SILU }}
         run: |
           make
           ./applications_silu
 
-      - name: Run GEAK optimization
-        working-directory: ${{ env.SMOKE_DIR }}
+      - name: Verify fused_rms_fp8 harness (GPU 2)
+        working-directory: ${{ env.SMOKE_DIR_FP8 }}
         run: |
-          geak --repo "$SMOKE_DIR" \
-            --yolo \
-            --exit-immediately \
-            --kernel-path "$SMOKE_DIR/silu.hip" \
-            -t "Optimize the silu_mul_kernel in silu.hip for better performance."
+          HIP_VISIBLE_DEVICES=2 python3 kernel.py --profile --warmup 1 --iterations 2
+
+      - name: Run GEAK optimization (silu on GPU 0–1, fused_rms_fp8 on GPU 2–3 in parallel)
+        run: |
+          set -euo pipefail
+          (
+            cd "${SMOKE_DIR_SILU:?}" && \
+            geak --repo "$SMOKE_DIR_SILU" \
+              --yolo \
+              -c geak.yaml \
+              --exit-immediately \
+              --num-parallel=2 \
+              --gpu-ids=0,1 \
+              --kernel-path "$SMOKE_DIR_SILU/silu.hip" \
+              -t "Optimize the silu_mul_kernel in silu.hip for better performance."
+          ) &
+          PID_SILU=$!
+          (
+            cd "${SMOKE_DIR_FP8:?}" && \
+            geak --repo "$SMOKE_DIR_FP8" \
+              --yolo \
+              -c geak.yaml \
+              --exit-immediately \
+              --num-parallel=2 \
+              --gpu-ids=2,3 \
+              --kernel-path "$SMOKE_DIR_FP8/kernel.py" \
+              -t "Optimize fused_rms_fp8_group_quant in kernel.py for better performance."
+          ) &
+          PID_FP8=$!
+          SILU_EXIT=0
+          FP8_EXIT=0
+          wait "$PID_SILU" || SILU_EXIT=$?
+          wait "$PID_FP8" || FP8_EXIT=$?
+          if [ "$SILU_EXIT" -ne 0 ] || [ "$FP8_EXIT" -ne 0 ]; then
+            echo "::error::Parallel smoke failed (silu exit=$SILU_EXIT, fused_rms_fp8 exit=$FP8_EXIT)"
+            exit 1
+          fi
 
       - name: Verify output
         run: |
           echo "=== Smoke test completed ==="
-          if [ -f "$SMOKE_DIR/output.traj.json" ]; then
-            echo "Trajectory file found"
-          fi
-          ls -la "$SMOKE_DIR"/optimization_logs/*/best_results.json 2>/dev/null && \
-            echo "Best results found" || true
+          for pair in "silu:${SMOKE_DIR_SILU}" "fused_rms_fp8:${SMOKE_DIR_FP8}"; do
+            name="${pair%%:*}"
+            d="${pair#*:}"
+            echo "--- $name ---"
+            if [ -f "$d/output.traj.json" ]; then
+              echo "Trajectory file found"
+            else
+              echo "::warning::No output.traj.json in $d"
+            fi
+            ls -la "$d"/optimization_logs/*/best_results.json 2>/dev/null && \
+              echo "Best results found" || true
+          done
           echo "=== Smoke test PASSED ==="
+
+      - name: Report duration and enforce 40-minute limit
+        if: success()
+        env:
+          SMOKE_MAX_SECONDS: "2400" # 40 * 60
+        run: |
+          end=$(date +%s)
+          start="${SMOKE_START_EPOCH:?}"
+          elapsed=$((end - start))
+          mins=$((elapsed / 60))
+          secs=$((elapsed % 60))
+          echo "Smoke test wall-clock duration: ${elapsed}s (${mins}m ${secs}s)"
+          if [ "$elapsed" -gt "$SMOKE_MAX_SECONDS" ]; then
+            echo "::error::Smoke test exceeded ${SMOKE_MAX_SECONDS}s (40 minutes); took ${elapsed}s"
+            exit 1
+          fi
 
       - name: Cleanup
         if: always()
-        run: rm -rf "$SMOKE_DIR"
+        run: rm -rf "${SMOKE_BASE:?}"
