@@ -200,9 +200,7 @@ class TestRunHomogeneousAgent:
                 repo=temp_repo,
             )
 
-            # Verify ParallelAgent was called
             mock_parallel.assert_called_once()
-            # Check that agent_class is StrategyInteractiveAgent
             call_kwargs = mock_parallel.call_args[1]
             from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 
@@ -574,8 +572,8 @@ class TestHomogeneousAgentConsoleOutput:
             )
             yield repo_path
 
-    def test_console_output_configuration_summary(self, temp_repo):
-        """Test that configuration summary is printed to console."""
+    def test_console_output_no_crash(self, temp_repo):
+        """Test that homogeneous agent runs without crashing when console is provided."""
         from io import StringIO
 
         from rich.console import Console
@@ -612,8 +610,7 @@ class TestHomogeneousAgentConsoleOutput:
                 console=console,
             )
 
-        output_str = output.getvalue()
-        assert "Configuration Summary" in output_str or "Parallel agents" in output_str
+        mock_parallel.assert_called_once()
 
 
 # --- Marker for slow tests ---

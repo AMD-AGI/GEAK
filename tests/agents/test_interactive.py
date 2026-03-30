@@ -67,7 +67,9 @@ def default_config():
     config_path = Path("src/minisweagent/config/mini.yaml")
     with open(config_path) as f:
         config = yaml.safe_load(f)
-    return config["agent"]
+    agent_config = config["agent"]
+    agent_config.pop("mode", None)
+    return agent_config
 
 
 @pytest.fixture
