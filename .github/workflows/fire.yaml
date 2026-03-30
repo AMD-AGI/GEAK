@@ -6,11 +6,13 @@ on:
 jobs:
   smoke:
     name: GEAK smoke test (silu kernel)
-    runs-on: geak-benchmark-5kh27
+    runs-on: geak-benchmark-7vhgm
     timeout-minutes: 60
 
     env:
       AMD_LLM_API_KEY: ${{ secrets.AMD_LLM_API_KEY }}
+      # Skip mini's interactive global config wizard in non-TTY CI (configure_if_first_time)
+      MSWEA_CONFIGURED: "true"
 
     steps:
       - name: Checkout repository
@@ -18,6 +20,15 @@ jobs:
 
       - name: Install GEAK
         run: pip install -e '.[full]'
+
+      - name: Check API key is set
+        run: |
+          if [ -z "$AMD_LLM_API_KEY" ]; then
+            echo "::error::AMD_LLM_API_KEY is NOT set. Please add it as a repository secret."
+            exit 1
+          else
+            echo "AMD_LLM_API_KEY is set (length: ${#AMD_LLM_API_KEY})"
+          fi
 
       - name: Verify CLI
         run: geak --help
@@ -38,14 +49,11 @@ jobs:
       - name: Run GEAK optimization
         working-directory: ${{ env.SMOKE_DIR }}
         run: |
-          geak \
-            -c geak \
-            --repo "$SMOKE_DIR" \
+          geak --repo "$SMOKE_DIR" \
             --yolo \
             --exit-immediately \
-            --max-rounds 1 \
-            --no-heterogeneous \
-            -t "Optimize the silu_mul_kernel in silu.hip for better performance on AMD MI300X. The kernel computes SiLU activation (x * sigmoid(x)) fused with element-wise multiplication on bf16 data."
+            --kernel-path "$SMOKE_DIR/silu.hip" \
+            -t "Optimize the silu_mul_kernel in silu.hip for better performance."
 
       - name: Verify output
         run: |
