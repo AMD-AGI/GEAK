@@ -155,8 +155,12 @@ def rewrite_summary_with_verified_selection(
 def record_final_outcome(ctx: dict[str, Any], report: dict[str, Any]) -> None:
     """Record the final outcome using verified speedup when available."""
     try:
-        from minisweagent.memory.cross_session_memory import classify_kernel_category
-        from minisweagent.memory.integration import record_optimization_outcome
+        from minisweagent.memory.cross_session_memory import (  # pylint: disable=import-error,no-name-in-module
+            classify_kernel_category,
+        )
+        from minisweagent.memory.integration import (  # pylint: disable=import-error,no-name-in-module
+            record_optimization_outcome,
+        )
 
         speedup_val = report.get("verified_speedup")
         if not isinstance(speedup_val, (int, float)):
@@ -481,8 +485,12 @@ def auto_finalize(
         return report
 
     try:
-        from minisweagent.memory.cross_session_memory import classify_kernel_category
-        from minisweagent.memory.integration import record_optimization_outcome
+        from minisweagent.memory.cross_session_memory import (  # pylint: disable=import-error,no-name-in-module
+            classify_kernel_category,
+        )
+        from minisweagent.memory.integration import (  # pylint: disable=import-error,no-name-in-module
+            record_optimization_outcome,
+        )
 
         _kpath = ctx.get("kernel_path", "")
         _kcat = classify_kernel_category(_kpath) if _kpath else "unknown"

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automated-test-discovery"
+version = "0.1.0"
+description = "Automated test discovery MCP server for GPU kernels"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=0.2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

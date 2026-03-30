@@ -482,8 +482,12 @@ def _run_task_agent(
 
         _bm_dict: dict[str, Any] = {}
         try:
-            from minisweagent.memory.integration import assemble_memory_context
-            from minisweagent.memory.working_notebook import summarize_working_notebook
+            from minisweagent.memory.integration import (  # pylint: disable=import-error,no-name-in-module
+                assemble_memory_context,
+            )
+            from minisweagent.memory.working_notebook import (  # pylint: disable=import-error,no-name-in-module
+                summarize_working_notebook,
+            )
 
             if baseline_metrics_path and Path(baseline_metrics_path).exists():
                 _bm_dict = json.loads(Path(baseline_metrics_path).read_text())
