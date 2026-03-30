@@ -1,0 +1,41 @@
+# ============================================================================
+# Agent & Task Configuration
+# ============================================================================
+# CI: copied to AgentKernelArena/config.yaml by .github/workflows/benchmark.yaml
+
+# Agent Template Selection
+# Choose ONE agent template that defines how the LLM interacts with the system
+# Available options:
+# - cursor
+# - codex
+# - geak_optimagentv2
+# - single_llm_call
+# - SWE-agent
+# - claude_code
+# - geak_hip
+# - openevolve
+# - geak_ourllm_kernel2kernel
+# - task_validator
+
+agent:
+  template: geak_v3
+
+# Task Selection
+# Specify task names to execute (use full path from tasks/ directory)
+# Examples:
+#   - hip2hip                           # All tasks under hip2hip
+#   - triton2triton                     # All tasks under triton2triton
+#   - torch2hip                         # All tasks under torch2hip
+#   - hip2hip/silu                      # single task under hip2hip
+#   - all                               # Run ALL available tasks
+
+tasks:
+  - hip2hip/others/
+  - repository/rocprim/block_radix_rank
+  - repository/rocprim/device_binary_search
+  - repository/rocprim/device_search_n
+  - repository/rocprim/device_merge_sort
+
+target_gpu_model: MI300
+log_directory: logs
+workspace_directory_prefix: workspace

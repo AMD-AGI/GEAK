@@ -1,16 +1,16 @@
 name: Benchmark
 
 on:
-  # Uncomment the schedule when GPU runner (geak-benchmark-5kh27) is available:
-  # schedule:
-  #   - cron: "0 5 1,15 * *"
   workflow_dispatch:
+  schedule:
+    # Weekly: Sundays 05:00 UTC
+    - cron: "0 5 * * 0"
 
 jobs:
   benchmark:
     name: Run AgentKernelArena benchmark
     runs-on: geak-benchmark-5kh27
-    timeout-minutes: 720
+    timeout-minutes: 1000
 
     env:
       AMD_LLM_API_KEY: ${{ secrets.AMD_LLM_API_KEY }}
@@ -36,15 +36,11 @@ jobs:
       - name: Verify GEAK CLI
         run: geak --help
 
-      - name: Configure AgentKernelArena for geak_v3
-        working-directory: arena
+      # Drop Arena's default config and use GEAK's benchmark config (single file to edit).
+      - name: Install benchmark config into AgentKernelArena
         run: |
-          python3 -c "
-          import yaml, pathlib
-          cfg = yaml.safe_load(pathlib.Path('config.yaml').read_text())
-          cfg['agent']['template'] = 'geak_v3'
-          pathlib.Path('config.yaml').write_text(yaml.dump(cfg, default_flow_style=False, sort_keys=False))
-          "
+          rm -f arena/config.yaml
+          cp geak/.github/arena-benchmark-config.yaml arena/config.yaml
 
       - name: Run benchmark
         working-directory: arena
