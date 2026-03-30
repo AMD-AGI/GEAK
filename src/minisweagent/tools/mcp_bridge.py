@@ -319,12 +319,7 @@ def _allocate_unique_openai_name(base: str, server_name: str, registry: set[str]
 
 
 def collect_mcp_tools() -> tuple[list[MCPToolBridge], list[dict[str, Any]]]:
-    """Discover bridges, call :meth:`MCPToolBridge.tool_list` on each.
-
-    Returns:
-        A tuple ``(bridges, tool_lists)`` with the same length. ``tool_lists[i]`` is the
-        MCP ``tools/list`` payload for ``bridges[i]`` (empty list if listing failed or none).
-    """
+    """Discover bridges and build a flat list of OpenAI-style tool dicts per MCP tool."""
     _mcp_bridges = _populate_mcp_bridges()
     tool_lists: list[dict[str, Any]] = []
     used_names: set[str] = set()

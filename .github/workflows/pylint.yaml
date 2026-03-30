@@ -47,6 +47,8 @@ jobs:
       - name: Install dependencies
         run: |
             uv pip install --python ${Python_ROOT_DIR} -e '.[full]'
+            uv pip install --python ${Python_ROOT_DIR} -e 'mcp_tools/profiler-mcp/'
+            uv pip install --python ${Python_ROOT_DIR} -e 'mcp_tools/automated-test-discovery/'
             uv pip install --python ${Python_ROOT_DIR} pylint
       - name: Run pylint (fail only on errors)
         run: |
