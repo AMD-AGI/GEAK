@@ -217,7 +217,7 @@ def run_unit_test_agent(
     task = (
         f"Create a fixed test harness for kernel: {kernel_name}\n"
         f"Repository: {repo}\n\n"
-        f"IMPORTANT: Read INSTRUCTIONS.md in the repository for test harness requirements\n"
+        f"IMPORTANT: Read src/minisweagent/run/preprocess/INSTRUCTIONS.md in the repository for test harness requirements\n"
         f"and COMMANDMENT format rules before creating the harness."
     )
     if preferred_harness_path is not None:
