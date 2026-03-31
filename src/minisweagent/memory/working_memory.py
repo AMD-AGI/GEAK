@@ -510,7 +510,7 @@ class WorkingMemory:
 
         # Conditional injection: skip if nothing changed since last injection
         result = "\n".join(parts)
-        _state_key = f"{self.best_speedup:.4f}:{len(self.insights)}:{len(self.strategies_tried)}"
+        _state_key = f"{self.best_speedup:.4f}:{len(self.insights)}:{len(self.strategies_tried)}:{self.bottleneck_type}"
         if hasattr(self, '_last_injection_hash') and self._last_injection_hash == _state_key:
             return ""
         self._last_injection_hash = _state_key
