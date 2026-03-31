@@ -59,6 +59,8 @@ flowchart TB
   style OUT fill:#fef2f2,stroke:#dc2626,stroke-width:1px,color:#991b1b
 ```
 
+
+
 Parallel runs add multiple isolated workspaces and a **best-patch** selection step on top of the same **optimization run** pattern.
 
 ## Table of Contents
@@ -92,9 +94,14 @@ Parallel runs add multiple isolated workspaces and a **best-patch** selection st
 ```bash
 git clone https://github.com/AMD-AGI/GEAK
 cd GEAK
+# Docker-based
+AMD_LLM_API_KEY=<YOUR_KEY> bash scripts/run-docker.sh
+# (or)
+# Local
 pip install -e .
 
-# Set model name and key
+# Set model name and key. In the case of docker-based setup, export the API key before
+# running scripts/run-docker.sh.
 
 # Option 1: set a LiteLLM model + provider API key
 export MSWEA_MODEL_NAME="openai/gpt-5"
@@ -115,6 +122,9 @@ export AMD_LLM_API_KEY="YOUR_KEY"
 ```bash
 # Interactive REPL
 geak
+
+# Typical kernel optimization using natural language input
+geak -t "Optimize the kernel from /path/to/aiter, specifically aiter/ops/triton/topk.py. Use the harness at /path/to/test_topk_harness.py. Use four GPUs with IDs 0-3 simultaneously."
 
 # Typical kernel optimization (single agent)
 geak --kernel-path /path/to/kernel/file \
@@ -146,10 +156,10 @@ geak --num-parallel 4 \
 For more options and examples, see **[Quick start](docs/quick_start.md)**.
 
 
-
 ### Configuration
 
 #### Loading Configurations
+
 `geak` loads configs in layers:
 
 1. base config: `geak.yaml`
@@ -162,11 +172,10 @@ For more options and examples, see **[Configuration](docs/configuration.md)**
 
 ### Output & Artifacts
 
-GEAK saves patches + test logs so results are reproducible.
+GEAK saves patches + test logs so the optimization progress and the results are transparent.
 
 - **Default output base**: `optimization_logs/`
 - **Auto-generated run directory**: `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`
-- **Parallel runs**: subfolders `parallel_0/`, `parallel_1/`, ...
 
 Typical structure (parallel run):
 
@@ -177,6 +186,20 @@ optimization_logs/<kernel>_<timestamp>/
 │   ├── patch_0_test.txt
 │   └── agent_0.log
 ├── parallel_1/
+│   └── ...
+├── best_results.json
+└── select_agent.log
+```
+
+Structure for triton kernels:
+
+```bash
+optimization_logs/<kernel>_<timestamp>/
+├── results/round_1/<kernel>-<strategy_0>/
+│   ├── patch_0.patch
+│   ├── patch_0_test.txt
+│   └── task_0.log
+├── results/round_1/<kernel>-<strategy_1>/
 │   └── ...
 ├── best_results.json
 └── select_agent.log
@@ -194,7 +217,6 @@ Every **`geak`** run starts with **preprocessing**. It anchors the rest of the r
 The pipeline chains steps such as **kernel URL resolution**, **codebase context**, **automated test discovery**, **harness execution / validation**, **kernel profiling**, **baseline metrics**, and **commandment** generation (order and fallbacks match the implementation). Critically, **baseline performance is exercised before the main optimization loop starts**, so reported **speedups are always against that same frozen baseline**—not a moving target the model might invent mid-run. The **test harness stays fixed** for the lifetime of the run (same entrypoints and modes from preprocess through patch evaluation), so comparisons stay apples-to-apples and **final speedup numbers are not reinterpreted** by the LLM.
 
 **Unit-test discovery / harness creation** is one stage inside that preprocess: if you **do not** pass **`--test-command`**, the preprocessor can invoke the **UnitTestAgent** to **find** an existing harness or **materialize** a validated one (correctness / profile / benchmark modes). If discovery already yields a good harness, the preprocessor may skip or fall back from UnitTestAgent as appropriate. The resulting command is what the later optimization loop uses so patches are still checked against a real correctness signal before chasing performance.
-
 
 
 ### Best patch selection

@@ -16,10 +16,16 @@ From the repository root:
 ```bash
 git clone https://github.com/AMD-AGI/GEAK.git
 cd GEAK
+
+# Docker-based
+AMD_LLM_API_KEY=<YOUR_KEY> bash scripts/run-docker.sh
+# (or)
+# Local
 pip install -e .
 ```
 
 ## 2. Configure the model
+In the case of docker-based setup, export the API key before running scripts/run-docker.sh.
 
 `geak` resolves the model name in this order (first hit wins): CLI **`-m` / `--model`**, then YAML **`model.model_name`**, then env **`GEAK_MODEL`**, then **`MSWEA_MODEL_NAME`**.
 
@@ -99,6 +105,11 @@ model:
 
 ## 3. Run the agent
 
+### Typical kernel optimization (natural language input)
+
+```bash
+geak -t "Optimize the kernel from /path/to/aiter, specifically aiter/ops/triton/topk.py. Use the harness at /path/to/test_topk_harness.py. Use four GPUs with IDs 0-3 simultaneously."
+```
 
 ### Typical kernel optimization (single agent)
 
