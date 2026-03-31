@@ -142,6 +142,32 @@ class WorkingMemory:
         if len(self.insights) > MAX_INSIGHTS:
             self.insights = self.insights[-MAX_INSIGHTS:]
 
+    def ingest_insight(self, insight) -> None:
+        """Centralised handler: add insight, update bottleneck/speedup/latency.
+
+        Replaces duplicated logic in orchestrator.py and default.py.
+        """
+        import re as _re
+        insight.step = self.current_step
+        self.add_insight(insight.tag, insight.message)
+
+        msg = insight.message or ""
+
+        # Update bottleneck_type from profiling insights
+        if "bottleneck=" in msg:
+            _bn = _re.search(r"bottleneck=(\w+)", msg)
+            if _bn:
+                self.bottleneck_type = _bn.group(1)
+
+        # Extract latency (stricter match first) then speedup
+        _lat = _re.search(r"latency:\s*(\d+\.\d+)\s*ms", msg, _re.IGNORECASE)
+        if _lat:
+            self.update_latency(float(_lat.group(1)))
+        else:
+            _sp = _re.search(r"(\d+\.\d+)x", msg)
+            if _sp:
+                self.update_speedup(float(_sp.group(1)))
+
     def record_strategy(self, name: str, success: bool):
         """Record a strategy attempt."""
         if name not in self.strategies_tried:
@@ -432,9 +458,9 @@ class WorkingMemory:
         if self.bottleneck_type and self.tuning_steps >= 2:
             _bn_hint = {
                 "balanced": "Bottleneck: balanced -- parameter tuning won't help. Focus on algorithmic changes or fusion; treat dispatch-path edits as a last resort.",
-                "memory-bound": "Bottleneck: memory -- try vectorized loads, LDS staging, or fuse ops.",
-                "compute-bound": "Bottleneck: compute -- try MFMA, reduce instructions, or fuse ops.",
-                "latency-bound": "Bottleneck: latency -- increase work per kernel, fuse with adjacent kernels, or try @triton.autotune.",
+                "memory": "Bottleneck: memory -- try vectorized loads, LDS staging, or fuse ops.",
+                "compute": "Bottleneck: compute -- try MFMA, reduce instructions, or fuse ops.",
+                "latency": "Bottleneck: latency -- increase work per kernel, fuse with adjacent kernels, or try @triton.autotune.",
             }
             hint = _bn_hint.get(self.bottleneck_type)
             if hint:

@@ -126,29 +126,7 @@ def run_llm_steps(
 
                 insight = extract_insight_from_tool_result(tool_name, result_str, 0)
                 if insight:
-                    insight.step = step
-                    _wm.insights.append(insight)
-                    if len(_wm.insights) > 15:
-                        _wm.insights = _wm.insights[-15:]
-                    # Update bottleneck_type from profiling insights
-                    if "bottleneck=" in (insight.message or ""):
-                        import re as _re_bn
-
-                        _bn = _re_bn.search(r"bottleneck=(\w+)", insight.message)
-                        if _bn:
-                            _wm.bottleneck_type = _bn.group(1)
-                    if "speedup" in (insight.message or "").lower():
-                        import re as _re
-
-                        _sp = _re.search(r"(\d+\.\d+)x", insight.message)
-                        if _sp:
-                            _wm.update_speedup(float(_sp.group(1)))
-                    elif "latency" in (insight.message or "").lower():
-                        import re as _re
-
-                        _lat = _re.search(r"(\d+\.\d+)\s*ms", insight.message)
-                        if _lat:
-                            _wm.update_latency(float(_lat.group(1)))
+                    _wm.ingest_insight(insight)
             except Exception:
                 pass
 

@@ -51,6 +51,7 @@ class AgentConfig:
     # Interactive/exit behaviour (set by --exit-immediately)
     confirm_exit: bool = True
     disabled_tools: list[str] = field(default_factory=list)
+    source_file_paths: list[str] | None = None
 
 
 # Unified observation truncation for both bash output and tool call results (head + tail).
@@ -434,23 +435,7 @@ class DefaultAgent:
                 rc = result.get("returncode", 0) if isinstance(result, dict) else 0
                 insight = extract_insight_from_tool_result("", output_str, rc)
                 if insight:
-                    insight.step = _wm.current_step
-                    _wm.add_insight(insight.tag, insight.message)
-                    import re as _re
-
-                    # Update bottleneck_type from profiling insights
-                    if "bottleneck=" in (insight.message or ""):
-                        _bn = _re.search(r"bottleneck=(\w+)", insight.message)
-                        if _bn:
-                            _wm.bottleneck_type = _bn.group(1)
-
-                    _lat = _re.search(r"latency:\s*(\d+\.\d+)ms", insight.message, _re.IGNORECASE)
-                    if _lat:
-                        _wm.update_latency(float(_lat.group(1)))
-                    else:
-                        _sp = _re.search(r"(\d+\.\d+)x", insight.message)
-                        if _sp:
-                            _wm.update_speedup(float(_sp.group(1)))
+                    _wm.ingest_insight(insight)
                     _wm.note_tool_result(
                         output_str,
                         rc,
