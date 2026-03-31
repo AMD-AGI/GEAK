@@ -155,7 +155,7 @@ REPO="/path/to/GEAK/examples/mla_decode"
 
 geak --repo "$REPO" \
   --kernel-url "$REPO/kernel.py" \
-  --test-command "python3 -c \"import ast; ast.parse(open('$REPO/kernel.py').read())\" && python3 '$REPO/test_kernel_harness.py' --correctness && python3 '$REPO/test_kernel_harness.py' --full-benchmark" \
+  --test-command "python3 -c \"import ast; ast.parse(open('kernel.py').read())\" && python3 'test_kernel_harness.py' --correctness && python3 'test_kernel_harness.py' --full-benchmark" \
   --task "Optimize the MLA decode Triton kernel." \
   --yolo --exit-immediately
 ```
@@ -174,7 +174,7 @@ GEAK is primarily configured via **CLI flags**, optionally merged with a **YAML 
 | `-t`, `--task` | Yes | Task string. If it matches an existing file path, GEAK reads the file contents as the task body. |
 | `--repo` | Yes | Repository root for the kernel. (Even single files should live in a repo for worktrees/patching.) |
 | `--kernel-url` | Yes | Kernel source file (path or URL). |
-| `--test-command` | No | Command to validate correctness and measure performance (if you have an existing harness). |
+| `--test-command` | No | Command to validate correctness and measure performance (if you have an existing harness). Prefer **relative paths** so worktree creation does not break your test harness paths. |
 | `--num-parallel` | No | Number of parallel agent runs. |
 | `--gpu-ids` | No | Comma-separated GPU device indices (one per parallel agent). |
 | `-o`, `--output` | No | Trajectory file or output directory. Default: `./optimization_logs/<kernel>_<timestamp>/` |
