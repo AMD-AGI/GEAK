@@ -1,4 +1,4 @@
-# GEAK-v3
+# GEAK
 
 **For teams shipping GPU kernels in real repositories** — GEAK is an agent-driven framework that turns profiling, tests, and LLM reasoning into **reviewable patches**, from one file to repo-wide runs.
 
@@ -7,6 +7,8 @@
 - **Scales with hardware** — Multi-agent parallel search with isolated git workspaces and best-patch selection when you explore competing strategies.
 
 **Documentation:** Markdown under [`docs/`](docs/) — start with **[Quick start](docs/quick_start.md)** if you want to run `geak` immediately.
+
+**Benchmark (AgentKernelArena):** test benchmark results on HIP and Triton kernels with GEAK — [AMD-AGI/AgentKernelArena: `agents/geak_v3`](https://github.com/AMD-AGI/AgentKernelArena/tree/geak_benchmark/agents/geak_v3).
 
 ## Architecture
 
@@ -78,6 +80,7 @@ Parallel runs add multiple isolated workspaces and a **best-patch** selection st
   - [GEAK v2 — Expansion (Agent Family)](#geak-v2-expansion-agent-family)
   - [GEAK v3 — Platform (L1 → L3)](#geak-v3-platform-l1-l3)
 - [Summary](#summary)
+- [Contributing](#contributing)
 - [Acknowledgments](#acknowledgments)
 
 ---
@@ -240,7 +243,13 @@ GEAK v3 evolves into a unified platform supporting the full optimization stack.
 
 **GEAK v3** is built to **automatically optimize HIP and Triton GPU kernels end to end** in real repositories: **`geak`** drives the full loop—measurement, iteration, patch application, and validation—so you are not stitching shell steps by hand. Runs are **reproducible and auditable**: everything lands under **`optimization_logs/`**, and **parallel** mode adds isolated **worktrees** plus **best-patch selection** when you want broader search without sacrificing traceability.
 
-Contributions, experiments, and feedback are welcome.
+## Contributing
+
+We appreciate all contributions. If you are planning to contribute **bug fixes**, please do so without further discussion.
+
+If you plan to contribute **new features, utility functions, or changes to the core**, please **open an issue first** and discuss the design with us. A pull request sent without that discussion may be **closed or not merged** if it diverges from the direction we are taking the project.
+
+For branching, pull requests, code standards, CI expectations, releases, and licensing details, see **[Contribution guidelines](docs/developer/contribution_guidelines.md)**.
 
 ## Acknowledgments
 
