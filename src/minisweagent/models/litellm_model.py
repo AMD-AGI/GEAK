@@ -1,4 +1,4 @@
-"""LiteLLM-backed model 
+"""LiteLLM-backed model
 
 Swap usage (when ready)::
 
@@ -13,7 +13,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import litellm
 from tenacity import (
@@ -192,9 +192,7 @@ def normalize_messages_for_litellm_api(messages: list[dict[str, Any]]) -> list[d
         if isinstance(tc, dict):
             m["tool_calls"] = [_openai_tool_call_to_api_shape(tc)]
         elif isinstance(tc, list):
-            m["tool_calls"] = [
-                _openai_tool_call_to_api_shape(x) if isinstance(x, dict) else x for x in tc
-            ]
+            m["tool_calls"] = [_openai_tool_call_to_api_shape(x) if isinstance(x, dict) else x for x in tc]
         out.append(m)
     return out
 
@@ -225,9 +223,12 @@ def _filter_default_tools(
 class LitellmModelConfig(AmdLlmModelConfig):
     """Configuration for :class:`NewLitellmModel`."""
 
-    litellm_model_registry: Path | str | None = field(
-        default_factory=lambda: os.getenv("LITELLM_MODEL_REGISTRY_PATH")
-    )
+    set_cache_control: Literal["default_end"] | None = None
+    """Override parent default: LiteLLM should NOT apply cache control unless explicitly set
+    (e.g. by ``get_model`` for Anthropic models). The parent ``AmdLlmModelConfig`` defaults to
+    ``"default_end"`` which would incorrectly apply cache control to non-Anthropic models."""
+
+    litellm_model_registry: Path | str | None = field(default_factory=lambda: os.getenv("LITELLM_MODEL_REGISTRY_PATH"))
     litellm_model_name_override: str = ""
     """If set, used only for ``litellm.cost_calculator.completion_cost`` (Portkey-style parity)."""
     tool_cache_control: bool = False
@@ -370,30 +371,26 @@ class LitellmModel:
 
 if __name__ == "__main__":
     # Quick smoke test
-    model_configs =[
+    model_configs = [
         {
-            "model_name":"openai/gpt-5",
+            "model_name": "openai/gpt-5",
             "model_kwargs": {
-                "extra_headers":{
-                    "Ocp-Apim-Subscription-Key": ""
-                },
+                "extra_headers": {"Ocp-Apim-Subscription-Key": ""},
                 "temperature": 1.0,
                 "max_tokens": 16000,
                 "api_key": "",
                 "api_base": "https://llm-api.amd.com/azure/engines/gpt-5",
-            }
+            },
         },
         {
-            "model_name":"anthropic/claude-opus-4.6",
+            "model_name": "anthropic/claude-opus-4.6",
             "model_kwargs": {
-                "extra_headers":{
-                    "Ocp-Apim-Subscription-Key": ""
-                },
+                "extra_headers": {"Ocp-Apim-Subscription-Key": ""},
                 "temperature": 1.0,
                 "max_tokens": 16000,
                 "api_key": "",
                 "api_base": "https://llm-api.amd.com/Anthropic",
-            }
+            },
         },
     ]
 
