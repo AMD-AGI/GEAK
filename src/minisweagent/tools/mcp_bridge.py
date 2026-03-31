@@ -330,8 +330,10 @@ def collect_mcp_tools() -> tuple[list[MCPToolBridge], list[dict[str, Any]]]:
             raw = bridge.tool_list()
         except Exception as e:
             logger.warning("tool_list failed for %r: %s", bridge.server_name, e)
-            print(f"[MCP] {bridge.server_name}: tool discovery failed. "
-                  f"Check dependencies: pip install -e mcp_tools/{bridge.server_name}")
+            print(
+                f"[MCP] {bridge.server_name}: tool discovery failed. "
+                f"Check dependencies: pip install -e mcp_tools/{bridge.server_name}"
+            )
             continue
 
         tools = _coerce_mcp_tool_list(raw)

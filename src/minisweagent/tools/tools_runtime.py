@@ -139,6 +139,7 @@ class ToolRuntime:
                     query = kwargs.get("topic") or kwargs.get("code_type") or ""
                     result["output"] = subagent.process(output, query=query)
                 return result
+
             return wrapper
 
         for name in list(self._tool_table):
