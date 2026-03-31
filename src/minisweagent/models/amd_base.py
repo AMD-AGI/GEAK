@@ -21,6 +21,7 @@ class AmdLlmModelConfig:
     cost_per_1k_input_tokens: float = 0.01
     cost_per_1k_output_tokens: float = 0.01
     set_cache_control: Literal["default_end"] | None = "default_end"
+    tool_cache_control: bool = False
     reasoning: dict[str, Any] = field(default_factory=dict)
     bash_tool: bool = True
     profiling: bool = False
@@ -105,6 +106,15 @@ class AmdLlmModelBase:
     def _parse_response(self, response) -> dict:
         """Parse the raw vendor response into the standard response dict."""
         raise NotImplementedError
+
+    def set_tools(self, tools: list[dict]) -> None:
+        """Replace the active tool schema (used by strategy / heterogeneous agents)."""
+        filtered = tools
+        if not self.config.profiling:
+            filtered = [t for t in filtered if t.get("name") != "profiling"]
+        if not self.config.bash_tool:
+            filtered = [t for t in filtered if t.get("name") != "bash"]
+        self.tools = filtered
 
     def format_messages(self, messages: list[dict]) -> Any:
         """Convert standard messages to vendor-specific format."""

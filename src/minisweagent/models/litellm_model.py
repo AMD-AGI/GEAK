@@ -57,6 +57,8 @@ LITELLM_COMPLETION_PARAM_KEYS: frozenset[str] = frozenset(
         # OpenAI / gateway “reasoning effort” style configs used in GEAK YAML.
         "reasoning_effort",
         "reasoning",
+        # Anthropic extended thinking (e.g. {"type": "enabled", "budget_tokens": 10000}).
+        "thinking",
     }
 )
 
