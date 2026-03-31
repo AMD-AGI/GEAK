@@ -34,7 +34,7 @@ YAML **`model.model_class`** selects the backend. If it is **missing or empty**,
 | `model_class` (YAML) | Backend |
 |----------------------|---------|
 | **`litellm`**  | **`LitellmModel`** — any `provider/model` string supported by [LiteLLM](https://docs.litellm.ai/) |
-| **`amd_llm`** | **`AmdLlmModel`** — AMD LLM gateway; **`model_name`** examples: `claude-opus-4.5`, `claude-sonnet-4.5`, `gpt-5`, `gpt-5-codex`, Gemini-style names with `gemini` |
+| **`amd_llm`** | **`AmdLlmModel`** — AMD LLM gateway; **`model_name`** examples: `claude-opus-4.6`, `claude-sonnet-4.5`, `gpt-5`, `gpt-5-codex`, Gemini-style names with `gemini` |
 | **`anthropic_model`** | Direct Anthropic SDK |
 
 Optional global override: **`MSWEA_MODEL_API_KEY`** is copied into **`model_kwargs.api_key`** when set.
@@ -86,7 +86,7 @@ Other LiteLLM providers (**Azure**, **Vertex**, …): set the **`MSWEA_MODEL_NAM
 ```yaml
 model:
   model_class: amd_llm
-  model_name: claude-opus-4.5
+  model_name: claude-opus-4.6
   api_key: ""
 ```
 
@@ -131,6 +131,57 @@ geak --num-parallel 4 \
   --gpu-ids 0,1,2,3 
 ```
 
+
+### End-to-end examples
+
+The four invocations below show every combination of **natural-language (NL) task description** versus **explicit CLI flags**, and **with / without a pre-built test harness**. All target the same kernel (`topk.py` in [aiter](https://github.com/ROCm/aiter)) on 8 GPUs.
+
+**Task 1 — Without NL, without harness**
+
+GEAK discovers the kernel structure, generates its own harness, and runs optimization — all from CLI flags.
+
+```bash
+geak --kernel-url 'https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/topk.py' \
+  --gpu-ids '0,1,2,3,4,5,6,7' --heterogeneous --yolo \
+  --task 'Optimize the topk kernel.' --exit-immediately \
+  -o '/workspace/GEAK_ARTIFACTS/topk_wo_task_wo_harness' \
+  2>&1 | tee '/workspace/GEAK_ARTIFACTS/topk_wo_task_wo_harness.log'
+```
+
+**Task 2 — Without NL, with harness**
+
+Same CLI-flag style, but a pre-existing test harness is supplied via `--test-command`.
+
+```bash
+geak --kernel-url 'https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/topk.py' \
+  --test-command 'python3 /workspace/GEAK_ARTIFACTS/test_topk_harness.py --correctness && python3 /workspace/GEAK_ARTIFACTS/test_topk_harness.py --full-benchmark' \
+  --gpu-ids '0,1,2,3,4,5,6,7' --heterogeneous --yolo \
+  --task 'Optimize the topk kernel.' --exit-immediately \
+  -o '/workspace/GEAK_ARTIFACTS/topk_wo_task_w_harness' \
+  2>&1 | tee '/workspace/GEAK_ARTIFACTS/topk_wo_task_w_harness.log'
+```
+
+**Task 3 — With NL, without harness**
+
+Everything is expressed in a single natural-language `-t` string; GEAK parses the kernel URL, GPU count, and mode from the text.
+
+```bash
+geak -t 'Optimize the topk kernel at https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/topk.py. Use GPUs 0-7 and heterogeneous mode.' \
+  --yolo --exit-immediately \
+  -o '/workspace/GEAK_ARTIFACTS/topk_w_task_wo_harness' \
+  2>&1 | tee '/workspace/GEAK_ARTIFACTS/topk_w_task_wo_harness.log'
+```
+
+**Task 4 — With NL, with harness**
+
+Natural-language task that also references an external test harness URL.
+
+```bash
+geak -t 'Optimize the topk kernel at https://github.com/ROCm/aiter/blob/main/aiter/ops/triton/topk.py, using the harness at https://github.com/AMD-AGI/AIG-Eval/blob/sdubagun/fix-kernel-harness-parity/tasks/geak_eval/topk/test_topk_harness.py. Use GPUs 0-7 and heterogeneous mode.' \
+  --yolo --exit-immediately \
+  -o '/workspace/GEAK_ARTIFACTS/topk_w_task_w_harness' \
+  2>&1 | tee '/workspace/GEAK_ARTIFACTS/topk_w_task_w_harness.log'
+```
 
 ### CLI reference
 
