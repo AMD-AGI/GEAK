@@ -57,6 +57,13 @@ class StrategyAgent(InteractiveAgent):
         )
         self._setup_save_and_test_context()
 
+        # Re-apply RAG subagent wrapping after ToolRuntime rebuild
+        if getattr(self.config, "rag_enable_subagent", False):
+            try:
+                self.toolruntime.wrap_rag_tools_with_subagent()
+            except Exception:
+                pass
+
         # Override model tools so the LLM only sees dispatchable tools
         if hasattr(self.model, "set_tools"):
             self.model.set_tools(self.toolruntime.get_tools_schema())
