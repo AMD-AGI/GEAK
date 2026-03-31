@@ -136,7 +136,6 @@ def _log_results(tool_name: str, query_str: str, results: list[tuple[Any, float,
 @mcp.tool()
 def query(
     topic: str,
-    layer: str | None = None,
     top_k: int | None = None,
 ) -> dict:
     """
@@ -144,20 +143,15 @@ def query(
 
     Args:
         topic:  Search query describing the information you need.
-        layer:  Optional layer filter (e.g. "hip", "rocm", "ai_frameworks").
         top_k:  Number of results to return (default from server config).
 
     Returns:
         Dictionary with 'results' list and retrieval metadata.
     """
     k = top_k or _top_k
-    logger.info("[RAG-STATS] Calling query | topic=%r, layer=%r, top_k=%d", topic, layer, k)
+    logger.info("[RAG-STATS] Calling query | topic=%r, top_k=%d", topic, k)
 
-    filters: dict[str, Any] = {}
-    if layer:
-        filters['layers'] = [layer]
-
-    raw_results = _retriever.search(topic, k=k, filters=filters or None)
+    raw_results = _retriever.search(topic, k=k)
     _log_results("query", topic, raw_results)
 
     if not raw_results:
