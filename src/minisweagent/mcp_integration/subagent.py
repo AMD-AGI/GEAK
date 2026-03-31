@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class SubAgentConfig:
     """Configuration for sub-agent behavior."""
 
-    model_name: str = "claude-opus-4.5"
+    model_name: str = "claude-opus-4.6"
     api_key: str | None = None
     system_prompt: str | None = None
     enabled: bool = True

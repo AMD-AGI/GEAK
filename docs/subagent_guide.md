@@ -18,7 +18,7 @@ from minisweagent.utils.subagent import create_rag_filter_subagent
 
 # Create sub-agent
 subagent = create_rag_filter_subagent(
-    model_name="claude-opus-4.5",
+    model_name="claude-opus-4.6",
     api_key="your-api-key",
     enabled=True,
 )
@@ -43,7 +43,7 @@ from minisweagent.mcp_integration.mcp_environment import MCPEnabledEnvironment
 # Create environment with sub-agent enabled
 env = MCPEnabledEnvironment(
     enable_rag_subagent=True,
-    rag_subagent_model="claude-opus-4.5",
+    rag_subagent_model="claude-opus-4.6",
     rag_subagent_api_key="your-api-key",
 )
 
@@ -58,7 +58,7 @@ result = env.execute('@amd:query {"topic": "HIP optimization"}')
 from minisweagent.utils.subagent import SubAgentConfig, RAGFilterSubAgent
 
 config = SubAgentConfig(
-    model_name="claude-opus-4.5",      # LLM model to use
+    model_name="claude-opus-4.6",      # LLM model to use
     api_key="your-api-key",             # API key (or use env vars)
     system_prompt="custom prompt...",   # Custom system prompt (optional)
     enabled=True,                       # Enable/disable sub-agent

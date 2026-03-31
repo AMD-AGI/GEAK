@@ -37,7 +37,7 @@ def test_standalone_subagent(run_api_test: bool = False):
     
     # Create sub-agent
     subagent = create_rag_filter_subagent(
-        model_name="claude-opus-4.5",
+        model_name="claude-opus-4.6",
         api_key=os.getenv("AMD_LLM_API_KEY"),  # Set in .env or environment
         enabled=True,
     )
@@ -84,7 +84,7 @@ def test_mcp_environment_integration():
     env = MCPEnabledEnvironment(
         auto_build_index=False,  # Skip index build for demo
         enable_rag_subagent=True,
-        rag_subagent_model="claude-opus-4.5",
+        rag_subagent_model="claude-opus-4.6",
         rag_subagent_api_key=os.getenv("RAG_SUBAGENT_API_KEY"),  # Set in .env or environment
     )
     
