@@ -49,6 +49,12 @@ flowchart TB
   PRE --> OptRun
   OptRun --> POSTPROC
   POSTPROC --> OUT
+
+  style Inputs fill:#eff6ff,stroke:#2563eb,stroke-width:1px,color:#1e40af
+  style Setup fill:#fffbeb,stroke:#d97706,stroke-width:1px,color:#92400e
+  style OptRun fill:#ecfdf5,stroke:#059669,stroke-width:1px,color:#065f46
+  style POSTPROC fill:#faf5ff,stroke:#7c3aed,stroke-width:1px,color:#5b21b6
+  style OUT fill:#fef2f2,stroke:#dc2626,stroke-width:1px,color:#991b1b
 ```
 
 
@@ -153,9 +159,10 @@ For more options and examples, see **[Quick start](docs/quick_start.md)**.
 
 `geak` loads configs in layers:
 
-1. strategy template: `mini_kernel_strategy_list.yaml` (base)
-2. default config: `geak.yaml`, or `--config xxx.yaml` if provided (deep-merged on top)
-3. CLI args (**final override**)
+1. base config: `geak.yaml`
+2. template: `mini_kernel_strategy_list.yaml` (default)
+3. user override: `--config xxx.yaml`
+4. cli override: cli args (**final override**)
 
 For more options and examples, see **[Configuration](docs/configuration.md)**
 
@@ -165,7 +172,7 @@ For more options and examples, see **[Configuration](docs/configuration.md)**
 GEAK saves patches + test logs so the optimization progress and the results are transparent.
 
 - **Default output base**: `optimization_logs/`
-- **Auto-generated run directory**: `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/
+- **Auto-generated run directory**: `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`
 
 Typical structure (parallel run):
 
