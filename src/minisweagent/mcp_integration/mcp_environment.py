@@ -103,7 +103,7 @@ class MCPEnabledEnvironment(LocalEnvironment):
         self._bm25_weight = fusion.get("bm25_weight", 0.3)
 
         self._enable_rag_subagent = summary.get("enable_rag_subagent", True)
-        self._rag_subagent_model = summary.get("rag_subagent_model", "claude-opus-4.5")
+        self._rag_subagent_model = summary.get("rag_subagent_model", "claude-opus-4.6")
 
         self._verbose = debug.get("verbose", False)
 

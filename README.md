@@ -1,23 +1,15 @@
-<<<<<<< HEAD
-# Mini SWE Agent
-
-A minimal AI coding agent powered by LLM tool calling and Bash commands. Features optional RAG knowledge retrieval via MCP (Model Context Protocol) for GPU/ROCm/HIP optimization tasks.
-=======
-# GEAK-v3
+# GEAK
 
 **For teams shipping GPU kernels in real repositories** — GEAK is an agent-driven framework that turns profiling, tests, and LLM reasoning into **reviewable patches**, from one file to repo-wide runs.
 
 - **Stack-aware** — **HIP** and **Triton** are the primary optimization targets today; support for additional languages and stacks (including ASM, Gluon, and others) is on the roadmap.
 - **Closed-loop / end-to-end** — **`geak`** can carry a run from start to finish: generate or discover **test/harness scripts** when needed, **run profiling**, iterate with the LLM, **save every patch** on disk, and **pick the best result** against your metrics—artifacts land under `optimization_logs/` for reproducibility.  
 - **Scales with hardware** — Multi-agent parallel search with isolated git workspaces and best-patch selection when you explore competing strategies.
->>>>>>> geak/main
 
 **Documentation:** Markdown under [`docs/`](docs/) — start with **[Quick start](docs/quick_start.md)** if you want to run `geak` immediately.
 
-<<<<<<< HEAD
-```bash
-pip install -e .
-=======
+**Benchmark (AgentKernelArena):** test benchmark results on HIP and Triton kernels with GEAK — [AMD-AGI/AgentKernelArena: `agents/geak_v3`](https://github.com/AMD-AGI/AgentKernelArena/tree/geak_benchmark/agents/geak_v3).
+
 ## Architecture
 
 Simplified data flow for a typical **`geak`** run:
@@ -65,8 +57,9 @@ flowchart TB
   style OptRun fill:#ecfdf5,stroke:#059669,stroke-width:1px,color:#065f46
   style POSTPROC fill:#faf5ff,stroke:#7c3aed,stroke-width:1px,color:#5b21b6
   style OUT fill:#fef2f2,stroke:#dc2626,stroke-width:1px,color:#991b1b
->>>>>>> geak/main
 ```
+
+
 
 Parallel runs add multiple isolated workspaces and a **best-patch** selection step on top of the same **optimization run** pattern.
 
@@ -89,6 +82,7 @@ Parallel runs add multiple isolated workspaces and a **best-patch** selection st
   - [GEAK v2 — Expansion (Agent Family)](#geak-v2-expansion-agent-family)
   - [GEAK v3 — Platform (L1 → L3)](#geak-v3-platform-l1-l3)
 - [Summary](#summary)
+- [Contributing](#contributing)
 - [Acknowledgments](#acknowledgments)
 
 ---
@@ -100,9 +94,14 @@ Parallel runs add multiple isolated workspaces and a **best-patch** selection st
 ```bash
 git clone https://github.com/AMD-AGI/GEAK
 cd GEAK
+# Docker-based
+AMD_LLM_API_KEY=<YOUR_KEY> bash scripts/run-docker.sh
+# (or)
+# Local
 pip install -e .
 
-# Set model name and key
+# Set model name and key. In the case of docker-based setup, export the API key before
+# running scripts/run-docker.sh.
 
 # Option 1: set a LiteLLM model + provider API key
 export MSWEA_MODEL_NAME="openai/gpt-5"
@@ -121,89 +120,17 @@ export AMD_LLM_API_KEY="YOUR_KEY"
 #### Basic (single-agent) GPU kernel optimization
 
 ```bash
-<<<<<<< HEAD
-# Interactive REPL (default: confirm mode)
-mini
-=======
 # Interactive REPL
 geak
->>>>>>> geak/main
+
+# Typical kernel optimization using natural language input
+geak -t "Optimize the kernel from /path/to/aiter, specifically aiter/ops/triton/topk.py. Use the harness at /path/to/test_topk_harness.py. Use four GPUs with IDs 0-3 simultaneously."
 
 # Typical kernel optimization (single agent)
 geak --kernel-path /path/to/kernel/file \
   --repo /path/to/kernel/repo \
   --task "Optimize the block_reduce kernel"
 
-<<<<<<< HEAD
-# Auto-execute mode (no confirmation needed)
-mini -y
-
-# Use Textual TUI
-mini -v
-
-# Enable RAG knowledge retrieval
-mini -c mini_rag
-
-# Custom config
-mini -c /path/to/config.yaml
-```
-
-## RAG MCP Integration
-
-Optional GPU/ROCm/HIP knowledge base retrieval via a dedicated MCP server. Uses hybrid search (embedding + BM25 + RRF fusion + BGE reranker).
-
-### Enable RAG
-
-```bash
-# Use the built-in mini_rag config
-mini -c mini_rag -t "optimize this HIP kernel for MI300X"
-```
-
-Or add `rag:` to any config YAML:
-
-```yaml
-# RAG MCP toggle: comment out the following two lines to disable RAG
-rag:
-  enable_subagent: false  # set true to enable LLM post-filtering of RAG results
-```
-
-### How RAG Works
-
-When RAG is enabled, two additional tools become available to the LLM:
-
-- **`rag_query`** — Search the knowledge base by topic (e.g., "HIP shared memory optimization")
-- **`rag_optimize`** — Get optimization suggestions for a kernel type on a target GPU
-
-The LLM decides when to call these tools. Results are retrieved from a local knowledge base index via the `rag-mcp` server (spawned as a subprocess on first use).
-
-### RAG Architecture
-
-```
-Agent → ToolRuntime.dispatch → MCPToolBridge → rag-mcp server (stdio subprocess)
-                                                    │
-                                            HybridRetriever.search()
-                                              ├─ Embedding (semantic)
-                                              ├─ BM25 (keyword)
-                                              ├─ RRF Fusion
-                                              └─ BGE Reranker
-```
-
-### RAG Server Config
-
-The RAG MCP server config is at `mcp_tools/rag-mcp/src/rag_mcp/config/rag_config.yaml`:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `retrieval.embed_top_k` | 25 | Embedding retrieval candidates |
-| `retrieval.bm25_top_k` | 25 | BM25 retrieval candidates |
-| `retrieval.enable_bm25` | true | Enable BM25 dual-path recall |
-| `retrieval.mcp_top_k` | 8 | Final results returned |
-| `reranker.enable_reranker` | true | Enable BGE reranker |
-| `fusion.semantic_weight` | 0.7 | Embedding weight in fusion |
-| `fusion.bm25_weight` | 0.3 | BM25 weight in fusion |
-
-Override with `RAG_MCP_CONFIG` env var or `~/.config/rag-mcp/config.yaml`.
-=======
 ```
 
 #### Parallel optimization (multiple agents)
@@ -229,10 +156,10 @@ geak --num-parallel 4 \
 For more options and examples, see **[Quick start](docs/quick_start.md)**.
 
 
-
 ### Configuration
 
 #### Loading Configurations
+
 `geak` loads configs in layers:
 
 1. base config: `geak.yaml`
@@ -245,11 +172,10 @@ For more options and examples, see **[Configuration](docs/configuration.md)**
 
 ### Output & Artifacts
 
-GEAK saves patches + test logs so results are reproducible.
+GEAK saves patches + test logs so the optimization progress and the results are transparent.
 
 - **Default output base**: `optimization_logs/`
 - **Auto-generated run directory**: `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`
-- **Parallel runs**: subfolders `parallel_0/`, `parallel_1/`, ...
 
 Typical structure (parallel run):
 
@@ -260,6 +186,20 @@ optimization_logs/<kernel>_<timestamp>/
 │   ├── patch_0_test.txt
 │   └── agent_0.log
 ├── parallel_1/
+│   └── ...
+├── best_results.json
+└── select_agent.log
+```
+
+Structure for triton kernels:
+
+```bash
+optimization_logs/<kernel>_<timestamp>/
+├── results/round_1/<kernel>-<strategy_0>/
+│   ├── patch_0.patch
+│   ├── patch_0_test.txt
+│   └── task_0.log
+├── results/round_1/<kernel>-<strategy_1>/
 │   └── ...
 ├── best_results.json
 └── select_agent.log
@@ -279,7 +219,6 @@ The pipeline chains steps such as **kernel URL resolution**, **codebase context*
 **Unit-test discovery / harness creation** is one stage inside that preprocess: if you **do not** pass **`--test-command`**, the preprocessor can invoke the **UnitTestAgent** to **find** an existing harness or **materialize** a validated one (correctness / profile / benchmark modes). If discovery already yields a good harness, the preprocessor may skip or fall back from UnitTestAgent as appropriate. The resulting command is what the later optimization loop uses so patches are still checked against a real correctness signal before chasing performance.
 
 
-
 ### Best patch selection
 
 **`--num-parallel`** runs several agents in **isolated git worktrees** (optionally pinned with **`--gpu-ids`**). Each run writes patches and test logs under **`optimization_logs/<kernel>_<timestamp>/parallel_*`**. When the batch finishes, a **selection** step reads those artifacts, applies your **metric** (from task text or **`patch.metric`** in YAML), and produces **`best_results.json`** plus **`select_agent.log`**.
@@ -288,77 +227,9 @@ The pipeline chains steps such as **kernel URL resolution**, **codebase context*
 ---
 
 ## Evolution: From Foundation to Platform
->>>>>>> geak/main
 
 ### GEAK v1 — Foundation (Triton)
 
-<<<<<<< HEAD
-```
-src/minisweagent/
-├── agents/                        # Agent implementations
-│   ├── default.py                 #   Core agent (tool calling + bash)
-│   ├── interactive.py             #   REPL-style interactive agent
-│   ├── interactive_textual.py     #   Textual TUI agent
-│   └── subagent.py                #   RAG result post-filtering sub-agent
-├── tools/                         # Tool runtime & implementations
-│   ├── tools_runtime.py           #   ToolRuntime: dispatch + RAG MCP registration
-│   ├── tools.json                 #   Tool schemas (bash, submit, str_replace_editor, rag_query, rag_optimize)
-│   ├── bash_command.py            #   Bash command execution
-│   ├── str_replace_editor.py      #   File editor (view, create, str_replace, insert)
-│   ├── submit.py                  #   Task submission
-│   └── mcp_bridge.py              #   Sync/async bridge for MCP server communication
-├── models/                        # LLM model interfaces
-│   ├── amd_llm.py                 #   AMD LLM Gateway router (Claude)
-│   ├── amd_base.py                #   Base class for AMD models
-│   ├── amd_claude.py              #   Claude backend via AMD Gateway
-│   ├── litellm_model.py           #   LiteLLM (supports most providers)
-│   ├── anthropic_model.py         #   Anthropic direct
-│   ├── openrouter_model.py        #   OpenRouter
-│   └── portkey_model.py           #   Portkey
-├── environments/                  # Execution environments
-│   ├── local.py                   #   Local subprocess
-│   ├── docker.py                  #   Docker/Podman
-│   └── singularity.py             #   Singularity/Apptainer
-├── config/                        # YAML config files
-│   ├── mini.yaml                  #   Default config (claude-opus-4.5, yolo, RAG enabled)
-│   ├── mini_rag.yaml              #   RAG-enabled config with subagent
-│   ├── default.yaml               #   Base DefaultAgent config
-│   └── ...
-└── run/                           # CLI entry points
-    ├── mini.py                    #   Main CLI (`mini` command)
-    └── ...
-
-mcp_tools/
-├── mcp-client/                    # Generic MCP client (JSON-RPC over stdio)
-│   └── src/mcp_client/
-│       ├── client.py              #   MCPClient: subprocess management + protocol
-│       ├── transport.py           #   Stdio transport layer
-│       └── config.py              #   Server registry
-└── rag-mcp/                       # RAG MCP server
-    └── src/rag_mcp/
-        ├── server.py              #   FastMCP server (query + optimize tools)
-        ├── retrieval.py           #   HybridRetriever (embedding + BM25 + RRF + reranker)
-        └── config/rag_config.yaml #   Retrieval config
-```
-
-## Configuration
-
-Use `mini -c <config_name_or_path>` to select a config. Built-in configs:
-
-| Config | Model | Mode | RAG | Description |
-|--------|-------|------|-----|-------------|
-| `mini.yaml` (default) | claude-opus-4.5 | yolo | enabled | Daily use, tool calling enabled |
-| `mini_rag.yaml` | claude-opus-4.5 | yolo | enabled + subagent | RAG with LLM post-filtering |
-| `default.yaml` | (not bound) | confirm | — | Generic base config |
-
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `AMD_LLM_API_KEY` or `LLM_GATEWAY_KEY` | API key for AMD LLM Gateway |
-| `RAG_MCP_CONFIG` | Override RAG server config path |
-| `RAG_INDEX_PATH` | Override knowledge base index path |
-=======
 GEAK v1 established the foundation with Triton-based kernel generation.
 
 - Reflexion-based kernel generation
@@ -394,7 +265,13 @@ GEAK v3 evolves into a unified platform supporting the full optimization stack.
 
 **GEAK v3** is built to **automatically optimize HIP and Triton GPU kernels end to end** in real repositories: **`geak`** drives the full loop—measurement, iteration, patch application, and validation—so you are not stitching shell steps by hand. Runs are **reproducible and auditable**: everything lands under **`optimization_logs/`**, and **parallel** mode adds isolated **worktrees** plus **best-patch selection** when you want broader search without sacrificing traceability.
 
-Contributions, experiments, and feedback are welcome.
+## Contributing
+
+We appreciate all contributions. If you are planning to contribute **bug fixes**, please do so without further discussion.
+
+If you plan to contribute **new features, utility functions, or changes to the core**, please **open an issue first** and discuss the design with us. A pull request sent without that discussion may be **closed or not merged** if it diverges from the direction we are taking the project.
+
+For branching, pull requests, code standards, CI expectations, releases, and licensing details, see **[Contribution guidelines](docs/developer/contribution_guidelines.md)**.
 
 ## Acknowledgments
 
@@ -409,4 +286,3 @@ We also thank:
 - **AMD Research [IntelliKit](https://github.com/AMDResearch/intellikit)** (`metrix`) — GPU profiling metrics integration  
 
 Dependencies and versions are listed in `pyproject.toml`; all third-party software remains under their respective licenses.
->>>>>>> geak/main

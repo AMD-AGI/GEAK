@@ -16,7 +16,7 @@ How GEAK loads **YAML** for **`geak`**, where builtin files live, and how **`--c
 | Key | Purpose |
 |-----|---------|
 | **`model_class`** | Backend short name for **`get_model_class`** (here **`amd_llm`** — AMD LLM gateway). |
-| **`model_name`** | Gateway model id (e.g. **`claude-opus-4.5`**, **`claude-sonnet-4.5`**, **`gpt-5`**, **`gpt-5.1`**, **`gpt-5-codex`**). Routed inside **`AmdLlmModel`** to Claude / OpenAI / Gemini clients by name pattern. |
+| **`model_name`** | Gateway model id (e.g. **`claude-opus-4.6`**, **`claude-sonnet-4.5`**, **`gpt-5`**, **`gpt-5.1`**, **`gpt-5-codex`**). Routed inside **`AmdLlmModel`** to Claude / OpenAI / Gemini clients by name pattern. |
 | **`api_key`** | Empty string **`""`** means “read **`AMD_LLM_API_KEY`** or **`LLM_GATEWAY_KEY`** from the environment”; a non-empty value is sent to the gateway instead. |
 | **`model_kwargs`** | Passed through to the vendor implementation: **`temperature`**, **`max_tokens`**, plus gateway-specific blocks. **`reasoning.effort`** and **`text.verbosity`** apply to **GPT**-style models on the gateway (see inline comments in the YAML). |
 

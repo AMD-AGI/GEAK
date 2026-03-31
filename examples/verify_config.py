@@ -12,7 +12,7 @@ from minisweagent.mcp_integration.mcp_environment import MCPEnvironmentConfig, M
 print("Test 1: Creating MCPEnvironmentConfig...")
 config = MCPEnvironmentConfig(
     enable_rag_subagent=True,
-    rag_subagent_model="claude-opus-4.5",
+    rag_subagent_model="claude-opus-4.6",
     rag_subagent_api_key="test-key"
 )
 print(f"✅ Config created: enable_rag_subagent={config.enable_rag_subagent}")
@@ -24,7 +24,7 @@ try:
     env = MCPEnabledEnvironment(
         auto_build_index=False,
         enable_rag_subagent=True,
-        rag_subagent_model="claude-opus-4.5",
+        rag_subagent_model="claude-opus-4.6",
         rag_subagent_api_key="test-key"
     )
     print(f"✅ Environment created successfully!")
