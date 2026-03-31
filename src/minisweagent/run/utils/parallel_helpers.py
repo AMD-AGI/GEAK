@@ -24,7 +24,6 @@ from typing import Any
 from minisweagent.agents.default import TerminatingException
 from minisweagent.debug_runtime import emit_debug_log
 from minisweagent.run.task_file import create_worktree, create_worktree_with_patch
-from minisweagent.run.postprocess.evaluation import _neutralize_namespace_stubs
 
 # ============================================================================
 # Thread-local stdout/stderr redirection
@@ -304,9 +303,6 @@ def run_parallel_heterogeneous(
             bootstrap_git_repo(worktree_path, console)
         worktree_path_str = str(worktree_path.resolve())
 
-        # Neutralize namespace package stubs that shadow installed packages
-        _neutralize_namespace_stubs(worktree_path)
-
         label = spec.label or spec.agent_class.__name__
         if console:
             with _stdout_lock:
@@ -492,9 +488,6 @@ def run_pool(
                 create_copy_workdir(repo_path, wt_path)
                 bootstrap_git_repo(wt_path, console)
             wt_path_str = str(wt_path.resolve())
-
-            # Neutralize namespace package stubs that shadow installed packages
-            _neutralize_namespace_stubs(wt_path)
 
             # Each task gets its own patch dir named by label (persists across worktree resets)
             if _has_dup_labels:
