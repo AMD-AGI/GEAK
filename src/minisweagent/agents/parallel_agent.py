@@ -589,9 +589,12 @@ class ParallelAgent(DefaultAgent):
 
             log_file = parallel_patch_dir / f"agent_{agent_id}.log"
 
-            # Keep test_command at its original absolute path — don't remap.
-            # The script uses env vars (GEAK_WORK_DIR, GEAK_HARNESS, GEAK_GPU_DEVICE)
-            # which are set to point to the worktree at lines below.
+            # test_command should use relative paths, executed from worktree cwd
+            # Path replacement kept for backward compatibility with absolute paths
+            if parallel_agent_config.get("test_command"):
+                parallel_agent_config["test_command"] = cls._replace_paths(
+                    parallel_agent_config["test_command"], repo_path, worktree_path
+                )
 
             task_with_repo = cls._replace_paths(task_content, repo_path, worktree_path)
 
