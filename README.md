@@ -59,7 +59,7 @@ flowchart TB
   style OUT fill:#fef2f2,stroke:#dc2626,stroke-width:1px,color:#991b1b
 ```
 
-## Start here (5 minutes)
+## Quick Start
 
 Minimal steps to install GEAK and run the **`geak`** CLI against a kernel or repository.
 
@@ -85,7 +85,7 @@ AMD_LLM_API_KEY=<YOUR_KEY> bash scripts/run-docker.sh
 pip install -e .
 ```
 
-### Minimal model setup
+### Model setup
 
 ```bash
 # Set model name and key. In the case of docker-based setup, export the API key before
@@ -105,10 +105,35 @@ export AMD_LLM_API_KEY="YOUR_KEY"
 
 - Full model/back-end configuration (and precedence rules) lives in [`docs/model_config.md`](docs/model_config.md).
 
+
+## Configurations
+
+GEAK is primarily configured via **CLI flags**, optionally merged with a **YAML config file**.
+
+- **Config file location**: `src/minisweagent/config/*.yaml`. You can add your own config (e.g. `custom_config.yaml`) in this directory.
+- **Config file merge**: pass `--config path/to/config.yaml` to apply it as the final override (overriding defaults such as `geak.yaml`).
+
+### Most-used CLI flags
+
+| Option | Required | What it controls |
+|--------|----------|------------------|
+| `-t`, `--task` | Yes | Task string. If it matches an existing file path, GEAK reads the file contents as the task body. |
+| `--repo` | Yes | Repository root for the kernel. (Even single files should live in a repo for worktrees/patching.) |
+| `--kernel-url` | Yes | Kernel source file (path or URL). |
+| `--test-command` | No | Command to validate correctness and measure performance (if you have an existing harness). Prefer **relative paths** so worktree creation does not break your test harness paths. |
+| `--num-parallel` | No | Number of parallel agent runs. |
+| `--gpu-ids` | No | Comma-separated GPU device indices (one per parallel agent). |
+| `-o`, `--output` | No | Trajectory file or output directory. Default: `./optimization_logs/<kernel>_<timestamp>/` |
+| `-y`, `--yolo` | No | Non-interactive / auto-confirm tool execution (parallel workers already run in yolo mode). |
+| `--exit-immediately` | No | Do not ask for confirmation before exit (useful for batch runs). |
+| `-c`, `--config` | No | Path to a YAML config file (merged over `geak.yaml`). |
+
+For more options and examples, see **[Configuration](docs/configuration.md)**
+
 ### Run GEAK
 
-Single-agent run with explicit kernel file path + repo path:
-NOTE: kernel-url accepts both github url or local file path
+Single-agent run with explicit `--kernel-url` and `--repo`:
+Note: `--kernel-url` accepts either a GitHub URL or a local file path.
 
 ```bash
 geak --kernel-url /path/to/kernel/file \
@@ -132,7 +157,7 @@ Natural-language task (GEAK can parse targets from text when present):
 geak -t "Optimize the kernel url at /path/to/repo/path/to/kernel.py. Repo path is /path/to/repo. Use GPUs 0-3."
 ```
 
-### Try an example
+### Runnable examples
 
 These are **examples** you can test in `examples/`. Replace paths, GPU IDs, and the metric wording as needed.
 
@@ -159,30 +184,6 @@ geak --repo "$REPO" \
   --task "Optimize the MLA decode Triton kernel." \
   --yolo --exit-immediately
 ```
-
-## Configuration and common options
-
-GEAK is primarily configured via **CLI flags**, optionally merged with a **YAML config file**.
-
-- **Config file location**: `src/minisweagent/config/*.yaml`. You can add your own config (e.g. `custom_config.yaml`) in this directory.
-- **Config file merge**: pass `--config path/to/config.yaml` to apply it as the final override (overriding defaults such as `geak.yaml`).
-
-### Most-used CLI flags
-
-| Option | Required | What it controls |
-|--------|----------|------------------|
-| `-t`, `--task` | Yes | Task string. If it matches an existing file path, GEAK reads the file contents as the task body. |
-| `--repo` | Yes | Repository root for the kernel. (Even single files should live in a repo for worktrees/patching.) |
-| `--kernel-url` | Yes | Kernel source file (path or URL). |
-| `--test-command` | No | Command to validate correctness and measure performance (if you have an existing harness). Prefer **relative paths** so worktree creation does not break your test harness paths. |
-| `--num-parallel` | No | Number of parallel agent runs. |
-| `--gpu-ids` | No | Comma-separated GPU device indices (one per parallel agent). |
-| `-o`, `--output` | No | Trajectory file or output directory. Default: `./optimization_logs/<kernel>_<timestamp>/` |
-| `-y`, `--yolo` | No | Non-interactive / auto-confirm tool execution (parallel workers already run in yolo mode). |
-| `--exit-immediately` | No | Do not ask for confirmation before exit (useful for batch runs). |
-| `-c`, `--config` | No | Path to a YAML config file (merged over `geak.yaml`). |
-
-For more options and examples, see **[Configuration](docs/configuration.md)**
 
 ### Output & Artifacts
 
@@ -226,16 +227,34 @@ optimization_logs/<kernel>_<timestamp>/
 
 ### Preprocess
 
-Every **`geak`** run starts with **preprocessing**. It anchors the rest of the run in **measured facts** instead of whatever the LLM “believes,” which makes kernel optimization outcomes **more reliable** and **less sensitive to hallucination**: paths, repos, and commands are resolved and recorded up front.
+Every **`geak`** run starts with **preprocessing**: the goal is to replace guesswork with **measured facts** (resolved paths, runnable commands, and baseline metrics) so the optimization loop is more reliable.
 
-The pipeline chains steps such as **kernel URL resolution**, **codebase context**, **automated test discovery**, **harness execution / validation**, **kernel profiling**, **baseline metrics**, and **commandment** generation (order and fallbacks match the implementation). Critically, **baseline performance is exercised before the main optimization loop starts**, so reported **speedups are always against that same frozen baseline**—not a moving target the model might invent mid-run. The **test harness stays fixed** for the lifetime of the run (same entrypoints and modes from preprocess through patch evaluation), so comparisons stay apples-to-apples and **final speedup numbers are not reinterpreted** by the LLM.
+Preprocess typically performs:
 
-**Unit-test discovery / harness creation** is one stage inside that preprocess: if you **do not** pass **`--test-command`**, the preprocessor can invoke the **UnitTestAgent** to **find** an existing harness or **materialize** a validated one (correctness / profile / benchmark modes). If discovery already yields a good harness, the preprocessor may skip or fall back from UnitTestAgent as appropriate. The resulting command is what the later optimization loop uses so patches are still checked against a real correctness signal before chasing performance.
+- **Resolve inputs**: kernel URL/path, repo root, and output directory
+- **Collect context**: lightweight codebase inspection relevant to the kernel
+- **Lock in a harness**: discover or validate a correctness/perf entrypoint
+- **Profile + baseline**: run the kernel to record the baseline metric used for all later comparisons
+
+
+Key invariants:
+
+- **Baseline is measured before optimization**: all reported speedups compare against the same frozen baseline (not a moving target).
+- **Harness is fixed for the run**: the same entrypoints/modes are reused from preprocess through patch evaluation.
+
+Harness discovery behavior:
+
+- **If you pass `--test-command`**: preprocess uses it as the harness for correctness + performance checks.
+- **If you do not pass `--test-command`**: preprocess may invoke **UnitTestAgent** to find an existing harness or materialize a validated one (correctness / profile / benchmark modes). The resulting command is then reused by the optimization loop.
 
 
 ### Best patch selection
 
-**`--num-parallel`** runs several agents in **isolated git worktrees** (optionally pinned with **`--gpu-ids`**). Each run writes patches and test logs under **`optimization_logs/<kernel>_<timestamp>/parallel_*`**. When the batch finishes, a **selection** step reads those artifacts, applies your **metric** (from task text or **`patch.metric`** in YAML), and produces **`best_results.json`** plus **`select_agent.log`**.
+Use **`--num-parallel`** to run multiple optimization agents concurrently and then automatically pick the best result.
+
+- **Isolation**: each agent runs in its own git worktree (optionally pinned with **`--gpu-ids`**).
+- **Selection**: after all agents finish, GEAK reads those artifacts and selects the best patch using your metric (from task text or **`patch.metric`** in YAML).
+- **Outputs**: **`best_results.json`** and **`select_agent.log`** summarize the final choice.
 
 ---
 
