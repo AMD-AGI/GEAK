@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -58,7 +57,6 @@ class SaveAndTestTool:
         desc_str = f" ({description})" if description else ""
         self._log(f"\n[SaveAndTest] Saving patch and running test{desc_str}...")
 
-        patch_content = ""
         try:
             # Get patch content
             patch_content = self._get_patch_content()
@@ -487,48 +485,28 @@ class SaveAndTestTool:
                     cwd = task_dir
 
         if self._is_git_repo(Path(cwd)):
-            if ctx.source_file_paths:
-                # Scope diff to only the declared kernel source files.
-                # This avoids the bug where git add -N . indexed ALL
-                # untracked files across concurrent runs (producing
-                # multi-GB patches) or returned empty.
-                file_args = " ".join(shlex.quote(f) for f in ctx.source_file_paths)
-                cmd = f"git add -N {file_args} 2>/dev/null; git diff --binary -- {file_args}"
-            else:
-                excludes = [
-                    "traj.json",
-                    "*.log",
-                    ".rocprofv3/",
-                    "__pycache__/",
-                    "*.pyc",
-                    ".pytest_cache/",
-                    "*.egg-info/",
-                    "*.so",
-                    ".geak_resolved/",
-                    *self._generated_helper_excludes(),
-                ]
-                exclude_args = " ".join(f"':(exclude){entry}'" for entry in excludes)
-                cmd = f"git add -N . && git diff --binary -- . {exclude_args}"
+            excludes = [
+                "traj.json",
+                "*.log",
+                ".rocprofv3/",
+                "__pycache__/",
+                "*.pyc",
+                ".pytest_cache/",
+                "*.egg-info/",
+                "*.so",
+                ".geak_resolved/",
+                *self._generated_helper_excludes(),
+            ]
+            exclude_args = " ".join(f"':(exclude){entry}'" for entry in excludes)
             result = subprocess.run(
-                cmd,
+                f"git add -N . && git diff --binary -- . {exclude_args}",
                 cwd=cwd,
                 capture_output=True,
                 text=True,
                 timeout=10,
                 shell=True,
             )
-            patch = result.stdout
-
-            # Convert new-file-mode patches to standard modification diffs.
-            if patch.strip():
-                patch = self._normalize_new_file_patch(patch)
-
-            # Fallback: if git diff is empty but source_file_paths is set,
-            # try direct diff against .geak_pristine/ baseline copies.
-            if not patch.strip() and ctx.source_file_paths:
-                patch = self._pristine_fallback(cwd, ctx.source_file_paths)
-
-            return patch
+            return result.stdout
 
         if ctx.base_repo_path and ctx.base_repo_path.exists():
             excludes = [".git", "__pycache__", *self._generated_helper_excludes()]
@@ -754,61 +732,6 @@ class SaveAndTestTool:
 
         return result
 
-
-    @staticmethod
-    def _normalize_new_file_patch(patch):
-        """Convert new file mode patches to standard modification diffs."""
-        if "new file mode" not in patch:
-            return patch
-
-        out_lines = []
-        lines = patch.splitlines(keepends=True)
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            if line.startswith("new file mode"):
-                i += 1
-                continue
-            if line.startswith("index 0000000"):
-                i += 1
-                continue
-            if line.rstrip() == "--- /dev/null":
-                if i + 1 < len(lines) and lines[i + 1].startswith("+++ b/"):
-                    file_path = lines[i + 1][len("+++ b/"):].rstrip()
-                    out_lines.append("--- a/" + file_path + "\n")
-                    i += 1
-                    continue
-                elif i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
-                    file_path = lines[i + 1][len("+++ "):].rstrip()
-                    out_lines.append("--- a/" + file_path + "\n")
-                    i += 1
-                    continue
-            out_lines.append(line)
-            i += 1
-        return "".join(out_lines)
-
-    def _pristine_fallback(self, cwd: str, source_files: list[str]) -> str:
-        """Diff source files against their .geak_pristine/ baseline copies."""
-        patches = []
-        pristine_dir = Path(cwd) / ".geak_pristine"
-        for src in source_files:
-            pristine = pristine_dir / src
-            current = Path(cwd) / src
-            if pristine.exists() and current.exists():
-                try:
-                    result = subprocess.run(
-                        ["diff", "-u", str(pristine), str(current)],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                    if result.stdout.strip():
-                        self._log(f"[SaveAndTest] Pristine fallback captured diff for {src}")
-                        patches.append(result.stdout)
-                except subprocess.TimeoutExpired:
-                    pass
-        return "\n".join(patches)
-
     def _run_test(self) -> tuple[str, bool, int]:
         """Run test command and return (output, passed, returncode)."""
         ctx = self.context
@@ -824,9 +747,14 @@ class SaveAndTestTool:
         test_env = self._build_test_env()
         self._restore_missing_harness_helper()
 
-        # Use test_command as-is — it uses env vars (GEAK_WORK_DIR, GEAK_HARNESS)
-        # which are already set to point to the correct worktree.
+        # If test_command still contains the original repo root path, replace it with the
+        # current working directory (worktree). Uses base_repo_path from context instead of
+        # any hardcoded path. Skip replacement if cwd is already present (already rewritten).
         test_command = ctx.test_command
+        if ctx.base_repo_path:
+            repo_root = str(ctx.base_repo_path)
+            if repo_root in test_command and ctx.cwd not in test_command:
+                test_command = test_command.replace(repo_root, ctx.cwd)
         self._log(f"[SaveAndTest] Running: {test_command}")
 
         with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".txt") as tmp:

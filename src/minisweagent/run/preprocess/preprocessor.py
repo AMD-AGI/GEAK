@@ -563,37 +563,18 @@ def run_preprocessor(
                 gpu_id=gpu_id,
             )
             if not ok_runtime:
-                import time
-                _print("  Deterministic harness execution failed, retrying in 10s...")
-                time.sleep(10)
-                ok_runtime, runtime_errors, candidate_results = execute_harness_validation(
-                    deterministic_path, repo_root=repo_root, gpu_id=gpu_id,
-                )
-
-            if not ok_runtime:
-                _print(f"  WARNING: Deterministic harness execution failed after retry: "
-                       f"{'; '.join(runtime_errors)}")
-                _print(f"  Setting test_command from harness path anyway (passed static validation)")
-                test_command = _build_deterministic_test_command(deterministic_path)
-                harness_results = candidate_results
-                ctx["harness_path"] = deterministic_path
-                selected_harness_source = "harness_degraded"
-                testcase_selection["selected_source"] = selected_harness_source
-                testcase_selection["deterministic_resolution"] = deterministic_meta
-                testcase_selection["degraded_reason"] = "; ".join(runtime_errors)
-                _print(f"  Using deterministic harness (degraded): {deterministic_path}")
-            else:
-                test_command = _build_deterministic_test_command(deterministic_path)
-                harness_results = candidate_results
-                ctx["harness_path"] = deterministic_path
-                selected_harness_source = "harness"
-                testcase_selection["selected_source"] = selected_harness_source
-                testcase_selection["deterministic_resolution"] = deterministic_meta
-                _print(f"  Using deterministic harness: {deterministic_path}")
-                for r in harness_results:
-                    status = "PASS" if r["success"] else "FAIL"
-                    _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
-                _print("  Deterministic harness execution: ALL MODES PASSED")
+                raise RuntimeError("Deterministic harness execution failed: " + "; ".join(runtime_errors))
+            test_command = _build_deterministic_test_command(deterministic_path)
+            harness_results = candidate_results
+            ctx["harness_path"] = deterministic_path
+            selected_harness_source = "harness"
+            testcase_selection["selected_source"] = selected_harness_source
+            testcase_selection["deterministic_resolution"] = deterministic_meta
+            _print(f"  Using deterministic harness: {deterministic_path}")
+            for r in harness_results:
+                status = "PASS" if r["success"] else "FAIL"
+                _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
+            _print("  Deterministic harness execution: ALL MODES PASSED")
 
         if testcase_cache_entry is not None:
             try:

@@ -167,37 +167,6 @@ def strip_generated_helper_sections(patch_text: str) -> tuple[str, list[str]]:
     return "".join(kept), removed
 
 
-
-
-def _normalize_patch_for_apply(patch_text: str) -> str:
-    """Convert new-file-mode patches so they can be applied to existing files."""
-    if "new file mode" not in patch_text:
-        return patch_text
-
-    out = []
-    for line in patch_text.splitlines(keepends=True):
-        if line.startswith("new file mode"):
-            continue
-        if line.startswith("index 0000000"):
-            continue
-        out.append(line)
-
-    fixed = []
-    for i, line in enumerate(out):
-        if line.rstrip() == "--- /dev/null":
-            if i + 1 < len(out) and out[i + 1].startswith("+++ b/"):
-                fpath = out[i + 1][len("+++ b/"):].rstrip()
-                fixed.append("--- a/" + fpath + "\n")
-                continue
-            elif i + 1 < len(out) and out[i + 1].startswith("+++ "):
-                fpath = out[i + 1][len("+++ "):].rstrip()
-                fixed.append("--- a/" + fpath + "\n")
-                continue
-        fixed.append(line)
-
-    return "".join(fixed)
-
-
 def apply_patch_with_generated_helper_fallback(
     *,
     patch_text: str,
@@ -209,11 +178,6 @@ def apply_patch_with_generated_helper_fallback(
     Returns ``(result, removed_paths)``. When the patch only contained generated
     helper artifacts, the empty sanitized patch is treated as a successful no-op.
     """
-
-    # Normalize new-file-mode patches to standard modification diffs.
-    # Patches from git add -N on untracked files contain "new file mode"
-    # which git apply rejects when the file already exists.
-    patch_text = _normalize_patch_for_apply(patch_text)
 
     result = subprocess.run(
         ["git", "apply", "--whitespace=nowarn", "--binary", "-"],

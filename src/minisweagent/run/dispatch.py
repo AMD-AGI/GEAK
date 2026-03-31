@@ -259,16 +259,6 @@ def task_file_to_agent_task(task_file: Path):
         if meta.get(_passthrough_key):
             cfg[_passthrough_key] = meta[_passthrough_key]
 
-    # Derive source_file_paths for scoped patch extraction.
-    # kernel_path is absolute; make it relative to repo_root so git diff
-    # can scope to just the kernel file(s) instead of the entire repo.
-    if meta.get("kernel_path") and meta.get("repo_root"):
-        try:
-            rel = os.path.relpath(meta["kernel_path"], meta["repo_root"])
-            cfg["source_file_paths"] = [rel]
-        except ValueError:
-            pass
-
     return AgentTask(
         agent_class=agent_class,
         task=body,
@@ -340,15 +330,10 @@ def run_task_batch(
     # can reference them as variables (no hardcoded paths).
     from minisweagent.run.pipeline_helpers import DEFAULT_AGENT_BENCHMARK_ITERATIONS
 
-    # Only pass --iterations if the harness actually supports it
-    _harness_text = Path(harness_path).read_text(errors="ignore") if harness_path and Path(harness_path).exists() else ""
-    _accepts_iterations = ("--iterations" in _harness_text or "parse_known_args" in _harness_text)
     base_env_vars: dict[str, str] = {
         "GEAK_REPO_ROOT": str(repo_path.resolve()),
+        "GEAK_BENCHMARK_EXTRA_ARGS": f"--iterations {DEFAULT_AGENT_BENCHMARK_ITERATIONS}",
     }
-    if _accepts_iterations:
-        base_env_vars["GEAK_BENCHMARK_EXTRA_ARGS"] = f"--iterations {DEFAULT_AGENT_BENCHMARK_ITERATIONS}"
-
     if harness_path:
         base_env_vars["GEAK_HARNESS"] = harness_path
 

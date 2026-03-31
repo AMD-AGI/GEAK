@@ -50,50 +50,45 @@ class PatchApplyError(Exception):
 
 
 def _find_agent_worktree_slot(results_dir: Path, best_task: str, repo_root: str, output_dir: Path) -> Path | None:
-    """Find the agent's worktree slot that contains the best task's modified kernel.
+    """Find the agent's worktree slot that contains the best task's kernel.
 
-    Searches for a modified kernel file across all slot directories using
-    two strategies:
-    1. The repo task path (tasks/.../<kernel_name>/kernel.py) if derivable.
-    2. Workspace-relative paths (ws_*/run_*/<task_id>_*/kernel.py) where
-       agents actually perform modifications.
+    The agent worktrees live at ``results_dir/worktrees/slot_N/``.
+    Each slot contains the full repo tree, so kernel.py is at e.g.
+    ``slot_0/tasks/triton2triton/geak_eval/L1/llama_ff_triton/kernel.py``.
 
-    The search patterns are derived from ``output_dir.name`` so they work
-    for any task type, not just a specific naming convention.
+    We identify the correct kernel by extracting the task path from
+    ``output_dir`` (which contains the kernel name like
+    ``triton2triton_geak_eval_L1_llama_ff_triton_...``), then look for
+    a slot with a modified kernel.py at that specific task path.
     """
-    import re
-
     worktrees_dir = results_dir / "worktrees"
     if not worktrees_dir.is_dir():
         return None
 
-    # Extract task identifier by stripping trailing timestamp + "_logs" suffix.
-    # e.g. "some_task_type_L1_kernel_name_20260329_103747_logs"
-    #    -> task_id = "some_task_type_L1_kernel_name"
-    dir_name = output_dir.name.replace("_logs", "")
-    m = re.match(r"(.+?)_\d{8}_\d{6,}$", dir_name)
-    task_id = m.group(1) if m else dir_name
+    # Extract kernel task path from output_dir name
+    # e.g. "triton2triton_geak_eval_L1_llama_ff_triton_20260326_091118_logs"
+    # -> "tasks/triton2triton/geak_eval/L1/llama_ff_triton"
+    import re
 
-    # Try to derive the repo-relative task path from the task directory
-    # structure.  The "tasks/" tree mirrors the task_id with path separators
-    # instead of underscores, but we cannot reliably reverse-engineer the
-    # path since underscores are ambiguous.  Instead, search the repo tasks/
-    # tree for a directory whose underscored name matches task_id.
-    task_rel: Path | None = None
-    repo = Path(repo_root)
-    tasks_root = repo / "tasks"
-    if tasks_root.is_dir():
-        for candidate in tasks_root.rglob("kernel.py"):
-            # Build the underscored equivalent of the relative path
-            rel = candidate.parent.relative_to(tasks_root)
-            rel_underscored = "_".join(rel.parts)
-            if rel_underscored == task_id:
-                task_rel = Path("tasks") / rel
-                break
+    dir_name = output_dir.name.replace("_logs", "")
+    m = re.match(r"(triton2triton_geak_eval_L\d+_\w+?)_\d{8}_\d+", dir_name)
+    if m:
+        # Convert underscores back to path separators for the task path
+        # triton2triton_geak_eval_L1_llama_ff_triton -> tasks/triton2triton/geak_eval/L1/llama_ff_triton
+        parts = m.group(1)
+        # Split on known structure: triton2triton / geak_eval / L{N} / kernel_name
+        tm = re.match(r"(triton2triton)_(geak_eval)_(L\d+)_(.*)", parts)
+        if tm:
+            task_rel = Path("tasks") / tm.group(1) / tm.group(2) / tm.group(3) / tm.group(4)
+        else:
+            task_rel = None
+    else:
+        task_rel = None
 
     # Read baseline kernel for comparison
     baseline_kernel = None
     if task_rel:
+        repo = Path(repo_root)
         baseline_path = repo / task_rel / "kernel.py"
         if baseline_path.exists():
             baseline_kernel = baseline_path.read_text()
@@ -102,7 +97,7 @@ def _find_agent_worktree_slot(results_dir: Path, best_task: str, repo_root: str,
         if not slot_dir.is_dir() or "_logs" in slot_dir.name:
             continue
 
-        # Look for kernel.py at the specific task path
+        # Look for kernel.py at the specific task path first
         if task_rel:
             specific_kernel = slot_dir / task_rel / "kernel.py"
             if specific_kernel.exists():
@@ -114,31 +109,13 @@ def _find_agent_worktree_slot(results_dir: Path, best_task: str, repo_root: str,
                 except OSError:
                     pass
 
-        # Fallback: look for kernel.py directly in slot root
+        # Fallback: look for any kernel.py directly in slot root
         root_kernel = slot_dir / "kernel.py"
         if root_kernel.exists():
             try:
                 content = root_kernel.read_text()
                 if baseline_kernel is None or content != baseline_kernel:
                     return root_kernel.parent
-            except OSError:
-                pass
-
-    # Fallback: search workspace-relative paths where agents actually modify
-    # kernels.  Agents work inside ws_*/run_*/<task_dir>/ directories that
-    # contain the task_id in their name.
-    for slot_dir in sorted(worktrees_dir.glob("slot_*")):
-        if not slot_dir.is_dir() or "_logs" in slot_dir.name:
-            continue
-        for ws_kernel in slot_dir.glob("ws_*/run_*/*/kernel.py"):
-            # Only consider directories whose name contains the task_id
-            if task_id not in ws_kernel.parent.name:
-                continue
-            try:
-                ws_content = ws_kernel.read_text()
-                if baseline_kernel is None or ws_content != baseline_kernel:
-                    logger.info("Found modified kernel at workspace path %s", ws_kernel.parent)
-                    return ws_kernel.parent
             except OSError:
                 pass
 
@@ -212,72 +189,6 @@ def cleanup_eval_worktree(repo_root: str, eval_dir: Path) -> None:
         shutil.rmtree(eval_dir, ignore_errors=True)
 
 
-def _neutralize_namespace_stubs(worktree_dir) -> list:
-    """Rename namespace package stubs anywhere inside an eval worktree.
-
-    Eval worktrees are full repo checkouts that may contain namespace
-    package directories (e.g. ``aiter/``) with stub ``__init__.py``
-    files using ``pkgutil.extend_path``.  These stubs shadow real
-    installed packages when the worktree (or any sub-directory such as the
-    harness parent directory) is on ``sys.path``, causing ImportError.
-    Renaming them lets the real packages load.
-
-    The search is recursive because Python automatically prepends the
-    directory of the executed script to ``sys.path[0]``, and that
-    directory may be deeply nested inside the worktree.
-
-    Returns a list of renamed directories (for cleanup/restore).
-    """
-    renamed: list[Path] = []
-    if not worktree_dir:
-        return renamed
-    wt = Path(worktree_dir)
-    if not wt.is_dir():
-        return renamed
-
-    # Collect all candidate directories first to avoid issues with
-    # rglob iteration order (sub-packages may appear before parents).
-    candidates: list[Path] = []
-    for init_py in wt.rglob("__init__.py"):
-        parent = init_py.parent
-        try:
-            init_text = init_py.read_text(errors="ignore").strip()
-        except OSError:
-            continue
-        if "extend_path" in init_text and len(init_text) < 1000:
-            candidates.append(parent)
-
-    # Sort by path depth (shallowest first) so we rename the topmost
-    # stub directory and automatically neutralise its children.
-    candidates.sort(key=lambda p: len(p.parts))
-
-    for candidate in candidates:
-        # Skip if this candidate is inside an already-renamed directory.
-        # Compare against original (pre-rename) paths.
-        skip = False
-        for r in renamed:
-            # Reconstruct the original path from the disabled name
-            orig_name = r.name.replace("_disabled", "").lstrip("_")
-            orig_path = r.with_name(orig_name)
-            try:
-                if candidate == orig_path or candidate.is_relative_to(orig_path):
-                    skip = True
-                    break
-            except (ValueError, TypeError):
-                if str(candidate).startswith(str(orig_path) + "/"):
-                    skip = True
-                    break
-        if skip:
-            continue
-        disabled = candidate.with_name("_" + candidate.name + "_disabled")
-        try:
-            candidate.rename(disabled)
-            renamed.append(disabled)
-        except OSError:
-            pass
-    return renamed
-
-
 def build_eval_env(
     work_dir: Path,
     repo_root: str,
@@ -301,16 +212,7 @@ def build_eval_env(
     env["GEAK_HARNESS"] = harness_path
     env["GEAK_GPU_DEVICE"] = str(gpu_id)
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
-    # Only add --iterations if the harness actually accepts it.
-    # Check for an argparse add_argument("--iterations"...) definition, or
-    # parse_known_args (which tolerates unknown flags).  A bare mention of
-    # "iterations" in comments is NOT sufficient.
-    harness_text = Path(harness_path).read_text(errors="ignore") if harness_path and Path(harness_path).exists() else ""
-    accepts_iterations = ("--iterations" in harness_text or "parse_known_args" in harness_text)
-    if accepts_iterations:
-        env["GEAK_BENCHMARK_EXTRA_ARGS"] = f"--iterations {iters}"
-    else:
-        env["GEAK_BENCHMARK_EXTRA_ARGS"] = ""
+    env["GEAK_BENCHMARK_EXTRA_ARGS"] = f"--iterations {iters}"
     env["PYTHONPATH"] = f"{work_dir}:{repo_root}:{env.get('PYTHONPATH', '')}"
     alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF", "")
     if "expandable_segments" in alloc_conf:
@@ -458,9 +360,14 @@ def evaluate_round_best(
         round_eval["candidate_shape_latency_ms"] = best["candidate_shape_latency_ms"]
 
     commandment_path = pp_dir / "COMMANDMENT.md"
-    _use_commandment = commandment_path.exists()
-    if not _use_commandment:
-        _print("  WARNING: COMMANDMENT.md not found, will use direct harness invocation for FULL_BENCHMARK")
+    if not commandment_path.exists():
+        eval_path = output_dir / f"round_{round_num}_evaluation.json"
+        eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
+        from minisweagent.run.pipeline_types import RoundEvaluation as _RE
+
+        return _RE(
+            round=round_num, best_patch=best_patch_file or "", best_task=best_task, benchmark_speedup=best_speedup
+        )
 
     repo_root = ctx.get("repo_root", "")
     harness_path = ctx.get("harness_path", "")
@@ -505,15 +412,6 @@ def evaluate_round_best(
             if eval_harness.exists():
                 eval_harness_path = str(eval_harness)
 
-        # Fix A: Discover harness in eval worktree when preprocessor failed
-        if not eval_harness_path and eval_worktree:
-            _discovered = eval_worktree / 'test_kernel_harness.py'
-            if _discovered.exists():
-                eval_harness_path = str(_discovered)
-                _print(f"  Discovered harness in eval worktree: {_discovered.name}")
-
-        # Neutralize namespace package stubs that shadow installed packages
-        _disabled_stubs = _neutralize_namespace_stubs(eval_worktree)
         eval_env = build_eval_env(eval_worktree, repo_root, eval_harness_path, gpu_id)
         _print(f"  Eval worktree: {eval_worktree}")
 
@@ -524,27 +422,8 @@ def evaluate_round_best(
         benchmark_baseline_path = pp_dir / "benchmark_baseline.txt"
         benchmark_baseline = benchmark_baseline_path.read_text().strip() if benchmark_baseline_path.exists() else None
 
-        # Fallback: if no baseline files exist, run baseline benchmark now
-        if not full_benchmark_baseline and not benchmark_baseline:
-            try:
-                _print("  No baseline files found — running baseline benchmark...")
-                baseline_env = build_eval_env(eval_worktree, repo_root, eval_harness_path, gpu_id)
-                bl_result = subprocess.run(
-                    ["python3", eval_harness_path, "--full-benchmark"],
-                    capture_output=True, text=True, timeout=600,
-                    cwd=str(eval_worktree), env=baseline_env,
-                )
-                if bl_result.returncode == 0 and bl_result.stdout.strip():
-                    full_benchmark_baseline = bl_result.stdout.strip()
-                    (pp_dir / "full_benchmark_baseline.txt").write_text(full_benchmark_baseline)
-                    _bl_ms = _extract_latency_ms(full_benchmark_baseline)
-                    _print(f"  Generated baseline: {_bl_ms}ms")
-            except Exception as exc:
-                _print(f"  WARNING: baseline generation failed: {exc}")
-
         # --- FULL_BENCHMARK ---
-        fb_script = build_eval_script(str(commandment_path), ["SETUP", "FULL_BENCHMARK"]) if _use_commandment else None
-        _ran_fb = False
+        fb_script = build_eval_script(str(commandment_path), ["SETUP", "FULL_BENCHMARK"])
         if fb_script:
             _print(f"  Running FULL_BENCHMARK on best kernel from round {round_num}...")
             try:
@@ -556,7 +435,6 @@ def evaluate_round_best(
                     cwd=str(eval_worktree),
                     env=eval_env,
                 )
-                _ran_fb = True
                 fb_stdout = fb_result.stdout
                 round_eval["full_benchmark"] = {
                     "stdout": fb_stdout[:5000],
@@ -640,52 +518,6 @@ def evaluate_round_best(
                 _print(f"  FULL_BENCHMARK failed: {exc}")
                 round_eval["full_benchmark"] = {"error": str(exc)}
 
-        if not _ran_fb and eval_harness_path:
-            _print(f"  Running FULL_BENCHMARK via direct harness invocation...")
-            try:
-                fb_result = subprocess.run(
-                    ["python3", eval_harness_path, "--full-benchmark"],
-                    capture_output=True, text=True, timeout=1800,
-                    cwd=str(eval_worktree), env=eval_env,
-                )
-                fb_stdout = fb_result.stdout
-                round_eval["full_benchmark"] = {
-                    "stdout": fb_stdout[:5000],
-                    "returncode": fb_result.returncode,
-                    "success": fb_result.returncode == 0,
-                }
-                if full_benchmark_baseline:
-                    round_eval["full_benchmark"]["baseline"] = full_benchmark_baseline[:2000]
-                if fb_result.returncode == 0:
-                    candidate_ms = _extract_latency_ms(fb_stdout)
-                    baseline_ref = full_benchmark_baseline or benchmark_baseline
-                    baseline_ms = _extract_latency_ms(baseline_ref) if baseline_ref else None
-                    if candidate_ms and baseline_ms and baseline_ms > 0:
-                        verified_speedup = baseline_ms / candidate_ms
-                        round_eval["full_benchmark"]["verified_speedup"] = round(verified_speedup, 4)
-                        round_eval["full_benchmark"]["candidate_ms"] = candidate_ms
-                        round_eval["full_benchmark"]["baseline_ms"] = baseline_ms
-                        _print(
-                            f"  FULL_BENCHMARK (direct) verified speedup: {verified_speedup:.4f}x "
-                            f"({baseline_ms:.4f} ms -> {candidate_ms:.4f} ms)"
-                        )
-                    else:
-                        candidate_reported_speedup = _extract_reported_speedup(fb_stdout)
-                        baseline_reported_speedup = _extract_reported_speedup(baseline_ref) if baseline_ref else None
-                        if (
-                            isinstance(candidate_reported_speedup, (int, float))
-                            and isinstance(baseline_reported_speedup, (int, float))
-                            and baseline_reported_speedup > 0
-                        ):
-                            verified_speedup = float(candidate_reported_speedup) / float(baseline_reported_speedup)
-                            round_eval["full_benchmark"]["verified_speedup"] = round(verified_speedup, 4)
-                            _print(f"  FULL_BENCHMARK (direct) verified speedup: {verified_speedup:.4f}x (from reported)")
-                _fb_status = "PASS" if fb_result.returncode == 0 else "FAIL"
-                _print(f"  FULL_BENCHMARK (direct): {_fb_status}")
-            except Exception as exc:
-                _print(f"  FULL_BENCHMARK (direct) failed: {exc}")
-                round_eval["full_benchmark"] = {"error": str(exc)}
-
         # --- PROFILE ---
         _print(f"  Running PROFILE on best kernel from round {round_num}...")
         baseline_metrics_path = pp_dir / "baseline_metrics.json"
@@ -707,24 +539,13 @@ def evaluate_round_best(
                 prev_pythonpath = os.environ.get("PYTHONPATH", "")
                 os.environ["PYTHONPATH"] = f"{eval_worktree}:{repo_root}:{prev_pythonpath}"
                 try:
-                    from concurrent.futures import ThreadPoolExecutor as _TPE
-                    from concurrent.futures import TimeoutError as _FTE
-                    _tpx = _TPE(max_workers=1)
-                    try:
-                        _pf = _tpx.submit(
-                            _profile_fn,
-                            command=f"python {harness_path} --profile",
-                            backend="metrix",
-                            num_replays=3,
-                            quick=True,
-                            gpu_devices=str(gpu_id),
-                        )
-                        profile_result = _pf.result(timeout=1200)
-                    except _FTE:
-                        _print("  PROFILE timed out after 20 minutes, skipping")
-                        round_eval["profile_comparison"] = {"error": "PROFILE timeout after 1200s"}
-                        profile_result = None
-                        _tpx.shutdown(wait=False, cancel_futures=True)
+                    profile_result = _profile_fn(
+                        command=f"python {harness_path} --profile",
+                        backend="metrix",
+                        num_replays=3,
+                        quick=True,
+                        gpu_devices=str(gpu_id),
+                    )
                 finally:
                     if prev_pythonpath:
                         os.environ["PYTHONPATH"] = prev_pythonpath

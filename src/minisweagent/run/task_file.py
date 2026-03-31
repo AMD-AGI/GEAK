@@ -334,35 +334,6 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
     return worktree_path
 
 
-
-def _normalize_patch_for_apply(patch_text):
-    """Convert new file mode patches so they can be applied to existing files."""
-    if "new file mode" not in patch_text:
-        return patch_text
-
-    out = []
-    for line in patch_text.splitlines(keepends=True):
-        if line.startswith("new file mode"):
-            continue
-        if line.startswith("index 0000000"):
-            continue
-        out.append(line)
-
-    fixed = []
-    for i, line in enumerate(out):
-        if line.rstrip() == "--- /dev/null":
-            if i + 1 < len(out) and out[i + 1].startswith("+++ b/"):
-                fpath = out[i + 1][len("+++ b/"):].rstrip()
-                fixed.append("--- a/" + fpath + "\n")
-                continue
-            elif i + 1 < len(out) and out[i + 1].startswith("+++ "):
-                fpath = out[i + 1][len("+++ "):].rstrip()
-                fixed.append("--- a/" + fpath + "\n")
-                continue
-        fixed.append(line)
-
-    return "".join(fixed)
-
 def create_worktree_with_patch(
     repo_path: Path,
     worktree_path: Path,
@@ -400,39 +371,6 @@ def create_worktree_with_patch(
         )
     return wt
 
-
-
-
-def _apply_patch_by_file_copy(patch_path, worktree, logger):
-    """Extract file content from a new-file-mode patch and write directly."""
-    patch_text = patch_path.read_text()
-    current_path = None
-    content_lines = []
-    in_hunk = False
-
-    for line in patch_text.splitlines():
-        if line.startswith("+++ b/") or line.startswith("+++ "):
-            if current_path and content_lines:
-                target = worktree / current_path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text("\n".join(content_lines) + "\n")
-                logger.info("Direct file copy from patch: %s (%d lines)", current_path, len(content_lines))
-            prefix = "+++ b/" if line.startswith("+++ b/") else "+++ "
-            current_path = line[len(prefix):]
-            content_lines = []
-            in_hunk = False
-        elif line.startswith("@@"):
-            in_hunk = True
-        elif in_hunk and line.startswith("+"):
-            content_lines.append(line[1:])
-        elif in_hunk and not line.startswith("-") and not line.startswith("\\"):
-            content_lines.append(line)
-
-    if current_path and content_lines:
-        target = worktree / current_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("\n".join(content_lines) + "\n")
-        logger.info("Direct file copy from patch: %s (%d lines)", current_path, len(content_lines))
 
 def replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
     """Replace repo paths with worktree paths in text."""
