@@ -179,7 +179,7 @@ poetry.toml
 
 # LSP config files
 pyrightconfig.json
-
+.specstory/
 # End of https://www.toptal.com/developers/gitignore/api/python
 rocPRIM_*/
 2025*/
@@ -187,10 +187,6 @@ rocPRIM_*/
 *txt
 optimization_logs/*
 .optimization_strategies.md
-.cursor/
-.vscode/
-
-<<<<<<< HEAD
 .vscode/  
 .cursor/
 .optimization_strategies.md
@@ -200,7 +196,9 @@ examples/add_kernel/test_harness.py
 examples/matmul_kernel/kernel.py
 HIP_Shared_Memory_Optimization_Best_Practices.md
 hip_shared_memory_best_practices.md
-=======
 # MkDocs build output (deployed via GitHub Actions, not committed)
 site/
->>>>>>> geak/main
+baseline_metrics.json
+profile.json
+tests/test_data/
+optimized_silu.hip.cpp
