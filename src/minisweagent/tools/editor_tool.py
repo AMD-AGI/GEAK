@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 
-"""This is an adaptation of the Anthropic Text Editor tool from
-https://github.com/anthropics/anthropic-quickstarts/blob/main/computer-use-demo/computer_use_demo/tools/edit.py
-However, we made it python 3.6 compatible and stateless (all state is saved in a json file)
+"""Standalone editor CLI.
+
+Adds ``--file_text_path`` so large file bodies can be passed via a UTF-8 file
+instead of the shell (used by :mod:`str_replace_editor`).
+Original: Anthropic Text Editor tool; Python 3.6+ compatible, stateless (JSON registry).
 """
+
+import os
+
+# Importing ``minisweagent.tools.registry`` loads ``minisweagent/__init__.py``, which
+# prints a Rich banner to stdout unless this is set — that pollutes subprocess output
+# when this file is run as ``python editor_tool.py`` (e.g. from str_replace_editor).
+if __name__ == "__main__":
+    os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
 import argparse
 import ast
@@ -705,11 +715,22 @@ def main():
     parser.add_argument("command", type=str)
     parser.add_argument("path", type=str)
     parser.add_argument("--file_text", type=str, default=None)
+    parser.add_argument(
+        "--file_text_path",
+        type=str,
+        default=None,
+        help="Read file_text from this UTF-8 path (overrides --file_text when set).",
+    )
     parser.add_argument("--view_range", type=parse_int_pair, default=None)
     parser.add_argument("--old_str", type=str, default=None)
     parser.add_argument("--new_str", type=str, default=None)
     parser.add_argument("--insert_line", type=int_or_none, default=None)
     args = parser.parse_args()
+
+    file_text = args.file_text
+    if args.file_text_path:
+        file_text = Path(args.file_text_path).read_text(encoding="utf-8")
+
     old_str = None
     new_str = None
 
@@ -729,7 +750,7 @@ def main():
     tool(
         command=args.command,
         path=args.path,
-        file_text=args.file_text,
+        file_text=file_text,
         view_range=args.view_range,
         old_str=old_str,
         new_str=new_str,

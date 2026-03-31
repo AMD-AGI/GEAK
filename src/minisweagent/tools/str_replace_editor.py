@@ -1,11 +1,15 @@
+from __future__ import annotations
+
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 
 class str_replace_editor:
-    def __init__(self):
+    def __init__(self) -> None:
         self.tool_py = Path(__file__).parent / "editor_tool.py"
 
     def __call__(
@@ -18,45 +22,60 @@ class str_replace_editor:
         old_str: str | None = None,
         new_str: str | None = None,
         insert_line: int | None = None,
-        **kwargs,
-    ):
-        if view_range:
-            view_range = f'"{str(view_range)}"'
-        if file_text:
-            file_text = f'"{str(file_text)}"'
-        old_file = None
-        new_file = None
-        if old_str:
-            with NamedTemporaryFile("w", delete=False) as f_old:
+        **kwargs: object,
+    ) -> dict[str, str | int]:
+        cmd: list[str] = [sys.executable, str(self.tool_py), command, path]
+
+        file_text_path: str | None = None
+        if file_text is not None:
+            with NamedTemporaryFile("w", delete=False, encoding="utf-8") as f_txt:
+                f_txt.write(file_text)
+                file_text_path = f_txt.name
+            cmd.extend(["--file_text_path", file_text_path])
+
+        if view_range is not None:
+            cmd.extend(["--view_range", json.dumps(view_range)])
+
+        old_file: str | None = None
+        new_file: str | None = None
+        if old_str is not None:
+            with NamedTemporaryFile("w", delete=False, encoding="utf-8") as f_old:
                 f_old.write(old_str)
                 old_file = f_old.name
-        if new_str:
-            with NamedTemporaryFile("w", delete=False) as f_old:
-                f_old.write(new_str)
-                new_file = f_old.name
-        make_cmd = [
-            f"python {str(self.tool_py)} {command} {path} --file_text {file_text} --view_range {view_range} --old_str {old_file} --new_str {new_file} --insert_line {insert_line}"
-        ]
-        result = subprocess.run(make_cmd, shell=True, capture_output=True, text=True, timeout=3600)
-        if old_file and Path(old_file).exists():
-            os.remove(old_file)
-        if new_file and Path(new_file).exists():
-            os.remove(new_file)
-        return {
-            "output": result.stdout.strip() or result.stderr.strip(),
-            "returncode": result.returncode,
-        }
+            cmd.extend(["--old_str", old_file])
+        if new_str is not None:
+            with NamedTemporaryFile("w", delete=False, encoding="utf-8") as f_new:
+                f_new.write(new_str)
+                new_file = f_new.name
+            cmd.extend(["--new_str", new_file])
+
+        if insert_line is not None:
+            cmd.extend(["--insert_line", str(insert_line)])
+
+        # Child imports minisweagent (via editor_tool → registry); package __init__
+        # prints a startup banner to stdout unless silenced.
+        subprocess_env = os.environ.copy()
+        subprocess_env["MSWEA_SILENT_STARTUP"] = "1"
+
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=3600,
+                env=subprocess_env,
+            )
+            out = (result.stdout or "").strip() or (result.stderr or "").strip()
+            return {"output": out, "returncode": result.returncode}
+        finally:
+            if file_text_path and Path(file_text_path).exists():
+                os.remove(file_text_path)
+            if old_file and Path(old_file).exists():
+                os.remove(old_file)
+            if new_file and Path(new_file).exists():
+                os.remove(new_file)
 
 
 if __name__ == "__main__":
-    command = "str_replace"  # str_replace insert veiw
-    path = "/mcp/rocPRIM_device_binary_search/benchmark/benchmark_device_binary_search.cpp"
-    insert_line = 10
-    old_str = "in the Software without restriction, including without limitation the rights"
-    new_str = "sssssssssssss"
-    view_range = [10, 200]
-    edit_tool = str_replace_editor()
-    response = edit_tool(
-        command=command, path=path, view_range=view_range, insert_line=insert_line, new_str=new_str, old_str=old_str
-    )
-    print(response["output"])
+    print("Import str_replace_editor and use str_replace_editor() as the tool callable.")
