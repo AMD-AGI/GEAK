@@ -3,7 +3,7 @@
 **For teams shipping GPU kernels in real repositories** — GEAK is an agent-driven framework that turns profiling, tests, and LLM reasoning into **reviewable patches**, from one file to repo-wide runs.
 
 - **Stack-aware** — **HIP** and **Triton** are the primary optimization targets today; support for additional languages and stacks (including ASM, Gluon, and others) is on the roadmap.
-- **Closed-loop / end-to-end** — **`geak`** can carry a run from start to finish: generate or discover **test/harness scripts** when needed, **run profiling**, iterate with the LLM, **save every patch** on disk, and **pick the best result** against your metrics—artifacts land under `optimization_logs/` for reproducibility.  
+- **Closed-loop / end-to-end** — **`geak`** can carry a run from start to finish: generate or discover **test/harness scripts** when needed, **run profiling**, iterate with the LLM, **save every patch** on disk, and **pick the best result** against your metrics—artifacts land for reproducibility.  
 - **Scales with hardware** — Multi-agent parallel search with isolated git workspaces and best-patch selection when you explore competing strategies.
 
 **Documentation:** Markdown under [`docs/`](docs/) — start with **[Quick start](docs/quick_start.md)** if you want to run `geak` immediately.
@@ -59,47 +59,35 @@ flowchart TB
   style OUT fill:#fef2f2,stroke:#dc2626,stroke-width:1px,color:#991b1b
 ```
 
+## Start here (5 minutes)
 
+Minimal steps to install GEAK and run the **`geak`** CLI against a kernel or repository.
 
-Parallel runs add multiple isolated workspaces and a **best-patch** selection step on top of the same **optimization run** pattern.
+### Prerequisites
 
-## Table of Contents
+- **Python** 3.10+
+- **Git** (parallel runs use worktrees)
+- **GPU** and the stack your kernels use — e.g. **Triton**, **PyTorch**, **CUDA**, or compiled **HIP**.
+- **AMD Instinct / Radeon (ROCm):** install a normal **ROCm** user-space environment so tools like **`rocminfo`** / **`rocm-smi`** work when the agent inspects hardware. For **HIP C++** you also need **`hipcc`** (and friends). **`HIP_VISIBLE_DEVICES`** is often set by the scheduler or your shell when pinning a card.
 
-- [Architecture](#architecture)
-- [Getting Started](#getting-started)
-  - [Installation](#installation)
-  - [Usage](#usage)
-    - [Basic (single-agent) GPU kernel optimization](#basic-single-agent-gpu-kernel-optimization)
-    - [Parallel optimization (multiple agents)](#parallel-optimization-multiple-agents)
-  - [Configuration](#configuration)
-    - [Loading Configurations](#loading-configurations)
-  - [Output & Artifacts](#output-artifacts)
-- [Features](#features)
-  - [Preprocess](#preprocess)
-  - [Best patch selection](#best-patch-selection)
-- [Evolution: From Foundation to Platform](#evolution-from-foundation-to-platform)
-  - [GEAK v1 — Foundation (Triton)](#geak-v1-foundation-triton)
-  - [GEAK v2 — Expansion (Agent Family)](#geak-v2-expansion-agent-family)
-  - [GEAK v3 — Platform (L1 → L3)](#geak-v3-platform-l1-l3)
-- [Summary](#summary)
-- [Contributing](#contributing)
-- [Acknowledgments](#acknowledgments)
+### Install
 
----
-
-## Getting Started
-
-### Installation
+From the repository root:
 
 ```bash
-git clone https://github.com/AMD-AGI/GEAK
+git clone https://github.com/AMD-AGI/GEAK.git
 cd GEAK
+
 # Docker-based
 AMD_LLM_API_KEY=<YOUR_KEY> bash scripts/run-docker.sh
 # (or)
 # Local
 pip install -e .
+```
 
+### Minimal model setup
+
+```bash
 # Set model name and key. In the case of docker-based setup, export the API key before
 # running scripts/run-docker.sh.
 
@@ -115,60 +103,86 @@ export ANTHROPIC_API_KEY="YOUR_KEY"
 export AMD_LLM_API_KEY="YOUR_KEY"
 ```
 
-### Usage
+- Full model/back-end configuration (and precedence rules) lives in [`docs/model_config.md`](docs/model_config.md).
 
-#### Basic (single-agent) GPU kernel optimization
+### Run GEAK
+
+Single-agent run with explicit kernel file path + repo path:
+NOTE: kernel-url accepts both github url or local file path
 
 ```bash
-# Interactive REPL
-geak
-
-# Typical kernel optimization using natural language input
-geak -t "Optimize the kernel from /path/to/aiter, specifically aiter/ops/triton/topk.py. Use the harness at /path/to/test_topk_harness.py. Use four GPUs with IDs 0-3 simultaneously."
-
-# Typical kernel optimization (single agent)
-geak --kernel-path /path/to/kernel/file \
+geak --kernel-url /path/to/kernel/file \
   --repo /path/to/kernel/repo \
-  --task "Optimize the block_reduce kernel"
-
+  --task "Optimize the kernel. Metric: higher is better."
 ```
 
-#### Parallel optimization (multiple agents)
-
-- Each agent works in an isolated git workspace
-- Patches and test results are saved separately
-- After all runs finish, GEAK automatically selects the best patch based on the specified metric
+Parallel agents (one agent per GPU ID):
 
 ```bash
 geak --num-parallel 4 \
   --repo /path/to/kernel/repo \
-  --task "Optimize block_reduce kernel. Kernel path is xxx. Extract Bandwidth in GB/s (higher is better) as the metric" \
+  --kernel-url /path/to/kernel/file \
+  --task "Optimize the kernel. Metric: Extract Bandwidth in GB/s (higher is better)" \
   --gpu-ids 0,1,2,3
 ```
 
-**Notes:**
+Natural-language task (GEAK can parse targets from text when present):
 
-- `--num-parallel`: number of optimization agents
-- `--repo`: required when `--num-parallel > 1` (each agent uses an isolated git worktree)
-- `--gpu-ids`: comma-separated GPU IDs for agents
-- `--yolo`: run end-to-end without interactive confirmation
+```bash
+geak -t "Optimize the kernel url at /path/to/repo/path/to/kernel.py. Repo path is /path/to/repo. Use GPUs 0-3."
+```
 
-For more options and examples, see **[Quick start](docs/quick_start.md)**.
+### Try an example
 
+These are **examples** you can test in `examples/`. Replace paths, GPU IDs, and the metric wording as needed.
 
-### Configuration
+**Example: HIP kernel `knn`**
+```bash
+# Repo root containing the kernel file
+REPO="/path/to/GEAK/examples/knn"
 
-#### Loading Configurations
+geak --repo "$REPO" \
+  --kernel-url "$REPO/knn_wrapper.py" \
+  --test-command "python scripts/task_runner.py compile && python scripts/task_runner.py correctness && python scripts/task_runner.py performance" \
+  --task "Optimize the knn kernel. Metric: latency (lower is better)." \
+  --yolo --exit-immediately
+```
 
-`geak` loads configs in layers:
+**Example: Triton kernel `mla_decode`**
 
-1. base config: `geak.yaml`
-2. template: `mini_kernel_strategy_list.yaml` (default)
-3. user override: `--config xxx.yaml`
-4. cli override: cli args (**final override**)
+```bash
+REPO="/path/to/GEAK/examples/mla_decode"
+
+geak --repo "$REPO" \
+  --kernel-url "$REPO/kernel.py" \
+  --test-command "python3 -c \"import ast; ast.parse(open('$REPO/kernel.py').read())\" && python3 '$REPO/test_kernel_harness.py' --correctness && python3 '$REPO/test_kernel_harness.py' --full-benchmark" \
+  --task "Optimize the MLA decode Triton kernel." \
+  --yolo --exit-immediately
+```
+
+## Configuration and common options
+
+GEAK is primarily configured via **CLI flags**, optionally merged with a **YAML config file**.
+
+- **Config file location**: `src/minisweagent/config/*.yaml`. You can add your own config (e.g. `custom_config.yaml`) in this directory.
+- **Config file merge**: pass `--config path/to/config.yaml` to apply it as the final override (overriding defaults such as `geak.yaml`).
+
+### Most-used CLI flags
+
+| Option | Required | What it controls |
+|--------|----------|------------------|
+| `-t`, `--task` | Yes | Task string. If it matches an existing file path, GEAK reads the file contents as the task body. |
+| `--repo` | Yes | Repository root for the kernel. (Even single files should live in a repo for worktrees/patching.) |
+| `--kernel-url` | Yes | Kernel source file (path or URL). |
+| `--test-command` | No | Command to validate correctness and measure performance (if you have an existing harness). |
+| `--num-parallel` | No | Number of parallel agent runs. |
+| `--gpu-ids` | No | Comma-separated GPU device indices (one per parallel agent). |
+| `-o`, `--output` | No | Trajectory file or output directory. Default: `./optimization_logs/<kernel>_<timestamp>/` |
+| `-y`, `--yolo` | No | Non-interactive / auto-confirm tool execution (parallel workers already run in yolo mode). |
+| `--exit-immediately` | No | Do not ask for confirmation before exit (useful for batch runs). |
+| `-c`, `--config` | No | Path to a YAML config file (merged over `geak.yaml`). |
 
 For more options and examples, see **[Configuration](docs/configuration.md)**
-
 
 ### Output & Artifacts
 
@@ -222,42 +236,6 @@ The pipeline chains steps such as **kernel URL resolution**, **codebase context*
 ### Best patch selection
 
 **`--num-parallel`** runs several agents in **isolated git worktrees** (optionally pinned with **`--gpu-ids`**). Each run writes patches and test logs under **`optimization_logs/<kernel>_<timestamp>/parallel_*`**. When the batch finishes, a **selection** step reads those artifacts, applies your **metric** (from task text or **`patch.metric`** in YAML), and produces **`best_results.json`** plus **`select_agent.log`**.
-
-
----
-
-## Evolution: From Foundation to Platform
-
-### GEAK v1 — Foundation (Triton)
-
-GEAK v1 established the foundation with Triton-based kernel generation.
-
-- Reflexion-based kernel generation
-- Instruction → Triton kernels
-- TritonBench / ROCmBench improvements
-
-**Outcome:** AI viability proven — LLM-based agents can generate and improve GPU kernels.
-
-### GEAK v2 — Expansion (Agent Family)
-
-GEAK v2 expanded into a multi-agent system for HIP kernel optimization.
-
-- **OptimAgent:** profiling-driven optimization with multi-offspring exploration
-- **OpenEvolve:** genetic optimization for kernel evolution
-- support HIP → HIP kernel optimization
-
-**Outcome:** Scalable multi-agent system.
-
-
-### GEAK v3 — Platform (L1 → L3)
-
-GEAK v3 evolves into a unified platform supporting the full optimization stack.
-
-- Support **L3** kernel optimization (repository-level, full lifecycle)
-- Reduce human intervention via closed-loop automation
-- Unified kernel optimization (test discovery, baselines, profiling, strategy execution, validation)
-
-**Outcome:** Anyone can optimize kernels — from single-kernel tuning to autonomous repo-level optimization.
 
 ---
 
