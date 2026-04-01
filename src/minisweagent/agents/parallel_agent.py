@@ -476,7 +476,6 @@ class ParallelAgent(DefaultAgent):
         if str(repo_path) != repo_path_str:
             text = text.replace(str(repo_path), worktree_path_str)
 
-
         # Keep agent id in any remaining /worktrees/agent_<id> segments aligned
         # with this worktree.
         return re.sub(

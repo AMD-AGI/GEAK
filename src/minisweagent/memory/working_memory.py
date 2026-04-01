@@ -27,7 +27,6 @@ from typing import Any
 
 from minisweagent.memory.working_notebook import WorkingNotebook, summarize_working_notebook
 
-
 MAX_WORKING_MEMORY_TOKENS = 800
 MAX_INSIGHTS = 15
 
@@ -35,6 +34,7 @@ MAX_INSIGHTS = 15
 @dataclass
 class Insight:
     """A single causal insight extracted from a tool result."""
+
     step: int
     tag: str  # WIN, FAIL, OK, WARN
     message: str
@@ -89,6 +89,7 @@ class WorkingMemory:
     pending_strategy: str = ""
     pending_change_category: str = ""
     _notebook: WorkingNotebook | None = field(default=None, init=False, repr=False)
+    _last_injection_hash: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.notebook_dir:
@@ -136,9 +137,13 @@ class WorkingMemory:
 
     def add_insight(self, tag: str, message: str):
         """Add a causal insight. Maintains rolling window of MAX_INSIGHTS."""
-        self.insights.append(Insight(
-            step=self.current_step, tag=tag, message=message[:120],
-        ))
+        self.insights.append(
+            Insight(
+                step=self.current_step,
+                tag=tag,
+                message=message[:120],
+            )
+        )
         if len(self.insights) > MAX_INSIGHTS:
             self.insights = self.insights[-MAX_INSIGHTS:]
 
@@ -247,11 +252,11 @@ class WorkingMemory:
             if lat_match:
                 lat_ms = float(lat_match.group(1))
             if lat_ms is None:
-                geo_match = re.search(r'[Gg]eo\s*mean:\s*(\d+\.\d+)\s*ms', output)
+                geo_match = re.search(r"[Gg]eo\s*mean:\s*(\d+\.\d+)\s*ms", output)
                 if geo_match:
                     lat_ms = float(geo_match.group(1))
             if lat_ms is None:
-                shape_lats = re.findall(r':\s*(\d+\.\d+)\s*ms', output)
+                shape_lats = re.findall(r":\s*(\d+\.\d+)\s*ms", output)
                 if len(shape_lats) >= 2:
                     lat_ms = float(shape_lats[-1])
             if lat_ms is not None and lat_ms > 0:
@@ -283,19 +288,11 @@ class WorkingMemory:
     def record_round_evaluation(self, round_eval: dict[str, Any]) -> None:
         """Store verified round-level evidence into the working notebook."""
         full_benchmark = round_eval.get("full_benchmark", {}) if isinstance(round_eval, dict) else {}
-        verified_speedup = (
-            full_benchmark.get("verified_speedup")
-            if isinstance(full_benchmark, dict)
-            else None
-        )
+        verified_speedup = full_benchmark.get("verified_speedup") if isinstance(full_benchmark, dict) else None
         if verified_speedup:
             self.update_speedup(float(verified_speedup))
             self.best_strategy = str(round_eval.get("best_task") or self.best_strategy)
-        candidate_ms = (
-            full_benchmark.get("candidate_ms")
-            if isinstance(full_benchmark, dict)
-            else None
-        )
+        candidate_ms = full_benchmark.get("candidate_ms") if isinstance(full_benchmark, dict) else None
         if candidate_ms:
             candidate_val = float(candidate_ms)
             if self.best_latency_ms <= 0 or candidate_val < self.best_latency_ms:
@@ -306,11 +303,7 @@ class WorkingMemory:
             round_num=int(round_eval.get("round", 0) or 0),
             best_task=round_eval.get("best_task"),
             verified_speedup=verified_speedup,
-            baseline_ms=(
-                full_benchmark.get("baseline_ms")
-                if isinstance(full_benchmark, dict)
-                else None
-            ),
+            baseline_ms=(full_benchmark.get("baseline_ms") if isinstance(full_benchmark, dict) else None),
             candidate_ms=candidate_ms,
             per_shape_speedups=round_eval.get("per_shape_speedups"),
         )
@@ -339,7 +332,7 @@ class WorkingMemory:
         if pct >= 0.85:
             return f"BUDGET_CRITICAL: ${self.current_cost:.2f}/${self.max_cost:.2f}, step {self.current_step}/{self.max_steps}. Wrap up and submit best result."
         if pct >= 0.70:
-            return f"BUDGET_WARN: ${self.current_cost:.2f}/${self.max_cost:.2f}, step {self.current_step}/{self.max_steps}. ~{int((1-pct)*self.max_steps)} steps remaining."
+            return f"BUDGET_WARN: ${self.current_cost:.2f}/${self.max_cost:.2f}, step {self.current_step}/{self.max_steps}. ~{int((1 - pct) * self.max_steps)} steps remaining."
         return ""
 
     def record_change_category(self, category: str):
@@ -441,7 +434,7 @@ class WorkingMemory:
         if self.consecutive_errors >= 3:
             parts.append(
                 f"[CRASH RECOVERY] Same error repeated {self.consecutive_errors}x: "
-                f"\"{self.last_error_msg[:50]}\". "
+                f'"{self.last_error_msg[:50]}". '
                 "STOP current approach. Try: (1) Read the kernel file fresh with cat, "
                 "(2) Use a completely different edit strategy, "
                 "(3) Run the test command directly to verify the environment works."
@@ -467,7 +460,13 @@ class WorkingMemory:
             parts.append(
                 f"[DIVERSITY REQUIRED] Last {self.consecutive_same_category} changes were all {cat.upper()}. "
                 "You MUST try a different category: "
-                + ("ALGORITHMIC or FUSION." if cat == "tuning" else "TUNING or MEMORY LAYOUT." if cat == "algorithmic" else "ALGORITHMIC or TUNING.")
+                + (
+                    "ALGORITHMIC or FUSION."
+                    if cat == "tuning"
+                    else "TUNING or MEMORY LAYOUT."
+                    if cat == "algorithmic"
+                    else "ALGORITHMIC or TUNING."
+                )
             )
 
         # Bottleneck guidance (only when relevant)
@@ -531,7 +530,7 @@ class WorkingMemory:
             f"{self.bottleneck_type}:{self.current_step}:{self.consecutive_errors}:"
             f"{self.steps_since_improvement}:{self.tuning_steps}"
         )
-        if hasattr(self, '_last_injection_hash') and self._last_injection_hash == _state_key:
+        if self._last_injection_hash == _state_key:
             return ""
         self._last_injection_hash = _state_key
         return result
@@ -539,11 +538,25 @@ class WorkingMemory:
 
 def classify_change(text: str) -> str:
     """Classify a code change as algorithmic, fusion, tuning, or wrapper."""
-    algo = [r'def \w+_kernel', r'split.*kernel', r'tl\.reshape|tl\.flip', r'direct.index',
-            r'half.dim', r'different.*algorithm', r'rewrite', r'restructur']
-    fusion = [r'fuse|fusion', r'fused_', r'merge.*kernel', r'combine.*ops']
-    tuning = [r'BLOCK_S\s*=', r'num_warps\s*=', r'num_stages\s*=', r'@triton\.autotune',
-              r'waves_per_eu', r'BLOCK_SIZE\s*=']
+    algo = [
+        r"def \w+_kernel",
+        r"split.*kernel",
+        r"tl\.reshape|tl\.flip",
+        r"direct.index",
+        r"half.dim",
+        r"different.*algorithm",
+        r"rewrite",
+        r"restructur",
+    ]
+    fusion = [r"fuse|fusion", r"fused_", r"merge.*kernel", r"combine.*ops"]
+    tuning = [
+        r"BLOCK_S\s*=",
+        r"num_warps\s*=",
+        r"num_stages\s*=",
+        r"@triton\.autotune",
+        r"waves_per_eu",
+        r"BLOCK_SIZE\s*=",
+    ]
     for p in algo:
         if re.search(p, text, re.IGNORECASE):
             return "algorithmic"
@@ -595,8 +608,8 @@ def _summarize_change(text: str) -> str:
 
     for space in search_spaces:
         specific_tuning = re.search(
-            r'\b(num_warps|num_stages|waves_per_eu|items_per_thread|threads_per_block|warps_per_block|'
-            r'BLOCK[_A-Z0-9]*|TILE[_A-Z0-9]*|GROUP[_A-Z0-9]*)\s*=\s*([0-9]+)\b',
+            r"\b(num_warps|num_stages|waves_per_eu|items_per_thread|threads_per_block|warps_per_block|"
+            r"BLOCK[_A-Z0-9]*|TILE[_A-Z0-9]*|GROUP[_A-Z0-9]*)\s*=\s*([0-9]+)\b",
             space,
             re.IGNORECASE,
         )
@@ -604,21 +617,27 @@ def _summarize_change(text: str) -> str:
             return f"TUNE({specific_tuning.group(1)}={specific_tuning.group(2)})"
 
     indicators = [
-        (r'@triton\.autotune|triton\.Config|autotun', 'TUNE(autotune/config)'),
+        (r"@triton\.autotune|triton\.Config|autotun", "TUNE(autotune/config)"),
         (
-            r'\b(aiter|ck|tensile|rocblas|cublas|cutlass|flash_attention|'
-            r'scaled_dot_product_attention|enable_gqa|dispatch)\b',
-            'PATH(dispatch/backend)',
+            r"\b(aiter|ck|tensile|rocblas|cublas|cutlass|flash_attention|"
+            r"scaled_dot_product_attention|enable_gqa|dispatch)\b",
+            "PATH(dispatch/backend)",
         ),
-        (r'\b(fuse|fuses|fused|fusing|merge\w*|combine\w*|single[-_ ]pass)\b', 'FUSION(op merge)'),
+        (r"\b(fuse|fuses|fused|fusing|merge\w*|combine\w*|single[-_ ]pass)\b", "FUSION(op merge)"),
         (
-            r'\b(repeat_interleave|contiguous|reshape|view|expand|transpose|permute|stride|layout)\b',
-            'ALGO(data layout)',
+            r"\b(repeat_interleave|contiguous|reshape|view|expand|transpose|permute|stride|layout)\b",
+            "ALGO(data layout)",
         ),
-        (r'\b(vector\w*|float2|float4|half2|half4|int2|int4|packed|simd|mfma|wmma)\b', 'ALGO(vectorization)'),
-        (r'\b(__shared__|shared memory|lds|smem|cache\w*|prefetch|register\w*|coalesc\w*)\b', 'ALGO(memory hierarchy)'),
-        (r'__global__|__device__|@triton\.jit|template\s*<|def\s+\w+\(|struct\s+\w+|class\s+\w+', 'ALGO(new kernel/helper)'),
-        (r'\b(reduce\w*|scan\w*|sort\w*|heap\w*|bitonic|radix|attention|matmul|gemm|tile\w*|split\w*)\b', 'ALGO(algorithm rewrite)'),
+        (r"\b(vector\w*|float2|float4|half2|half4|int2|int4|packed|simd|mfma|wmma)\b", "ALGO(vectorization)"),
+        (r"\b(__shared__|shared memory|lds|smem|cache\w*|prefetch|register\w*|coalesc\w*)\b", "ALGO(memory hierarchy)"),
+        (
+            r"__global__|__device__|@triton\.jit|template\s*<|def\s+\w+\(|struct\s+\w+|class\s+\w+",
+            "ALGO(new kernel/helper)",
+        ),
+        (
+            r"\b(reduce\w*|scan\w*|sort\w*|heap\w*|bitonic|radix|attention|matmul|gemm|tile\w*|split\w*)\b",
+            "ALGO(algorithm rewrite)",
+        ),
     ]
     for space in search_spaces:
         for pat, desc in indicators:
@@ -648,13 +667,15 @@ def extract_insight_from_tool_result(tool_name: str, output: str, returncode: in
     output_lower = output.lower()
 
     # Profiling results
-    if "bottleneck" in output_lower and ("memory" in output_lower or "compute" in output_lower or "latency" in output_lower or "lds" in output_lower):
+    if "bottleneck" in output_lower and (
+        "memory" in output_lower or "compute" in output_lower or "latency" in output_lower or "lds" in output_lower
+    ):
         bn_match = re.search(r'"bottleneck":\s*"(\w+)"', output)
         if bn_match:
             return Insight(step=0, tag="OK", message=f"Profiling: bottleneck={bn_match.group(1)}")
 
     # GEAK benchmark latency (most precise kernel metric)
-    latency_match = re.search(r'GEAK_RESULT_LATENCY_MS=(\d+\.\d+)', output)
+    latency_match = re.search(r"GEAK_RESULT_LATENCY_MS=(\d+\.\d+)", output)
     if latency_match:
         lat = float(latency_match.group(1))
         change_desc = _summarize_change(output)
@@ -663,7 +684,7 @@ def extract_insight_from_tool_result(tool_name: str, output: str, returncode: in
         return Insight(step=0, tag="OK", message=f"Benchmark latency: {lat:.4f}ms")
 
     # Speedup results
-    speedup_match = re.search(r'Speedup \(geomean\):\s+(\d+\.\d+)x', output)
+    speedup_match = re.search(r"Speedup \(geomean\):\s+(\d+\.\d+)x", output)
     if speedup_match:
         sp = float(speedup_match.group(1))
         tag = "WIN" if sp > 1.0 else "FAIL" if sp < 0.5 else "OK"
@@ -673,7 +694,7 @@ def extract_insight_from_tool_result(tool_name: str, output: str, returncode: in
     if "all pass" in output_lower or "all_pass" in output_lower:
         return Insight(step=0, tag="OK", message="Correctness: ALL PASS")
     if "fail" in output_lower and returncode != 0:
-        fail_match = re.search(r'(FAIL|Error|failed).*?$', output, re.MULTILINE)
+        fail_match = re.search(r"(FAIL|Error|failed).*?$", output, re.MULTILINE)
         msg = fail_match.group(0)[:80] if fail_match else "Test failed"
         return Insight(step=0, tag="FAIL", message=msg)
 
@@ -684,26 +705,26 @@ def extract_insight_from_tool_result(tool_name: str, output: str, returncode: in
         return Insight(step=0, tag="FAIL", message="COMMANDMENT validation failed")
 
     # OpenEvolve progress
-    oe_match = re.search(r'best speedup: (\d+\.\d+)x', output)
+    oe_match = re.search(r"best speedup: (\d+\.\d+)x", output)
     if oe_match:
         sp = float(oe_match.group(1))
         tag = "WIN" if sp > 1.0 else "OK"
         return Insight(step=0, tag=tag, message=f"OpenEvolve best: {sp:.2f}x")
 
     # Custom benchmark: "Geo mean: 0.024120ms" or "geo mean: X.XXms"
-    geo_match = re.search(r'[Gg]eo\s*mean:\s*(\d+\.\d+)\s*ms', output)
+    geo_match = re.search(r"[Gg]eo\s*mean:\s*(\d+\.\d+)\s*ms", output)
     if geo_match:
         lat = float(geo_match.group(1))
         return Insight(step=0, tag="OK", message=f"Benchmark latency: {lat:.4f}ms")
 
     # Shape-specific latencies: "hd=256 tn=1: 0.0238ms" — take last as summary
-    shape_lats = re.findall(r':\s*(\d+\.\d+)\s*ms', output)
+    shape_lats = re.findall(r":\s*(\d+\.\d+)\s*ms", output)
     if len(shape_lats) >= 2:
         lat = float(shape_lats[-1])
         return Insight(step=0, tag="OK", message=f"Benchmark latency: {lat:.4f}ms")
 
     # Generic latency after keywords: "latency: X.XXms", "time: X.XXms"
-    lat_generic = re.search(r'(?:latency|result|time)[:\s]+(\d+\.\d+)\s*ms', output, re.IGNORECASE)
+    lat_generic = re.search(r"(?:latency|result|time)[:\s]+(\d+\.\d+)\s*ms", output, re.IGNORECASE)
     if lat_generic:
         lat = float(lat_generic.group(1))
         return Insight(step=0, tag="OK", message=f"Benchmark latency: {lat:.4f}ms")

@@ -14,7 +14,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 _OVERALL_SPEEDUP_RE = re.compile(
     r"Overall:\s*([0-9]+(?:\.[0-9]+)?)x\s*"
     r"\(([0-9]+(?:\.[0-9]+)?)\s*ms\s*->\s*([0-9]+(?:\.[0-9]+)?)\s*ms\)",
@@ -307,7 +306,10 @@ class WorkingNotebook:
         # Show what WORKED (positive signals for cross-round learning)
         winners = [(s, info) for s, info in tried.items() if float(info.get("best_speedup", 0)) > 1.01]
         if winners:
-            winner_strs = [f"{s} ({float(info['best_speedup']):.2f}x)" for s, info in sorted(winners, key=lambda x: -float(x[1]["best_speedup"]))]
+            winner_strs = [
+                f"{s} ({float(info['best_speedup']):.2f}x)"
+                for s, info in sorted(winners, key=lambda x: -float(x[1]["best_speedup"]))
+            ]
             lines.append("WHAT WORKED: " + "; ".join(winner_strs[:3]))
 
         if tried:
@@ -320,7 +322,6 @@ class WorkingNotebook:
                 category = f"/{info['category']}" if info.get("category") else ""
                 best = float(info.get("best_speedup", 0.0))
                 attempts = int(info.get("attempts", 0))
-                status = info.get("last_status", "")
                 outcome = ""
                 if best > 1.01:
                     outcome = ", IMPROVED"

@@ -506,7 +506,9 @@ def _run_task_agent(
             if combined_memory:
                 template_vars["memory_context"] = combined_memory
         except Exception as _mem_exc:
-            import logging as _lg; _lg.getLogger(__name__).warning("Memory assembly failed: %s", _mem_exc)
+            import logging as _lg
+
+            _lg.getLogger(__name__).warning("Memory assembly failed: %s", _mem_exc)
 
         _kernel_meta = {
             "file_path": kernel_path,

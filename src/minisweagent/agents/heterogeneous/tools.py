@@ -85,6 +85,7 @@ def tool_generate_tasks(
                 _rev = _rev.to_dict()
             elif not isinstance(_rev, dict):
                 import dataclasses as _dc
+
                 if _dc.is_dataclass(_rev) and not isinstance(_rev, type):
                     _rev = _dc.asdict(_rev)
             _round_evals.append(_rev)
