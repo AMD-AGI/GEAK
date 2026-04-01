@@ -15,7 +15,6 @@ on:
       - 'knowledge-base/**'
       - 'README.md'
       - '.cursor/**'
-      - '.github/workflows/release.yaml'
       - '.github/workflows/pylint.yaml'
       - '.github/workflows/lint.yaml'
   pull_request:
@@ -28,7 +27,6 @@ on:
       - 'knowledge-base/**'
       - 'README.md'
       - '.cursor/**'
-      - '.github/workflows/release.yaml'
       - '.github/workflows/pylint.yaml'
       - '.github/workflows/lint.yaml'
 
