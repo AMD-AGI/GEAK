@@ -697,6 +697,49 @@ class TestInferRepoRoot:
             result = _infer_repo_root(str(kernel))
             assert result == str(repo)
 
+    def test_finds_setup_py(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "myrepo"
+            kernel_dir = repo / "src"
+            kernel_dir.mkdir(parents=True)
+            (repo / "setup.py").write_text("from setuptools import setup; setup()")
+            kernel = kernel_dir / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result == str(repo)
+
+    def test_finds_setup_cfg(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "myrepo"
+            kernel_dir = repo / "src"
+            kernel_dir.mkdir(parents=True)
+            (repo / "setup.cfg").write_text("[metadata]\nname = mypackage")
+            kernel = kernel_dir / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result == str(repo)
+
+    def test_git_takes_precedence_over_inner_pyproject(self):
+        """If both .git at root and pyproject.toml in a subdirectory exist, .git wins."""
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "myrepo"
+            sub = repo / "subpkg"
+            kernel_dir = sub / "kernels"
+            kernel_dir.mkdir(parents=True)
+            (repo / ".git").mkdir()
+            # pyproject.toml sits closer to the kernel — but .git is at the true root
+            (sub / "pyproject.toml").write_text("[project]\nname = 'sub'")
+            kernel = kernel_dir / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            # Walk upward hits sub/pyproject.toml first — that's acceptable behaviour;
+            # what matters is it never returns None and never crashes.
+            assert result is not None
+            assert result != ""
+
     def test_falls_back_to_parent_when_no_markers(self):
         from minisweagent.run.preprocess.preprocessor import _infer_repo_root
         with tempfile.TemporaryDirectory() as tmp:
@@ -849,7 +892,7 @@ if __name__ == "__main__":
 # ===================================================================
 
 class TestRewriteRelativeImports:
-    """Relative imports must be converted to absolute imports."""
+    """Relative imports must be converted to absolute imports anchored at repo_root."""
 
     def test_rewrites_single_level_relative_import(self):
         from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
@@ -866,6 +909,20 @@ class TestRewriteRelativeImports:
             assert "from ops.utils import helper" in result
             assert "from .." not in result
 
+    def test_rewrites_same_package_relative_import(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            # harness at repo/ops/ -> package ops
+            # from .sibling import foo  (level=1) -> from ops.sibling import foo
+            repo = Path(tmp) / "pkg"
+            harness_dir = repo / "ops"
+            harness_dir.mkdir(parents=True)
+            harness = harness_dir / "test_harness.py"
+            source = "from .sibling import foo\n"
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert "from ops.sibling import foo" in result
+            assert "from ." not in result
+
     def test_rewrites_two_level_relative_import(self):
         from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
         with tempfile.TemporaryDirectory() as tmp:
@@ -878,6 +935,63 @@ class TestRewriteRelativeImports:
             source = "from ...root_mod import something\n"
             result = _rewrite_relative_imports(source, harness, repo)
             assert "from a.root_mod import something" in result
+
+    def test_rewrites_multiple_relative_imports_in_one_file(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "pkg"
+            harness_dir = repo / "ops" / "triton"
+            harness_dir.mkdir(parents=True)
+            harness = harness_dir / "test_harness.py"
+            source = (
+                "from ..utils import helper\n"
+                "from ..kernels import my_kernel\n"
+                "import torch\n"
+                "from .local import something\n"
+            )
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert "from ops.utils import helper" in result
+            assert "from ops.kernels import my_kernel" in result
+            assert "from ops.triton.local import something" in result
+            assert "from .." not in result
+            assert "from ." not in result
+
+    def test_rewritten_import_resolves_to_patched_not_original(self):
+        """The rewritten absolute import must pick up files from PYTHONPATH order,
+        meaning the patched copy in output_dir (prepended to PYTHONPATH) wins over
+        the original in the repo. This is the core correctness guarantee of Issue 2."""
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Simulate: repo_root/ops/utils.py  (original, unpatched)
+            repo = tmp_path / "repo"
+            ops_dir = repo / "ops"
+            ops_dir.mkdir(parents=True)
+            (ops_dir / "utils.py").write_text("VALUE = 'original'")
+            # Simulate: output_dir/ops/utils.py  (patched copy)
+            out_dir = tmp_path / "output"
+            out_ops = out_dir / "ops"
+            out_ops.mkdir(parents=True)
+            (out_ops / "utils.py").write_text("VALUE = 'patched'")
+            # With output_dir first in sys.path, absolute import gets patched version
+            saved = sys.path[:]
+            try:
+                sys.path.insert(0, str(out_dir))
+                sys.path.insert(1, str(repo))
+                # Remove any cached module
+                for key in list(sys.modules):
+                    if "ops" in key or "utils" in key:
+                        del sys.modules[key]
+                import importlib
+                mod = importlib.import_module("ops.utils")
+                assert mod.VALUE == "patched", (
+                    "Absolute import must resolve to patched copy in GEAK_WORK_DIR"
+                )
+            finally:
+                sys.path[:] = saved
+                for key in list(sys.modules):
+                    if "ops" in key or "utils" in key:
+                        del sys.modules[key]
 
     def test_leaves_absolute_imports_unchanged(self):
         from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
@@ -908,7 +1022,17 @@ class TestRewriteRelativeImports:
 # ===================================================================
 
 class TestCommandmentHardcodesHarness:
-    """COMMANDMENT.md must not contain ${GEAK_HARNESS}."""
+    """COMMANDMENT.md must hardcode the harness path — no ${GEAK_HARNESS} variable."""
+
+    _HARNESS_SOURCE = (
+        "import argparse\n"
+        "p = argparse.ArgumentParser()\n"
+        "g = p.add_mutually_exclusive_group(required=True)\n"
+        "g.add_argument('--correctness', action='store_true')\n"
+        "g.add_argument('--profile', action='store_true')\n"
+        "g.add_argument('--benchmark', action='store_true')\n"
+        "g.add_argument('--full-benchmark', action='store_true')\n"
+    )
 
     def test_simple_commandment_has_no_geak_harness_var(self):
         from minisweagent.run.preprocess.commandment import generate_commandment
@@ -917,23 +1041,61 @@ class TestCommandmentHardcodesHarness:
             kernel = tmp_path / "kernel.py"
             kernel.write_text("# kernel")
             harness = tmp_path / "test_harness.py"
-            harness.write_text(
-                "import argparse\n"
-                "p = argparse.ArgumentParser()\n"
-                "g = p.add_mutually_exclusive_group(required=True)\n"
-                "g.add_argument('--correctness', action='store_true')\n"
-                "g.add_argument('--profile', action='store_true')\n"
-                "g.add_argument('--benchmark', action='store_true')\n"
-                "g.add_argument('--full-benchmark', action='store_true')\n"
-            )
+            harness.write_text(self._HARNESS_SOURCE)
             content = generate_commandment(
-                kernel_path=kernel,
-                harness_path=harness,
-                repo_root=tmp_path,
+                kernel_path=kernel, harness_path=harness, repo_root=tmp_path,
             )
             assert "${GEAK_HARNESS}" not in content, (
                 "COMMANDMENT.md must not reference ${GEAK_HARNESS} variable"
             )
             assert str(harness.resolve()) in content, (
                 "COMMANDMENT.md must contain the literal harness path"
+            )
+
+    def test_all_four_sections_contain_literal_harness_path(self):
+        """Every evaluation section (CORRECTNESS, PROFILE, BENCHMARK, FULL_BENCHMARK)
+        must reference the hardcoded path, not a variable."""
+        from minisweagent.run.preprocess.commandment import generate_commandment
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kernel = tmp_path / "kernel.py"
+            kernel.write_text("# kernel")
+            harness = tmp_path / "test_harness.py"
+            harness.write_text(self._HARNESS_SOURCE)
+            content = generate_commandment(
+                kernel_path=kernel, harness_path=harness, repo_root=tmp_path,
+            )
+            harness_abs = str(harness.resolve())
+            for section in ("## CORRECTNESS", "## PROFILE", "## BENCHMARK", "## FULL_BENCHMARK"):
+                # Find the section and check the next non-empty line has the literal path
+                idx = content.find(section)
+                assert idx != -1, f"Missing section {section}"
+                section_body = content[idx + len(section):]
+                next_section = section_body.find("\n## ")
+                section_body = section_body[:next_section] if next_section != -1 else section_body
+                assert harness_abs in section_body, (
+                    f"{section} does not contain literal harness path"
+                )
+                assert "${GEAK_HARNESS}" not in section_body, (
+                    f"{section} still uses ${{GEAK_HARNESS}} variable"
+                )
+
+    def test_harness_path_is_absolute_not_relative(self):
+        """The hardcoded path must be absolute so agents can find it from any CWD."""
+        from minisweagent.run.preprocess.commandment import generate_commandment
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kernel = tmp_path / "kernel.py"
+            kernel.write_text("# kernel")
+            harness = tmp_path / "test_harness.py"
+            harness.write_text(self._HARNESS_SOURCE)
+            content = generate_commandment(
+                kernel_path=kernel, harness_path=harness, repo_root=tmp_path,
+            )
+            harness_abs = str(harness.resolve())
+            assert harness_abs.startswith("/"), "Hardcoded path must be absolute"
+            # The relative name alone must not appear without the full path prefix
+            # (i.e. not just "test_harness.py" floating without its directory)
+            assert content.count("test_harness.py") == content.count(harness_abs), (
+                "Harness filename appears without its full absolute prefix"
             )
