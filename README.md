@@ -59,31 +59,7 @@ flowchart TB
   style OUT fill:#fef2f2,stroke:#dc2626,stroke-width:1px,color:#991b1b
 ```
 
-
-
 Parallel runs add multiple isolated workspaces and a **best-patch** selection step on top of the same **optimization run** pattern.
-
-## Table of Contents
-
-- [Architecture](#architecture)
-- [Getting Started](#getting-started)
-  - [Installation](#installation)
-  - [Usage](#usage)
-    - [Basic (single-agent) GPU kernel optimization](#basic-single-agent-gpu-kernel-optimization)
-    - [Parallel optimization (multiple agents)](#parallel-optimization-multiple-agents)
-  - [Configuration](#configuration)
-    - [Loading Configurations](#loading-configurations)
-  - [Output & Artifacts](#output-artifacts)
-- [Features](#features)
-  - [Preprocess](#preprocess)
-  - [Best patch selection](#best-patch-selection)
-- [Evolution: From Foundation to Platform](#evolution-from-foundation-to-platform)
-  - [GEAK v1 — Foundation (Triton)](#geak-v1-foundation-triton)
-  - [GEAK v2 — Expansion (Agent Family)](#geak-v2-expansion-agent-family)
-  - [GEAK v3 — Platform (L1 → L3)](#geak-v3-platform-l1-l3)
-- [Summary](#summary)
-- [Contributing](#contributing)
-- [Acknowledgments](#acknowledgments)
 
 ---
 
@@ -127,7 +103,7 @@ geak
 geak -t "Optimize the kernel from /path/to/aiter, specifically aiter/ops/triton/topk.py. Use the harness at /path/to/test_topk_harness.py. Use four GPUs with IDs 0-3 simultaneously."
 
 # Typical kernel optimization (single agent)
-geak --kernel-path /path/to/kernel/file \
+geak --kernel-url /path/to/kernel/file \
   --repo /path/to/kernel/repo \
   --task "Optimize the block_reduce kernel"
 
@@ -148,10 +124,39 @@ geak --num-parallel 4 \
 
 **Notes:**
 
+- `--repo`: required, the target repo path
+- `--kernel-url`: required, the path to the target kernel file; accepts both URLs and local paths
 - `--num-parallel`: number of optimization agents
-- `--repo`: required when `--num-parallel > 1` (each agent uses an isolated git worktree)
 - `--gpu-ids`: comma-separated GPU IDs for agents
 - `--yolo`: run end-to-end without interactive confirmation
+
+### Runnable examples
+
+These are **examples** you can test in `examples/`. Replace paths, GPU IDs, and the metric wording as needed.
+
+**Example: HIP kernel `knn`**
+```bash
+# Repo root containing the kernel file
+REPO="/path/to/GEAK/examples/knn"
+
+geak --repo "$REPO" \
+  --kernel-url "$REPO/knn_wrapper.py" \
+  --test-command "python scripts/task_runner.py compile && python scripts/task_runner.py correctness && python scripts/task_runner.py performance" \
+  --task "Optimize the knn kernel. Metric: latency (lower is better)." \
+  --yolo --exit-immediately
+```
+
+**Example: Triton kernel `mla_decode`**
+
+```bash
+REPO="/path/to/GEAK/examples/mla_decode"
+
+geak --repo "$REPO" \
+  --kernel-url "$REPO/kernel.py" \
+  --test-command "python3 -c \"import ast; ast.parse(open('kernel.py').read())\" && python3 'test_kernel_harness.py' --correctness && python3 'test_kernel_harness.py' --full-benchmark" \
+  --task "Optimize the MLA decode Triton kernel." \
+  --yolo --exit-immediately
+```
 
 For more options and examples, see **[Quick start](docs/quick_start.md)**.
 
@@ -162,8 +167,8 @@ For more options and examples, see **[Quick start](docs/quick_start.md)**.
 
 `geak` loads configs in layers:
 
-1. base config: `geak.yaml`
-2. template: `mini_kernel_strategy_list.yaml` (default)
+1. base config: `src/minisweagent/config/geak.yaml`
+2. template: `src/minisweagent/config/mini_kernel_strategy_list.yaml` (default)
 3. user override: `--config xxx.yaml`
 4. cli override: cli args (**final override**)
 
