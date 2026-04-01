@@ -17,13 +17,13 @@ jobs:
 
     steps:
       - name: Checkout GEAK_v3
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: dev
           path: geak
 
       - name: Checkout AgentKernelArena
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: AMD-AGI/AgentKernelArena
           ref: geak_benchmark
