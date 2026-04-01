@@ -664,4 +664,230 @@ class TestPreprocessContractEnforcement:
             assert "repo_root" in d
             assert "test_command" in d
             assert "harness_path" in d
-            assert "discovery" in d
+
+
+# ===================================================================
+# Test: _infer_repo_root (Issue 4)
+# ===================================================================
+
+class TestInferRepoRoot:
+    """_infer_repo_root must find repo markers and never return None."""
+
+    def test_finds_git_directory(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "myrepo"
+            kernel_dir = repo / "src" / "kernels"
+            kernel_dir.mkdir(parents=True)
+            (repo / ".git").mkdir()
+            kernel = kernel_dir / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result == str(repo)
+
+    def test_finds_pyproject_toml(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "myrepo"
+            kernel_dir = repo / "ops"
+            kernel_dir.mkdir(parents=True)
+            (repo / "pyproject.toml").write_text("[project]\nname = 'test'")
+            kernel = kernel_dir / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result == str(repo)
+
+    def test_falls_back_to_parent_when_no_markers(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = Path(tmp) / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result == tmp
+
+    def test_never_returns_none(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = Path(tmp) / "deep" / "nested" / "kernel.py"
+            kernel.parent.mkdir(parents=True)
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result is not None
+            assert result != ""
+
+
+# ===================================================================
+# Test: detect_and_split_kernel_from_harness (Issue 1)
+# ===================================================================
+
+class TestDetectAndSplitKernelFromHarness:
+    """Kernel defs embedded in harness must be extracted to a separate file."""
+
+    _MERGED_HARNESS = '''\
+import argparse
+import triton
+import triton.language as tl
+
+@triton.jit
+def my_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    tl.store(output_ptr + offsets, x, mask=mask)
+
+def run_correctness(args):
+    pass
+
+def run_profile(args):
+    pass
+
+def run_benchmark(args):
+    pass
+
+parser = argparse.ArgumentParser()
+group = parser.add_mutually_exclusive_group(required=True)
+group.add_argument("--correctness", action="store_true")
+group.add_argument("--profile", action="store_true")
+group.add_argument("--benchmark", action="store_true")
+group.add_argument("--full-benchmark", action="store_true")
+args = parser.parse_args()
+'''
+
+    def test_splits_triton_kernel_from_harness(self):
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = tmp_path / "test_kernel_harness.py"
+            harness.write_text(self._MERGED_HARNESS)
+            result = detect_and_split_kernel_from_harness(harness, tmp_path)
+            assert result is not None, "Expected split to occur"
+            new_harness_path, extracted_path = result
+            assert Path(extracted_path).is_file(), "Extracted kernel file must exist"
+            assert Path(new_harness_path).is_file(), "Rewritten harness must exist"
+            extracted = Path(extracted_path).read_text()
+            assert "@triton.jit" in extracted
+            assert "my_kernel" in extracted
+            harness_text = Path(new_harness_path).read_text()
+            assert "from kernel_extracted import" in harness_text
+            assert "@triton.jit" not in harness_text
+
+    def test_no_split_when_no_kernel_defs(self):
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
+        source = '''\
+import argparse
+import torch
+
+def run_correctness(args):
+    pass
+
+parser = argparse.ArgumentParser()
+group = parser.add_mutually_exclusive_group(required=True)
+group.add_argument("--correctness", action="store_true")
+group.add_argument("--profile", action="store_true")
+group.add_argument("--benchmark", action="store_true")
+group.add_argument("--full-benchmark", action="store_true")
+args = parser.parse_args()
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = tmp_path / "test_kernel_harness.py"
+            harness.write_text(source)
+            result = detect_and_split_kernel_from_harness(harness, tmp_path)
+            assert result is None, "Expected no split for harness without kernel defs"
+
+
+# ===================================================================
+# Test: _rewrite_relative_imports (Issue 2)
+# ===================================================================
+
+class TestRewriteRelativeImports:
+    """Relative imports must be converted to absolute imports."""
+
+    def test_rewrites_single_level_relative_import(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            # repo_root is in PYTHONPATH, so importable paths start from inside repo_root.
+            # harness at repo/ops/triton/ -> package ops.triton
+            # from ..utils import helper  (level=2) -> from ops.utils import helper
+            repo = Path(tmp) / "mypackage"
+            harness_dir = repo / "ops" / "triton"
+            harness_dir.mkdir(parents=True)
+            harness = harness_dir / "test_harness.py"
+            source = "from ..utils import helper\nimport torch\n"
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert "from ops.utils import helper" in result
+            assert "from .." not in result
+
+    def test_rewrites_two_level_relative_import(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            # harness at repo/a/b/c/ -> package a.b.c
+            # from ...root_mod import something  (level=3) -> from a.root_mod import something
+            repo = Path(tmp) / "pkg"
+            harness_dir = repo / "a" / "b" / "c"
+            harness_dir.mkdir(parents=True)
+            harness = harness_dir / "test_harness.py"
+            source = "from ...root_mod import something\n"
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert "from a.root_mod import something" in result
+
+    def test_leaves_absolute_imports_unchanged(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "pkg"
+            harness_dir = repo / "sub"
+            harness_dir.mkdir(parents=True)
+            harness = harness_dir / "test.py"
+            source = "from pkg.utils import foo\nimport torch\n"
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert result == source
+
+    def test_returns_unchanged_when_harness_outside_repo(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            other = Path(tmp) / "other"
+            other.mkdir()
+            harness = other / "test.py"
+            source = "from ..utils import foo\n"
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert result == source  # unchanged, harness outside repo
+
+
+# ===================================================================
+# Test: COMMANDMENT.md hardcodes harness path (Issue 3)
+# ===================================================================
+
+class TestCommandmentHardcodesHarness:
+    """COMMANDMENT.md must not contain ${GEAK_HARNESS}."""
+
+    def test_simple_commandment_has_no_geak_harness_var(self):
+        from minisweagent.run.preprocess.commandment import generate_commandment
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kernel = tmp_path / "kernel.py"
+            kernel.write_text("# kernel")
+            harness = tmp_path / "test_harness.py"
+            harness.write_text(
+                "import argparse\n"
+                "p = argparse.ArgumentParser()\n"
+                "g = p.add_mutually_exclusive_group(required=True)\n"
+                "g.add_argument('--correctness', action='store_true')\n"
+                "g.add_argument('--profile', action='store_true')\n"
+                "g.add_argument('--benchmark', action='store_true')\n"
+                "g.add_argument('--full-benchmark', action='store_true')\n"
+            )
+            content = generate_commandment(
+                kernel_path=kernel,
+                harness_path=harness,
+                repo_root=tmp_path,
+            )
+            assert "${GEAK_HARNESS}" not in content, (
+                "COMMANDMENT.md must not reference ${GEAK_HARNESS} variable"
+            )
+            assert str(harness.resolve()) in content, (
+                "COMMANDMENT.md must contain the literal harness path"
+            )

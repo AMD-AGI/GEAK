@@ -9,6 +9,7 @@ down once the preprocess boundary is stable.
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import importlib
 import logging
@@ -16,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -223,11 +225,103 @@ def _materialized_harness_bootstrap(
     )
 
 
+def _rewrite_relative_imports(source: str, harness_path: Path, repo_root: Path) -> str:
+    """Convert relative imports in *source* to absolute imports anchored at *repo_root*.
+
+    Example::
+
+        # harness at: repo_root/aiter/ops/triton/test_harness.py
+        from ..utils import foo
+        # becomes:
+        from aiter.ops.utils import foo
+
+    If the harness is not inside *repo_root* (can't compute package path), the
+    source is returned unchanged with a warning.
+    """
+    try:
+        harness_abs = harness_path.resolve()
+        repo_abs = repo_root.resolve()
+        rel = harness_abs.relative_to(repo_abs)
+    except ValueError:
+        logger.warning(
+            "Harness %s is outside repo_root %s — cannot rewrite relative imports",
+            harness_path,
+            repo_root,
+        )
+        return source
+
+    # Package parts of the harness (excluding the file itself)
+    # e.g. aiter/ops/triton/test_harness.py -> ["aiter", "ops", "triton"]
+    harness_package_parts = list(rel.parts[:-1])
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    # Collect relative imports to rewrite: (lineno, col_offset, end_lineno, original_text, new_text)
+    rewrites: list[tuple[int, str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level == 0:
+            continue  # absolute import, leave alone
+
+        # Walk up `level` packages from harness_package_parts
+        if node.level > len(harness_package_parts):
+            logger.warning(
+                "Relative import %r in %s exceeds package depth; skipping",
+                ast.unparse(node),
+                harness_path,
+            )
+            continue
+
+        base_parts = harness_package_parts[: len(harness_package_parts) - (node.level - 1)]
+        if node.module:
+            abs_module = ".".join(base_parts + [node.module])
+        else:
+            abs_module = ".".join(base_parts)
+
+        names_str = ", ".join(
+            (f"{alias.name} as {alias.asname}" if alias.asname else alias.name) for alias in node.names
+        )
+        new_import = f"from {abs_module} import {names_str}"
+        old_import = ast.unparse(node)
+        rewrites.append((node.lineno, old_import, new_import))
+
+    if not rewrites:
+        return source
+
+    # Apply rewrites line-by-line (ast.unparse gives canonical form; use line numbers)
+    lines = source.splitlines(keepends=True)
+    rewrite_map: dict[int, str] = {lineno: new_text for lineno, _, new_text in rewrites}
+    # Build set of lines to skip (multi-line imports span lineno..end_lineno)
+    # For simplicity parse again to get end_lineno
+    skip_lines: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level > 0 and node.lineno in rewrite_map:
+            for ln in range(node.lineno, node.end_lineno + 1):
+                skip_lines.add(ln)
+
+    new_lines: list[str] = []
+    for i, line in enumerate(lines, 1):
+        if i in rewrite_map:
+            new_lines.append(rewrite_map[i] + "\n")
+        elif i in skip_lines:
+            pass  # continuation lines of the rewritten import
+        else:
+            new_lines.append(line)
+
+    logger.info("Rewrote %d relative import(s) in %s to absolute", len(rewrites), harness_path)
+    return "".join(new_lines)
+
+
 def _rewrite_materialized_harness_source(
     source_text: str,
     *,
     repo_root: Path,
     kernel_path: Path | None,
+    harness_path: Path | None = None,
 ) -> str:
     bootstrap = _materialized_harness_bootstrap(
         repo_root=repo_root,
@@ -248,13 +342,21 @@ def _rewrite_materialized_harness_source(
     ]
     for pattern in legacy_patterns:
         if pattern.search(source_text):
-            return pattern.sub(bootstrap, source_text, count=1)
+            source_text = pattern.sub(bootstrap, source_text, count=1)
+            break
+    else:
+        import_block = re.compile(r"(?ms)\A((?:from __future__ import annotations\n)?(?:import .+\n|from .+ import .+\n)+)")
+        match = import_block.match(source_text)
+        if match:
+            source_text = source_text[: match.end()] + "\n" + bootstrap + source_text[match.end() :]
+        else:
+            source_text = bootstrap + "\n" + source_text
 
-    import_block = re.compile(r"(?ms)\A((?:from __future__ import annotations\n)?(?:import .+\n|from .+ import .+\n)+)")
-    match = import_block.match(source_text)
-    if match:
-        return source_text[: match.end()] + "\n" + bootstrap + source_text[match.end() :]
-    return bootstrap + "\n" + source_text
+    # Rewrite relative imports to absolute so PYTHONPATH ordering is respected
+    if harness_path is not None:
+        source_text = _rewrite_relative_imports(source_text, harness_path, repo_root)
+
+    return source_text
 
 
 def _materialize_validated_harness(
@@ -280,6 +382,7 @@ def _materialize_validated_harness(
         source_harness.read_text(),
         repo_root=repo_root,
         kernel_path=kernel_path,
+        harness_path=source_harness,
     )
     target_harness.write_text(rewritten_text)
     shutil.copymode(source_harness, target_harness)
@@ -299,6 +402,151 @@ def _materialize_validated_harness(
             "Materialized harness runtime validation failed: " + "; ".join(e.splitlines()[0] for e in exec_errors)
         )
     return materialized_command, str(target_harness), harness_results
+
+
+# ── kernel-in-harness detection and splitting ────────────────────────
+
+# Markers that indicate a Python file contains kernel definitions (not just test logic)
+_TRITON_KERNEL_MARKERS = ("@triton.jit", "@triton.autotune", "triton.jit", "tl.constexpr")
+# HIP/CUDA markers for non-Python kernels (detected via regex in source text)
+_HIP_KERNEL_RE = re.compile(r"\b(__global__|__kernel__|__device__)\b")
+
+_TRITON_DECORATOR_NAMES = frozenset({"triton.jit", "triton.autotune", "jit", "autotune"})
+
+
+def _is_triton_decorator(decorator: ast.expr) -> bool:
+    """Return True if decorator node is @triton.jit or @triton.autotune."""
+    if isinstance(decorator, ast.Attribute):
+        return (
+            isinstance(decorator.value, ast.Name)
+            and decorator.value.id == "triton"
+            and decorator.attr in ("jit", "autotune")
+        )
+    if isinstance(decorator, ast.Name):
+        return decorator.id in ("jit", "autotune")
+    # @triton.autotune(...) call
+    if isinstance(decorator, ast.Call):
+        return _is_triton_decorator(decorator.func)
+    return False
+
+
+def _harness_has_kernel_definitions(source: str) -> bool:
+    """Return True if the Python source contains embedded kernel definitions."""
+    if not any(marker in source for marker in _TRITON_KERNEL_MARKERS):
+        return False
+    # Confirm with AST to avoid false positives (e.g. comments mentioning @triton.jit)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        # Fall back to text match if AST fails
+        return any(marker in source for marker in _TRITON_KERNEL_MARKERS)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if any(_is_triton_decorator(d) for d in node.decorator_list):
+                return True
+    return False
+
+
+def detect_and_split_kernel_from_harness(
+    harness_path: str | Path,
+    output_dir: Path,
+) -> tuple[str, str] | None:
+    """If the harness contains kernel definitions, split them into a separate file.
+
+    Detects ``@triton.jit`` / ``@triton.autotune`` decorated functions in the
+    harness.  When found:
+
+    1. Extracts all kernel-decorated top-level functions (and their imports)
+       into ``<output_dir>/kernel_extracted.py``.
+    2. Rewrites the harness to remove those function definitions and adds
+       ``from kernel_extracted import <names>`` in their place.
+    3. Writes the new harness back to the same path.
+
+    Returns ``(harness_path, extracted_kernel_path)`` if a split was performed,
+    or ``None`` if no kernel definitions were detected.
+    """
+    harness_path = Path(harness_path).resolve()
+    source = harness_path.read_text()
+
+    if not _harness_has_kernel_definitions(source):
+        return None
+
+    logger.info("Harness %s contains kernel definitions — splitting out to kernel_extracted.py", harness_path)
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        logger.warning("Could not parse harness for splitting (SyntaxError: %s); skipping split", exc)
+        return None
+
+    source_lines = source.splitlines(keepends=True)
+
+    # Collect top-level nodes that are kernel definitions
+    kernel_node_indices: list[int] = []
+    kernel_names: list[str] = []
+
+    for i, node in enumerate(tree.body):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if any(_is_triton_decorator(d) for d in node.decorator_list):
+                kernel_node_indices.append(i)
+                kernel_names.append(node.name)
+
+    if not kernel_node_indices:
+        return None
+
+    # Build set of lines (0-indexed) that belong to kernel nodes
+    kernel_line_ranges: list[tuple[int, int]] = []
+    for i in kernel_node_indices:
+        node = tree.body[i]
+        # decorator_list may start before the function def line
+        start = (node.decorator_list[0].lineno if node.decorator_list else node.lineno) - 1
+        end = node.end_lineno  # end_lineno is 1-indexed, exclusive slice end
+        kernel_line_ranges.append((start, end))
+
+    # Collect imports needed by extracted kernel nodes
+    # Strategy: take ALL top-level import statements (conservative but safe)
+    import_lines: list[str] = []
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            import_lines.extend(source_lines[node.lineno - 1 : node.end_lineno])
+
+    # Build extracted kernel file content
+    extracted_chunks: list[str] = []
+    for start, end in kernel_line_ranges:
+        chunk = "".join(source_lines[start:end])
+        extracted_chunks.append(chunk)
+
+    extracted_content = "".join(import_lines) + "\n" + "\n\n".join(extracted_chunks) + "\n"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    extracted_path = output_dir / "kernel_extracted.py"
+    extracted_path.write_text(extracted_content)
+    logger.info("Extracted kernel definitions to %s", extracted_path)
+
+    # Build rewritten harness: remove kernel lines, add import at top
+    kernel_line_set: set[int] = set()
+    for start, end in kernel_line_ranges:
+        kernel_line_set.update(range(start, end))
+
+    remaining_lines = [line for i, line in enumerate(source_lines) if i not in kernel_line_set]
+
+    # Insert import statement after the last top-level import block
+    import_insert_idx = 0
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            import_insert_idx = node.end_lineno  # 1-indexed
+
+    names_str = ", ".join(kernel_names)
+    import_stmt = f"from kernel_extracted import {names_str}\n"
+
+    # Convert to 0-indexed for remaining_lines
+    remaining_lines.insert(import_insert_idx, import_stmt)
+
+    new_harness_source = "".join(remaining_lines)
+    harness_path.write_text(new_harness_source)
+    logger.info("Rewrote harness %s to import from kernel_extracted", harness_path)
+
+    return str(harness_path), str(extracted_path)
 
 
 # ── harness validation ───────────────────────────────────────────────
