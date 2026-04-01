@@ -660,16 +660,24 @@ def detect_and_split_kernel_from_harness(
     new_harness_path.write_text("".join(harness_parts))
     logger.info("Wrote test harness to %s", new_harness_path)
 
-    # ── strip test lines from original (which becomes clean kernel) ────
+    # ── write clean kernel copy to output_dir (leave original untouched) ─
+    # We must NOT modify the original file: the geak framework uses git to
+    # apply/revert patches against the repo, so mutating the original breaks
+    # those operations.  Instead, write the cleaned copy to output_dir where
+    # GEAK_WORK_DIR (which is prepended to PYTHONPATH) will find it first.
     kernel_lines = [line for i, line in enumerate(source_lines) if i not in strip_line_set]
-    # Remove trailing blank lines that result from stripping
     while kernel_lines and kernel_lines[-1].strip() == "":
         kernel_lines.pop()
     kernel_lines.append("\n")
-    harness_path.write_text("".join(kernel_lines))
-    logger.info("Stripped test logic from %s (now clean kernel file)", harness_path)
+    clean_kernel_path = output_dir / harness_path.name
+    clean_kernel_path.write_text("".join(kernel_lines))
+    logger.info(
+        "Wrote clean kernel (test logic stripped) to %s; original %s untouched",
+        clean_kernel_path,
+        harness_path,
+    )
 
-    return str(new_harness_path), str(harness_path)
+    return str(new_harness_path), str(clean_kernel_path)
 
 
 # ── harness validation ───────────────────────────────────────────────

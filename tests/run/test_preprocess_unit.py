@@ -763,23 +763,32 @@ if __name__ == "__main__":
 '''
 
     def test_splits_tests_out_leaves_kernel(self):
-        """Test functions must be extracted to new harness; kernel stays in original."""
+        """Test functions must be extracted to new harness; clean kernel written to output_dir."""
         from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            merged = tmp_path / "my_kernel.py"
+            # Put the merged source in a DIFFERENT dir to simulate a repo file
+            src_dir = tmp_path / "repo"
+            src_dir.mkdir()
+            merged = src_dir / "my_kernel.py"
             merged.write_text(self._MERGED_SOURCE)
-            result = detect_and_split_kernel_from_harness(merged, tmp_path)
+            out_dir = tmp_path / "output"
+            out_dir.mkdir()
+
+            result = detect_and_split_kernel_from_harness(merged, out_dir)
             assert result is not None, "Expected split to occur"
             new_harness_path, kernel_path = result
 
-            # kernel_path is the (now stripped) original file
-            assert kernel_path == str(merged)
-            kernel_text = merged.read_text()
-            # Kernel still has @triton.jit
+            # Original file must be UNTOUCHED (git safety)
+            original_text = merged.read_text()
+            assert "run_correctness" in original_text, "Original must not be modified"
+            assert "@triton.jit" in original_text
+
+            # Clean kernel copy is in output_dir, not original path
+            assert kernel_path == str(out_dir / "my_kernel.py")
+            kernel_text = Path(kernel_path).read_text()
             assert "@triton.jit" in kernel_text
-            assert "my_kernel" in kernel_text
-            # Test functions stripped from kernel file
+            assert "def my_kernel" in kernel_text
             assert "run_correctness" not in kernel_text
             assert "run_profile" not in kernel_text
             assert "__main__" not in kernel_text
@@ -789,9 +798,7 @@ if __name__ == "__main__":
             assert "run_correctness" in harness_text
             assert "run_profile" in harness_text
             assert "__main__" in harness_text
-            # New harness imports from original kernel module
             assert "from my_kernel import *" in harness_text
-            # Harness should NOT contain the triton kernel definition itself
             assert "@triton.jit" not in harness_text
 
     def test_kernel_not_included_in_test_bfs(self):
@@ -799,12 +806,18 @@ if __name__ == "__main__":
         from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            merged = tmp_path / "my_kernel.py"
+            src_dir = tmp_path / "repo"
+            src_dir.mkdir()
+            merged = src_dir / "my_kernel.py"
             merged.write_text(self._MERGED_SOURCE)
-            detect_and_split_kernel_from_harness(merged, tmp_path)
-            # Even though run_correctness calls my_kernel, my_kernel stays in original
-            kernel_text = merged.read_text()
+            out_dir = tmp_path / "output"
+            out_dir.mkdir()
+            detect_and_split_kernel_from_harness(merged, out_dir)
+            # Clean kernel copy in output_dir still has my_kernel def
+            kernel_text = (out_dir / "my_kernel.py").read_text()
             assert "def my_kernel" in kernel_text
+            # Original file untouched
+            assert "def my_kernel" in merged.read_text()
 
     def test_no_split_when_no_kernel_defs(self):
         """Files without @triton.jit should not be split."""
