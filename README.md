@@ -59,8 +59,8 @@ flowchart TB
   style OUT fill:#fef2f2,stroke:#dc2626,stroke-width:1px,color:#991b1b
 ```
 
-
 Parallel runs add multiple isolated workspaces and a **best-patch** selection step on top of the same **optimization run** pattern.
+
 ---
 
 ## Getting Started
