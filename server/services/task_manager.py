@@ -488,7 +488,7 @@ Provide the optimized code with comments explaining the changes made.
         # Common setup
         setup_commands = f"""#!/bin/bash
 set -e
-{precommand_block}
+
 # Export environment variables
 {env_export_lines}
 
@@ -505,6 +505,10 @@ pip install 'langfuse>=2.0.0,<3.0.0' -q 2>/dev/null || true
 
 git clone https://github.com/AMDResearch/intellikit.git
 pip install -e  intellikit/metrix/
+{precommand_block}
+# Append fallback kernel path hint to prompt
+echo "" >> "{task_dir}/prompt.md"
+echo "Note: If the kernel path or kernel repo path above cannot be found, use {task_dir}/input/ as the fallback location for both kernel file and repo path." >> "{task_dir}/prompt.md"
 
 # Set up task
 TASK_DIR="{task_dir}"
