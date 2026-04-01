@@ -530,11 +530,11 @@ def detect_and_split_kernel_from_harness(
             )
         )
 
-    # Map of fn_name -> ast node for all top-level functions
-    fn_map: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    # Map of fn_name -> list of ast nodes (handles duplicate function names)
+    fn_map: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            fn_map[node.name] = node
+            fn_map.setdefault(node.name, []).append(node)
 
     def _collect_called_names(node: ast.AST) -> set[str]:
         """Return names of same-file functions called within node."""
@@ -574,7 +574,7 @@ def detect_and_split_kernel_from_harness(
 
     # Add functions called directly from __main__ block as seeds
     if main_block is not None:
-        seeds.update(_collect_called_names(main_block) - {name for name, n in fn_map.items() if _is_triton_fn(n)})
+        seeds.update(_collect_called_names(main_block) - {name for name, nodes in fn_map.items() if all(_is_triton_fn(n) for n in nodes)})
 
     if not seeds:
         logger.debug("No test roots found in %s; skipping split", harness_path)
@@ -587,15 +587,17 @@ def detect_and_split_kernel_from_harness(
         name = queue.pop()
         if name in test_fns:
             continue
-        node = fn_map.get(name)
-        if node is None:
+        nodes = fn_map.get(name)
+        if nodes is None:
             continue
-        if _is_triton_fn(node):
-            continue  # never include kernel functions in the test set
+        # Skip if ALL definitions for this name are triton kernel fns
+        if all(_is_triton_fn(n) for n in nodes):
+            continue
         test_fns.add(name)
-        for callee in _collect_called_names(node):
-            if callee not in test_fns:
-                queue.append(callee)
+        for n in nodes:
+            for callee in _collect_called_names(n):
+                if callee not in test_fns:
+                    queue.append(callee)
 
     if not test_fns:
         return None
@@ -608,11 +610,12 @@ def detect_and_split_kernel_from_harness(
     strip_line_set: set[int] = set()
     test_fn_chunks: list[tuple[int, str]] = []  # (start_line, source_chunk)
 
-    for name in test_fns:
-        node = fn_map[name]
-        start, end = _node_line_range(node)
-        strip_line_set.update(range(start, end))
-        test_fn_chunks.append((start, "".join(source_lines[start:end])))
+    # Scan tree.body directly (not fn_map) to catch duplicate function names
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in test_fns:
+            start, end = _node_line_range(node)
+            strip_line_set.update(range(start, end))
+            test_fn_chunks.append((start, "".join(source_lines[start:end])))
 
     # Also strip __main__ block
     main_chunk: str | None = None
