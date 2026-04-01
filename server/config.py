@@ -38,13 +38,13 @@ class Settings(BaseSettings):
     
     # Database
     database_path: str = Field(
-        default="./data/geak.db",
+        default="/tmp/geak/geak.db",
         description="SQLite database path"
     )
     
     # Storage
     nfs_base_path: str = Field(
-        default="/wekafs/geak",
+        default="/tmp/geak-data",
         description="NFS base path for task storage"
     )
     
