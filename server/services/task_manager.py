@@ -334,7 +334,8 @@ Provide the optimized code with comments explaining the changes made.
         input_type = task.get("input_type", "file")
         
         # Build execution command based on input type
-        command = self._build_execution_command(task_id, task_dir, output_dir, input_type)
+        input_path = task.get("input_path", "")
+        command = self._build_execution_command(task_id, task_dir, output_dir, input_type, input_path)
         
         # Get workspace ID (from task config or default to user's first workspace)
         workspace_id = runtime.get("workspace_id") or await self.safe_client.get_default_workspace_id()
@@ -462,7 +463,7 @@ Provide the optimized code with comments explaining the changes made.
             except Exception:
                 pass
     
-    def _build_execution_command(self, task_id: str, task_dir: Path, output_dir: Path, input_type: str = "file") -> str:
+    def _build_execution_command(self, task_id: str, task_dir: Path, output_dir: Path, input_type: str = "file", input_path: str = "") -> str:
         """Build the execution command for the workload.
         
         Args:
@@ -470,6 +471,7 @@ Provide the optimized code with comments explaining the changes made.
             task_dir: Task directory path.
             output_dir: Output directory path.
             input_type: Input type ('file' or 'repo').
+            input_path: Absolute path to primary input file.
         """
         settings = self.settings
         
@@ -508,7 +510,7 @@ pip install -e  intellikit/metrix/
 {precommand_block}
 # Append fallback kernel path hint to prompt
 echo "" >> "{task_dir}/prompt.md"
-echo "Note: If the kernel path or kernel repo path above cannot be found, use {task_dir}/input/ as the fallback location for both kernel file and repo path." >> "{task_dir}/prompt.md"
+echo "Note: If the kernel path or kernel repo path above cannot be found, use kernel absolute path: {input_path} and kernel repo path: {task_dir}/input/ as the fallback." >> "{task_dir}/prompt.md"
 
 # Set up task
 TASK_DIR="{task_dir}"
