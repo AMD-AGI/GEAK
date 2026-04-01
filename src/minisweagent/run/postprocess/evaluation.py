@@ -213,7 +213,7 @@ def build_eval_env(
     env["GEAK_GPU_DEVICE"] = str(gpu_id)
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
     env["GEAK_BENCHMARK_EXTRA_ARGS"] = f"--iterations {iters}"
-    env["PYTHONPATH"] = f"{work_dir}:{repo_root}:{env.get('PYTHONPATH', '')}"
+    env["PYTHONPATH"] = f"{repo_root}:{env.get('PYTHONPATH', '')}"
     alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF", "")
     if "expandable_segments" in alloc_conf:
         env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
@@ -425,6 +425,18 @@ def evaluate_round_best(
         # --- FULL_BENCHMARK ---
         fb_script = build_eval_script(str(commandment_path), ["SETUP", "FULL_BENCHMARK"])
         if fb_script:
+            # Clean agent-created directories that shadow system packages.
+            # Python adds the script dir to sys.path[0], so any dir here
+            # with an __init__.py would shadow the real system package.
+            if eval_worktree:
+                import shutil
+                _keep = {"__pycache__", ".git", ".aiter_jit"}
+                for child in eval_worktree.iterdir():
+                    if not child.is_dir() or child.name.startswith(".") or child.name in _keep:
+                        continue
+                    if (child / "__init__.py").exists():
+                        shutil.rmtree(child)
+                        _print(f"  Removed shadow package: {child.name}/")
             _print(f"  Running FULL_BENCHMARK on best kernel from round {round_num}...")
             try:
                 fb_result = subprocess.run(

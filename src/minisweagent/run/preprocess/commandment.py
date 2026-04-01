@@ -178,19 +178,19 @@ def _generate_simple(
         build_cmd = _detect_build_command(repo_root)
         setup_section = (
             "rm -rf ${GEAK_WORK_DIR}/.aiter_jit\n" + build_cmd + "\n"
-            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:${PYTHONPATH}\\n"
             "export HIP_VISIBLE_DEVICES=%s\\n"
             "export AITER_JIT_DIR=%s/.aiter_jit\\n"
             'exec python3 "$@"\\n\' '
-            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
+            '"${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
             "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
         )
     else:
         setup_section = (
-            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:${PYTHONPATH}\\n"
             "export HIP_VISIBLE_DEVICES=%s\\n"
             'exec python3 "$@"\\n\' '
-            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
+            '"${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
             "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
         )
 
@@ -257,9 +257,9 @@ def _generate_inner_kernel(
         setup_lines.append(f"touch {init_touch}")
 
     setup_lines.append(
-        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:${PYTHONPATH}\\n"
         'export HIP_VISIBLE_DEVICES=%s\\nexec python3 ${GEAK_HARNESS} "$@"\\n\' '
-        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" > ${GEAK_WORK_DIR}/run_harness.sh '
+        '"${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" > ${GEAK_WORK_DIR}/run_harness.sh '
         "&& chmod +x ${GEAK_WORK_DIR}/run_harness.sh"
     )
 
@@ -380,10 +380,10 @@ def generate_commandment_from_commands(
     # SETUP: compile step (cd to workdir first)
     setup_parts = []
     setup_parts.append(
-        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:${PYTHONPATH}\\n"
         "export HIP_VISIBLE_DEVICES=%s\\n"
         'exec "$@"\\n\' '
-        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
+        '"${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
         "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
     )
     if compile_cmd:
