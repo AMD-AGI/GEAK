@@ -6,7 +6,7 @@ real-time feedback (B6).
 
 Components:
 1. Session State Tracker (~300 tokens): phase, strategies tried, best speedup
-2. Insight Buffer (~200 tokens): rolling window of 5 WIN/FAIL/OK insights
+2. Insight Buffer (~200 tokens): rolling window of 15 WIN/FAIL/OK insights
 3. Progress Monitor (~100 tokens): speedup trajectory + early-stop signals
 4. Cost/Step Budget (~100 tokens): hard limits with graceful degradation
 
@@ -20,7 +20,6 @@ Inspired by:
 
 from __future__ import annotations
 
-import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -57,6 +56,7 @@ class WorkingMemory:
     best_speedup_step: int = 0
     strategies_tried: list[str] = field(default_factory=list)
     strategies_failed: list[str] = field(default_factory=list)
+    failed_category_counts: dict[str, int] = field(default_factory=dict)
     current_action: str = ""
     kernel_category: str = "unknown"
 
@@ -147,7 +147,6 @@ class WorkingMemory:
 
         Replaces duplicated logic in orchestrator.py and default.py.
         """
-        import re as _re
         insight.step = self.current_step
         self.add_insight(insight.tag, insight.message)
 
@@ -155,16 +154,16 @@ class WorkingMemory:
 
         # Update bottleneck_type from profiling insights
         if "bottleneck=" in msg:
-            _bn = _re.search(r"bottleneck=(\w+)", msg)
+            _bn = re.search(r"bottleneck=(\w+)", msg)
             if _bn:
                 self.bottleneck_type = _bn.group(1)
 
         # Extract latency (stricter match first) then speedup
-        _lat = _re.search(r"latency:\s*(\d+\.\d+)\s*ms", msg, _re.IGNORECASE)
+        _lat = re.search(r"latency:\s*(\d+\.\d+)\s*ms", msg, re.IGNORECASE)
         if _lat:
             self.update_latency(float(_lat.group(1)))
         else:
-            _sp = _re.search(r"(\d+\.\d+)x", msg)
+            _sp = re.search(r"(\d+\.\d+)x", msg)
             if _sp:
                 self.update_speedup(float(_sp.group(1)))
 
@@ -172,8 +171,11 @@ class WorkingMemory:
         """Record a strategy attempt."""
         if name not in self.strategies_tried:
             self.strategies_tried.append(name)
-        if not success and name not in self.strategies_failed:
-            self.strategies_failed.append(name)
+        if not success:
+            if name not in self.strategies_failed:
+                self.strategies_failed.append(name)
+            category = name.split("(")[0].strip()
+            self.failed_category_counts[category] = self.failed_category_counts.get(category, 0) + 1
 
     def sync_notebook_baseline(self) -> None:
         """Persist the current baseline metadata into the working notebook."""
@@ -203,8 +205,14 @@ class WorkingMemory:
         *,
         tag: str | None = None,
         message: str | None = None,
+        skip_metrics: bool = False,
     ) -> None:
-        """Persist a tool result and extract speedup metrics."""
+        """Persist a tool result and extract speedup metrics.
+
+        Args:
+            skip_metrics: When True, skip latency/speedup extraction (already
+                handled by ingest_insight to avoid double-counting).
+        """
         if not output:
             return
         if self._notebook:
@@ -218,10 +226,17 @@ class WorkingMemory:
                 step=self.current_step,
             )
 
+        if skip_metrics:
+            # Metrics already ingested via ingest_insight; skip to error tracking.
+            self._track_errors(output, returncode)
+            return
+
         overall = re.search(r"Overall:\s*([0-9]+(?:\.[0-9]+)?)x", output, re.IGNORECASE)
         if overall:
             speedup = float(overall.group(1))
-            if speedup > self.best_speedup:
+            prev_best = self.best_speedup
+            self.update_speedup(speedup)
+            if speedup > prev_best:
                 self.best_strategy = self.pending_strategy
                 self.best_change_category = self.pending_change_category
 
@@ -240,12 +255,16 @@ class WorkingMemory:
                 if len(shape_lats) >= 2:
                     lat_ms = float(shape_lats[-1])
             if lat_ms is not None and lat_ms > 0:
+                prev_best = self.best_speedup
                 self.update_latency(lat_ms)
-                if self.baseline_latency_ms / lat_ms > self.best_speedup:
+                if self.baseline_latency_ms / lat_ms > prev_best:
                     self.best_strategy = self.pending_strategy
                     self.best_change_category = self.pending_change_category
 
-        # Track consecutive errors for crash loop detection
+        self._track_errors(output, returncode)
+
+    def _track_errors(self, output: str, returncode: int) -> None:
+        """Track consecutive errors and reset pending state on patch save."""
         if returncode != 0:
             err_sig = output.strip().splitlines()[-1][:60] if output.strip() else "unknown"
             if err_sig == self.last_error_msg:
@@ -386,12 +405,9 @@ class WorkingMemory:
                 "or save your best patch and submit."
             )
         # Dead-end detection: when 3+ attempts of same strategy category failed
-        if self.strategies_failed and len(self.strategies_failed) >= 3:
-            from collections import Counter
-            _fail_cats = Counter(s.split("(")[0].strip() for s in self.strategies_failed)
-            for _cat, _cnt in _fail_cats.items():
-                if _cnt >= 3:
-                    parts.append(f"DEAD END: {_cat} tried {_cnt}x without gain. Switch to a different approach.")
+        for _cat, _cnt in self.failed_category_counts.items():
+            if _cnt >= 3:
+                parts.append(f"DEAD END: {_cat} tried {_cnt}x without gain. Switch to a different approach.")
 
         # Path reminder: agents often use wrong paths in first steps
         if self.current_step <= 2:
@@ -510,7 +526,11 @@ class WorkingMemory:
 
         # Conditional injection: skip if nothing changed since last injection
         result = "\n".join(parts)
-        _state_key = f"{self.best_speedup:.4f}:{len(self.insights)}:{len(self.strategies_tried)}:{self.bottleneck_type}"
+        _state_key = (
+            f"{self.best_speedup:.4f}:{len(self.insights)}:{len(self.strategies_tried)}:"
+            f"{self.bottleneck_type}:{self.current_step}:{self.consecutive_errors}:"
+            f"{self.steps_since_improvement}:{self.tuning_steps}"
+        )
         if hasattr(self, '_last_injection_hash') and self._last_injection_hash == _state_key:
             return ""
         self._last_injection_hash = _state_key

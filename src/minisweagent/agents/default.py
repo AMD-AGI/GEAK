@@ -441,6 +441,7 @@ class DefaultAgent:
                         rc,
                         tag=insight.tag,
                         message=insight.message,
+                        skip_metrics=True,
                     )
                 else:
                     _wm.note_tool_result(output_str, rc)
