@@ -721,9 +721,9 @@ class TestInferRepoRoot:
 # ===================================================================
 
 class TestDetectAndSplitKernelFromHarness:
-    """Kernel defs embedded in harness must be extracted to a separate file."""
+    """Merged kernel+harness files must be split: tests extracted, kernel stays clean."""
 
-    _MERGED_HARNESS = '''\
+    _MERGED_SOURCE = '''\
 import argparse
 import triton
 import triton.language as tl
@@ -738,42 +738,76 @@ def my_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     tl.store(output_ptr + offsets, x, mask=mask)
 
 def run_correctness(args):
-    pass
+    my_kernel(None, None, 0, BLOCK_SIZE=64)
 
 def run_profile(args):
-    pass
+    run_correctness(args)
 
 def run_benchmark(args):
     pass
 
-parser = argparse.ArgumentParser()
-group = parser.add_mutually_exclusive_group(required=True)
-group.add_argument("--correctness", action="store_true")
-group.add_argument("--profile", action="store_true")
-group.add_argument("--benchmark", action="store_true")
-group.add_argument("--full-benchmark", action="store_true")
-args = parser.parse_args()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--correctness", action="store_true")
+    group.add_argument("--profile", action="store_true")
+    group.add_argument("--benchmark", action="store_true")
+    group.add_argument("--full-benchmark", action="store_true")
+    args = parser.parse_args()
+    if args.correctness:
+        run_correctness(args)
+    elif args.profile:
+        run_profile(args)
+    else:
+        run_benchmark(args)
 '''
 
-    def test_splits_triton_kernel_from_harness(self):
+    def test_splits_tests_out_leaves_kernel(self):
+        """Test functions must be extracted to new harness; kernel stays in original."""
         from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            harness = tmp_path / "test_kernel_harness.py"
-            harness.write_text(self._MERGED_HARNESS)
-            result = detect_and_split_kernel_from_harness(harness, tmp_path)
+            merged = tmp_path / "my_kernel.py"
+            merged.write_text(self._MERGED_SOURCE)
+            result = detect_and_split_kernel_from_harness(merged, tmp_path)
             assert result is not None, "Expected split to occur"
-            new_harness_path, extracted_path = result
-            assert Path(extracted_path).is_file(), "Extracted kernel file must exist"
-            assert Path(new_harness_path).is_file(), "Rewritten harness must exist"
-            extracted = Path(extracted_path).read_text()
-            assert "@triton.jit" in extracted
-            assert "my_kernel" in extracted
+            new_harness_path, kernel_path = result
+
+            # kernel_path is the (now stripped) original file
+            assert kernel_path == str(merged)
+            kernel_text = merged.read_text()
+            # Kernel still has @triton.jit
+            assert "@triton.jit" in kernel_text
+            assert "my_kernel" in kernel_text
+            # Test functions stripped from kernel file
+            assert "run_correctness" not in kernel_text
+            assert "run_profile" not in kernel_text
+            assert "__main__" not in kernel_text
+
+            # New harness file contains test logic
             harness_text = Path(new_harness_path).read_text()
-            assert "from kernel_extracted import" in harness_text
+            assert "run_correctness" in harness_text
+            assert "run_profile" in harness_text
+            assert "__main__" in harness_text
+            # New harness imports from original kernel module
+            assert "from my_kernel import *" in harness_text
+            # Harness should NOT contain the triton kernel definition itself
             assert "@triton.jit" not in harness_text
 
+    def test_kernel_not_included_in_test_bfs(self):
+        """@triton.jit functions called from test roots must not be moved to harness."""
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            merged = tmp_path / "my_kernel.py"
+            merged.write_text(self._MERGED_SOURCE)
+            detect_and_split_kernel_from_harness(merged, tmp_path)
+            # Even though run_correctness calls my_kernel, my_kernel stays in original
+            kernel_text = merged.read_text()
+            assert "def my_kernel" in kernel_text
+
     def test_no_split_when_no_kernel_defs(self):
+        """Files without @triton.jit should not be split."""
         from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
         source = '''\
 import argparse
@@ -782,20 +816,19 @@ import torch
 def run_correctness(args):
     pass
 
-parser = argparse.ArgumentParser()
-group = parser.add_mutually_exclusive_group(required=True)
-group.add_argument("--correctness", action="store_true")
-group.add_argument("--profile", action="store_true")
-group.add_argument("--benchmark", action="store_true")
-group.add_argument("--full-benchmark", action="store_true")
-args = parser.parse_args()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--correctness", action="store_true")
+    args = parser.parse_args()
+    run_correctness(args)
 '''
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             harness = tmp_path / "test_kernel_harness.py"
             harness.write_text(source)
             result = detect_and_split_kernel_from_harness(harness, tmp_path)
-            assert result is None, "Expected no split for harness without kernel defs"
+            assert result is None, "Expected no split for file without kernel defs"
 
 
 # ===================================================================

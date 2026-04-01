@@ -335,27 +335,27 @@ def _ensure_harness_has_no_kernel_defs(
     output_dir: Path,
     ctx: dict,
 ) -> str:
-    """Split kernel definitions out of harness if present. Updates ctx in place.
+    """Split test logic out of a merged kernel+harness file if present.
 
-    If the harness contains @triton.jit / @triton.autotune decorated functions,
-    those are extracted to kernel_extracted.py and the harness is rewritten to
-    import from it.  The extracted file becomes the new ctx["kernel_path"] so
-    agents patch the right file.
+    When the file contains both @triton.jit kernel defs and test/harness
+    functions, this splits off the test logic into a new
+    ``test_<stem>_harness.py`` and strips those functions from the original,
+    leaving the original as a clean kernel file.
 
-    Returns the (possibly unchanged) harness_path.
+    Returns the path to the harness to use (new split harness, or unchanged
+    original if no split was needed).
     """
     result = detect_and_split_kernel_from_harness(harness_path, output_dir)
     if result is not None:
-        new_harness_path, extracted_kernel_path = result
+        new_harness_path, kernel_path = result
         logger.info(
-            "Harness had embedded kernel defs: extracted to %s, harness rewritten at %s",
-            extracted_kernel_path,
+            "Split test logic out of merged file: kernel=%s, harness=%s",
+            kernel_path,
             new_harness_path,
         )
         ctx["harness_path"] = new_harness_path
-        # Only override kernel_path if not already pointing to a real kernel file
-        if not ctx.get("kernel_path") or not Path(str(ctx["kernel_path"])).is_file():
-            ctx["kernel_path"] = extracted_kernel_path
+        # The original file is now the clean kernel; set it as kernel_path
+        ctx["kernel_path"] = kernel_path
         return new_harness_path
     return harness_path
 

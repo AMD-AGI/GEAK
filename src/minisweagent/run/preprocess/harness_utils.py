@@ -451,27 +451,40 @@ def detect_and_split_kernel_from_harness(
     harness_path: str | Path,
     output_dir: Path,
 ) -> tuple[str, str] | None:
-    """If the harness contains kernel definitions, split them into a separate file.
+    """Split test logic out of a merged kernel+harness file.
 
-    Detects ``@triton.jit`` / ``@triton.autotune`` decorated functions in the
-    harness.  When found:
+    When a single file contains both kernel definitions (``@triton.jit`` /
+    ``@triton.autotune``) and test/harness logic, agents would see mixed
+    content and patch evaluation would be unreliable.  This function:
 
-    1. Extracts all kernel-decorated top-level functions (and their imports)
-       into ``<output_dir>/kernel_extracted.py``.
-    2. Rewrites the harness to remove those function definitions and adds
-       ``from kernel_extracted import <names>`` in their place.
-    3. Writes the new harness back to the same path.
+    1. Detects whether the file contains both kernel defs and test roots.
+    2. Finds all *test-root* functions: names starting with ``test_`` or
+       ``run_`` (GEAK convention), functions decorated with pytest/unittest
+       markers, functions that reference GEAK CLI flags (``--correctness``
+       etc.), and functions called from an ``if __name__ == "__main__"``
+       block.
+    3. Uses BFS from those seeds to collect all same-file functions they
+       call—**except** functions decorated with ``@triton.jit`` /
+       ``@triton.autotune``, which belong to the kernel and must stay.
+    4. Strips the collected test functions (and the ``__main__`` block)
+       from the original file so the original becomes a clean kernel file.
+    5. Writes a new ``test_<stem>_harness.py`` in ``output_dir`` containing:
+       - All import statements (cheap copy of everything in the original)
+       - A sys.path bootstrap so the harness can import the kernel by stem
+       - ``from <stem> import *``
+       - All collected test functions
+       - The ``__main__`` block (if present)
 
-    Returns ``(harness_path, extracted_kernel_path)`` if a split was performed,
-    or ``None`` if no kernel definitions were detected.
+    Returns ``(new_harness_path, kernel_path)`` where *kernel_path* is the
+    (now stripped) original file.  Returns ``None`` when no split is needed
+    (no kernel defs, or no test roots found).
     """
     harness_path = Path(harness_path).resolve()
     source = harness_path.read_text()
 
+    # Fast guard: only proceed if the file has kernel definitions at all
     if not _harness_has_kernel_definitions(source):
         return None
-
-    logger.info("Harness %s contains kernel definitions — splitting out to kernel_extracted.py", harness_path)
 
     try:
         tree = ast.parse(source)
@@ -481,72 +494,182 @@ def detect_and_split_kernel_from_harness(
 
     source_lines = source.splitlines(keepends=True)
 
-    # Collect top-level nodes that are kernel definitions
-    kernel_node_indices: list[int] = []
-    kernel_names: list[str] = []
+    # ── helpers ────────────────────────────────────────────────────────
+    _GEAK_FLAGS = {"--correctness", "--profile", "--benchmark", "--full-benchmark"}
 
-    for i, node in enumerate(tree.body):
+    def _is_triton_fn(node: ast.AST) -> bool:
+        """True if node is a function decorated with @triton.jit / @triton.autotune."""
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        return any(_is_triton_decorator(d) for d in node.decorator_list)
+
+    def _is_test_decorator(decorator: ast.expr) -> bool:
+        s = ast.unparse(decorator)
+        return any(s.startswith(pfx) for pfx in ("pytest", "unittest", "mock", "fixture"))
+
+    def _node_source(node: ast.AST) -> str:
+        start = (node.decorator_list[0].lineno if hasattr(node, "decorator_list") and node.decorator_list else node.lineno) - 1
+        end = node.end_lineno
+        return "".join(source_lines[start:end])
+
+    def _has_geak_flags(node: ast.AST) -> bool:
+        src = _node_source(node)
+        return any(flag in src for flag in _GEAK_FLAGS) or "ArgumentParser" in src
+
+    def _is_main_block(node: ast.AST) -> bool:
+        if not isinstance(node, ast.If):
+            return False
+        test = node.test
+        return (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "__name__"
+            and any(
+                isinstance(c, ast.Constant) and c.value == "__main__"
+                for c in test.comparators
+            )
+        )
+
+    # Map of fn_name -> ast node for all top-level functions
+    fn_map: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if any(_is_triton_decorator(d) for d in node.decorator_list):
-                kernel_node_indices.append(i)
-                kernel_names.append(node.name)
+            fn_map[node.name] = node
 
-    if not kernel_node_indices:
+    def _collect_called_names(node: ast.AST) -> set[str]:
+        """Return names of same-file functions called within node."""
+        names: set[str] = set()
+        for call in ast.walk(node):
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
+                if call.func.id in fn_map:
+                    names.add(call.func.id)
+        return names
+
+    # ── identify __main__ block ────────────────────────────────────────
+    main_block: ast.If | None = None
+    for node in tree.body:
+        if _is_main_block(node):
+            main_block = node
+            break
+
+    # ── find test-root seeds ───────────────────────────────────────────
+    seeds: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if _is_triton_fn(node):
+            continue  # never seed from kernel functions
+        name = node.name
+        # GEAK naming conventions
+        if name.startswith("test_") or name.startswith("run_"):
+            seeds.add(name)
+            continue
+        # pytest / unittest decorators
+        if any(_is_test_decorator(d) for d in node.decorator_list):
+            seeds.add(name)
+            continue
+        # Contains GEAK CLI flags or ArgumentParser usage
+        if _has_geak_flags(node):
+            seeds.add(name)
+
+    # Add functions called directly from __main__ block as seeds
+    if main_block is not None:
+        seeds.update(_collect_called_names(main_block) - {name for name, n in fn_map.items() if _is_triton_fn(n)})
+
+    if not seeds:
+        logger.debug("No test roots found in %s; skipping split", harness_path)
         return None
 
-    # Build set of lines (0-indexed) that belong to kernel nodes
-    kernel_line_ranges: list[tuple[int, int]] = []
-    for i in kernel_node_indices:
-        node = tree.body[i]
-        # decorator_list may start before the function def line
-        start = (node.decorator_list[0].lineno if node.decorator_list else node.lineno) - 1
-        end = node.end_lineno  # end_lineno is 1-indexed, exclusive slice end
-        kernel_line_ranges.append((start, end))
+    # ── BFS to collect all test-reachable functions ────────────────────
+    test_fns: set[str] = set()
+    queue = list(seeds)
+    while queue:
+        name = queue.pop()
+        if name in test_fns:
+            continue
+        node = fn_map.get(name)
+        if node is None:
+            continue
+        if _is_triton_fn(node):
+            continue  # never include kernel functions in the test set
+        test_fns.add(name)
+        for callee in _collect_called_names(node):
+            if callee not in test_fns:
+                queue.append(callee)
 
-    # Collect imports needed by extracted kernel nodes
-    # Strategy: take ALL top-level import statements (conservative but safe)
-    import_lines: list[str] = []
+    if not test_fns:
+        return None
+
+    # ── compute line ranges for nodes to strip from original ───────────
+    def _node_line_range(node: ast.AST) -> tuple[int, int]:
+        start = (node.decorator_list[0].lineno if hasattr(node, "decorator_list") and node.decorator_list else node.lineno) - 1
+        return start, node.end_lineno  # start 0-indexed, end 1-indexed (exclusive)
+
+    strip_line_set: set[int] = set()
+    test_fn_chunks: list[tuple[int, str]] = []  # (start_line, source_chunk)
+
+    for name in test_fns:
+        node = fn_map[name]
+        start, end = _node_line_range(node)
+        strip_line_set.update(range(start, end))
+        test_fn_chunks.append((start, "".join(source_lines[start:end])))
+
+    # Also strip __main__ block
+    main_chunk: str | None = None
+    if main_block is not None:
+        start, end = _node_line_range(main_block)
+        strip_line_set.update(range(start, end))
+        main_chunk = "".join(source_lines[start:end])
+
+    # ── collect all import statements (cheap copy) ─────────────────────
+    import_chunks: list[str] = []
     for node in tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
-            import_lines.extend(source_lines[node.lineno - 1 : node.end_lineno])
+            import_chunks.append("".join(source_lines[node.lineno - 1 : node.end_lineno]))
 
-    # Build extracted kernel file content
-    extracted_chunks: list[str] = []
-    for start, end in kernel_line_ranges:
-        chunk = "".join(source_lines[start:end])
-        extracted_chunks.append(chunk)
-
-    extracted_content = "".join(import_lines) + "\n" + "\n\n".join(extracted_chunks) + "\n"
-
+    # ── write new harness file ─────────────────────────────────────────
+    stem = harness_path.stem  # e.g. "kernel" or "naive_softmax"
     output_dir.mkdir(parents=True, exist_ok=True)
-    extracted_path = output_dir / "kernel_extracted.py"
-    extracted_path.write_text(extracted_content)
-    logger.info("Extracted kernel definitions to %s", extracted_path)
+    new_harness_path = output_dir / f"test_{stem}_harness.py"
 
-    # Build rewritten harness: remove kernel lines, add import at top
-    kernel_line_set: set[int] = set()
-    for start, end in kernel_line_ranges:
-        kernel_line_set.update(range(start, end))
+    harness_parts: list[str] = []
+    # 1. All imports
+    harness_parts.extend(import_chunks)
+    harness_parts.append("\n")
+    # 2. sys.path bootstrap so the kernel module is importable
+    harness_parts.append(
+        "import sys as _geak_sys\n"
+        f"_KERNEL_DIR = {repr(str(harness_path.parent))}\n"
+        "if _KERNEL_DIR not in _geak_sys.path:\n"
+        "    _geak_sys.path.insert(0, _KERNEL_DIR)\n"
+        "\n"
+    )
+    # 3. Star-import kernel module
+    harness_parts.append(f"from {stem} import *\n\n")
+    # 4. Test functions (sorted by original line order for determinism)
+    test_fn_chunks.sort(key=lambda t: t[0])
+    for _, chunk in test_fn_chunks:
+        harness_parts.append(chunk)
+        if not chunk.endswith("\n\n"):
+            harness_parts.append("\n")
+    # 5. __main__ block
+    if main_chunk is not None:
+        harness_parts.append("\n")
+        harness_parts.append(main_chunk)
 
-    remaining_lines = [line for i, line in enumerate(source_lines) if i not in kernel_line_set]
+    new_harness_path.write_text("".join(harness_parts))
+    logger.info("Wrote test harness to %s", new_harness_path)
 
-    # Insert import statement after the last top-level import block
-    import_insert_idx = 0
-    for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            import_insert_idx = node.end_lineno  # 1-indexed
+    # ── strip test lines from original (which becomes clean kernel) ────
+    kernel_lines = [line for i, line in enumerate(source_lines) if i not in strip_line_set]
+    # Remove trailing blank lines that result from stripping
+    while kernel_lines and kernel_lines[-1].strip() == "":
+        kernel_lines.pop()
+    kernel_lines.append("\n")
+    harness_path.write_text("".join(kernel_lines))
+    logger.info("Stripped test logic from %s (now clean kernel file)", harness_path)
 
-    names_str = ", ".join(kernel_names)
-    import_stmt = f"from kernel_extracted import {names_str}\n"
-
-    # Convert to 0-indexed for remaining_lines
-    remaining_lines.insert(import_insert_idx, import_stmt)
-
-    new_harness_source = "".join(remaining_lines)
-    harness_path.write_text(new_harness_source)
-    logger.info("Rewrote harness %s to import from kernel_extracted", harness_path)
-
-    return str(harness_path), str(extracted_path)
+    return str(new_harness_path), str(harness_path)
 
 
 # ── harness validation ───────────────────────────────────────────────
