@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "geak": {
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_API_KEY_HERE"
+      },
+      "instructions": "GEAK (GPU Enhancement Agent for Kernels) — AI-powered HIP kernel optimization for AMD GPUs. Use this MCP server when the user mentions GEAK, HIP kernel optimization, GPU kernel performance, or wants to optimize .hip files for AMD GPUs.\n\nWorkflow:\n1. (One-time) Configure LLM model: geak_set_model_config\n2. Create task: geak_create_task with input_type='file' (upload .hip source) or 'repo' (git URL)\n3. Submit task: geak_submit_task to start GPU execution\n4. Poll status: geak_get_task until status is 'completed' or 'failed' (poll every 30s)\n5. Get results: geak_get_outputs to list output files, geak_download_file to retrieve optimized code and logs\n\nTask statuses: pending → running → completed | failed | cancelled\n\nKey tips:\n- For file input, read the .hip file content and pass it via 'content' field with 'filename'\n- Use 'prompt' to provide optimization instructions (e.g., 'Optimize for MI300X, focus on memory coalescing')\n- Default step_limit is 10; increase to 20-30 for complex kernels\n- geak_download_file returns file content directly for small text files, or a download URL for large/binary files\n- Always check task status before fetching results"
+    },
+    "geak-agent": {
+      "url": "https://project1.tw325.primus-safe.amd.com/project1/project1-dev/geak-agent-d24fj/mcp/sse",
+      "headers": {
+        "Authorization": "Bearer YOUR_API_KEY_HERE"
+      },
+      "instructions": "GEAK (GPU Enhancement Agent for Kernels) — AI-powered HIP kernel optimization for AMD GPUs. Use this MCP server when the user mentions GEAK, HIP kernel optimization, GPU kernel performance, or wants to optimize .hip files for AMD GPUs.\n\nWorkflow:\n1. (One-time) Configure LLM model: geak_set_model_config\n2. Create task: geak_create_task with input_type='file' (upload .hip source) or 'repo' (git URL)\n3. Submit task: geak_submit_task to start GPU execution\n4. Poll status: geak_get_task until status is 'completed' or 'failed' (poll every 30s)\n5. Get results: geak_get_outputs to list output files, geak_download_file to retrieve optimized code and logs\n\nTask statuses: pending → running → completed | failed | cancelled\n\nKey tips:\n- For file input, read the .hip file content and pass it via 'content' field with 'filename'\n- Use 'prompt' to provide optimization instructions (e.g., 'Optimize for MI300X, focus on memory coalescing')\n- Default step_limit is 10; increase to 20-30 for complex kernels\n- geak_download_file returns file content directly for small text files, or a download URL for large/binary files\n- Always check task status before fetching results"
+    }
+  }
+}
