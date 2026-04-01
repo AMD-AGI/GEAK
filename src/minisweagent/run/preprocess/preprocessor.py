@@ -487,6 +487,23 @@ def run_preprocessor(
     ctx["kernel_path"] = kernel_path
     ctx["repo_root"] = repo_root
 
+    # If the kernel file is a merged file (contains both kernel defs and test
+    # logic), split the test functions out into a separate harness file so
+    # agents only patch the clean kernel.
+    _split_result = detect_and_split_kernel_from_harness(kernel_path, output_dir)
+    if _split_result is not None:
+        _new_harness, _clean_kernel = _split_result
+        logger.info(
+            "Kernel file was merged — split test logic to %s; kernel stays at %s",
+            _new_harness,
+            _clean_kernel,
+        )
+        ctx["kernel_path"] = _clean_kernel
+        kernel_path = _clean_kernel
+        # Surface the split harness as the harness hint for discovery / UTA
+        if not harness:
+            harness = _new_harness
+
     _print(f"  Kernel: {kernel_path}")
 
     # ── Fast path for eval_command: skip Steps 2-4 ───────────────────
