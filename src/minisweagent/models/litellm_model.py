@@ -389,6 +389,22 @@ if __name__ == "__main__":
                 "api_base": "https://llm-api.amd.com/Anthropic",
             },
         },
+         {
+            "model_name": "gpt-5.2",
+            "model_kwargs": {
+                "max_tokens": 16000,
+                "api_key": "",
+                "api_base": "https://oci-slc.primus-safe.amd.com/llm-gateway/v1",
+            },
+        },
+        {
+            "model_name": "claude-opus-4-6",
+            "model_kwargs": {
+                "max_tokens": 16000,
+                "api_key": "",
+                "api_base": "https://oci-slc.primus-safe.amd.com/llm-gateway",
+            },
+        },
     ]
 
     messages = [

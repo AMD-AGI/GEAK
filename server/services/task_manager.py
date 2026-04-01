@@ -397,9 +397,6 @@ Provide the optimized code with comments explaining the changes made.
             "-t", str(task_dir / "prompt.md"),
             "-o", str(output_dir) + "/",
             "--gpu-ids", str(gpu_id),
-            "--enable-strategies",
-            "--heterogeneous",
-            "--max-rounds", "3",
             "--yolo",
         ]
         logger.info("Local task %s → GPU %d, cmd: %s", task_id[:8], gpu_id, " ".join(cmd))
@@ -522,7 +519,7 @@ cd "$OUTPUT_DIR"
 export REPO_DIR="$TASK_DIR/input/repo"
 
 # Run optimization from repo directory
-geak -c "$TASK_DIR/config.yaml" -t "$TASK_DIR/prompt.md" -o "$OUTPUT_DIR/" --enable-strategies --heterogeneous --max-rounds 3 --yolo > "$OUTPUT_DIR/execution.log" 2>&1
+geak -c "$TASK_DIR/config.yaml" -t "$TASK_DIR/prompt.md" -o "$OUTPUT_DIR/" --yolo > "$OUTPUT_DIR/execution.log" 2>&1
 
 # Archive the modified repo
 cd "$TASK_DIR/input"
@@ -533,7 +530,7 @@ tar -czf "$OUTPUT_DIR/modified_repo.tar.gz" repo/
             # For file input, run geak
             run_commands = f"""
 # Run optimization
-geak -c "$TASK_DIR/config.yaml" -t "$TASK_DIR/prompt.md" -o "$OUTPUT_DIR/" --enable-strategies --heterogeneous --max-rounds 3 --yolo > "$OUTPUT_DIR/execution.log" 2>&1
+geak -c "$TASK_DIR/config.yaml" -t "$TASK_DIR/prompt.md" -o "$OUTPUT_DIR/" --yolo > "$OUTPUT_DIR/execution.log" 2>&1
 
 """
         
