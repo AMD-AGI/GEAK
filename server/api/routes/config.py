@@ -1,5 +1,8 @@
 """User Configuration Routes for GEAK API."""
 
+from copy import deepcopy
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, status
 
 from server.api.deps import CurrentUser
@@ -7,6 +10,19 @@ from server.api.schemas.config import UserModelConfigRequest, UserModelConfigRes
 from server.database import UserConfigDB
 
 router = APIRouter(prefix="/config", tags=["config"])
+
+
+def _mask_api_key(config: dict[str, Any]) -> dict[str, Any]:
+    """Mask api_key in model_kwargs, keeping first 4 and last 4 chars."""
+    config = deepcopy(config)
+    kwargs = config.get("model_kwargs")
+    if isinstance(kwargs, dict) and "api_key" in kwargs:
+        key = kwargs["api_key"]
+        if isinstance(key, str) and len(key) > 8:
+            kwargs["api_key"] = key[:4] + "****" + key[-4:]
+        elif isinstance(key, str):
+            kwargs["api_key"] = "****"
+    return config
 
 
 @router.get("/model", response_model=UserModelConfigResponse)
@@ -26,7 +42,7 @@ async def get_model_config(user: CurrentUser):
     
     return UserModelConfigResponse(
         user_id=user_id,
-        config=config.get("model_config", {}),
+        config=_mask_api_key(config.get("model_config", {})),
         created_at=config.get("created_at", ""),
         updated_at=config.get("updated_at", ""),
     )
@@ -65,7 +81,7 @@ async def update_model_config(user: CurrentUser, request: UserModelConfigRequest
     
     return UserModelConfigResponse(
         user_id=user_id,
-        config=config.get("model_config", {}),
+        config=_mask_api_key(config.get("model_config", {})),
         created_at=config.get("created_at", ""),
         updated_at=config.get("updated_at", ""),
     )
