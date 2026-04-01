@@ -61,7 +61,7 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
 
     eval_dir = (output_dir / "_eval_worktree").resolve()
     if eval_dir.exists():
-        logger.warning(f"Removing existing evaluation worktree: {eval_dir}")
+        logger.warning("Removing existing evaluation worktree: %s", eval_dir)
         shutil.rmtree(eval_dir, ignore_errors=True)
 
     repo = Path(repo_root).resolve()
@@ -221,19 +221,19 @@ def run_benchmark(
         baseline_path = pp_dir / (section_key + "_baseline.txt")
 
         if not baseline_path.exists():
-            logger.warning(f"{baseline_path} does NOT exist.")
+            logger.warning("%s does not exist", baseline_path)
             continue
 
         baseline_text = baseline_path.read_text().strip()
-        logger.info(f"{section_key} baseline found: {baseline_path}")
+        logger.info("%s baseline found: %s", section_key, baseline_path)
 
         # Prepare the script to run the benchmark
         benchmark_script = build_eval_script(str(commandment_path), ["SETUP", baseline_section_name])
         if not benchmark_script:
-            logger.warning(f"No {baseline_section_name} commands found in COMMANDMENT")
+            logger.warning("No %s commands found in COMMANDMENT", baseline_section_name)
             continue
 
-        logger.info(f"Running {section_key} on best kernel from round {round_num}...")
+        logger.info("Running %s on best kernel from round %d...", section_key, round_num)
         try:
             candidate_result = subprocess.run(
                 ["bash", benchmark_script],
@@ -244,12 +244,12 @@ def run_benchmark(
                 env=eval_env,
             )
         except Exception as exc:
-            logger.warning(f"{section_key} execution failed: {exc}")
+            logger.warning("%s execution failed: %s", section_key, exc)
             round_eval[section_key] = {"error": str(exc)}
             continue
 
         if candidate_result.returncode != 0:
-            logger.warning(f"{baseline_section_name} execution failed: {candidate_result.stderr}")
+            logger.warning("%s execution failed: %s", baseline_section_name, candidate_result.stderr)
             round_eval[section_key] = {"error": candidate_result.stderr}
             continue
 
@@ -265,7 +265,7 @@ def run_benchmark(
         if not round_eval[section_key].get("config_mismatch"):
             _compute_verified_speedup(candidate_stdout, baseline_text, round_eval, section_key)
 
-        logger.info(f"{baseline_section_name}: {'PASS'}")
+        logger.info("%s: PASS", baseline_section_name)
         break
 
     else:
@@ -336,85 +336,87 @@ def _check_config_mismatch(
 
 def run_profile(
     eval_worktree: Path,
-    repo_root: str,
-    harness_path: str,
-    gpu_id: int,
+    eval_env: dict[str, str],
+    commandment_path: Path,
     pp_dir: Path,
     round_eval: dict[str, Any],
     round_num: int,
+    results_dir: Path,
 ) -> None:
-    """Run the PROFILE step and compare against baseline metrics.
+    """Run the COMMANDMENT PROFILE section, save output, compare against baseline.
 
+    The COMMANDMENT's PROFILE section handles warmup and runs
+    ``kernel-profile --json -o ${GEAK_WORK_DIR}/profile.json``.
+    This function picks up the resulting file, copies it to *results_dir*,
+    and builds a comparison against ``baseline_metrics.json``.
     Mutates ``round_eval["profile_comparison"]`` in place.
     """
-    if not harness_path:
-        logger.info("Skipping PROFILE: no harness_path provided")
+    profile_script = build_eval_script(str(commandment_path), ["SETUP", "PROFILE"])
+    if not profile_script:
+        logger.warning("No PROFILE commands found in COMMANDMENT")
         return
 
     logger.info("Running PROFILE on best kernel from round %d...", round_num)
+    try:
+        subprocess.run(
+            ["bash", profile_script],
+            capture_output=True, text=True, timeout=1800,
+            cwd=str(eval_worktree), env=eval_env,
+        )
+    except Exception as exc:
+        logger.warning("PROFILE execution failed: %s", exc)
+        round_eval["profile_comparison"] = {"error": str(exc)}
+        return
 
-    baseline_metrics_path = pp_dir / "baseline_metrics.json"
-    baseline_metrics = None
-    if baseline_metrics_path.exists():
-        try:
-            baseline_metrics = json.loads(baseline_metrics_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            logger.warning("Failed to parse baseline metrics: %s", baseline_metrics_path, exc_info=True)
+    profile_output = eval_worktree / "profile.json"
+    if not profile_output.exists():
+        logger.warning("COMMANDMENT PROFILE did not produce profile.json")
+        return
+
+    dest = results_dir / "profile.json"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(profile_output, dest)
+    logger.info("Raw profile saved to %s", dest)
 
     try:
-        from minisweagent.run.pipeline_helpers import _ensure_mcp_importable
+        profile_result = json.loads(dest.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to parse profile output: %s", exc)
+        return
 
-        _ensure_mcp_importable()
-        from profiler_mcp.server import profile_kernel
+    baseline_metrics_path = pp_dir / "baseline_metrics.json"
+    if not baseline_metrics_path.exists():
+        logger.info("PROFILE: completed (no baseline_metrics.json for comparison)")
+        return
 
-        _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
-        prev_pythonpath = os.environ.get("PYTHONPATH", "")
-        os.environ["PYTHONPATH"] = f"{eval_worktree}:{repo_root}:{prev_pythonpath}"
-        try:
-            profile_result = _profile_fn(
-                command=f"python {harness_path} --profile",
-                backend="metrix",
-                num_replays=3,
-                quick=True,
-                gpu_devices=str(gpu_id),
-            )
-        finally:
-            if prev_pythonpath:
-                os.environ["PYTHONPATH"] = prev_pythonpath
-            else:
-                os.environ.pop("PYTHONPATH", None)
+    try:
+        baseline_metrics = json.loads(baseline_metrics_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        logger.warning("Failed to parse baseline metrics: %s", baseline_metrics_path, exc_info=True)
+        return
 
-        if baseline_metrics and profile_result:
-            from minisweagent.run.preprocess.baseline import build_baseline_metrics
+    from minisweagent.run.preprocess.baseline import build_baseline_metrics
 
-            optimized_metrics = build_baseline_metrics(profile_result, include_all=True)
-            profile_comparison: dict[str, Any] = {}
-            for key in ("duration_us", "bottleneck"):
-                if key in baseline_metrics and key in optimized_metrics:
-                    base_val = baseline_metrics[key]
-                    opt_val = optimized_metrics[key]
-                    if key == "duration_us" and isinstance(base_val, (int, float)):
-                        change_pct = ((opt_val - base_val) / base_val * 100) if base_val else 0
-                        profile_comparison[key] = {
-                            "baseline": base_val,
-                            "optimized": opt_val,
-                            "change_pct": round(change_pct, 1),
-                        }
-                    else:
-                        profile_comparison[key] = {"baseline": base_val, "optimized": opt_val}
+    optimized_metrics = build_baseline_metrics(profile_result, include_all=True)
+    comparison: dict[str, Any] = {
+        "baseline": baseline_metrics,
+        "optimized": optimized_metrics,
+    }
 
-            opt_bn = optimized_metrics.get("bottleneck", "unknown")
-            base_bn = baseline_metrics.get("bottleneck", "unknown")
-            if base_bn != opt_bn:
-                profile_comparison["bottleneck_shift"] = f"{base_bn} -> {opt_bn}"
+    base_dur = baseline_metrics.get("duration_us")
+    opt_dur = optimized_metrics.get("duration_us")
+    if isinstance(base_dur, (int, float)) and isinstance(opt_dur, (int, float)) and base_dur > 0:
+        comparison["duration_change_pct"] = round((opt_dur - base_dur) / base_dur * 100, 1)
 
-            round_eval["profile_comparison"] = profile_comparison
-            logger.info("PROFILE comparison: %s", json.dumps(profile_comparison)[:300])
-        else:
-            logger.info("PROFILE: completed (no baseline for comparison)")
-    except Exception as exc:
-        logger.warning("PROFILE failed: %s", exc)
-        round_eval["profile_comparison"] = {"error": str(exc)}
+    base_bn = baseline_metrics.get("bottleneck", "unknown")
+    opt_bn = optimized_metrics.get("bottleneck", "unknown")
+    if base_bn != opt_bn:
+        comparison["bottleneck_shift"] = f"{base_bn} -> {opt_bn}"
+
+    comparison_path = results_dir / "profile_comparison.json"
+    comparison_path.write_text(json.dumps(comparison, indent=2, default=str))
+    round_eval["profile_comparison"] = comparison
+    logger.info("Profile comparison saved to %s", comparison_path)
 
 
 def write_eval_results(
@@ -431,10 +433,6 @@ def write_eval_results(
     if isinstance(fb_raw, dict) and fb_raw.get("stdout"):
         fb_output_path = output_dir / f"round_{round_num}_full_benchmark.txt"
         fb_output_path.write_text(fb_raw["stdout"])
-    profile_raw = round_eval.get("profile_comparison")
-    if isinstance(profile_raw, dict) and profile_raw:
-        profile_path = output_dir / f"round_{round_num}_profile_comparison.json"
-        profile_path.write_text(json.dumps(profile_raw, indent=2, default=str))
 
     from minisweagent.run.pipeline_types import FullBenchmarkResult, RoundEvaluation
 
@@ -486,46 +484,50 @@ def evaluate_round_best(
     # --- Collect candidates ---
     candidates: list[dict[str, Any]] = []
     for task_dir in sorted(results_dir.iterdir()):
-        if not task_dir.is_dir() or task_dir.name in ("worktrees",):
+        if not task_dir.is_dir() or task_dir.name == "worktrees":
             continue
         br_file = task_dir / "best_results.json"
         if not br_file.exists():
-            logger.debug("No best_results.json in %s", task_dir.name)
+            logger.warning("No best_results.json in %s", task_dir.name)
             continue
         try:
             br = json.loads(br_file.read_text())
-            speedup = float(br.get("best_patch_speedup", 0))
-            patch_file = br.get("best_patch_file")
-            if not patch_file:
-                logger.warning("No patch file in %s", br_file)
-                continue
-            if speedup <= 0:
-                logger.info("No improvement (speedup=%.4f) in %s", speedup, task_dir.name)
-                continue
-
-            kernel_time: float | None = None
-            test_output_path = br.get("best_patch_test_output", "")
-            if test_output_path:
-                test_path = Path(test_output_path)
-                if test_path.exists():
-                    kernel_time = parse_total_kernel_time_ms(test_path.read_text())
-                else:
-                    logger.warning("Test output file missing: %s", test_output_path)
-
-            candidates.append(
-                {
-                    "task": task_dir.name,
-                    "patch_file": patch_file,
-                    "speedup": speedup,
-                    "kernel_time_ms": kernel_time,
-                    "per_shape_speedups": br.get("per_shape_speedups") or {},
-                    "baseline_shape_latency_ms": br.get("baseline_shape_latency_ms") or {},
-                    "candidate_shape_latency_ms": br.get("candidate_shape_latency_ms") or {},
-                }
-            )
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
             logger.warning("Failed to parse %s: %s", br_file, exc)
             continue
+
+        speedup = float(br.get("best_patch_speedup", 0))
+        patch_file = br.get("best_patch_file")
+        if not patch_file:
+            logger.warning("No patch file in %s", br_file)
+            continue
+        if speedup <= 0:
+            logger.info("No improvement (speedup=%.4f) in %s", speedup, task_dir.name)
+            continue
+
+        kernel_time: float | None = None
+        test_output_path = br.get("best_patch_test_output", "")
+        if test_output_path:
+            test_path = Path(test_output_path)
+            if test_path.exists():
+                try:
+                    kernel_time = parse_total_kernel_time_ms(test_path.read_text())
+                except (OSError, ValueError) as exc:
+                    logger.warning("Failed to parse kernel time from %s: %s", test_output_path, exc)
+            else:
+                logger.warning("Test output file missing: %s", test_output_path)
+
+        candidates.append(
+            {
+                "task": task_dir.name,
+                "patch_file": patch_file,
+                "speedup": speedup,
+                "kernel_time_ms": kernel_time,
+                "per_shape_speedups": br.get("per_shape_speedups") or {},
+                "baseline_shape_latency_ms": br.get("baseline_shape_latency_ms") or {},
+                "candidate_shape_latency_ms": br.get("candidate_shape_latency_ms") or {},
+            }
+        )
 
     if not candidates:
         logger.info("Round %d: no valid candidates for evaluation", round_num)
@@ -617,7 +619,7 @@ def evaluate_round_best(
 
     try:
         run_benchmark(eval_worktree, eval_env, commandment_path, pp_dir, round_eval, round_num)
-        run_profile(eval_worktree, repo_root, harness_path, gpu_id, pp_dir, round_eval, round_num)
+        run_profile(eval_worktree, eval_env, commandment_path, pp_dir, round_eval, round_num, results_dir)
     finally:
         cleanup_eval_worktree(repo_root, eval_worktree)
 

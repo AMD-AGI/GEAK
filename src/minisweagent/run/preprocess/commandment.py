@@ -203,7 +203,7 @@ ${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --correctness
 
 ## PROFILE
 {warmup_block}
-kernel-profile "${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
+kernel-profile "${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json
 
 ## BENCHMARK
 ${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
@@ -274,7 +274,7 @@ ${{GEAK_WORK_DIR}}/run_harness.sh --correctness
 
 ## PROFILE
 {warmup_block}
-kernel-profile "${{GEAK_WORK_DIR}}/run_harness.sh --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}
+kernel-profile "${{GEAK_WORK_DIR}}/run_harness.sh --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json
 
 ## BENCHMARK
 ${{GEAK_WORK_DIR}}/run_harness.sh --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
@@ -405,7 +405,8 @@ def generate_commandment_from_commands(
     profile_section = (
         f"{warmup_block}\n"
         f'kernel-profile "cd ${{GEAK_WORK_DIR}} && {profile_target}" '
-        f"--gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays}"
+        f"--gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays} "
+        f"--json -o ${{GEAK_WORK_DIR}}/profile.json"
     )
 
     # BENCHMARK and FULL_BENCHMARK
