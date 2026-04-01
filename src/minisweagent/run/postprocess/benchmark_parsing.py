@@ -79,7 +79,7 @@ def parse_shape_latencies_ms(output: str) -> dict[str, float]:
     return shape_latencies
 
 
-def extract_benchmark_config_lines(output: str) -> list[str] | None:
+def extract_benchmark_config_lines(output: str) -> list[str]:
     """Extract benchmark config fingerprint lines from harness output.
 
     Captures the config/shape identifiers from each benchmark line,
@@ -99,32 +99,30 @@ def extract_benchmark_config_lines(output: str) -> list[str] | None:
     Returns a sorted list of config identifiers, or None if no configs found.
     """
     configs: list[str] = []
-    # Match lines with at least one timing value: "0.0342ms", "0.0342 ms", or
-    # bare floats like "0.0342" in columns (common in table-formatted output).
-    timing_pattern = re.compile(r"\d+\.\d+(?:ms|us|µs|s|x)?")
+    # Match lines with at least one timing value that includes a unit suffix.
+    # Requiring a unit avoids false positives on lines that happen to contain
+    # bare decimals (e.g. version numbers, shape descriptions with floats).
+    timing_pattern = re.compile(r"\d+\.\d+\s*(?:ms|us|µs|s|x)")
     for line in output.splitlines():
         line = line.strip()
         if not line or line.startswith(("-", "=", "#", "Status", "Geometric", "GEAK_")):
             continue
         if not timing_pattern.search(line):
             continue
-        # Skip header/summary lines
         if any(kw in line.lower() for kw in ("comparing", "running", "warmup", "median", "geomean", "mean")):
             continue
         # Extract config prefix: everything before the first timing value.
         # Handles multiple output formats:
-        #   "M=128, N=16  0.0747  0.0474  1.58x"   → "M=128, N=16"
-        #   "B=1 H=32 ... 2.11ms 0.10ms 21.37x"    → "B=1 H=32 ..."
-        #   "(2, 4, 64): kernel=0.0411 ms | ref=..."→ "(2, 4, 64)"
-        # Split on: =<float>, :<whitespace><float>, or <whitespace><float>
+        #   "M=128, N=16  0.0747ms  0.0474ms  1.58x" → "M=128, N=16"
+        #   "B=1 H=32 ... 2.11ms 0.10ms 21.37x"      → "B=1 H=32 ..."
+        #   "(2, 4, 64): kernel=0.0411 ms | ref=..."   → "(2, 4, 64)"
         config_part = re.split(r"(?<=[=:])\s*\d+\.\d+|\s+\d+\.\d+", line)[0].strip()
-        # Clean trailing separators and labels that precede timing values
         config_part = re.sub(r"[\s:|]+$", "", config_part)
         config_part = re.sub(r"\s*\|\s*\w+$", "", config_part)
         config_part = re.sub(r":\s*\w+=$", "", config_part)
-        if config_part and len(config_part) > 3:
+        if config_part:
             configs.append(config_part)
-    return sorted(configs) if configs else None
+    return sorted(configs)
 
 
 def _universal_latency_fallback(text: str) -> float | None:
@@ -144,7 +142,7 @@ def _universal_latency_fallback(text: str) -> float | None:
     return candidates[-1] if candidates else None
 
 
-def _extract_latency(text: str) -> float | None:
+def extract_latency_ms(text: str) -> float | None:
     """Extract latency from benchmark output.
 
     Priority:
@@ -170,11 +168,6 @@ def _extract_latency(text: str) -> float | None:
         return val
 
     return _universal_latency_fallback(text)
-
-
-def extract_latency_ms(text: str) -> float | None:
-    """Public wrapper for standardized latency extraction."""
-    return _extract_latency(text)
 
 
 def extract_reported_speedup(text: str) -> float | None:
@@ -229,7 +222,7 @@ def _find_original_baseline_ms(patch_dir: Path) -> float | None:
         bl = d / "benchmark_baseline.txt"
         if bl.is_file():
             text = bl.read_text()
-            lat = _extract_latency(text)
+            lat = extract_latency_ms(text)
             if lat is not None and lat > 0:
                 return lat
         parent = d.parent
@@ -262,7 +255,7 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
             baseline_shape_latencies = parse_shape_latencies_ms(baseline_text)
     elif baseline_file.exists():
         baseline_text = baseline_file.read_text()
-        baseline_ms = _extract_latency(baseline_text)
+        baseline_ms = extract_latency_ms(baseline_text)
         baseline_source = "patch_0_test.txt (FALLBACK)"
         baseline_shape_latencies = parse_shape_latencies_ms(baseline_text)
     else:
@@ -291,7 +284,7 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
             continue
 
         candidate_text = test_file.read_text()
-        candidate_ms = _extract_latency(candidate_text)
+        candidate_ms = extract_latency_ms(candidate_text)
         if candidate_ms is None or candidate_ms <= 0:
             continue
         candidate_shape_latencies = parse_shape_latencies_ms(candidate_text)

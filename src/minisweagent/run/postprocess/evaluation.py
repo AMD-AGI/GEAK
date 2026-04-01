@@ -21,19 +21,10 @@ from pathlib import Path
 from typing import Any
 
 from minisweagent.run.postprocess.benchmark_parsing import (
-    extract_benchmark_config_lines as _extract_benchmark_config_lines,
-)
-from minisweagent.run.postprocess.benchmark_parsing import (
-    extract_latency_ms as _extract_latency_ms,
-)
-from minisweagent.run.postprocess.benchmark_parsing import (
-    extract_reported_speedup as _extract_reported_speedup,
-)
-from minisweagent.run.postprocess.benchmark_parsing import (
-    parse_shape_count as _parse_shape_count,
-)
-from minisweagent.run.postprocess.benchmark_parsing import (
-    parse_total_kernel_time_ms as _parse_total_kernel_time_ms,
+    extract_benchmark_config_lines,
+    extract_latency_ms,
+    parse_shape_count,
+    parse_total_kernel_time_ms,
 )
 from minisweagent.run.utils.generated_artifacts import (
     apply_patch_with_generated_helper_fallback,
@@ -49,81 +40,12 @@ class PatchApplyError(Exception):
     pass
 
 
-def _find_agent_worktree_slot(results_dir: Path, best_task: str, repo_root: str, output_dir: Path) -> Path | None:
-    """Find the agent's worktree slot that contains the best task's kernel.
-
-    The agent worktrees live at ``results_dir/worktrees/slot_N/``.
-    Each slot contains the full repo tree, so kernel.py is at e.g.
-    ``slot_0/tasks/triton2triton/geak_eval/L1/llama_ff_triton/kernel.py``.
-
-    We identify the correct kernel by extracting the task path from
-    ``output_dir`` (which contains the kernel name like
-    ``triton2triton_geak_eval_L1_llama_ff_triton_...``), then look for
-    a slot with a modified kernel.py at that specific task path.
-    """
-    worktrees_dir = results_dir / "worktrees"
-    if not worktrees_dir.is_dir():
-        return None
-
-    # Extract kernel task path from output_dir name
-    # e.g. "triton2triton_geak_eval_L1_llama_ff_triton_20260326_091118_logs"
-    # -> "tasks/triton2triton/geak_eval/L1/llama_ff_triton"
-    import re
-
-    dir_name = output_dir.name.replace("_logs", "")
-    m = re.match(r"(triton2triton_geak_eval_L\d+_\w+?)_\d{8}_\d+", dir_name)
-    if m:
-        # Convert underscores back to path separators for the task path
-        # triton2triton_geak_eval_L1_llama_ff_triton -> tasks/triton2triton/geak_eval/L1/llama_ff_triton
-        parts = m.group(1)
-        # Split on known structure: triton2triton / geak_eval / L{N} / kernel_name
-        tm = re.match(r"(triton2triton)_(geak_eval)_(L\d+)_(.*)", parts)
-        if tm:
-            task_rel = Path("tasks") / tm.group(1) / tm.group(2) / tm.group(3) / tm.group(4)
-        else:
-            task_rel = None
-    else:
-        task_rel = None
-
-    # Read baseline kernel for comparison
-    baseline_kernel = None
-    if task_rel:
-        repo = Path(repo_root)
-        baseline_path = repo / task_rel / "kernel.py"
-        if baseline_path.exists():
-            baseline_kernel = baseline_path.read_text()
-
-    for slot_dir in sorted(worktrees_dir.glob("slot_*")):
-        if not slot_dir.is_dir() or "_logs" in slot_dir.name:
-            continue
-
-        # Look for kernel.py at the specific task path first
-        if task_rel:
-            specific_kernel = slot_dir / task_rel / "kernel.py"
-            if specific_kernel.exists():
-                try:
-                    content = specific_kernel.read_text()
-                    if baseline_kernel is None or content != baseline_kernel:
-                        logger.info("Found modified kernel at %s", specific_kernel.parent)
-                        return specific_kernel.parent
-                except OSError:
-                    pass
-
-        # Fallback: look for any kernel.py directly in slot root
-        root_kernel = slot_dir / "kernel.py"
-        if root_kernel.exists():
-            try:
-                content = root_kernel.read_text()
-                if baseline_kernel is None or content != baseline_kernel:
-                    return root_kernel.parent
-            except OSError:
-                pass
-
-    return None
-
-
 def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Path:
     """Create a temporary worktree and apply the best patch.
+
+    For git repos, creates a detached worktree.  For non-git directories,
+    copies the tree and initialises a temporary git repo so that
+    ``git apply`` works uniformly.
 
     Returns the worktree path.  The caller is responsible for cleanup
     via ``cleanup_eval_worktree``.
@@ -131,12 +53,19 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
     Raises:
         PatchApplyError: If the patch fails to apply.
     """
+    patch_path = Path(patch_file)
+    if not patch_path.exists():
+        raise PatchApplyError(f"Patch file does not exist: {patch_file}")
+    if patch_path.stat().st_size == 0:
+        raise PatchApplyError(f"Patch file is empty: {patch_file}")
+
     eval_dir = (output_dir / "_eval_worktree").resolve()
     if eval_dir.exists():
+        logger.warning(f"Removing existing evaluation worktree: {eval_dir}")
         shutil.rmtree(eval_dir, ignore_errors=True)
 
     repo = Path(repo_root).resolve()
-    is_git = (repo / ".git").exists() or (repo / ".git").is_file()
+    is_git = (repo / ".git").exists()
 
     git_env = get_git_safe_env(output_dir)
     if is_git:
@@ -150,25 +79,30 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
         )
     else:
         shutil.copytree(str(repo), str(eval_dir), dirs_exist_ok=True)
-
-    patch_path = Path(patch_file)
-    if patch_path.exists() and patch_path.stat().st_size > 0:
-        patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
-        apply_result, removed_paths = apply_patch_with_generated_helper_fallback(
-            patch_text=patch_text,
-            cwd=eval_dir,
-            env=git_env,
+        subprocess.run(["git", "init"], cwd=str(eval_dir), capture_output=True, text=True, check=True, env=git_env)
+        subprocess.run(["git", "add", "."], cwd=str(eval_dir), capture_output=True, text=True, check=True, env=git_env)
+        subprocess.run(
+            ["git", "commit", "-m", "initial"], cwd=str(eval_dir), capture_output=True, text=True, check=True, env=git_env
         )
-        if removed_paths:
-            logger.warning(
-                "Retrying evaluation patch apply without generated helper artifacts: %s",
-                ", ".join(removed_paths[:5]),
-            )
-        if apply_result.returncode != 0:
-            error_msg = f"git apply failed (rc={apply_result.returncode}): {apply_result.stderr[:500]}"
-            logger.warning(error_msg)
-            cleanup_eval_worktree(repo_root, eval_dir)
-            raise PatchApplyError(error_msg)
+        logger.warning("Initialised temporary git repo in non-git eval worktree: %s", eval_dir)
+
+    patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+    # errors="replace" is the Unicode error handling mode for str.decode()
+    apply_result, removed_paths = apply_patch_with_generated_helper_fallback(
+        patch_text=patch_text,
+        cwd=eval_dir,
+        env=git_env,
+    )
+    if removed_paths:
+        logger.warning(
+            "Retrying evaluation patch apply without generated helper artifacts: %s",
+            ", ".join(removed_paths),
+        )
+    if apply_result.returncode != 0:
+        error_msg = f"git apply failed (rc={apply_result.returncode}): {apply_result.stderr}"
+        logger.warning(error_msg)
+        cleanup_eval_worktree(repo_root, eval_dir)
+        raise PatchApplyError(error_msg)
     return eval_dir
 
 
@@ -241,365 +175,259 @@ def build_eval_script(
     if not has_commands:
         return None
     script_dir = Path(commandment_path).parent
-    script_path = script_dir / "_geak_eval_cmd.sh"
+    script_path = (script_dir / "_geak_eval_cmd.sh").resolve()
     script_path.write_text("\n".join(lines) + "\n")
     script_path.chmod(0o755)
     return str(script_path)
 
 
-def evaluate_round_best(
-    ctx: dict[str, Any],
-    round_num: int,
-    results_dir: Path,
-    _print,
-) -> Any:
-    """Evaluate the single best kernel from a round with FULL_BENCHMARK + PROFILE.
+def resolve_eval_worktree(
+    repo_root: str,
+    best_patch_file: str,
+    harness_path: str,
+    output_dir: Path,
+    gpu_id: int,
+) -> tuple[Path, dict[str, str]]:
+    """Create a clean evaluation worktree, apply the patch, build env dict.
 
-    Creates a temporary worktree, applies the best patch, sets all GEAK_*
-    env vars, runs SETUP + FULL_BENCHMARK, then profiles with PYTHONPATH
-    pointing at the patched worktree.
-
-    Returns a round evaluation dict, or None if no valid candidates exist.
+    Returns ``(eval_worktree, eval_env)``.
+    Raises ``PatchApplyError`` if the patch fails to apply.
     """
-    output_dir = Path(ctx["output_dir"])
-    pp_dir = Path(ctx.get("preprocess_dir", ctx.get("output_dir", ".")))
+    eval_worktree = setup_eval_worktree(repo_root, best_patch_file, output_dir)
+    logger.info("Eval worktree: %s", eval_worktree)
 
-    best_patch_file: str | None = None
-    best_speedup: float = 0.0
-    best_task: str = ""
-    best_kernel_time: float = float("inf")
+    # The harness_path comes from the original location. We assume it does not
+    # import the kernel from relative locations.
+    eval_env = build_eval_env(eval_worktree, repo_root, harness_path, gpu_id)
+    return eval_worktree, eval_env
 
-    if not results_dir.is_dir():
-        return None
 
-    candidates: list[dict[str, Any]] = []
-    for task_dir in sorted(results_dir.iterdir()):
-        if not task_dir.is_dir() or task_dir.name in ("worktrees",):
+def run_benchmark(
+    eval_worktree: Path,
+    eval_env: dict[str, str],
+    commandment_path: Path,
+    pp_dir: Path,
+    round_eval: dict[str, Any],
+    round_num: int,
+) -> None:
+    """
+    Run FULL_BENCHMARK, compute verified speedup, detect config mismatches.
+
+    Falls back to BENCHMARK if FULL_BENCHMARK baseline is not found.
+    """    
+    # Prefer full-benchmarking over benchmarking, but fallback to benchmarking if full-benchmarking is not found.
+    for baseline_section_name in ["FULL_BENCHMARK", "BENCHMARK"]:
+        section_key = baseline_section_name.lower()
+        baseline_path = pp_dir / (section_key + "_baseline.txt")
+
+        if not baseline_path.exists():
+            logger.warning(f"{baseline_path} does NOT exist.")
             continue
-        br_file = task_dir / "best_results.json"
-        if not br_file.exists():
+
+        baseline_text = baseline_path.read_text().strip()
+        logger.info(f"{section_key} baseline found: {baseline_path}")
+
+        # Prepare the script to run the benchmark
+        benchmark_script = build_eval_script(str(commandment_path), ["SETUP", baseline_section_name])
+        if not benchmark_script:
+            logger.warning(f"No {baseline_section_name} commands found in COMMANDMENT")
             continue
+
+        logger.info(f"Running {section_key} on best kernel from round {round_num}...")
         try:
-            br = json.loads(br_file.read_text())
-            speedup = float(br.get("best_patch_speedup", 0))
-            patch_file = br.get("best_patch_file")
-            if not patch_file or speedup <= 0:
-                continue
-
-            kernel_time: float | None = None
-            test_output_path = br.get("best_patch_test_output", "")
-            if test_output_path:
-                test_path = Path(test_output_path)
-                if test_path.exists():
-                    kernel_time = _parse_total_kernel_time_ms(test_path.read_text())
-
-            candidates.append(
-                {
-                    "task": task_dir.name,
-                    "patch_file": patch_file,
-                    "speedup": speedup,
-                    "kernel_time_ms": kernel_time,
-                    "per_shape_speedups": br.get("per_shape_speedups") or {},
-                    "baseline_shape_latency_ms": br.get("baseline_shape_latency_ms") or {},
-                    "candidate_shape_latency_ms": br.get("candidate_shape_latency_ms") or {},
-                }
+            candidate_result = subprocess.run(
+                ["bash", benchmark_script],
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                cwd=str(eval_worktree),
+                env=eval_env,
             )
-        except (json.JSONDecodeError, ValueError, TypeError):
+        except Exception as exc:
+            logger.warning(f"{section_key} execution failed: {exc}")
+            round_eval[section_key] = {"error": str(exc)}
             continue
 
-    if not candidates:
-        _print(f"  Round {round_num}: no valid candidates for evaluation")
-        # Still write a round evaluation so finalize_run() can find it.
-        # Without this, finalize_run() has no round data and may skip
-        # writing final_report.json entirely.
-        no_improvement_eval = {
-            "round": round_num,
-            "best_patch": None,
-            "best_task": None,
-            "benchmark_speedup": 1.0,
-            "status": "no_candidates",
+        if candidate_result.returncode != 0:
+            logger.warning(f"{baseline_section_name} execution failed: {candidate_result.stderr}")
+            round_eval[section_key] = {"error": candidate_result.stderr}
+            continue
+
+        candidate_stdout = candidate_result.stdout
+        round_eval[section_key] = {
+            "stdout": candidate_stdout,
+            "returncode": candidate_result.returncode,
+            "success": candidate_result.returncode == 0,
+            "baseline": baseline_text,
         }
-        eval_path = output_dir / f"round_{round_num}_evaluation.json"
-        eval_path.write_text(json.dumps(no_improvement_eval, indent=2))
-        return None
 
-    all_have_kernel_time = all(c["kernel_time_ms"] is not None for c in candidates)
+        _check_config_mismatch(candidate_stdout, baseline_text, round_eval, section_key)
+        if not round_eval[section_key].get("config_mismatch"):
+            _compute_verified_speedup(candidate_stdout, baseline_text, round_eval, section_key)
 
-    if all_have_kernel_time:
-        best = min(candidates, key=lambda c: c["kernel_time_ms"])  # type: ignore[arg-type]
+        logger.info(f"{baseline_section_name}: {'PASS'}")
+        break
+
     else:
-        best = max(candidates, key=lambda c: c["speedup"])
+        logger.warning("No full benchmark baseline or benchmark baseline found")
+        return
 
-    best_task = best["task"]
-    best_patch_file = best["patch_file"]
-    best_speedup = best["speedup"]
-    if best["kernel_time_ms"] is not None:
-        best_kernel_time = best["kernel_time_ms"]
 
-    selection_method = "kernel_time" if all_have_kernel_time else "speedup"
-    if best_kernel_time < float("inf"):
-        _print(
-            f"  Round {round_num} best: {best_task} "
-            f"({best_speedup:.2f}x, {best_kernel_time:.4f}ms, "
-            f"selected by {selection_method})"
-        )
-    else:
-        _print(f"  Round {round_num} best: {best_task} ({best_speedup:.2f}x)")
 
-    round_eval: dict[str, Any] = {
-        "round": round_num,
-        "best_patch": best_patch_file,
-        "best_task": best_task,
-        "benchmark_speedup": best_speedup,
-    }
-    if best.get("per_shape_speedups"):
-        round_eval["per_shape_speedups"] = best["per_shape_speedups"]
-    if best.get("baseline_shape_latency_ms"):
-        round_eval["baseline_shape_latency_ms"] = best["baseline_shape_latency_ms"]
-    if best.get("candidate_shape_latency_ms"):
-        round_eval["candidate_shape_latency_ms"] = best["candidate_shape_latency_ms"]
+def _compute_verified_speedup(
+    candidate_stdout: str,
+    baseline_text: str,
+    round_eval: dict[str, Any],
+    section_key: str,
+) -> None:
+    """Compute verified speedup from latency measurements."""
+    candidate_ms = extract_latency_ms(candidate_stdout)
+    baseline_ms = extract_latency_ms(baseline_text)
 
-    commandment_path = pp_dir / "COMMANDMENT.md"
-    if not commandment_path.exists():
-        eval_path = output_dir / f"round_{round_num}_evaluation.json"
-        eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
-        from minisweagent.run.pipeline_types import RoundEvaluation as _RE
+    if not candidate_ms or not baseline_ms or baseline_ms <= 0:
+        logger.warning("Could not extract latency: candidate_ms=%s, baseline_ms=%s", candidate_ms, baseline_ms)
+        return
 
-        return _RE(
-            round=round_num, best_patch=best_patch_file or "", best_task=best_task, benchmark_speedup=best_speedup
-        )
+    verified_speedup = baseline_ms / candidate_ms
+    round_eval[section_key]["verified_speedup"] = round(verified_speedup, 4)
+    round_eval[section_key]["candidate_ms"] = candidate_ms
+    round_eval[section_key]["baseline_ms"] = baseline_ms
+    logger.info(
+        f"  Verified speedup: {verified_speedup:.4f}x "
+        f"({baseline_ms:.4f} ms -> {candidate_ms:.4f} ms)"
+    )
 
-    repo_root = ctx.get("repo_root", "")
-    harness_path = ctx.get("harness_path", "")
-    gpu_id = ctx.get("gpu_ids", [0])[0]
 
-    eval_worktree: Path | None = None
-    try:
-        # Prefer the agent's actual worktree slot over a clean worktree.
-        # This ensures FULL_BENCHMARK measures the EXACT same kernel.py
-        # that save_and_test benchmarked — no discrepancies from patch
-        # application, CUDA graph warm state, or missing runtime files.
-        agent_slot_dir = _find_agent_worktree_slot(results_dir, best_task, repo_root, output_dir)
-        if agent_slot_dir:
-            eval_worktree = agent_slot_dir
-            _print(f"  Using agent worktree slot: {eval_worktree.name}")
-        else:
-            # Fallback to clean worktree + patch
-            try:
-                eval_worktree = setup_eval_worktree(repo_root, best_patch_file, output_dir)
-                _print("  Using clean eval worktree (agent slot not found)")
-            except PatchApplyError as exc:
-                _print(f"  Patch apply failed: {exc}")
-                round_eval["patch_apply_error"] = str(exc)
-                round_eval["status"] = "patch_failed"
-                eval_path = output_dir / f"round_{round_num}_evaluation.json"
-                eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
-                from minisweagent.run.pipeline_types import FullBenchmarkResult as _FB
-                from minisweagent.run.pipeline_types import RoundEvaluation as _RE
+def _check_config_mismatch(
+    candidate_stdout: str,
+    baseline_text: str,
+    round_eval: dict[str, Any],
+    section_key: str,
+) -> None:
+    """Detect and flag benchmark config or shape count mismatches."""
+    candidate_configs = extract_benchmark_config_lines(candidate_stdout)
+    baseline_configs = extract_benchmark_config_lines(baseline_text)
 
-                return _RE(
-                    round=round_num,
-                    best_patch=best_patch_file or "",
-                    best_task=best_task,
-                    benchmark_speedup=best_speedup,
-                    full_benchmark=_FB(failure_reason=f"patch apply failed: {exc}"),
-                )
+    if candidate_configs and baseline_configs:
+        if candidate_configs != baseline_configs:
+            logger.warning(
+                "Benchmark config mismatch: baseline_configs=%d lines, candidate_configs=%d lines. "
+                "Rejecting speedup.",
+                len(baseline_configs),
+                len(candidate_configs),
+            )
+            round_eval[section_key]["config_mismatch"] = True
+            round_eval[section_key]["config_mismatch_detail"] = (
+                f"baseline={len(baseline_configs)} configs, candidate={len(candidate_configs)} configs"
+            )
+    elif candidate_configs or baseline_configs:
+        candidate_shapes = parse_shape_count(candidate_stdout)
+        baseline_shapes = parse_shape_count(baseline_text)
+        if candidate_shapes and baseline_shapes and candidate_shapes != baseline_shapes:
+            logger.warning(
+                "Shape count mismatch: baseline=%d, candidate=%d",
+                baseline_shapes,
+                candidate_shapes,
+            )
+            round_eval[section_key]["shape_count_warning"] = (
+                f"baseline={baseline_shapes}, candidate={candidate_shapes}"
+            )
 
-        eval_harness_path = harness_path
-        if harness_path and eval_worktree:
-            harness_name = Path(harness_path).name
-            eval_harness = eval_worktree / harness_name
-            if eval_harness.exists():
-                eval_harness_path = str(eval_harness)
 
-        eval_env = build_eval_env(eval_worktree, repo_root, eval_harness_path, gpu_id)
-        _print(f"  Eval worktree: {eval_worktree}")
+def run_profile(
+    eval_worktree: Path,
+    repo_root: str,
+    harness_path: str,
+    gpu_id: int,
+    pp_dir: Path,
+    round_eval: dict[str, Any],
+    round_num: int,
+) -> None:
+    """Run the PROFILE step and compare against baseline metrics.
 
-        full_benchmark_baseline_path = pp_dir / "full_benchmark_baseline.txt"
-        full_benchmark_baseline = (
-            full_benchmark_baseline_path.read_text().strip() if full_benchmark_baseline_path.exists() else None
-        )
-        benchmark_baseline_path = pp_dir / "benchmark_baseline.txt"
-        benchmark_baseline = benchmark_baseline_path.read_text().strip() if benchmark_baseline_path.exists() else None
+    Mutates ``round_eval["profile_comparison"]`` in place.
+    """
+    if not harness_path:
+        logger.info("Skipping PROFILE: no harness_path provided")
+        return
 
-        # --- FULL_BENCHMARK ---
-        fb_script = build_eval_script(str(commandment_path), ["SETUP", "FULL_BENCHMARK"])
-        if fb_script:
-            _print(f"  Running FULL_BENCHMARK on best kernel from round {round_num}...")
-            try:
-                fb_result = subprocess.run(
-                    ["bash", fb_script],
-                    capture_output=True,
-                    text=True,
-                    timeout=1800,
-                    cwd=str(eval_worktree),
-                    env=eval_env,
-                )
-                fb_stdout = fb_result.stdout
-                round_eval["full_benchmark"] = {
-                    "stdout": fb_stdout[:5000],
-                    "returncode": fb_result.returncode,
-                    "success": fb_result.returncode == 0,
-                }
-                if full_benchmark_baseline:
-                    round_eval["full_benchmark"]["baseline"] = full_benchmark_baseline[:2000]
+    logger.info("Running PROFILE on best kernel from round %d...", round_num)
 
-                if fb_result.returncode == 0:
-                    candidate_ms = _extract_latency_ms(fb_stdout)
-                    baseline_ref = full_benchmark_baseline or benchmark_baseline
-                    baseline_ms = _extract_latency_ms(baseline_ref) if baseline_ref else None
-                    if candidate_ms and baseline_ms and baseline_ms > 0:
-                        verified_speedup = baseline_ms / candidate_ms
-                        round_eval["full_benchmark"]["verified_speedup"] = round(verified_speedup, 4)
-                        round_eval["full_benchmark"]["candidate_ms"] = candidate_ms
-                        round_eval["full_benchmark"]["baseline_ms"] = baseline_ms
-                        _print(
-                            f"  FULL_BENCHMARK verified speedup: {verified_speedup:.4f}x "
-                            f"({baseline_ms:.4f} ms -> {candidate_ms:.4f} ms)"
-                        )
-                    else:
-                        candidate_reported_speedup = _extract_reported_speedup(fb_stdout)
-                        baseline_reported_speedup = _extract_reported_speedup(baseline_ref) if baseline_ref else None
-                        if (
-                            isinstance(candidate_reported_speedup, (int, float))
-                            and isinstance(baseline_reported_speedup, (int, float))
-                            and baseline_reported_speedup > 0
-                        ):
-                            verified_speedup = float(candidate_reported_speedup) / float(baseline_reported_speedup)
-                            round_eval["full_benchmark"]["verified_speedup"] = round(verified_speedup, 4)
-                            round_eval["full_benchmark"]["candidate_reported_speedup"] = round(
-                                float(candidate_reported_speedup), 6
-                            )
-                            round_eval["full_benchmark"]["baseline_reported_speedup"] = round(
-                                float(baseline_reported_speedup), 6
-                            )
-                            _print(
-                                "  FULL_BENCHMARK verified speedup: "
-                                f"{verified_speedup:.4f}x "
-                                f"(reported speedup {baseline_reported_speedup:.4f}x "
-                                f"-> {candidate_reported_speedup:.4f}x)"
-                            )
-                    candidate_configs = _extract_benchmark_config_lines(fb_stdout)
-                    baseline_configs = _extract_benchmark_config_lines(baseline_ref) if baseline_ref else None
-                    if candidate_configs and baseline_configs:
-                        if candidate_configs != baseline_configs:
-                            _print(
-                                "  WARNING: Benchmark config mismatch detected! "
-                                "Agent may have modified benchmark parameters. "
-                                "Rejecting speedup."
-                            )
-                            logger.warning(
-                                "Benchmark config mismatch: agent modified benchmark configs. "
-                                "baseline_configs=%d lines, candidate_configs=%d lines",
-                                len(baseline_configs),
-                                len(candidate_configs),
-                            )
-                            round_eval["full_benchmark"]["config_mismatch"] = True
-                            round_eval["full_benchmark"]["config_mismatch_detail"] = (
-                                f"baseline={len(baseline_configs)} configs, candidate={len(candidate_configs)} configs"
-                            )
-                            round_eval["full_benchmark"].pop("verified_speedup", None)
-                            _print("  Verified speedup INVALIDATED due to config mismatch")
-                    elif candidate_configs or baseline_configs:
-                        candidate_shapes = _parse_shape_count(fb_stdout)
-                        baseline_shapes = _parse_shape_count(baseline_ref) if baseline_ref else None
-                        if candidate_shapes and baseline_shapes and candidate_shapes != baseline_shapes:
-                            logger.warning(
-                                "Shape count mismatch: baseline=%d, candidate=%d",
-                                baseline_shapes,
-                                candidate_shapes,
-                            )
-                            round_eval["full_benchmark"]["shape_count_warning"] = (
-                                f"baseline={baseline_shapes}, candidate={candidate_shapes}"
-                            )
-
-                _print(f"  FULL_BENCHMARK: {'PASS' if fb_result.returncode == 0 else 'FAIL'}")
-            except Exception as exc:
-                _print(f"  FULL_BENCHMARK failed: {exc}")
-                round_eval["full_benchmark"] = {"error": str(exc)}
-
-        # --- PROFILE ---
-        _print(f"  Running PROFILE on best kernel from round {round_num}...")
-        baseline_metrics_path = pp_dir / "baseline_metrics.json"
-        baseline_metrics = None
-        if baseline_metrics_path.exists():
-            try:
-                baseline_metrics = json.loads(baseline_metrics_path.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
-
+    baseline_metrics_path = pp_dir / "baseline_metrics.json"
+    baseline_metrics = None
+    if baseline_metrics_path.exists():
         try:
-            from minisweagent.run.pipeline_helpers import _ensure_mcp_importable
+            baseline_metrics = json.loads(baseline_metrics_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Failed to parse baseline metrics: %s", baseline_metrics_path, exc_info=True)
 
-            _ensure_mcp_importable()
-            from profiler_mcp.server import profile_kernel
+    try:
+        from minisweagent.run.pipeline_helpers import _ensure_mcp_importable
 
-            _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
-            if harness_path:
-                prev_pythonpath = os.environ.get("PYTHONPATH", "")
-                os.environ["PYTHONPATH"] = f"{eval_worktree}:{repo_root}:{prev_pythonpath}"
-                try:
-                    profile_result = _profile_fn(
-                        command=f"python {harness_path} --profile",
-                        backend="metrix",
-                        num_replays=3,
-                        quick=True,
-                        gpu_devices=str(gpu_id),
-                    )
-                finally:
-                    if prev_pythonpath:
-                        os.environ["PYTHONPATH"] = prev_pythonpath
+        _ensure_mcp_importable()
+        from profiler_mcp.server import profile_kernel
+
+        _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
+        prev_pythonpath = os.environ.get("PYTHONPATH", "")
+        os.environ["PYTHONPATH"] = f"{eval_worktree}:{repo_root}:{prev_pythonpath}"
+        try:
+            profile_result = _profile_fn(
+                command=f"python {harness_path} --profile",
+                backend="metrix",
+                num_replays=3,
+                quick=True,
+                gpu_devices=str(gpu_id),
+            )
+        finally:
+            if prev_pythonpath:
+                os.environ["PYTHONPATH"] = prev_pythonpath
+            else:
+                os.environ.pop("PYTHONPATH", None)
+
+        if baseline_metrics and profile_result:
+            from minisweagent.run.preprocess.baseline import build_baseline_metrics
+
+            optimized_metrics = build_baseline_metrics(profile_result, include_all=True)
+            profile_comparison: dict[str, Any] = {}
+            for key in ("duration_us", "bottleneck"):
+                if key in baseline_metrics and key in optimized_metrics:
+                    base_val = baseline_metrics[key]
+                    opt_val = optimized_metrics[key]
+                    if key == "duration_us" and isinstance(base_val, (int, float)):
+                        change_pct = ((opt_val - base_val) / base_val * 100) if base_val else 0
+                        profile_comparison[key] = {
+                            "baseline": base_val,
+                            "optimized": opt_val,
+                            "change_pct": round(change_pct, 1),
+                        }
                     else:
-                        os.environ.pop("PYTHONPATH", None)
+                        profile_comparison[key] = {"baseline": base_val, "optimized": opt_val}
 
-                if baseline_metrics and profile_result:
-                    from minisweagent.run.preprocess.baseline import build_baseline_metrics
+            opt_bn = optimized_metrics.get("bottleneck", "unknown")
+            base_bn = baseline_metrics.get("bottleneck", "unknown")
+            if base_bn != opt_bn:
+                profile_comparison["bottleneck_shift"] = f"{base_bn} -> {opt_bn}"
 
-                    optimized_metrics = build_baseline_metrics(profile_result, include_all=True)
-                    profile_comparison: dict[str, Any] = {}
-                    for key in ("duration_us", "bottleneck"):
-                        if key in baseline_metrics and key in optimized_metrics:
-                            base_val = baseline_metrics[key]
-                            opt_val = optimized_metrics[key]
-                            if key == "duration_us" and isinstance(base_val, (int, float)):
-                                change_pct = ((opt_val - base_val) / base_val * 100) if base_val else 0
-                                profile_comparison[key] = {
-                                    "baseline": base_val,
-                                    "optimized": opt_val,
-                                    "change_pct": round(change_pct, 1),
-                                }
-                            else:
-                                profile_comparison[key] = {
-                                    "baseline": base_val,
-                                    "optimized": opt_val,
-                                }
+            round_eval["profile_comparison"] = profile_comparison
+            logger.info("PROFILE comparison: %s", json.dumps(profile_comparison)[:300])
+        else:
+            logger.info("PROFILE: completed (no baseline for comparison)")
+    except Exception as exc:
+        logger.warning("PROFILE failed: %s", exc)
+        round_eval["profile_comparison"] = {"error": str(exc)}
 
-                    opt_bn = optimized_metrics.get("bottleneck", "unknown")
-                    base_bn = baseline_metrics.get("bottleneck", "unknown")
-                    if base_bn != opt_bn:
-                        profile_comparison["bottleneck_shift"] = f"{base_bn} -> {opt_bn}"
 
-                    round_eval["profile_comparison"] = profile_comparison
-                    _print(f"  PROFILE comparison: {json.dumps(profile_comparison)[:300]}")
-                else:
-                    _print("  PROFILE: completed (no baseline for comparison)")
-        except Exception as exc:
-            _print(f"  PROFILE failed: {exc}")
-            round_eval["profile_comparison"] = {"error": str(exc)}
-
-    finally:
-        # Only clean up if we created a temporary eval worktree, not if
-        # we reused an agent's existing slot directory.
-        if eval_worktree and not agent_slot_dir:
-            cleanup_eval_worktree(repo_root, eval_worktree)
-
-    # Write full detail dict for backward compatibility and debugging
+def write_eval_results(
+    round_eval: dict[str, Any],
+    output_dir: Path,
+    round_num: int,
+) -> Any:
+    """Write evaluation artifacts to disk and return a typed RoundEvaluation."""
     eval_path = output_dir / f"round_{round_num}_evaluation.json"
     eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
-    _print(f"  Round evaluation written to: {eval_path}")
+    logger.info("Round evaluation written to: %s", eval_path)
 
-    # Write stdout/profile to files instead of embedding in the typed return
-    fb_raw = round_eval.get("full_benchmark") or {}
+    fb_raw = round_eval.get("full_benchmark") or round_eval.get("benchmark") or {}
     if isinstance(fb_raw, dict) and fb_raw.get("stdout"):
         fb_output_path = output_dir / f"round_{round_num}_full_benchmark.txt"
         fb_output_path.write_text(fb_raw["stdout"])
@@ -608,7 +436,6 @@ def evaluate_round_best(
         profile_path = output_dir / f"round_{round_num}_profile_comparison.json"
         profile_path.write_text(json.dumps(profile_raw, indent=2, default=str))
 
-    # Convert to typed boundary object
     from minisweagent.run.pipeline_types import FullBenchmarkResult, RoundEvaluation
 
     fb_typed = None
@@ -634,3 +461,164 @@ def evaluate_round_best(
         benchmark_speedup=round_eval.get("benchmark_speedup", 1.0),
         full_benchmark=fb_typed,
     )
+
+
+def evaluate_round_best(
+    ctx: dict[str, Any],
+    round_num: int,
+    results_dir: Path,
+) -> Any:
+    """Evaluate the single best kernel from a round with FULL_BENCHMARK + PROFILE.
+
+    Creates a temporary worktree, applies the best patch, sets all GEAK_*
+    env vars, runs SETUP + FULL_BENCHMARK, then profiles with PYTHONPATH
+    pointing at the patched worktree.
+
+    Returns a typed ``RoundEvaluation``, or ``None`` if no valid candidates exist.
+    """
+    output_dir = Path(ctx["output_dir"])
+    pp_dir = Path(ctx.get("preprocess_dir", ctx.get("output_dir", ".")))
+
+    if not results_dir.is_dir():
+        logger.warning("results_dir does not exist: %s", results_dir)
+        return None
+
+    # --- Collect candidates ---
+    candidates: list[dict[str, Any]] = []
+    for task_dir in sorted(results_dir.iterdir()):
+        if not task_dir.is_dir() or task_dir.name in ("worktrees",):
+            continue
+        br_file = task_dir / "best_results.json"
+        if not br_file.exists():
+            logger.debug("No best_results.json in %s", task_dir.name)
+            continue
+        try:
+            br = json.loads(br_file.read_text())
+            speedup = float(br.get("best_patch_speedup", 0))
+            patch_file = br.get("best_patch_file")
+            if not patch_file:
+                logger.warning("No patch file in %s", br_file)
+                continue
+            if speedup <= 0:
+                logger.info("No improvement (speedup=%.4f) in %s", speedup, task_dir.name)
+                continue
+
+            kernel_time: float | None = None
+            test_output_path = br.get("best_patch_test_output", "")
+            if test_output_path:
+                test_path = Path(test_output_path)
+                if test_path.exists():
+                    kernel_time = parse_total_kernel_time_ms(test_path.read_text())
+                else:
+                    logger.warning("Test output file missing: %s", test_output_path)
+
+            candidates.append(
+                {
+                    "task": task_dir.name,
+                    "patch_file": patch_file,
+                    "speedup": speedup,
+                    "kernel_time_ms": kernel_time,
+                    "per_shape_speedups": br.get("per_shape_speedups") or {},
+                    "baseline_shape_latency_ms": br.get("baseline_shape_latency_ms") or {},
+                    "candidate_shape_latency_ms": br.get("candidate_shape_latency_ms") or {},
+                }
+            )
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            logger.warning("Failed to parse %s: %s", br_file, exc)
+            continue
+
+    if not candidates:
+        logger.info("Round %d: no valid candidates for evaluation", round_num)
+        no_improvement_eval = {
+            "round": round_num,
+            "best_patch": None,
+            "best_task": None,
+            "benchmark_speedup": 1.0,
+            "status": "no_candidates",
+        }
+        eval_path = output_dir / f"round_{round_num}_evaluation.json"
+        eval_path.write_text(json.dumps(no_improvement_eval, indent=2))
+        return None
+
+    # --- Select best candidate ---
+    all_have_kernel_time = all(c["kernel_time_ms"] is not None for c in candidates)
+    if all_have_kernel_time:
+        best = min(candidates, key=lambda c: c["kernel_time_ms"])  # type: ignore[arg-type]
+    else:
+        best = max(candidates, key=lambda c: c["speedup"])
+
+    best_task: str = best["task"]
+    best_patch_file: str = best["patch_file"]
+    best_speedup: float = best["speedup"]
+    best_kernel_time: float = best["kernel_time_ms"] if best["kernel_time_ms"] is not None else float("inf")
+
+    selection_method = "kernel_time" if all_have_kernel_time else "speedup"
+    if best_kernel_time < float("inf"):
+        logger.info(
+            "Round %d best: %s (%.2fx, %.4fms, selected by %s)",
+            round_num, best_task, best_speedup, best_kernel_time, selection_method,
+        )
+    else:
+        logger.info("Round %d best: %s (%.2fx)", round_num, best_task, best_speedup)
+
+    round_eval: dict[str, Any] = {
+        "round": round_num,
+        "best_patch": best_patch_file,
+        "best_task": best_task,
+        "benchmark_speedup": best_speedup,
+    }
+    if best.get("per_shape_speedups"):
+        round_eval["per_shape_speedups"] = best["per_shape_speedups"]
+    if best.get("baseline_shape_latency_ms"):
+        round_eval["baseline_shape_latency_ms"] = best["baseline_shape_latency_ms"]
+    if best.get("candidate_shape_latency_ms"):
+        round_eval["candidate_shape_latency_ms"] = best["candidate_shape_latency_ms"]
+
+    # --- Validate required context ---
+    commandment_path = pp_dir / "COMMANDMENT.md"
+    if not commandment_path.exists():
+        logger.warning("COMMANDMENT.md not found at %s; skipping FULL_BENCHMARK and PROFILE", commandment_path)
+        eval_path = output_dir / f"round_{round_num}_evaluation.json"
+        eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
+        from minisweagent.run.pipeline_types import RoundEvaluation
+
+        return RoundEvaluation(
+            round=round_num, best_patch=best_patch_file or "", best_task=best_task, benchmark_speedup=best_speedup
+        )
+
+    repo_root = ctx.get("repo_root")
+    if not repo_root:
+        raise ValueError("ctx['repo_root'] is required for evaluation")
+    harness_path = ctx.get("harness_path", "")
+    if not harness_path:
+        logger.warning("No harness_path in ctx; PROFILE step will be skipped")
+    gpu_id = ctx.get("gpu_ids", [0])[0]
+
+    # --- Resolve worktree, run benchmark + profile, clean up ---
+    try:
+        eval_worktree, eval_env = resolve_eval_worktree(
+            repo_root, best_patch_file, harness_path, output_dir, gpu_id,
+        )
+    except PatchApplyError as exc:
+        logger.warning("Patch apply failed: %s", exc)
+        round_eval["patch_apply_error"] = str(exc)
+        round_eval["status"] = "patch_failed"
+        eval_path = output_dir / f"round_{round_num}_evaluation.json"
+        eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
+        from minisweagent.run.pipeline_types import FullBenchmarkResult, RoundEvaluation
+
+        return RoundEvaluation(
+            round=round_num,
+            best_patch=best_patch_file or "",
+            best_task=best_task,
+            benchmark_speedup=best_speedup,
+            full_benchmark=FullBenchmarkResult(failure_reason=f"patch apply failed: {exc}"),
+        )
+
+    try:
+        run_benchmark(eval_worktree, eval_env, commandment_path, pp_dir, round_eval, round_num)
+        run_profile(eval_worktree, repo_root, harness_path, gpu_id, pp_dir, round_eval, round_num)
+    finally:
+        cleanup_eval_worktree(repo_root, eval_worktree)
+
+    return write_eval_results(round_eval, output_dir, round_num)
