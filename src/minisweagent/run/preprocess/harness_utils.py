@@ -410,6 +410,10 @@ def _materialize_validated_harness(
 _TRITON_KERNEL_MARKERS = ("@triton.jit", "@triton.autotune", "triton.jit", "tl.constexpr")
 # HIP/CUDA markers for non-Python kernels (detected via regex in source text)
 _HIP_KERNEL_RE = re.compile(r"\b(__global__|__kernel__|__device__)\b")
+_C_LIKE_KERNEL_SOURCE_SUFFIXES = frozenset({".hip", ".cu", ".cpp", ".cc", ".cxx"})
+_C_LIKE_TEST_ENTRY_RE = re.compile(
+    r"(?m)^(?P<signature>[^\n{;#]*\b(?P<name>main|run_[A-Za-z_]\w*|test_[A-Za-z_]\w*)\s*\([^;{]*\)\s*)\{"
+)
 
 _TRITON_DECORATOR_NAMES = frozenset({"triton.jit", "triton.autotune", "jit", "autotune"})
 
@@ -447,6 +451,330 @@ def _harness_has_kernel_definitions(source: str) -> bool:
     return False
 
 
+def _source_has_c_like_kernel_definitions(source: str) -> bool:
+    """Return True if a C-like source file looks like HIP/CUDA kernel code."""
+    return _HIP_KERNEL_RE.search(source) is not None and (
+        "__global__" in source or "hipLaunchKernelGGL" in source or "<<<" in source
+    )
+
+
+def _infer_repo_root_for_split(path: Path) -> Path | None:
+    """Infer a repo root for split/materialization helpers."""
+    candidate = path.resolve().parent
+    for ancestor in [candidate, *candidate.parents]:
+        if any((ancestor / marker).exists() for marker in (".git", "pyproject.toml", "setup.py", "setup.cfg")):
+            return ancestor
+    return None
+
+
+def _find_matching_brace(source: str, open_brace_index: int) -> int | None:
+    """Return the exclusive end index of the brace block starting at *open_brace_index*."""
+    depth = 0
+    i = open_brace_index
+    in_single_quote = False
+    in_double_quote = False
+    in_line_comment = False
+    in_block_comment = False
+
+    while i < len(source):
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < len(source) else ""
+
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+        if in_block_comment:
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_single_quote:
+            if ch == "\\" and nxt:
+                i += 2
+                continue
+            if ch == "'":
+                in_single_quote = False
+            i += 1
+            continue
+        if in_double_quote:
+            if ch == "\\" and nxt:
+                i += 2
+                continue
+            if ch == '"':
+                in_double_quote = False
+            i += 1
+            continue
+
+        if ch == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if ch == "'":
+            in_single_quote = True
+            i += 1
+            continue
+        if ch == '"':
+            in_double_quote = True
+            i += 1
+            continue
+
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+
+    return None
+
+
+def _find_c_like_test_blocks(source: str) -> list[tuple[str, int, int]]:
+    """Return ``(name, start, end)`` ranges for host-side test entry functions."""
+    blocks: list[tuple[str, int, int]] = []
+    seen_ranges: set[tuple[int, int]] = set()
+
+    for match in _C_LIKE_TEST_ENTRY_RE.finditer(source):
+        brace_index = match.end() - 1
+        end_index = _find_matching_brace(source, brace_index)
+        if end_index is None:
+            logger.warning("Could not find matching brace for %s in merged source split", match.group("name"))
+            continue
+        key = (match.start(), end_index)
+        if key in seen_ranges:
+            continue
+        seen_ranges.add(key)
+        blocks.append((match.group("name"), match.start(), end_index))
+
+    return sorted(blocks, key=lambda item: item[1])
+
+
+def _generate_c_like_python_harness(
+    *,
+    wrapper_path: Path,
+    c_harness_path: Path,
+    clean_kernel_path: Path,
+    original_source_dir: Path,
+    repo_root: Path | None,
+) -> None:
+    """Generate a Python GEAK harness wrapper for merged HIP/CUDA split outputs."""
+    include_dirs = [original_source_dir]
+    if repo_root is not None:
+        include_dirs.append(repo_root)
+    for extra_name in ("Common", "common", "include", "includes", "inc", "src"):
+        candidate = original_source_dir / extra_name
+        if candidate.exists():
+            include_dirs.append(candidate)
+    parent_common = original_source_dir.parent / "Common"
+    if parent_common.exists():
+        include_dirs.append(parent_common)
+
+    deduped_include_dirs: list[str] = []
+    seen_dirs: set[str] = set()
+    for path in include_dirs:
+        resolved = str(path.resolve())
+        if resolved not in seen_dirs:
+            seen_dirs.add(resolved)
+            deduped_include_dirs.append(resolved)
+
+    repo_root_str = str(repo_root.resolve()) if repo_root is not None else str(original_source_dir.resolve())
+    wrapper_source = textwrap.dedent(
+        f"""\
+        import argparse
+        import os
+        import re
+        import statistics
+        import subprocess
+        import sys
+        import time
+        from pathlib import Path
+
+        C_HARNESS = Path({str(c_harness_path.resolve())!r})
+        CLEAN_KERNEL = Path({str(clean_kernel_path.resolve())!r})
+        SOURCE_DIR = Path({str(original_source_dir.resolve())!r})
+        REPO_ROOT = Path({repo_root_str!r})
+        BINARY = C_HARNESS.with_suffix("")
+        INCLUDE_DIRS = {deduped_include_dirs!r}
+
+
+        def _compile_binary() -> Path:
+            needs_rebuild = (not BINARY.exists()) or any(
+                src.exists() and src.stat().st_mtime > BINARY.stat().st_mtime
+                for src in (C_HARNESS, CLEAN_KERNEL)
+            )
+            if not needs_rebuild:
+                return BINARY
+
+            cmd = ["hipcc", "-O3", "-std=c++17", str(C_HARNESS), "-o", str(BINARY)]
+            for inc in INCLUDE_DIRS:
+                cmd.extend(["-I", inc])
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(SOURCE_DIR),
+            )
+            if proc.returncode != 0:
+                if proc.stdout:
+                    sys.stdout.write(proc.stdout)
+                if proc.stderr:
+                    sys.stderr.write(proc.stderr)
+                raise SystemExit(proc.returncode)
+            return BINARY
+
+
+        def _extract_latency_ms(output: str, fallback_ms: float) -> float:
+            patterns = (
+                (r"GEAK_RESULT_LATENCY_MS=([\\d.]+(?:e[+-]?\\d+)?)", 1.0),
+                (r"Perf:\\s*([\\d.]+(?:e[+-]?\\d+)?)\\s*us/launch", 1.0 / 1000.0),
+                (r"Perf:\\s*([\\d.]+(?:e[+-]?\\d+)?)\\s*ms/launch", 1.0),
+                (r"TOTAL_KERNEL_TIME_MS:\\s*([\\d.]+(?:e[+-]?\\d+)?)", 1.0),
+                (r"BENCHMARK_LATENCY_MS:\\s*([\\d.]+(?:e[+-]?\\d+)?)", 1.0),
+            )
+            for pattern, scale in patterns:
+                match = re.search(pattern, output)
+                if match:
+                    return float(match.group(1)) * scale
+            return fallback_ms
+
+
+        def _run_once() -> tuple[subprocess.CompletedProcess[str], float]:
+            binary = _compile_binary()
+            t0 = time.perf_counter()
+            proc = subprocess.run(
+                [str(binary)],
+                capture_output=True,
+                text=True,
+                cwd=str(SOURCE_DIR),
+                env=os.environ.copy(),
+            )
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            return proc, elapsed_ms
+
+
+        def _run_mode(measure: bool) -> int:
+            proc, elapsed_ms = _run_once()
+            if proc.stdout:
+                sys.stdout.write(proc.stdout)
+            if proc.stderr:
+                sys.stderr.write(proc.stderr)
+            if measure and proc.returncode == 0:
+                latency_ms = _extract_latency_ms(proc.stdout + "\\n" + proc.stderr, elapsed_ms)
+                print(f"GEAK_RESULT_LATENCY_MS={{latency_ms:.6f}}")
+            return proc.returncode
+
+
+        def run_correctness() -> int:
+            return _run_mode(measure=False)
+
+
+        def run_profile() -> int:
+            return _run_mode(measure=False)
+
+
+        def run_benchmark() -> int:
+            return _run_mode(measure=True)
+
+
+        def run_full_benchmark() -> int:
+            return _run_mode(measure=True)
+
+
+        def main() -> int:
+            parser = argparse.ArgumentParser()
+            group = parser.add_mutually_exclusive_group(required=True)
+            group.add_argument("--correctness", action="store_true")
+            group.add_argument("--profile", action="store_true")
+            group.add_argument("--benchmark", action="store_true")
+            group.add_argument("--full-benchmark", action="store_true")
+            parser.parse_known_args()
+
+            if parser.parse_known_args()[0].correctness:
+                return run_correctness()
+            if parser.parse_known_args()[0].profile:
+                return run_profile()
+            if parser.parse_known_args()[0].benchmark:
+                return run_benchmark()
+            return run_full_benchmark()
+
+
+        if __name__ == "__main__":
+            raise SystemExit(main())
+        """
+    )
+    wrapper_path.write_text(wrapper_source)
+
+
+def _detect_and_split_c_like_kernel_from_harness(
+    harness_path: Path,
+    output_dir: Path,
+    source: str,
+) -> tuple[str, str] | None:
+    """Split host-side test logic out of merged HIP/CUDA source files.
+
+    The conservative C-like path handles merged sources where the executable
+    host-side validation entrypoint lives in the same file as the HIP/CUDA
+    kernel. We move ``main()`` plus any ``run_*`` / ``test_*`` helper
+    functions into a generated harness file, and keep the clean kernel copy in
+    ``output_dir`` for agent patching.
+    """
+    if harness_path.suffix not in _C_LIKE_KERNEL_SOURCE_SUFFIXES:
+        return None
+    if not _source_has_c_like_kernel_definitions(source):
+        return None
+
+    test_blocks = _find_c_like_test_blocks(source)
+    if not test_blocks:
+        return None
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    clean_kernel_path = output_dir / harness_path.name
+    c_harness_path = output_dir / f"test_{harness_path.stem}_harness{harness_path.suffix}"
+    wrapper_harness_path = output_dir / f"test_{harness_path.stem}_harness.py"
+
+    clean_chunks: list[str] = []
+    harness_chunks: list[str] = []
+    cursor = 0
+    for _name, start, end in test_blocks:
+        clean_chunks.append(source[cursor:start])
+        harness_chunks.append(source[start:end].strip())
+        cursor = end
+    clean_chunks.append(source[cursor:])
+
+    clean_source = "".join(clean_chunks).rstrip() + "\n"
+    clean_kernel_path.write_text(clean_source)
+
+    harness_source = (
+        f'#include "{clean_kernel_path.name}"\n\n'
+        + "\n\n".join(chunk for chunk in harness_chunks if chunk)
+        + "\n"
+    )
+    c_harness_path.write_text(harness_source)
+
+    _generate_c_like_python_harness(
+        wrapper_path=wrapper_harness_path,
+        c_harness_path=c_harness_path,
+        clean_kernel_path=clean_kernel_path,
+        original_source_dir=harness_path.parent,
+        repo_root=_infer_repo_root_for_split(harness_path),
+    )
+    logger.info(
+        "Split merged C-like source: kernel=%s, harness_source=%s, harness_wrapper=%s",
+        clean_kernel_path,
+        c_harness_path,
+        wrapper_harness_path,
+    )
+    return str(wrapper_harness_path), str(clean_kernel_path)
+
+
 def detect_and_split_kernel_from_harness(
     harness_path: str | Path,
     output_dir: Path,
@@ -481,6 +809,10 @@ def detect_and_split_kernel_from_harness(
     """
     harness_path = Path(harness_path).resolve()
     source = harness_path.read_text()
+
+    c_like_result = _detect_and_split_c_like_kernel_from_harness(harness_path, output_dir, source)
+    if c_like_result is not None:
+        return c_like_result
 
     # Fast guard: only proceed if the file has kernel definitions at all
     if not _harness_has_kernel_definitions(source):

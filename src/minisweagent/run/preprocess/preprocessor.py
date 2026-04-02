@@ -500,9 +500,11 @@ def run_preprocessor(
         )
         ctx["kernel_path"] = _clean_kernel
         kernel_path = _clean_kernel
-        # Do NOT set harness = _new_harness here: the split harness is
-        # pytest-based and will fail GEAK harness validation. Let UTA
-        # generate a proper --correctness/--profile/--benchmark harness.
+        # For merged kernels, the split helper may produce a GEAK-compatible
+        # wrapper harness (e.g. HIP/CUDA mixed-source cases). Reuse it directly
+        # when the caller did not already provide a harness.
+        if not harness:
+            harness = _new_harness
 
     _print(f"  Kernel: {kernel_path}")
 

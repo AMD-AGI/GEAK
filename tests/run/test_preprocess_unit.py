@@ -805,6 +805,34 @@ if __name__ == "__main__":
         run_benchmark(args)
 '''
 
+    _MERGED_HIP_SOURCE = '''\
+#include <hip/hip_runtime.h>
+#include <cstdio>
+
+__device__ float clamp_value(float x) {
+    return x > 0 ? x : 0;
+}
+
+__global__ void relu_kernel(float* out, const float* in) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    out[idx] = clamp_value(in[idx]);
+}
+
+static void launch_relu(float* out, const float* in) {
+    hipLaunchKernelGGL(relu_kernel, dim3(1), dim3(64), 0, 0, out, in);
+}
+
+static void run_correctness() {
+    printf("correctness\\n");
+    launch_relu(nullptr, nullptr);
+}
+
+int main(int argc, char** argv) {
+    run_correctness();
+    return 0;
+}
+'''
+
     def test_splits_tests_out_leaves_kernel(self):
         """Test functions must be extracted to new harness; clean kernel written to output_dir."""
         from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
@@ -885,6 +913,80 @@ if __name__ == "__main__":
             harness.write_text(source)
             result = detect_and_split_kernel_from_harness(harness, tmp_path)
             assert result is None, "Expected no split for file without kernel defs"
+
+    def test_splits_hip_main_and_run_functions(self):
+        """Merged HIP source should split host-side test entrypoints into a harness."""
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
+        from minisweagent.run.preprocess.harness_utils import validate_harness
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_dir = tmp_path / "repo"
+            src_dir.mkdir()
+            merged = src_dir / "relu_kernel.hip"
+            merged.write_text(self._MERGED_HIP_SOURCE)
+            out_dir = tmp_path / "output"
+            out_dir.mkdir()
+
+            result = detect_and_split_kernel_from_harness(merged, out_dir)
+            assert result is not None, "Expected merged HIP source to split"
+            new_harness_path, kernel_path = result
+
+            # Original file must be untouched.
+            original_text = merged.read_text()
+            assert "int main" in original_text
+            assert "run_correctness" in original_text
+
+            # Clean kernel copy keeps kernel-side code but drops host-side test entrypoints.
+            assert kernel_path == str(out_dir / "relu_kernel.hip")
+            kernel_text = Path(kernel_path).read_text()
+            assert "__global__ void relu_kernel" in kernel_text
+            assert "__device__ float clamp_value" in kernel_text
+            assert "static void launch_relu" in kernel_text
+            assert "run_correctness" not in kernel_text
+            assert "int main" not in kernel_text
+
+            # Generated GEAK harness is a Python wrapper that drives the split HIP harness.
+            assert new_harness_path == str(out_dir / "test_relu_kernel_harness.py")
+            harness_text = Path(new_harness_path).read_text()
+            assert "argparse" in harness_text
+            assert "--correctness" in harness_text
+            assert "--profile" in harness_text
+            assert "--benchmark" in harness_text
+            assert "--full-benchmark" in harness_text
+            assert "hipcc" in harness_text
+            valid, errors = validate_harness(str(new_harness_path))
+            assert valid, f"Generated HIP wrapper harness should satisfy GEAK harness contract: {errors}"
+
+            # The split C-like harness source still contains the moved host-side test logic.
+            split_harness = out_dir / "test_relu_kernel_harness.hip"
+            assert split_harness.is_file()
+            split_harness_text = split_harness.read_text()
+            assert '#include "relu_kernel.hip"' in split_harness_text
+            assert "run_correctness" in split_harness_text
+            assert "int main" in split_harness_text
+            assert "__global__ void relu_kernel" not in split_harness_text
+
+    def test_no_split_for_hip_without_host_test_entrypoint(self):
+        """HIP sources without main()/run_*/test_* entrypoints should be left alone."""
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
+        source = '''\
+#include <hip/hip_runtime.h>
+
+__global__ void relu_kernel(float* out, const float* in) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    out[idx] = in[idx];
+}
+
+static void launch_relu(float* out, const float* in) {
+    hipLaunchKernelGGL(relu_kernel, dim3(1), dim3(64), 0, 0, out, in);
+}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            merged = tmp_path / "relu_kernel.hip"
+            merged.write_text(source)
+            result = detect_and_split_kernel_from_harness(merged, tmp_path)
+            assert result is None, "Expected no split for HIP source without host-side test entrypoints"
 
 
 # ===================================================================
