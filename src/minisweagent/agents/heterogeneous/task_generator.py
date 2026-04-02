@@ -505,8 +505,10 @@ def _run_task_agent(
             combined_memory = "\n\n".join(part.strip() for part in (_wm_ctx, _mem or "") if part and str(part).strip())
             if combined_memory:
                 template_vars["memory_context"] = combined_memory
-        except Exception:
-            pass
+        except Exception as _mem_exc:
+            import logging as _lg
+
+            _lg.getLogger(__name__).warning("Memory assembly failed: %s", _mem_exc)
 
         _kernel_meta = {
             "file_path": kernel_path,

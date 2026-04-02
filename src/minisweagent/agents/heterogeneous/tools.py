@@ -75,6 +75,30 @@ def tool_generate_tasks(
         kwargs["previous_tasks_dir"] = tasks_parent
         kwargs["current_round"] = round_num
 
+    # Collect round evaluations from orchestrator context for memory injection
+    _round_evals = []
+    for _r in range(1, round_num):
+        _eval_key = f"round_{_r}_eval"
+        if _eval_key in ctx:
+            _rev = ctx[_eval_key]
+            if hasattr(_rev, "to_dict"):
+                _rev = _rev.to_dict()
+            elif not isinstance(_rev, dict):
+                import dataclasses as _dc
+
+                if _dc.is_dataclass(_rev) and not isinstance(_rev, type):
+                    _rev = _dc.asdict(_rev)
+            _round_evals.append(_rev)
+        else:
+            _eval_path = Path(ctx["output_dir"]) / f"round_{_r}_evaluation.json"
+            if _eval_path.exists():
+                try:
+                    _round_evals.append(json.loads(_eval_path.read_text()))
+                except (json.JSONDecodeError, OSError):
+                    pass
+    if _round_evals:
+        kwargs["round_evaluations"] = _round_evals
+
     emit_debug_log(
         "heterogeneous_orchestrator:tool_generate_tasks:before_gen",
         "Invoking task generator with orchestrator model",

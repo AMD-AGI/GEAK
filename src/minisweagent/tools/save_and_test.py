@@ -57,6 +57,7 @@ class SaveAndTestTool:
         desc_str = f" ({description})" if description else ""
         self._log(f"\n[SaveAndTest] Saving patch and running test{desc_str}...")
 
+        patch_content = ""
         try:
             # Get patch content
             patch_content = self._get_patch_content()
@@ -503,7 +504,7 @@ class SaveAndTestTool:
                 cwd=cwd,
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=30,
                 shell=True,
             )
             return result.stdout

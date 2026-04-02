@@ -170,9 +170,10 @@ wrapper-only or dispatch-only tasks before kernel-body avenues are exhausted.
 ## Task priority scheme (lower number = higher priority = runs first)
 
 - 0: Novel algorithmic kernel rewrites (different algorithm, different reduction/scan tree, split kernel variants, eliminate expensive ops like tl.reshape/tl.flip)
-- 3: Operation fusion (fuse adjacent kernels, fuse elementwise ops into kernel body, fuse normalization + quantization)
-- 4: Shape-adaptive optimization (use @triton.autotune with multiple configs so optimal BLOCK_S/num_warps is selected per input shape; or build 2-3 kernel variants specialized to different shape categories, with any wrapper selection logic kept secondary)
+- 2: Operation fusion (fuse adjacent kernels, fuse elementwise ops into kernel body, fuse normalization + quantization)
+- 4: Cross-language kernel rewrite (rewrite a Triton kernel as a raw HIP kernel for launch-overhead-bound or latency-bound kernels where Triton JIT overhead dominates; use ctypes or hip_launch for minimal-overhead kernel dispatch)
 - 5: Kernel-body memory access restructuring, computation reordering, LDS optimization, register pressure optimization
+- 6: Shape-adaptive optimization (use @triton.autotune with multiple configs so optimal BLOCK_S/num_warps is selected per input shape; or build 2-3 kernel variants specialized to different shape categories, with any wrapper selection logic kept secondary)
 - 8: Autotune configs, parameter search (BLOCK_S, num_warps, num_stages -- kernel-level but not algorithmic)
 - 15: Wrapper/launch-config/dispatch-only changes (lowest priority)
 
