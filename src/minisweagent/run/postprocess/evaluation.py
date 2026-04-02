@@ -82,7 +82,12 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
         subprocess.run(["git", "init"], cwd=str(eval_dir), capture_output=True, text=True, check=True, env=git_env)
         subprocess.run(["git", "add", "."], cwd=str(eval_dir), capture_output=True, text=True, check=True, env=git_env)
         subprocess.run(
-            ["git", "commit", "-m", "initial"], cwd=str(eval_dir), capture_output=True, text=True, check=True, env=git_env
+            ["git", "commit", "-m", "initial"],
+            cwd=str(eval_dir),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=git_env,
         )
         logger.warning("Initialised temporary git repo in non-git eval worktree: %s", eval_dir)
 
@@ -202,7 +207,7 @@ def resolve_eval_worktree(
     return eval_worktree, eval_env
 
 
-def run_benchmark(
+def run_correctness_and_benchmark(
     eval_worktree: Path,
     eval_env: dict[str, str],
     commandment_path: Path,
@@ -210,12 +215,46 @@ def run_benchmark(
     round_eval: dict[str, Any],
     round_num: int,
 ) -> None:
-    """
-    Run FULL_BENCHMARK, compute verified speedup, detect config mismatches.
+    """Run CORRECTNESS then FULL_BENCHMARK, compute verified speedup.
 
+    Runs the COMMANDMENT CORRECTNESS section first as a safety gate.
+    If correctness fails, the benchmark is skipped.
     Falls back to BENCHMARK if FULL_BENCHMARK baseline is not found.
-    """    
-    # Prefer full-benchmarking over benchmarking, but fallback to benchmarking if full-benchmarking is not found.
+    """
+    correctness_script = build_eval_script(str(commandment_path), ["SETUP", "CORRECTNESS"])
+    if correctness_script:
+        logger.info("Running CORRECTNESS on best kernel from round %d...", round_num)
+        try:
+            correctness_result = subprocess.run(
+                ["bash", correctness_script],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                cwd=str(eval_worktree),
+                env=eval_env,
+            )
+        except Exception as exc:
+            logger.warning("CORRECTNESS execution failed: %s", exc)
+            round_eval["correctness"] = {"error": str(exc)}
+            round_eval["status"] = "correctness_failed"
+            return
+
+        round_eval["correctness"] = {
+            "returncode": correctness_result.returncode,
+            "success": correctness_result.returncode == 0,
+        }
+        if correctness_result.returncode != 0:
+            logger.warning(
+                "CORRECTNESS failed (rc=%d): %s",
+                correctness_result.returncode,
+                correctness_result.stderr,
+            )
+            round_eval["status"] = "correctness_failed"
+            return
+        logger.info("CORRECTNESS: PASS")
+    else:
+        logger.warning("No CORRECTNESS commands found in COMMANDMENT")
+
     for baseline_section_name in ["FULL_BENCHMARK", "BENCHMARK"]:
         section_key = baseline_section_name.lower()
         baseline_path = pp_dir / (section_key + "_baseline.txt")
@@ -227,7 +266,6 @@ def run_benchmark(
         baseline_text = baseline_path.read_text().strip()
         logger.info("%s baseline found: %s", section_key, baseline_path)
 
-        # Prepare the script to run the benchmark
         benchmark_script = build_eval_script(str(commandment_path), ["SETUP", baseline_section_name])
         if not benchmark_script:
             logger.warning("No %s commands found in COMMANDMENT", baseline_section_name)
@@ -273,7 +311,6 @@ def run_benchmark(
         return
 
 
-
 def _compute_verified_speedup(
     candidate_stdout: str,
     baseline_text: str,
@@ -292,10 +329,7 @@ def _compute_verified_speedup(
     round_eval[section_key]["verified_speedup"] = round(verified_speedup, 4)
     round_eval[section_key]["candidate_ms"] = candidate_ms
     round_eval[section_key]["baseline_ms"] = baseline_ms
-    logger.info(
-        f"  Verified speedup: {verified_speedup:.4f}x "
-        f"({baseline_ms:.4f} ms -> {candidate_ms:.4f} ms)"
-    )
+    logger.info(f"  Verified speedup: {verified_speedup:.4f}x ({baseline_ms:.4f} ms -> {candidate_ms:.4f} ms)")
 
 
 def _check_config_mismatch(
@@ -311,8 +345,7 @@ def _check_config_mismatch(
     if candidate_configs and baseline_configs:
         if candidate_configs != baseline_configs:
             logger.warning(
-                "Benchmark config mismatch: baseline_configs=%d lines, candidate_configs=%d lines. "
-                "Rejecting speedup.",
+                "Benchmark config mismatch: baseline_configs=%d lines, candidate_configs=%d lines. Rejecting speedup.",
                 len(baseline_configs),
                 len(candidate_configs),
             )
@@ -329,9 +362,7 @@ def _check_config_mismatch(
                 baseline_shapes,
                 candidate_shapes,
             )
-            round_eval[section_key]["shape_count_warning"] = (
-                f"baseline={baseline_shapes}, candidate={candidate_shapes}"
-            )
+            round_eval[section_key]["shape_count_warning"] = f"baseline={baseline_shapes}, candidate={candidate_shapes}"
 
 
 def run_profile(
@@ -360,8 +391,11 @@ def run_profile(
     try:
         subprocess.run(
             ["bash", profile_script],
-            capture_output=True, text=True, timeout=1800,
-            cwd=str(eval_worktree), env=eval_env,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            cwd=str(eval_worktree),
+            env=eval_env,
         )
     except Exception as exc:
         logger.warning("PROFILE execution failed: %s", exc)
@@ -558,7 +592,11 @@ def evaluate_round_best(
     if best_kernel_time < float("inf"):
         logger.info(
             "Round %d best: %s (%.2fx, %.4fms, selected by %s)",
-            round_num, best_task, best_speedup, best_kernel_time, selection_method,
+            round_num,
+            best_task,
+            best_speedup,
+            best_kernel_time,
+            selection_method,
         )
     else:
         logger.info("Round %d best: %s (%.2fx)", round_num, best_task, best_speedup)
@@ -599,7 +637,11 @@ def evaluate_round_best(
     # --- Resolve worktree, run benchmark + profile, clean up ---
     try:
         eval_worktree, eval_env = resolve_eval_worktree(
-            repo_root, best_patch_file, harness_path, output_dir, gpu_id,
+            repo_root,
+            best_patch_file,
+            harness_path,
+            output_dir,
+            gpu_id,
         )
     except PatchApplyError as exc:
         logger.warning("Patch apply failed: %s", exc)
@@ -618,7 +660,7 @@ def evaluate_round_best(
         )
 
     try:
-        run_benchmark(eval_worktree, eval_env, commandment_path, pp_dir, round_eval, round_num)
+        run_correctness_and_benchmark(eval_worktree, eval_env, commandment_path, pp_dir, round_eval, round_num)
         run_profile(eval_worktree, eval_env, commandment_path, pp_dir, round_eval, round_num, results_dir)
     finally:
         cleanup_eval_worktree(repo_root, eval_worktree)
