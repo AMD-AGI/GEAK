@@ -59,6 +59,7 @@ LITELLM_COMPLETION_PARAM_KEYS: frozenset[str] = frozenset(
         "reasoning",
         # Anthropic extended thinking (e.g. {"type": "enabled", "budget_tokens": 10000}).
         "thinking",
+        "text",
     }
 )
 
@@ -390,7 +391,7 @@ if __name__ == "__main__":
             },
         },
          {
-            "model_name": "gpt-5.2",
+            "model_name": "gpt-5.4-mini",
             "model_kwargs": {
                 "max_tokens": 16000,
                 "api_key": "",
