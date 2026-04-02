@@ -624,11 +624,28 @@ def detect_and_split_kernel_from_harness(
         strip_line_set.update(range(start, end))
         main_chunk = "".join(source_lines[start:end])
 
-    # ── collect all import statements (cheap copy) ─────────────────────
-    import_chunks: list[str] = []
-    for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            import_chunks.append("".join(source_lines[node.lineno - 1 : node.end_lineno]))
+    # ── collect all import statements (cheap copy, relative→absolute) ──
+    # Relative imports must be rewritten here using harness_path (the original
+    # file's location inside the repo) as the reference.  The new harness file
+    # lives in output_dir (outside the repo), so if we waited until after
+    # writing it _rewrite_relative_imports would refuse to rewrite because it
+    # couldn't determine the package path from outside the repo root.
+    raw_imports = "".join(
+        "".join(source_lines[node.lineno - 1 : node.end_lineno])
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    )
+    # Try to find repo_root for this file so relative imports can be resolved.
+    # Walk up from harness_path looking for standard repo markers.
+    _candidate = harness_path.resolve().parent
+    _repo_root_for_split: Path | None = None
+    for _ancestor in [_candidate, *_candidate.parents]:
+        if any((_ancestor / m).exists() for m in (".git", "pyproject.toml", "setup.py", "setup.cfg")):
+            _repo_root_for_split = _ancestor
+            break
+    if _repo_root_for_split is not None:
+        raw_imports = _rewrite_relative_imports(raw_imports, harness_path, _repo_root_for_split)
+    import_chunks = [raw_imports] if raw_imports.strip() else []
 
     # ── write new harness file ─────────────────────────────────────────
     stem = harness_path.stem  # e.g. "kernel" or "naive_softmax"
