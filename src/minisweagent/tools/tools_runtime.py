@@ -12,13 +12,24 @@ json_path = Path(__file__).parent / "tools.json"
 with open(json_path, encoding="utf-8") as f:
     _all_tools = json.load(f)
 
+# Collect MCP tool *schemas* once at import time (lightweight, no subprocess).
+# Bridge *instances* are created per-ToolRuntime so each agent gets its own
+# subprocess and stdio pipes — required for safe parallel profiling.
 try:
-    from minisweagent.tools.mcp_bridge import collect_mcp_tools
+    from minisweagent.tools.mcp_bridge import collect_mcp_tools, _populate_mcp_bridges
 
-    _mcp_bridges, _mcp_tools = collect_mcp_tools()
+    _boot_bridges, _mcp_tools = collect_mcp_tools()
     _all_tools.extend(_mcp_tools)
+    # Shut down the bootstrap bridges — they were only needed to discover
+    # tool schemas.  Each ToolRuntime will create its own.
+    for _b in _boot_bridges:
+        try:
+            _b._shutdown_loop()
+        except Exception:
+            pass
+    del _boot_bridges
 except Exception:
-    _mcp_bridges, _mcp_tools = [], []
+    _mcp_tools = []
 
 _TOOL_PROFILES: dict[str, set[str] | None] = {
     "full": None,
@@ -62,7 +73,13 @@ class ToolRuntime:
         tool_profile: str = "full",
     ):
         self._tool_profile = tool_profile
-        self._mcp_bridges: list = list(_mcp_bridges)
+
+        # Each ToolRuntime gets its OWN set of MCP bridge instances so that
+        # parallel agents do not share asyncio event loops or stdio pipes.
+        # This prevents the "readuntil() called while another coroutine is
+        # already waiting for incoming data" race condition.
+        self._mcp_bridges: list = self._create_own_bridges()
+
         allowed = _TOOL_PROFILES.get(tool_profile)
 
         self._tool_table = {
@@ -124,6 +141,14 @@ class ToolRuntime:
 
         self.use_strategy_manager = use_strategy_manager
         self._codebase_context: str | None = None
+
+    @staticmethod
+    def _create_own_bridges() -> list:
+        """Create a fresh set of MCPToolBridge instances for this ToolRuntime."""
+        try:
+            return _populate_mcp_bridges()
+        except Exception:
+            return []
 
     def _register_profiler_mcp(self):
         """Register only the profiler-mcp tool."""
