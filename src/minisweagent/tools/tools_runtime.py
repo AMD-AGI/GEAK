@@ -20,13 +20,8 @@ try:
 
     _boot_bridges, _mcp_tools = collect_mcp_tools()
     _all_tools.extend(_mcp_tools)
-    # Shut down the bootstrap bridges — they were only needed to discover
-    # tool schemas.  Each ToolRuntime will create its own.
-    for _b in _boot_bridges:
-        try:
-            _b._shutdown_loop()
-        except Exception:
-            pass
+    # Bootstrap bridges are only needed for schema discovery; discard the
+    # references.  Their atexit handlers will clean up at interpreter exit.
     del _boot_bridges
 except Exception:
     _mcp_tools = []
