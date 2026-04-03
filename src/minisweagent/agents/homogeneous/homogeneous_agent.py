@@ -95,6 +95,7 @@ def run_homogeneous_agent(
     # Configure agent for homogeneous mode
     agent_config["mode"] = "yolo"
     agent_config["confirm_exit"] = False
+    agent_config.setdefault("use_strategy_manager", True)
     agent_config["num_parallel"] = final_num_parallel
     agent_config["gpu_ids"] = final_gpu_ids
     agent_config["repo"] = str(final_repo)
