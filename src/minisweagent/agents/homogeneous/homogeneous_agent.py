@@ -117,6 +117,7 @@ def run_homogeneous_agent(
     agent = ParallelAgent(model, env, **agent_config)
 
     try:
+        task_content = task_content + "\n\n" + "The current worktree is: " + str(final_repo)
         best_result = agent.run(
             task_content,
             output=final_traj_output,

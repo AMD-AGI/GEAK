@@ -55,6 +55,8 @@ class StrategyAgent(InteractiveAgent):
             patch_output_dir=self.config.patch_output_dir,
             tool_profile=self.config.tool_profile,
         )
+        if self.config.disabled_tools:
+            self.toolruntime.disable_tools(self.config.disabled_tools)
         self._setup_save_and_test_context()
 
         # Override model tools so the LLM only sees dispatchable tools
