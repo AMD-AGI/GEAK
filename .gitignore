@@ -203,3 +203,4 @@ profile.json
 tests/test_data/
 optimized_silu.hip.cpp
 CLAUDE.md
+knowledge-base-descriptors/

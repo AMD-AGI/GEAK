@@ -274,6 +274,7 @@ class DefaultAgent:
     def run(self, task: str, **kwargs) -> tuple[str, str]:
         """Run step() until agent is finished. Return exit status & message"""
         self.extra_template_vars |= {"task": task, **kwargs}
+        self.extra_template_vars["tool_names"] = set(self.toolruntime._tool_table.keys())
         self.messages = []
         self._traj_last_saved_idx = -1
         self.add_message("system", self.render_template(self.config.system_template))

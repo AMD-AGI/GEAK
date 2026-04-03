@@ -214,9 +214,9 @@ def main(
         disabled_tools.append("profiling")
         disabled_tools.append("profile_kernel")
 
-    # RAG MCP toggle: disable RAG tools when rag config is absent
-    rag_cfg = config.get("rag")
-    if not rag_cfg:
+    # RAG MCP toggle: disable RAG tools when rag is not enabled
+    rag_enabled = tools_cfg.get("rag", False)
+    if not rag_enabled:
         disabled_tools.append("query")
         disabled_tools.append("optimize")
 
@@ -448,7 +448,7 @@ def main(
 
     agent_config = dict(config.get("agent", {}))
     # Pass RAG subagent config to agent
-    if rag_cfg and rag_cfg.get("enable_subagent"):
+    if rag_enabled and tools_cfg.get("rag_enable_subagent", False):
         agent_config["rag_enable_subagent"] = True
     agent_config["save_patch"] = True
     agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")

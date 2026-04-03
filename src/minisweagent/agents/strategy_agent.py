@@ -57,6 +57,9 @@ class StrategyAgent(InteractiveAgent):
         )
         self._setup_save_and_test_context()
 
+        if self.config.disabled_tools:
+            self.toolruntime.disable_tools(self.config.disabled_tools)
+
         # Re-apply RAG subagent wrapping after ToolRuntime rebuild
         if getattr(self.config, "rag_enable_subagent", False):
             try:

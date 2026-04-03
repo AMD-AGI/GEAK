@@ -60,6 +60,13 @@ agent:
        - Explore the directory structure and identify relevant kernel files
        - Understand the current implementation and its context
        - For complex tasks: Use `strategy_manager` tool to create `.optimization_strategies.md` with 3-5 potential optimization strategies
+    {% if 'query' in tool_names %}
+
+    2b. **Knowledge Base Lookup** (Recommended)
+        - Use `query` tool to search for optimization techniques, hardware-specific tips, and code patterns relevant to this kernel
+        - Use `optimize` tool to get targeted optimization suggestions based on your kernel type and bottleneck analysis
+        - Integrate retrieved knowledge into your strategy planning
+    {% endif %}
 
     3. **Establish Baseline Performance** 
        - **CRITICAL**: Measure original implementation performance BEFORE any optimization
@@ -218,4 +225,6 @@ agent:
     - **submit**: Submit final result and complete task
     - **strategy_manager**: Track optimization strategies
     - **profile_kernel**: Profile GPU kernel with rocprof
-    </available_tools>
+    {% if 'query' in tool_names %}- **query**: Search knowledge base for optimization techniques
+    - **optimize**: Get optimization suggestions for specific kernel types
+    {% endif %}</available_tools>
