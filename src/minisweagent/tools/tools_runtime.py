@@ -16,7 +16,7 @@ with open(json_path, encoding="utf-8") as f:
 # Bridge *instances* are created per-ToolRuntime so each agent gets its own
 # subprocess and stdio pipes — required for safe parallel profiling.
 try:
-    from minisweagent.tools.mcp_bridge import collect_mcp_tools, _populate_mcp_bridges
+    from minisweagent.tools.mcp_bridge import _populate_mcp_bridges, collect_mcp_tools
 
     _boot_bridges, _mcp_tools = collect_mcp_tools()
     _all_tools.extend(_mcp_tools)
