@@ -28,6 +28,8 @@ _ROOT_GENERATED_FILES = {
     "cmake_install.cmake",
     "Makefile",
     "_geak_eval_cmd.sh",
+    "baseline_metrics.json",
+    "profile.json",
 }
 
 _ROOT_GENERATED_GLOBS = (
@@ -96,6 +98,8 @@ def generated_helper_excludes(cwd: Path | None = None) -> list[str]:
         "rocprim_version.hpp",
         "_geak_test_cmd_*.sh",
         "_geak_eval_cmd.sh",
+        "baseline_metrics.json",
+        "profile.json",
     ]
     if cwd is not None and cwd.is_dir():
         for child in cwd.iterdir():
