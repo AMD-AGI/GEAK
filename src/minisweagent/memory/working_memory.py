@@ -197,6 +197,7 @@ class WorkingMemory:
 
         if baseline_metrics_path and Path(baseline_metrics_path).exists():
             import json
+
             bm = json.loads(Path(baseline_metrics_path).read_text())
             if bm.get("benchmark_duration_us"):
                 self.baseline_latency_ms = float(bm["benchmark_duration_us"]) / 1000.0
