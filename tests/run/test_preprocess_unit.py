@@ -1080,9 +1080,11 @@ class TestRewriteRelativeImports:
             try:
                 sys.path.insert(0, str(out_dir))
                 sys.path.insert(1, str(repo))
-                # Remove any cached module
+                # Remove only the temp 'ops' package from the cache — do NOT
+                # use a broad "utils" filter which would evict unrelated modules
+                # like minisweagent.run.utils.* and corrupt other workers' state.
                 for key in list(sys.modules):
-                    if "ops" in key or "utils" in key:
+                    if key == "ops" or key.startswith("ops."):
                         del sys.modules[key]
                 import importlib
                 mod = importlib.import_module("ops.utils")
@@ -1092,7 +1094,7 @@ class TestRewriteRelativeImports:
             finally:
                 sys.path[:] = saved
                 for key in list(sys.modules):
-                    if "ops" in key or "utils" in key:
+                    if key == "ops" or key.startswith("ops."):
                         del sys.modules[key]
 
     def test_leaves_absolute_imports_unchanged(self):
