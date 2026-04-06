@@ -630,9 +630,7 @@ def run_preprocessor(
             )
             if not ok_runtime:
                 raise RuntimeError("Deterministic harness execution failed: " + "; ".join(runtime_errors))
-            deterministic_path = _ensure_harness_has_no_kernel_defs(
-                deterministic_path, output_dir, ctx
-            )
+            deterministic_path = _ensure_harness_has_no_kernel_defs(deterministic_path, output_dir, ctx)
             test_command = _build_deterministic_test_command(deterministic_path)
             harness_results = candidate_results
             ctx["harness_path"] = deterministic_path
@@ -716,9 +714,7 @@ def run_preprocessor(
                     if not ok_runtime:
                         continue
 
-                    candidate_harness = _ensure_harness_has_no_kernel_defs(
-                        candidate_harness, output_dir, ctx
-                    )
+                    candidate_harness = _ensure_harness_has_no_kernel_defs(candidate_harness, output_dir, ctx)
                     candidate_cmd, candidate_harness, candidate_results = _materialize_preprocessor_harness(
                         test_command=candidate_cmd,
                         harness_path=candidate_harness,

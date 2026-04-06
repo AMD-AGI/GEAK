@@ -345,7 +345,9 @@ def _rewrite_materialized_harness_source(
             source_text = pattern.sub(bootstrap, source_text, count=1)
             break
     else:
-        import_block = re.compile(r"(?ms)\A((?:from __future__ import annotations\n)?(?:import .+\n|from .+ import .+\n)+)")
+        import_block = re.compile(
+            r"(?ms)\A((?:from __future__ import annotations\n)?(?:import .+\n|from .+ import .+\n)+)"
+        )
         match = import_block.match(source_text)
         if match:
             source_text = source_text[: match.end()] + "\n" + bootstrap + source_text[match.end() :]
@@ -753,9 +755,7 @@ def _detect_and_split_c_like_kernel_from_harness(
     clean_kernel_path.write_text(clean_source)
 
     harness_source = (
-        f'#include "{clean_kernel_path.name}"\n\n'
-        + "\n\n".join(chunk for chunk in harness_chunks if chunk)
-        + "\n"
+        f'#include "{clean_kernel_path.name}"\n\n' + "\n\n".join(chunk for chunk in harness_chunks if chunk) + "\n"
     )
     c_harness_path.write_text(harness_source)
 
@@ -840,7 +840,9 @@ def detect_and_split_kernel_from_harness(
         return any(s.startswith(pfx) for pfx in ("pytest", "unittest", "mock", "fixture"))
 
     def _node_source(node: ast.AST) -> str:
-        start = (node.decorator_list[0].lineno if hasattr(node, "decorator_list") and node.decorator_list else node.lineno) - 1
+        start = (
+            node.decorator_list[0].lineno if hasattr(node, "decorator_list") and node.decorator_list else node.lineno
+        ) - 1
         end = node.end_lineno
         return "".join(source_lines[start:end])
 
@@ -856,10 +858,7 @@ def detect_and_split_kernel_from_harness(
             isinstance(test, ast.Compare)
             and isinstance(test.left, ast.Name)
             and test.left.id == "__name__"
-            and any(
-                isinstance(c, ast.Constant) and c.value == "__main__"
-                for c in test.comparators
-            )
+            and any(isinstance(c, ast.Constant) and c.value == "__main__" for c in test.comparators)
         )
 
     # Map of fn_name -> list of ast nodes (handles duplicate function names)
@@ -906,7 +905,10 @@ def detect_and_split_kernel_from_harness(
 
     # Add functions called directly from __main__ block as seeds
     if main_block is not None:
-        seeds.update(_collect_called_names(main_block) - {name for name, nodes in fn_map.items() if all(_is_triton_fn(n) for n in nodes)})
+        seeds.update(
+            _collect_called_names(main_block)
+            - {name for name, nodes in fn_map.items() if all(_is_triton_fn(n) for n in nodes)}
+        )
 
     if not seeds:
         logger.debug("No test roots found in %s; skipping split", harness_path)
@@ -936,7 +938,9 @@ def detect_and_split_kernel_from_harness(
 
     # ── compute line ranges for nodes to strip from original ───────────
     def _node_line_range(node: ast.AST) -> tuple[int, int]:
-        start = (node.decorator_list[0].lineno if hasattr(node, "decorator_list") and node.decorator_list else node.lineno) - 1
+        start = (
+            node.decorator_list[0].lineno if hasattr(node, "decorator_list") and node.decorator_list else node.lineno
+        ) - 1
         return start, node.end_lineno  # start 0-indexed, end 1-indexed (exclusive)
 
     strip_line_set: set[int] = set()
