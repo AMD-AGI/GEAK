@@ -451,7 +451,7 @@ def _run_task_agent(
                 evals_text += f"- Canonical benchmark speedup: {canonical_speedup}x\n"
                 if fb:
                     evals_text += f"- Verified kernel time: {fb.get('kernel_time_ms', 'N/A')}ms\n"
-                profile = rev.get("profile", {})
+                profile = rev.get("profile_comparison", {})
                 if profile:
                     evals_text += f"- Profile comparison: {json.dumps(profile, default=str)[:500]}\n"
                 evals_text += f"- Best patch: {rev.get('best_patch', 'N/A')}\n\n"
