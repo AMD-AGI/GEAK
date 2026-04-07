@@ -100,6 +100,8 @@ def _derive_output_dir_and_traj(output: Path | None, kernel_name: str | None) ->
         output_dir = (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
         return output_dir, output_dir / "trajectory.json"
 
+    output = output.resolve()
+
     if output.suffix:
         return output.parent, output
 

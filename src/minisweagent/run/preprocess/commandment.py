@@ -161,16 +161,16 @@ def _generate_simple(
 ) -> str:
     """Generate COMMANDMENT for a simple (non-inner) kernel.
 
-    All paths are expressed via environment variables so that the
-    COMMANDMENT can be executed verbatim in any worktree:
+    The harness path is hardcoded at generation time so agents cannot
+    accidentally override it.  Dynamic paths use environment variables:
 
       * ``GEAK_WORK_DIR``  -- the agent's working copy / worktree root
       * ``GEAK_REPO_ROOT`` -- the original repository root
       * ``GEAK_GPU_DEVICE`` -- GPU device ID
-      * ``GEAK_HARNESS``   -- absolute path to the test harness script
     """
+    harness_abs = str(harness_path.resolve())
     warmup_block = _warmup_block(
-        "${GEAK_WORK_DIR}/run.sh ${GEAK_HARNESS} --profile > /dev/null 2>&1 || true",
+        f"${{GEAK_WORK_DIR}}/run.sh {harness_abs} --profile > /dev/null 2>&1 || true",
         warmup_runs,
     )
 
@@ -199,17 +199,17 @@ def _generate_simple(
 {setup_section}
 
 ## CORRECTNESS
-${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --correctness
+${{GEAK_WORK_DIR}}/run.sh {harness_abs} --correctness
 
 ## PROFILE
 {warmup_block}
-kernel-profile "${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json
+kernel-profile "${{GEAK_WORK_DIR}}/run.sh {harness_abs} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json
 
 ## BENCHMARK
-${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+${{GEAK_WORK_DIR}}/run.sh {harness_abs} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
 
 ## FULL_BENCHMARK
-${{GEAK_WORK_DIR}}/run.sh ${{GEAK_HARNESS}} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+${{GEAK_WORK_DIR}}/run.sh {harness_abs} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
 """
 
 
@@ -245,7 +245,7 @@ def _generate_inner_kernel(
     copy_cmd = f"cp ${{GEAK_WORK_DIR}}/{kernel_path.name} ${{GEAK_WORK_DIR}}/{rel_dir}/{basename}"
 
     warmup_block = _warmup_block(
-        "${GEAK_WORK_DIR}/run_harness.sh --profile > /dev/null 2>&1 || true",
+        "${GEAK_WORK_DIR}/run_harness.sh --profile > /dev/null 2>&1 || true",  # harness path is baked into run_harness.sh
         warmup_runs,
     )
 
@@ -256,9 +256,10 @@ def _generate_inner_kernel(
     if init_touch:
         setup_lines.append(f"touch {init_touch}")
 
+    harness_abs = str(harness_path.resolve())
     setup_lines.append(
-        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
-        'export HIP_VISIBLE_DEVICES=%s\\nexec python3 ${GEAK_HARNESS} "$@"\\n\' '
+        f"printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${{PYTHONPATH}}\\n"
+        f'export HIP_VISIBLE_DEVICES=%s\\nexec python3 {harness_abs} "$@"\\n\' '
         '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" > ${GEAK_WORK_DIR}/run_harness.sh '
         "&& chmod +x ${GEAK_WORK_DIR}/run_harness.sh"
     )

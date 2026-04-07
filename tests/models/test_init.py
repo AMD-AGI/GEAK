@@ -23,7 +23,8 @@ class TestGetModelName:
 
     def test_env_var_fallback(self):
         """Test that environment variable is used when no config provided."""
-        with patch.dict(os.environ, {"MSWEA_MODEL_NAME": "env-model"}):
+        # GEAK_MODEL takes precedence over MSWEA_MODEL_NAME, so explicitly unset it
+        with patch.dict(os.environ, {"MSWEA_MODEL_NAME": "env-model", "GEAK_MODEL": ""}, clear=False):
             assert get_model_name(None, {}) == "env-model"
 
     def test_config_fallback(self):
