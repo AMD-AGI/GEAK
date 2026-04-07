@@ -125,15 +125,6 @@ class AmdLlmModelBase:
         """Parse the raw vendor response into the standard response dict."""
         raise NotImplementedError
 
-    def set_tools(self, tools: list[dict]) -> None:
-        """Replace the active tool schema (used by strategy / heterogeneous agents)."""
-        filtered = tools
-        if not self.config.profiling:
-            filtered = [t for t in filtered if t.get("name") != "profiling"]
-        if not self.config.bash_tool:
-            filtered = [t for t in filtered if t.get("name") != "bash"]
-        self.tools = filtered
-
     def format_messages(self, messages: list[dict]) -> Any:
         """Convert standard messages to vendor-specific format."""
         raise NotImplementedError
