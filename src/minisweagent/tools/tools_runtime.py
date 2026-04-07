@@ -12,13 +12,30 @@ json_path = Path(__file__).parent / "tools.json"
 with open(json_path, encoding="utf-8") as f:
     _all_tools = json.load(f)
 
-try:
-    from minisweagent.tools.mcp_bridge import collect_mcp_tools
+_mcp_bridges: list = []
+_mcp_tools: list = []
+_mcp_collected = False
 
-    _mcp_bridges, _mcp_tools = collect_mcp_tools()
-    _all_tools.extend(_mcp_tools)
-except Exception:
-    _mcp_bridges, _mcp_tools = [], []
+
+def _ensure_mcp_collected() -> None:
+    """Lazily start MCP servers and collect their tools.
+
+    Called on first ToolRuntime instantiation rather than at module import
+    time, so that ``geak --help`` and other import-only paths do not spawn
+    MCP server subprocesses and hang.
+    """
+    global _mcp_bridges, _mcp_tools, _mcp_collected
+    if _mcp_collected:
+        return
+    _mcp_collected = True
+    try:
+        from minisweagent.tools.mcp_bridge import collect_mcp_tools
+
+        _mcp_bridges, _mcp_tools = collect_mcp_tools()
+        _all_tools.extend(_mcp_tools)
+    except Exception:
+        pass
+
 
 _TOOL_PROFILES: dict[str, set[str] | None] = {
     "full": None,
@@ -61,6 +78,7 @@ class ToolRuntime:
         patch_output_dir: str | None = None,
         tool_profile: str = "full",
     ):
+        _ensure_mcp_collected()
         self._tool_profile = tool_profile
         self._mcp_bridges: list = list(_mcp_bridges)
         allowed = _TOOL_PROFILES.get(tool_profile)

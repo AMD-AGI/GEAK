@@ -126,16 +126,7 @@ def run_llm_steps(
 
                 insight = extract_insight_from_tool_result(tool_name, result_str, 0)
                 if insight:
-                    insight.step = step
-                    _wm.insights.append(insight)
-                    if len(_wm.insights) > 5:
-                        _wm.insights = _wm.insights[-5:]
-                    if "speedup" in (insight.message or "").lower():
-                        import re as _re
-
-                        _sp = _re.search(r"(\d+\.\d+)x", insight.message)
-                        if _sp:
-                            _wm.update_speedup(float(_sp.group(1)))
+                    _wm.ingest_insight(insight)
             except Exception:
                 pass
 
@@ -377,7 +368,7 @@ def run_heterogeneous_orchestrator(
                 phase=f"round_{round_num}",
             )
 
-            round_eval = post_round_evaluate(ctx, round_num, output_dir, _print)
+            round_eval = post_round_evaluate(ctx, round_num, output_dir)
             if round_eval:
                 if _working_mem:
                     round_eval_dict = round_eval.to_dict() if hasattr(round_eval, "to_dict") else round_eval
@@ -405,7 +396,6 @@ def run_heterogeneous_orchestrator(
                 return finalize_run(
                     ctx,
                     output_dir,
-                    _print,
                     finalize_result=finalize_result,
                     round_eval=round_eval,
                 )
@@ -415,10 +405,6 @@ def run_heterogeneous_orchestrator(
         elif hasattr(model_impl, "tools"):
             model_impl.tools = []
 
-    _print(
-        "[yellow]Orchestrator completed all rounds without calling finalize – auto-selecting best result...[/yellow]"
-        if console
-        else "Orchestrator completed all rounds without calling finalize – auto-selecting best result..."
-    )
+    logger.info("Orchestrator completed all rounds without calling finalize - auto-selecting best result...")
 
-    return finalize_run(ctx, output_dir, _print)
+    return finalize_run(ctx, output_dir)

@@ -100,6 +100,8 @@ def _derive_output_dir_and_traj(output: Path | None, kernel_name: str | None) ->
         output_dir = (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
         return output_dir, output_dir / "trajectory.json"
 
+    output = output.resolve()
+
     if output.suffix:
         return output.parent, output
 
@@ -186,7 +188,8 @@ def main(
     tee_out, tee_err = TeeOutput(sys.stdout), TeeOutput(sys.stderr)
     sys.stdout, sys.stderr = tee_out, tee_err
 
-    configure_if_first_time()
+    if sys.stdin.isatty():
+        configure_if_first_time()
 
     # 1) Config merge
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
@@ -298,8 +301,14 @@ def main(
         test_command = parsed_config["test_command"]
     if num_parallel is None:
         num_parallel = _as_int(parsed_config.get("num_parallel"))
-    if gpu_ids is None and parsed_config.get("gpu_ids"):
-        gpu_ids = parsed_config["gpu_ids"]
+    if gpu_ids is None and parsed_config.get("gpu_ids") is not None:
+        _parsed_gpu_ids = parsed_config["gpu_ids"]
+        if isinstance(_parsed_gpu_ids, list):
+            gpu_ids = ",".join(map(str, _parsed_gpu_ids))
+        else:
+            gpu_ids = str(_parsed_gpu_ids)
+        if not gpu_ids.strip():
+            gpu_ids = None
 
     # Apply config/model/output_dir extracted from task (CLI flags take priority)
     if config_spec is None and parsed_config.get("config"):
@@ -323,6 +332,8 @@ def main(
         raise typer.Exit(1)
 
     parsed_gpu_ids = parse_gpu_ids(gpu_ids)
+    if num_parallel is None and isinstance(gpu_ids, str) and gpu_ids.strip():
+        num_parallel = len(parsed_gpu_ids)
     metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
 
     kernel_name_for_output = parsed_config.get("kernel_name")

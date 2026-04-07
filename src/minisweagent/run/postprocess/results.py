@@ -38,13 +38,21 @@ def parse_reported_speedup(total_speedup: str | None) -> float | None:
     return None
 
 
+def _get_benchmark_section(round_eval: dict[str, Any]) -> dict[str, Any]:
+    """Return the benchmark results section, checking both key names."""
+    for key in ("full_benchmark", "benchmark"):
+        section = round_eval.get(key)
+        if isinstance(section, dict):
+            return section
+    return {}
+
+
 def extract_verified_speedup(round_eval: dict[str, Any]) -> float | None:
-    """Return only FULL_BENCHMARK verified speedup."""
-    full_benchmark = round_eval.get("full_benchmark", {})
-    if isinstance(full_benchmark, dict):
-        verified = full_benchmark.get("verified_speedup")
-        if isinstance(verified, (int, float)):
-            return float(verified)
+    """Return the verified speedup from the benchmark section."""
+    section = _get_benchmark_section(round_eval)
+    verified = section.get("verified_speedup")
+    if isinstance(verified, (int, float)):
+        return float(verified)
     return None
 
 
@@ -60,12 +68,11 @@ def round_eval_label(round_eval: dict[str, Any]) -> str:
 
 
 def round_eval_candidate_ms(round_eval: dict[str, Any]) -> float | None:
-    """Return the candidate latency from FULL_BENCHMARK, if available."""
-    full_benchmark = round_eval.get("full_benchmark", {})
-    if isinstance(full_benchmark, dict):
-        candidate = full_benchmark.get("candidate_ms")
-        if isinstance(candidate, (int, float)) and candidate > 0:
-            return float(candidate)
+    """Return the candidate latency from the benchmark section, if available."""
+    section = _get_benchmark_section(round_eval)
+    candidate = section.get("candidate_ms")
+    if isinstance(candidate, (int, float)) and candidate > 0:
+        return float(candidate)
     return None
 
 
@@ -127,11 +134,11 @@ def rewrite_summary_with_verified_selection(
     """Return one canonical verified final-selection summary block."""
     best_patch_label = format_patch_label(round_eval.get("best_patch"))
     best_task = round_eval.get("best_task") or Path(round_eval.get("best_patch", "")).parent.name or "unknown"
-    full_benchmark = round_eval.get("full_benchmark", {})
-    baseline_ms = full_benchmark.get("baseline_ms") if isinstance(full_benchmark, dict) else None
-    candidate_ms = full_benchmark.get("candidate_ms") if isinstance(full_benchmark, dict) else None
-    baseline_speedup = full_benchmark.get("baseline_reported_speedup") if isinstance(full_benchmark, dict) else None
-    candidate_speedup = full_benchmark.get("candidate_reported_speedup") if isinstance(full_benchmark, dict) else None
+    bench_section = _get_benchmark_section(round_eval)
+    baseline_ms = bench_section.get("baseline_ms")
+    candidate_ms = bench_section.get("candidate_ms")
+    baseline_speedup = bench_section.get("baseline_reported_speedup")
+    candidate_speedup = bench_section.get("candidate_reported_speedup")
 
     lines = [
         "## Verified Final Selection",
@@ -240,10 +247,10 @@ def merge_round_evaluation_into_final_report(
         best_patch_path = str(merged.get("best_patch") or round_eval.get("best_patch") or "")
         if best_patch_path and Path(best_patch_path).is_file():
             merged["best_patch_size_bytes"] = Path(best_patch_path).stat().st_size
-        full_benchmark = round_eval.get("full_benchmark", {})
-        if isinstance(full_benchmark, dict):
-            baseline_ms = full_benchmark.get("baseline_ms")
-            candidate_ms = full_benchmark.get("candidate_ms")
+        bench_section = _get_benchmark_section(round_eval)
+        if bench_section:
+            baseline_ms = bench_section.get("baseline_ms")
+            candidate_ms = bench_section.get("candidate_ms")
             patch_sz = merged.get("best_patch_size_bytes")
             if isinstance(baseline_ms, (int, float)) and isinstance(candidate_ms, (int, float)):
                 analysis = (
@@ -273,7 +280,6 @@ def post_round_evaluate(
     ctx: dict[str, Any],
     round_num: int,
     output_dir: Path,
-    _print,
 ) -> Any:
     """Run post-round evaluation and update ctx with best-patch tracking.
 
@@ -291,7 +297,7 @@ def post_round_evaluate(
     from minisweagent.run.postprocess.evaluation import evaluate_round_best
 
     results_dir = output_dir / "results" / f"round_{round_num}"
-    round_eval = evaluate_round_best(ctx, round_num, results_dir, _print)
+    round_eval = evaluate_round_best(ctx, round_num, results_dir)
     if round_eval is None:
         return None
 
@@ -329,7 +335,6 @@ def _dict_to_final_report(d: dict[str, Any]) -> Any:
 def finalize_run(
     ctx: dict[str, Any],
     output_dir: Path,
-    _print,
     *,
     finalize_result: dict[str, Any] | None = None,
     round_eval: Any = None,
@@ -377,13 +382,12 @@ def finalize_run(
             report_path.write_text(json.dumps(finalize_result, indent=2, default=str))
             logger.info("Wrote final_report.json (no verified round evaluations)")
         return _dict_to_final_report(finalize_result)
-    report_dict = auto_finalize(ctx, _print)
+    report_dict = auto_finalize(ctx)
     return _dict_to_final_report(report_dict)
 
 
 def auto_finalize(
     ctx: dict[str, Any],
-    _print,
 ) -> dict[str, Any]:
     """Auto-select the best result across all rounds when step limit is hit.
 
@@ -473,13 +477,13 @@ def auto_finalize(
             report,
             best_verified_round_eval,
         )
-        _print(f"Auto-finalized: {merged.get('verification_note', summary_text)}")
-        _print(f"Report written to: {report_path}")
+        logger.info("Auto-finalized: %s", merged.get("verification_note", summary_text))
+        logger.info("Report written to: %s", report_path)
         return merged
 
     report_path.write_text(json.dumps(report, indent=2))
-    _print(f"Auto-finalized: {summary_text}")
-    _print(f"Report written to: {report_path}")
+    logger.info("Auto-finalized: %s", summary_text)
+    logger.info("Report written to: %s", report_path)
 
     if not best_overall:
         return report

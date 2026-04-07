@@ -1,0 +1,18 @@
+task_type: triton_geak
+source_file_path:
+- kernel.py
+harness_path: test_kernel_harness.py
+aiter_commit: 22122345c03991cb8026947b8df05e02f50d1f88
+compile_command:
+- python3 -c "import ast; ast.parse(open('kernel.py').read())"
+correctness_command:
+- python3 test_kernel_harness.py --correctness
+performance_command:
+- python3 test_kernel_harness.py --full-benchmark
+target_kernel_functions:
+- _decode_grouped_att_m_fwd_rope
+- _decode_softmax_reducev_fwd
+prompt:
+  instructions: Optimize the MLA decode attention Triton kernel for AMD MI300X GPU.
+    The kernel implements grouped multi-latent attention with fused RoPE for decode-phase
+    inference.

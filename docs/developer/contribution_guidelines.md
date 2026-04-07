@@ -181,7 +181,6 @@ GEAK follows [Semantic Versioning](https://semver.org/): `vMAJOR.MINOR.PATCH`.
    ```
 6. **Merge into `main`** via PR: `release/v3.2 → main`. Get review + merge.
 7. **Merge back into `dev`** via PR: `release/v3.2 → dev` (to bring in any release-branch fixes).
-8. GitHub Actions (or manual) publishes the release artifacts.
 
 ### Hotfixes
 

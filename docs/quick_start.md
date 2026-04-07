@@ -65,7 +65,7 @@ geak --yolo --model claude-sonnet-4.5 -t "Your task here"
 ```bash
 export MSWEA_MODEL_NAME="openai/gpt-5"
 export OPENAI_API_KEY="YOUR_KEY"
-geak --model-class litellm --kernel-path /path/to/kernel/file --repo /path/to/kernel/repo
+geak --model-class litellm --kernel-url /path/to/kernel/file --repo /path/to/kernel/repo
 ```
 
 **Example 3 — LiteLLM + Anthropic**
@@ -73,7 +73,7 @@ geak --model-class litellm --kernel-path /path/to/kernel/file --repo /path/to/ke
 ```bash
 export MSWEA_MODEL_NAME="anthropic/claude-sonnet-4-5-20250929"
 export ANTHROPIC_API_KEY="YOUR_KEY"
-geak --model-class litellm --kernel-path /path/to/kernel/file --repo /path/to/kernel/repo
+geak --model-class litellm --kernel-url /path/to/kernel/file --repo /path/to/kernel/repo
 ```
 
 Other LiteLLM providers (**Azure**, **Vertex**, …): set the **`MSWEA_MODEL_NAME`** / **`GEAK_MODEL`** string and provider env vars per [LiteLLM](https://docs.litellm.ai/) and pass **`--model-class litellm`** when the merged YAML is not already LiteLLM.
@@ -114,7 +114,7 @@ geak -t "Optimize the kernel from /path/to/aiter, specifically aiter/ops/triton/
 ### Typical kernel optimization (single agent)
 
 ```bash
-geak --kernel-path /path/to/kernel/file \
+geak --kernel-url /path/to/kernel/file \
   --repo /path/to/kernel/repo \
   --task "Optimize the block_reduce kernel" \
 ```
@@ -126,7 +126,7 @@ Pass **`--gpu-ids`** as a comma-separated list of device indices (**`0,1,2,3`**)
 ```bash
 geak --num-parallel 4 \
   --repo /path/to/kernel/repo \
-  --kernel-path /path/to/kernel/file \
+  --kernel-url /path/to/kernel/file \
   --task "Optimize block_reduce. Metric: Extract Bandwidth in GB/s (higher is better)" \
   --gpu-ids 0,1,2,3 
 ```
@@ -200,24 +200,41 @@ Options match the Typer **`Option`** definitions in **`main`** (same names in **
 | **`-o`**, **`--output`** | Trajectory **file** or output **directory**. Default is `./optimization_logs/kernel_name_timestamp` |
 | **`--exit-immediately`** | Sets **`agent.confirm_exit`** to **`False`** in config. |
 | **`--repo`** | Repository root for kernel. Even if the kernel code is in a single file, it needs to be put into a repository. |
-| **`--kernel-url`**, **`--kernel-path`** | Kernel **source file** path or URL. **Required** unless **`kernel_target`** is supplied another way (e.g. parsed from **`--task "kernel url is xxx"`**). **URLs** are resolved by **`run/preprocess/resolve_kernel_url.py`** (clone/checkout under run output). |
+| **`--kernel-url`** | Kernel **source file** path or URL. **Required** unless **`kernel target`** is supplied another way (e.g. parsed from **`--task "kernel url is xxx"`**). **URLs** are resolved by **`run/preprocess/resolve_kernel_url.py`** (clone/checkout under run output). |
 | **`--num-parallel`** | Number of parallel agent runs. |
 | **`--gpu-ids`** | Comma-separated GPU device indices. |
 | **`--test-command`**, **`--test_command`** | test command used to test the correctness and performance of the kernel. |
 
 ## 4. Outputs
 
-Default artifact root: **`optimization_logs/`**, with a per-run directory like **`optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`**.
+GEAK saves patches + test logs so the optimization progress and the results are transparent.
 
-Parallel layout example:
+- **Default output base**: `optimization_logs/`
+- **Auto-generated run directory**: `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`
 
-```text
+Typical structure (parallel run):
+
+```bash
 optimization_logs/<kernel>_<timestamp>/
 ├── parallel_0/
 │   ├── patch_0.patch
 │   ├── patch_0_test.txt
 │   └── agent_0.log
 ├── parallel_1/
+│   └── ...
+├── best_results.json
+└── select_agent.log
+```
+
+Structure for triton kernels:
+
+```bash
+optimization_logs/<kernel>_<timestamp>/
+├── results/round_1/<kernel>-<strategy_0>/
+│   ├── patch_0.patch
+│   ├── patch_0_test.txt
+│   └── task_0.log
+├── results/round_1/<kernel>-<strategy_1>/
 │   └── ...
 ├── best_results.json
 └── select_agent.log
