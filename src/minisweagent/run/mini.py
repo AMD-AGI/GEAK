@@ -188,7 +188,8 @@ def main(
     tee_out, tee_err = TeeOutput(sys.stdout), TeeOutput(sys.stderr)
     sys.stdout, sys.stderr = tee_out, tee_err
 
-    configure_if_first_time()
+    if sys.stdin.isatty():
+        configure_if_first_time()
 
     # 1) Config merge
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
