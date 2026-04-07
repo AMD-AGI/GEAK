@@ -72,7 +72,7 @@ tools_list = _all_tools
 class ToolRuntime:
     def __init__(
         self,
-        use_strategy_manager: bool = False,
+        use_strategy_manager: bool = True,
         strategy_file: str = ".optimization_strategies.md",
         on_strategy_change=None,
         patch_output_dir: str | None = None,

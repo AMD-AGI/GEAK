@@ -153,6 +153,7 @@ agent:
        For `bash` tool, directory or environment variable changes are not persistent. Every action is executed in a new subshell.
        However, you can prefix any bash command with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
     3. Ignore policy: When analyzing logs / drawing conclusions / optimizing, IGNORE all information related to parallel execution or hardware assignment (e.g., "parallel X runs", "gpu idx N", "device id", multi-GPU, threads, streams, scheduling, affinity). This information is already handled by the backend; it MUST NOT enter your reasoning, MUST NOT influence decisions, and MUST NOT be mentioned in the final answer.
+    4. All code edits MUST stay inside the current worktree. Never write files using absolute paths outside the current worktree.
 
     <system_information>
     {{system}} {{release}} {{version}} {{machine}}
