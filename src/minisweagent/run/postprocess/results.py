@@ -486,6 +486,7 @@ def auto_finalize(
     best_verified_round_eval = select_best_verified_round_evaluation(output_dir)
     report_path = output_dir / "final_report.json"
     if best_verified_round_eval is not None:
+        report["speedup_source"] = "FULL_BENCHMARK verified result"
         merged = merge_round_evaluation_into_final_report(
             ctx,
             output_dir,
@@ -496,6 +497,7 @@ def auto_finalize(
         logger.info("Report written to: %s", report_path)
         return merged
 
+    report["speedup_source"] = "agent-reported benchmark (no FULL_BENCHMARK verified result available)"
     report_path.write_text(json.dumps(report, indent=2))
     logger.info("Auto-finalized: %s", summary_text)
     logger.info("Report written to: %s", report_path)
