@@ -1,0 +1,24 @@
+# GEAK Online Service Dependencies
+
+# Web Framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+
+# HTTP Client
+httpx>=0.26.0
+aiofiles>=23.2.1
+
+# Database
+aiosqlite>=0.19.0
+
+# Configuration
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# Utilities
+pyyaml>=6.0.1
+
+# MCP (Model Context Protocol)
+mcp>=1.0.0
