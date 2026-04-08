@@ -80,6 +80,10 @@ class AmdLlmModel:
     # Forwarded methods
     # ------------------------------------------------------------------
 
+    def set_tools(self, tools: list[dict]) -> None:
+        """Replace the active tool schema (forwarded to the vendor implementation)."""
+        self._impl.set_tools(tools)
+
     def query(self, messages: list[dict], **kwargs) -> dict:
         return self._impl.query(messages, **kwargs)
 
