@@ -261,13 +261,10 @@ def run_heterogeneous_orchestrator(
                 notebook_dir=_wm_notebook_dir,
                 notebook_writer_id="orchestrator",
             )
-            _bm_dict = preprocess_ctx.get("baseline_metrics") or {}
-            if _bm_dict.get("bottleneck"):
-                _working_mem.bottleneck_type = str(_bm_dict["bottleneck"])
-            if _bm_dict.get("benchmark_duration_us"):
-                _working_mem.baseline_latency_ms = float(_bm_dict["benchmark_duration_us"]) / 1000.0
-            elif _bm_dict.get("duration_us"):
-                _working_mem.baseline_latency_ms = float(_bm_dict["duration_us"]) / 1000.0
+            _working_mem.load_baseline_from_artifacts(
+                baseline_metrics_path=str(output_dir / "baseline_metrics.json"),
+                benchmark_baseline_path=str(output_dir / "benchmark_baseline.txt"),
+            )
             _working_mem.sync_notebook_baseline()
             ctx["working_memory"] = _working_mem
     except Exception as _wm_exc:

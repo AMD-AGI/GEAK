@@ -182,6 +182,76 @@ class WorkingMemory:
             category = name.split("(")[0].strip()
             self.failed_category_counts[category] = self.failed_category_counts.get(category, 0) + 1
 
+    def load_baseline_from_artifacts(
+        self,
+        baseline_metrics_path: str | None = None,
+        benchmark_baseline_path: str | None = None,
+    ) -> None:
+        """Load baseline from preprocessing artifacts.
+
+        Reads profiler metrics first, then overrides with the harness
+        baseline (``GEAK_RESULT_LATENCY_MS``) so that speedup is computed
+        against the same metric agents optimize.
+
+        Harness baseline sources (checked in order):
+        1. ``benchmark_baseline.txt`` — written by preprocessor for some paths
+        2. ``harness_results.json`` — always written; contains benchmark stdout
+        """
+        from pathlib import Path
+
+        if baseline_metrics_path and Path(baseline_metrics_path).exists():
+            import json
+
+            bm = json.loads(Path(baseline_metrics_path).read_text())
+            if bm.get("benchmark_duration_us"):
+                self.baseline_latency_ms = float(bm["benchmark_duration_us"]) / 1000.0
+            elif bm.get("duration_us"):
+                self.baseline_latency_ms = float(bm["duration_us"]) / 1000.0
+            if bm.get("bottleneck"):
+                self.bottleneck_type = str(bm["bottleneck"])
+
+        harness_latency = self._extract_harness_baseline(benchmark_baseline_path)
+        if harness_latency is not None:
+            self.baseline_latency_ms = harness_latency
+
+    @staticmethod
+    def _extract_harness_baseline(benchmark_baseline_path: str | None) -> float | None:
+        """Extract GEAK_RESULT_LATENCY_MS from harness artifacts.
+
+        Checks ``benchmark_baseline.txt`` first, then falls back to the
+        benchmark entry in ``harness_results.json`` (sibling file).
+        """
+        from pathlib import Path
+
+        if benchmark_baseline_path and Path(benchmark_baseline_path).exists():
+            m = re.search(
+                r"GEAK_RESULT_LATENCY_MS=([\d.]+(?:e[+-]?\d+)?)",
+                Path(benchmark_baseline_path).read_text(),
+            )
+            if m:
+                return float(m.group(1))
+
+        # Fallback: harness_results.json in the same directory
+        if benchmark_baseline_path:
+            harness_results = Path(benchmark_baseline_path).parent / "harness_results.json"
+            if harness_results.exists():
+                import json
+
+                try:
+                    entries = json.loads(harness_results.read_text())
+                    for entry in entries if isinstance(entries, list) else []:
+                        if entry.get("mode") in ("benchmark", "full-benchmark") and entry.get("success"):
+                            m = re.search(
+                                r"GEAK_RESULT_LATENCY_MS=([\d.]+(?:e[+-]?\d+)?)",
+                                entry.get("stdout", ""),
+                            )
+                            if m:
+                                return float(m.group(1))
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+        return None
+
     def sync_notebook_baseline(self) -> None:
         """Persist the current baseline metadata into the working notebook."""
         if not self._notebook:

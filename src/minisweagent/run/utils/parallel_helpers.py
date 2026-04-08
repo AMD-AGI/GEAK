@@ -601,17 +601,10 @@ def run_pool(
                         notebook_dir=_wm_notebook_dir,
                         notebook_writer_id=f"{task.label or f'task_{task_id}'}-slot-{slot_idx}",
                     )
-                    if _wm_bm_path and Path(_wm_bm_path).exists():
-                        _bm = json.loads(Path(_wm_bm_path).read_text())
-                        if _bm.get("duration_us"):
-                            _wm.baseline_latency_ms = float(_bm["duration_us"]) / 1000.0
-                        if _bm.get("bottleneck"):
-                            _wm.bottleneck_type = str(_bm["bottleneck"])
-                    if _wm_bb_path and Path(_wm_bb_path).exists():
-                        _bb_text = Path(_wm_bb_path).read_text()
-                        _lat_m = re.search(r"GEAK_RESULT_LATENCY_MS=(\d+\.\d+)", _bb_text)
-                        if _lat_m:
-                            _wm.baseline_latency_ms = float(_lat_m.group(1))
+                    _wm.load_baseline_from_artifacts(
+                        baseline_metrics_path=_wm_bm_path,
+                        benchmark_baseline_path=_wm_bb_path,
+                    )
                     _wm.sync_notebook_baseline()
                     # V2: Generate profiler diagnosis from baseline_metrics
                     if _wm_bm_path and Path(_wm_bm_path).exists():
