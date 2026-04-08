@@ -454,6 +454,11 @@ def write_eval_results(
     round_num: int,
 ) -> Any:
     """Write evaluation artifacts to disk and return a typed RoundEvaluation."""
+    fb_raw_check = round_eval.get("full_benchmark") or round_eval.get("benchmark") or {}
+    if isinstance(fb_raw_check, dict) and fb_raw_check.get("verified_speedup") is not None:
+        round_eval["speedup_source"] = "FULL_BENCHMARK verified result"
+    else:
+        round_eval["speedup_source"] = "agent-reported benchmark (no FULL_BENCHMARK verified result available)"
     eval_path = output_dir / f"round_{round_num}_evaluation.json"
     eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
     logger.info("Round evaluation written to: %s", eval_path)
