@@ -261,13 +261,10 @@ def run_heterogeneous_orchestrator(
                 notebook_dir=_wm_notebook_dir,
                 notebook_writer_id="orchestrator",
             )
-            _bm_dict = preprocess_ctx.get("baseline_metrics") or {}
-            if _bm_dict.get("bottleneck"):
-                _working_mem.bottleneck_type = str(_bm_dict["bottleneck"])
-            if _bm_dict.get("benchmark_duration_us"):
-                _working_mem.baseline_latency_ms = float(_bm_dict["benchmark_duration_us"]) / 1000.0
-            elif _bm_dict.get("duration_us"):
-                _working_mem.baseline_latency_ms = float(_bm_dict["duration_us"]) / 1000.0
+            _working_mem.load_baseline_from_artifacts(
+                baseline_metrics_path=str(output_dir / "baseline_metrics.json"),
+                benchmark_baseline_path=str(output_dir / "benchmark_baseline.txt"),
+            )
             _working_mem.sync_notebook_baseline()
             ctx["working_memory"] = _working_mem
     except Exception as _wm_exc:
@@ -368,7 +365,7 @@ def run_heterogeneous_orchestrator(
                 phase=f"round_{round_num}",
             )
 
-            round_eval = post_round_evaluate(ctx, round_num, output_dir, _print)
+            round_eval = post_round_evaluate(ctx, round_num, output_dir)
             if round_eval:
                 if _working_mem:
                     round_eval_dict = round_eval.to_dict() if hasattr(round_eval, "to_dict") else round_eval
@@ -396,7 +393,6 @@ def run_heterogeneous_orchestrator(
                 return finalize_run(
                     ctx,
                     output_dir,
-                    _print,
                     finalize_result=finalize_result,
                     round_eval=round_eval,
                 )
@@ -406,10 +402,6 @@ def run_heterogeneous_orchestrator(
         elif hasattr(model_impl, "tools"):
             model_impl.tools = []
 
-    _print(
-        "[yellow]Orchestrator completed all rounds without calling finalize – auto-selecting best result...[/yellow]"
-        if console
-        else "Orchestrator completed all rounds without calling finalize – auto-selecting best result..."
-    )
+    logger.info("Orchestrator completed all rounds without calling finalize - auto-selecting best result...")
 
-    return finalize_run(ctx, output_dir, _print)
+    return finalize_run(ctx, output_dir)

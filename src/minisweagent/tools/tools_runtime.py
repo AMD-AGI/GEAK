@@ -12,19 +12,34 @@ json_path = Path(__file__).parent / "tools.json"
 with open(json_path, encoding="utf-8") as f:
     _all_tools = json.load(f)
 
-# Collect MCP tool *schemas* once at import time (lightweight, no subprocess).
-# Bridge *instances* are created per-ToolRuntime so each agent gets its own
-# subprocess and stdio pipes — required for safe parallel profiling.
-try:
-    from minisweagent.tools.mcp_bridge import _populate_mcp_bridges, collect_mcp_tools
+# MCP tool schemas are shared at module level.
+# MCP bridge *instances* are created per ToolRuntime so each agent gets its
+# own subprocess and stdio pipes (safe for parallel profiling).
+_mcp_tools: list = []
+_mcp_collected = False
 
-    _boot_bridges, _mcp_tools = collect_mcp_tools()
-    _all_tools.extend(_mcp_tools)
-    # Bootstrap bridges are only needed for schema discovery; discard the
-    # references.  Their atexit handlers will clean up at interpreter exit.
-    del _boot_bridges
-except Exception:
-    _mcp_tools = []
+
+def _ensure_mcp_collected() -> None:
+    """Lazily collect MCP tool schemas.
+
+    Called on first ToolRuntime instantiation rather than at module import
+    time, so that ``geak --help`` and other import-only paths do not spawn
+    MCP server subprocesses and hang.
+    """
+    global _mcp_tools, _mcp_collected
+    if _mcp_collected:
+        return
+    _mcp_collected = True
+    try:
+        from minisweagent.tools.mcp_bridge import collect_mcp_tools
+
+        _boot_bridges, _mcp_tools = collect_mcp_tools()
+        _all_tools.extend(_mcp_tools)
+        # Bootstrap bridges are only needed for schema discovery; discard refs.
+        # Their atexit handlers will clean up at interpreter exit.
+        del _boot_bridges
+    except Exception:
+        _mcp_tools = []
 
 _TOOL_PROFILES: dict[str, set[str] | None] = {
     "full": None,
@@ -61,12 +76,13 @@ tools_list = _all_tools
 class ToolRuntime:
     def __init__(
         self,
-        use_strategy_manager: bool = False,
+        use_strategy_manager: bool = True,
         strategy_file: str = ".optimization_strategies.md",
         on_strategy_change=None,
         patch_output_dir: str | None = None,
         tool_profile: str = "full",
     ):
+        _ensure_mcp_collected()
         self._tool_profile = tool_profile
 
         # Each ToolRuntime gets its OWN set of MCP bridge instances so that
@@ -141,6 +157,8 @@ class ToolRuntime:
     def _create_own_bridges() -> list:
         """Create a fresh set of MCPToolBridge instances for this ToolRuntime."""
         try:
+            from minisweagent.tools.mcp_bridge import _populate_mcp_bridges
+
             return _populate_mcp_bridges()
         except Exception:
             return []

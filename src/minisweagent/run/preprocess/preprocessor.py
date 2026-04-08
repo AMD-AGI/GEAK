@@ -42,6 +42,7 @@ from minisweagent.run.preprocess.harness_utils import (
     DEFAULT_PIPELINE_OUTPUT_DIR,
     _materialize_validated_harness,
     create_validated_harness,
+    detect_and_split_kernel_from_harness,
     execute_harness_validation,
     extract_harness_path,
     run_baseline_profile,
@@ -56,6 +57,20 @@ from minisweagent.run.preprocess.testcase_cache import (
 )
 
 # ── main entry point ─────────────────────────────────────────────────
+
+
+def _infer_repo_root(kernel_path: str) -> str:
+    """Walk up from kernel_path to find the repo root.
+
+    Looks for .git, pyproject.toml, setup.py, or setup.cfg markers.
+    Falls back to the kernel's parent directory with a warning.
+    """
+    p = Path(kernel_path).resolve().parent
+    for ancestor in [p, *p.parents]:
+        if any((ancestor / marker).exists() for marker in (".git", "pyproject.toml", "setup.py", "setup.cfg")):
+            return str(ancestor)
+    logger.warning("Could not infer repo_root from %s; using kernel parent dir", kernel_path)
+    return str(p)
 
 
 def _build_deterministic_test_command(harness_path: str | Path) -> str:
@@ -315,6 +330,36 @@ def _build_harness_candidates(
     return candidates
 
 
+def _ensure_harness_has_no_kernel_defs(
+    harness_path: str,
+    output_dir: Path,
+    ctx: dict,
+) -> str:
+    """Split test logic out of a merged kernel+harness file if present.
+
+    When the file contains both @triton.jit kernel defs and test/harness
+    functions, this splits off the test logic into a new
+    ``test_<stem>_harness.py`` and strips those functions from the original,
+    leaving the original as a clean kernel file.
+
+    Returns the path to the harness to use (new split harness, or unchanged
+    original if no split was needed).
+    """
+    result = detect_and_split_kernel_from_harness(harness_path, output_dir)
+    if result is not None:
+        new_harness_path, kernel_path = result
+        logger.info(
+            "Split test logic out of merged file: kernel=%s, harness=%s",
+            kernel_path,
+            new_harness_path,
+        )
+        ctx["harness_path"] = new_harness_path
+        # The original file is now the clean kernel; set it as kernel_path
+        ctx["kernel_path"] = kernel_path
+        return new_harness_path
+    return harness_path
+
+
 def _materialize_preprocessor_harness(
     *,
     test_command: str,
@@ -435,10 +480,31 @@ def run_preprocessor(
         raise RuntimeError(f"resolve-kernel-url failed: {resolved['error']}")
 
     kernel_path = resolved["local_file_path"]
-    repo_root = resolved.get("local_repo_path") or str(Path(kernel_path).parent)
+    repo_root = resolved.get("local_repo_path") or _infer_repo_root(kernel_path)
+    if not repo_root:
+        raise RuntimeError(f"Cannot determine repo_root for kernel: {kernel_path}")
     ctx["resolved"] = resolved
     ctx["kernel_path"] = kernel_path
     ctx["repo_root"] = repo_root
+
+    # If the kernel file is a merged file (contains both kernel defs and test
+    # logic), split the test functions out into a separate harness file so
+    # agents only patch the clean kernel.
+    _split_result = detect_and_split_kernel_from_harness(kernel_path, output_dir)
+    if _split_result is not None:
+        _new_harness, _clean_kernel = _split_result
+        logger.info(
+            "Kernel file was merged — split test logic to %s; kernel stays at %s",
+            _new_harness,
+            _clean_kernel,
+        )
+        ctx["kernel_path"] = _clean_kernel
+        kernel_path = _clean_kernel
+        # For merged kernels, the split helper may produce a GEAK-compatible
+        # wrapper harness (e.g. HIP/CUDA mixed-source cases). Reuse it directly
+        # when the caller did not already provide a harness.
+        if not harness:
+            harness = _new_harness
 
     _print(f"  Kernel: {kernel_path}")
 
@@ -564,6 +630,7 @@ def run_preprocessor(
             )
             if not ok_runtime:
                 raise RuntimeError("Deterministic harness execution failed: " + "; ".join(runtime_errors))
+            deterministic_path = _ensure_harness_has_no_kernel_defs(deterministic_path, output_dir, ctx)
             test_command = _build_deterministic_test_command(deterministic_path)
             harness_results = candidate_results
             ctx["harness_path"] = deterministic_path
@@ -647,6 +714,7 @@ def run_preprocessor(
                     if not ok_runtime:
                         continue
 
+                    candidate_harness = _ensure_harness_has_no_kernel_defs(candidate_harness, output_dir, ctx)
                     candidate_cmd, candidate_harness, candidate_results = _materialize_preprocessor_harness(
                         test_command=candidate_cmd,
                         harness_path=candidate_harness,
@@ -741,6 +809,10 @@ def run_preprocessor(
                     discovery_context=discovery_context,
                     gpu_id=gpu_id,
                 )
+                _uta_harness = extract_harness_path(test_command)
+                _uta_harness = _ensure_harness_has_no_kernel_defs(_uta_harness, output_dir, ctx)
+                if _uta_harness != extract_harness_path(test_command):
+                    test_command = test_command.replace(extract_harness_path(test_command), _uta_harness)
                 selected_harness_source = "unit_test_agent"
                 testcase_selection["selected_source"] = selected_harness_source
                 _print(f"  UnitTestAgent test_command: {test_command}")

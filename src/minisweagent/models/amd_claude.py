@@ -102,19 +102,22 @@ class AmdClaudeModel(AmdLlmModelBase):
                     }
                 )
             elif role == "assistant" and msg.get("tool_calls"):
-                # Assistant message with tool call → structured content blocks
+                # Assistant message with tool call → structured content blocks.
+                # Accept both a single dict and a list (for future multi-tool support).
                 content_blocks: list[dict] = []
                 if content:
                     content_blocks.append({"type": "text", "text": content})
-                tool_info = msg["tool_calls"]
-                content_blocks.append(
-                    {
-                        "type": "tool_use",
-                        "id": tool_info.get("id", ""),
-                        "name": tool_info["function"]["name"],
-                        "input": tool_info["function"]["arguments"],
-                    }
-                )
+                raw_tool_calls = msg["tool_calls"]
+                tool_list = raw_tool_calls if isinstance(raw_tool_calls, list) else [raw_tool_calls]
+                for tool_info in tool_list:
+                    content_blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tool_info.get("id", ""),
+                            "name": tool_info["function"]["name"],
+                            "input": tool_info["function"]["arguments"],
+                        }
+                    )
                 anthropic_messages.append({"role": "assistant", "content": content_blocks})
             else:
                 anthropic_role = "assistant" if role == "assistant" else "user"
@@ -144,6 +147,7 @@ class AmdClaudeModel(AmdLlmModelBase):
             "metadata",
             "system",
             "tools",
+            "thinking",
         }
 
         all_kwargs = self.config.model_kwargs | kwargs
@@ -205,13 +209,20 @@ class AmdClaudeModel(AmdLlmModelBase):
         try:
             if response.content:
                 content_parts = []
+                thinking_parts = []
                 for block in response.content:
-                    # Be permissive: some gateways/models may return text blocks
-                    # whose first content item isn't text, or with slightly different types.
+                    block_type = getattr(block, "type", None)
+                    if block_type == "thinking":
+                        thinking_text = getattr(block, "thinking", None)
+                        if isinstance(thinking_text, str) and thinking_text:
+                            thinking_parts.append(thinking_text)
+                        continue
                     block_text = getattr(block, "text", None)
                     if isinstance(block_text, str) and block_text:
                         content_parts.append(block_text)
                 output_dict["content"] = "".join(content_parts)
+                if thinking_parts:
+                    output_dict["thinking"] = "".join(thinking_parts)
 
                 for block in response.content:
                     if block.type == "tool_use":

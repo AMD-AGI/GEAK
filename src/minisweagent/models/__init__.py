@@ -55,12 +55,11 @@ def get_model(input_model_name: str | None = None, config: dict | None = None) -
     if (from_env := os.getenv("MSWEA_MODEL_API_KEY")) and not str(type(model_class)).endswith("DeterministicModel"):
         config.setdefault("model_kwargs", {})["api_key"] = from_env
 
-    if (
-        any(s in resolved_model_name.lower() for s in ["anthropic", "sonnet", "opus", "claude"])
-        and "set_cache_control" not in config
-    ):
-        # Select cache control for Anthropic models by default
-        config["set_cache_control"] = "default_end"
+    if any(s in resolved_model_name.lower() for s in ["anthropic", "sonnet", "opus", "claude"]):
+        if "set_cache_control" not in config:
+            config["set_cache_control"] = "default_end"
+        if "tool_cache_control" not in config:
+            config["tool_cache_control"] = True
 
     return model_class(**config)
 
@@ -81,10 +80,8 @@ def get_model_name(input_model_name: str | None = None, config: dict | None = No
 
 
 _MODEL_CLASS_MAPPING = {
-    "anthropic_model": "minisweagent.models.anthropic.AnthropicModel",
+    "anthropic_model": "minisweagent.models.anthropic_model.AnthropicModel",
     "litellm": "minisweagent.models.litellm_model.LitellmModel",
-    "openrouter": "minisweagent.models.openrouter_model.OpenRouterModel",
-    "portkey": "minisweagent.models.portkey_model.PortkeyModel",
     "deterministic": "minisweagent.models.test_models.DeterministicModel",
     "amd_llm": "minisweagent.models.amd_llm.AmdLlmModel",
 }
@@ -94,7 +91,7 @@ def get_model_class(model_name: str, model_class: str = "") -> type:
     """Select the best model class.
 
     If a model_class is provided (as shortcut name, or as full import path,
-    e.g., "anthropic" or "minisweagent.models.anthropic.AnthropicModel"),
+    e.g., "anthropic_model" or "minisweagent.models.anthropic_model.AnthropicModel"),
     it takes precedence over the `model_name`.
     Otherwise, the model_name is used to select the best model class.
     """

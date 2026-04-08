@@ -1,11 +1,18 @@
+import shutil
+
 import pytest
 
 swerex = pytest.importorskip("swerex", reason="swerex package not installed")
 
 from minisweagent.environments.extra.swerex_docker import SwerexDockerEnvironment
 
+requires_docker = pytest.mark.skipif(
+    shutil.which("docker") is None, reason="docker binary not available"
+)
+
 
 @pytest.mark.slow
+@requires_docker
 def test_swerex_docker_basic_execution():
     """Test basic command execution in SwerexDockerEnvironment."""
     env = SwerexDockerEnvironment(image="python:3.11")
@@ -20,6 +27,7 @@ def test_swerex_docker_basic_execution():
 
 
 @pytest.mark.slow
+@requires_docker
 def test_swerex_docker_command_failure():
     """Test that command failures are properly captured in SwerexDockerEnvironment."""
     env = SwerexDockerEnvironment(image="python:3.11")

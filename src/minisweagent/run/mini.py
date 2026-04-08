@@ -100,6 +100,8 @@ def _derive_output_dir_and_traj(output: Path | None, kernel_name: str | None) ->
         output_dir = (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
         return output_dir, output_dir / "trajectory.json"
 
+    output = output.resolve()
+
     if output.suffix:
         return output.parent, output
 
@@ -186,7 +188,8 @@ def main(
     tee_out, tee_err = TeeOutput(sys.stdout), TeeOutput(sys.stderr)
     sys.stdout, sys.stderr = tee_out, tee_err
 
-    configure_if_first_time()
+    if sys.stdin.isatty():
+        configure_if_first_time()
 
     # 1) Config merge
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"

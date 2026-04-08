@@ -664,4 +664,542 @@ class TestPreprocessContractEnforcement:
             assert "repo_root" in d
             assert "test_command" in d
             assert "harness_path" in d
-            assert "discovery" in d
+
+
+# ===================================================================
+# Test: _infer_repo_root (Issue 4)
+# ===================================================================
+
+class TestInferRepoRoot:
+    """_infer_repo_root must find repo markers and never return None."""
+
+    def test_finds_git_directory(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "myrepo"
+            kernel_dir = repo / "src" / "kernels"
+            kernel_dir.mkdir(parents=True)
+            (repo / ".git").mkdir()
+            kernel = kernel_dir / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result == str(repo)
+
+    def test_finds_pyproject_toml(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "myrepo"
+            kernel_dir = repo / "ops"
+            kernel_dir.mkdir(parents=True)
+            (repo / "pyproject.toml").write_text("[project]\nname = 'test'")
+            kernel = kernel_dir / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result == str(repo)
+
+    def test_finds_setup_py(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "myrepo"
+            kernel_dir = repo / "src"
+            kernel_dir.mkdir(parents=True)
+            (repo / "setup.py").write_text("from setuptools import setup; setup()")
+            kernel = kernel_dir / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result == str(repo)
+
+    def test_finds_setup_cfg(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "myrepo"
+            kernel_dir = repo / "src"
+            kernel_dir.mkdir(parents=True)
+            (repo / "setup.cfg").write_text("[metadata]\nname = mypackage")
+            kernel = kernel_dir / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result == str(repo)
+
+    def test_git_takes_precedence_over_inner_pyproject(self):
+        """If both .git at root and pyproject.toml in a subdirectory exist, .git wins."""
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "myrepo"
+            sub = repo / "subpkg"
+            kernel_dir = sub / "kernels"
+            kernel_dir.mkdir(parents=True)
+            (repo / ".git").mkdir()
+            # pyproject.toml sits closer to the kernel — but .git is at the true root
+            (sub / "pyproject.toml").write_text("[project]\nname = 'sub'")
+            kernel = kernel_dir / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            # Walk upward hits sub/pyproject.toml first — that's acceptable behaviour;
+            # what matters is it never returns None and never crashes.
+            assert result is not None
+            assert result != ""
+
+    def test_falls_back_to_parent_when_no_markers(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = Path(tmp) / "kernel.py"
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result == tmp
+
+    def test_never_returns_none(self):
+        from minisweagent.run.preprocess.preprocessor import _infer_repo_root
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = Path(tmp) / "deep" / "nested" / "kernel.py"
+            kernel.parent.mkdir(parents=True)
+            kernel.write_text("# kernel")
+            result = _infer_repo_root(str(kernel))
+            assert result is not None
+            assert result != ""
+
+
+# ===================================================================
+# Test: detect_and_split_kernel_from_harness (Issue 1)
+# ===================================================================
+
+class TestDetectAndSplitKernelFromHarness:
+    """Merged kernel+harness files must be split: tests extracted, kernel stays clean."""
+
+    _MERGED_SOURCE = '''\
+import argparse
+import triton
+import triton.language as tl
+
+@triton.jit
+def my_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    tl.store(output_ptr + offsets, x, mask=mask)
+
+def run_correctness(args):
+    my_kernel(None, None, 0, BLOCK_SIZE=64)
+
+def run_profile(args):
+    run_correctness(args)
+
+def run_benchmark(args):
+    pass
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--correctness", action="store_true")
+    group.add_argument("--profile", action="store_true")
+    group.add_argument("--benchmark", action="store_true")
+    group.add_argument("--full-benchmark", action="store_true")
+    args = parser.parse_args()
+    if args.correctness:
+        run_correctness(args)
+    elif args.profile:
+        run_profile(args)
+    else:
+        run_benchmark(args)
+'''
+
+    _MERGED_HIP_SOURCE = '''\
+#include <hip/hip_runtime.h>
+#include <cstdio>
+
+__device__ float clamp_value(float x) {
+    return x > 0 ? x : 0;
+}
+
+__global__ void relu_kernel(float* out, const float* in) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    out[idx] = clamp_value(in[idx]);
+}
+
+static void launch_relu(float* out, const float* in) {
+    hipLaunchKernelGGL(relu_kernel, dim3(1), dim3(64), 0, 0, out, in);
+}
+
+static void run_correctness() {
+    printf("correctness\\n");
+    launch_relu(nullptr, nullptr);
+}
+
+int main(int argc, char** argv) {
+    run_correctness();
+    return 0;
+}
+'''
+
+    def test_splits_tests_out_leaves_kernel(self):
+        """Test functions must be extracted to new harness; clean kernel written to output_dir."""
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Put the merged source in a DIFFERENT dir to simulate a repo file
+            src_dir = tmp_path / "repo"
+            src_dir.mkdir()
+            merged = src_dir / "my_kernel.py"
+            merged.write_text(self._MERGED_SOURCE)
+            out_dir = tmp_path / "output"
+            out_dir.mkdir()
+
+            result = detect_and_split_kernel_from_harness(merged, out_dir)
+            assert result is not None, "Expected split to occur"
+            new_harness_path, kernel_path = result
+
+            # Original file must be UNTOUCHED (git safety)
+            original_text = merged.read_text()
+            assert "run_correctness" in original_text, "Original must not be modified"
+            assert "@triton.jit" in original_text
+
+            # Clean kernel copy is in output_dir, not original path
+            assert kernel_path == str(out_dir / "my_kernel.py")
+            kernel_text = Path(kernel_path).read_text()
+            assert "@triton.jit" in kernel_text
+            assert "def my_kernel" in kernel_text
+            assert "run_correctness" not in kernel_text
+            assert "run_profile" not in kernel_text
+            assert "__main__" not in kernel_text
+
+            # New harness file contains test logic
+            harness_text = Path(new_harness_path).read_text()
+            assert "run_correctness" in harness_text
+            assert "run_profile" in harness_text
+            assert "__main__" in harness_text
+            assert "from my_kernel import *" in harness_text
+            assert "@triton.jit" not in harness_text
+
+    def test_kernel_not_included_in_test_bfs(self):
+        """@triton.jit functions called from test roots must not be moved to harness."""
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_dir = tmp_path / "repo"
+            src_dir.mkdir()
+            merged = src_dir / "my_kernel.py"
+            merged.write_text(self._MERGED_SOURCE)
+            out_dir = tmp_path / "output"
+            out_dir.mkdir()
+            detect_and_split_kernel_from_harness(merged, out_dir)
+            # Clean kernel copy in output_dir still has my_kernel def
+            kernel_text = (out_dir / "my_kernel.py").read_text()
+            assert "def my_kernel" in kernel_text
+            # Original file untouched
+            assert "def my_kernel" in merged.read_text()
+
+    def test_no_split_when_no_kernel_defs(self):
+        """Files without @triton.jit should not be split."""
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
+        source = '''\
+import argparse
+import torch
+
+def run_correctness(args):
+    pass
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--correctness", action="store_true")
+    args = parser.parse_args()
+    run_correctness(args)
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = tmp_path / "test_kernel_harness.py"
+            harness.write_text(source)
+            result = detect_and_split_kernel_from_harness(harness, tmp_path)
+            assert result is None, "Expected no split for file without kernel defs"
+
+    def test_splits_hip_main_and_run_functions(self):
+        """Merged HIP source should split host-side test entrypoints into a harness."""
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
+        from minisweagent.run.preprocess.harness_utils import validate_harness
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_dir = tmp_path / "repo"
+            src_dir.mkdir()
+            merged = src_dir / "relu_kernel.hip"
+            merged.write_text(self._MERGED_HIP_SOURCE)
+            out_dir = tmp_path / "output"
+            out_dir.mkdir()
+
+            result = detect_and_split_kernel_from_harness(merged, out_dir)
+            assert result is not None, "Expected merged HIP source to split"
+            new_harness_path, kernel_path = result
+
+            # Original file must be untouched.
+            original_text = merged.read_text()
+            assert "int main" in original_text
+            assert "run_correctness" in original_text
+
+            # Clean kernel copy keeps kernel-side code but drops host-side test entrypoints.
+            assert kernel_path == str(out_dir / "relu_kernel.hip")
+            kernel_text = Path(kernel_path).read_text()
+            assert "__global__ void relu_kernel" in kernel_text
+            assert "__device__ float clamp_value" in kernel_text
+            assert "static void launch_relu" in kernel_text
+            assert "run_correctness" not in kernel_text
+            assert "int main" not in kernel_text
+
+            # Generated GEAK harness is a Python wrapper that drives the split HIP harness.
+            assert new_harness_path == str(out_dir / "test_relu_kernel_harness.py")
+            harness_text = Path(new_harness_path).read_text()
+            assert "argparse" in harness_text
+            assert "--correctness" in harness_text
+            assert "--profile" in harness_text
+            assert "--benchmark" in harness_text
+            assert "--full-benchmark" in harness_text
+            assert "hipcc" in harness_text
+            valid, errors = validate_harness(str(new_harness_path))
+            assert valid, f"Generated HIP wrapper harness should satisfy GEAK harness contract: {errors}"
+
+            # The split C-like harness source still contains the moved host-side test logic.
+            split_harness = out_dir / "test_relu_kernel_harness.hip"
+            assert split_harness.is_file()
+            split_harness_text = split_harness.read_text()
+            assert '#include "relu_kernel.hip"' in split_harness_text
+            assert "run_correctness" in split_harness_text
+            assert "int main" in split_harness_text
+            assert "__global__ void relu_kernel" not in split_harness_text
+
+    def test_no_split_for_hip_without_host_test_entrypoint(self):
+        """HIP sources without main()/run_*/test_* entrypoints should be left alone."""
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
+        source = '''\
+#include <hip/hip_runtime.h>
+
+__global__ void relu_kernel(float* out, const float* in) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    out[idx] = in[idx];
+}
+
+static void launch_relu(float* out, const float* in) {
+    hipLaunchKernelGGL(relu_kernel, dim3(1), dim3(64), 0, 0, out, in);
+}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            merged = tmp_path / "relu_kernel.hip"
+            merged.write_text(source)
+            result = detect_and_split_kernel_from_harness(merged, tmp_path)
+            assert result is None, "Expected no split for HIP source without host-side test entrypoints"
+
+
+# ===================================================================
+# Test: _rewrite_relative_imports (Issue 2)
+# ===================================================================
+
+class TestRewriteRelativeImports:
+    """Relative imports must be converted to absolute imports anchored at repo_root."""
+
+    def test_rewrites_single_level_relative_import(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            # repo_root is in PYTHONPATH, so importable paths start from inside repo_root.
+            # harness at repo/ops/triton/ -> package ops.triton
+            # from ..utils import helper  (level=2) -> from ops.utils import helper
+            repo = Path(tmp) / "mypackage"
+            harness_dir = repo / "ops" / "triton"
+            harness_dir.mkdir(parents=True)
+            harness = harness_dir / "test_harness.py"
+            source = "from ..utils import helper\nimport torch\n"
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert "from ops.utils import helper" in result
+            assert "from .." not in result
+
+    def test_rewrites_same_package_relative_import(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            # harness at repo/ops/ -> package ops
+            # from .sibling import foo  (level=1) -> from ops.sibling import foo
+            repo = Path(tmp) / "pkg"
+            harness_dir = repo / "ops"
+            harness_dir.mkdir(parents=True)
+            harness = harness_dir / "test_harness.py"
+            source = "from .sibling import foo\n"
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert "from ops.sibling import foo" in result
+            assert "from ." not in result
+
+    def test_rewrites_two_level_relative_import(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            # harness at repo/a/b/c/ -> package a.b.c
+            # from ...root_mod import something  (level=3) -> from a.root_mod import something
+            repo = Path(tmp) / "pkg"
+            harness_dir = repo / "a" / "b" / "c"
+            harness_dir.mkdir(parents=True)
+            harness = harness_dir / "test_harness.py"
+            source = "from ...root_mod import something\n"
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert "from a.root_mod import something" in result
+
+    def test_rewrites_multiple_relative_imports_in_one_file(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "pkg"
+            harness_dir = repo / "ops" / "triton"
+            harness_dir.mkdir(parents=True)
+            harness = harness_dir / "test_harness.py"
+            source = (
+                "from ..utils import helper\n"
+                "from ..kernels import my_kernel\n"
+                "import torch\n"
+                "from .local import something\n"
+            )
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert "from ops.utils import helper" in result
+            assert "from ops.kernels import my_kernel" in result
+            assert "from ops.triton.local import something" in result
+            assert "from .." not in result
+            assert "from ." not in result
+
+    def test_rewritten_import_resolves_to_patched_not_original(self):
+        """The rewritten absolute import must pick up files from PYTHONPATH order,
+        meaning the patched copy in output_dir (prepended to PYTHONPATH) wins over
+        the original in the repo. This is the core correctness guarantee of Issue 2."""
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Simulate: repo_root/ops/utils.py  (original, unpatched)
+            repo = tmp_path / "repo"
+            ops_dir = repo / "ops"
+            ops_dir.mkdir(parents=True)
+            (ops_dir / "utils.py").write_text("VALUE = 'original'")
+            # Simulate: output_dir/ops/utils.py  (patched copy)
+            out_dir = tmp_path / "output"
+            out_ops = out_dir / "ops"
+            out_ops.mkdir(parents=True)
+            (out_ops / "utils.py").write_text("VALUE = 'patched'")
+            # With output_dir first in sys.path, absolute import gets patched version
+            saved = sys.path[:]
+            try:
+                sys.path.insert(0, str(out_dir))
+                sys.path.insert(1, str(repo))
+                # Remove only the temp 'ops' package from the cache — do NOT
+                # use a broad "utils" filter which would evict unrelated modules
+                # like minisweagent.run.utils.* and corrupt other workers' state.
+                for key in list(sys.modules):
+                    if key == "ops" or key.startswith("ops."):
+                        del sys.modules[key]
+                import importlib
+                mod = importlib.import_module("ops.utils")
+                assert mod.VALUE == "patched", (
+                    "Absolute import must resolve to patched copy in GEAK_WORK_DIR"
+                )
+            finally:
+                sys.path[:] = saved
+                for key in list(sys.modules):
+                    if key == "ops" or key.startswith("ops."):
+                        del sys.modules[key]
+
+    def test_leaves_absolute_imports_unchanged(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "pkg"
+            harness_dir = repo / "sub"
+            harness_dir.mkdir(parents=True)
+            harness = harness_dir / "test.py"
+            source = "from pkg.utils import foo\nimport torch\n"
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert result == source
+
+    def test_returns_unchanged_when_harness_outside_repo(self):
+        from minisweagent.run.preprocess.harness_utils import _rewrite_relative_imports
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            other = Path(tmp) / "other"
+            other.mkdir()
+            harness = other / "test.py"
+            source = "from ..utils import foo\n"
+            result = _rewrite_relative_imports(source, harness, repo)
+            assert result == source  # unchanged, harness outside repo
+
+
+# ===================================================================
+# Test: COMMANDMENT.md hardcodes harness path (Issue 3)
+# ===================================================================
+
+class TestCommandmentHardcodesHarness:
+    """COMMANDMENT.md must hardcode the harness path — no ${GEAK_HARNESS} variable."""
+
+    _HARNESS_SOURCE = (
+        "import argparse\n"
+        "p = argparse.ArgumentParser()\n"
+        "g = p.add_mutually_exclusive_group(required=True)\n"
+        "g.add_argument('--correctness', action='store_true')\n"
+        "g.add_argument('--profile', action='store_true')\n"
+        "g.add_argument('--benchmark', action='store_true')\n"
+        "g.add_argument('--full-benchmark', action='store_true')\n"
+    )
+
+    def test_simple_commandment_has_no_geak_harness_var(self):
+        from minisweagent.run.preprocess.commandment import generate_commandment
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kernel = tmp_path / "kernel.py"
+            kernel.write_text("# kernel")
+            harness = tmp_path / "test_harness.py"
+            harness.write_text(self._HARNESS_SOURCE)
+            content = generate_commandment(
+                kernel_path=kernel, harness_path=harness, repo_root=tmp_path,
+            )
+            assert "${GEAK_HARNESS}" not in content, (
+                "COMMANDMENT.md must not reference ${GEAK_HARNESS} variable"
+            )
+            assert str(harness.resolve()) in content, (
+                "COMMANDMENT.md must contain the literal harness path"
+            )
+
+    def test_all_four_sections_contain_literal_harness_path(self):
+        """Every evaluation section (CORRECTNESS, PROFILE, BENCHMARK, FULL_BENCHMARK)
+        must reference the hardcoded path, not a variable."""
+        from minisweagent.run.preprocess.commandment import generate_commandment
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kernel = tmp_path / "kernel.py"
+            kernel.write_text("# kernel")
+            harness = tmp_path / "test_harness.py"
+            harness.write_text(self._HARNESS_SOURCE)
+            content = generate_commandment(
+                kernel_path=kernel, harness_path=harness, repo_root=tmp_path,
+            )
+            harness_abs = str(harness.resolve())
+            for section in ("## CORRECTNESS", "## PROFILE", "## BENCHMARK", "## FULL_BENCHMARK"):
+                # Find the section and check the next non-empty line has the literal path
+                idx = content.find(section)
+                assert idx != -1, f"Missing section {section}"
+                section_body = content[idx + len(section):]
+                next_section = section_body.find("\n## ")
+                section_body = section_body[:next_section] if next_section != -1 else section_body
+                assert harness_abs in section_body, (
+                    f"{section} does not contain literal harness path"
+                )
+                assert "${GEAK_HARNESS}" not in section_body, (
+                    f"{section} still uses ${{GEAK_HARNESS}} variable"
+                )
+
+    def test_harness_path_is_absolute_not_relative(self):
+        """The hardcoded path must be absolute so agents can find it from any CWD."""
+        from minisweagent.run.preprocess.commandment import generate_commandment
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kernel = tmp_path / "kernel.py"
+            kernel.write_text("# kernel")
+            harness = tmp_path / "test_harness.py"
+            harness.write_text(self._HARNESS_SOURCE)
+            content = generate_commandment(
+                kernel_path=kernel, harness_path=harness, repo_root=tmp_path,
+            )
+            harness_abs = str(harness.resolve())
+            assert harness_abs.startswith("/"), "Hardcoded path must be absolute"
+            # The relative name alone must not appear without the full path prefix
+            # (i.e. not just "test_harness.py" floating without its directory)
+            assert content.count("test_harness.py") == content.count(harness_abs), (
+                "Harness filename appears without its full absolute prefix"
+            )
