@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,25 +23,6 @@ class TestDeepMerge:
 
     def test_override_replaces_non_dict_value(self) -> None:
         assert mini_module._deep_merge({"k": {"a": 1}}, {"k": "scalar"}) == {"k": "scalar"}
-
-
-class TestAsBool:
-    @pytest.mark.parametrize(
-        ("raw", "expected"),
-        [
-            (True, True),
-            (False, False),
-            ("true", True),
-            ("TRUE", True),
-            ("yes", True),
-            ("on", True),
-            ("1", True),
-            ("false", False),
-            ("0", False),
-        ],
-    )
-    def test_coercion(self, raw: object, expected: bool) -> None:
-        assert mini_module._as_bool(raw) is expected
 
 
 class TestAsInt:
@@ -126,16 +106,6 @@ class TestFinalReportToBestpatchresult:
         assert bpr.metric_result["best_speedup"] == 1.5
         assert bpr.llm_conclusion == "done"
         assert bpr.patch_dir == patch_file.parent
-
-
-class TestTeeOutput:
-    def test_writes_to_terminal_and_buffer(self) -> None:
-        term = io.StringIO()
-        tee = mini_module.TeeOutput(term)
-        tee.write("hello")
-        tee.flush()
-        assert term.getvalue() == "hello"
-        assert tee.getvalue() == "hello"
 
 
 class TestTryPromoteToHarness:

@@ -19,7 +19,6 @@ import asyncio
 import json
 import logging
 import re
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,9 +40,9 @@ def load_rag_config(config_path: Path | None = None) -> dict:
     if config_path.exists():
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
-            print(f"[RAG Config] Loaded from {config_path}", file=sys.stderr)
+            logger.info("[RAG Config] Loaded from %s", config_path)
             return cfg
-    print(f"[RAG Config] Not found at {config_path}, using defaults", file=sys.stderr)
+    logger.info("[RAG Config] Not found at %s, using defaults", config_path)
     return {}
 
 
@@ -107,21 +106,26 @@ class MCPEnabledEnvironment(LocalEnvironment):
 
         self._verbose = debug.get("verbose", False)
 
-        # Print config to stderr (consistent with other logs)
-        print(
-            f"[RAG Config] Retrieval: embed_top_k={self._embed_top_k}, bm25_top_k={self._bm25_top_k} (enable_bm25={enable_bm25}), rag_top_k={self._mcp_top_k}",
-            file=sys.stderr,
+        logger.info(
+            "[RAG Config] Retrieval: embed_top_k=%s, bm25_top_k=%s (enable_bm25=%s), rag_top_k=%s",
+            self._embed_top_k,
+            self._bm25_top_k,
+            enable_bm25,
+            self._mcp_top_k,
         )
-        print(f"[RAG Config] Reranker: enable_reranker={self._enable_reranker}", file=sys.stderr)
-        print(
-            f"[RAG Config] Fusion: rrf_k={self._rrf_k}, semantic_weight={self._semantic_weight}, bm25_weight={self._bm25_weight}",
-            file=sys.stderr,
+        logger.info("[RAG Config] Reranker: enable_reranker=%s", self._enable_reranker)
+        logger.info(
+            "[RAG Config] Fusion: rrf_k=%s, semantic_weight=%s, bm25_weight=%s",
+            self._rrf_k,
+            self._semantic_weight,
+            self._bm25_weight,
         )
-        print(
-            f"[RAG Config] Summary: enable_rag_subagent={self._enable_rag_subagent}, model={self._rag_subagent_model}",
-            file=sys.stderr,
+        logger.info(
+            "[RAG Config] Summary: enable_rag_subagent=%s, model=%s",
+            self._enable_rag_subagent,
+            self._rag_subagent_model,
         )
-        print(f"[RAG Config] Debug: verbose={self._verbose}", file=sys.stderr)
+        logger.info("[RAG Config] Debug: verbose=%s", self._verbose)
 
         # Inject rag_subagent_api_key into kwargs for MCPEnvironmentConfig
         kwargs = {
@@ -149,20 +153,20 @@ class MCPEnabledEnvironment(LocalEnvironment):
         orig_chunks = SEMANTIC_INDEX_PATH / "chunks.pkl"
 
         if lc_faiss.exists() and lc_pkl.exists():
-            print("✅ LangChain semantic index found (LangChain format)")
+            logger.info("✅ LangChain semantic index found (LangChain format)")
             return
 
         if orig_faiss.exists() and orig_chunks.exists():
-            print("✅ Semantic index found (original format)")
+            logger.info("✅ Semantic index found (original format)")
             return
 
         # Also check for BM25 files
         bm25_index = SEMANTIC_INDEX_PATH / "bm25_index.pkl"
         if not bm25_index.exists():
-            print("⚠️  BM25 index not found, hybrid retrieval will use embedding only")
+            logger.warning("⚠️  BM25 index not found, hybrid retrieval will use embedding only")
 
-        print("⚠️  LangChain index not found at:", SEMANTIC_INDEX_PATH)
-        print("   Build index with: python langchain/build_index.py --force")
+        logger.warning("⚠️  LangChain index not found at: %s", SEMANTIC_INDEX_PATH)
+        logger.warning("   Build index with: python langchain/build_index.py --force")
 
     @property
     def retriever(self) -> HybridRetriever:
@@ -236,32 +240,32 @@ class MCPEnabledEnvironment(LocalEnvironment):
         """
         command = command.strip()
 
-        # Verbose: print command before execution
+        # Verbose: log command before execution
         if self._verbose:
-            print(f"\n{'=' * 60}")
-            print("🔧 [ENV] Executing command:")
-            print(f"{'=' * 60}")
-            print(command)
-            print(f"{'=' * 60}")
+            logger.debug("\n%s", "=" * 60)
+            logger.debug("🔧 [ENV] Executing command:")
+            logger.debug("%s", "=" * 60)
+            logger.debug("%s", command)
+            logger.debug("%s", "=" * 60)
 
         # Check if this is a RAG tool call
         prefix = self.config.mcp_prefix
         if command.startswith(prefix):
             if self._verbose:
-                print("✅ [ENV] This is a RAG command! Will route to RAG retrieval.")
+                logger.debug("✅ [ENV] This is a RAG command! Will route to RAG retrieval.")
             result = self._execute_mcp(command[len(prefix) :])
         else:
             if self._verbose:
-                print("⚠️  [ENV] This is a BASH command, not RAG.")
+                logger.debug("⚠️  [ENV] This is a BASH command, not RAG.")
             result = super().execute(command, cwd, timeout=timeout)
 
-        # Verbose: print result after execution
+        # Verbose: log result after execution
         if self._verbose:
-            print("\n📤 [ENV] Command output (first 500 chars):")
-            print(f"{'-' * 60}")
-            print(result.get("output", "")[:500])
-            print(f"{'-' * 60}")
-            print(f"📤 [ENV] Return code: {result.get('returncode')}")
+            logger.debug("\n📤 [ENV] Command output (first 500 chars):")
+            logger.debug("%s", "-" * 60)
+            logger.debug("%s", result.get("output", "")[:500])
+            logger.debug("%s", "-" * 60)
+            logger.debug("📤 [ENV] Return code: %s", result.get("returncode"))
 
         return result
 
@@ -280,8 +284,8 @@ class MCPEnabledEnvironment(LocalEnvironment):
             tool_name, args = self._parse_mcp_command(command)
 
             if self._verbose:
-                print(f"[RAG] Calling tool: {tool_name}")
-                print(f"[RAG] Arguments: {args}")
+                logger.debug("[RAG] Calling tool: %s", tool_name)
+                logger.debug("[RAG] Arguments: %s", args)
 
             # Output stats to stderr for RAG tools
             self._print_mcp_stats(tool_name, args)
@@ -308,12 +312,14 @@ class MCPEnabledEnvironment(LocalEnvironment):
         return preview
 
     def _print_mcp_stats(self, tool_name: str, args: dict[str, Any]) -> None:
-        """Output RAG tool stats to stderr for logging with query results, retrieval method, and content."""
-        print(
-            f"[RAG-STATS] Calling {tool_name} with LangChain retrieval (embed_top_k={self._embed_top_k}, bm25_top_k={self._bm25_top_k})",
-            file=sys.stderr,
+        """Log RAG tool stats with query results, retrieval method, and content."""
+        logger.debug(
+            "[RAG-STATS] Calling %s with LangChain retrieval (embed_top_k=%s, bm25_top_k=%s)",
+            tool_name,
+            self._embed_top_k,
+            self._bm25_top_k,
         )
-        print(f"[RAG-STATS] Args: {args}", file=sys.stderr)
+        logger.debug("[RAG-STATS] Args: %s", args)
 
         top_k = self._mcp_top_k
 
@@ -334,9 +340,12 @@ class MCPEnabledEnvironment(LocalEnvironment):
                 embed_count = sum(1 for r in results if r[2] == "embedding")
                 bm25_count = sum(1 for r in results if r[2] == "bm25")
 
-                print(
-                    f"[RAG-STATS] query returned {len(results)} results (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}",
-                    file=sys.stderr,
+                logger.debug(
+                    "[RAG-STATS] query returned %s results (top_k=%s) | embedding: %s, bm25: %s",
+                    len(results),
+                    top_k,
+                    embed_count,
+                    bm25_count,
                 )
                 for i, (doc, score, source, orig_score) in enumerate(results, 1):
                     title = doc.metadata.get("section", doc.metadata.get("title", "Unknown"))[:40]
@@ -344,11 +353,17 @@ class MCPEnabledEnvironment(LocalEnvironment):
                     layer_info = doc.metadata.get("layer", "unknown")
                     method_tag = "[EMB]" if source == "embedding" else "[BM25]"
                     content_preview = self._format_content_preview(doc.page_content)
-                    print(
-                        f"  [{i}] {method_tag} Score={score:.4f} (orig={orig_score:.4f}) Layer={layer_info} Len={content_len} Title={title}",
-                        file=sys.stderr,
+                    logger.debug(
+                        "  [%s] %s Score=%.4f (orig=%.4f) Layer=%s Len=%s Title=%s",
+                        i,
+                        method_tag,
+                        score,
+                        orig_score,
+                        layer_info,
+                        content_len,
+                        title,
                     )
-                    print(f"      Content: {content_preview}", file=sys.stderr)
+                    logger.debug("      Content: %s", content_preview)
 
             elif tool_name in ("example", "get_code_example"):
                 category = args.get("category", "")
@@ -360,20 +375,28 @@ class MCPEnabledEnvironment(LocalEnvironment):
                 embed_count = sum(1 for r in results if r[2] == "embedding")
                 bm25_count = sum(1 for r in results if r[2] == "bm25")
 
-                print(
-                    f"[RAG-STATS] example returned {len(results)} results (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}",
-                    file=sys.stderr,
+                logger.debug(
+                    "[RAG-STATS] example returned %s results (top_k=%s) | embedding: %s, bm25: %s",
+                    len(results),
+                    top_k,
+                    embed_count,
+                    bm25_count,
                 )
                 for i, (doc, score, source, orig_score) in enumerate(results, 1):
                     title = doc.metadata.get("section", doc.metadata.get("title", "Unknown"))[:40]
                     content_len = len(doc.page_content)
                     method_tag = "[EMB]" if source == "embedding" else "[BM25]"
                     content_preview = self._format_content_preview(doc.page_content)
-                    print(
-                        f"  [{i}] {method_tag} Score={score:.4f} (orig={orig_score:.4f}) Title={title} Len={content_len}",
-                        file=sys.stderr,
+                    logger.debug(
+                        "  [%s] %s Score=%.4f (orig=%.4f) Title=%s Len=%s",
+                        i,
+                        method_tag,
+                        score,
+                        orig_score,
+                        title,
+                        content_len,
                     )
-                    print(f"      Content: {content_preview}", file=sys.stderr)
+                    logger.debug("      Content: %s", content_preview)
 
             elif tool_name in ("optimize", "suggest_optimization"):
                 code_type = args.get("code_type", "")
@@ -386,20 +409,28 @@ class MCPEnabledEnvironment(LocalEnvironment):
                 embed_count = sum(1 for r in results if r[2] == "embedding")
                 bm25_count = sum(1 for r in results if r[2] == "bm25")
 
-                print(
-                    f"[RAG-STATS] optimize returned {len(results)} results (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}",
-                    file=sys.stderr,
+                logger.debug(
+                    "[RAG-STATS] optimize returned %s results (top_k=%s) | embedding: %s, bm25: %s",
+                    len(results),
+                    top_k,
+                    embed_count,
+                    bm25_count,
                 )
                 for i, (doc, score, source, orig_score) in enumerate(results, 1):
                     title = doc.metadata.get("section", doc.metadata.get("title", "Unknown"))[:40]
                     content_len = len(doc.page_content)
                     method_tag = "[EMB]" if source == "embedding" else "[BM25]"
                     content_preview = self._format_content_preview(doc.page_content)
-                    print(
-                        f"  [{i}] {method_tag} Score={score:.4f} (orig={orig_score:.4f}) Title={title} Len={content_len}",
-                        file=sys.stderr,
+                    logger.debug(
+                        "  [%s] %s Score=%.4f (orig=%.4f) Title=%s Len=%s",
+                        i,
+                        method_tag,
+                        score,
+                        orig_score,
+                        title,
+                        content_len,
                     )
-                    print(f"      Content: {content_preview}", file=sys.stderr)
+                    logger.debug("      Content: %s", content_preview)
 
             elif tool_name == "troubleshoot":
                 error_message = args.get("error_message", "")
@@ -411,29 +442,36 @@ class MCPEnabledEnvironment(LocalEnvironment):
                 embed_count = sum(1 for r in results if r[2] == "embedding")
                 bm25_count = sum(1 for r in results if r[2] == "bm25")
 
-                print(
-                    f"[RAG-STATS] troubleshoot returned {len(results)} results (top_k={top_k}) | embedding: {embed_count}, bm25: {bm25_count}",
-                    file=sys.stderr,
+                logger.debug(
+                    "[RAG-STATS] troubleshoot returned %s results (top_k=%s) | embedding: %s, bm25: %s",
+                    len(results),
+                    top_k,
+                    embed_count,
+                    bm25_count,
                 )
                 for i, (doc, score, source, orig_score) in enumerate(results, 1):
                     content_len = len(doc.page_content)
                     method_tag = "[EMB]" if source == "embedding" else "[BM25]"
                     content_preview = self._format_content_preview(doc.page_content)
-                    print(
-                        f"  [{i}] {method_tag} Score={score:.4f} (orig={orig_score:.4f}) Len={content_len}",
-                        file=sys.stderr,
+                    logger.debug(
+                        "  [%s] %s Score=%.4f (orig=%.4f) Len=%s",
+                        i,
+                        method_tag,
+                        score,
+                        orig_score,
+                        content_len,
                     )
-                    print(f"      Content: {content_preview}", file=sys.stderr)
+                    logger.debug("      Content: %s", content_preview)
 
             elif tool_name in ("compat", "check_compatibility"):
                 # For compatibility check, just log the call
-                print(f"[RAG-STATS] compat check for ROCm {args.get('rocm_version', 'unknown')}", file=sys.stderr)
+                logger.debug("[RAG-STATS] compat check for ROCm %s", args.get("rocm_version", "unknown"))
 
             elif tool_name in ("docs", "get_documentation_urls"):
-                print("[RAG-STATS] docs returned document URL list", file=sys.stderr)
+                logger.debug("[RAG-STATS] docs returned document URL list")
 
         except Exception as e:
-            print(f"[RAG-STATS] Error getting stats: {e}", file=sys.stderr)
+            logger.debug("[RAG-STATS] Error getting stats: %s", e)
 
     def _parse_mcp_command(self, command: str) -> tuple[str, dict[str, Any]]:
         """

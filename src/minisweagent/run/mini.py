@@ -2,10 +2,10 @@
 
 """Backup mini entry with kernel-type routing."""
 
+import logging
 import os
 import shlex
 import sys
-from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -30,27 +30,10 @@ from minisweagent.run.utils.task_parser import _resolve_path_case, display_parse
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
 DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
 
+logger = logging.getLogger(__name__)
 console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich")
 prompt_session = PromptSession(history=FileHistory(global_config_dir / "mini_task_history.txt"))
-
-
-class TeeOutput:
-    """Capture stdout/stderr to buffer while keeping terminal output."""
-
-    def __init__(self, original):
-        self.terminal = original
-        self.buffer = StringIO()
-
-    def write(self, message):
-        self.terminal.write(message)
-        self.buffer.write(message)
-
-    def flush(self):
-        self.terminal.flush()
-
-    def getvalue(self):
-        return self.buffer.getvalue()
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -61,14 +44,6 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             result[key] = value
     return result
-
-
-def _as_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
 
 
 def _as_int(value: Any) -> int | None:
@@ -185,18 +160,16 @@ def main(
 ):
     # fmt: on
     del visual
-    tee_out, tee_err = TeeOutput(sys.stdout), TeeOutput(sys.stderr)
-    sys.stdout, sys.stderr = tee_out, tee_err
 
     if sys.stdin.isatty():
         configure_if_first_time()
 
     # 1) Config merge
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
-    console.print(f"Loading base config: [bold green]'{base_config_path.name}'[/bold green]")
+    logger.info("Loading base config: [bold green]'%s'[/bold green]", base_config_path.name)
     config = yaml.safe_load(base_config_path.read_text()) or {}
     config_path = config_spec or (builtin_config_dir / "geak.yaml")
-    console.print(f"[dim]Applying user config from '{config_path}' (final override)[/dim]")
+    logger.info("[dim]Applying user config from '%s' (final override)[/dim]", config_path)
     user_config = yaml.safe_load(config_path.read_text()) or {}
     config = _deep_merge(config, user_config)
 
@@ -223,14 +196,14 @@ def main(
 
     model = get_model(model_name, config.get("model", {}))
     _model_name = getattr(model.config, "model_name", "unknown")
-    console.print(f"\\Using model: [bold cyan]{_model_name}[/bold cyan]")
+    logger.info("Using model: [bold cyan]%s[/bold cyan]", _model_name)
 
     task_content = task
     if task:
         task_path = Path(task)
         if task_path.exists() and task_path.is_file():
             task_content = task_path.read_text(encoding="utf-8")
-            console.print(f"[bold green]Read task from file: {task_path}[/bold green]")
+            logger.info("[bold green]Read task from file: %s[/bold green]", task_path)
         elif not task.strip():
             task_content = None
 
@@ -253,7 +226,7 @@ def main(
     if task_content:
         from minisweagent.run.utils.task_parser import parse_pipeline_params
 
-        console.print("[bold cyan]Checking task for pipeline parameters...[/bold cyan]")
+        logger.info("[bold cyan]Checking task for pipeline parameters...[/bold cyan]")
         pipeline_params = parse_pipeline_params(task_content, model)
 
         # Apply non-None extracted values (CLI flags still take priority)
@@ -308,21 +281,23 @@ def main(
     if config_spec is None and parsed_config.get("config"):
         _task_config_path = get_config_path(Path(parsed_config["config"]))
         if _task_config_path and _task_config_path.exists():
-            console.print(f"[dim]Applying config from task: '{_task_config_path}'[/dim]")
+            logger.info("[dim]Applying config from task: '%s'[/dim]", _task_config_path)
             _task_user_config = yaml.safe_load(_task_config_path.read_text()) or {}
             config = _deep_merge(config, _task_user_config)
 
     if model_name is None and parsed_config.get("model"):
         model_name = parsed_config["model"]
         model = get_model(model_name, config.get("model", {}))
-        console.print(f"\\Using model (from task): [bold cyan]{model_name}[/bold cyan]")
+        logger.info("Using model (from task): [bold cyan]%s[/bold cyan]", model_name)
 
     if output is None and parsed_config.get("output_dir"):
         output = Path(parsed_config["output_dir"])
 
     kernel_target = kernel_url or parsed_config.get("kernel_url") or parsed_config.get("kernel_name")
     if not kernel_target:
-        console.print("[red]Error: missing kernel target. Provide --kernel-url or include kernel info in task.[/red]")
+        logger.error(
+            "[red]Error: missing kernel target. Provide --kernel-url or include kernel info in task.[/red]"
+        )
         raise typer.Exit(1)
 
     parsed_gpu_ids = parse_gpu_ids(gpu_ids)
@@ -339,9 +314,10 @@ def main(
     preprocess_output_dir, traj_output_path = _derive_output_dir_and_traj(output, kernel_name_for_output)
     preprocess_output_dir.mkdir(parents=True, exist_ok=True)
     config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
-    console.print(
-        f"[dim]Logs and artifacts for this run are under '{preprocess_output_dir}' "
-        f"(e.g. optimization_logs/<kernel>_<timestamp>/).[/dim]"
+    logger.info(
+        "[dim]Logs and artifacts for this run are under '%s' "
+        "(e.g. optimization_logs/<kernel>_<timestamp>/).[/dim]",
+        preprocess_output_dir,
     )
 
     # Display the *resolved* configuration (CLI overrides auto-detection).
@@ -369,7 +345,7 @@ def main(
         env_class = get_environment_class(env_type)
         env = env_class(**_env_kwargs)
     except Exception as e:
-        console.print(f"[red]Error: failed to initialize env.type={env_type}: {e}[/red]")
+        logger.error("[red]Error: failed to initialize env.type=%s: %s[/red]", env_type, e)
         raise typer.Exit(1)
 
     harness_spec = config.get("patch", {}).get("harness")
@@ -377,7 +353,7 @@ def main(
         promoted = _try_promote_to_harness(test_command)
         if promoted:
             harness_spec = promoted
-            console.print(f"[bold cyan]Promoted test command to validated harness: {promoted}[/bold cyan]")
+            logger.info("[bold cyan]Promoted test command to validated harness: %s[/bold cyan]", promoted)
 
     _preprocess_kwargs = dict(
         kernel_url=kernel_target,
@@ -393,7 +369,9 @@ def main(
             preprocess_ctx = run_preprocessor(**_preprocess_kwargs, harness=harness_spec)
         except RuntimeError as exc:
             if "harness" in str(exc).lower():
-                console.print(f"[yellow]Harness validation failed, falling back to eval_command: {exc}[/yellow]")
+                logger.warning(
+                    "[yellow]Harness validation failed, falling back to eval_command: %s[/yellow]", exc
+                )
                 preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
             else:
                 raise
@@ -447,7 +425,6 @@ def main(
             output_dir=preprocess_output_dir,
             max_rounds=max_rounds or config.get("orchestrator", {}).get("max_rounds"),
             heterogeneous=True,
-            console=console,
         )
         return _final_report_to_bestpatchresult(report)
 

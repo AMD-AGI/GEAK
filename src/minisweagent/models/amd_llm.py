@@ -12,7 +12,7 @@ import logging
 
 from minisweagent.models.amd_base import AmdLlmModelConfig
 
-logger = logging.getLogger("amd_llm")
+logger = logging.getLogger(__name__)
 
 
 class AmdLlmModel:

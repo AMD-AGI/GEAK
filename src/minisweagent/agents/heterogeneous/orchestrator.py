@@ -36,8 +36,6 @@ def run_llm_steps(
     model,
     messages: list[dict],
     ctx: dict[str, Any],
-    _print,
-    console,
     *,
     phase: str,
 ) -> dict[str, Any] | None:
@@ -53,7 +51,7 @@ def run_llm_steps(
 
     while step < max_steps:
         step += 1
-        _print(f"[dim]{phase} step {step}[/dim]" if console else f"{phase} step {step}")
+        logger.debug("[dim]%s step %d[/dim]", phase, step)
 
         if _wm and phase != "explore":
             _wm.update_step(step, 0.0)
@@ -82,7 +80,7 @@ def run_llm_steps(
                     hypothesis_id="H3",
                 )
             if content_text:
-                _print(f"  Orchestrator: {content_text[:300]}")
+                logger.info("  Orchestrator: %s", content_text[:300])
             messages.append({"role": "assistant", "content": content_text})
             return None
 
@@ -96,7 +94,7 @@ def run_llm_steps(
             except json.JSONDecodeError:
                 tool_args = {}
 
-        _print(f"  Tool: {tool_name}({json.dumps(tool_args)[:200]})")
+        logger.debug("  Tool: %s(%s)", tool_name, json.dumps(tool_args)[:200])
 
         messages.append(
             {
@@ -116,7 +114,7 @@ def run_llm_steps(
             }
         )
 
-        _print(f"  Result: {result_str[:300]}")
+        logger.debug("  Result: %s", result_str[:300])
 
         if _wm:
             try:
@@ -135,19 +133,14 @@ def run_llm_steps(
                 report = json.loads(result_str)
             except json.JSONDecodeError:
                 report = {"summary": result_str}
-            _print(
-                "[bold green]Orchestrator: Optimisation finalised.[/bold green]"
-                if console
-                else "Orchestrator: Optimisation finalised."
-            )
+            logger.info("[bold green]Orchestrator: Optimisation finalised.[/bold green]")
             return report
 
     logger.warning(
-        "Orchestrator hit step limit (%d) for phase %s -- proceeding to next phase",
+        "Orchestrator hit step limit (%d) for phase %s — proceeding to next phase",
         max_steps,
         phase,
     )
-    _print(f"  Step limit ({max_steps}) reached for {phase}, moving on...")
     return None
 
 
@@ -162,8 +155,6 @@ def run_heterogeneous_orchestrator(
     output_dir: Path,
     max_rounds: int,
     start_round: int,
-    _print,
-    console,
 ) -> dict[str, Any]:
     """Run the heterogeneous orchestrator with LLM-driven tool calling.
 
@@ -284,10 +275,10 @@ def run_heterogeneous_orchestrator(
     )
 
     start_label = f"rounds {start_round}-{max_rounds}" if start_round > 1 else f"{max_rounds} rounds"
-    _print(
-        f"[bold cyan]--- Orchestrator starting ({start_label}, {len(gpu_ids)} GPUs) ---[/bold cyan]"
-        if console
-        else f"--- Orchestrator starting ({start_label}, {len(gpu_ids)} GPUs) ---"
+    logger.info(
+        "[bold cyan]--- Orchestrator starting (%s, %d GPUs) ---[/bold cyan]",
+        f"{start_label}",
+        len(gpu_ids),
     )
 
     messages: list[dict] = [
@@ -314,19 +305,17 @@ def run_heterogeneous_orchestrator(
                             ),
                         }
                     )
-                    _print(f"  Loaded prior evaluation: {eval_path.name}")
+                    logger.info("  Loaded prior evaluation: %s", eval_path.name)
                 except (json.JSONDecodeError, OSError) as exc:
-                    _print(f"  Warning: could not load {eval_path.name}: {exc}")
+                    logger.warning("  Could not load %s: %s", eval_path.name, exc)
 
     try:
         if start_round <= 1:
-            _print("[bold cyan]--- Exploration phase ---[/bold cyan]" if console else "--- Exploration phase ---")
+            logger.info("[bold cyan]--- Exploration phase ---[/bold cyan]")
             finalize_result = run_llm_steps(
                 model,
                 messages,
                 ctx,
-                _print,
-                console,
                 phase="explore",
             )
             if finalize_result is not None:
@@ -335,7 +324,7 @@ def run_heterogeneous_orchestrator(
         for round_num in range(start_round, max_rounds + 1):
             is_last = round_num == max_rounds
             round_header = f"--- Round {round_num}/{max_rounds}{' (final round)' if is_last else ''} ---"
-            _print(f"[bold cyan]{round_header}[/bold cyan]" if console else round_header)
+            logger.info("[bold cyan]%s[/bold cyan]", round_header)
 
             if is_last:
                 round_instruction = (
@@ -360,8 +349,6 @@ def run_heterogeneous_orchestrator(
                 model,
                 messages,
                 ctx,
-                _print,
-                console,
                 phase=f"round_{round_num}",
             )
 

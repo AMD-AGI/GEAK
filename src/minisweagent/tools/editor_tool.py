@@ -19,6 +19,7 @@ import argparse
 import ast
 import io
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -26,6 +27,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from minisweagent.tools.registry import registry as REGISTRY
+
+logger = logging.getLogger(__name__)
 
 # There are some super strange "ascii can't decode x" errors,
 # that can be solved with setting the default encoding for stdout
@@ -548,7 +551,7 @@ class EditTool:
             try:
                 pre_edit_lint = flake8(str(path))
             except Exception as e:
-                print(f"Warning: Failed to run pre-edit linter on {path}: {e}")
+                logger.warning("Failed to run pre-edit linter on %s: %s", path, e)
 
         # Replace old_str with new_str
         new_file_content = file_content.replace(old_str, new_str)
@@ -561,7 +564,7 @@ class EditTool:
             try:
                 post_edit_lint = flake8(str(path))
             except Exception as e:
-                print(f"Warning: Failed to run post-edit linter on {path}: {e}")
+                logger.warning("Failed to run post-edit linter on %s: %s", path, e)
 
         if post_edit_lint:
             ...

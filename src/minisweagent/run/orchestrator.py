@@ -36,7 +36,6 @@ def run_orchestrator(
     max_rounds: int | None = None,
     start_round: int = 1,
     heterogeneous: bool = DEFAULT_HETEROGENEOUS,
-    console=None,
 ) -> dict[str, Any]:
     """Run the orchestrator agent loop.
 
@@ -59,20 +58,12 @@ def run_orchestrator(
     heterogeneous:
         If True, use LLM-generated diverse tasks per round.
         If False (default), use homogeneous mode where all agents get the same task.
-    console:
-        Optional Rich console for progress messages.
     """
     _out = output_dir or Path(preprocess_ctx.get("output_dir", DEFAULT_PIPELINE_OUTPUT_DIR))
     _out = Path(_out)
     _out.mkdir(parents=True, exist_ok=True)
 
     max_rounds = max_rounds or int(os.getenv("GEAK_MAX_ROUNDS", "5"))
-
-    def _print(msg: str) -> None:
-        if console:
-            console.print(msg)
-        else:
-            print(msg, file=sys.stderr)
 
     if not heterogeneous:
         raise NotImplementedError("Homogeneous mode is not supported via geak-orchestrate. Use the 'mini' CLI instead.")
@@ -87,8 +78,6 @@ def run_orchestrator(
         _out,
         max_rounds,
         start_round,
-        _print,
-        console,
     )
 
 
@@ -255,13 +244,6 @@ def main() -> None:
     model = load_geak_model(model_name)
     factory = geak_model_factory(model_name)
 
-    try:
-        from rich.console import Console
-
-        console = Console(highlight=False)
-    except ImportError:
-        console = None
-
     report = run_orchestrator(
         preprocess_ctx=ctx,
         gpu_ids=gpu_ids,
@@ -271,7 +253,6 @@ def main() -> None:
         max_rounds=args.max_rounds,
         start_round=args.start_round,
         heterogeneous=args.heterogeneous,
-        console=console,
     )
 
     if report:

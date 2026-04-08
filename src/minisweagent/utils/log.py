@@ -1,3 +1,10 @@
+"""Central logging for the minisweagent package.
+
+Use ``logging.getLogger(__name__)`` in package modules so records propagate to
+the ``minisweagent`` logger configured here. For entrypoints that are not
+package modules, import ``logger`` from this module.
+"""
+
 import logging
 import os
 from pathlib import Path
@@ -21,6 +28,9 @@ def _silence_noisy_loggers() -> None:
 def _setup_root_logger() -> None:
     logger = logging.getLogger("minisweagent")
     logger.setLevel(_get_log_level_from_env())
+    if logger.handlers:
+        _silence_noisy_loggers()
+        return
     _handler = RichHandler(
         show_path=False,
         show_time=False,

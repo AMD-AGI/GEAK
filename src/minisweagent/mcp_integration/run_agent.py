@@ -1,10 +1,11 @@
 """
 Run mini-swe-agent with RAG integration.
 Reads configuration from mini.yaml automatically.
-DEBUG VERSION - prints detailed info at each step.
+DEBUG VERSION - logs detailed info at each step.
 """
 
 import argparse
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,8 @@ from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.mcp_integration.mcp_environment import MCPEnabledEnvironment
 from minisweagent.mcp_integration.prompts import INSTANCE_TEMPLATE, SYSTEM_TEMPLATE
 from minisweagent.models import get_model
+
+logger = logging.getLogger(__name__)
 
 # Default config path
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "mini.yaml"
@@ -32,25 +35,25 @@ class DebugMCPEnvironment(MCPEnabledEnvironment):
     """RAG Environment with debug output."""
 
     def execute(self, command: str, cwd: str = "", *, timeout: int | None = None):
-        print(f"\n{'=' * 60}")
-        print("🔧 [ENV] Executing command:")
-        print(f"{'=' * 60}")
-        print(command)
-        print(f"{'=' * 60}")
+        logger.info("\n%s", "=" * 60)
+        logger.info("🔧 [ENV] Executing command:")
+        logger.info("%s", "=" * 60)
+        logger.info("%s", command)
+        logger.info("%s", "=" * 60)
 
         # Check if it's RAG or bash
         if command.strip().startswith(self.config.mcp_prefix):
-            print("✅ [ENV] This is a RAG command! Will route to RAG retrieval.")
+            logger.info("✅ [ENV] This is a RAG command! Will route to RAG retrieval.")
         else:
-            print("⚠️  [ENV] This is a BASH command, not RAG.")
+            logger.info("⚠️  [ENV] This is a BASH command, not RAG.")
 
         result = super().execute(command, cwd, timeout=timeout)
 
-        print("\n📤 [ENV] Command output (first 500 chars):")
-        print(f"{'-' * 60}")
-        print(result.get("output", "")[:500])
-        print(f"{'-' * 60}")
-        print(f"📤 [ENV] Return code: {result.get('returncode')}")
+        logger.info("\n📤 [ENV] Command output (first 500 chars):")
+        logger.info("%s", "-" * 60)
+        logger.info("%s", result.get("output", "")[:500])
+        logger.info("%s", "-" * 60)
+        logger.info("📤 [ENV] Return code: %s", result.get("returncode"))
 
         return result
 
@@ -59,24 +62,24 @@ class DebugAgent(DefaultAgent):
     """Agent with debug output at each step."""
 
     def run(self, task: str, **kwargs):
-        print(f"\n{'#' * 60}")
-        print("# DEBUG: Starting agent run")
-        print(f"{'#' * 60}")
-        print(f"\n📝 [AGENT] Task: {task}")
+        logger.info("\n%s", "#" * 60)
+        logger.info("# DEBUG: Starting agent run")
+        logger.info("%s", "#" * 60)
+        logger.info("\n📝 [AGENT] Task: %s", task)
         return super().run(task, **kwargs)
 
     def query(self):
-        print(f"\n{'=' * 60}")
-        print(f"🤖 [AGENT] Querying LLM (call #{self.model.n_calls + 1})...")
-        print(f"{'=' * 60}")
+        logger.info("\n%s", "=" * 60)
+        logger.info("🤖 [AGENT] Querying LLM (call #%s)...", self.model.n_calls + 1)
+        logger.info("%s", "=" * 60)
 
         response = super().query()
 
-        print("\n📥 [AGENT] LLM Response (content):")
-        print(f"{'-' * 60}")
+        logger.info("\n📥 [AGENT] LLM Response (content):")
+        logger.info("%s", "-" * 60)
         content = response.get("content", "")
-        print(content[:1000] + ("..." if len(content) > 1000 else ""))
-        print(f"{'-' * 60}")
+        logger.info("%s", content[:1000] + ("..." if len(content) > 1000 else ""))
+        logger.info("%s", "-" * 60)
 
         return response
 
@@ -84,12 +87,12 @@ class DebugAgent(DefaultAgent):
         content = response.get("content", "")
         actions = re.findall(r"```bash\s*\n(.*?)\n```", content, re.DOTALL)
 
-        print("\n🔍 [AGENT] Parsing actions from response...")
-        print(f"   Found {len(actions)} action(s) in triple backticks")
+        logger.info("\n🔍 [AGENT] Parsing actions from response...")
+        logger.info("   Found %s action(s) in triple backticks", len(actions))
 
         if actions:
             for i, action in enumerate(actions):
-                print(f"   Action {i + 1}: {action[:100]}...")
+                logger.info("   Action %s: %s...", i + 1, action[:100])
 
         return super().parse_action(response)
 
@@ -139,22 +142,22 @@ def main():
     model_config = config.get("model", {})
     model_name = args.model or model_config.get("model_name", "not set")
     model_class = model_config.get("model_class", "litellm")
-    print(f"📋 Config: {args.config}")
-    print(f"🤖 Model: {model_name} (class: {model_class})")
+    logger.info("📋 Config: %s", args.config)
+    logger.info("🤖 Model: %s (class: %s)", model_name, model_class)
 
-    # Debug: print loaded prompts
+    # Debug: log loaded prompts
     if args.debug:
-        print(f"\n{'#' * 60}")
-        print("# DEBUG: Loaded Prompts")
-        print(f"{'#' * 60}")
-        print("\n📄 SYSTEM_TEMPLATE (first 300 chars):")
-        print(f"{'-' * 60}")
-        print(SYSTEM_TEMPLATE[:300])
-        print(f"{'-' * 60}")
-        print("\n📄 INSTANCE_TEMPLATE (first 300 chars):")
-        print(f"{'-' * 60}")
-        print(INSTANCE_TEMPLATE[:300])
-        print(f"{'-' * 60}")
+        logger.info("\n%s", "#" * 60)
+        logger.info("# DEBUG: Loaded Prompts")
+        logger.info("%s", "#" * 60)
+        logger.info("\n📄 SYSTEM_TEMPLATE (first 300 chars):")
+        logger.info("%s", "-" * 60)
+        logger.info("%s", SYSTEM_TEMPLATE[:300])
+        logger.info("%s", "-" * 60)
+        logger.info("\n📄 INSTANCE_TEMPLATE (first 300 chars):")
+        logger.info("%s", "-" * 60)
+        logger.info("%s", INSTANCE_TEMPLATE[:300])
+        logger.info("%s", "-" * 60)
 
     agent = create_agent(
         model_name=args.model,
@@ -164,16 +167,16 @@ def main():
 
     # Debug: verify agent config
     if args.debug:
-        print("\n📄 Agent's system_template (first 200 chars):")
-        print(f"{'-' * 60}")
-        print(agent.config.system_template[:200])
-        print(f"{'-' * 60}")
+        logger.info("\n📄 Agent's system_template (first 200 chars):")
+        logger.info("%s", "-" * 60)
+        logger.info("%s", agent.config.system_template[:200])
+        logger.info("%s", "-" * 60)
 
     if args.interactive:
-        print("\n🚀 RAG-enabled mini-swe-agent (interactive mode)")
+        logger.info("\n🚀 RAG-enabled mini-swe-agent (interactive mode)")
         if args.debug:
-            print("🐛 DEBUG MODE ENABLED")
-        print("Type 'quit' to exit\n")
+            logger.info("🐛 DEBUG MODE ENABLED")
+        logger.info("Type 'quit' to exit\n")
 
         while True:
             try:
@@ -184,10 +187,10 @@ def main():
                     continue
 
                 status, result = agent.run(task)
-                print(f"\n[{status}]\n{result}\n")
+                logger.info("\n[%s]\n%s\n", status, result)
 
             except KeyboardInterrupt:
-                print("\nBye!")
+                logger.info("\nBye!")
                 break
     else:
         if not args.task:
@@ -195,7 +198,7 @@ def main():
             return
 
         status, result = agent.run(args.task)
-        print(f"[{status}]\n{result}")
+        logger.info("[%s]\n%s", status, result)
 
 
 if __name__ == "__main__":
