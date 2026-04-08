@@ -41,6 +41,7 @@ def _ensure_mcp_collected() -> None:
     except Exception:
         _mcp_tools = []
 
+
 _TOOL_PROFILES: dict[str, set[str] | None] = {
     "full": None,
     "swe": {
