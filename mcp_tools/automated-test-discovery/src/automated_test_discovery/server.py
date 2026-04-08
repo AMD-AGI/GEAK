@@ -13,6 +13,7 @@ No configuration files needed - uses content-based detection.
 import json
 import os
 import re
+import sys
 import textwrap
 from pathlib import Path
 
@@ -269,8 +270,13 @@ def _expand_workspace(kernel_path: Path) -> Path:
     return kernel_path if kernel_path.is_dir() else kernel_path.parent
 
 
-def _get_kernel_type(content: str, suffix: str = "") -> str:
+def _get_kernel_type(content: str, suffix: str = "", file_path: Path | None = None) -> str:
     if "@triton" in content or "tl." in content:
+        return "triton"
+    if "import triton" in content:
+        if file_path is not None:
+            if _imports_triton_kernels(content, file_path):
+                return "triton"
         return "triton"
     if "ck_tile::" in content or "ck::tile" in content or "#include <ck_tile/" in content:
         return "ck"
@@ -281,6 +287,48 @@ def _get_kernel_type(content: str, suffix: str = "") -> str:
     if suffix in (".cu", ".hip", ".cpp"):
         return "hip" if "hip" in content.lower() else "cuda"
     return "unknown"
+
+
+def _imports_triton_kernels(content: str, file_path: Path, _depth: int = 0) -> bool:
+    """Check whether a Python file imports modules containing @triton.jit kernels.
+
+    Follows ``from X import ...`` statements up to 2 levels deep, resolving
+    relative paths against the file's directory and ``sys.path``.  Returns
+    True as soon as any imported module contains ``@triton.jit`` or
+    ``@triton.autotune``.
+    """
+    if _depth > 2:
+        return False
+
+    import_re = re.compile(
+        r"^\s*from\s+([\w.]+)\s+import\s", re.MULTILINE
+    )
+
+    search_dirs = [file_path.parent]
+    for sp in sys.path:
+        p = Path(sp)
+        if p.is_dir():
+            search_dirs.append(p)
+
+    for m in import_re.finditer(content):
+        module_path = m.group(1).replace(".", "/")
+        for base in search_dirs:
+            candidate = base / f"{module_path}.py"
+            if not candidate.is_file():
+                candidate = base / module_path / "__init__.py"
+            if not candidate.is_file():
+                continue
+            try:
+                imported_content = candidate.read_text(errors="ignore")[:8192]
+            except OSError:
+                continue
+            if "@triton.jit" in imported_content or "@triton.autotune" in imported_content:
+                return True
+            if _depth < 2 and "import triton" in imported_content:
+                if _imports_triton_kernels(imported_content, candidate, _depth + 1):
+                    return True
+            break
+    return False
 
 
 # ============================================================================
@@ -453,7 +501,7 @@ def _find_kernels_in_dir(directory: Path) -> list[dict]:
             kernels.append(
                 {
                     "name": candidate.stem,
-                    "type": _get_kernel_type(content, candidate.suffix),
+                    "type": _get_kernel_type(content, candidate.suffix, candidate),
                     "file": str(candidate),
                 }
             )
@@ -533,7 +581,7 @@ def discover(
         _GENERIC_STEMS = {"kernel", "main", "module", "op", "impl"}
         if kernel_name.lower() in _GENERIC_STEMS and path.parent.name:
             kernel_name = path.parent.name
-        kernel_type = _get_kernel_type(content, path.suffix)
+        kernel_type = _get_kernel_type(content, path.suffix, path)
         kernel_functions = []
         for m in re.finditer(r"@triton\.jit\s*\n\s*def\s+(\w+)", content):
             if m.group(1) not in kernel_functions:
@@ -702,7 +750,7 @@ def discover(
 
     try:
         content = path.read_text()
-        kernel_type = _get_kernel_type(content, path.suffix)
+        kernel_type = _get_kernel_type(content, path.suffix, path)
     except Exception:
         content = ""
         kernel_type = "unknown"
