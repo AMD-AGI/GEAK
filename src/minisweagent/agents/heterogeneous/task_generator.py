@@ -83,7 +83,8 @@ def _infer_kernel_type(kernel_path: Path) -> str:
         return "unknown"
     if ext in (".cu", ".hip", ".hpp", ".cpp"):
         path_lower = str(kernel_path).lower()
-        if "composable_kernel" in path_lower or "/ck_" in path_lower or "/ck/" in path_lower:
+        ck_path_markers = ("composable_kernel", "composablekernel", "/ck_", "/ck/")
+        if any(m in path_lower for m in ck_path_markers):
             return "ck"
         return "hip"
     return "unknown"

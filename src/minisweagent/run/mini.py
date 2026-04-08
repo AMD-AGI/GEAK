@@ -84,6 +84,8 @@ def _normalize_kernel_type(value: Any) -> str:
         return "triton"
     if text in {"hip", "rocm", "rocblas"}:
         return "hip"
+    if text == "ck":
+        return "ck"
     return "other"
 
 
@@ -284,7 +286,7 @@ def main(
             from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
 
             inferred = _normalize_kernel_type(_infer_kernel_type(kp))
-            if inferred in {"hip", "triton"}:
+            if inferred in {"hip", "triton", "ck"}:
                 kernel_type = inferred
 
     # Keep kernel_type resolution internal; avoid exposing routing details in logs.
