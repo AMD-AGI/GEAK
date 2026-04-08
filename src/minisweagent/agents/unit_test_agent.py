@@ -66,13 +66,11 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- Use `cudaEventElapsedTime` or `torch.cuda.Event` for benchmarking."
     ),
     "ck": (
-        "This is a Composable Kernel (CK) kernel (C++ compiled with hipcc + CK includes).\n"
-        "- A build step is REQUIRED. Needs CK headers and hipcc.\n"
-        "- Template parameters (tile sizes, vector widths) are compile-time; test multiple configs.\n"
-        "- Use host-side validation against a reference GEMM/convolution.\n"
-        "- Use `hipEventElapsedTime` for benchmarking.\n"
-        "- NEVER use `sys.path.insert(0, '/absolute/path/...')`. "
-        "Rely on PYTHONPATH set by the COMMANDMENT SETUP section."
+        "This is a Composable Kernel (CK) kernel.\n"
+        "- The build and test harness must work standalone in the GEAK_WORK_DIR directory that is created for each optimizer agent later in the pipeline.\n"
+        "- The GEAK_WORK_DIR directory will be a copy of the kernel folder in the repo root, not the full repo root.\n"
+        "- IMPORTANT: Read GEAK/knowledge-base/ck-knowledge-base/standalone-test-harness-recipe/README.md. Follow the recipe to create the standalone build and test harness.\n"
+        "- Test your standalone build and test harness in a temp directory that imitates how GEAK_WORK_DIR is a copy of the original kernel folder.\n"
     ),
     "asm": (
         "This is a precompiled HSACO assembly kernel.\n"
