@@ -304,10 +304,11 @@ def post_round_evaluate(
     ctx[f"round_{round_num}_eval"] = round_eval
     if round_eval.best_patch:
         fb = round_eval.full_benchmark
-        current = (
-            fb.verified_speedup if fb and fb.verified_speedup is not None else None
-        ) or round_eval.benchmark_speedup
-        if current >= ctx.get("_best_global_speedup", 0):
+        # Only count rounds with an independently verified FULL_BENCHMARK result.
+        # Falling back to the agent's self-reported benchmark_speedup risks
+        # promoting a hallucinated or inflated speedup as the global best.
+        current = fb.verified_speedup if fb and fb.verified_speedup is not None else None
+        if current is not None and current >= ctx.get("_best_global_speedup", 0):
             ctx["starting_patch"] = round_eval.best_patch
             ctx["_best_global_speedup"] = current
     return round_eval

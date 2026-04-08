@@ -437,11 +437,6 @@ def run_profile(
         "optimized": optimized_metrics,
     }
 
-    base_dur = baseline_metrics.get("duration_us")
-    opt_dur = optimized_metrics.get("duration_us")
-    if isinstance(base_dur, (int, float)) and isinstance(opt_dur, (int, float)) and base_dur > 0:
-        comparison["duration_change_pct"] = round((opt_dur - base_dur) / base_dur * 100, 1)
-
     base_bn = baseline_metrics.get("bottleneck", "unknown")
     opt_bn = optimized_metrics.get("bottleneck", "unknown")
     if base_bn != opt_bn:
