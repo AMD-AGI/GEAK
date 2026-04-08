@@ -1,8 +1,10 @@
-"""Memory system integration layer for GEAK (working-session only).
+"""Memory system integration layer for GEAK.
 
 Environment toggles:
-  GEAK_MEMORY_DISABLE=1           -- disable all memory
-  GEAK_MEMORY_NO_WORKING=1        -- disable within-session working memory
+  GEAK_MEMORY_DISABLE=1              -- disable all memory
+  GEAK_MEMORY_NO_WORKING=1           -- disable within-session working memory
+  GEAK_MEMORY_NO_CROSS_SESSION=1     -- disable cross-session memory
+  GEAK_CROSS_SESSION_MEMORY_URL=...  -- point to shared memory server
 """
 
 from __future__ import annotations
@@ -23,10 +25,24 @@ def is_working_memory_enabled() -> bool:
 
 
 def assemble_memory_context(**kwargs) -> str:
-    """Placeholder — cross-session memory not yet integrated."""
-    return ""
+    """Retrieve relevant cross-session optimization experiences for prompt injection."""
+    if not is_memory_enabled():
+        return ""
+    try:
+        from minisweagent.memory.cross_session import retrieve
+
+        return retrieve(**kwargs)
+    except Exception:
+        return ""
 
 
 def record_optimization_outcome(**kwargs) -> None:
-    """Placeholder — cross-session recording not yet integrated."""
-    pass
+    """Persist an optimization outcome to cross-session memory."""
+    if not is_memory_enabled():
+        return
+    try:
+        from minisweagent.memory.cross_session import record
+
+        record(**kwargs)
+    except Exception:
+        pass
