@@ -156,6 +156,8 @@ def main(
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs."),
     test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command"),
+    target_language: str | None = typer.Option(None, "--target-language", help="Target language for translation (e.g. flydsl). Auto-detects if omitted."),
+    translate_only: bool = typer.Option(False, "--translate-only", help="Run translation only, skip optimization pipeline."),
 ):
     # fmt: on
     del visual
@@ -457,6 +459,8 @@ def main(
         gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
         model_factory=lambda: get_model(model_name, config.get("model", {})),
         console=console,
+        target_language=target_language,
+        translate_only=translate_only,
     )
     logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
 
@@ -490,6 +494,15 @@ def main(
         test_command = preprocess_ctx["test_command"]
     if preprocess_ctx.get("repo_root") and repo is None:
         repo = Path(preprocess_ctx["repo_root"])
+
+    # --translate-only: exit after translation, skip optimization
+    if preprocess_ctx.get("translate_only"):
+        _success = preprocess_ctx.get("translation_success", False)
+        console.print(
+            f"[bold green]Translation complete (success={_success}). "
+            f"Skipping optimization (--translate-only).[/bold green]"
+        )
+        return None
 
     # kernel_type routing:
     # - hip/other -> homogeneous agent

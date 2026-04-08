@@ -43,6 +43,13 @@ class PreprocessContext:
     baseline_metrics_path: str
     profiling_result_path: str
     discovery: dict | None = None
+    # Translation metadata (populated when translation preprocessing runs)
+    translation_source_language: str | None = None
+    translation_target_language: str | None = None
+    translation_pytorch_latency_ms: float | None = None
+    translation_rounds_used: int | None = None
+    translation_kernel_path: str | None = None
+    translation_best_attempt_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _strip_none({f.name: getattr(self, f.name) for f in fields(self)})
@@ -59,6 +66,12 @@ class PreprocessContext:
             baseline_metrics_path=d.get("baseline_metrics_path", ""),
             profiling_result_path=d.get("profiling_result_path", ""),
             discovery=d.get("discovery"),
+            translation_source_language=d.get("translation_source_language"),
+            translation_target_language=d.get("translation_target_language"),
+            translation_pytorch_latency_ms=d.get("translation_pytorch_latency_ms"),
+            translation_rounds_used=d.get("translation_rounds_used"),
+            translation_kernel_path=d.get("translation_kernel_path"),
+            translation_best_attempt_path=d.get("translation_best_attempt_path"),
         )
 
 

@@ -411,6 +411,8 @@ def run_preprocessor(
     correctness_command: str | list[str] | None = None,
     performance_command: str | list[str] | None = None,
     benchmark_timeout: int = 3600,
+    target_language: str | None = None,
+    translate_only: bool = False,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -523,6 +525,36 @@ def run_preprocessor(
                 harness = _new_harness
 
     logger.info("  Kernel: %s", kernel_path)
+
+    # ── Step 1.5: Translation (conditional) ──────────────────────────
+    if target_language or translate_only:
+        _print(
+            "[bold cyan]--- Step 1.5: Translation ---[/bold cyan]"
+            if console
+            else "--- Step 1.5: Translation ---"
+        )
+        from minisweagent.run.preprocess.translate import run_translation
+
+        _translation_model = model or (model_factory() if model_factory else None)
+        translation_output_dir = output_dir / "translation"
+        translation_result = run_translation(
+            kernel_path=Path(kernel_path),
+            output_dir=translation_output_dir,
+            gpu_id=gpu_id,
+            target_language=target_language,
+            model=_translation_model,
+            repo=Path(repo_root) if repo_root else None,
+            console=console,
+        )
+        ctx.update(translation_result)
+        if translation_result.get("translation_success"):
+            kernel_path = translation_result["translation_kernel_path"]
+            ctx["kernel_path"] = kernel_path
+            _print(f"  Translated kernel: {kernel_path}")
+        if translate_only:
+            ctx["translate_only"] = True
+            _print("  --translate-only: skipping remaining preprocessing steps")
+            return ctx
 
     # ── Fast path for eval_command: skip Steps 2-4 ───────────────────
     if eval_command:
