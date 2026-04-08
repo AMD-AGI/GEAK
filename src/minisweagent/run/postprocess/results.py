@@ -308,7 +308,21 @@ def post_round_evaluate(
         # Falling back to the agent's self-reported benchmark_speedup risks
         # promoting a hallucinated or inflated speedup as the global best.
         current = fb.verified_speedup if fb and fb.verified_speedup is not None else None
-        if current is not None and current >= ctx.get("_best_global_speedup", 0):
+        if current is None:
+            agent_speedup = round_eval.benchmark_speedup
+            note = (
+                f"No FULL_BENCHMARK verified speedup available; "
+                f"agent reported {agent_speedup:.4f}x (not used for global best selection)"
+            )
+            logger.warning("Round %d: %s", round_num, note)
+            eval_path = output_dir / f"round_{round_num}_evaluation.json"
+            try:
+                eval_dict = json.loads(eval_path.read_text())
+                eval_dict["verified_speedup_skipped"] = note
+                eval_path.write_text(json.dumps(eval_dict, indent=2, default=str))
+            except (json.JSONDecodeError, OSError):
+                pass
+        elif current >= ctx.get("_best_global_speedup", 0):
             ctx["starting_patch"] = round_eval.best_patch
             ctx["_best_global_speedup"] = current
     return round_eval
