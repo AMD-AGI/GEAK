@@ -3,7 +3,6 @@
 """Backup mini entry with kernel-type routing."""
 
 import logging
-import os
 import shlex
 import sys
 from pathlib import Path
@@ -26,9 +25,6 @@ from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.orchestrator import run_orchestrator
 from minisweagent.run.preprocess.preprocessor import run_preprocessor
 from minisweagent.run.utils.task_parser import _resolve_path_case, display_parsed_config, parse_task_info
-
-DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
-DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
 
 logger = logging.getLogger(__name__)
 console = Console(highlight=False)
@@ -164,23 +160,44 @@ def main(
     if sys.stdin.isatty():
         configure_if_first_time()
 
-    # 1) Config merge
+    # 1) Config merge — explicit UTF-8 avoids locale-dependent decoding for YAML on some platforms
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
-    logger.info("Loading base config: [bold green]'%s'[/bold green]", base_config_path.name)
-    config = yaml.safe_load(base_config_path.read_text()) or {}
+    config = yaml.safe_load(base_config_path.read_text(encoding="utf-8")) or {}
+    if config:
+        logger.info("Loaded base config from [bold green]'%s'[/bold green]", base_config_path.name)
+    else:
+        logger.warning(
+            "Base config %s: null or empty YAML file.",
+            base_config_path.name,
+        )
+
     config_path = config_spec or (builtin_config_dir / "geak.yaml")
-    logger.info("[dim]Applying user config from '%s' (final override)[/dim]", config_path)
-    user_config = yaml.safe_load(config_path.read_text()) or {}
+    user_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if user_config:
+        logger.info(
+            "Loaded user config from [bold green]'%s'[/bold green] [dim](final override)[/dim]",
+            config_path.name,
+        )
+    else:
+        logger.warning(
+            "User config %s: null or empty YAML file.",
+            config_path.name,
+        )
+
     config = _deep_merge(config, user_config)
 
     if yolo:
         config.setdefault("agent", {})["mode"] = "yolo"
+        logger.info("Running in YOLO mode.")
     if cost_limit is not None:
         config.setdefault("agent", {})["cost_limit"] = cost_limit
+        logger.info("Setting cost limit to %s.", cost_limit)
     if exit_immediately:
         config.setdefault("agent", {})["confirm_exit"] = False
+        logger.info("Running in exit-immediately mode.")
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
+        logger.info("Using model class: %s.", model_class)
 
     tools_cfg = config.get("tools") or {}
     disabled_tools: list[str] = []
@@ -193,6 +210,7 @@ def main(
     if disabled_tools:
         config.setdefault("agent", {}).setdefault("disabled_tools", [])
         config["agent"]["disabled_tools"] = list(set(config["agent"]["disabled_tools"]) | set(disabled_tools))
+    logger.debug("config: %s", config)
 
     model = get_model(model_name, config.get("model", {}))
     _model_name = getattr(model.config, "model_name", "unknown")
@@ -206,6 +224,7 @@ def main(
             logger.info("[bold green]Read task from file: %s[/bold green]", task_path)
         elif not task.strip():
             task_content = None
+            logger.info("Task content is empty.")
 
     if not task_content:
         console.print("[bold yellow]What do you want to do?")
@@ -228,29 +247,36 @@ def main(
 
         logger.info("[bold cyan]Checking task for pipeline parameters...[/bold cyan]")
         pipeline_params = parse_pipeline_params(task_content, model)
+        logger.debug("pipeline_params: %s", pipeline_params)
 
         # Apply non-None extracted values (CLI flags still take priority)
         if pipeline_params.get("heterogeneous") is not None and heterogeneous is None:
             heterogeneous = pipeline_params["heterogeneous"]
+            logger.info("Using heterogeneous mode.")
         if pipeline_params.get("max_rounds") is not None:
             max_rounds = pipeline_params["max_rounds"]
+            logger.info("Using max rounds: %s.", max_rounds)
 
         # Prompt for missing required params (kernel_url) — only if not already set
         if kernel_url is None:
             from minisweagent.run.utils.config_editor import prompt_missing_pipeline_params
 
+            logger.info("Prompting for missing pipeline parameters.")
             pipeline_params, should_use_pipeline = prompt_missing_pipeline_params(
                 pipeline_params, console, yolo
             )
+            logger.info("pipeline_params: %s, should_use_pipeline: %s", pipeline_params, should_use_pipeline)
 
             if should_use_pipeline:
                 if pipeline_params.get("kernel_url"):
                     kernel_url = pipeline_params["kernel_url"]
+                    logger.info("Using kernel URL: %s.", kernel_url)
 
     # 2b) Detect configs from task
     parsed_config = parse_task_info(task_content, model)
-    task_kernel_type = _normalize_kernel_type(parsed_config.get("kernel_type"))
-    kernel_type = task_kernel_type
+    kernel_type = _normalize_kernel_type(parsed_config.get("kernel_type"))
+    logger.info("Normalized kernel_type from task content: %s", kernel_type)
+
     if kernel_url:
         kp = Path(kernel_url)
         if kp.exists() and kp.is_file():
@@ -259,15 +285,14 @@ def main(
             inferred = _normalize_kernel_type(_infer_kernel_type(kp))
             if inferred in {"hip", "triton"}:
                 kernel_type = inferred
-
-    # Keep kernel_type resolution internal; avoid exposing routing details in logs.
+                logger.info("Updated kernel_type using kernel path: %s", kernel_type)
 
     if repo is None and parsed_config.get("repo"):
         repo = Path(parsed_config["repo"])
+        logger.info("Using repo from task content: %s", repo)
     if test_command is None and parsed_config.get("test_command"):
         test_command = parsed_config["test_command"]
-    if num_parallel is None:
-        num_parallel = _as_int(parsed_config.get("num_parallel"))
+        logger.info("Using test command from task content: %s", test_command)
     if gpu_ids is None and parsed_config.get("gpu_ids") is not None:
         _parsed_gpu_ids = parsed_config["gpu_ids"]
         if isinstance(_parsed_gpu_ids, list):
@@ -276,13 +301,20 @@ def main(
             gpu_ids = str(_parsed_gpu_ids)
         if not gpu_ids.strip():
             gpu_ids = None
+        logger.info("Using gpu_ids: %s", gpu_ids)
 
     # Apply config/model/output_dir extracted from task (CLI flags take priority)
     if config_spec is None and parsed_config.get("config"):
         _task_config_path = get_config_path(Path(parsed_config["config"]))
         if _task_config_path and _task_config_path.exists():
             logger.info("[dim]Applying config from task: '%s'[/dim]", _task_config_path)
-            _task_user_config = yaml.safe_load(_task_config_path.read_text()) or {}
+            _task_yaml = yaml.safe_load(_task_config_path.read_text(encoding="utf-8"))
+            _task_user_config = _task_yaml or {}
+            if not _task_yaml:
+                logger.warning(
+                    "Task config %s: null or empty YAML; merge layer uses {}.",
+                    _task_config_path,
+                )
             config = _deep_merge(config, _task_user_config)
 
     if model_name is None and parsed_config.get("model"):
@@ -292,6 +324,7 @@ def main(
 
     if output is None and parsed_config.get("output_dir"):
         output = Path(parsed_config["output_dir"])
+        logger.info("Using output_dir from task content: %s", output)
 
     kernel_target = kernel_url or parsed_config.get("kernel_url") or parsed_config.get("kernel_name")
     if not kernel_target:
@@ -301,15 +334,13 @@ def main(
         raise typer.Exit(1)
 
     parsed_gpu_ids = parse_gpu_ids(gpu_ids)
-    if num_parallel is None and isinstance(gpu_ids, str) and gpu_ids.strip():
-        num_parallel = len(parsed_gpu_ids)
-    metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
 
     kernel_name_for_output = parsed_config.get("kernel_name")
     if not kernel_name_for_output and kernel_url:
         kernel_name_for_output = Path(kernel_url).stem
     if not kernel_name_for_output and isinstance(kernel_target, str):
         kernel_name_for_output = Path(kernel_target).stem
+    logger.info("Using kernel_name_for_output: %s", kernel_name_for_output)
 
     preprocess_output_dir, traj_output_path = _derive_output_dir_and_traj(output, kernel_name_for_output)
     preprocess_output_dir.mkdir(parents=True, exist_ok=True)
@@ -363,6 +394,7 @@ def main(
         model_factory=lambda: get_model(model_name, config.get("model", {})),
         console=console,
     )
+    logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
 
     if harness_spec:
         try:
@@ -380,6 +412,7 @@ def main(
             left, right = test_command.rsplit("&&", 1)
             correctness_command = left.strip() or None
             performance_command = right.strip() or None
+            logger.info("Correctness command: %s, Performance command: %s", correctness_command, performance_command)
             preprocess_ctx = run_preprocessor(
                 **_preprocess_kwargs,
                 correctness_command=correctness_command,
@@ -387,6 +420,7 @@ def main(
             )
         else:
             preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
+    logger.debug("Preprocessor context: %s", preprocess_ctx)
 
     if preprocess_ctx.get("test_command") and not test_command:
         test_command = preprocess_ctx["test_command"]
@@ -408,15 +442,25 @@ def main(
 
         if _auto_kernel_type == "triton":
             heterogeneous = True
+            logger.info("Using heterogeneous mode based on discovery.")
         else:
             heterogeneous = False
-    else:
-        pass
+            logger.info("Using homogeneous mode based on discovery.")
 
     if heterogeneous:
         commandment = preprocess_ctx.get("commandment")
-        if commandment:
-            task_content = f"{commandment}\n\n---\n\n{task_content}"
+        if not commandment:
+            error_message = "No commandment found in preprocessor context. Check preprocessor logs for failures."
+            logger.error(error_message)
+            raise RuntimeError(error_message)
+
+        task_content = f"{commandment}\n\n---\n\n{task_content}"
+        logger.info(
+            "Prepended COMMANDMENT.md to task content (total length %d chars).",
+            len(task_content),
+        )
+        logger.debug("Task content after commandment prepend: %s", task_content)
+
         report = run_orchestrator(
             preprocess_ctx=preprocess_ctx,
             gpu_ids=parsed_gpu_ids,
@@ -428,11 +472,22 @@ def main(
         )
         return _final_report_to_bestpatchresult(report)
 
+    # Homogeneous path only: num_parallel and metric are not passed to run_orchestrator.
+    if num_parallel is None:
+        num_parallel = _as_int(parsed_config.get("num_parallel"))
+        logger.info("Using num_parallel from task content: %s", num_parallel)
+    if num_parallel is None and isinstance(gpu_ids, str) and gpu_ids.strip():
+        num_parallel = len(parsed_gpu_ids)
+        logger.info("Auto-setting num_parallel: %s based on GPU IDs.", num_parallel)
+    metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
+    logger.info("Using metric: %s", metric)
+
     agent_config = dict(config.get("agent", {}))
     agent_config["save_patch"] = True
     agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
     agent_config["metric"] = metric
     agent_config["patch_output_dir"] = str(preprocess_output_dir)
+    logger.debug("Homogeneous agent_config: %s", agent_config)
 
     repo_path = repo or config.get("patch", {}).get("repo")
     if repo_path:
@@ -442,6 +497,7 @@ def main(
             if resolved is not None:
                 p = resolved
         repo_path = p.resolve()
+    logger.info("Resolved repo path: %s", repo_path)
 
     return run_homogeneous_agent(
         config=config,
