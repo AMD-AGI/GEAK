@@ -62,6 +62,7 @@ def generate_commandment(
     warmup_runs: int = 2,
     profile_replays: int = 5,
     kernel_language: str = "python",
+    kernel_type: str = "",
 ) -> str:
     """Generate a valid COMMANDMENT.md and return its content.
 
@@ -84,6 +85,8 @@ def generate_commandment(
         profile_replays: Number of replay passes for ``kernel-profile``.
         kernel_language: ``"python"``, ``"cpp"``, or ``"asm"``.  When
             ``"cpp"``, SETUP includes a build step and JIT cache isolation.
+        kernel_type: Discovery-style label (e.g. ``triton``, ``ck``, ``hip``).
+            When ``ck``, SETUP uses the Composable Kernel compile harness path.
 
     Returns:
         The content of a valid COMMANDMENT.md as a string.
@@ -122,6 +125,7 @@ def generate_commandment(
             warmup_runs=warmup_runs,
             profile_replays=profile_replays,
             kernel_language=kernel_language,
+            kernel_type=kernel_type,
         )
 
     return _validate_and_fix(content, harness_path=str(harness_path))
@@ -158,6 +162,7 @@ def _generate_simple(
     warmup_runs: int,
     profile_replays: int,
     kernel_language: str = "python",
+    kernel_type: str = "",
 ) -> str:
     """Generate COMMANDMENT for a simple (non-inner) kernel.
 
@@ -174,7 +179,17 @@ def _generate_simple(
         warmup_runs,
     )
 
-    if kernel_language == "cpp":
+    if kernel_type.lower() == "ck":
+        setup_section = (
+            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+            "rm -rf libbaseline.so liboptimized.so libbaseline.d liboptimized.d\\n"
+            "python3 compile.py\\n"
+            "export HIP_VISIBLE_DEVICES=%s\\n"
+            'exec python3 "$@"\\n\' '
+            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
+            "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
+        )
+    elif kernel_language == "cpp":
         build_cmd = _detect_build_command(repo_root)
         setup_section = (
             "rm -rf ${GEAK_WORK_DIR}/.aiter_jit\n" + build_cmd + "\n"
