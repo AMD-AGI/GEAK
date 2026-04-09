@@ -89,6 +89,8 @@ def _infer_kernel_type(kernel_path: Path) -> str:
                 if _check_imported_triton(text, kernel_path):
                     logger.debug("_infer_kernel_type: triton detected via import-follow in %s", kernel_path.name)
                     return "triton"
+                logger.debug("_infer_kernel_type: bare 'import triton' in %s; classifying as triton.", kernel_path.name)
+                return "triton"
         except OSError as exc:
             logger.debug("_infer_kernel_type: could not read %s: %s", kernel_path, exc)
         logger.debug("_infer_kernel_type: no triton markers in %s; returning 'unknown'.", kernel_path.name)
