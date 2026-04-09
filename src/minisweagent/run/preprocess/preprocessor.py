@@ -450,6 +450,7 @@ def run_preprocessor(
             console.print(msg)
         else:
             print(msg, file=sys.stderr)
+        logger.info(msg)
 
     ctx: dict[str, Any] = {}
 

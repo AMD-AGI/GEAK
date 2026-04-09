@@ -242,16 +242,19 @@ def bootstrap_git_repo(repo_path: Path, console=None) -> bool:
 
         if console:
             console.print("[bold green]Git repo bootstrapped successfully[/bold green]")
+        logger.info("Git repo bootstrapped successfully at %s", repo_path)
         return True
 
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr or e.stdout or str(e)
         if console:
             console.print(f"[bold red]Failed to bootstrap git repo: {error_msg}[/bold red]")
+        logger.error("Failed to bootstrap git repo: %s", error_msg)
         return False
     except Exception as e:
         if console:
             console.print(f"[bold red]Failed to bootstrap git repo: {e}[/bold red]")
+        logger.error("Failed to bootstrap git repo: %s", e)
         return False
 
 
@@ -288,9 +291,10 @@ def run_parallel_heterogeneous(
 ) -> list[tuple[int, Any, Any, Any]]:
     """Run heterogeneous parallel agents from AgentSpec list."""
     num_agents = len(agent_specs)
+    labels = [s.label or s.agent_class.__name__ for s in agent_specs]
     if console:
-        labels = [s.label or s.agent_class.__name__ for s in agent_specs]
         console.print(f"[bold green]Running {num_agents} heterogeneous agents: {labels}[/bold green]")
+    logger.info("Running %d heterogeneous agents: %s", num_agents, labels)
 
     base_patch_dir = base_patch_dir.resolve()
     worktree_base = base_patch_dir / "worktrees"
@@ -313,6 +317,7 @@ def run_parallel_heterogeneous(
                     f"[bold green]Agent {agent_id} ({label}): "
                     f"GPU {spec.hip_visible_devices}, worktree {worktree_path}[/bold green]"
                 )
+        logger.info("Agent %d (%s): GPU %s, worktree %s", agent_id, label, spec.hip_visible_devices, worktree_path)
 
         parallel_patch_dir = (base_patch_dir / f"parallel_{agent_id}").resolve()
         parallel_patch_dir.mkdir(parents=True, exist_ok=True)
@@ -394,9 +399,7 @@ def run_parallel_heterogeneous(
                 results.append(r)
             except Exception as e:
                 agent_id = futures[future]
-                from minisweagent.utils.log import logger
-
-                logger.error(f"Error in heterogeneous agent {agent_id}: {e}", exc_info=True)
+                logger.error("Error in heterogeneous agent %d: %s", agent_id, e, exc_info=True)
     return results
 
 
@@ -431,12 +434,13 @@ def run_pool(
     n_slots = len(gpu_ids)
     n_tasks = len(tasks)
 
+    labels = [t.label or t.agent_class.__name__ for t in tasks]
     if console:
-        labels = [t.label or t.agent_class.__name__ for t in tasks]
         console.print(
             f"[bold green]GPU Pool: {n_tasks} tasks on {n_slots} GPU slots "
             f"(labels: {labels[:8]}{'...' if len(labels) > 8 else ''})[/bold green]"
         )
+    logger.info("GPU Pool: %d tasks on %d GPU slots (labels: %s)", n_tasks, n_slots, labels[:8])
 
     base_patch_dir = base_patch_dir.resolve()
     worktree_base = base_patch_dir / "worktrees"
@@ -478,6 +482,7 @@ def run_pool(
                         f"[bold green]Task {task_id} ({label}): "
                         f"assigned to GPU(s) {hip_devices} (slot {slot_idx})[/bold green]"
                     )
+            logger.info("Task %d (%s): assigned to GPU(s) %s (slot %d)", task_id, label, hip_devices, slot_idx)
 
             # Create or reset worktree for this slot
             wt_path = worktree_base / f"slot_{slot_idx}"
@@ -708,6 +713,7 @@ def run_pool(
             if console:
                 with _stdout_lock:
                     console.print(f"[bold blue]Task {task_id} ({label}): completed on GPU(s) {hip_devices}[/bold blue]")
+            logger.info("Task %d (%s): completed on GPU(s) %s", task_id, label, hip_devices)
 
             return task_id, agent, exit_status, result
 

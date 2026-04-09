@@ -25,6 +25,7 @@ from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.orchestrator import run_orchestrator
 from minisweagent.run.preprocess.preprocessor import run_preprocessor
 from minisweagent.run.utils.task_parser import _resolve_path_case, display_parsed_config, parse_task_info
+from minisweagent.utils.log import DEFAULT_LOG_FILENAME, add_file_handler
 
 logger = logging.getLogger(__name__)
 console = Console(highlight=False)
@@ -228,6 +229,7 @@ def main(
 
     if not task_content:
         console.print("[bold yellow]What do you want to do?")
+        logger.info("Prompting user for task input (interactive).")
         task_content = prompt_session.prompt(
             "",
             multiline=True,
@@ -238,6 +240,7 @@ def main(
             ),
         )
         console.print("[bold green]Got that, thanks![/bold green]")
+        logger.info("User task input (%d chars): %s", len(task_content), task_content[:500])
 
     # 2a) LLM-driven pipeline param extraction
     heterogeneous = None
@@ -344,6 +347,7 @@ def main(
 
     preprocess_output_dir, traj_output_path = _derive_output_dir_and_traj(output, kernel_name_for_output)
     preprocess_output_dir.mkdir(parents=True, exist_ok=True)
+    add_file_handler(preprocess_output_dir / DEFAULT_LOG_FILENAME)
     config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
     logger.info(
         "[dim]Logs and artifacts for this run are under '%s' "
@@ -368,7 +372,9 @@ def main(
         _display_cfg["model"] = model_name
     if config_spec is not None:
         _display_cfg["config"] = str(config_spec)
-    console.print(display_parsed_config(_display_cfg, str(preprocess_output_dir)))
+    _resolved_config_display = display_parsed_config(_display_cfg, str(preprocess_output_dir))
+    console.print(_resolved_config_display)
+    logger.info("Resolved configuration:\n%s", _resolved_config_display)
 
     _env_kwargs = dict(config.get("env", {}))
     env_type = str(_env_kwargs.pop("type", _env_kwargs.pop("environment_class", "local"))).strip().lower() or "local"

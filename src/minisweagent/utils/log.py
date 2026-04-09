@@ -55,8 +55,10 @@ def add_file_handler(path: Path | str, level: int | None = None, *, print_path: 
         print(f"Logging to '{path}'")
 
 
+DEFAULT_LOG_FILENAME = "minisweagent.log"
+
 _setup_root_logger()
 logger = logging.getLogger("minisweagent")
 
 
-__all__ = ["logger"]
+__all__ = ["add_file_handler", "logger", "DEFAULT_LOG_FILENAME"]

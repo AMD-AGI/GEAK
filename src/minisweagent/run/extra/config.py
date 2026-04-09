@@ -5,6 +5,7 @@ You can also directly edit the `.env` file in the config directory.
 It is located at [bold green]{global_config_file}[/bold green].
 """
 
+import logging
 import os
 import subprocess
 
@@ -15,6 +16,8 @@ from rich.rule import Rule
 from typer import Argument, Typer
 
 from minisweagent import global_config_file
+
+logger = logging.getLogger(__name__)
 
 app = Typer(
     help=__doc__.format(global_config_file=global_config_file),  # type: ignore
@@ -49,6 +52,7 @@ To find the best model, check the leaderboard at https://swebench.com/
 def configure_if_first_time():
     if not os.getenv("MSWEA_CONFIGURED"):
         console.print(Rule())
+        logger.info("First-time configuration: running setup.")
         setup()
         console.print(Rule())
 

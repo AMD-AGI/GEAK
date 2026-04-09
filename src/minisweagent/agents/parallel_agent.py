@@ -113,10 +113,13 @@ class ParallelAgent(DefaultAgent):
         )
         if console:
             console.print(f"\n[bold green]Selecting best patch from {num_parallel} parallel runs...[/bold green]")
+        logger.info("Selecting best patch from %d parallel runs...", num_parallel)
         best_result = self._select_best_from_parallel_runs(base_patch_dir, num_parallel, metric, model_factory)
-        if best_result and console and best_result.llm_conclusion:
-            console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
-            console.print(best_result.llm_conclusion)
+        if best_result and best_result.llm_conclusion:
+            if console:
+                console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
+                console.print(best_result.llm_conclusion)
+            logger.info("LLM Conclusion: %s", best_result.llm_conclusion)
 
         # Return the best result object
         return best_result
