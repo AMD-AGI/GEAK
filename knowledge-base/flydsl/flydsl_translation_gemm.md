@@ -1,121 +1,169 @@
 ---
 layer: "flydsl"
 category: "translation"
-tags: ["flydsl", "translation", "gemm", "mfma", "matmul"]
+tags: ["flydsl", "translation", "gemm", "matmul", "linear"]
 last_updated: 2026-03-23
 ---
 
-# Translating GEMM Kernels from PyTorch to FlyDSL
+# FlyDSL Translation: GEMM / Matrix Multiplication
 
-## Overview
+## Always Use FlyDSL Pre-built GEMM
 
-Matrix multiplication (`torch.matmul`, `torch.mm`, `torch.bmm`) requires
-tiled algorithms with shared memory for efficient GPU execution. This is
-significantly more complex than element-wise translations.
+FlyDSL provides highly optimized GEMM kernels. **Do NOT fall back to PyTorch
+`torch.matmul` / `F.linear` / `nn.Linear` when FlyDSL GEMM is available.**
 
-## Basic Tiled GEMM Pattern
-
-```python
-# PyTorch: C = torch.matmul(A, B)  # A: [M, K], B: [K, N], C: [M, N]
-
-TILE_M = 16
-TILE_N = 16
-TILE_K = 16
-
-@flyc.kernel
-def gemm_kernel(a_ptr, b_ptr, c_ptr, M: int, N: int, K: int):
-    # Block coordinates
-    bm = flyc.block_id() // ((N + TILE_N - 1) // TILE_N)
-    bn = flyc.block_id() % ((N + TILE_N - 1) // TILE_N)
-    tid = flyc.thread_id() - flyc.block_id() * flyc.block_dim()
-
-    # Thread coordinates within tile
-    tm = tid // TILE_N
-    tn = tid % TILE_N
-
-    # Global coordinates
-    row = bm * TILE_M + tm
-    col = bn * TILE_N + tn
-
-    # Shared memory for tiles
-    a_shared = flyc.shared_memory((TILE_M, TILE_K), flyc.float32)
-    b_shared = flyc.shared_memory((TILE_K, TILE_N), flyc.float32)
-
-    acc = 0.0
-    for k_tile in range(0, K, TILE_K):
-        # Load A tile
-        if row < M and (k_tile + tn) < K:
-            flyc.store(a_shared, (tm, tn), flyc.load(a_ptr, row * K + k_tile + tn))
-        # Load B tile
-        if (k_tile + tm) < K and col < N:
-            flyc.store(b_shared, (tm, tn), flyc.load(b_ptr, (k_tile + tm) * N + col))
-
-        flyc.syncthreads()
-
-        # Compute partial dot product
-        for kk in range(TILE_K):
-            acc += flyc.load(a_shared, (tm, kk)) * flyc.load(b_shared, (kk, tn))
-
-        flyc.syncthreads()
-
-    # Store result
-    if row < M and col < N:
-        flyc.store(c_ptr, row * N + col, acc)
-
-@flyc.jit
-def gemm_jit(A, B, C, M, N, K):
-    grid = ((M + TILE_M - 1) // TILE_M) * ((N + TILE_N - 1) // TILE_N)
-    block = TILE_M * TILE_N
-    gemm_kernel[grid, block](A, B, C, M, N, K)
-
-class Model(torch.nn.Module):
-    def forward(self, A, B):
-        M, K = A.shape
-        _, N = B.shape
-        C = torch.empty(M, N, device=A.device, dtype=A.dtype)
-        gemm_jit(A, B, C, M, N, K)
-        return C
-```
-
-## MFMA Intrinsics (MI300X)
-
-For high-performance GEMM on MI300X, use Matrix Fused Multiply-Add (MFMA):
-
-- `flyc.mfma_f32_16x16x4_f32` — 16x16 output tile, K=4 accumulation
-- `flyc.mfma_f32_32x32x8_f16` — 32x32 output tile with FP16 inputs
-
-These map directly to AMD CDNA3 matrix core instructions.
-
-## Batched Matrix Multiplication
+### Primary: Preshuffle GEMM
 
 ```python
-# PyTorch: C = torch.bmm(A, B)  # A: [B, M, K], B: [B, K, N]
+from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from tests.utils import shuffle_weight
 
-@flyc.kernel
-def batched_gemm_kernel(a_ptr, b_ptr, c_ptr,
-                         batch: int, M: int, N: int, K: int):
-    # Use block_id to index into batch dimension
-    batch_idx = flyc.block_id() // (((M + TILE_M - 1) // TILE_M) *
-                                     ((N + TILE_N - 1) // TILE_N))
-    # Offset pointers by batch stride
-    a_offset = batch_idx * M * K
-    b_offset = batch_idx * K * N
-    c_offset = batch_idx * M * N
-    # ... rest of tiled GEMM with offset pointers
+# Compile a GEMM launcher (JIT-compiled on first call)
+launch_fn = compile_preshuffle_gemm_a8(
+    M=0, N=N, K=K,             # M=0 for dynamic batch size
+    tile_m=64, tile_n=128, tile_k=128,  # tile sizes
+    in_dtype="fp16",            # "fp8", "int8", "int4", "fp16", "bf16", "fp4"
+    out_dtype="fp16",           # "fp16" or "bf16"
+    lds_stage=2,                # ping-pong LDS (tuned)
+)
+
+# B-matrix MUST be preshuffled (done once, e.g. in __init__):
+B_shuffled = shuffle_weight(B.contiguous(), layout=(16, 16))
+
+# Launch call — ALL tensors must be .view(-1) (flattened to 1D):
+C = torch.empty(M, N, device=x.device, dtype=torch.float16)
+scale_a = torch.empty(0, device=x.device, dtype=torch.float32)
+scale_b = torch.empty(0, device=x.device, dtype=torch.float32)
+launch_fn(
+    C.contiguous().view(-1),
+    A.contiguous().view(-1),
+    B_shuffled.contiguous().view(-1),
+    scale_a, scale_b,
+    M, N,
+    torch.cuda.current_stream(),
+)
 ```
 
-## Occupancy Tuning
+### CRITICAL: Weight Preshuffling
 
-- **Tile sizes**: Balance shared memory usage vs. parallelism.
-  Larger tiles (32x32, 64x64) improve arithmetic intensity but reduce occupancy.
-- **Register pressure**: Each thread accumulates TILE_M/thread * TILE_N/thread values.
-  MI300X has 256 VGPRs per thread; plan register usage accordingly.
-- **LDS usage**: MI300X has 64 KB per workgroup. Two tiles of 64x64 float32 = 32 KB.
+The preshuffle GEMM **requires** B in a permuted layout. Use `shuffle_weight`:
 
-## Key Differences from PyTorch
+```python
+from tests.utils import shuffle_weight
 
-- PyTorch's `torch.matmul` dispatches to highly optimized rocBLAS/hipBLAS.
-  FlyDSL translations will likely be slower for large matrices unless MFMA
-  intrinsics and optimal tiling are used.
-- For correctness validation, a naive tiled GEMM is sufficient.
-- Performance optimization of the GEMM kernel is out of scope for translation.
+# For fp16/bf16 weights:
+weight_shuffled = shuffle_weight(weight.contiguous(), layout=(16, 16))
+
+# For int8 weights:
+weight_shuffled = shuffle_weight(weight_i8.contiguous(), layout=(16, 16))
+```
+
+`shuffle_weight` permutes the weight tensor in blocks of (16, 32) — the N-dimension
+is split into blocks of 16 rows, and K into blocks of 32 elements. This matches the
+MFMA tile register layout for maximum throughput.
+
+**You MUST call `shuffle_weight` once in `__init__` and cache the result.** Do NOT
+call it in every `forward()` pass.
+
+### Scales for Non-quantized GEMM
+
+For fp16/bf16, scale tensors are unused but still required as arguments. Use empty tensors:
+
+```python
+scale_a = torch.empty(0, device=device, dtype=torch.float32)
+scale_b = torch.empty(0, device=device, dtype=torch.float32)
+```
+
+### Supported Data Types
+
+| `in_dtype` | A type | B type | C type | Notes |
+|-----------|--------|--------|--------|-------|
+| `"fp16"` | fp16 | fp16 | fp16 | Default for most translations |
+| `"bf16"` | bf16 | bf16 | bf16 | |
+| `"fp8"` | fp8 | fp8 | fp16 | With per-token scaling |
+| `"int8"` | int8 | int8 | int32 | |
+| `"int4"` | int8 | int4(packed) | int32 | W4A8 quantization |
+| `"fp4"` | fp8 | fp4 | fp16 | Requires gfx950 (MI350) |
+
+### Tile Configuration Guide
+
+| M range | Recommended `tile_m` | Notes |
+|---------|---------------------|-------|
+| 1-16 | 16 | Small batch |
+| 16-64 | 32 or 64 | Medium batch |
+| 64+ | 64 or 128 | Large batch |
+
+`tile_n`: 128. `tile_k`: 128 for fp16/bf16, 256 for fp8/int8. Use `lds_stage=2`.
+
+### Constraints
+
+- `tile_k * elem_bytes` must be divisible by 64
+- `M` and `N` can be 0 (dynamic) — resolved at launch time
+- B must be preshuffled with `shuffle_weight(b, layout=(16, 16))`
+- Scale tensors required (use `torch.empty(0)` for non-quantized)
+- All tensor args must be `.view(-1)` (flattened 1D)
+
+## Complete nn.Linear Translation Example
+
+```python
+import torch
+import torch.nn as nn
+from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from tests.utils import shuffle_weight
+
+class Model(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(out_features, in_features, dtype=torch.float16))
+        self.bias = nn.Parameter(torch.randn(out_features, dtype=torch.float16))
+        self._gemm = None
+        self._weight_shuffled = None
+
+    def forward(self, x):
+        x = x.half()  # ensure fp16
+        M = x.shape[0]
+        N, K = self.weight.shape  # out_features, in_features
+
+        if self._gemm is None:
+            self._gemm = compile_preshuffle_gemm_a8(
+                M=0, N=N, K=K,
+                tile_m=64, tile_n=128, tile_k=128,
+                in_dtype="fp16", out_dtype="fp16", lds_stage=2,
+            )
+            self._weight_shuffled = shuffle_weight(
+                self.weight.data.contiguous(), layout=(16, 16)
+            )
+
+        output = torch.empty(M, N, device=x.device, dtype=torch.float16)
+        scale = torch.empty(0, device=x.device, dtype=torch.float32)
+        self._gemm(
+            output.contiguous().view(-1),
+            x.contiguous().view(-1),
+            self._weight_shuffled.contiguous().view(-1),
+            scale, scale,
+            M, N,
+            torch.cuda.current_stream(),
+        )
+
+        if self.bias is not None:
+            output = output + self.bias
+
+        return output
+
+def get_inputs():
+    return [torch.randn(1024, 4096, device="cuda")]
+
+def get_init_inputs():
+    return [4096, 4096]
+```
+
+## When PyTorch Fallback is Acceptable
+
+Only fall back to PyTorch GEMM (`torch.matmul`, `F.linear`) when:
+
+1. **Batched matmul** (`torch.bmm`) — no FlyDSL batched GEMM yet
+2. **Very small dimensions** where GEMM kernel overhead exceeds compute
+3. **Conv2d / pooling** — these are NOT GEMM (no FlyDSL equivalent)
+
+**Do NOT use PyTorch fallback for standard `nn.Linear` or `torch.matmul(A, B)` —
+these should use `compile_preshuffle_gemm_a8`.**

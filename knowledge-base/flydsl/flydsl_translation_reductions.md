@@ -2,133 +2,154 @@
 layer: "flydsl"
 category: "translation"
 tags: ["flydsl", "translation", "reductions", "softmax", "layernorm"]
-last_updated: 2026-03-23
+last_updated: 2026-04-08
 ---
 
-# Translating Reductions from PyTorch to FlyDSL
+# FlyDSL Translation: Reduction Patterns
 
-## Overview
+## Warp/Block Reduction in FlyDSL
 
-Reduction operations (sum, mean, softmax, layer norm) are among the most
-challenging translations because PyTorch hides the parallel reduction
-complexity behind single function calls.
+FlyDSL provides reduction helpers in `kernels/reduce.py`. For custom reductions:
 
-## Parallel Reduction Pattern
+### Warp Reduction (XOR Shuffle)
 
-### Wave-Level Reduction
-
-AMD GPUs execute 64 threads per wavefront. Use wave-level primitives first:
+AMD wavefront size is 64. Reduce using XOR shuffles:
 
 ```python
-@flyc.kernel
-def sum_kernel(x_ptr, partial_ptr, N: int):
-    tid = flyc.thread_id()
-    bid = flyc.block_id()
-    bdim = flyc.block_dim()
-    local_id = tid - bid * bdim
+from flydsl.expr import arith, range_constexpr
+import math
 
-    # Each thread loads one element
-    val = flyc.load(x_ptr, tid) if tid < N else 0.0
+WARP_SIZE = 64
 
-    # Wave-level reduction (64 threads)
-    wave_sum = flyc.warp_reduce_sum(val)
+def wave_reduce_sum(x):
+    width_i32 = fx.Int32(WARP_SIZE)
+    w = x
+    for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
+        off = fx.Int32(WARP_SIZE // (2 << _sh_exp))
+        peer = w.shuffle_xor(off, width_i32)
+        w = w.addf(peer)
+    return w
 
-    # First thread in each wave writes to shared memory
-    smem = flyc.shared_memory((bdim // 64,), flyc.float32)
-    wave_id = local_id // 64
-    if local_id % 64 == 0:
-        flyc.store(smem, wave_id, wave_sum)
-    flyc.syncthreads()
-
-    # First wave reduces across waves
-    if local_id < bdim // 64:
-        partial = flyc.load(smem, local_id)
-        block_sum = flyc.warp_reduce_sum(partial)
-        if local_id == 0:
-            flyc.atomic_add(partial_ptr, bid, block_sum)
+def wave_reduce_max(x):
+    width_i32 = fx.Int32(WARP_SIZE)
+    w = x
+    for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
+        off = fx.Int32(WARP_SIZE // (2 << _sh_exp))
+        peer = w.shuffle_xor(off, width_i32)
+        w = w.maximumf(peer)
+    return w
 ```
 
-### Multi-Pass Reduction
+### Block Reduction (Multi-Wave via LDS)
 
-For large tensors, use a two-pass approach:
-1. First pass: each block reduces to a partial sum
-2. Second pass: reduce partial sums to final result
-
-## Translating `torch.softmax`
-
-Softmax requires three passes: max, exp-sum, normalize.
+For blocks with multiple waves, use shared memory:
 
 ```python
-# PyTorch: output = torch.softmax(x, dim=-1)
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from flydsl.expr import gpu
 
-# FlyDSL: row-wise softmax (each block handles one row)
-@flyc.kernel
-def softmax_kernel(x_ptr, out_ptr, cols: int):
-    row = flyc.block_id()
-    tid = flyc.thread_id() - row * flyc.block_dim()
-    row_offset = row * cols
+NUM_WAVES = BLOCK_SIZE // WARP_SIZE
 
-    # Pass 1: find row max (for numerical stability)
-    max_val = -1e30
-    for i in range(tid, cols, flyc.block_dim()):
-        val = flyc.load(x_ptr, row_offset + i)
-        max_val = flyc.max(max_val, val)
-    max_val = flyc.warp_reduce_max(max_val)
-    # (cross-wave reduction via shared memory omitted for brevity)
+def block_reduce_sum(tid, val, allocator, red_offset):
+    lane = tid % WARP_SIZE
+    wave = tid // WARP_SIZE
+    base_ptr = allocator.get_base()
+    s_red = SmemPtr(base_ptr, red_offset, T.f32, shape=(NUM_WAVES,))
 
-    # Pass 2: compute exp(x - max) and sum
-    exp_sum = 0.0
-    for i in range(tid, cols, flyc.block_dim()):
-        val = flyc.load(x_ptr, row_offset + i)
-        exp_val = flyc.exp(val - max_val)
-        flyc.store(out_ptr, row_offset + i, exp_val)
-        exp_sum += exp_val
-    exp_sum = flyc.warp_reduce_sum(exp_sum)
+    w = wave_reduce_sum(val)
+    if lane == fx.Int32(0):
+        wave_idx = arith.index_cast(T.index, wave)
+        s_red.store(w, [wave_idx])
+    gpu.barrier()
 
-    flyc.syncthreads()
-
-    # Pass 3: normalize
-    for i in range(tid, cols, flyc.block_dim()):
-        val = flyc.load(out_ptr, row_offset + i)
-        flyc.store(out_ptr, row_offset + i, val / exp_sum)
+    if wave == fx.Int32(0):
+        in_range = lane < NUM_WAVES
+        lane_safe = in_range.select(lane, fx.Int32(0))
+        v = s_red.load([arith.index_cast(T.index, lane_safe)])
+        z = arith.constant(0.0, type=T.f32)
+        ww = in_range.select(v, z)
+        ww = wave_reduce_sum(ww)
+        if lane == fx.Int32(0):
+            s_red.store(ww, [fx.Index(0)])
+    gpu.barrier()
+    return s_red.load([fx.Index(0)])
 ```
 
-## Translating `torch.mean` / `torch.sum`
+## Using Pre-built Softmax
 
-For global reductions:
+For `torch.softmax(x, dim=-1)` translation, use the pre-built kernel:
 
 ```python
-# PyTorch: output = torch.mean(x)
-# FlyDSL: two-pass global reduction
+from kernels.softmax_kernel import build_softmax_module
 
-@flyc.jit
-def mean_jit(x, output, N):
-    block = 256
-    grid = (N + block - 1) // block
-    partials = torch.zeros(grid, device=x.device)
-    sum_kernel[grid, block](x, partials, N)
-    # Final reduction of partials
-    final_sum = partials.sum()
-    output.fill_(final_sum / N)
+class Model(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self._softmax = None
+        self.dim = dim
+
+    def forward(self, x):
+        if x.dim() == 2:
+            M, N = x.shape
+        else:
+            M = x.shape[0] * x.shape[1] if x.dim() == 3 else x.numel() // x.shape[-1]
+            N = x.shape[-1]
+            x = x.reshape(M, N)
+
+        if self._softmax is None:
+            self._softmax = build_softmax_module(M, N, dtype_str="f32")
+
+        output = torch.empty_like(x)
+        self._softmax(x, output, M, stream=torch.cuda.current_stream())
+        return output.reshape_as(x)
 ```
 
-## Translating Layer Norm / RMS Norm
-
-Layer norm combines mean, variance, and normalization:
+## Using Pre-built LayerNorm / RMSNorm
 
 ```python
-# PyTorch: output = F.layer_norm(x, [hidden_dim])
-# FlyDSL: each block handles one row (batch element)
-# 1. Compute mean (reduction)
-# 2. Compute variance (reduction)
-# 3. Normalize: (x - mean) / sqrt(variance + eps) * weight + bias
+from kernels.layernorm_kernel import build_layernorm_module
+from kernels.rmsnorm_kernel import build_rmsnorm_module
+
+class Model(nn.Module):
+    def __init__(self, normalized_shape):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(normalized_shape))
+        self.beta = nn.Parameter(torch.zeros(normalized_shape))
+        self._ln = None
+
+    def forward(self, x):
+        M = x.shape[0]
+        N = x.shape[-1]
+        if self._ln is None:
+            self._ln = build_layernorm_module(M, N, dtype_str="f32")
+        output = torch.empty_like(x)
+        self._ln(x, self.gamma, self.beta, output, M,
+                 stream=torch.cuda.current_stream())
+        return output
 ```
 
-## Key Considerations
+## Manual Mean/Sum Reduction
 
-- **Shared memory (LDS)**: AMD MI300X has 64 KB LDS per workgroup. Use for
-  cross-wave communication within a block.
-- **Wavefront size**: AMD uses 64-thread wavefronts (not 32 like NVIDIA warps).
-- **Synchronization**: `flyc.syncthreads()` synchronizes all threads in a block.
-  There is no global synchronization — use multiple kernel launches.
-- **Numerical stability**: Always subtract the max before `exp()` in softmax.
+For `torch.mean(x)` or `torch.sum(x)`, combine vector reduction with block reduce:
+
+```python
+from flydsl.expr import vector
+
+# Inside kernel: each thread processes vec_width elements
+vI = fx.memref_load_vec(rI)  # load vector
+partial_sum = vector.reduction(T.f32, vector.CombiningKind.ADD, vI)
+
+# Block-level reduction
+total = block_reduce_sum(tid, partial_sum, allocator, red_offset)
+
+# Only thread 0 writes final result
+if tid == fx.Int32(0):
+    # ... store total to output ...
+```
+
+## Key AMD Hardware Considerations
+
+- **Wavefront size**: 64 (not 32 like NVIDIA warp)
+- **LDS per CU**: 64 KB on MI300X (gfx942), 160 KB on MI350 (gfx950)
+- **Use `exp2` via rocdl**: `rocdl.exp2(T.f32, x)` for fast hardware exp2
+- **Numerical stability**: For softmax, use `exp2(x * log2(e))` not `exp(x)`

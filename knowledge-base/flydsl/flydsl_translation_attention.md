@@ -1,116 +1,182 @@
 ---
 layer: "flydsl"
 category: "translation"
-tags: ["flydsl", "translation", "attention", "flash-attention"]
+tags: ["flydsl", "translation", "attention", "transformer", "flash-attention"]
 last_updated: 2026-03-23
 ---
 
-# Translating Attention Kernels from PyTorch to FlyDSL
+# FlyDSL Translation: Attention Patterns
 
-## Overview
+## FlyDSL Has Flash Attention
 
-Attention mechanisms (scaled dot-product attention, multi-head attention) are
-the most complex translation targets. Direct translation of the mathematical
-formula is possible but inefficient; Flash Attention algorithms are preferred
-for production use.
+FlyDSL provides a high-performance Flash Attention kernel in `kernels/flash_attn_func.py`.
+This is an MFMA32-based implementation with online softmax, LDS prefetch, and XOR swizzle.
+**Always use it instead of PyTorch `F.scaled_dot_product_attention`.**
 
-## Why Direct Translation Is Insufficient
-
-The naive attention formula `softmax(Q @ K^T / sqrt(d)) @ V` requires
-materializing the full `[seq_len, seq_len]` attention matrix, which:
-- Uses O(seq_len^2) memory
-- Is bandwidth-bound on GPU
-- Cannot fit in LDS for long sequences
-
-## Flash Attention Algorithm
-
-Flash Attention computes attention without materializing the full matrix
-by processing Q in tiles and maintaining running statistics:
-
-```
-For each Q tile (q_tile):
-    Initialize running max = -inf, running sum = 0, output = 0
-    For each K,V tile (k_tile, v_tile):
-        scores = q_tile @ k_tile^T / sqrt(d)
-        new_max = max(running_max, row_max(scores))
-        correction = exp(running_max - new_max)
-        exp_scores = exp(scores - new_max)
-        output = output * correction + exp_scores @ v_tile
-        running_sum = running_sum * correction + row_sum(exp_scores)
-        running_max = new_max
-    output = output / running_sum
-```
-
-## FlyDSL Translation Pattern
+### Strategy 1: Pre-built Flash Attention (Preferred)
 
 ```python
-# PyTorch: output = F.scaled_dot_product_attention(Q, K, V)
+from kernels.flash_attn_func import build_flash_attn_func_module
 
-@flyc.kernel
-def attention_kernel(q_ptr, k_ptr, v_ptr, out_ptr,
-                     seq_len: int, head_dim: int):
-    # Each block handles one query position
-    q_pos = flyc.block_id()
-    tid = flyc.thread_id() - q_pos * flyc.block_dim()
-
-    # Load Q row into registers
-    # Tile over K/V in chunks
-    # Maintain running softmax statistics
-    # Accumulate weighted V
-    # Store final output
-    pass  # See full implementation in FlyDSL repo docs
-
-@flyc.jit
-def attention_jit(Q, K, V, output, seq_len, head_dim):
-    grid = seq_len  # one block per query position
-    block = head_dim  # threads process one head dimension
-    attention_kernel[grid, block](Q, K, V, output, seq_len, head_dim)
-```
-
-## Multi-Head Attention
-
-```python
-# PyTorch: output = nn.MultiheadAttention(embed_dim, num_heads)(Q, K, V)
-
-class Model(torch.nn.Module):
-    def __init__(self, embed_dim, num_heads):
+class Model(nn.Module):
+    def __init__(self, num_heads, head_dim, seq_len):
         super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        # Projection weights (stored as parameters)
+        self._flash_attn = build_flash_attn_func_module(
+            num_heads=num_heads,
+            head_dim=head_dim,
+            causal=True,           # set False for non-causal
+            dtype_str="f16",       # or "bf16"
+        )
 
-    def forward(self, Q, K, V):
-        batch, seq_len, _ = Q.shape
-        # 1. Project Q, K, V through linear layers
-        # 2. Reshape to [batch, num_heads, seq_len, head_dim]
-        # 3. Run attention per head (can parallelize via batch*num_heads blocks)
-        # 4. Concat heads and project output
-        pass
+    def forward(self, q, k, v):
+        # q, k, v: (batch, seq_len, num_heads, head_dim) — BSHD layout
+        B, S, H, D = q.shape
+        output = torch.empty_like(q)
+        # Flatten to 1D (BSHD contiguous layout)
+        self._flash_attn(
+            q.contiguous().view(-1),
+            k.contiguous().view(-1),
+            v.contiguous().view(-1),
+            output.view(-1),
+            B, S,                              # batch_size, seq_len
+            stream=torch.cuda.current_stream(),
+        )
+        return output
+```
+
+**Builder signature:**
+```python
+build_flash_attn_func_module(
+    num_heads: int,       # number of attention heads
+    head_dim: int,        # dimension per head (>= 64, % 32 == 0)
+    causal: bool = True,  # causal masking
+    dtype_str: str = "f16",  # "f16" or "bf16"
+    waves_per_eu: int = 2,
+)
+```
+
+**Launcher signature** (returned function):
+```python
+launcher(Q_flat, K_flat, V_flat, O_flat, batch_size, seq_len, stream=None)
+```
+
+Note: `num_heads` is baked in at build time. The launcher only takes `batch_size`
+and `seq_len` as runtime parameters (not `num_heads`).
+
+**Constraints:**
+- `head_dim % 32 == 0` and `head_dim >= 64`
+- `seq_len % 128 == 0`
+- Q/K/V/O must be contiguous 1D (BSHD flattened layout)
+- Supports f16 and bf16
+- Auto-selects BLOCK_M (128 or 256) based on num_heads
+
+### Strategy 2: Decomposed Attention with Pre-built Kernels
+
+When flash attention constraints aren't met, decompose into pre-built components:
+
+```python
+from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from kernels.softmax_kernel import build_softmax_module
+from tests.utils import shuffle_weight
+
+class Model(nn.Module):
+    def forward(self, q, k, v):
+        # QK^T via FlyDSL GEMM (after preshuffling K)
+        scores = ...  # use compile_preshuffle_gemm_a8
+
+        # Softmax via FlyDSL
+        scores_2d = scores.reshape(-1, N)
+        softmax_fn = build_softmax_module(scores_2d.shape[0], N, "f32")
+        attn_weights = torch.empty_like(scores_2d)
+        softmax_fn(scores_2d, attn_weights, scores_2d.shape[0],
+                   stream=torch.cuda.current_stream())
+
+        # V projection via FlyDSL GEMM
+        return ...  # use compile_preshuffle_gemm_a8
+```
+
+### Strategy 3: PyTorch Fallback (Last Resort)
+
+Only use `F.scaled_dot_product_attention` when:
+- head_dim < 64 or head_dim not divisible by 32
+- seq_len not divisible by 128
+- Batched attention with irregular shapes
+
+```python
+attn_out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
 ```
 
 ## Causal Masking
 
-For causal (autoregressive) attention, mask future positions:
+The FlyDSL flash attention kernel supports causal masking natively via `causal=True`
+in the builder. For decomposed attention, apply the mask before softmax:
 
 ```python
-# In the attention kernel, when computing scores:
-if k_pos > q_pos:
-    score = -1e30  # mask out future positions
+mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
+scores = scores.masked_fill(mask, float('-inf'))
 ```
 
-## Memory Staging
+## Full Multi-Head Attention Block Translation
 
-- **Q row** (~128 floats for head_dim=128): fits in registers
-- **K/V tiles** (tile_size x head_dim): load into shared memory
-- **Running statistics** (max, sum per row): kept in registers
-- **Output accumulator**: kept in registers, written to global at end
+For a full multi-head attention block (e.g., minGPT):
 
-## Key Considerations
+```python
+import torch
+import torch.nn as nn
+from kernels.flash_attn_func import build_flash_attn_func_module
 
-- Attention translation is the highest-complexity translation target.
-- For correctness validation, a naive implementation (materializing full
-  attention matrix) is acceptable.
-- Flash Attention optimization should be done post-translation in the
-  optimization phase.
-- Use `flyc.warp_reduce_max` and `flyc.warp_reduce_sum` for the online
-  softmax statistics.
+class Model(nn.Module):
+    def __init__(self, n_embd, n_head, block_size, ...):
+        super().__init__()
+        self.n_head = n_head
+        self.n_embd = n_embd
+        self.c_attn = nn.Linear(n_embd, 3 * n_embd)  # QKV projection
+        self.c_proj = nn.Linear(n_embd, n_embd)       # output projection
+        head_dim = n_embd // n_head
+        self._flash_attn = build_flash_attn_func_module(
+            num_heads=n_head,
+            head_dim=head_dim,
+            causal=True,
+            dtype_str="f16",
+        )
+
+    def forward(self, x):
+        B, T, C = x.size()
+        # QKV projection (nn.Linear kept for simplicity, or replace with GEMM)
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(C, dim=2)
+        head_dim = C // self.n_head
+        # Reshape to BSHD layout
+        q = q.view(B, T, self.n_head, head_dim).half()
+        k = k.view(B, T, self.n_head, head_dim).half()
+        v = v.view(B, T, self.n_head, head_dim).half()
+
+        # Attention via FlyDSL Flash Attention
+        y = torch.empty_like(q)
+        self._flash_attn(
+            q.contiguous().view(-1),
+            k.contiguous().view(-1),
+            v.contiguous().view(-1),
+            y.view(-1),
+            B, T,
+            stream=torch.cuda.current_stream(),
+        )
+        y = y.float().view(B, T, C)
+
+        # Output projection
+        return self.c_proj(y)
+```
+
+## Decision Summary
+
+```
+Attention pattern?
+├── Standard SDPA (head_dim>=64, head_dim%32==0, seq%128==0)
+│   └── Use build_flash_attn_func_module() from kernels.flash_attn_func
+├── Decomposed Q@K, softmax, @V
+│   └── Use compile_preshuffle_gemm_a8 + build_softmax_module
+├── Non-standard shapes (head_dim<64, seq not %128)
+│   └── F.scaled_dot_product_attention (PyTorch fallback, last resort)
+└── Causal attention
+    └── FlyDSL flash attention supports causal=True natively
+```
