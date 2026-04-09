@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -239,7 +240,8 @@ def tool_dispatch_tasks(
         return json.dumps({"error": "No task files found"})
 
     task_paths = [Path(f) for f in task_files]
-    logger.info("tool_dispatch_tasks: dispatching %d task(s) across GPU(s) %s.", len(task_paths), gpu_ids)
+    logger.info("[bold yellow]Dispatching %d task(s)[/bold yellow] across GPU(s) %s.", len(task_paths), gpu_ids)
+    _dispatch_t0 = time.monotonic()
     stages = _group_task_files_by_dispatch_stage(task_paths)
     round_match = None
     for tf in task_paths[:1]:
@@ -273,6 +275,9 @@ def tool_dispatch_tasks(
                 if _dispatch_stage_name(0) == remaining_stage:
                     continue
             break
+
+    _dispatch_elapsed = time.monotonic() - _dispatch_t0
+    logger.info("[bold green]Dispatch completed[/bold green] in %.1fs (%d stages).", _dispatch_elapsed, len(all_results))
 
     return json.dumps(
         {

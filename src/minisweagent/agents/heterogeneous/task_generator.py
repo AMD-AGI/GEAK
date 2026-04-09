@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -581,18 +582,24 @@ def _run_task_agent(
         )
 
         logger.info(
-            "Starting task-generation agent (step_limit=%d, cost_limit=%.1f)",
+            "[bold yellow]Starting task-generation agent[/bold yellow] (step_limit=%d, cost_limit=%.1f)",
             tg_step_limit,
             tg_cost_limit,
         )
 
+        _t0 = time.monotonic()
         exit_type, exit_msg = agent.run(
             task="generate optimization tasks",
             **template_vars,
         )
+        _elapsed = time.monotonic() - _t0
 
         if exit_type == "Submitted":
-            logger.debug("Task-generation agent submitted results (%d chars).", len(exit_msg))
+            logger.info(
+                "[bold green]Task-generation agent completed[/bold green] in %.1fs (%d chars).",
+                _elapsed,
+                len(exit_msg),
+            )
             return exit_msg
 
         logger.warning("Task-generation agent did not submit (exit_type=%s).", exit_type)

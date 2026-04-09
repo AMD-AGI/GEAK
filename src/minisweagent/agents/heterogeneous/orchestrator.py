@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +60,10 @@ def run_llm_steps(
             if _wm_text and not any("[Working Memory" in m.get("content", "") for m in messages[-3:]):
                 messages.append({"role": "user", "content": f"[Working Memory Update]\n{_wm_text}"})
 
+        _t0 = time.monotonic()
         response = model.query(messages)
+        _elapsed = time.monotonic() - _t0
+        logger.debug("%s step %d: model.query returned in %.1fs", phase, step, _elapsed)
 
         content_text = response.get("content", "") if isinstance(response, dict) else ""
         tool_call = response.get("tools") if isinstance(response, dict) else None
@@ -105,7 +109,11 @@ def run_llm_steps(
             }
         )
 
+        _t0 = time.monotonic()
         result_str = dispatch_tool_call(ctx, tool_name, tool_args, phase=phase)
+        _elapsed = time.monotonic() - _t0
+        if _elapsed > 5.0:
+            logger.info("[dim]Tool %s completed in %.1fs[/dim]", tool_name, _elapsed)
 
         messages.append(
             {
@@ -287,7 +295,7 @@ def run_heterogeneous_orchestrator(
 
     start_label = f"rounds {start_round}-{max_rounds}" if start_round > 1 else f"{max_rounds} rounds"
     logger.info(
-        "\n%s\n  Heterogeneous Orchestrator (%s, %d GPUs)\n%s",
+        "\n[bold cyan]%s[/bold cyan]\n  [bold]Heterogeneous Orchestrator[/bold] (%s, %d GPUs)\n[bold cyan]%s[/bold cyan]",
         "=" * 60,
         start_label,
         len(gpu_ids),
@@ -325,7 +333,7 @@ def run_heterogeneous_orchestrator(
 
     try:
         if start_round <= 1:
-            logger.info("\n%s\n  Exploration Phase\n%s", "-" * 60, "-" * 60)
+            logger.info("\n[dim]%s[/dim]\n  [bold yellow]Exploration Phase[/bold yellow]\n[dim]%s[/dim]", "-" * 60, "-" * 60)
             finalize_result = run_llm_steps(
                 model,
                 messages,
@@ -337,9 +345,14 @@ def run_heterogeneous_orchestrator(
 
         for round_num in range(start_round, max_rounds + 1):
             is_last = round_num == max_rounds
-            final_tag = " (FINAL)" if is_last else ""
-            banner = f"{'=' * 60}\n  Round {round_num}/{max_rounds}{final_tag}\n{'=' * 60}"
-            logger.info("\n%s", banner)
+            final_tag = " [bold red](FINAL)[/bold red]" if is_last else ""
+            color = "bold green" if not is_last else "bold red"
+            logger.info(
+                "\n[%s]%s[/%s]\n  [bold]Round %d/%d[/bold]%s\n[%s]%s[/%s]",
+                color, "=" * 60, color,
+                round_num, max_rounds, final_tag,
+                color, "=" * 60, color,
+            )
 
             if is_last:
                 round_instruction = (
