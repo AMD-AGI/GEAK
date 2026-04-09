@@ -1,12 +1,15 @@
 """PyTorch -> FlyDSL translation module.
 
 Provides:
-- ``run_translation()`` — library function called by the preprocessor
+- ``run_translation()`` — orchestration function called by the preprocessor
+  (multi-round retry loop, self-review, performance measurement)
 - ``main()`` — standalone CLI entry point (``geak-translate``)
 
-The translation loop uses a ``DefaultAgent`` configured with
-translation-specific YAML configs and KB content injected via
-``agent.run(task, knowledge_base=...)``.
+Each translation round delegates to
+:func:`~minisweagent.agents.translation_agent.run_translation_agent`
+which instantiates a :class:`~minisweagent.agents.translation_agent.TranslationAgent`
+(a ``DefaultAgent`` subclass) configured with translation-specific YAML
+and KB content.
 """
 
 from __future__ import annotations
@@ -67,8 +70,7 @@ def run_translation(
     dict with translation metadata including success/failure status,
     translated kernel path, latency comparison, and diagnostic info.
     """
-    from minisweagent.agents.default import AgentConfig, DefaultAgent
-    from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
+    from minisweagent.agents.translation_agent import run_translation_agent
     from minisweagent.run.preprocess.config_loader import load_preprocess_agent_config
     from minisweagent.run.preprocess.run_harness import run_harness
     from minisweagent.tools.translation_registry import (
@@ -214,19 +216,21 @@ def run_translation(
                 f"Fix these issues in your new attempt.\n"
             )
 
-        env = LocalEnvironment(**LocalEnvironmentConfig(cwd=str(repo_root)).__dict__)
-        agent_kwargs = dict(agent_config_dict)
-        agent_kwargs["test_command"] = f"{sys.executable} {harness_path} {pair.harness_candidate_flag} {candidate_path}"
-        agent_kwargs["patch_output_dir"] = str(output_dir / f"round_{round_num}")
-        if pair.env_setup != type(pair).env_setup:
-            env_config = LocalEnvironmentConfig(cwd=str(repo_root), env=env_overrides)
-            env = LocalEnvironment(**env_config.__dict__)
-
-        agent = DefaultAgent(_model, env, **agent_kwargs)
-        agent.log_file = output_dir / f"translation_agent_round_{round_num}.log"
+        round_log_dir = output_dir / f"round_{round_num}"
+        test_cmd = f"{sys.executable} {harness_path} {pair.harness_candidate_flag} {candidate_path}"
 
         try:
-            exit_status, agent_result = agent.run(round_task, knowledge_base=kb_content)
+            exit_status, agent_result = run_translation_agent(
+                model=_model,
+                repo_root=repo_root,
+                agent_config=agent_config_dict,
+                task=round_task,
+                kb_content=kb_content,
+                env_overrides=env_overrides or None,
+                test_command=test_cmd,
+                log_dir=round_log_dir,
+                log_name=f"translation_agent_round_{round_num}.log",
+            )
         except Exception as exc:
             _print(f"  Round {round_num} agent error: {exc}")
             best_attempt_errors.append(str(exc))
@@ -426,8 +430,7 @@ def _run_self_review(
     - ``True`` if all ops are justified (no changes)
     - ``False`` if the review agent failed
     """
-    from minisweagent.agents.default import DefaultAgent
-    from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
+    from minisweagent.agents.translation_agent import run_translation_agent
 
     candidate_code = candidate_path.read_text()
     prompt = _SELF_REVIEW_PROMPT.format(
@@ -437,22 +440,25 @@ def _run_self_review(
         harness_flag=pair.harness_candidate_flag,
     )
 
-    env_config = LocalEnvironmentConfig(cwd=str(repo_root), env=env_overrides)
-    env = LocalEnvironment(**env_config.__dict__)
+    review_config = dict(agent_config_dict)
+    review_config["step_limit"] = min(agent_config_dict.get("step_limit", 50), 20)
+    review_config["cost_limit"] = min(agent_config_dict.get("cost_limit", 8.0), 3.0)
 
-    review_kwargs = dict(agent_config_dict)
-    review_kwargs["test_command"] = (
-        f"{sys.executable} {harness_path} {pair.harness_candidate_flag} {candidate_path}"
-    )
-    review_kwargs["patch_output_dir"] = str(output_dir / f"round_{round_num}_self_review")
-    review_kwargs["step_limit"] = min(agent_config_dict.get("step_limit", 50), 20)
-    review_kwargs["cost_limit"] = min(agent_config_dict.get("cost_limit", 8.0), 3.0)
-
-    agent = DefaultAgent(model, env, **review_kwargs)
-    agent.log_file = output_dir / f"translation_agent_round_{round_num}_self_review.log"
+    review_log_dir = output_dir / f"round_{round_num}_self_review"
+    test_cmd = f"{sys.executable} {harness_path} {pair.harness_candidate_flag} {candidate_path}"
 
     try:
-        exit_status, _ = agent.run(prompt, knowledge_base=kb_content)
+        exit_status, _ = run_translation_agent(
+            model=model,
+            repo_root=repo_root,
+            agent_config=review_config,
+            task=prompt,
+            kb_content=kb_content,
+            env_overrides=env_overrides or None,
+            test_command=test_cmd,
+            log_dir=review_log_dir,
+            log_name=f"translation_agent_round_{round_num}_self_review.log",
+        )
     except Exception as exc:
         _print(f"  Self-review agent error: {exc}")
         return False
