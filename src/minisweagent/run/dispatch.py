@@ -360,6 +360,12 @@ def run_task_batch(
     )
     # endregion
 
+    logger.info(
+        "[bold yellow]Running %d sub-agent(s) in parallel:[/bold yellow]%s",
+        len(tasks),
+        "".join(f"\n  - {t.label} (priority={t.priority})" for t in tasks),
+    )
+
     try:
         raw_results = ParallelAgent.run_parallel(
             num_parallel=len(gpu_ids),

@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -663,6 +664,14 @@ class ParallelAgent(DefaultAgent):
                 f.write(init_msg)
                 f.flush()
 
+            _task_label = tasks[agent_id].label if tasks and agent_id < len(tasks) else f"agent_{agent_id}"
+            logger.info(
+                "[dim]Sub-agent %d (%s) started on GPU %s[/dim]",
+                agent_id,
+                _task_label,
+                new_env.get("GEAK_GPU_DEVICE", "?"),
+            )
+            _agent_t0 = time.monotonic()
             exit_status, result, extra_info = None, None, None
             with redirect_output_fn(log_file):
                 try:
@@ -679,6 +688,14 @@ class ParallelAgent(DefaultAgent):
                         save_traj_fn(
                             agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info
                         )
+            _agent_elapsed = time.monotonic() - _agent_t0
+            logger.info(
+                "Sub-agent %d (%s) finished in %.0fs (exit=%s)",
+                agent_id,
+                _task_label,
+                _agent_elapsed,
+                exit_status,
+            )
 
             return agent_id, agent, exit_status, result
 
