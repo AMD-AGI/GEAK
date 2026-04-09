@@ -84,7 +84,9 @@ def run_llm_steps(
                     hypothesis_id="H3",
                 )
             if content_text:
-                logger.info("  Orchestrator: %s", content_text[:300])
+                _first_line = content_text.strip().split("\n", 1)[0][:200]
+                _suffix = "..." if len(content_text.strip()) > len(_first_line) else ""
+                logger.info("  Orchestrator: %s%s", _first_line, _suffix)
             messages.append({"role": "assistant", "content": content_text})
             return None
 
@@ -230,7 +232,7 @@ def run_heterogeneous_orchestrator(
     _codebase_ctx_path = preprocess_dir / "CODEBASE_CONTEXT.md"
     if _codebase_ctx_path.exists():
         codebase_ctx = _codebase_ctx_path.read_text().strip()
-        logger.info("Loaded CODEBASE_CONTEXT.md: %s", _codebase_ctx_path.name)
+        logger.debug("Loaded CODEBASE_CONTEXT.md (%d bytes) from %s", len(codebase_ctx), preprocess_dir)
     else:
         logger.warning("CODEBASE_CONTEXT.md not found in preprocess_dir; using empty string.")
 

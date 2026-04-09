@@ -957,6 +957,11 @@ def run_preprocessor(
             extract_harness_path(test_command) if test_command else None
         )
         if harness_path_for_baseline and harness_results:
+            _print(
+                "[bold cyan]--- Step 4/7: Baseline collection ---[/bold cyan]"
+                if console
+                else "--- Step 4/7: Baseline collection ---"
+            )
             extra = f"--iterations {eval_iters}"
             _print(f"  Re-running all modes with {extra} for baselines...")
             bl_ok, bl_errors, baseline_results = execute_harness_validation(
