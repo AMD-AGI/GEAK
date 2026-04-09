@@ -1,9 +1,11 @@
+import json
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
-import re
+
 import yaml
-import os
-import json
+
 
 @dataclass
 class SkillDescriptor:
@@ -47,14 +49,13 @@ class SkillRuntime:
                 try:
                     skills.append(self._parse_metadata(p))
                 except Exception as e:
-                    print("Get skills fail")
-        skill_map = {s.name: s for s in skills}
-        return skill_map
+                    print(f"Get skills fail: {e}")
+        return {s.name: s for s in skills}
 
     def build_system_prompt(self) -> str:
         blocks = ["\n<available_skills>"]
 
-        for name, s in self.skills.items():
+        for _name, s in self.skills.items():
             blocks.append(
                 f"""  <skill>
         <name>{s.name}</name>
