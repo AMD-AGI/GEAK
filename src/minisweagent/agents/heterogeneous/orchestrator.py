@@ -333,7 +333,9 @@ def run_heterogeneous_orchestrator(
 
     try:
         if start_round <= 1:
-            logger.info("\n[dim]%s[/dim]\n  [bold yellow]Exploration Phase[/bold yellow]\n[dim]%s[/dim]", "-" * 60, "-" * 60)
+            logger.info(
+                "\n[dim]%s[/dim]\n  [bold yellow]Exploration Phase[/bold yellow]\n[dim]%s[/dim]", "-" * 60, "-" * 60
+            )
             finalize_result = run_llm_steps(
                 model,
                 messages,
@@ -349,9 +351,15 @@ def run_heterogeneous_orchestrator(
             color = "bold green" if not is_last else "bold red"
             logger.info(
                 "\n[%s]%s[/%s]\n  [bold]Round %d/%d[/bold]%s\n[%s]%s[/%s]",
-                color, "=" * 60, color,
-                round_num, max_rounds, final_tag,
-                color, "=" * 60, color,
+                color,
+                "=" * 60,
+                color,
+                round_num,
+                max_rounds,
+                final_tag,
+                color,
+                "=" * 60,
+                color,
             )
 
             if is_last:

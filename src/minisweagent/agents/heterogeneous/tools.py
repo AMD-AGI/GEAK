@@ -268,7 +268,9 @@ def tool_dispatch_tasks(
             }
         )
         if _stage_found_improvement(results_base, stage_tasks):
-            logger.info("tool_dispatch_tasks: improvement found in stage '%s'; skipping lower-priority stages.", stage_name)
+            logger.info(
+                "tool_dispatch_tasks: improvement found in stage '%s'; skipping lower-priority stages.", stage_name
+            )
             for remaining_stage, _remaining_tasks in stages:
                 if remaining_stage == stage_name:
                     continue
@@ -277,7 +279,9 @@ def tool_dispatch_tasks(
             break
 
     _dispatch_elapsed = time.monotonic() - _dispatch_t0
-    logger.info("[bold green]Dispatch completed[/bold green] in %.1fs (%d stages).", _dispatch_elapsed, len(all_results))
+    logger.info(
+        "[bold green]Dispatch completed[/bold green] in %.1fs (%d stages).", _dispatch_elapsed, len(all_results)
+    )
 
     return json.dumps(
         {

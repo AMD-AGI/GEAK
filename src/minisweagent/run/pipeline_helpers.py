@@ -720,9 +720,7 @@ def _gpu_arch_context(profiling_path: str) -> list[str]:
     try:
         data = _json.loads(Path(profiling_path).read_text())
     except Exception:
-        logger.debug(
-            "Could not read or parse profiling JSON at %s", profiling_path, exc_info=True
-        )
+        logger.debug("Could not read or parse profiling JSON at %s", profiling_path, exc_info=True)
         return []
 
     results = data.get("results", [])

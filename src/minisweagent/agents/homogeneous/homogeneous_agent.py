@@ -80,9 +80,12 @@ def run_homogeneous_agent(
         num_parallel or parallel_config.get("num_parallel") or config.get("agent", {}).get("num_parallel") or 1
     )
     _np_source = (
-        "arg" if num_parallel
-        else "parallel config" if parallel_config.get("num_parallel")
-        else "agent config" if config.get("agent", {}).get("num_parallel")
+        "arg"
+        if num_parallel
+        else "parallel config"
+        if parallel_config.get("num_parallel")
+        else "agent config"
+        if config.get("agent", {}).get("num_parallel")
         else "default"
     )
     logger.debug("num_parallel=%d (source=%s)", final_num_parallel, _np_source)

@@ -666,7 +666,9 @@ def _parse_llm_response(
         try:
             priority = int(item.get("priority", 10))
         except (ValueError, TypeError):
-            logger.debug("_parse_llm_response: invalid priority %r for '%s'; defaulting to 10.", item.get("priority"), label)
+            logger.debug(
+                "_parse_llm_response: invalid priority %r for '%s'; defaulting to 10.", item.get("priority"), label
+            )
             priority = 10
         priority = max(0, min(15, priority))
         agent_type = filter_agent_type(str(item.get("agent_type", "strategy_agent")))

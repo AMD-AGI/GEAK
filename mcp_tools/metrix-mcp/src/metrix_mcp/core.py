@@ -246,14 +246,15 @@ class MetrixTool:
                 raise RuntimeError("No kernel found in profiling results")
             kernels_to_process = [main_kernel]
             logger.debug(
-                    "GPU %s: Auto-selected kernel '%s' (duration: %.2f μs)",
-                    device,
-                    main_kernel.name,
-                    main_kernel.duration_us.avg,
-                )
+                "GPU %s: Auto-selected kernel '%s' (duration: %.2f μs)",
+                device,
+                main_kernel.name,
+                main_kernel.duration_us.avg,
+            )
         else:
             kernels_to_process = results.kernels
-            logger.debug("GPU %s: Processing %d kernel(s)%s",
+            logger.debug(
+                "GPU %s: Processing %d kernel(s)%s",
                 device,
                 len(kernels_to_process),
                 f" matching filter '{kernel_filter}'" if kernel_filter else "",

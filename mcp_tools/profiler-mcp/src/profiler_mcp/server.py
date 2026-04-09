@@ -36,11 +36,11 @@ mcp = FastMCP(
 # Command normalisation
 # ---------------------------------------------------------------------------
 
-_SHELL_META = re.compile(r'[&|;$`(){}<>!\\]|&&|\|\||<<|>>|\bcd\b|\bsource\b|\bexport\b')
+_SHELL_META = re.compile(r"[&|;$`(){}<>!\\]|&&|\|\||<<|>>|\bcd\b|\bsource\b|\bexport\b")
 
 # Detects inline env-var assignment: "VAR=value command ..."
 # rocprofv3 treats "VAR=value" as the executable name and crashes.
-_INLINE_ENV = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=\S+\s')
+_INLINE_ENV = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+\s")
 
 
 def _normalize_command(command: str) -> str:

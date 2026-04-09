@@ -69,7 +69,9 @@ def run_orchestrator(
         "run_orchestrator: output_dir=%s, max_rounds=%d (source=%s), start_round=%d, heterogeneous=%s",
         _out,
         max_rounds,
-        "arg" if (max_rounds != int(_env_rounds or "5") if _env_rounds else max_rounds != 5) else ("env" if _env_rounds else "default"),
+        "arg"
+        if (max_rounds != int(_env_rounds or "5") if _env_rounds else max_rounds != 5)
+        else ("env" if _env_rounds else "default"),
         start_round,
         heterogeneous,
     )

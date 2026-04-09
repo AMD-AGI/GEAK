@@ -83,9 +83,7 @@ def run_shape_fixer(
     try:
         agent_config, _ = load_preprocess_agent_config("mini_shape_fixer")
     except Exception:
-        logger.debug(
-            "Failed to load preprocess agent config for mini_shape_fixer", exc_info=True
-        )
+        logger.debug("Failed to load preprocess agent config for mini_shape_fixer", exc_info=True)
         agent_config = {}
 
     env = LocalEnvironment(**LocalEnvironmentConfig(cwd=str(repo)).__dict__)

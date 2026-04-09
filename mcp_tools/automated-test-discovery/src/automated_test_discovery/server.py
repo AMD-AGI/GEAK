@@ -303,9 +303,7 @@ def _imports_triton_kernels(content: str, file_path: Path, _depth: int = 0) -> b
     if _depth > 2:
         return False
 
-    import_re = re.compile(
-        r"^\s*from\s+([\w.]+)\s+import\s", re.MULTILINE
-    )
+    import_re = re.compile(r"^\s*from\s+([\w.]+)\s+import\s", re.MULTILINE)
 
     search_dirs = [file_path.parent]
     for sp in sys.path:
@@ -605,18 +603,22 @@ def discover(
                 "functions": kernel_functions,
             },
             "workspace": str(_expand_workspace(path)),
-            "tests": [{
-                "file": harness,
-                "name": harness_name,
-                "confidence": 10.0,
-                "command": f"python {harness} --correctness",
-            }],
-            "benchmarks": [{
-                "file": harness,
-                "name": harness_name,
-                "confidence": 10.0,
-                "command": f"python {harness} --benchmark",
-            }],
+            "tests": [
+                {
+                    "file": harness,
+                    "name": harness_name,
+                    "confidence": 10.0,
+                    "command": f"python {harness} --correctness",
+                }
+            ],
+            "benchmarks": [
+                {
+                    "file": harness,
+                    "name": harness_name,
+                    "confidence": 10.0,
+                    "command": f"python {harness} --benchmark",
+                }
+            ],
             "total_tests_found": 1,
             "total_benchmarks_found": 1,
             "summary": f"Discovery skipped (harness provided: {harness_name})",
