@@ -551,6 +551,23 @@ def run_preprocessor(
             kernel_path = translation_result["translation_kernel_path"]
             ctx["kernel_path"] = kernel_path
             _print(f"  Translated kernel: {kernel_path}")
+        else:
+            _errors = translation_result.get("translation_errors", [])
+            _src = translation_result.get("translation_source_language") or "source"
+            if translate_only:
+                _print(
+                    f"  [red]Translation failed[/red]" if console
+                    else "  Translation failed"
+                )
+            else:
+                _print(
+                    f"  [yellow]Translation failed — continuing with original {_src} kernel[/yellow]"
+                    if console
+                    else f"  Translation failed — continuing with original {_src} kernel"
+                )
+            if _errors:
+                for _e in _errors[-3:]:
+                    _print(f"    {_e}")
         if translate_only:
             ctx["translate_only"] = True
             _print("  --translate-only: skipping remaining preprocessing steps")
