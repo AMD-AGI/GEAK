@@ -15,15 +15,43 @@ agent:
 
     ## Rules
 
-    1. You MUST write FlyDSL code using the FlyDSL API described in the knowledge base.
-    2. You MUST NOT use Triton, CUDA, or any other GPU programming model.
+    1. FlyDSL is INSTALLED in this environment. Use the real FlyDSL API:
+       - `import flydsl.compiler as flyc`
+       - `import flydsl.expr as fx`
+       - `from flydsl.expr import arith, gpu, vector`
+    2. You MUST NOT use Triton, CUDA, or any other GPU programming model. Do NOT create shims or mock modules.
     3. You MUST preserve the exact `Model(nn.Module)` interface: same `__init__`, `forward` signature, same output shape and dtype.
     4. You MUST preserve `get_inputs()` and `get_init_inputs()` functions.
     5. The translated kernel MUST produce numerically identical results to the PyTorch original (within tolerance).
     6. Use the `save_and_test` tool to validate your translation after writing it.
     7. Every response must contain exactly one action.
 
-    Failure to follow these rules will cause your response to be rejected.
+    ## FlyDSL Kernel Structure
+
+    Every FlyDSL translation follows the three-layer pattern:
+    - `@flyc.kernel`: GPU kernel function using layout algebra (fx.logical_divide, fx.slice, copy atoms)
+    - `@flyc.jit`: Host-side launcher that configures grid/block and calls kernel.launch()
+    - `Model(nn.Module)`: Wrapper that allocates output tensors and calls the @flyc.jit launcher
+
+    ## Translation Strategy (in order of preference)
+
+    - **GEMM / Linear**: Use `compile_preshuffle_gemm_a8()` from `kernels.preshuffle_gemm`.
+      CRITICAL: B-matrix must be preshuffled with `shuffle_weight(B.contiguous(), layout=(16, 16))` from `tests.utils`.
+      All tensor args must be `.view(-1)`. Scales: `torch.empty(0, device=dev, dtype=torch.float32)` for fp16.
+    - **Attention / SDPA**: Use `build_flash_attn_func_module()` from `kernels.flash_attn_func`.
+      Builder: `build_flash_attn_func_module(num_heads=H, head_dim=D, causal=True, dtype_str="f16")`.
+      Launcher: `fn(Q.view(-1), K.view(-1), V.view(-1), O.view(-1), batch_size, seq_len, stream=stream)`.
+      Note: num_heads is baked in at build time, NOT passed at launch time.
+    - **Softmax**: `build_softmax_module(M, N, dtype_str)` — call as `fn(input, output, M, stream=stream)`
+    - **LayerNorm**: `build_layernorm_module(M, N, dtype_str)` — call as `fn(input, gamma, beta, output, M, stream=stream)`
+    - **RMSNorm**: `build_rmsnorm_module(M, N, dtype_str)` — call as `fn(input, gamma, output, M, stream=stream)`
+    - **Element-wise ops** (relu, sigmoid, tanh, clamp, etc.): Write custom @flyc.kernel with layout algebra
+    - **Reductions** (sum, mean): Manual block reduction with wave shuffle
+    - **Conv/Pool/BatchNorm**: Use `torch.nn.functional` (ONLY ops with no FlyDSL equivalent)
+    - **Complex models**: Use FlyDSL for ALL ops except conv/pool/batchnorm
+
+    CRITICAL: Do NOT use torch.matmul, F.linear, nn.Linear, or F.scaled_dot_product_attention.
+    These ALL have FlyDSL pre-built replacements. PyTorch fallback is ONLY for Conv2d, MaxPool2d, BatchNorm2d.
 
   instance_template: |
     ## Translation Task
@@ -39,8 +67,11 @@ agent:
     1. Read the source PyTorch kernel to understand its computation
     2. Plan the FlyDSL translation:
        - Identify the computation pattern (element-wise, reduction, GEMM, attention)
-       - Map PyTorch ops to FlyDSL equivalents using the API reference above
-       - Design the three-layer structure: @flyc.kernel, @flyc.jit, Model wrapper
+       - For GEMM/Linear: use `compile_preshuffle_gemm_a8` + `shuffle_weight` from `tests.utils`
+       - For attention/SDPA: use `build_flash_attn_func_module` from `kernels.flash_attn_func`
+       - For softmax/layernorm/rmsnorm: use pre-built kernels from `kernels.*` module
+       - For element-wise: use @flyc.kernel with layout algebra (logical_divide, slice, copy atoms)
+       - For conv/pool/batchnorm ONLY: keep using PyTorch (no FlyDSL equivalent)
     3. Write the FlyDSL translation to the specified output path
     4. Test it using the harness command provided
     5. If the test fails, read the error output and fix the translation
@@ -51,9 +82,10 @@ agent:
     - Every response must contain exactly one action enclosed in triple backticks
     - Directory or environment variable changes are not persistent
     - Use `save_and_test` to validate your translation
+    - FlyDSL IS installed — do NOT create flycompute.py shims or mock modules
 
-  cost_limit: 3.0
-  step_limit: 30
+  cost_limit: 8.0
+  step_limit: 50
 
 model:
   model_class: amd_llm
