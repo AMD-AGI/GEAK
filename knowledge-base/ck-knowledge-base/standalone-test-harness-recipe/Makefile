@@ -1,11 +1,16 @@
 # GEAK Test Harness - Kernel .so build rules
 # Standalone build (independent of CK's CMake).
 #
-# Preferred: use compile.py which auto-detects GPU arch from PyTorch.
-# Direct usage: make ARCH=gfx950 [target]
+# Paths are anchored to this Makefile so builds work regardless of cwd
+# (e.g. make -f /abs/path/Makefile or compile.py invoked by absolute path).
 
+THIS_MAKEFILE := $(abspath $(firstword $(MAKEFILE_LIST)))
+IMPL_DIR      := $(dir $(THIS_MAKEFILE))
+CK_INCLUDE    := $(abspath $(IMPL_DIR)../include)
 HIPCC      ?= /opt/rocm/bin/hipcc
-CK_INCLUDE  = ../../../include
+
+BASELINE_SO   := $(IMPL_DIR)libbaseline.so
+OPTIMIZED_SO  := $(IMPL_DIR)liboptimized.so
 
 ifndef ARCH
   $(error ARCH not set. Use compile.py for auto-detection, or: make ARCH=gfx950)
@@ -21,19 +26,19 @@ HIPCC_FLAGS = -shared -fPIC -O3 \
 
 all: baseline optimized
 
-baseline: libbaseline.so
-optimized: liboptimized.so
+baseline: $(BASELINE_SO)
+optimized: $(OPTIMIZED_SO)
 
-libbaseline.so: baseline.cpp
+$(BASELINE_SO): $(IMPL_DIR)baseline.cpp
 	@echo "Building baseline for $(ARCH)..."
-	$(HIPCC) $(HIPCC_FLAGS) -MF $(basename $@).d -o $@ $<
+	$(HIPCC) $(HIPCC_FLAGS) -MF $(IMPL_DIR)libbaseline.d -o $@ $<
 
-liboptimized.so: optimized.cpp
+$(OPTIMIZED_SO): $(IMPL_DIR)optimized.cpp
 	@echo "Building optimized for $(ARCH)..."
-	$(HIPCC) $(HIPCC_FLAGS) -MF $(basename $@).d -o $@ $<
+	$(HIPCC) $(HIPCC_FLAGS) -MF $(IMPL_DIR)liboptimized.d -o $@ $<
 
 clean:
 	rm -f libbaseline.so liboptimized.so libbaseline.d liboptimized.d
 
 # Pulled in after first compile; lists all headers the compiler actually opened.
--include libbaseline.d liboptimized.d
+-include $(IMPL_DIR)libbaseline.d $(IMPL_DIR)liboptimized.d

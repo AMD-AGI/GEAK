@@ -9,7 +9,7 @@
 #include <hip/hip_runtime.h>
 
 #include "ck/ck.hpp"
-#include "device_softmax_impl.hpp" // This must point to the local copy of the target kernel.
+#include "./device_softmax_impl.hpp" // Target kernel header must point to the local copy of the target kernel.
 #include "ck/tensor_operation/gpu/element/element_wise_operation.hpp"
 
 using PassThrough = ck::tensor_operation::element_wise::PassThrough;

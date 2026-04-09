@@ -21,7 +21,7 @@ kernel output is ground truth; the optimized kernel is verified against it.
 
 | File | Role | Mutable? |
 |------|------|----------|
-| `device_softmax_impl.hpp`| Work copy of the given target kernel to optimize -- LLM edits | Each iteration |
+| `device_softmax_impl.hpp`| Target kernel to optimize -- LLM edits | Each iteration |
 | `baseline.cpp` | Compiled to `libbaseline.so` -- frozen ground truth | Never |
 | `optimized.cpp` | Compiled to `liboptimized.so` -- LLM edits TUNING PARAMETERS | Each iteration |
 | `test_harness.py` | Loads both `.so` via ctypes, verifies, benchmarks | Never |
@@ -59,43 +59,43 @@ the start of `mode_benchmark()`, baseline-vs-optimized comparison, benchmark rep
 
 The files must be on the same level as the target kernel. The generated test harness will be used by
 optimizer agents which are given the original target kernel location. The optimizer agents will make a
-worktree copy of the target kernel folder and make edits, compile and test in the worktree folder.
+worktree copy (GEAK_WORK_DIR) of the target kernel folder and make edits, compile and test in the worktree folder.
 
 For the example target kernel the original directory is with `rocm-libraries/projects/composablekernel/include/ck/tensor_operation/gpu/device/impl/device_softmax_impl.hpp`.
 
-Therefore, your generated files must be in:
+Therefore, your generated files (excluding test harness) must be in:
 
 ```
 rocm-libraries/
-└───projects/
-    └───composablekernel/
-        └───include/
-            └───tensor_operation/
-                └───gpu/
-                    └───device/
-                        └───impl/
-                            │   device_softmax_impl.hpp
-                            │   baseline.cpp
-                            │   optimized.cpp
-                            │   test_harness.py
-                            │   compile.py
-                            │   Makefile
-                            │   ...
+└── projects/
+    └── composablekernel/
+        └─── include/
+            └── ck/
+                └── tensor_operation/
+                    └── gpu/
+                        └── device/
+                            └── impl/
+                                │   device_softmax_impl.hpp (Target kernel already exist, it's not generated.)
+                                │   baseline.cpp
+                                │   optimized.cpp
+                                │   test_harness.py
+                                │   compile.py
+                                │   Makefile
+                                │   ...
 ```
 
-The worktree copy will look like:
+The optimizer agent's output directory, including the worktree will look like:
 
 ```
 example_run
-└───results
-    └───round_1
-        └───worktrees
-            └───slot_0
-                │   device_softmax_impl.hpp
-                │   baseline.cpp
-                │   optimized.cpp
-                │   test_harness.py
-                │   compile.py
-                │   Makefile
-                │   ...
+├── worktrees
+│   └── agent_0
+│       │   device_softmax_impl.hpp
+│       │   baseline.cpp
+│       │   optimized.cpp
+│       │   compile.py
+│       │   Makefile
+│       │   ...
+├── test_harness.py
+│   ...
 ```

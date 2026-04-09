@@ -5,8 +5,10 @@ Loads baseline and optimized CK softmax kernel .so files via ctypes,
 verifies the optimized kernel against the baseline (ground truth), and
 reports bandwidth and speedup.
 
-The .so files (libbaseline.so, liboptimized.so) are auto-discovered in the
-same directory as this script.
+The .so files (libbaseline.so, liboptimized.so) are resolved from the kernel
+directory: by default the directory containing this script (so the harness
+works when invoked by absolute path from any cwd). Override with --kernel-dir
+or GEAK_WORK_DIR when the script lives elsewhere than the build output.
 
 Modes:
     --correctness     Verify optimized against baseline on HARNESS_SHAPES
@@ -15,11 +17,12 @@ Modes:
     --full-benchmark  Benchmark both kernels on ALL_SHAPES, report speedup
 
 Usage:
-    python test_harness.py --correctness
-    python test_harness.py --benchmark
-    python test_harness.py --benchmark --iterations 50
-    python test_harness.py --full-benchmark
-    python test_harness.py --profile
+    python3 /path/to/test_harness.py --correctness
+    python3 test_harness.py --benchmark
+    python3 test_harness.py --kernel-dir /path/to/impl --correctness
+    python3 test_harness.py --benchmark --iterations 50
+    python3 test_harness.py --full-benchmark
+    python3 test_harness.py --profile
 """
 
 import argparse
@@ -31,9 +34,14 @@ from pathlib import Path
 
 import torch
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-BASELINE_SO = SCRIPT_DIR / "libbaseline.so"
-OPTIMIZED_SO = SCRIPT_DIR / "liboptimized.so"
+def resolve_kernel_dir(cli_dir: str | None) -> Path:
+    """Directory containing libbaseline.so / liboptimized.so."""
+    if cli_dir is not None:
+        return Path(cli_dir).expanduser().resolve()
+    env = os.environ.get("GEAK_WORK_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path(__file__).resolve().parent
 
 # -- Shape lists (sorted by element count) ------------------------------------
 # 3D softmax shapes: (Batch, SeqLen, Hidden) with reduction on last dim.
@@ -329,17 +337,29 @@ def main():
 
     parser.add_argument("--iterations", type=int, default=None, help="Timed iterations (default: env GEAK_BENCHMARK_ITERATIONS or 20)")
     parser.add_argument("--reduce-dim", type=int, default=-1, help="Reduction dimension (default: last dim)")
+    parser.add_argument(
+        "--kernel-dir",
+        default=None,
+        metavar="DIR",
+        help="Directory with libbaseline.so and liboptimized.so (default: this script's dir, or GEAK_KERNEL_DIR)",
+    )
     args = parser.parse_args()
 
-    for path in [BASELINE_SO, OPTIMIZED_SO]:
-        if not path.exists():
-            print(f"Error: {path} not found", file=sys.stderr)
+    kdir = resolve_kernel_dir(args.kernel_dir)
+    baseline_so = (kdir / "libbaseline.so").resolve()
+    optimized_so = (kdir / "liboptimized.so").resolve()
+    for path in [baseline_so, optimized_so]:
+        if not path.is_file():
+            print(
+                f"Error: {path} not found (kernel dir: {kdir})",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
-    base_label = BASELINE_SO.name
-    opt_label = OPTIMIZED_SO.name
-    base_lib = load_kernel(str(BASELINE_SO))
-    opt_lib = load_kernel(str(OPTIMIZED_SO))
+    base_label = baseline_so.name
+    opt_label = optimized_so.name
+    base_lib = load_kernel(str(baseline_so))
+    opt_lib = load_kernel(str(optimized_so))
 
     if args.correctness:
         print(f"Correctness check: {opt_label} vs {base_label} (ground truth)")
