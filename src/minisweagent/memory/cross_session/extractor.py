@@ -45,6 +45,7 @@ def extract_experience(**kwargs: Any) -> ExperienceRecord:
     key_insight, best_change_category = _extract_report_insights(report_dir)
     hardware = _extract_hardware(profiling_metrics)
     language = _infer_language(kernel_path)
+    patch_content, code_changes_summary = _extract_patch_content(patch_file, report_dir)
 
     strategy_name = str(kwargs.get("strategy_name", "") or "")
     if not best_change_category and strategy_name:
@@ -71,10 +72,102 @@ def extract_experience(**kwargs: Any) -> ExperienceRecord:
         dead_ends=dead_ends,
         key_insight=key_insight[:500],
         trajectory_sketch=trajectory[:500],
+        patch_content=patch_content,
+        code_changes_summary=code_changes_summary,
         patch_file=patch_file,
         final_report_path=str(report_dir / "final_report.json") if report_dir else "",
         notebook_dir=str(report_dir / "_working_memory") if report_dir else "",
     )
+
+
+def _extract_patch_content(patch_file: str, report_dir: Path | None) -> tuple[str, str]:
+    """Read the actual patch/diff content and generate a code changes summary.
+
+    Returns (patch_content, code_changes_summary).
+    patch_content: the raw diff text (truncated to 5000 chars)
+    code_changes_summary: human-readable summary of key code changes
+    """
+    patch_text = ""
+
+    # Try the patch_file path first
+    if patch_file:
+        p = Path(patch_file)
+        if p.exists() and p.stat().st_size > 0:
+            try:
+                patch_text = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+    # Fallback: search for patches in the report directory
+    if not patch_text and report_dir:
+        for pattern in ("best_patch.diff", "best_patch.patch", "results/*/best_patch.diff"):
+            import glob
+            matches = glob.glob(str(report_dir / pattern))
+            if not matches and report_dir.parent:
+                matches = glob.glob(str(report_dir.parent / pattern))
+            for m in sorted(matches, reverse=True):
+                try:
+                    candidate = Path(m).read_text(encoding="utf-8", errors="replace")
+                    if candidate.strip():
+                        patch_text = candidate
+                        break
+                except Exception:
+                    continue
+            if patch_text:
+                break
+
+    # Also check for modified kernel.py in worktrees
+    if not patch_text and report_dir:
+        for wt_kernel in sorted(report_dir.rglob("worktrees/*/kernel.py")):
+            try:
+                patch_text = f"# Modified kernel from {wt_kernel.parent.name}\n" + wt_kernel.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                break
+            except Exception:
+                continue
+
+    # Truncate large patches
+    max_len = 5000
+    if len(patch_text) > max_len:
+        patch_text = patch_text[:max_len] + f"\n... (truncated, {len(patch_text)} chars total)"
+
+    # Generate code changes summary from the diff
+    summary = _summarize_patch(patch_text) if patch_text else ""
+
+    return patch_text, summary
+
+
+def _summarize_patch(patch_text: str) -> str:
+    """Generate a human-readable summary of code changes from a diff."""
+    if not patch_text:
+        return ""
+
+    lines = patch_text.splitlines()
+    added = [l[1:].strip() for l in lines if l.startswith("+") and not l.startswith("+++")]
+    removed = [l[1:].strip() for l in lines if l.startswith("-") and not l.startswith("---")]
+
+    # Filter to meaningful code lines (skip blank, comments, imports)
+    added_code = [l for l in added if l and not l.startswith("#") and len(l) > 10]
+    removed_code = [l for l in removed if l and not l.startswith("#") and len(l) > 10]
+
+    parts = []
+    if added_code:
+        parts.append(f"Added {len(added_code)} code lines")
+        # Show the most distinctive added lines (likely the optimization)
+        key_adds = [l for l in added_code if any(
+            kw in l.lower() for kw in (
+                "block", "tile", "warp", "tl.", "triton", "autotune",
+                "config", "shared", "cache", "fuse", "vectori", "mfma",
+                "atomic", "reduce", "parallel", "unroll", "pipeline",
+            )
+        )]
+        if key_adds:
+            parts.append("Key additions: " + "; ".join(key_adds[:3]))
+    if removed_code:
+        parts.append(f"Removed {len(removed_code)} code lines")
+
+    return ". ".join(parts)[:500] if parts else ""
 
 
 def _extract_numeric_metrics(profiling_metrics: dict) -> dict[str, Any]:

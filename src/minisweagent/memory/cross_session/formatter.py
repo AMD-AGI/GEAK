@@ -78,6 +78,11 @@ def format_landscape_context(
         for nudge in nudges[:2]:
             parts.append(f"  - {nudge}")
 
+    # Code insights: show actual code changes that produced speedups
+    code_section = _best_code_insights(experiences)
+    if code_section:
+        parts.append(code_section)
+
     return "\n".join(parts)
 
 
@@ -181,6 +186,40 @@ def _exploration_nudges(
             nudges.append(f"{label} has few data points for this profile; consider exploring.")
 
     return nudges
+
+
+def _best_code_insights(experiences: list[ExperienceRecord]) -> str:
+    """Extract the most useful code change insights from top experiences."""
+    best = None
+    best_speedup = 0.0
+    for exp in experiences:
+        if exp.success and exp.best_speedup > best_speedup and (exp.patch_content or exp.code_changes_summary):
+            best = exp
+            best_speedup = exp.best_speedup
+
+    if not best:
+        return ""
+
+    parts = [f"**Code insights from {best.kernel_name} ({best.best_speedup:.2f}x speedup):**"]
+
+    if best.code_changes_summary:
+        parts.append(f"  Changes: {best.code_changes_summary[:300]}")
+
+    if best.patch_content:
+        snippet = best.patch_content[:800]
+        # Show only the most relevant diff hunks (added lines with optimization keywords)
+        relevant_lines = []
+        for line in snippet.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                body = line[1:].strip()
+                if body and len(body) > 5 and not body.startswith("#"):
+                    relevant_lines.append(body)
+        if relevant_lines:
+            parts.append("  Key code additions:")
+            for rl in relevant_lines[:8]:
+                parts.append(f"    + {rl}")
+
+    return "\n".join(parts)
 
 
 def _infer_category_from_text(text: str) -> str:

@@ -57,6 +57,10 @@ class ExperienceRecord:
     key_insight: str = ""
     trajectory_sketch: str = ""
 
+    # Code artifacts (the most transferable knowledge)
+    patch_content: str = ""  # actual diff/patch text that produced the speedup
+    code_changes_summary: str = ""  # human-readable summary of what changed in the code
+
     # Linkage
     patch_file: str = ""
     final_report_path: str = ""

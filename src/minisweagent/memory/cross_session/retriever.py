@@ -117,10 +117,16 @@ def _experience_text(exp: ExperienceRecord) -> str:
         exp.best_change_category,
         exp.key_insight,
         exp.trajectory_sketch,
+        exp.code_changes_summary,
     ]
     parts.extend(exp.what_worked)
     parts.extend(exp.what_failed)
     parts.extend(exp.dead_ends)
+    # Include keywords from patch content (not the full diff, just identifiers)
+    if exp.patch_content:
+        import re
+        code_words = re.findall(r'\b[a-zA-Z_]\w{3,}\b', exp.patch_content[:2000])
+        parts.extend(code_words[:50])
     return " ".join(p for p in parts if p).lower()
 
 

@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS experiences (
     best_change_category TEXT NOT NULL DEFAULT '',
     key_insight      TEXT NOT NULL DEFAULT '',
     trajectory_sketch TEXT NOT NULL DEFAULT '',
+    patch_content    TEXT NOT NULL DEFAULT '',
+    code_changes_summary TEXT NOT NULL DEFAULT '',
     patch_file       TEXT NOT NULL DEFAULT '',
     final_report_path TEXT NOT NULL DEFAULT '',
     notebook_dir     TEXT NOT NULL DEFAULT '',
