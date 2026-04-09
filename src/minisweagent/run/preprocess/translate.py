@@ -29,6 +29,7 @@ def run_translation(
     target_language: str | None = None,
     model=None,
     model_factory=None,
+    model_name: str | None = None,
     repo: Path | None = None,
     flydsl_repo: Path | None = None,
     console=None,
@@ -49,6 +50,10 @@ def run_translation(
         LLM model instance (optional; uses *model_factory* if ``None``).
     model_factory:
         Callable returning a new model instance.
+    model_name:
+        Explicit model name from CLI ``-m`` flag.  When ``None`` the
+        agent config YAML's ``model`` section is used to create the model,
+        giving the per-config model precedence over the global default.
     repo:
         Repository root path.
     flydsl_repo:
@@ -109,8 +114,24 @@ def run_translation(
     result["translation_target_language"] = pair.target
     _print(f"  Translation: {pair.source} -> {pair.target}")
 
+    # -- Load agent config (before model so YAML model section can be used) --
+    try:
+        agent_config_dict, model_config = load_preprocess_agent_config(pair.config_name)
+    except Exception as exc:
+        msg = f"Failed to load translation agent config '{pair.config_name}': {exc}"
+        result["translation_errors"].append(msg)
+        _print(f"  [red]{msg}[/red]" if console else f"  ERROR: {msg}")
+        return result
+
     # -- Resolve model --
-    _model = model or (model_factory() if model_factory else None)
+    # Precedence: explicit model object > explicit model_name > YAML config > factory default
+    _model = model
+    if _model is None and model_name is None and model_config.get("model_name"):
+        from minisweagent.models import get_model
+        _print(f"  Using model from agent config: {model_config['model_name']}")
+        _model = get_model(model_config["model_name"], config=model_config)
+    if _model is None:
+        _model = model_factory() if model_factory else None
     if _model is None:
         msg = "No LLM model available for translation agent"
         result["translation_errors"].append(msg)
@@ -129,21 +150,15 @@ def run_translation(
 
     # -- Set up environment --
     repo_root = repo or kernel_path.parent
-    env_overrides = pair.env_setup(repo_root)
+    try:
+        env_overrides = pair.env_setup(repo_root, flydsl_repo=flydsl_repo)
+    except TypeError:
+        env_overrides = pair.env_setup(repo_root)
 
     # -- Build candidate filename --
     kernel_stem = kernel_path.stem
     candidate_filename = pair.candidate_filename_fn(kernel_stem)
     candidate_path = output_dir / candidate_filename
-
-    # -- Load agent config --
-    try:
-        agent_config_dict, model_config = load_preprocess_agent_config(pair.config_name)
-    except Exception as exc:
-        msg = f"Failed to load translation agent config '{pair.config_name}': {exc}"
-        result["translation_errors"].append(msg)
-        _print(f"  [red]{msg}[/red]" if console else f"  ERROR: {msg}")
-        return result
 
     # -- Build the test command that the agent will use via save_and_test --
     test_command = f"{sys.executable} {{harness}} {pair.harness_candidate_flag} {{candidate}}"
@@ -240,7 +255,83 @@ def run_translation(
             _print(f"  Round {round_num}: CORRECT")
             result["translation_success"] = True
             result["translation_kernel_path"] = str(candidate_path)
-            break
+
+            # Run performance comparison (harness with --flydsl-kernel)
+            _print("  Running performance comparison...")
+            try:
+                import subprocess as _sp
+                perf_cmd = [
+                    sys.executable, str(harness_path),
+                    "--flydsl-kernel", str(candidate_path),
+                ]
+                from minisweagent.run.preprocess.run_harness import _build_env
+                perf_env = _build_env(str(repo_root), gpu_id, env_overrides)
+                perf_proc = _sp.run(
+                    perf_cmd, capture_output=True, text=True,
+                    timeout=300, env=perf_env, cwd=str(repo_root),
+                )
+                perf_out = perf_proc.stdout
+                import re
+                ref_match = re.search(r"PyTorch reference latency:\s*([\d.]+)\s*ms", perf_out)
+                cand_match = re.search(r"FlyDSL candidate latency:\s*([\d.]+)\s*ms", perf_out)
+                speedup_match = re.search(r"Speedup:\s*([\d.]+)x", perf_out)
+                if ref_match:
+                    result["translation_pytorch_latency_ms"] = float(ref_match.group(1))
+                if cand_match:
+                    result["translation_flydsl_latency_ms"] = float(cand_match.group(1))
+                if speedup_match:
+                    result["translation_speedup"] = float(speedup_match.group(1))
+                _print(f"  PyTorch: {result.get('translation_pytorch_latency_ms', 'N/A')}ms | "
+                       f"FlyDSL: {result.get('translation_flydsl_latency_ms', 'N/A')}ms | "
+                       f"Speedup: {result.get('translation_speedup', 'N/A')}x")
+            except Exception as exc:
+                _print(f"  Performance comparison failed: {exc}")
+
+            # -- Self-review: force agent to enumerate remaining PyTorch ops --
+            _print("  Running self-review (PyTorch op audit)...")
+            review_ok = _run_self_review(
+                candidate_path=candidate_path,
+                harness_path=harness_path,
+                pair=pair,
+                model=_model,
+                repo_root=repo_root,
+                output_dir=output_dir,
+                env_overrides=env_overrides,
+                kb_content=kb_content,
+                agent_config_dict=agent_config_dict,
+                round_num=round_num,
+                gpu_id=gpu_id,
+                _print=_print,
+            )
+
+            if review_ok:
+                # Re-run perf after potential rewrites
+                if review_ok == "rewritten":
+                    _print("  Self-review rewrote candidate. Re-checking correctness...")
+                    recheck = run_harness(
+                        str(harness_path),
+                        mode="correctness",
+                        repo_root=str(repo_root),
+                        gpu_id=gpu_id,
+                        env_overrides=env_overrides,
+                    )
+                    if not recheck["success"]:
+                        _print("  Self-review broke correctness — continuing to next round")
+                        result["translation_success"] = False
+                        result["translation_kernel_path"] = None
+                        best_attempt_errors.append(
+                            "Self-review rewrite broke correctness"
+                        )
+                        continue
+                    _print("  Self-review rewrite still correct")
+                result["translation_self_review"] = "passed"
+                break
+            else:
+                _print("  Self-review failed — continuing to next round")
+                result["translation_success"] = False
+                result["translation_kernel_path"] = None
+                best_attempt_errors.append("Self-review agent failed or broke correctness")
+                continue
         else:
             stderr_tail = harness_result.get("stderr", "")[-500:]
             best_attempt_errors.append(f"Correctness check failed:\n{stderr_tail}")
@@ -264,6 +355,117 @@ def run_translation(
     )
 
     return result
+
+
+_SELF_REVIEW_PROMPT = """\
+## Translation Self-Review: PyTorch Compute Op Audit
+
+The FlyDSL translation below passed correctness. Your job is to audit it
+for **unnecessary PyTorch fallbacks** — operations where FlyDSL provides an
+equivalent that should be used instead.
+
+### Translated code ({candidate_path}):
+```python
+{candidate_code}
+```
+
+### Instructions
+
+1. **Enumerate** every call in the code that performs GPU *compute* via
+   PyTorch (e.g. `torch.matmul`, `F.relu`, `nn.Linear(...)`, `@` operator
+   for matrix multiplication, `F.softmax`, `F.scaled_dot_product_attention`,
+   `torch.sum`, `torch.mean`, etc.).
+
+   Ignore non-compute helpers: `import torch`, `torch.empty`, `torch.zeros`,
+   `torch.no_grad`, `.cuda()`, `.contiguous()`, `.view()`, `.reshape()`,
+   dtype/device helpers, and `torch.Tensor` type annotations.
+
+2. For **each** compute operation produce a verdict:
+   - **REPLACE** — FlyDSL has an equivalent. You MUST rewrite the code to
+     use it. Consult the knowledge base for the correct FlyDSL API.
+   - **KEEP** — FlyDSL genuinely has no equivalent (e.g. `nn.Conv2d`,
+     `nn.BatchNorm2d`, `F.max_pool2d`). Briefly explain why.
+
+3. Present the enumeration as a table:
+
+   | # | PyTorch Operation | Verdict | Reason |
+   |---|-------------------|---------|--------|
+
+4. If **any** operation is marked REPLACE, rewrite `{candidate_path}` with
+   ALL replacements applied, then verify correctness:
+   ```
+   python {harness_path} {harness_flag} {candidate_path}
+   ```
+
+5. If **no** operation needs replacement, state "ALL OPS JUSTIFIED" and do
+   NOT modify the file.
+
+Think step by step. Be strict — the goal is maximum FlyDSL utilisation.
+"""
+
+
+def _run_self_review(
+    *,
+    candidate_path: Path,
+    harness_path: Path,
+    pair,
+    model,
+    repo_root: Path,
+    output_dir: Path,
+    env_overrides: dict[str, str],
+    kb_content: str,
+    agent_config_dict: dict,
+    round_num: int,
+    gpu_id: int,
+    _print,
+) -> str | bool:
+    """Run the self-review agent on a correct translation.
+
+    Returns:
+    - ``"rewritten"`` if the agent modified the candidate file
+    - ``True`` if all ops are justified (no changes)
+    - ``False`` if the review agent failed
+    """
+    from minisweagent.agents.default import DefaultAgent
+    from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
+
+    candidate_code = candidate_path.read_text()
+    prompt = _SELF_REVIEW_PROMPT.format(
+        candidate_path=candidate_path,
+        candidate_code=candidate_code,
+        harness_path=harness_path,
+        harness_flag=pair.harness_candidate_flag,
+    )
+
+    env_config = LocalEnvironmentConfig(cwd=str(repo_root), env=env_overrides)
+    env = LocalEnvironment(**env_config.__dict__)
+
+    review_kwargs = dict(agent_config_dict)
+    review_kwargs["test_command"] = (
+        f"{sys.executable} {harness_path} {pair.harness_candidate_flag} {candidate_path}"
+    )
+    review_kwargs["patch_output_dir"] = str(output_dir / f"round_{round_num}_self_review")
+    review_kwargs["step_limit"] = min(agent_config_dict.get("step_limit", 50), 20)
+    review_kwargs["cost_limit"] = min(agent_config_dict.get("cost_limit", 8.0), 3.0)
+
+    agent = DefaultAgent(model, env, **review_kwargs)
+    agent.log_file = output_dir / f"translation_agent_round_{round_num}_self_review.log"
+
+    try:
+        exit_status, _ = agent.run(prompt, knowledge_base=kb_content)
+    except Exception as exc:
+        _print(f"  Self-review agent error: {exc}")
+        return False
+
+    _print(f"  Self-review exit: {exit_status}")
+
+    new_code = candidate_path.read_text()
+    if new_code != candidate_code:
+        _print("  Self-review modified the candidate")
+        return "rewritten"
+    else:
+        _print("  Self-review: all ops justified (no changes)")
+        return True
 
 
 def _create_translation_harness(
@@ -534,7 +736,7 @@ def main() -> None:
 
     output_dir = Path(args.output) if args.output else kernel_path.parent / "translation_output"
 
-    # Build model factory
+    # Build model factory (used as fallback when YAML config has no model)
     from minisweagent.run.preprocess.harness_utils import geak_model_factory
 
     _model_factory = geak_model_factory(args.model)
@@ -552,6 +754,7 @@ def main() -> None:
         output_dir=output_dir,
         gpu_id=args.gpu,
         target_language=args.target_language,
+        model_name=args.model,
         model_factory=_model_factory,
         repo=repo_root,
         flydsl_repo=flydsl_repo,
