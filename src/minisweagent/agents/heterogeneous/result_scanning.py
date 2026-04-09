@@ -8,8 +8,11 @@ in previous rounds.
 from __future__ import annotations
 
 import json
+import logging
 import re as _re
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _LATENCY_RE = _re.compile(r"GEAK_RESULT_LATENCY_MS=([\d.]+(?:e[+-]?\d+)?)")
 _SPEEDUP_RE = _re.compile(r"GEAK_RESULT_SPEEDUP=([\d.]+(?:e[+-]?\d+)?)")
@@ -78,8 +81,8 @@ def scan_single_round_results(results_dir: Path) -> list[str]:
                 )
                 if br.get("llm_selection_analysis"):
                     section.append(f"- Selection: {br['llm_selection_analysis']}")
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.debug("scan_single_round: bad best_results.json in %s: %s", label, exc)
 
         for tf in test_outputs:
             try:
@@ -102,7 +105,8 @@ def scan_single_round_results(results_dir: Path) -> list[str]:
                     tail_content = content[-3000:] if len(content) > 3000 else content
                     section.append(f"\n<details><summary>{tf.name} (best patch full output)</summary>\n")
                     section.append(f"```\n{tail_content.strip()}\n```\n</details>")
-            except Exception:
+            except Exception as exc:
+                logger.debug("scan_single_round: could not read test output %s: %s", tf.name, exc)
                 section.append(f"- {tf.name}: (unreadable)")
 
         for lf in log_files[:2]:
@@ -117,8 +121,8 @@ def scan_single_round_results(results_dir: Path) -> list[str]:
                     )
                 else:
                     section.append(f"- Log ({lf.name}): completed")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("scan_single_round: could not read log %s: %s", lf.name, exc)
 
         sections.append("\n".join(section))
 
@@ -193,7 +197,8 @@ def scan_previous_tasks(tasks_dir: Path, current_round: int) -> str:
                     f"- **{label}** (agent={agent_type}, priority={priority}): "
                     f"{body_preview}{'...' if len(body_preview) >= 200 else ''}"
                 )
-            except Exception:
+            except Exception as exc:
+                logger.debug("scan_previous_tasks: could not read %s: %s", tf.name, exc)
                 round_items.append(f"- {tf.name}: (unreadable)")
 
         if round_items:

@@ -91,7 +91,7 @@ class MetrixTool:
         else:
             self.gpu_devices = gpu_devices
 
-        logger.info(f"Initializing MetrixTool with GPU device(s): {self.gpu_devices}")
+        logger.debug("Initializing MetrixTool with GPU device(s): %s", self.gpu_devices)
 
         self.profiler = Metrix()  # Auto-detect GPU architecture
 
@@ -101,10 +101,13 @@ class MetrixTool:
             self.gpu_info_map[device] = self._get_gpu_info_from_metrix(device)
             if self.gpu_info_map[device].get("detected"):
                 gpu_info = self.gpu_info_map[device]
-                logger.info(
-                    f"GPU {device}: {gpu_info.get('model')} ({gpu_info.get('architecture')}), "
-                    f"{gpu_info.get('compute_units')} CUs, "
-                    f"{gpu_info.get('peak_hbm_bandwidth_gbs'):.0f} GB/s HBM"
+                logger.debug(
+                    "GPU %s: %s (%s), %s CUs, %.0f GB/s HBM",
+                    device,
+                    gpu_info.get("model"),
+                    gpu_info.get("architecture"),
+                    gpu_info.get("compute_units"),
+                    gpu_info.get("peak_hbm_bandwidth_gbs", 0),
                 )
 
     def _get_gpu_info_from_metrix(self, device: str) -> dict[str, Any]:
@@ -175,11 +178,14 @@ class MetrixTool:
                 ]
             }
         """
-        profile_mode = "quick" if quick else "memory (full)"
+        profile_mode = "quick" if quick else "memory"
         logger.info(
-            f"Starting profiling: {len(self.gpu_devices)} GPU(s), "
-            f"profile={profile_mode}, replays={num_replays}, "
-            f"auto_select={auto_select}, kernel_filter={kernel_filter or 'None'}"
+            "Starting profiling: %d GPU(s), profile=%s, replays=%d, auto_select=%s, kernel_filter=%s",
+            len(self.gpu_devices),
+            profile_mode,
+            num_replays,
+            auto_select,
+            kernel_filter or "None",
         )
 
         # Always return a list for consistency
@@ -191,7 +197,9 @@ class MetrixTool:
             results_list.append(result)
 
         logger.info(
-            f"Profiling complete: {sum(len(r['kernels']) for r in results_list)} total kernels across {len(self.gpu_devices)} GPU(s)"
+            "Profiling complete: %d total kernels across %d GPU(s)",
+            sum(len(r["kernels"]) for r in results_list),
+            len(self.gpu_devices),
         )
         return {"results": results_list}
 
@@ -206,7 +214,7 @@ class MetrixTool:
         cwd: str,
     ) -> dict[str, Any]:
         """Profile on a single GPU."""
-        logger.info(f"Profiling GPU {device}...")
+        logger.debug("Profiling GPU %s...", device)
 
         # Set HIP_VISIBLE_DEVICES for this specific GPU
         original_hip_devices = os.environ.get("HIP_VISIBLE_DEVICES")
@@ -237,18 +245,19 @@ class MetrixTool:
             if not main_kernel:
                 raise RuntimeError("No kernel found in profiling results")
             kernels_to_process = [main_kernel]
-            logger.info(
-                f"GPU {device}: Auto-selected kernel '{main_kernel.name}' "
-                f"(duration: {main_kernel.duration_us.avg:.2f} μs)"
-            )
+            logger.debug(
+                    "GPU %s: Auto-selected kernel '%s' (duration: %.2f μs)",
+                    device,
+                    main_kernel.name,
+                    main_kernel.duration_us.avg,
+                )
         else:
             kernels_to_process = results.kernels
-            if kernel_filter:
-                logger.info(
-                    f"GPU {device}: Processing {len(kernels_to_process)} kernel(s) matching filter '{kernel_filter}'"
-                )
-            else:
-                logger.info(f"GPU {device}: Processing all {len(kernels_to_process)} kernel(s)")
+            logger.debug("GPU %s: Processing %d kernel(s)%s",
+                device,
+                len(kernels_to_process),
+                f" matching filter '{kernel_filter}'" if kernel_filter else "",
+            )
 
         if not kernels_to_process:
             raise RuntimeError("No kernels found in profiling results")

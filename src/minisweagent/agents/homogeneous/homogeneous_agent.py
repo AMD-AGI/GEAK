@@ -7,6 +7,7 @@ homogeneous configuration (all agents run the same task with identical settings)
 """
 
 import copy
+import logging
 from pathlib import Path
 
 from rich.console import Console
@@ -15,6 +16,8 @@ from minisweagent.agents.parallel_agent import BestPatchResult, ParallelAgent
 from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 from minisweagent.models import get_model
 from minisweagent.run.utils.save import save_traj
+
+logger = logging.getLogger(__name__)
 
 
 def parse_gpu_ids(gpu_ids_str: str | None) -> list[int]:
@@ -76,9 +79,17 @@ def run_homogeneous_agent(
     final_num_parallel = (
         num_parallel or parallel_config.get("num_parallel") or config.get("agent", {}).get("num_parallel") or 1
     )
+    _np_source = (
+        "arg" if num_parallel
+        else "parallel config" if parallel_config.get("num_parallel")
+        else "agent config" if config.get("agent", {}).get("num_parallel")
+        else "default"
+    )
+    logger.debug("num_parallel=%d (source=%s)", final_num_parallel, _np_source)
 
     # GPU IDs
     final_gpu_ids = parse_gpu_ids(gpu_ids or parallel_config.get("gpu_ids") or config.get("agent", {}).get("gpu_ids"))
+    logger.debug("gpu_ids=%s", final_gpu_ids)
 
     # Repository path
     final_repo = repo
@@ -114,6 +125,14 @@ def run_homogeneous_agent(
     # Get model config for factory
     model_config = config.get("model", {})
 
+    logger.info(
+        "run_homogeneous_agent: num_parallel=%d, gpu_ids=%s, repo=%s, output_dir=%s",
+        final_num_parallel,
+        final_gpu_ids,
+        final_repo,
+        final_output_dir,
+    )
+
     # Create and run ParallelAgent
     agent = ParallelAgent(model, env, **agent_config)
 
@@ -129,15 +148,18 @@ def run_homogeneous_agent(
         )
 
         if best_result:
+            logger.info("Best patch: %s (agent %d)", best_result.patch_id, best_result.agent_id)
             console.print(
                 f"\n[bold green]Best patch:[/bold green] {best_result.patch_id} (agent {best_result.agent_id})"
             )
             if best_result.llm_conclusion:
                 console.print(f"[bold green]Conclusion:[/bold green] {best_result.llm_conclusion}")
         else:
+            logger.info("No best patch selected from parallel runs.")
             console.print("\n[bold yellow]No best patch selected[/bold yellow]")
 
     except Exception as e:
+        logger.error("Homogeneous agent failed: %s", e, exc_info=True)
         console.print(f"[bold red]Error:[/bold red] {e}")
         raise
 

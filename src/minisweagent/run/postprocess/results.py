@@ -88,11 +88,13 @@ def select_best_verified_round_evaluation(output_dir: Path) -> Any:
     for eval_path in sorted(output_dir.glob("round_*_evaluation.json")):
         try:
             round_eval = json.loads(eval_path.read_text())
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.debug("select_best_verified: skipping unreadable %s: %s", eval_path.name, exc)
             continue
 
         verified = extract_verified_speedup(round_eval)
         if verified is None:
+            logger.debug("select_best_verified: no verified speedup in %s; skipping.", eval_path.name)
             continue
 
         candidate_ms = round_eval_candidate_ms(round_eval)
@@ -109,10 +111,18 @@ def select_best_verified_round_evaluation(output_dir: Path) -> Any:
         candidates.append((sort_key, round_eval))
 
     if not candidates:
+        logger.info("select_best_verified: no verified round evaluations found.")
         return None
 
     candidates.sort(key=lambda item: item[0])
-    return candidates[0][1]
+    best = candidates[0][1]
+    logger.info(
+        "select_best_verified: best from %d candidate(s): %s (speedup=%.4fx).",
+        len(candidates),
+        round_eval_label(best),
+        extract_verified_speedup(best) or 0.0,
+    )
+    return best
 
 
 def format_patch_label(patch_path: str | None) -> str:
@@ -224,6 +234,11 @@ def merge_round_evaluation_into_final_report(
 
     verified_speedup_raw = extract_verified_speedup(round_eval)
     if verified_speedup_raw is not None:
+        logger.info(
+            "merge_round_evaluation: verified_speedup_raw=%.4f from %s.",
+            verified_speedup_raw,
+            round_eval_label(round_eval),
+        )
         # FULL_BENCHMARK verified_speedup is the canonical result — it's what
         # anyone gets by independently running the harness on the patched kernel.
         # The agent's benchmark_speedup may be higher due to non-reproducible
@@ -299,6 +314,7 @@ def post_round_evaluate(
     results_dir = output_dir / "results" / f"round_{round_num}"
     round_eval = evaluate_round_best(ctx, round_num, results_dir)
     if round_eval is None:
+        logger.info("post_round_evaluate: no candidates for round %d.", round_num)
         return None
 
     ctx[f"round_{round_num}_eval"] = round_eval
@@ -325,6 +341,11 @@ def post_round_evaluate(
         elif current >= ctx.get("_best_global_speedup", 0):
             ctx["starting_patch"] = round_eval.best_patch
             ctx["_best_global_speedup"] = current
+            logger.info(
+                "post_round_evaluate: new best global speedup %.4fx from round %d.",
+                current,
+                round_num,
+            )
     return round_eval
 
 
@@ -367,8 +388,10 @@ def finalize_run(
     not just the current round's result.
     """
     if finalize_result is not None:
+        logger.debug("finalize_run: LLM finalize_result provided; selecting best verified round.")
         best_eval = select_best_verified_round_evaluation(output_dir)
         if best_eval is not None:
+            logger.info("finalize_run: merging with best verified round (%s).", round_eval_label(best_eval))
             merged = merge_round_evaluation_into_final_report(
                 ctx,
                 output_dir,
@@ -377,6 +400,7 @@ def finalize_run(
             )
             return _dict_to_final_report(merged)
         if round_eval is not None:
+            logger.info("finalize_run: no best verified across all rounds; using current round_eval.")
             round_eval_dict = round_eval.to_dict() if hasattr(round_eval, "to_dict") else round_eval
             merged = merge_round_evaluation_into_final_report(
                 ctx,

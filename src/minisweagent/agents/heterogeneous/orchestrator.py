@@ -92,6 +92,7 @@ def run_llm_steps(
             try:
                 tool_args = json.loads(tool_args)
             except json.JSONDecodeError:
+                logger.warning("Bad JSON in tool_args for %s; resetting to empty dict.", tool_name)
                 tool_args = {}
 
         logger.debug("  Tool: %s(%s)", tool_name, json.dumps(tool_args)[:200])
@@ -125,13 +126,14 @@ def run_llm_steps(
                 insight = extract_insight_from_tool_result(tool_name, result_str, 0)
                 if insight:
                     _wm.ingest_insight(insight)
-            except Exception:
-                pass
+            except Exception as _wm_exc:
+                logger.debug("Working-memory insight extraction failed for %s: %s", tool_name, _wm_exc)
 
         if tool_name == "finalize":
             try:
                 report = json.loads(result_str)
             except json.JSONDecodeError:
+                logger.warning("Finalize payload is not valid JSON; wrapping as summary text.")
                 report = {"summary": result_str}
             logger.info("[bold green]Orchestrator: Optimisation finalised.[/bold green]")
             return report
@@ -170,13 +172,14 @@ def run_heterogeneous_orchestrator(
     from minisweagent.tools.tools_runtime import ToolRuntime
 
     disc_dict = preprocess_ctx.get("discovery") or {}
-    kernel_path = preprocess_ctx.get("kernel_path", "")
+    kernel_path = str(preprocess_ctx.get("kernel_path", ""))
     kernel_meta = _extract_kernel_meta(disc_dict, kernel_path)
 
     preprocess_dir = output_dir
     for candidate in ("resolved.json", "discovery.json", "profile.json"):
         if (output_dir / candidate).exists():
             preprocess_dir = output_dir
+            logger.debug("preprocess_dir set to output_dir (found %s).", candidate)
             break
 
     toolruntime = ToolRuntime(tool_profile="full", use_strategy_manager=True)
@@ -200,18 +203,28 @@ def run_heterogeneous_orchestrator(
     model_impl.tools = tools_schema
 
     bm = preprocess_ctx.get("baseline_metrics") or {}
+    if not bm:
+        logger.warning("No baseline metrics found in preprocess_ctx; using empty dict.")
     bm_summary = json.dumps(bm, indent=2, default=str) if bm else "Not available"
 
     prof = preprocess_ctx.get("profiling") or {}
+    if not prof:
+        logger.warning("No profiling data found in preprocess_ctx; using empty dict.")
     prof_summary = json.dumps(prof, indent=2, default=str)[:2000] if prof else "Not available"
 
     cmd = preprocess_ctx.get("commandment") or ""
+    if not cmd:
+        logger.error("No commandment found in preprocess_ctx.")
+        raise ValueError("No commandment found in preprocess_ctx.")
     cmd_excerpt = cmd[:1500] + ("..." if len(cmd) > 1500 else "") if cmd else "Not available"
 
     codebase_ctx = ""
     _codebase_ctx_path = preprocess_dir / "CODEBASE_CONTEXT.md"
     if _codebase_ctx_path.exists():
         codebase_ctx = _codebase_ctx_path.read_text().strip()
+        logger.info("Loaded CODEBASE_CONTEXT.md: %s", _codebase_ctx_path.name)
+    else:
+        logger.warning("CODEBASE_CONTEXT.md not found in preprocess_dir; using empty string.")
 
     _memory_context = ""
     try:
@@ -219,11 +232,10 @@ def run_heterogeneous_orchestrator(
             assemble_memory_context,
         )
 
-        _bm = preprocess_ctx.get("baseline_metrics") or {}
         _memory_context = assemble_memory_context(
-            kernel_path=str(preprocess_ctx.get("kernel_path", "")),
-            bottleneck_type=_bm.get("bottleneck"),
-            profiling_metrics=_bm,
+            kernel_path=kernel_path,
+            bottleneck_type=bm.get("bottleneck"),
+            profiling_metrics=bm,
         )
         if _memory_context:
             _memory_context = "### Optimization Memory (from past runs)\n" + _memory_context
@@ -244,10 +256,9 @@ def run_heterogeneous_orchestrator(
                 WorkingMemory,
             )
 
-            _kpath = str(preprocess_ctx.get("kernel_path", ""))
             _wm_notebook_dir = str(output_dir / "_working_memory")
             _working_mem = WorkingMemory(
-                kernel_category=classify_kernel_category(_kpath) if _kpath else "unknown",
+                kernel_category=classify_kernel_category(kernel_path) if kernel_path else "unknown",
                 max_steps=int(os.getenv("GEAK_AGENT_STEP_LIMIT", "100")),
                 notebook_dir=_wm_notebook_dir,
                 notebook_writer_id="orchestrator",
@@ -287,6 +298,7 @@ def run_heterogeneous_orchestrator(
     ]
 
     if start_round > 1:
+        logger.info("Resuming from round %d; loading prior evaluations 1..%d.", start_round, start_round - 1)
         for prev_round in range(1, start_round):
             eval_path = output_dir / f"round_{prev_round}_evaluation.json"
             if eval_path.exists():
@@ -351,8 +363,11 @@ def run_heterogeneous_orchestrator(
                 ctx,
                 phase=f"round_{round_num}",
             )
+            logger.info("Round %d finalized result", round_num)
 
             round_eval = post_round_evaluate(ctx, round_num, output_dir)
+            logger.info("Round %d evaluated post-round", round_num)
+
             if round_eval:
                 if _working_mem:
                     round_eval_dict = round_eval.to_dict() if hasattr(round_eval, "to_dict") else round_eval
@@ -377,6 +392,7 @@ def run_heterogeneous_orchestrator(
                 )
 
             if finalize_result is not None:
+                logger.info("Finalizing run")
                 return finalize_run(
                     ctx,
                     output_dir,
@@ -384,6 +400,7 @@ def run_heterogeneous_orchestrator(
                     round_eval=round_eval,
                 )
     finally:
+        logger.debug("Restoring original model tools schema.")
         if original_tools is not None:
             model_impl.tools = original_tools
         elif hasattr(model_impl, "tools"):

@@ -767,6 +767,10 @@ def run_preprocessor(
                     # endregion
                     break
                 except Exception:
+                    logger.debug(
+                        "Harness candidate validation failed; trying next candidate",
+                        exc_info=True,
+                    )
                     continue
 
         if test_command is None and _uta_model and repo_root:

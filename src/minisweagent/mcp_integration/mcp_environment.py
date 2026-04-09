@@ -296,11 +296,14 @@ class MCPEnabledEnvironment(LocalEnvironment):
             return {"output": result, "returncode": 0}
 
         except json.JSONDecodeError as e:
+            logger.debug("RAG MCP: invalid JSON arguments: %s", e)
             return {"output": f"RAG Error: Invalid JSON arguments - {e}", "returncode": 1}
         except KeyError as e:
+            logger.debug("RAG MCP: unknown tool: %s", e)
             available = ", ".join(sorted(self._tool_map.keys()))
             return {"output": f"RAG Error: Unknown tool {e}. Available: {available}", "returncode": 1}
         except Exception as e:
+            logger.warning("RAG MCP: tool execution failed: %s: %s", type(e).__name__, e)
             return {"output": f"RAG Error: {type(e).__name__}: {str(e)}", "returncode": 1}
 
     def _format_content_preview(self, content: str, max_len: int = 200) -> str:

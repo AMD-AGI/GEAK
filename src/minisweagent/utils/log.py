@@ -21,7 +21,7 @@ def _get_log_level_from_env() -> int:
 def _silence_noisy_loggers() -> None:
     # Prevent third-party HTTP client INFO logs (e.g. "HTTP Request: POST ...")
     # from cluttering our file logs when root handlers are configured elsewhere.
-    for name in ("httpx", "httpcore"):
+    for name in ("httpx", "httpcore", "metrix"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 

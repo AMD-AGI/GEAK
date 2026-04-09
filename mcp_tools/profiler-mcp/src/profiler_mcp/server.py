@@ -105,6 +105,7 @@ def _profile_with_metrix(
             cwd=cwd,
         )
     except Exception as e:
+        logger.warning("Metrix profiling failed: %s", e)
         return {
             "success": False,
             "backend": "metrix",

@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ with open(json_path, encoding="utf-8") as f:
 # MCP tool schemas are shared at module level.
 # MCP bridge *instances* are created per ToolRuntime so each agent gets its
 # own subprocess and stdio pipes (safe for parallel profiling).
+logger = logging.getLogger(__name__)
+
 _mcp_tools: list = []
 _mcp_collected = False
 
@@ -38,7 +41,9 @@ def _ensure_mcp_collected() -> None:
         # Bootstrap bridges are only needed for schema discovery; discard refs.
         # Their atexit handlers will clean up at interpreter exit.
         del _boot_bridges
-    except Exception:
+        logger.debug("_ensure_mcp_collected: discovered %d MCP tool(s).", len(_mcp_tools))
+    except Exception as exc:
+        logger.warning("MCP tool collection failed; MCP tools will be unavailable: %s", exc)
         _mcp_tools = []
 
 
@@ -161,7 +166,8 @@ class ToolRuntime:
             from minisweagent.tools.mcp_bridge import _populate_mcp_bridges
 
             return _populate_mcp_bridges()
-        except Exception:
+        except Exception as exc:
+            logger.warning("_create_own_bridges: MCP bridge creation failed: %s", exc)
             return []
 
     def _register_profiler_mcp(self):

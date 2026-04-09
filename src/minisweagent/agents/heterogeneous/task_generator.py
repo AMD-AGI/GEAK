@@ -82,19 +82,24 @@ def _infer_kernel_type(kernel_path: Path) -> str:
         try:
             text = kernel_path.read_text(errors="ignore")
             if "@triton" in text or "tl." in text:
+                logger.debug("_infer_kernel_type: triton markers found in %s", kernel_path.name)
                 return "triton"
             if "import triton" in text:
                 if _check_imported_triton(text, kernel_path):
+                    logger.debug("_infer_kernel_type: triton detected via import-follow in %s", kernel_path.name)
                     return "triton"
-                return "triton"
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.debug("_infer_kernel_type: could not read %s: %s", kernel_path, exc)
+        logger.debug("_infer_kernel_type: no triton markers in %s; returning 'unknown'.", kernel_path.name)
         return "unknown"
     if ext in (".cu", ".hip", ".hpp", ".cpp"):
         path_lower = str(kernel_path).lower()
         if "composable_kernel" in path_lower or "/ck_" in path_lower or "/ck/" in path_lower:
+            logger.debug("_infer_kernel_type: CK path pattern in %s", kernel_path.name)
             return "ck"
+        logger.debug("_infer_kernel_type: native extension %s → hip", ext)
         return "hip"
+    logger.debug("_infer_kernel_type: unrecognised extension %s; returning 'unknown'.", ext)
     return "unknown"
 
 
@@ -218,6 +223,7 @@ def generate_tasks(
         RuntimeError: If the agent fails to submit results.
     """
     if not kernel_path:
+        logger.warning("generate_tasks: kernel_path is empty; returning no tasks.")
         return []
 
     submitted_text = _run_task_agent(
@@ -327,7 +333,7 @@ def generate_tasks_from_content(
             try:
                 f.unlink(missing_ok=True)
             except Exception:
-                pass
+                logger.debug("Failed to remove temp file %s", f)
 
 
 def write_task_files(
@@ -551,9 +557,7 @@ def _run_task_agent(
             if combined_memory:
                 template_vars["memory_context"] = combined_memory
         except Exception as _mem_exc:
-            import logging as _lg
-
-            _lg.getLogger(__name__).warning("Memory assembly failed: %s", _mem_exc)
+            logger.warning("Memory assembly failed in task generator: %s", _mem_exc)
 
         _kernel_meta = {
             "file_path": kernel_path,
@@ -588,8 +592,10 @@ def _run_task_agent(
         )
 
         if exit_type == "Submitted":
+            logger.debug("Task-generation agent submitted results (%d chars).", len(exit_msg))
             return exit_msg
 
+        logger.warning("Task-generation agent did not submit (exit_type=%s).", exit_type)
         raise RuntimeError(f"Task-generation agent did not submit results (exit: {exit_type}): {exit_msg[:500]}")
     finally:
         if original_tools is not None:
@@ -614,7 +620,7 @@ def _run_task_agent(
             try:
                 f.unlink(missing_ok=True)
             except Exception:
-                pass
+                logger.debug("Failed to remove temp file %s", f)
 
 
 def _parse_llm_response(
@@ -646,13 +652,15 @@ def _parse_llm_response(
     tasks: list[AgentTask] = []
     for item in raw_tasks:
         if not isinstance(item, dict):
+            logger.debug("_parse_llm_response: skipping non-dict item: %s", type(item).__name__)
             continue
 
         label = str(item.get("label", "unknown"))
         try:
             priority = int(item.get("priority", 10))
         except (ValueError, TypeError):
-            priority = 10  # Default priority if parsing fails
+            logger.debug("_parse_llm_response: invalid priority %r for '%s'; defaulting to 10.", item.get("priority"), label)
+            priority = 10
         priority = max(0, min(15, priority))
         agent_type = filter_agent_type(str(item.get("agent_type", "strategy_agent")))
         kernel_language = str(item.get("kernel_language", "python"))
@@ -663,9 +671,12 @@ def _parse_llm_response(
             task_num_gpus = 1
 
         if not task_prompt:
+            logger.debug("_parse_llm_response: skipping task '%s' with empty prompt.", label)
             continue
 
         resolved_class = type_to_class.get(agent_type, agent_class)
+        if agent_type not in type_to_class:
+            logger.debug("_parse_llm_response: unknown agent_type %r for '%s'; using default class.", agent_type, label)
 
         cfg: dict[str, Any] = {}
 

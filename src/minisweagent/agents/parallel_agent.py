@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from minisweagent import Environment, Model
+
+logger = logging.getLogger(__name__)
 from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.agents.select_patch_agent import run_select_patch
 from minisweagent.run.utils.parallel_helpers import (
@@ -121,6 +124,7 @@ class ParallelAgent(DefaultAgent):
         base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory
     ) -> BestPatchResult | None:
         """Select the best patch from multiple parallel runs using SelectPatchAgent."""
+        logger.info("Selecting best patch from %d parallel runs via SelectPatchAgent.", num_parallel)
         print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
 
         model = model_factory()
@@ -139,9 +143,11 @@ class ParallelAgent(DefaultAgent):
             )
 
         if not best_patch_id:
+            logger.warning("SelectPatchAgent did not produce best_results.json.")
             print("[ParallelAgent] SelectPatchAgent did not produce best_results.json", flush=True)
             return None
 
+        logger.info("Selected best patch: %s", best_patch_id)
         print(f"[ParallelAgent] Selected best patch: {best_patch_id}", flush=True)
 
         try:
@@ -179,6 +185,7 @@ class ParallelAgent(DefaultAgent):
                 llm_conclusion=best_results.get("llm_selection_analysis", ""),
             )
         except Exception as e:
+            logger.warning("Failed to process best_results.json: %s", e)
             print(f"[ParallelAgent] Failed to process best_results.json: {e}", flush=True)
             return None
 
@@ -244,15 +251,15 @@ class ParallelAgent(DefaultAgent):
                     )
         except subprocess.CalledProcessError:
             subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("_create_worktree: cleanup failed for %s: %s", worktree_path, exc)
 
         # Remove directory if it still exists
         if worktree_path.exists():
             try:
                 shutil.rmtree(worktree_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("_create_worktree: rmtree failed for %s: %s", worktree_path, exc)
 
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
         ParallelAgent._ensure_safe_directory(repo_path)
@@ -359,8 +366,8 @@ class ParallelAgent(DefaultAgent):
                         shutil.rmtree(backup_path)
                     git_dir.rename(backup_path)
                     renamed.append(backup_path)
-                except Exception:
-                    pass  # Best effort
+                except Exception as exc:
+                    logger.debug("_neutralize_nested_git_repos: rename failed for %s: %s", git_dir, exc)
         return renamed
 
     @staticmethod
@@ -375,7 +382,8 @@ class ParallelAgent(DefaultAgent):
                 text=True,
             )
             return result.returncode == 0
-        except Exception:
+        except Exception as exc:
+            logger.debug("_has_valid_head: check failed for %s: %s", repo_path, exc)
             return False
 
     @staticmethod
@@ -404,7 +412,8 @@ class ParallelAgent(DefaultAgent):
                     shutil.rmtree(git_dir)
                 else:
                     git_dir.unlink()
-            except Exception:
+            except Exception as exc:
+                logger.debug("_init_as_git_repo: failed to remove invalid .git in %s: %s", repo_path, exc)
                 pass
 
         try:
@@ -683,7 +692,5 @@ class ParallelAgent(DefaultAgent):
                     results.append(result)
                 except Exception as e:
                     agent_id = futures[future]
-                    from minisweagent.utils.log import logger
-
-                    logger.error(f"Error in parallel agent {agent_id}: {e}", exc_info=True)
+                    logger.error("Error in parallel agent %d: %s", agent_id, e, exc_info=True)
         return results

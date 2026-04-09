@@ -63,7 +63,16 @@ def run_orchestrator(
     _out = Path(_out)
     _out.mkdir(parents=True, exist_ok=True)
 
-    max_rounds = max_rounds or int(os.getenv("GEAK_MAX_ROUNDS", "5"))
+    _env_rounds = os.getenv("GEAK_MAX_ROUNDS")
+    max_rounds = max_rounds or int(_env_rounds or "5")
+    logger.info(
+        "run_orchestrator: output_dir=%s, max_rounds=%d (source=%s), start_round=%d, heterogeneous=%s",
+        _out,
+        max_rounds,
+        "arg" if (max_rounds != int(_env_rounds or "5") if _env_rounds else max_rounds != 5) else ("env" if _env_rounds else "default"),
+        start_round,
+        heterogeneous,
+    )
 
     if not heterogeneous:
         raise NotImplementedError("Homogeneous mode is not supported via geak-orchestrate. Use the 'mini' CLI instead.")
@@ -88,6 +97,7 @@ def _probe_preprocess_dir(pp_dir: Path):
     """Backward-compatible fallback: reconstruct PreprocessContext by probing files."""
     from minisweagent.run.pipeline_types import PreprocessContext
 
+    logger.debug("_probe_preprocess_dir: probing %s for preprocessor artefacts.", pp_dir)
     kernel_path = ""
     repo_root = str(pp_dir)
     harness_path = ""
@@ -108,10 +118,13 @@ def _probe_preprocess_dir(pp_dir: Path):
                 cur = cur.parent
             if git_root:
                 repo_root = str(git_root)
+                logger.debug("_probe_preprocess_dir: repo_root from git walk: %s", repo_root)
             elif repo_path:
                 repo_root = repo_path
+                logger.debug("_probe_preprocess_dir: repo_root from resolved.json: %s", repo_root)
             else:
                 repo_root = str(Path(kernel_path).parent)
+                logger.debug("_probe_preprocess_dir: repo_root defaulted to kernel parent: %s", repo_root)
 
     testcase_sel_path = pp_dir / "testcase_selection.json"
     if testcase_sel_path.exists():
@@ -119,16 +132,16 @@ def _probe_preprocess_dir(pp_dir: Path):
             ts = json.loads(testcase_sel_path.read_text())
             if isinstance(ts, dict):
                 harness_path = ts.get("harness_path", "")
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.debug("_probe_preprocess_dir: failed to read testcase_selection.json: %s", exc)
 
     discovery = None
     discovery_path = pp_dir / "discovery.json"
     if discovery_path.exists():
         try:
             discovery = json.loads(discovery_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.debug("_probe_preprocess_dir: failed to read discovery.json: %s", exc)
 
     return PreprocessContext(
         kernel_path=kernel_path,
@@ -196,7 +209,7 @@ def main() -> None:
 
     pp_dir = Path(args.preprocess_dir).resolve()
     if not pp_dir.is_dir():
-        print(f"ERROR: preprocess directory not found: {args.preprocess_dir}", file=sys.stderr)
+        logger.error("Preprocess directory not found: %s", args.preprocess_dir)
         sys.exit(1)
 
     from minisweagent.run.pipeline_types import PreprocessContext
@@ -230,12 +243,15 @@ def main() -> None:
     # Parse GPU IDs
     if args.gpu_ids:
         gpu_ids = [int(g.strip()) for g in args.gpu_ids.split(",") if g.strip()]
+        logger.info("GPU IDs from CLI: %s", gpu_ids)
     else:
         try:
             from minisweagent.agents.agent_spec import detect_available_gpus
 
             gpu_ids = detect_available_gpus()
-        except Exception:
+            logger.info("Auto-detected GPU IDs: %s", gpu_ids)
+        except Exception as exc:
+            logger.warning("GPU auto-detection failed (%s); falling back to [0].", exc)
             gpu_ids = [0]
 
     from minisweagent.run.pipeline_helpers import geak_model_factory, load_geak_model
@@ -257,7 +273,7 @@ def main() -> None:
 
     if report:
         report_dict = report.to_dict() if hasattr(report, "to_dict") else report
-        print(json.dumps(report_dict, indent=2, default=str)[:2000])
+        logger.info("Orchestrator report (truncated): %s", json.dumps(report_dict, indent=2, default=str)[:2000])
 
 
 if __name__ == "__main__":
