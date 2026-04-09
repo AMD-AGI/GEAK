@@ -499,7 +499,8 @@ def auto_finalize(
 
     report["speedup_source"] = (
         "agent-reported benchmark (no FULL_BENCHMARK verified result available — "
-        "please run the FULL_BENCHMARK section from COMMANDMENT.md to verify this speedup)"
+        "the orchestrator will run FULL_BENCHMARK automatically after this round; "
+        "do not use this speedup for final selection)"
     )
     report_path.write_text(json.dumps(report, indent=2))
     logger.info("Auto-finalized: %s", summary_text)

@@ -460,7 +460,8 @@ def write_eval_results(
     else:
         round_eval["speedup_source"] = (
             "agent-reported benchmark (no FULL_BENCHMARK verified result available — "
-            "please run the FULL_BENCHMARK section from COMMANDMENT.md to verify this speedup)"
+            "the orchestrator will run FULL_BENCHMARK automatically after this round; "
+            "do not use this speedup for final selection)"
         )
     eval_path = output_dir / f"round_{round_num}_evaluation.json"
     eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
