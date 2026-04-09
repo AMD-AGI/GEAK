@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,6 +25,8 @@ from typing import Any
 from minisweagent.agents.default import TerminatingException
 from minisweagent.debug_runtime import emit_debug_log
 from minisweagent.run.task_file import create_worktree, create_worktree_with_patch
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Thread-local stdout/stderr redirection
@@ -644,6 +647,8 @@ def run_pool(
                 f.write(f"GPU: {hip_devices} | Priority: {task.priority} | Language: {task.kernel_language}\n")
                 f.write("=" * 60 + "\n\n")
 
+            logger.info("[dim]Sub-agent %d (%s) started on GPU %s[/dim]", task_id, label, hip_devices)
+            _agent_t0 = time.monotonic()
             exit_status, result, extra_info = None, None, None
             with redirect_output_fn(log_file):
                 try:
@@ -663,6 +668,8 @@ def run_pool(
                         save_traj_fn(
                             agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info
                         )
+            _agent_elapsed = time.monotonic() - _agent_t0
+            logger.info("Sub-agent %d (%s) finished in %.0fs (exit=%s)", task_id, label, _agent_elapsed, exit_status)
 
             # Auto-extract final patch from worktree if agent didn't save any
             if not list(task_patch_dir.glob("patch_*.patch")) and wt_path.exists():
@@ -708,6 +715,32 @@ def run_pool(
             for g in acquired_gpus:
                 gpu_queue.put(g)
 
+    # Progress reporting thread
+    _progress_stop = threading.Event()
+    _dispatch_t0 = time.monotonic()
+
+    def _report_progress():
+        _interval = float(os.environ.get("GEAK_PROGRESS_INTERVAL", "30"))
+        while not _progress_stop.wait(_interval):
+            elapsed = time.monotonic() - _dispatch_t0
+            patches_by_task = []
+            for _tid, _task in sorted_tasks:
+                _lbl = _task.label or f"task_{_tid}"
+                _pdir = base_patch_dir / _lbl
+                count = len(list(_pdir.glob("*.patch"))) if _pdir.is_dir() else 0
+                patches_by_task.append((_lbl, count))
+            total = sum(c for _, c in patches_by_task)
+            summary = ", ".join(f"{l}: {c}" for l, c in patches_by_task if c > 0)
+            logger.info(
+                "[dim][%.1fmin] Sub-agents working: %d total patches%s[/dim]",
+                elapsed / 60,
+                total,
+                f" ({summary})" if summary else "",
+            )
+
+    _progress_thread = threading.Thread(target=_report_progress, daemon=True)
+    _progress_thread.start()
+
     # Submit ALL M tasks; ThreadPoolExecutor(max_workers=N) queues overflow
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_slots) as executor:
@@ -742,9 +775,7 @@ def run_pool(
                 # endregion
             except Exception as e:
                 task_id = futures[future]
-                from minisweagent.utils.log import logger
-
-                logger.error(f"Error in pool task {task_id}: {e}", exc_info=True)
+                logger.error("Error in pool task %d: %s", task_id, e, exc_info=True)
                 # region agent log
                 emit_debug_log(
                     "parallel_agent.py:_run_pool:future_exception",
@@ -758,6 +789,9 @@ def run_pool(
                     hypothesis_id="H8",
                 )
                 # endregion
+
+    _progress_stop.set()
+    _progress_thread.join(timeout=2)
 
     # region agent log
     emit_debug_log(
