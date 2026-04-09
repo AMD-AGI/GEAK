@@ -526,12 +526,12 @@ def run_preprocessor(
 
     logger.info("  Kernel: %s", kernel_path)
 
-    # ── Step 1.5: Translation (conditional) ──────────────────────────
-    if target_language or translate_only:
+    # ── --translate-only lightweight path: translate and exit early ──
+    if translate_only:
         _print(
-            "[bold cyan]--- Step 1.5: Translation ---[/bold cyan]"
+            "[bold cyan]--- Translation (--translate-only) ---[/bold cyan]"
             if console
-            else "--- Step 1.5: Translation ---"
+            else "--- Translation (--translate-only) ---"
         )
         from minisweagent.run.preprocess.translate import run_translation
 
@@ -548,30 +548,19 @@ def run_preprocessor(
         )
         ctx.update(translation_result)
         if translation_result.get("translation_success"):
-            kernel_path = translation_result["translation_kernel_path"]
-            ctx["kernel_path"] = kernel_path
-            _print(f"  Translated kernel: {kernel_path}")
+            ctx["kernel_path"] = translation_result["translation_kernel_path"]
+            _print(f"  Translated kernel: {ctx['kernel_path']}")
         else:
             _errors = translation_result.get("translation_errors", [])
-            _src = translation_result.get("translation_source_language") or "source"
-            if translate_only:
-                _print(
-                    f"  [red]Translation failed[/red]" if console
-                    else "  Translation failed"
-                )
-            else:
-                _print(
-                    f"  [yellow]Translation failed — continuing with original {_src} kernel[/yellow]"
-                    if console
-                    else f"  Translation failed — continuing with original {_src} kernel"
-                )
-            if _errors:
-                for _e in _errors[-3:]:
-                    _print(f"    {_e}")
-        if translate_only:
-            ctx["translate_only"] = True
-            _print("  --translate-only: skipping remaining preprocessing steps")
-            return ctx
+            _print(
+                "  [red]Translation failed[/red]" if console
+                else "  Translation failed"
+            )
+            for _e in (_errors or [])[-3:]:
+                _print(f"    {_e}")
+        ctx["translate_only"] = True
+        _print("  --translate-only: skipping remaining preprocessing steps")
+        return ctx
 
     # ── Fast path for eval_command: skip Steps 2-4 ───────────────────
     if eval_command:
@@ -1019,6 +1008,48 @@ def run_preprocessor(
             testcase_selection["test_command"] = test_command
             testcase_selection["harness_path"] = ctx.get("harness_path")
             (output_dir / "testcase_selection.json").write_text(json.dumps(testcase_selection, indent=2, default=str))
+
+        # ── Step 4: Translation (conditional, after UTA) ─────────────
+        if target_language:
+            _print(
+                "[bold cyan]--- Step 4: Translation ---[/bold cyan]"
+                if console
+                else "--- Step 4: Translation ---"
+            )
+            from minisweagent.run.preprocess.translate import run_translation
+
+            translation_output_dir = output_dir / "translation"
+            translation_result = run_translation(
+                kernel_path=Path(kernel_path),
+                output_dir=translation_output_dir,
+                gpu_id=gpu_id,
+                target_language=target_language,
+                model=model,
+                model_factory=model_factory,
+                repo=Path(repo_root) if repo_root else None,
+                console=console,
+            )
+            ctx.update(translation_result)
+            if translation_result.get("translation_success"):
+                kernel_path = translation_result["translation_kernel_path"]
+                ctx["kernel_path"] = kernel_path
+                _print(f"  Translated kernel: {kernel_path}")
+                _harness = next(translation_output_dir.glob("test_*_translation_harness.py"), None)
+                if _harness and _harness.exists():
+                    test_command = f"{sys.executable} {_harness} --flydsl-kernel {kernel_path}"
+                    ctx["test_command"] = test_command
+                    ctx["harness_path"] = str(_harness)
+                    _print(f"  Translation harness as test_command: {test_command}")
+            else:
+                _errors = translation_result.get("translation_errors", [])
+                _src = translation_result.get("translation_source_language") or "source"
+                _print(
+                    f"  [yellow]Translation failed — continuing with original {_src} kernel[/yellow]"
+                    if console
+                    else f"  Translation failed — continuing with original {_src} kernel"
+                )
+                for _e in (_errors or [])[-3:]:
+                    _print(f"    {_e}")
 
         # GEAK_HARNESS_ONLY=1 skips profiling, baseline, and commandment steps.
         # Used by test_harness_variance.py to validate harness shapes quickly.
