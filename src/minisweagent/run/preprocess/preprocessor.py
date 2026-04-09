@@ -535,14 +535,14 @@ def run_preprocessor(
         )
         from minisweagent.run.preprocess.translate import run_translation
 
-        _translation_model = model or (model_factory() if model_factory else None)
         translation_output_dir = output_dir / "translation"
         translation_result = run_translation(
             kernel_path=Path(kernel_path),
             output_dir=translation_output_dir,
             gpu_id=gpu_id,
             target_language=target_language,
-            model=_translation_model,
+            model=model,
+            model_factory=model_factory,
             repo=Path(repo_root) if repo_root else None,
             console=console,
         )
