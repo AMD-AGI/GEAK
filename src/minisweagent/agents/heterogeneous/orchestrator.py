@@ -287,9 +287,11 @@ def run_heterogeneous_orchestrator(
 
     start_label = f"rounds {start_round}-{max_rounds}" if start_round > 1 else f"{max_rounds} rounds"
     logger.info(
-        "[bold cyan]--- Orchestrator starting (%s, %d GPUs) ---[/bold cyan]",
-        f"{start_label}",
+        "\n%s\n  Heterogeneous Orchestrator (%s, %d GPUs)\n%s",
+        "=" * 60,
+        start_label,
         len(gpu_ids),
+        "=" * 60,
     )
 
     messages: list[dict] = [
@@ -323,7 +325,7 @@ def run_heterogeneous_orchestrator(
 
     try:
         if start_round <= 1:
-            logger.info("[bold cyan]--- Exploration phase ---[/bold cyan]")
+            logger.info("\n%s\n  Exploration Phase\n%s", "-" * 60, "-" * 60)
             finalize_result = run_llm_steps(
                 model,
                 messages,
@@ -335,8 +337,9 @@ def run_heterogeneous_orchestrator(
 
         for round_num in range(start_round, max_rounds + 1):
             is_last = round_num == max_rounds
-            round_header = f"--- Round {round_num}/{max_rounds}{' (final round)' if is_last else ''} ---"
-            logger.info("[bold cyan]%s[/bold cyan]", round_header)
+            final_tag = " (FINAL)" if is_last else ""
+            banner = f"{'=' * 60}\n  Round {round_num}/{max_rounds}{final_tag}\n{'=' * 60}"
+            logger.info("\n%s", banner)
 
             if is_last:
                 round_instruction = (

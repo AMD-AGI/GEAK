@@ -41,17 +41,17 @@ class AmdLlmModel:
             from minisweagent.models.amd_openai import AmdOpenAIModel
 
             self._impl = AmdOpenAIModel(config)
-            logger.info("LLM backend: OpenAI (gpt), model_name=%s", config.model_name)
+            logger.debug("LLM backend: OpenAI (gpt), model_name=%s", config.model_name)
         elif "claude" in config.model_name:
             from minisweagent.models.amd_claude import AmdClaudeModel
 
             self._impl = AmdClaudeModel(config)
-            logger.info("LLM backend: Anthropic (claude), model_name=%s", config.model_name)
+            logger.debug("LLM backend: Anthropic (claude), model_name=%s", config.model_name)
         elif "gemini" in config.model_name:
             from minisweagent.models.amd_gemini import AmdGeminiModel
 
             self._impl = AmdGeminiModel(config)
-            logger.info("LLM backend: Google (gemini), model_name=%s", config.model_name)
+            logger.debug("LLM backend: Google (gemini), model_name=%s", config.model_name)
         else:
             raise ValueError(f"Unsupported model: {config.model_name}")
 

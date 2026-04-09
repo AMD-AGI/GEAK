@@ -21,10 +21,6 @@ from typing import Any
 from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 
 mcp = FastMCP(
     name="profiler",
@@ -247,9 +243,7 @@ def profile_kernel(
             # rocprof-compute returns: "analysis" with text output
         }
     """
-    logger.info("=" * 60)
-    logger.info(f"Profiler MCP: backend={backend}, command={command}")
-    logger.info("=" * 60)
+    logger.info("Profiler MCP: backend=%s, command=%s", backend, command)
 
     command = _normalize_command(command)
 

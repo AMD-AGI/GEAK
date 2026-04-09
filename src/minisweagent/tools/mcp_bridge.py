@@ -117,7 +117,7 @@ class MCPToolBridge:
 
             self._client = MCPClient(self.server_name, self.server_config)
             await self._client.start()
-            logger.info(f"MCPToolBridge: started {self.server_name}")
+            logger.debug("MCPToolBridge: started %s", self.server_name)
         return self._client
 
     # ------------------------------------------------------------------

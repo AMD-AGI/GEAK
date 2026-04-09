@@ -40,6 +40,7 @@ def _setup_root_logger() -> None:
     _formatter = logging.Formatter("%(name)s: %(levelname)s: %(message)s")
     _handler.setFormatter(_formatter)
     logger.addHandler(_handler)
+    logger.propagate = False
     _silence_noisy_loggers()
 
 

@@ -44,7 +44,7 @@ class MCPClient:
             RuntimeError: If server fails to start
         """
         if self.process:
-            logger.warning("MCP server already running")
+            logger.debug("MCP server already running: %s", self.server_name)
             return
 
         cmd = self.server_config["command"]
@@ -55,7 +55,7 @@ class MCPClient:
         if "env" in self.server_config:
             env.update(self.server_config["env"])
 
-        logger.info(f"Starting MCP server: {self.server_name}")
+        logger.debug("Starting MCP server: %s", self.server_name)
         logger.debug(f"Command: {' '.join(cmd)}")
         logger.debug(f"CWD: {cwd}")
 
@@ -79,7 +79,7 @@ class MCPClient:
             # Initialize MCP session
             await self._initialize()
 
-            logger.info(f"MCP server {self.server_name} started successfully")
+            logger.debug("MCP server %s started successfully", self.server_name)
 
         except Exception as e:
             logger.error(f"Failed to start MCP server: {e}")
@@ -130,7 +130,7 @@ class MCPClient:
         if not self._initialized:
             raise RuntimeError("MCP client not initialized. Call start() first.")
 
-        logger.info(f"Calling tool: {tool_name}")
+        logger.debug("Calling tool: %s", tool_name)
         logger.debug(f"Arguments: {arguments}")
 
         request = {
@@ -191,7 +191,7 @@ class MCPClient:
             raise RuntimeError(f"List tools failed: {response['error']}")
 
         tools = response.get("result", {}).get("tools", [])
-        logger.info(f"Available tools: {[t.get('name') for t in tools]}")
+        logger.debug("Available tools from %s: %s", self.server_name, [t.get("name") for t in tools])
 
         return tools
 
@@ -202,7 +202,7 @@ class MCPClient:
         if not self.process:
             return
 
-        logger.info(f"Stopping MCP server: {self.server_name}")
+        logger.debug("Stopping MCP server: %s", self.server_name)
 
         try:
             if self.transport:
@@ -224,7 +224,7 @@ class MCPClient:
         self.transport = None
         self._initialized = False
 
-        logger.info("MCP server stopped")
+        logger.debug("MCP server %s stopped", self.server_name)
 
     async def __aenter__(self):
         """Context manager entry."""
