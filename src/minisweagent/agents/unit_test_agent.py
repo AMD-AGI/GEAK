@@ -67,10 +67,8 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
     ),
     "ck": (
         "This is a Composable Kernel (CK) kernel.\n"
-        "- The build and test harness must work standalone in the GEAK_WORK_DIR directory that is created for each optimizer agent later in the pipeline.\n"
-        "- The GEAK_WORK_DIR directory will be a copy of the kernel folder in the repo root, not the full repo root.\n"
+        "- A build step is REQUIRED before running tests.\n"
         "- IMPORTANT: Read GEAK/knowledge-base/ck-knowledge-base/standalone-test-harness-recipe/README.md. Follow the recipe to create the standalone build and test harness.\n"
-        "- Test your standalone build and test harness in a temp directory that imitates how GEAK_WORK_DIR is a copy of the original kernel folder.\n"
     ),
     "asm": (
         "This is a precompiled HSACO assembly kernel.\n"
