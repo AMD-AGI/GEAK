@@ -82,10 +82,11 @@ _CATEGORY_PATTERNS: dict[str, list[str]] = {
         r"nn\.Linear",
     ],
     "attention": [
-        r"F\.scaled_dot_product_attention",
+        r"scaled_dot_product_attention",
         r"MultiheadAttention",
         r"multi_head_attention",
         r"flash_attn",
+        r"\w\s+@\s+\w.*transpose",
     ],
     "reductions": [
         r"torch\.sum\b",
@@ -120,28 +121,37 @@ def detect_kernel_categories(source_path: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _flydsl_env_setup(repo_root: Path) -> dict[str, str]:
+def _flydsl_env_setup(repo_root: Path, flydsl_repo: Path | None = None) -> dict[str, str]:
     """Discover FlyDSL build artifacts and return env overrides.
 
     Scans for ``build-fly/python_packages`` and MLIR shared libs under
-    *repo_root* and its parent.  Returns PYTHONPATH and LD_LIBRARY_PATH
-    additions suitable for ``run_harness(env_overrides=...)``.
+    *flydsl_repo* (if given), then *repo_root* and its parent, then
+    common installation paths and ``FLYDSL_HOME`` env var.
+
+    Returns PYTHONPATH and LD_LIBRARY_PATH additions suitable for
+    ``run_harness(env_overrides=...)``.
     """
     overrides: dict[str, str] = {}
-    search_roots = [repo_root, repo_root.parent]
+    search_roots: list[Path] = []
+    if flydsl_repo:
+        search_roots.append(flydsl_repo)
+    search_roots.extend([repo_root, repo_root.parent])
+    flydsl_home = os.environ.get("FLYDSL_HOME")
+    if flydsl_home:
+        search_roots.append(Path(flydsl_home))
+    search_roots.append(Path("/workspace/FlyDSL"))
 
     for root in search_roots:
         fly_python = root / "build-fly" / "python_packages"
         if fly_python.is_dir():
             existing = os.environ.get("PYTHONPATH", "")
-            overrides["PYTHONPATH"] = f"{fly_python}:{existing}" if existing else str(fly_python)
+            overrides["PYTHONPATH"] = f"{fly_python}:{root}:{existing}" if existing else f"{fly_python}:{root}"
 
-        mlir_lib = root / "build-fly" / "lib"
-        if mlir_lib.is_dir():
-            existing = os.environ.get("LD_LIBRARY_PATH", "")
-            overrides["LD_LIBRARY_PATH"] = f"{mlir_lib}:{existing}" if existing else str(mlir_lib)
+            mlir_lib = fly_python / "flydsl" / "_mlir" / "_mlir_libs"
+            if mlir_lib.is_dir():
+                existing_ld = os.environ.get("LD_LIBRARY_PATH", "")
+                overrides["LD_LIBRARY_PATH"] = f"{mlir_lib}:{existing_ld}" if existing_ld else str(mlir_lib)
 
-        if overrides:
             break
 
     return overrides
@@ -151,16 +161,11 @@ def _flydsl_env_setup(repo_root: Path) -> dict[str, str]:
 # GPU auto-detection via rocminfo
 # ---------------------------------------------------------------------------
 
-_GFX_TO_GPU: dict[str, str] = {
-    "gfx942": "MI300X",
-    "gfx940": "MI300A",
-    "gfx90a": "MI250X",
-    "gfx908": "MI100",
-}
-
-
 def detect_target_gpu() -> tuple[str | None, str | None]:
     """Detect AMD GPU architecture via ``rocminfo``.
+
+    Parses both the ``Name:`` field (for gfx arch) and ``Marketing Name:``
+    (for human-readable model like "AMD Instinct MI300X").
 
     Returns (gfx_name, gpu_model) or (None, None) if unavailable.
     """
@@ -173,12 +178,25 @@ def detect_target_gpu() -> tuple[str | None, str | None]:
         )
         if result.returncode != 0:
             return None, None
+
+        gfx: str | None = None
+        marketing: str | None = None
+
         for line in result.stdout.splitlines():
-            if "gfx" in line.lower():
-                match = re.search(r"(gfx\d+\w*)", line)
+            stripped = line.strip()
+            if stripped.startswith("Name:") and gfx is None:
+                match = re.search(r"(gfx\d+\w*)", stripped)
                 if match:
                     gfx = match.group(1)
-                    return gfx, _GFX_TO_GPU.get(gfx, gfx)
+            elif stripped.startswith("Marketing Name:") and gfx is not None:
+                raw = stripped.split(":", 1)[1].strip()
+                if raw:
+                    parts = raw.replace("AMD Instinct", "").strip().split()
+                    marketing = parts[0] if parts else raw
+                break
+
+        if gfx:
+            return gfx, marketing or gfx
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
     return None, None
@@ -194,7 +212,7 @@ def _extract_gpu_specs_section(gpu_model: str) -> str | None:
 
     text = cdna_path.read_text()
     pattern = re.compile(
-        rf"(#{1,3}\s+.*{re.escape(gpu_model)}.*?\n)(.*?)(?=\n#{1,3}\s|\Z)",
+        rf"(#{1,6}\s+.*{re.escape(gpu_model)}.*?\n)(.*?)(?=\n#{1,6}\s|\Z)",
         re.DOTALL | re.IGNORECASE,
     )
     match = pattern.search(text)
@@ -223,6 +241,7 @@ _FLYDSL_REPO_DOCS = [
     "docs/kernel_authoring_guide.md",
     "docs/layout_system_guide.md",
     "docs/prebuilt_kernels_guide.md",
+    "docs/cute_layout_algebra_guide.md",
 ]
 
 
