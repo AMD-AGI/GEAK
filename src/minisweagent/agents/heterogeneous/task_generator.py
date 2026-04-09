@@ -583,10 +583,23 @@ def _run_task_agent(
             cost_limit=tg_cost_limit,
         )
 
+        _context_files = [
+            k
+            for k in (
+                "profiling_path",
+                "commandment_path",
+                "baseline_metrics_path",
+                "codebase_context_path",
+                "previous_results_path",
+                "round_evaluations_path",
+            )
+            if template_vars.get(k)
+        ]
         logger.info(
-            "[bold yellow]Starting task-generation agent[/bold yellow] (step_limit=%d, cost_limit=%.1f)",
+            "[bold yellow]Starting task-generation agent[/bold yellow] (step_limit=%d, cost=%.1f, context=%s)",
             tg_step_limit,
             tg_cost_limit,
+            ", ".join(k.replace("_path", "") for k in _context_files) or "minimal",
         )
 
         _t0 = time.monotonic()

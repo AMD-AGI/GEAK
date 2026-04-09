@@ -3,10 +3,12 @@
 import concurrent.futures
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from dataclasses import dataclass
@@ -699,8 +701,34 @@ class ParallelAgent(DefaultAgent):
 
             return agent_id, agent, exit_status, result
 
-        # Run parallel agents
+        # Run parallel agents with periodic progress reporting
         results = []
+        _progress_stop = threading.Event()
+        _dispatch_t0 = time.monotonic()
+
+        def _report_progress():
+            """Periodically scan patch dirs and report sub-agent progress."""
+            _interval = float(os.environ.get("GEAK_PROGRESS_INTERVAL", "30"))
+            while not _progress_stop.wait(_interval):
+                elapsed = time.monotonic() - _dispatch_t0
+                patches_by_agent = []
+                for i in range(num_parallel):
+                    _label = tasks[i].label if tasks and i < len(tasks) else f"agent_{i}"
+                    pdir = base_patch_dir / (f"parallel_{i}" if not tasks else _label)
+                    count = len(list(pdir.glob("*.patch"))) if pdir.is_dir() else 0
+                    patches_by_agent.append((_label, count))
+                total_patches = sum(c for _, c in patches_by_agent)
+                summary = ", ".join(f"{l}: {c}" for l, c in patches_by_agent if c > 0)
+                logger.info(
+                    "[dim][%.0fmin] Sub-agents working: %d total patches%s[/dim]",
+                    elapsed / 60,
+                    total_patches,
+                    f" ({summary})" if summary else "",
+                )
+
+        _progress_thread = threading.Thread(target=_report_progress, daemon=True)
+        _progress_thread.start()
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel) as executor:
             futures = {executor.submit(run_single_agent, i): i for i in range(num_parallel)}
             for future in concurrent.futures.as_completed(futures):
@@ -710,4 +738,7 @@ class ParallelAgent(DefaultAgent):
                 except Exception as e:
                     agent_id = futures[future]
                     logger.error("Error in parallel agent %d: %s", agent_id, e, exc_info=True)
+
+        _progress_stop.set()
+        _progress_thread.join(timeout=2)
         return results

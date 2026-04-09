@@ -75,6 +75,8 @@ class InteractiveAgent(DefaultAgent):
                     self.add_message("assistant", msg["content"])
                     return msg
         try:
+            if self.extra_template_vars.get("_is_parallel_mode"):
+                return super().query()
             with console.status("Waiting for the LM to respond..."):
                 return super().query()
         except LimitsExceeded:

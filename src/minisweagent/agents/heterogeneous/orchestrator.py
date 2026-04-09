@@ -338,12 +338,15 @@ def run_heterogeneous_orchestrator(
             logger.info(
                 "\n[dim]%s[/dim]\n  [bold yellow]Exploration Phase[/bold yellow]\n[dim]%s[/dim]", "-" * 60, "-" * 60
             )
+            _explore_t0 = time.monotonic()
             finalize_result = run_llm_steps(
                 model,
                 messages,
                 ctx,
                 phase="explore",
             )
+            _explore_elapsed = time.monotonic() - _explore_t0
+            logger.info("[bold green]Exploration completed[/bold green] in %.0fs.", _explore_elapsed)
             if finalize_result is not None:
                 return finalize_result
 
@@ -383,16 +386,18 @@ def run_heterogeneous_orchestrator(
                 )
             messages.append({"role": "user", "content": round_instruction})
 
+            _round_t0 = time.monotonic()
             finalize_result = run_llm_steps(
                 model,
                 messages,
                 ctx,
                 phase=f"round_{round_num}",
             )
-            logger.info("Round %d finalized result", round_num)
+            _round_elapsed = time.monotonic() - _round_t0
+            logger.info("Round %d LLM loop completed in %.0fs.", round_num, _round_elapsed)
 
             round_eval = post_round_evaluate(ctx, round_num, output_dir)
-            logger.info("Round %d evaluated post-round", round_num)
+            logger.info("Round %d post-evaluation complete.", round_num)
 
             if round_eval:
                 if _working_mem:

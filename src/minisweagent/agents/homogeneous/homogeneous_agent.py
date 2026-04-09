@@ -8,6 +8,7 @@ homogeneous configuration (all agents run the same task with identical settings)
 
 import copy
 import logging
+import time
 from pathlib import Path
 
 from rich.console import Console
@@ -129,18 +130,20 @@ def run_homogeneous_agent(
     model_config = config.get("model", {})
 
     logger.info(
-        "run_homogeneous_agent: num_parallel=%d, gpu_ids=%s, repo=%s, output_dir=%s",
+        "\n[bold cyan]%s[/bold cyan]\n  [bold]Homogeneous Agent[/bold] (%d agents, GPUs %s)\n[bold cyan]%s[/bold cyan]",
+        "=" * 60,
         final_num_parallel,
         final_gpu_ids,
-        final_repo,
-        final_output_dir,
+        "=" * 60,
     )
+    logger.info("  repo=%s, output_dir=%s", final_repo, final_output_dir)
 
     # Create and run ParallelAgent
     agent = ParallelAgent(model, env, **agent_config)
 
     try:
         task_content = task_content + "\n\n" + "The current worktree is: " + str(final_repo)
+        _t0 = time.monotonic()
         best_result = agent.run(
             task_content,
             output=final_traj_output,
@@ -149,16 +152,22 @@ def run_homogeneous_agent(
             model_factory=lambda: get_model(model_name, model_config.copy()),
             env_factory=lambda: env_class(**copy.deepcopy(env_kwargs)),
         )
+        _elapsed = time.monotonic() - _t0
 
         if best_result:
-            logger.info("Best patch: %s (agent %d)", best_result.patch_id, best_result.agent_id)
+            logger.info(
+                "[bold green]Homogeneous run completed[/bold green] in %.0fs. Best patch: %s (agent %d)",
+                _elapsed,
+                best_result.patch_id,
+                best_result.agent_id,
+            )
             console.print(
                 f"\n[bold green]Best patch:[/bold green] {best_result.patch_id} (agent {best_result.agent_id})"
             )
             if best_result.llm_conclusion:
                 console.print(f"[bold green]Conclusion:[/bold green] {best_result.llm_conclusion}")
         else:
-            logger.info("No best patch selected from parallel runs.")
+            logger.info("Homogeneous run completed in %.0fs. No best patch selected.", _elapsed)
             console.print("\n[bold yellow]No best patch selected[/bold yellow]")
 
     except Exception as e:
