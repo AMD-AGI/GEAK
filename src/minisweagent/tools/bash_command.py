@@ -76,8 +76,10 @@ class BashCommand:
             if "COMMANDMENT.md" in command:
                 output_text = self._maybe_validate_commandment(command, output_text)
 
+            if result.returncode != 0:
+                output_text = output_text or "Command failed with no output."
             return {
-                "output": output_text,
+                "output": output_text or "Bash command executed successfully.",
                 "returncode": result.returncode,
             }
 
