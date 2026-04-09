@@ -1,5 +1,4 @@
 import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +15,7 @@ class SkillDescriptor:
 
 class SkillRuntime:
     def __init__(self):
-        repo_root = Path(os.path.dirname(__file__)).resolve().parent.parent.parent
+        repo_root = Path(__file__).resolve().parent.parent.parent.parent
         skills_dir = repo_root / "skills"
         self.skills = self._discover_skills(skills_dir)
 
