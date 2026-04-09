@@ -396,6 +396,7 @@ def run_preprocessor(
     eval_command: str | None = None,
     correctness_command: str | list[str] | None = None,
     performance_command: str | list[str] | None = None,
+    benchmark_timeout: int = 3600,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -430,6 +431,9 @@ def run_preprocessor(
     performance_command:
         Benchmark/performance command(s), e.g. ``"./benchmark"``.  Used
         directly for profiling and baseline capture — no ``&&`` guessing.
+    benchmark_timeout:
+        Timeout in seconds for the benchmark baseline subprocess.
+        Defaults to 3600s. Increase for kernels with long runtimes.
 
     Returns
     -------
@@ -1048,7 +1052,7 @@ def run_preprocessor(
                     shell=True,
                     capture_output=True,
                     text=True,
-                    timeout=300,
+                    timeout=benchmark_timeout,
                     cwd=_cwd,
                 )
                 if result.returncode == 0:
