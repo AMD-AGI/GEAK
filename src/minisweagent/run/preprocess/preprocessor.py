@@ -521,7 +521,7 @@ def run_preprocessor(
 
     # ── Fast path for eval_command: skip Steps 2-4 ───────────────────
     if eval_command:
-        _print("  [eval_command mode] Skipping Steps 2-4 (codebase context, discovery, harness selection)")
+        _print("  [eval_command mode] Skipping Steps 2-4 (codebase context, discovery, baseline collection)")
         ctx["codebase_context_path"] = None
         ctx["discovery"] = {}
         ctx["test_command"] = eval_command

@@ -7,7 +7,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import traceback
@@ -559,8 +558,7 @@ class ParallelAgent(DefaultAgent):
             )
 
         # Homogeneous mode (original behavior)
-        if console:
-            console.print(f"[bold green]Running {num_parallel} parallel patch agents...[/bold green]")
+        logger.debug("Running %d parallel patch agents...", num_parallel)
 
         base_patch_dir = base_patch_dir.resolve()
         worktree_base = base_patch_dir / "worktrees"
@@ -570,16 +568,16 @@ class ParallelAgent(DefaultAgent):
 
         # Initialize non-git repos as git repos for unified worktree management
         if not is_git_repo:
-            if console:
-                console.print("[bold yellow]Initializing non-git repo as git for worktree management...[/bold yellow]")
+            logger.info("Initializing non-git repo as git for worktree management...")
             cls._init_as_git_repo(repo_path_resolved)
             is_git_repo = True  # Now it's a git repo
 
         if gpu_ids and len(gpu_ids) < num_parallel:
-            if console:
-                console.print(
-                    f"[bold yellow]Warning: Only {len(gpu_ids)} GPU IDs provided for {num_parallel} parallel agents. Some agents will not have GPU isolation.[/bold yellow]"
-                )
+            logger.warning(
+                "Only %d GPU IDs for %d parallel agents; some agents will not have GPU isolation.",
+                len(gpu_ids),
+                num_parallel,
+            )
 
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
@@ -587,8 +585,7 @@ class ParallelAgent(DefaultAgent):
             worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             worktree_path_str = str(worktree_path.resolve())
 
-            if console:
-                console.print(f"[bold green]Created worktree for agent {agent_id}: {worktree_path}[/bold green]")
+            logger.debug("Created worktree for agent %d: %s", agent_id, worktree_path)
 
             parallel_patch_dir = (base_patch_dir / f"parallel_{agent_id}").resolve()
             parallel_patch_dir.mkdir(parents=True, exist_ok=True)
@@ -624,13 +621,7 @@ class ParallelAgent(DefaultAgent):
                 new_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
                 new_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
                 new_env["GEAK_GPU_DEVICE"] = str(gpu_id)
-                if console:
-                    # Use lock to ensure console output completes before stdout redirection
-                    with _stdout_lock:
-                        console.print(f"[bold green]Parallel agent {agent_id} using GPU {gpu_id}[/bold green]")
-                        # Force flush to ensure output is written before redirection
-                        if hasattr(sys.stdout, "flush"):
-                            sys.stdout.flush()
+                logger.debug("Parallel agent %d assigned GPU %d", agent_id, gpu_id)
             env_config_dict["env"] = new_env
             parallel_env = type(base_env)(**env_config_dict)
 
@@ -720,7 +711,7 @@ class ParallelAgent(DefaultAgent):
                 total_patches = sum(c for _, c in patches_by_agent)
                 summary = ", ".join(f"{l}: {c}" for l, c in patches_by_agent if c > 0)
                 logger.info(
-                    "[dim][%.0fmin] Sub-agents working: %d total patches%s[/dim]",
+                    "[dim][%.1fmin] Sub-agents working: %d total patches%s[/dim]",
                     elapsed / 60,
                     total_patches,
                     f" ({summary})" if summary else "",
