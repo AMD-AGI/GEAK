@@ -52,6 +52,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# MCP tool packages under mcp_tools/ — installed as local path dependencies.
+# pip install -e '.[mcp]' installs these alongside the main package.
+mcp = [
+    "automated-test-discovery @ file:mcp_tools/automated-test-discovery",
+    "metrix-mcp @ file:mcp_tools/metrix-mcp",
+    "profiler-mcp @ file:mcp_tools/profiler-mcp",
+]
+
 # LangChain hybrid retrieval for AMD GPU knowledge base (embedding + BM25 + reranker)
 langchain = [
     "langchain>=0.3.0",
@@ -67,6 +75,7 @@ langchain = [
 full = [
     "mini-swe-agent[dev]",
     "mini-swe-agent[langchain]",
+    "mini-swe-agent[mcp]",
     "swe-rex>=1.4.0",
 ]
 
