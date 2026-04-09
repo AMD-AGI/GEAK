@@ -11,7 +11,8 @@ class SkillDescriptor:
     name: str
     description: str
     path: Path
-    loaded: bool = False   # runtime state
+    loaded: bool = False  # runtime state
+
 
 class SkillRuntime:
     def __init__(self):
@@ -20,13 +21,12 @@ class SkillRuntime:
         self.skills = self._discover_skills(skills_dir)
 
     def _extract_yaml_frontmatter(self, markdown: str) -> dict:
-        FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n",re.DOTALL)
+        FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
         match = FRONTMATTER_RE.match(markdown)
         if not match:
             raise ValueError("SKILL.md missing YAML frontmatter")
 
         return yaml.safe_load(match.group(1))
-
 
     def _parse_metadata(self, skill_path: Path) -> SkillDescriptor:
         skill_md = skill_path / "SKILL.md"
@@ -34,12 +34,7 @@ class SkillRuntime:
 
         fm = self._extract_yaml_frontmatter(content)
 
-        return SkillDescriptor(
-            name=fm["name"],
-            description=fm["description"],
-            path=skill_path,
-            loaded=False
-        )
+        return SkillDescriptor(name=fm["name"], description=fm["description"], path=skill_path, loaded=False)
 
     def _discover_skills(self, skills_root: Path) -> dict:
         skills = []
@@ -81,10 +76,9 @@ Otherwise, respond normally.
 
         return "\n".join(blocks)
 
-
     def load_skill(self, response: dict) -> dict:
         results = {
-            "output":  "",
+            "output": "",
             "returncode": 0,
         }
         if response["content"]:
@@ -107,6 +101,7 @@ Otherwise, respond normally.
             except Exception as e:
                 results["output"] = f"No skills. Error: {e}"
         return results
+
 
 if __name__ == "__main__":
     skills_str = """

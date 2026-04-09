@@ -163,11 +163,8 @@ class DefaultAgent:
             )
         if self.config.codebase_context:
             self.toolruntime.set_codebase_context(self.config.codebase_context)
-
-        # Setup test_perf tool context
-        self._setup_test_perf_context()
         self.skillruntime = SkillRuntime()
-    
+
     def _get_strategy_file(self) -> str:
         """Get the strategy file path.
 
@@ -436,11 +433,11 @@ class DefaultAgent:
             skills_action = self.skillruntime.load_skill(response)
             all_action["output"] += skills_action["output"]
             all_action["returncode"] = max(all_action["returncode"], skills_action["returncode"])
-        if all_action["output"] or all_action["returncode"]==0:
+        if all_action["output"] or all_action["returncode"] == 0:
             return all_action
         else:
             raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
-    
+
     def _handle_tool_result(self, result: dict) -> dict:
         """Handle tool results. Submit tool raises Submitted, save_and_test handles itself."""
         if hasattr(self, "_save_and_test_context"):
