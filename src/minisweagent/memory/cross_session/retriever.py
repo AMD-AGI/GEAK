@@ -1,23 +1,25 @@
 """Multi-stage retrieval funnel for cross-session memory.
 
-Stage 1: Coarse SQL filter (language, hardware)
-Stage 2: Profiling fingerprint scoring (weighted cosine similarity)
-Stage 3: Category/context re-ranking with diversity penalty
+Stage 1: Fetch all candidates (broad, no hard filters)
+Stage 2: Text similarity scoring (keyword overlap between query context
+         and stored insights/strategies/what_worked)
+Stage 3: Soft boosts (category, bottleneck, success) + diversity penalty
 Stage 4: Landscape aggregation via formatter
+
+Text similarity is the primary signal because optimization strategies
+and code patterns transfer across hardware and kernel categories.
+A code diff showing "fuse QK+softmax" is useful for any attention-like
+kernel regardless of whether profiling metrics match.
 """
 
 from __future__ import annotations
 
 import logging
+import re
+from collections import Counter
 from typing import Any
 
 from minisweagent.memory.cross_session.backends.base import MemoryBackend
-from minisweagent.memory.cross_session.fingerprint import (
-    bottleneck_bonus,
-    build_fingerprint,
-    category_bonus,
-    fingerprint_similarity,
-)
 from minisweagent.memory.cross_session.formatter import format_landscape_context
 from minisweagent.memory.cross_session.schemas import ExperienceRecord
 
@@ -33,25 +35,20 @@ def retrieve_context(
     top_k: int = 5,
 ) -> str:
     """Run the full retrieval funnel and return formatted context."""
-    profiling_metrics = profiling_metrics or {}
-
     kernel_category = _infer_category(kernel_path)
     language = _infer_language(kernel_path)
 
-    # Stage 1: coarse filter
-    candidates = _stage1_coarse_filter(backend, language=language, limit=limit)
-    if not candidates:
-        candidates = _stage1_coarse_filter(backend, language=None, limit=limit)
+    # Stage 1: fetch all candidates (broad)
+    candidates = backend.search_experiences(limit=limit)
     if not candidates:
         return ""
 
-    # Stage 2: fingerprint scoring
-    query_fp = build_fingerprint(profiling_metrics.get("metrics", profiling_metrics))
-    scored = _stage2_fingerprint_scoring(candidates, query_fp, bottleneck_type, kernel_category)
+    # Stage 2: text similarity scoring
+    query_terms = _build_query_terms(kernel_path, kernel_category, bottleneck_type)
+    scored = _stage2_text_similarity(candidates, query_terms, kernel_category, bottleneck_type)
 
     # Stage 3: re-rank with diversity
     top = _stage3_rerank_diverse(scored, top_k=top_k)
-
     if not top:
         return ""
 
@@ -76,33 +73,99 @@ def retrieve_context(
     )
 
 
-def _stage1_coarse_filter(
-    backend: MemoryBackend,
-    language: str | None = None,
-    limit: int = 30,
-) -> list[ExperienceRecord]:
-    """SQL-level coarse filter."""
-    lang = language if language and language != "unknown" else None
-    return backend.search_experiences(language=lang, limit=limit)
+def _build_query_terms(kernel_path: str, category: str, bottleneck: str) -> set[str]:
+    """Build a set of query keywords from the kernel context."""
+    terms: set[str] = set()
+
+    path_lower = kernel_path.lower()
+    for word in re.split(r"[/_.\-\s]+", path_lower):
+        if len(word) >= 3:
+            terms.add(word)
+
+    if category and category != "unknown":
+        terms.add(category)
+    if bottleneck and bottleneck != "unknown":
+        terms.add(bottleneck)
+
+    _DOMAIN_SYNONYMS = {
+        "attention": {"attention", "attn", "mla", "sdpa", "softmax", "qkv", "kv", "rope"},
+        "gemm": {"gemm", "matmul", "mm", "matrix", "multiply", "linear"},
+        "normalization": {"norm", "rms", "layernorm", "rmsnorm", "normalization"},
+        "moe": {"moe", "expert", "routing", "gating", "topk", "dispatch"},
+        "positional_encoding": {"rope", "rotary", "positional", "embedding", "cos", "sin"},
+        "memory": {"memory", "bandwidth", "coalescing", "vectorized", "loads", "hbm"},
+        "compute": {"compute", "flops", "mfma", "arithmetic", "intensity"},
+        "latency": {"latency", "launch", "overhead", "pipeline", "stall"},
+        "fusion": {"fuse", "fused", "fusion", "merge", "combine", "single-pass"},
+    }
+    expanded: set[str] = set()
+    for term in terms:
+        for _group_key, synonyms in _DOMAIN_SYNONYMS.items():
+            if term in synonyms:
+                expanded.update(synonyms)
+    terms.update(expanded)
+    return terms
 
 
-def _stage2_fingerprint_scoring(
+def _experience_text(exp: ExperienceRecord) -> str:
+    """Concatenate all text fields of an experience into a searchable blob."""
+    parts = [
+        exp.kernel_name,
+        exp.kernel_category,
+        exp.bottleneck_type,
+        exp.best_strategy,
+        exp.best_change_category,
+        exp.key_insight,
+        exp.trajectory_sketch,
+    ]
+    parts.extend(exp.what_worked)
+    parts.extend(exp.what_failed)
+    parts.extend(exp.dead_ends)
+    return " ".join(p for p in parts if p).lower()
+
+
+def _text_similarity(query_terms: set[str], doc_text: str) -> float:
+    """Simple keyword overlap score (Jaccard-like)."""
+    if not query_terms or not doc_text:
+        return 0.0
+
+    doc_words = set(re.split(r"[/_.\-\s,;:()]+", doc_text))
+    doc_words = {w for w in doc_words if len(w) >= 3}
+
+    if not doc_words:
+        return 0.0
+
+    overlap = query_terms & doc_words
+    return len(overlap) / (len(query_terms) + len(doc_words) - len(overlap))
+
+
+def _stage2_text_similarity(
     candidates: list[ExperienceRecord],
-    query_fp: list[float],
-    query_bottleneck: str,
+    query_terms: set[str],
     query_category: str,
+    query_bottleneck: str,
 ) -> list[tuple[float, ExperienceRecord]]:
-    """Score each candidate by profiling fingerprint similarity + bonuses."""
+    """Score each candidate by text similarity + soft boosts."""
     scored: list[tuple[float, ExperienceRecord]] = []
 
     for exp in candidates:
-        exp_fp = build_fingerprint(exp.profiling_metrics)
-        sim = fingerprint_similarity(query_fp, exp_fp)
-        bn_bonus = bottleneck_bonus(query_bottleneck, exp.bottleneck_type)
-        cat_bonus = category_bonus(query_category, exp.kernel_category)
+        doc_text = _experience_text(exp)
+        text_sim = _text_similarity(query_terms, doc_text)
 
-        success_bonus = 0.1 if exp.success else 0.0
-        total = sim + bn_bonus + cat_bonus + success_bonus
+        # Soft boosts (not hard filters)
+        cat_boost = 0.15 if (
+            query_category and query_category != "unknown"
+            and exp.kernel_category == query_category
+        ) else 0.0
+
+        bn_boost = 0.10 if (
+            query_bottleneck and query_bottleneck != "unknown"
+            and exp.bottleneck_type == query_bottleneck
+        ) else 0.0
+
+        success_boost = 0.05 if exp.success and exp.best_speedup > 1.05 else 0.0
+
+        total = text_sim + cat_boost + bn_boost + success_boost
         scored.append((total, exp))
 
     scored.sort(key=lambda x: -x[0])
@@ -127,11 +190,12 @@ def _stage3_rerank_diverse(
         cat = exp.best_change_category or "other"
         cat_count = seen_categories.get(cat, 0)
 
-        # Diversity: penalty for 3rd+ instance of same strategy category
         if cat_count >= 2:
             adjusted = score * 0.5
-            # Skip if there are better-scoring candidates still available
-            remaining = [(s, e) for s, e in scored if e not in selected and (e.best_change_category or "other") != cat]
+            remaining = [
+                (s, e) for s, e in scored
+                if e not in selected and (e.best_change_category or "other") != cat
+            ]
             if remaining and remaining[0][0] > adjusted:
                 continue
 
@@ -142,7 +206,7 @@ def _stage3_rerank_diverse(
 
 
 def _infer_category(kernel_path: str) -> str:
-    """Quick category inference from path (delegates to existing classifier when available)."""
+    """Quick category inference from path."""
     try:
         from minisweagent.memory.cross_session_memory import classify_kernel_category
         return classify_kernel_category(kernel_path)
@@ -153,8 +217,10 @@ def _infer_category(kernel_path: str) -> str:
     for tag, cat in [
         ("gemm", "gemm"), ("matmul", "gemm"), ("attention", "attention"),
         ("mla", "attention"), ("sdpa", "attention"), ("norm", "normalization"),
-        ("moe", "moe"), ("rope", "positional_encoding"), ("rotary", "positional_encoding"),
+        ("rms", "normalization"), ("moe", "moe"), ("expert", "moe"),
+        ("rope", "positional_encoding"), ("rotary", "positional_encoding"),
         ("topk", "topk"), ("softmax", "softmax"), ("reduce", "reduction"),
+        ("ff", "ffn"), ("feedforward", "ffn"), ("linear", "gemm"),
     ]:
         if tag in p:
             return cat

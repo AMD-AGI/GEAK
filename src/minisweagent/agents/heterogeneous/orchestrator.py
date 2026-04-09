@@ -267,8 +267,11 @@ def run_heterogeneous_orchestrator(
         )
         if _memory_context:
             _memory_context = "### Optimization Memory (from past runs)\n" + _memory_context
-    except Exception as exc:
-        logger.debug("Memory context assembly failed: %s", exc)
+            logger.info("Cross-session memory context injected (%d chars)", len(_memory_context))
+        else:
+            logger.info("Cross-session memory: no relevant experiences found")
+    except Exception as _mem_exc:
+        logger.warning("Cross-session memory assembly failed: %s", _mem_exc)
 
     _working_mem = None
     try:
