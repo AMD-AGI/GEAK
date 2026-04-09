@@ -458,7 +458,10 @@ def write_eval_results(
     if isinstance(fb_raw_check, dict) and fb_raw_check.get("verified_speedup") is not None:
         round_eval["speedup_source"] = "FULL_BENCHMARK verified result"
     else:
-        round_eval["speedup_source"] = "agent-reported benchmark (no FULL_BENCHMARK verified result available)"
+        round_eval["speedup_source"] = (
+            "agent-reported benchmark (no FULL_BENCHMARK verified result available — "
+            "please run the FULL_BENCHMARK section from COMMANDMENT.md to verify this speedup)"
+        )
     eval_path = output_dir / f"round_{round_num}_evaluation.json"
     eval_path.write_text(json.dumps(round_eval, indent=2, default=str))
     logger.info("Round evaluation written to: %s", eval_path)

@@ -497,7 +497,10 @@ def auto_finalize(
         logger.info("Report written to: %s", report_path)
         return merged
 
-    report["speedup_source"] = "agent-reported benchmark (no FULL_BENCHMARK verified result available)"
+    report["speedup_source"] = (
+        "agent-reported benchmark (no FULL_BENCHMARK verified result available — "
+        "please run the FULL_BENCHMARK section from COMMANDMENT.md to verify this speedup)"
+    )
     report_path.write_text(json.dumps(report, indent=2))
     logger.info("Auto-finalized: %s", summary_text)
     logger.info("Report written to: %s", report_path)
