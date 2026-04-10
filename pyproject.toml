@@ -54,10 +54,11 @@ dependencies = [
 [project.optional-dependencies]
 # MCP tool packages under mcp_tools/ — installed as local path dependencies.
 # pip install -e '.[mcp]' installs these alongside the main package.
+# Paths are resolved via [tool.uv.sources] below (uv) or pip install -e mcp_tools/* directly.
 mcp = [
-    "automated-test-discovery @ file:mcp_tools/automated-test-discovery",
-    "metrix-mcp @ file:mcp_tools/metrix-mcp",
-    "profiler-mcp @ file:mcp_tools/profiler-mcp",
+    "automated-test-discovery",
+    "metrix-mcp",
+    "profiler-mcp",
 ]
 
 # LangChain hybrid retrieval for AMD GPU knowledge base (embedding + BM25 + reranker)
@@ -269,6 +270,11 @@ skip-magic-trailing-comma = false
 
 # Like Black, automatically detect the appropriate line ending.
 line-ending = "auto"
+
+[tool.uv.sources]
+automated-test-discovery = { path = "mcp_tools/automated-test-discovery", editable = true }
+metrix-mcp = { path = "mcp_tools/metrix-mcp", editable = true }
+profiler-mcp = { path = "mcp_tools/profiler-mcp", editable = true }
 
 [tool.typos.default.extend-identifiers]
 # *sigh* this just isn't worth the cost of fixing
