@@ -67,8 +67,8 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
     ),
     "ck": (
         "This is a Composable Kernel (CK) kernel.\n"
-        "- A build step is REQUIRED before running tests.\n"
-        "- IMPORTANT: Read GEAK/knowledge-base/ck-knowledge-base/standalone-test-harness-recipe/README.md. Follow the recipe to create the standalone build and test harness.\n"
+        "- A build step is REQUIRED before running tests. Include build step in the TEST_COMMAND.\n"
+        "- IMPORTANT: Read GEAK/knowledge-base/ck-knowledge-base/standalone-test-harness-recipe/README.md. Follow the recipe to create the standalone build and test harness."
     ),
     "asm": (
         "This is a precompiled HSACO assembly kernel.\n"
