@@ -1,7 +1,45 @@
+import locale
 import os
 import re
 import subprocess
 from pathlib import Path
+
+_OUTPUT_UNREADABLE = (
+    "The combined command output could not be decoded as a whole using the "
+    "process locale encoding. Part of the command (e.g. one stage such as "
+    '"cat" of a binary file) may have produced invalid or non-text bytes, so '
+    "none of the captured stdout is shown. Run text-producing steps separately "
+    "or use a tool suited for binary data."
+)
+
+
+def _process_stream_encoding() -> str:
+    try:
+        return locale.getencoding()
+    except AttributeError:
+        return locale.getpreferredencoding(False) or "utf-8"
+
+
+def _decode_captured_output(stdout_b: bytes | None, stderr_b: bytes | None) -> str:
+    """Decode subprocess bytes with the locale encoding and strict errors.
+
+    If the chosen stream is non-empty but not valid for that encoding, return
+    ``_OUTPUT_UNREADABLE`` instead of partial or replacement-character output.
+    """
+    enc = _process_stream_encoding()
+    out = (stdout_b or b"").strip()
+    err = (stderr_b or b"").strip()
+    if out:
+        try:
+            return out.decode(enc, "strict")
+        except UnicodeDecodeError:
+            return _OUTPUT_UNREADABLE
+    if err:
+        try:
+            return err.decode(enc, "strict")
+        except UnicodeDecodeError:
+            return _OUTPUT_UNREADABLE
+    return ""
 
 # Matches shell redirect / heredoc patterns that write to COMMANDMENT.md,
 # e.g. ``cat > path/COMMANDMENT.md``, ``tee path/COMMANDMENT.md``,
@@ -70,8 +108,15 @@ class BashCommand:
         else:
             env = os.environ | self._env_override if self._env_override else None
             cwd = self._cwd if self._cwd and Path(self._cwd).is_dir() else None
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, env=env, cwd=cwd)
-            output_text = result.stdout.strip() or result.stderr.strip()
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=False,
+                env=env,
+                cwd=cwd,
+            )
+            output_text = _decode_captured_output(result.stdout, result.stderr)
 
             if "COMMANDMENT.md" in command:
                 output_text = self._maybe_validate_commandment(command, output_text)
