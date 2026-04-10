@@ -1,4 +1,4 @@
-FROM lmsysorg/sglang:v0.5.6.post1-rocm700-mi35x
+FROM lmsysorg/sglang:v0.5.9-rocm700-mi35x
 
 # Install git if not present
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
