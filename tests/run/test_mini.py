@@ -55,7 +55,7 @@ class TestNormalizeKernelType:
         assert mini_module._normalize_kernel_type(value) == expected
 
 
-class TestDeriveOutputDirAndTraj:
+class TestDeriveOutputDir:
     def test_none_output_uses_generated_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
 
@@ -66,23 +66,20 @@ class TestDeriveOutputDirAndTraj:
             "minisweagent.run.utils.task_parser.generate_patch_output_dir",
             side_effect=fake_generate,
         ):
-            out_dir, traj = mini_module._derive_output_dir_and_traj(None, "my_kernel")
+            out_dir = mini_module._derive_output_dir(None, "my_kernel")
 
         assert out_dir == (tmp_path / "optimization_logs" / "kernel_fixed_ts").resolve()
-        assert traj == out_dir / "trajectory.json"
 
     def test_file_path_uses_parent_for_dir(self, tmp_path: Path) -> None:
         f = tmp_path / "run.traj.json"
-        out_dir, traj = mini_module._derive_output_dir_and_traj(f, None)
-        assert out_dir == f.parent
-        assert traj == f
+        out_dir = mini_module._derive_output_dir(f, None)
+        assert out_dir == f.parent.resolve()
 
-    def test_directory_path_appends_trajectory(self, tmp_path: Path) -> None:
+    def test_directory_path_returns_dir(self, tmp_path: Path) -> None:
         d = tmp_path / "logs"
         d.mkdir()
-        out_dir, traj = mini_module._derive_output_dir_and_traj(d, None)
-        assert out_dir == d
-        assert traj == d / "trajectory.json"
+        out_dir = mini_module._derive_output_dir(d, None)
+        assert out_dir == d.resolve()
 
 
 class TestFinalReportToBestpatchresult:

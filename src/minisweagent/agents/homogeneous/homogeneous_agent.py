@@ -7,6 +7,7 @@ homogeneous configuration (all agents run the same task with identical settings)
 """
 
 import copy
+import json
 import logging
 import time
 from pathlib import Path
@@ -16,7 +17,6 @@ from rich.console import Console
 from minisweagent.agents.parallel_agent import BestPatchResult, ParallelAgent
 from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 from minisweagent.models import get_model
-from minisweagent.run.utils.save import save_traj
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,6 @@ def run_homogeneous_agent(
     num_parallel: int | None = None,
     gpu_ids: str | None = None,
     output_dir: Path | None = None,
-    traj_output: Path | None = None,
     model_name: str | None = None,
     console: Console | None = None,
 ) -> BestPatchResult | None:
@@ -63,7 +62,6 @@ def run_homogeneous_agent(
         num_parallel: Number of parallel agents
         gpu_ids: Comma-separated GPU IDs
         output_dir: Output directory
-        traj_output: Trajectory output file path (optional)
         model_name: Model name for factory
         console: Rich console for output
 
@@ -123,9 +121,6 @@ def run_homogeneous_agent(
     # Set patch_output_dir to output_dir so patches are saved alongside logs
     agent_config["patch_output_dir"] = str(final_output_dir)
 
-    final_traj_output = Path(traj_output) if traj_output is not None else (final_output_dir / "trajectory.json")
-    final_traj_output.parent.mkdir(parents=True, exist_ok=True)
-
     # Get model config for factory
     model_config = config.get("model", {})
 
@@ -147,8 +142,6 @@ def run_homogeneous_agent(
         _t0 = time.monotonic()
         best_result = agent.run(
             task_content,
-            output=final_traj_output,
-            save_traj_fn=save_traj,
             console=console,
             model_factory=lambda: get_model(model_name, model_config.copy()),
             env_factory=lambda: env_class(**copy.deepcopy(env_kwargs)),
@@ -171,6 +164,17 @@ def run_homogeneous_agent(
         else:
             logger.info("Homogeneous run completed in %.0fs. No best patch selected.", _elapsed)
             console.print("\n[bold yellow]No best patch selected[/bold yellow]")
+
+        # Write final_report.json (aligned with heterogeneous output structure)
+        report = {
+            "status": "complete",
+            "best_patch": str(best_result.patch_dir / best_result.patch_id) if best_result and best_result.patch_dir else None,
+            "best_speedup": best_result.metric_result.get("best_speedup") if best_result and best_result.metric_result else None,
+            "summary": best_result.llm_conclusion if best_result else "No best patch selected",
+        }
+        report_path = final_output_dir / "final_report.json"
+        report_path.write_text(json.dumps(report, indent=2, default=str))
+        logger.info("Wrote final_report.json to %s", report_path)
 
     except Exception as e:
         logger.error("Homogeneous agent failed: %s", e, exc_info=True)

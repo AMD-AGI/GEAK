@@ -114,7 +114,8 @@ class ParallelAgent(DefaultAgent):
         if console:
             console.print(f"\n[bold green]Selecting best patch from {num_parallel} parallel runs...[/bold green]")
         logger.info("Selecting best patch from %d parallel runs...", num_parallel)
-        best_result = self._select_best_from_parallel_runs(base_patch_dir, num_parallel, metric, model_factory)
+        results_dir = base_patch_dir / "results" / "round_1"
+        best_result = self._select_best_from_parallel_runs(results_dir, num_parallel, metric, model_factory)
         if best_result and best_result.llm_conclusion:
             if console:
                 console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
@@ -478,7 +479,7 @@ class ParallelAgent(DefaultAgent):
         # (e.g. "<repo>/optimization_logs/<run>/worktrees/agent_X/..."),
         # collapse that whole prefix back to the current worktree root first.
         # This prevents path "nesting" when replacement is applied more than once.
-        prev_worktree_pat = re.compile(re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/agent_\d+")
+        prev_worktree_pat = re.compile(re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/(?:agent|slot)_\d+")
         text = prev_worktree_pat.sub(worktree_path_str, text)
 
         # Replace repo path (resolved and unresolved forms) with worktree path
@@ -486,11 +487,11 @@ class ParallelAgent(DefaultAgent):
         if str(repo_path) != repo_path_str:
             text = text.replace(str(repo_path), worktree_path_str)
 
-        # Keep agent id in any remaining /worktrees/agent_<id> segments aligned
+        # Keep slot id in any remaining /worktrees/slot_<id> segments aligned
         # with this worktree.
         return re.sub(
-            r"/worktrees/agent_\d+",
-            f"/worktrees/agent_{worktree_path.name.split('_')[-1]}",
+            r"/worktrees/(?:agent|slot)_\d+",
+            f"/worktrees/{worktree_path.name}",
             text,
         )
 
@@ -560,10 +561,20 @@ class ParallelAgent(DefaultAgent):
         logger.debug("Running %d parallel patch agents...", num_parallel)
 
         base_patch_dir = base_patch_dir.resolve()
-        worktree_base = base_patch_dir / "worktrees"
+        results_dir = base_patch_dir / "results" / "round_1"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        worktree_base = results_dir / "worktrees"
         worktree_base.mkdir(parents=True, exist_ok=True)
         repo_path_resolved = repo_path.resolve()
         repo_path_str = str(repo_path_resolved)
+
+        # Write task files (aligned with heterogeneous tasks/ structure)
+        tasks_dir = base_patch_dir / "tasks" / "round_1"
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(num_parallel):
+            task_path = tasks_dir / f"parallel_{i}.md"
+            task_path.write_text(f"---\nlabel: parallel_{i}\n---\n\n{task_content}\n")
+        logger.debug("Wrote %d task files to %s", num_parallel, tasks_dir)
 
         # Initialize non-git repos as git repos for unified worktree management
         if not is_git_repo:
@@ -581,12 +592,12 @@ class ParallelAgent(DefaultAgent):
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
             # All repos use git worktree (non-git repos are initialized as git above)
-            worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
+            worktree_path = cls._create_worktree(repo_path, worktree_base / f"slot_{agent_id}")
             worktree_path_str = str(worktree_path.resolve())
 
             logger.debug("Created worktree for agent %d: %s", agent_id, worktree_path)
 
-            parallel_patch_dir = (base_patch_dir / f"parallel_{agent_id}").resolve()
+            parallel_patch_dir = (results_dir / f"parallel_{agent_id}").resolve()
             parallel_patch_dir.mkdir(parents=True, exist_ok=True)
             parallel_agent_config = agent_config.copy()
             parallel_agent_config["patch_output_dir"] = str(parallel_patch_dir)
@@ -699,23 +710,32 @@ class ParallelAgent(DefaultAgent):
         def _report_progress():
             """Periodically scan patch dirs and report sub-agent progress."""
             _interval = float(os.environ.get("GEAK_PROGRESS_INTERVAL", "30"))
+            _prev_patches: dict[str, set[str]] = {}  # label -> set of patch filenames
             while not _progress_stop.wait(_interval):
                 elapsed = time.monotonic() - _dispatch_t0
                 patches_by_agent = []
+                new_patch_paths: list[str] = []
                 for i in range(num_parallel):
                     _label = tasks[i].label if tasks and i < len(tasks) else f"agent_{i}"
-                    pdir = base_patch_dir / (f"parallel_{i}" if not tasks else _label)
-                    count = len(list(pdir.glob("*.patch"))) if pdir.is_dir() else 0
+                    pdir = results_dir / (f"parallel_{i}" if not tasks else _label)
+                    cur_patches = set(p.name for p in pdir.glob("*.patch")) if pdir.is_dir() else set()
+                    count = len(cur_patches)
                     patches_by_agent.append((_label, count))
+                    prev = _prev_patches.get(_label, set())
+                    for pname in sorted(cur_patches - prev):
+                        new_patch_paths.append(str(pdir / pname))
+                    _prev_patches[_label] = cur_patches
                 total_patches = sum(c for _, c in patches_by_agent)
                 summary = ", ".join(f"{l}: {c}" for l, c in patches_by_agent if c > 0)
                 logger.info(
-                    "[dim][%.1fmin] Sub-agents working: %d total patches%s[/dim]",
+                    "[dim][running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
                     elapsed / 60,
                     total_patches,
                     f" ({summary})" if summary else "",
                     extra={"progress_tick": True},
                 )
+                for pp in new_patch_paths:
+                    logger.info("[dim]  New patch: %s[/dim]", pp)
 
         _progress_thread = threading.Thread(target=_report_progress, daemon=True)
         _progress_thread.start()

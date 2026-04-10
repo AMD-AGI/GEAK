@@ -147,7 +147,7 @@ def replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
     # (e.g. "<repo>/optimization_logs/<run>/worktrees/agent_X/..."),
     # collapse that whole prefix back to the current worktree root first.
     # This prevents path "nesting" when replacement is applied more than once.
-    prev_worktree_pat = re.compile(re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/agent_\d+")
+    prev_worktree_pat = re.compile(re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/(?:agent|slot)_\d+")
     text = prev_worktree_pat.sub(worktree_path_str, text)
 
     # Replace repo path (resolved and unresolved forms) with worktree path
@@ -155,11 +155,11 @@ def replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
     if str(repo_path) != repo_path_str:
         text = text.replace(str(repo_path), worktree_path_str)
 
-    # Keep agent id in any remaining /worktrees/agent_<id> segments aligned
+    # Keep slot/agent id in any remaining /worktrees/ segments aligned
     # with this worktree.
     return re.sub(
-        r"/worktrees/agent_\d+",
-        f"/worktrees/agent_{worktree_path.name.split('_')[-1]}",
+        r"/worktrees/(?:agent|slot)_\d+",
+        f"/worktrees/{worktree_path.name}",
         text,
     )
 
@@ -727,23 +727,32 @@ def run_pool(
 
     def _report_progress():
         _interval = float(os.environ.get("GEAK_PROGRESS_INTERVAL", "30"))
+        _prev_patches: dict[str, set[str]] = {}  # label -> set of patch filenames
         while not _progress_stop.wait(_interval):
             elapsed = time.monotonic() - _dispatch_t0
             patches_by_task = []
+            new_patch_paths: list[str] = []
             for _tid, _task in sorted_tasks:
                 _lbl = _task.label or f"task_{_tid}"
                 _pdir = base_patch_dir / _lbl
-                count = len(list(_pdir.glob("*.patch"))) if _pdir.is_dir() else 0
+                cur_patches = set(p.name for p in _pdir.glob("*.patch")) if _pdir.is_dir() else set()
+                count = len(cur_patches)
                 patches_by_task.append((_lbl, count))
+                prev = _prev_patches.get(_lbl, set())
+                for pname in sorted(cur_patches - prev):
+                    new_patch_paths.append(str(_pdir / pname))
+                _prev_patches[_lbl] = cur_patches
             total = sum(c for _, c in patches_by_task)
             summary = ", ".join(f"{l}: {c}" for l, c in patches_by_task if c > 0)
             logger.info(
-                "[dim][%.1fmin] Sub-agents working: %d total patches%s[/dim]",
+                "[dim][running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
                 elapsed / 60,
                 total,
                 f" ({summary})" if summary else "",
                 extra={"progress_tick": True},
             )
+            for pp in new_patch_paths:
+                logger.info("[dim]  New patch: %s[/dim]", pp)
 
     _progress_thread = threading.Thread(target=_report_progress, daemon=True)
     _progress_thread.start()

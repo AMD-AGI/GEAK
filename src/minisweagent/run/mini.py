@@ -60,25 +60,24 @@ def _normalize_kernel_type(value: Any) -> str:
     return "other"
 
 
-def _derive_output_dir_and_traj(output: Path | None, kernel_name: str | None) -> tuple[Path, Path]:
-    """Unify patch_output_dir and -o/--output location.
+def _derive_output_dir(output: Path | None, kernel_name: str | None) -> Path:
+    """Derive the output directory from ``-o``/``--output``.
 
-    - If output is a file path: output_dir = output.parent, traj = output
-    - If output is a directory: output_dir = output, traj = output/trajectory.json
-    - If output is not provided: use ./optimization_logs/<kernel_name>_<timestamp> as output_dir
+    - If output is a file path: output_dir = output.parent
+    - If output is a directory: output_dir = output
+    - If output is not provided: use ./optimization_logs/<kernel_name>_<timestamp>
     """
     if output is None:
         from minisweagent.run.utils.task_parser import generate_patch_output_dir
 
-        output_dir = (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
-        return output_dir, output_dir / "trajectory.json"
+        return (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
 
     output = output.resolve()
 
     if output.suffix:
-        return output.parent, output
+        return output.parent
 
-    return output, output / "trajectory.json"
+    return output
 
 
 def _final_report_to_bestpatchresult(report: Any) -> BestPatchResult | None:
@@ -339,6 +338,13 @@ def main(
 
     parsed_gpu_ids = parse_gpu_ids(gpu_ids)
 
+    # Auto-detect num_parallel from gpu_ids when not explicitly provided.
+    if num_parallel is None:
+        num_parallel = _as_int(parsed_config.get("num_parallel"))
+    if num_parallel is None and parsed_gpu_ids:
+        num_parallel = len(parsed_gpu_ids)
+        logger.info("Auto-setting num_parallel=%s from gpu_ids.", num_parallel)
+
     kernel_name_for_output = parsed_config.get("kernel_name")
     if not kernel_name_for_output and kernel_url:
         kernel_name_for_output = Path(kernel_url).stem
@@ -346,7 +352,7 @@ def main(
         kernel_name_for_output = Path(kernel_target).stem
     logger.info("Using kernel_name_for_output: %s", kernel_name_for_output)
 
-    preprocess_output_dir, traj_output_path = _derive_output_dir_and_traj(output, kernel_name_for_output)
+    preprocess_output_dir = _derive_output_dir(output, kernel_name_for_output)
     preprocess_output_dir.mkdir(parents=True, exist_ok=True)
     add_file_handler(preprocess_output_dir / DEFAULT_LOG_FILENAME)
     _run_t0 = time.monotonic()
@@ -375,7 +381,6 @@ def main(
     if config_spec is not None:
         _display_cfg["config"] = str(config_spec)
     _resolved_config_display = display_parsed_config(_display_cfg, str(preprocess_output_dir))
-    console.print(_resolved_config_display)
     logger.info("Resolved configuration:\n%s", _resolved_config_display)
 
     _env_kwargs = dict(config.get("env", {}))
@@ -481,13 +486,6 @@ def main(
         logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
         return _final_report_to_bestpatchresult(report)
 
-    # Homogeneous path only: num_parallel and metric are not passed to run_orchestrator.
-    if num_parallel is None:
-        num_parallel = _as_int(parsed_config.get("num_parallel"))
-        logger.info("Using num_parallel from task content: %s", num_parallel)
-    if num_parallel is None and isinstance(gpu_ids, str) and gpu_ids.strip():
-        num_parallel = len(parsed_gpu_ids)
-        logger.info("Auto-setting num_parallel: %s based on GPU IDs.", num_parallel)
     metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
     logger.info("Using metric: %s", metric)
 
@@ -520,7 +518,6 @@ def main(
         num_parallel=num_parallel,
         gpu_ids=gpu_ids,
         output_dir=preprocess_output_dir,
-        traj_output=traj_output_path,
         model_name=model_name,
         console=console,
     )
