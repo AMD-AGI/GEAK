@@ -506,9 +506,16 @@ def run_preprocessor(
         kernel_path = _clean_kernel
         # For merged kernels, the split helper may produce a GEAK-compatible
         # wrapper harness (e.g. HIP/CUDA mixed-source cases). Reuse it directly
-        # when the caller did not already provide a harness.
+        # when the caller did not already provide a harness — but only if the
+        # split harness passes static validation (has argparse + all required
+        # flags). Pure Triton merged files produce raw test logic without
+        # argparse, which fails validate_harness and causes a hard crash (#128).
         if not harness:
-            harness = _new_harness
+            from minisweagent.run.preprocess.harness_utils import validate_harness as _validate_harness
+
+            _split_valid, _ = _validate_harness(_new_harness)
+            if _split_valid:
+                harness = _new_harness
 
     _print(f"  Kernel: {kernel_path}")
 
