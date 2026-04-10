@@ -11,6 +11,7 @@ from pathlib import Path
 from jinja2 import StrictUndefined, Template
 
 from minisweagent import Environment, Model
+from minisweagent.skills.skill_runtime import SkillRuntime
 from minisweagent.tools.tools_runtime import ToolRuntime
 
 
@@ -52,6 +53,7 @@ class AgentConfig:
     confirm_exit: bool = True
     disabled_tools: list[str] = field(default_factory=list)
     source_file_paths: list[str] | None = None
+    use_skills: bool = False
 
 
 # Unified observation truncation for both bash output and tool call results (head + tail).
@@ -161,6 +163,7 @@ class DefaultAgent:
             )
         if self.config.codebase_context:
             self.toolruntime.set_codebase_context(self.config.codebase_context)
+        self.skillruntime = SkillRuntime()
 
     def _get_strategy_file(self) -> str:
         """Get the strategy file path.
@@ -269,6 +272,8 @@ class DefaultAgent:
         self.extra_template_vars |= {"task": task, **kwargs}
         self.messages = []
         self._traj_last_saved_idx = -1
+        if self.config.use_skills:
+            self.config.system_template += self.skillruntime.build_system_prompt()
         self.add_message("system", self.render_template(self.config.system_template))
         self.add_message("user", self.render_template(self.config.instance_template))
 
@@ -402,10 +407,16 @@ class DefaultAgent:
 
     def parse_action(self, response: dict) -> dict:
         """Parse the action from the message. Returns the action."""
+        all_action = {
+            "output": "",
+            "returncode": 0,
+        }
         content = response.get("content", "")
         actions = re.findall(r"```bash\s*\n(.*?)\n```", content, re.DOTALL) if content else []
         if len(actions) == 1:
-            return self.execute_action({"action": actions[0].strip(), **response})
+            bash_action = self.execute_action({"action": actions[0].strip(), **response})
+            all_action["output"] += bash_action["output"]
+            all_action["returncode"] = max(all_action["returncode"], bash_action["returncode"])
         if response.get("tools"):
             from minisweagent.tools.submit import Submitted as ToolSubmitted
 
@@ -415,8 +426,17 @@ class DefaultAgent:
             except ToolSubmitted as e:
                 raise Submitted(str(e))
             # Handle tool results (sync state, etc.)
-            return self._handle_tool_result(result)
-        raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
+            tool_action = self._handle_tool_result(result)
+            all_action["output"] += tool_action["output"]
+            all_action["returncode"] = max(all_action["returncode"], tool_action["returncode"])
+        if self.config.use_skills:
+            skills_action = self.skillruntime.load_skill(response)
+            all_action["output"] += skills_action["output"]
+            all_action["returncode"] = max(all_action["returncode"], skills_action["returncode"])
+        if all_action["output"] or all_action["returncode"] == 0:
+            return all_action
+        else:
+            raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
 
     def _handle_tool_result(self, result: dict) -> dict:
         """Handle tool results. Submit tool raises Submitted, save_and_test handles itself."""

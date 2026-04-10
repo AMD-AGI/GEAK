@@ -424,7 +424,7 @@ def main(
         _kernel_info = _discovery.get("kernel") or {}
         _auto_kernel_type = _kernel_info.get("type")
 
-        if not _auto_kernel_type and preprocess_ctx.get("kernel_path"):
+        if (not _auto_kernel_type or _auto_kernel_type == "unknown") and preprocess_ctx.get("kernel_path"):
             from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
             _auto_kernel_type = _infer_kernel_type(Path(preprocess_ctx["kernel_path"]))
 

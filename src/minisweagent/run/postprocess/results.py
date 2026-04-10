@@ -304,10 +304,25 @@ def post_round_evaluate(
     ctx[f"round_{round_num}_eval"] = round_eval
     if round_eval.best_patch:
         fb = round_eval.full_benchmark
-        current = (
-            fb.verified_speedup if fb and fb.verified_speedup is not None else None
-        ) or round_eval.benchmark_speedup
-        if current >= ctx.get("_best_global_speedup", 0):
+        # Only count rounds with an independently verified FULL_BENCHMARK result.
+        # Falling back to the agent's self-reported benchmark_speedup risks
+        # promoting a hallucinated or inflated speedup as the global best.
+        current = fb.verified_speedup if fb and fb.verified_speedup is not None else None
+        if current is None:
+            agent_speedup = round_eval.benchmark_speedup
+            note = (
+                f"No FULL_BENCHMARK verified speedup available; "
+                f"agent reported {agent_speedup:.4f}x (not used for global best selection)"
+            )
+            logger.warning("Round %d: %s", round_num, note)
+            eval_path = output_dir / f"round_{round_num}_evaluation.json"
+            try:
+                eval_dict = json.loads(eval_path.read_text())
+                eval_dict["verified_speedup_skipped"] = note
+                eval_path.write_text(json.dumps(eval_dict, indent=2, default=str))
+            except (json.JSONDecodeError, OSError):
+                pass
+        elif current >= ctx.get("_best_global_speedup", 0):
             ctx["starting_patch"] = round_eval.best_patch
             ctx["_best_global_speedup"] = current
     return round_eval
@@ -471,6 +486,7 @@ def auto_finalize(
     best_verified_round_eval = select_best_verified_round_evaluation(output_dir)
     report_path = output_dir / "final_report.json"
     if best_verified_round_eval is not None:
+        report["speedup_source"] = "FULL_BENCHMARK verified result"
         merged = merge_round_evaluation_into_final_report(
             ctx,
             output_dir,
@@ -481,6 +497,11 @@ def auto_finalize(
         logger.info("Report written to: %s", report_path)
         return merged
 
+    report["speedup_source"] = (
+        "agent-reported benchmark (no FULL_BENCHMARK verified result available — "
+        "the orchestrator will run FULL_BENCHMARK automatically after this round; "
+        "do not use this speedup for final selection)"
+    )
     report_path.write_text(json.dumps(report, indent=2))
     logger.info("Auto-finalized: %s", summary_text)
     logger.info("Report written to: %s", report_path)

@@ -396,6 +396,7 @@ def run_preprocessor(
     eval_command: str | None = None,
     correctness_command: str | list[str] | None = None,
     performance_command: str | list[str] | None = None,
+    benchmark_timeout: int = 3600,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -430,6 +431,9 @@ def run_preprocessor(
     performance_command:
         Benchmark/performance command(s), e.g. ``"./benchmark"``.  Used
         directly for profiling and baseline capture — no ``&&`` guessing.
+    benchmark_timeout:
+        Timeout in seconds for the benchmark baseline subprocess.
+        Defaults to 3600s. Increase for kernels with long runtimes.
 
     Returns
     -------
@@ -1048,7 +1052,7 @@ def run_preprocessor(
                     shell=True,
                     capture_output=True,
                     text=True,
-                    timeout=300,
+                    timeout=benchmark_timeout,
                     cwd=_cwd,
                 )
                 if result.returncode == 0:
@@ -1127,6 +1131,11 @@ def run_preprocessor(
         _bm_val = extract_latency_ms(bb_text)
         if _bm_val is not None:
             baseline_metrics["benchmark_duration_us"] = _bm_val * 1000.0
+            # Preserve profiler value separately, then override duration_us with
+            # the harness-measured value so all consumers use the same source.
+            if "duration_us" in baseline_metrics:
+                baseline_metrics["profiler_duration_us"] = baseline_metrics["duration_us"]
+            baseline_metrics["duration_us"] = _bm_val * 1000.0
         _sm = _re.search(r"(\d+)\s+shapes", bb_text, _re.IGNORECASE)
         if _sm:
             baseline_metrics["benchmark_shape_count"] = int(_sm.group(1))
