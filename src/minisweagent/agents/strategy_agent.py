@@ -60,10 +60,10 @@ class StrategyAgent(InteractiveAgent):
         if self.config.disabled_tools:
             self.toolruntime.disable_tools(self.config.disabled_tools)
 
-        # Re-apply RAG subagent wrapping after ToolRuntime rebuild
-        if getattr(self.config, "rag_enable_subagent", False):
+        # Re-apply RAG postprocessor wrapping after ToolRuntime rebuild
+        if getattr(self.config, "rag_enable_postprocessor", False):
             try:
-                self.toolruntime.wrap_rag_tools_with_subagent()
+                self.toolruntime.wrap_rag_tools_with_postprocessor()
             except Exception:
                 pass
 

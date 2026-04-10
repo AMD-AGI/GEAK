@@ -12,30 +12,13 @@ json_path = Path(__file__).parent / "tools.json"
 with open(json_path, encoding="utf-8") as f:
     _all_tools = json.load(f)
 
-_mcp_bridges: list = []
-_mcp_tools: list = []
-_mcp_collected = False
+try:
+    from minisweagent.tools.mcp_bridge import collect_mcp_tools
 
-
-def _ensure_mcp_collected() -> None:
-    """Lazily start MCP servers and collect their tools.
-
-    Called on first ToolRuntime instantiation rather than at module import
-    time, so that ``geak --help`` and other import-only paths do not spawn
-    MCP server subprocesses and hang.
-    """
-    global _mcp_bridges, _mcp_tools, _mcp_collected
-    if _mcp_collected:
-        return
-    _mcp_collected = True
-    try:
-        from minisweagent.tools.mcp_bridge import collect_mcp_tools
-
-        _mcp_bridges, _mcp_tools = collect_mcp_tools()
-        _all_tools.extend(_mcp_tools)
-    except Exception:
-        pass
-
+    _mcp_bridges, _mcp_tools = collect_mcp_tools()
+    _all_tools.extend(_mcp_tools)
+except Exception:
+    _mcp_bridges, _mcp_tools = [], []
 
 _TOOL_PROFILES: dict[str, set[str] | None] = {
     "full": None,
@@ -78,7 +61,6 @@ class ToolRuntime:
         patch_output_dir: str | None = None,
         tool_profile: str = "full",
     ):
-        _ensure_mcp_collected()
         self._tool_profile = tool_profile
         self._mcp_bridges: list = list(_mcp_bridges)
         allowed = _TOOL_PROFILES.get(tool_profile)
@@ -143,11 +125,11 @@ class ToolRuntime:
         self.use_strategy_manager = use_strategy_manager
         self._codebase_context: str | None = None
 
-    def wrap_rag_tools_with_subagent(self) -> None:
-        """Wrap RAG MCP tools with RAGFilterSubAgent for result filtering."""
-        from minisweagent.mcp_integration.subagent import RAGFilterSubAgent, SubAgentConfig
+    def wrap_rag_tools_with_postprocessor(self) -> None:
+        """Wrap RAG MCP tools with RAGPostProcessor for result filtering."""
+        from minisweagent.tools.rag_postprocessor import RAGPostProcessor, RAGPostProcessorConfig
 
-        subagent = RAGFilterSubAgent(SubAgentConfig(enabled=True))
+        postprocessor = RAGPostProcessor(RAGPostProcessorConfig(enabled=True))
 
         def _wrap(tool_callable):
             def wrapper(**kwargs):
@@ -155,7 +137,7 @@ class ToolRuntime:
                 output = result.get("output", "")
                 if output and result.get("returncode") == 0:
                     query = kwargs.get("topic") or kwargs.get("code_type") or ""
-                    result["output"] = subagent.process(output, query=query)
+                    result["output"] = postprocessor.process(output, query=query)
                 return result
 
             return wrapper

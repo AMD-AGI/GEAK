@@ -100,8 +100,6 @@ def _derive_output_dir_and_traj(output: Path | None, kernel_name: str | None) ->
         output_dir = (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
         return output_dir, output_dir / "trajectory.json"
 
-    output = output.resolve()
-
     if output.suffix:
         return output.parent, output
 
@@ -188,8 +186,7 @@ def main(
     tee_out, tee_err = TeeOutput(sys.stdout), TeeOutput(sys.stderr)
     sys.stdout, sys.stderr = tee_out, tee_err
 
-    if sys.stdin.isatty():
-        configure_if_first_time()
+    configure_if_first_time()
 
     # 1) Config merge
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
@@ -219,6 +216,28 @@ def main(
 
     # RAG MCP toggle: disable RAG tools when rag is not enabled
     rag_enabled = tools_cfg.get("rag", False)
+    if rag_enabled:
+        # Fail fast: check that rag-mcp package is installed
+        try:
+            import rag_mcp  # noqa: F401
+        except ImportError:
+            msg = (
+                "RAG is enabled in config but rag-mcp package is not installed.\n\n"
+                "Please install it:\n"
+                "  pip install -e mcp_tools/rag-mcp"
+            )
+            raise RuntimeError(msg)
+        # Fail fast: check that the semantic index has been built
+        _index_path = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
+        _has_faiss = (_index_path / "index.faiss").exists() or (_index_path / "faiss.index").exists()
+        _has_pkl = bool(list(_index_path.glob("*.pkl"))) if _index_path.exists() else False
+        if not (_has_faiss and _has_pkl):
+            raise RuntimeError(
+                "RAG is enabled in config but the semantic index was not found at:\n"
+                f"  {_index_path}\n\n"
+                "Please build the index first:\n"
+                "  python scripts/build_index.py --force"
+            )
     if not rag_enabled:
         disabled_tools.append("query")
         disabled_tools.append("optimize")
@@ -458,9 +477,9 @@ def main(
         return _final_report_to_bestpatchresult(report)
 
     agent_config = dict(config.get("agent", {}))
-    # Pass RAG subagent config to agent
-    if rag_enabled and tools_cfg.get("rag_enable_subagent", False):
-        agent_config["rag_enable_subagent"] = True
+    # Pass RAG postprocessor config to agent
+    if rag_enabled and tools_cfg.get("rag_enable_postprocessor", False):
+        agent_config["rag_enable_postprocessor"] = True
     agent_config["save_patch"] = True
     agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
     agent_config["metric"] = metric

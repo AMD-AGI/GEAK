@@ -1,8 +1,9 @@
 """
-Sub-agent utilities for processing RAG results and other intermediate data.
+RAG postprocessor for filtering and restructuring retrieval results.
 
-This module provides reusable sub-agents that can be used throughout the
-minisweagent system to filter, summarize, and process intermediate results.
+This module uses an LLM to post-process RAG retrieval results:
+filtering irrelevant chunks, deduplication, and reorganizing content
+for downstream consumption.
 """
 
 import logging
@@ -15,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class SubAgentConfig:
-    """Configuration for sub-agent behavior."""
+class RAGPostProcessorConfig:
+    """Configuration for RAG postprocessor behavior."""
 
     model_name: str = "claude-opus-4.6"
     api_key: str | None = None
@@ -25,32 +26,15 @@ class SubAgentConfig:
     model_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
-class RAGFilterSubAgent:
+class RAGPostProcessor:
     """
-    Sub-agent for filtering and summarizing RAG database results.
+    Post-processor for RAG retrieval results.
 
-    This sub-agent processes retrieved chunks from RAG queries by:
+    Processes retrieved chunks from RAG queries by:
     1. Evaluating relevance
     2. Removing duplicates
-    3. Summarizing key points
+    3. Reorganizing content for downstream LLM consumption
     """
-
-    DEFAULT_SYSTEM_PROMPT = """You are a subagent in a code generation/optimization system. Your task is to process retrieved chunks from the RAG database based on the user's query.
-
-Input: 
-- User query: [QUERY]
-- Retrieved chunks: [CHUNKS] (list of text snippets)
-
-Steps:
-1. Evaluate each chunk for relevance to the query (score 0-10; discard if <5).
-2. Remove duplicates or highly similar chunks.
-3. Summarize the remaining chunks into concise, key points or a coherent paragraph, focusing on code-related insights, optimizations, example codes or generation techniques.
-4. Do not discard any information that is relevant to the user's query.
-5. Output only the filtered summary; no explanations or additional content.
-
-Output format:
-- Full summary of the retrieved chunks.
-- If no relevant chunks: "No relevant information found." """
 
     DEFAULT_SYSTEM_PROMPT = """You are a sub-agent in a code generation and optimization system.
 
@@ -94,8 +78,8 @@ Instructions:
      "No relevant information found."
    """
 
-    def __init__(self, config: SubAgentConfig | None = None):
-        self.config = config or SubAgentConfig()
+    def __init__(self, config: RAGPostProcessorConfig | None = None):
+        self.config = config or RAGPostProcessorConfig()
         self._model = None
 
     @property
@@ -112,14 +96,14 @@ Instructions:
 
     def process(self, rag_result: str, query: str = "") -> str:
         """
-        Process RAG database results through the sub-agent.
+        Process RAG retrieval results through the postprocessor.
 
         Args:
-            rag_result: Raw result from RAG database query
+            rag_result: Raw result from RAG retrieval
             query: Optional original query for context
 
         Returns:
-            Filtered and summarized result
+            Filtered and reorganized result
         """
         if not self.config.enabled:
             return rag_result
@@ -130,19 +114,19 @@ Instructions:
         if query:
             user_content = f"Query: {query}\n\n{rag_result}"
 
-        logger.debug("RAG filter sub-agent processing %d chars", len(rag_result))
+        logger.debug("RAG postprocessor processing %d chars", len(rag_result))
 
         response = self.model.query(
             [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}]
         )
 
         result = response["content"]
-        logger.debug("RAG filter sub-agent output %d chars", len(result))
+        logger.debug("RAG postprocessor output %d chars", len(result))
 
         return result
 
 
-def create_rag_filter_subagent(**kwargs) -> RAGFilterSubAgent:
-    """Convenience function to create a RAG filter sub-agent."""
-    config = SubAgentConfig(**kwargs)
-    return RAGFilterSubAgent(config)
+def create_rag_postprocessor(**kwargs) -> RAGPostProcessor:
+    """Convenience function to create a RAG postprocessor."""
+    config = RAGPostProcessorConfig(**kwargs)
+    return RAGPostProcessor(config)
