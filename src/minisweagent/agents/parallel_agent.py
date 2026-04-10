@@ -479,7 +479,9 @@ class ParallelAgent(DefaultAgent):
         # (e.g. "<repo>/optimization_logs/<run>/worktrees/agent_X/..."),
         # collapse that whole prefix back to the current worktree root first.
         # This prevents path "nesting" when replacement is applied more than once.
-        prev_worktree_pat = re.compile(re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/(?:agent|slot)_\d+")
+        prev_worktree_pat = re.compile(
+            re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/(?:agent|slot)_\d+"
+        )
         text = prev_worktree_pat.sub(worktree_path_str, text)
 
         # Replace repo path (resolved and unresolved forms) with worktree path
