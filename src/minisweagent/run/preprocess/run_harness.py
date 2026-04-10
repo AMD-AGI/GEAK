@@ -45,6 +45,18 @@ MODE_TIMEOUTS: dict[str, int] = {
     "full-benchmark": 900,
 }
 
+# During UTA harness-generation validation the kernel may require expensive
+# initialisation (e.g. physics-simulation warm-up) that blows past the normal
+# 300 s correctness timeout.  A separate, more relaxed default applies only to
+# that phase so the pipeline doesn't retry in an infinite loop.
+# Override via GEAK_UTA_CORRECTNESS_TIMEOUT (seconds).
+_UTA_CORRECTNESS_TIMEOUT_DEFAULT = 1800
+
+UTA_MODE_TIMEOUTS: dict[str, int] = {
+    m: int(os.environ.get("GEAK_UTA_CORRECTNESS_TIMEOUT", _UTA_CORRECTNESS_TIMEOUT_DEFAULT))
+    for m in MODE_TIMEOUTS
+}
+
 _STDERR_TAIL_LINES = 60
 
 
@@ -137,6 +149,7 @@ def run_harness(
     gpu_id: int = 0,
     timeout: int | None = None,
     env_overrides: dict[str, str] | None = None,
+    mode_timeouts: dict[str, int] | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Execute a test harness and return structured results.
 
@@ -154,9 +167,13 @@ def run_harness(
         GPU device for HIP_VISIBLE_DEVICES.
     timeout:
         Per-mode timeout in seconds.  ``None`` uses the per-mode defaults
-        from :data:`MODE_TIMEOUTS`.
+        from :data:`MODE_TIMEOUTS` (or ``mode_timeouts`` if supplied).
     env_overrides:
         Extra environment variables merged into the subprocess env.
+    mode_timeouts:
+        Optional per-mode timeout overrides.  When provided, takes precedence
+        over :data:`MODE_TIMEOUTS` (but ``timeout`` still wins over both).
+        Use :data:`UTA_MODE_TIMEOUTS` for harness-generation validation.
 
     Returns
     -------
@@ -178,11 +195,12 @@ def run_harness(
 
     env = _build_env(repo_root, gpu_id, env_overrides)
     cwd = repo_root
+    _timeouts = mode_timeouts if mode_timeouts is not None else MODE_TIMEOUTS
 
     if mode == "all":
         results: list[dict[str, Any]] = []
         for m in MODES:
-            t = timeout if timeout is not None else MODE_TIMEOUTS[m]
+            t = timeout if timeout is not None else _timeouts[m]
             logger.info("run_harness: running --%s (timeout=%ds)", m, t)
             result = _run_single(harness_path, m, env=env, timeout=t, cwd=cwd)
             results.append(result)
@@ -209,7 +227,7 @@ def run_harness(
             "duration_s": 0.0,
         }
 
-    t = timeout if timeout is not None else MODE_TIMEOUTS[mode]
+    t = timeout if timeout is not None else _timeouts[mode]
     return _run_single(harness_path, mode, env=env, timeout=t, cwd=cwd)
 
 
