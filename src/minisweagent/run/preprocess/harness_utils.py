@@ -161,19 +161,20 @@ def extract_harness_path(test_command: str) -> str:
         'pytest /path/to/test.py -v'                -> '/path/to/test.py'
         'python /path/to/harness.py --correctness'  -> '/path/to/harness.py'
         '/path/to/harness.py'                       -> '/path/to/harness.py'
+        '/path/to/compile.py /path/to/harness.py'   -> '/path/to/harness.py'
     """
     try:
         tokens = shlex.split(test_command)
     except ValueError:
         tokens = test_command.split()
 
-    for token in tokens:
-        if token.endswith(".py") and "/" in token:
-            return token
+    path_like_py = [t for t in tokens if t.endswith(".py") and "/" in t]
+    if path_like_py:
+        return path_like_py[-1]
 
-    for token in tokens:
-        if token.endswith(".py"):
-            return token
+    bare_py = [t for t in tokens if t.endswith(".py")]
+    if bare_py:
+        return bare_py[-1]
 
     return tokens[-1] if tokens else test_command
 
