@@ -2,6 +2,20 @@
 
 This directory is where you add **Model Context Protocol** servers that the GEAK agent can call as ordinary tools. Each subdirectory here is one server package. The main application discovers those packages automatically, starts them as subprocesses, and merges their tool definitions into the agent’s tool list.
 
+## Installation
+
+`fastmcp` and `mcp[cli]` are core dependencies — installed automatically with `pip install -e .`.
+
+The three MCP server packages in this directory (`automated-test-discovery`, `metrix-mcp`, `profiler-mcp`) are **not** installed by default. Install them with:
+
+```bash
+pip install -e ‘.[mcp]’   # MCP servers only
+# or
+pip install -e ‘.[full]’  # everything
+```
+
+Without this, the agent will fail with `ModuleNotFoundError` when it tries to start these servers.
+
 ## Directory and module naming
 
 Use a **hyphenated** folder name for the server (for example, `profiler-mcp`). GEAK maps that name to a **Python package** by replacing hyphens with underscores (`profiler_mcp`).
