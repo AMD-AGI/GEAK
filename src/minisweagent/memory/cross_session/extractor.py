@@ -39,7 +39,7 @@ def extract_experience(**kwargs: Any) -> ExperienceRecord:
     best_latency_ms = baseline_latency_ms / speedup if speedup > 0 and baseline_latency_ms > 0 else 0.0
 
     patch_file = str(kwargs.get("patch_file", "") or "")
-    report_dir = Path(patch_file).parent if patch_file else None
+    report_dir = _resolve_report_dir(patch_file, kernel_path)
 
     what_worked, what_failed, dead_ends, trajectory = _extract_notebook_insights(report_dir)
     key_insight, best_change_category = _extract_report_insights(report_dir)
@@ -80,12 +80,53 @@ def extract_experience(**kwargs: Any) -> ExperienceRecord:
     )
 
 
+def _resolve_report_dir(patch_file: str, kernel_path: str) -> Path | None:
+    """Find the GEAK logs directory containing final_report.json and working notebook.
+
+    Searches upward from patch_file, then looks for _logs directories near kernel_path.
+    """
+    candidates: list[Path] = []
+
+    if patch_file:
+        p = Path(patch_file)
+        # Walk up from patch file looking for final_report.json or _working_memory
+        for parent in [p.parent] + list(p.parents)[:6]:
+            if (parent / "final_report.json").exists() or (parent / "_working_memory").exists():
+                candidates.append(parent)
+                break
+            # Check for _logs sibling
+            for sibling in parent.parent.iterdir() if parent.parent else []:
+                if sibling.name.endswith("_logs") and sibling.is_dir():
+                    if (sibling / "final_report.json").exists() or (sibling / "_working_memory").exists():
+                        candidates.append(sibling)
+                        break
+            if candidates:
+                break
+
+    if kernel_path and not candidates:
+        kp = Path(kernel_path)
+        for parent in [kp.parent] + list(kp.parents)[:6]:
+            for child in parent.iterdir() if parent.exists() else []:
+                if child.name.endswith("_logs") and child.is_dir():
+                    candidates.append(child)
+                    break
+            if candidates:
+                break
+
+    return candidates[0] if candidates else (Path(patch_file).parent if patch_file else None)
+
+
 def _extract_patch_content(patch_file: str, report_dir: Path | None) -> tuple[str, str]:
     """Read the actual patch/diff content and generate a code changes summary.
 
+    Searches multiple locations because GEAK's heterogeneous orchestrator
+    writes patches in various structures:
+      - patch_file (from final_report.json best_patch)
+      - results/round_N/best_patch.diff (orchestrator-created)
+      - results/round_N/<task_name>/patch_N.patch (per-task patches)
+      - results/round_N/worktrees/slot_N/kernel.py (modified kernels)
+
     Returns (patch_content, code_changes_summary).
-    patch_content: the raw diff text (truncated to 5000 chars)
-    code_changes_summary: human-readable summary of key code changes
     """
     patch_text = ""
 
@@ -98,43 +139,88 @@ def _extract_patch_content(patch_file: str, report_dir: Path | None) -> tuple[st
             except Exception:
                 pass
 
-    # Fallback: search for patches in the report directory
-    if not patch_text and report_dir:
-        for pattern in ("best_patch.diff", "best_patch.patch", "results/*/best_patch.diff"):
-            import glob
-            matches = glob.glob(str(report_dir / pattern))
-            if not matches and report_dir.parent:
-                matches = glob.glob(str(report_dir.parent / pattern))
-            for m in sorted(matches, reverse=True):
-                try:
-                    candidate = Path(m).read_text(encoding="utf-8", errors="replace")
-                    if candidate.strip():
-                        patch_text = candidate
-                        break
-                except Exception:
-                    continue
+    # Fallback: search report_dir and parent directories
+    search_roots = []
+    if report_dir:
+        search_roots.append(report_dir)
+        if report_dir.parent:
+            search_roots.append(report_dir.parent)
+
+    if not patch_text:
+        import glob
+        for root in search_roots:
+            # Try all patch patterns in priority order
+            for pattern in (
+                "best_patch.diff",
+                "best_patch.patch",
+                "results/*/best_patch.diff",
+                "results/*/best_patch.patch",
+                "results/*/*/patch_*.patch",  # per-task patches
+                "results/*/*/patch_*.diff",
+            ):
+                matches = glob.glob(str(root / pattern))
+                # Sort by modification time (newest first) to get the best patch
+                matches.sort(key=lambda m: Path(m).stat().st_mtime, reverse=True)
+                for m in matches:
+                    try:
+                        candidate = Path(m).read_text(encoding="utf-8", errors="replace")
+                        if candidate.strip() and len(candidate) > 20:
+                            patch_text = candidate
+                            break
+                    except Exception:
+                        continue
+                if patch_text:
+                    break
             if patch_text:
                 break
 
-    # Also check for modified kernel.py in worktrees
-    if not patch_text and report_dir:
-        for wt_kernel in sorted(report_dir.rglob("worktrees/*/kernel.py")):
-            try:
-                patch_text = f"# Modified kernel from {wt_kernel.parent.name}\n" + wt_kernel.read_text(
-                    encoding="utf-8", errors="replace"
-                )
-                break
-            except Exception:
+    # Fallback: find best modified kernel.py in worktrees (diff against original)
+    if not patch_text:
+        for root in search_roots:
+            wt_kernels = sorted(root.rglob("worktrees/*/kernel.py"))
+            if not wt_kernels:
                 continue
+            # Find the original kernel.py (should be at repo root)
+            orig = root / "kernel.py"
+            if not orig.exists():
+                for parent_check in [root.parent, root.parent.parent]:
+                    candidate_orig = parent_check / "kernel.py"
+                    if candidate_orig.exists():
+                        orig = candidate_orig
+                        break
 
-    # Truncate large patches
-    max_len = 5000
+            if orig.exists():
+                import subprocess
+                for wt_kernel in wt_kernels:
+                    try:
+                        diff_result = subprocess.run(
+                            ["diff", "-u", str(orig), str(wt_kernel)],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        if diff_result.stdout.strip() and len(diff_result.stdout) > 20:
+                            patch_text = diff_result.stdout
+                            break
+                    except Exception:
+                        continue
+            else:
+                # No original to diff against -- just take the modified kernel
+                for wt_kernel in wt_kernels:
+                    try:
+                        patch_text = f"# Modified kernel from {wt_kernel.parent.name}\n" + wt_kernel.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
+                        break
+                    except Exception:
+                        continue
+            if patch_text:
+                break
+
+    # Truncate large patches but keep enough to be useful
+    max_len = 8000
     if len(patch_text) > max_len:
         patch_text = patch_text[:max_len] + f"\n... (truncated, {len(patch_text)} chars total)"
 
-    # Generate code changes summary from the diff
     summary = _summarize_patch(patch_text) if patch_text else ""
-
     return patch_text, summary
 
 
@@ -294,14 +380,70 @@ def _extract_notebook_insights(report_dir: Path | None) -> tuple[list[str], list
     except Exception as exc:
         logger.debug("Notebook insight extraction failed: %s", exc)
 
+    # Also extract round evaluation insights (verified vs task-local discrepancies)
+    _extract_round_eval_insights(report_dir, worked, failed, dead_ends, trajectory_parts)
+
     trajectory = " -> ".join(trajectory_parts[:10]) if trajectory_parts else ""
 
     return (
-        _dedup(worked)[:10],
-        _dedup(failed)[:10],
-        _dedup(dead_ends)[:5],
+        _dedup(worked)[:15],
+        _dedup(failed)[:15],
+        _dedup(dead_ends)[:8],
         trajectory,
     )
+
+
+def _extract_round_eval_insights(
+    report_dir: Path | None,
+    worked: list[str],
+    failed: list[str],
+    dead_ends: list[str],
+    trajectory_parts: list[str],
+) -> None:
+    """Extract insights from round_N_evaluation.json files.
+
+    Captures verified speedups, task-local vs verified discrepancies,
+    and per-shape breakdowns.
+    """
+    if not report_dir:
+        return
+
+    for eval_path in sorted(report_dir.glob("round_*_evaluation.json")):
+        try:
+            d = json.loads(eval_path.read_text())
+            round_num = d.get("round", "?")
+            task = d.get("best_task", "?")
+            bm_speedup = d.get("benchmark_speedup", 0)
+            fb = d.get("full_benchmark", {})
+            verified = fb.get("verified_speedup") if isinstance(fb, dict) else None
+
+            if verified is not None and bm_speedup > 0:
+                if verified > 1.01:
+                    worked.append(f"R{round_num} {task}: verified {verified:.2f}x")
+                    trajectory_parts.append(f"R{round_num}:{task}({verified:.2f}x)")
+                elif verified < 0.99:
+                    discrepancy = f"task-local={bm_speedup:.2f}x but verified={verified:.2f}x"
+                    failed.append(f"R{round_num} {task}: REGRESSED ({discrepancy})")
+                    if bm_speedup > 1.1 and verified < 0.95:
+                        dead_ends.append(
+                            f"{task}: task-local showed {bm_speedup:.2f}x gain but "
+                            f"verified at {verified:.2f}x (regression on full shapes)"
+                        )
+
+            # Per-shape data
+            per_shape = d.get("per_shape_speedups", {})
+            if per_shape:
+                slow_shapes = [s for s, v in per_shape.items() if isinstance(v, dict) and v.get("speedup", 1) < 0.9]
+                fast_shapes = [s for s, v in per_shape.items() if isinstance(v, dict) and v.get("speedup", 1) > 1.5]
+                if slow_shapes:
+                    failed.append(f"R{round_num}: shapes {slow_shapes[:3]} regressed")
+                if fast_shapes and slow_shapes:
+                    dead_ends.append(
+                        f"R{round_num} {task}: helped {len(fast_shapes)} shapes but hurt {len(slow_shapes)} -- "
+                        f"needs shape-specialized dispatch"
+                    )
+        except Exception:
+            continue
 
 
 def _extract_report_insights(report_dir: Path | None) -> tuple[str, str]:
