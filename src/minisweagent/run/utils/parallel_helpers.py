@@ -735,7 +735,7 @@ def run_pool(
             for _tid, _task in sorted_tasks:
                 _lbl = _task.label or f"task_{_tid}"
                 _pdir = base_patch_dir / _lbl
-                cur_patches = set(p.name for p in _pdir.glob("*.patch")) if _pdir.is_dir() else set()
+                cur_patches = {p.name for p in _pdir.glob("*.patch")} if _pdir.is_dir() else set()
                 count = len(cur_patches)
                 patches_by_task.append((_lbl, count))
                 prev = _prev_patches.get(_lbl, set())

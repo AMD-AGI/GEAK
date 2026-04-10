@@ -718,7 +718,7 @@ class ParallelAgent(DefaultAgent):
                 for i in range(num_parallel):
                     _label = tasks[i].label if tasks and i < len(tasks) else f"agent_{i}"
                     pdir = results_dir / (f"parallel_{i}" if not tasks else _label)
-                    cur_patches = set(p.name for p in pdir.glob("*.patch")) if pdir.is_dir() else set()
+                    cur_patches = {p.name for p in pdir.glob("*.patch")} if pdir.is_dir() else set()
                     count = len(cur_patches)
                     patches_by_agent.append((_label, count))
                     prev = _prev_patches.get(_label, set())
