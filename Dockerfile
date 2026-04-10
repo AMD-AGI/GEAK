@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 # Copy and install GEAK-agent
 WORKDIR /workspace
 COPY . .
-RUN pip install -e .
+RUN pip install .
 
 # Install MCP dependencies
 RUN pip install fastmcp
@@ -14,12 +14,12 @@ RUN pip install fastmcp
 # Install Metrix from AMD intellikit (required by metrix-mcp)
 RUN git clone https://github.com/AMDResearch/intellikit.git /tmp/intellikit \
     && cd /tmp/intellikit/metrix \
-    && pip install -e . \
-    && cd /workspace
+    && pip install . \
+    && rm -rf /tmp/intellikit
 
 # Install MCP tools (only those with pyproject.toml; mcp-client removed from this branch)
-RUN pip install -e mcp_tools/metrix-mcp/ && \
-    pip install -e mcp_tools/profiler-mcp/
+RUN pip install mcp_tools/metrix-mcp/ && \
+    pip install mcp_tools/profiler-mcp/
 
 # Verify core imports
 RUN python3 -c "from profiler_mcp.server import profile_kernel; print('Core imports verified')"

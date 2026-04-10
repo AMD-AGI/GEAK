@@ -10,6 +10,17 @@ unset HIP_VISIBLE_DEVICES
 echo "🚀 GEAK-agent container initializing..."
 echo ""
 
+# Editable mode: re-install packages from the mounted /workspace so that
+# live host code is picked up instead of the baked-in site-packages copies.
+if [ "${GEAK_EDITABLE}" = "1" ]; then
+    echo "📝 Editable mode: re-installing packages from /workspace..."
+    pip install -e /workspace > /dev/null 2>&1
+    pip install -e /workspace/mcp_tools/metrix-mcp/ > /dev/null 2>&1
+    pip install -e /workspace/mcp_tools/profiler-mcp/ > /dev/null 2>&1
+    echo "✅ Editable installs complete"
+    echo ""
+fi
+
 # Setup mini-swe-agent config from environment variables
 mkdir -p /root/.config/mini-swe-agent
 

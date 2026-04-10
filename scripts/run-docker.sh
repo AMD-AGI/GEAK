@@ -4,6 +4,7 @@
 # Usage:
 #   scripts/run-docker.sh                          # Interactive bash shell
 #   scripts/run-docker.sh --rebuild                # Rebuild image, then bash
+#   scripts/run-docker.sh --editable               # Mount host repo for live code editing
 #   scripts/run-docker.sh -- test-discovery /path  # Run a command inside container
 #   scripts/run-docker.sh --rebuild -- geak --help # Rebuild, then run command
 #
@@ -33,13 +34,14 @@ set -e
 IMAGE_NAME="geak-agent:latest"
 CONTAINER_NAME="geak-agent-${USER}"
 
-# Repo root (directory containing scripts/); mount this over /workspace for live code without rebuild
+# Repo root (directory containing scripts/); used with --editable to mount live code
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Set directories to user's home
 PARENT_DIR="${HOME}"
 HOST_CODE_DIR="${HOME}"
 
 REBUILD=false
+EDITABLE=false
 EXEC_CMD=()  # Command to run inside the container (empty = bash)
 
 #######################################
@@ -49,6 +51,10 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --rebuild)
             REBUILD=true
+            shift
+            ;;
+        --editable)
+            EDITABLE=true
             shift
             ;;
         --)
@@ -61,6 +67,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --rebuild     Stop/remove container if present, then rebuild image (no cache)"
+            echo "  --editable    Mount host repo over /workspace for live code editing"
             echo "  -h, --help    Show this help"
             echo ""
             echo "If COMMAND is provided after --, it runs inside the container instead of bash."
@@ -180,6 +187,21 @@ elif [ "$REBUILD" != true ]; then
     echo "To rebuild from scratch, run: $0 --rebuild"
 fi
 
+# Build volume mount args; --editable overlays host repo for live code editing
+VOLUME_ARGS=(
+    -v /cephfs:/cephfs
+    -v "${PARENT_DIR}:${PARENT_DIR}"
+    -v /mnt:/mnt
+    -v /shared-nfs:/shared-nfs
+    -v /shared-aig:/shared-aig
+)
+EDITABLE_ENV=()
+if [ "$EDITABLE" = true ]; then
+    echo "Editable mode: mounting ${REPO_ROOT} -> /workspace"
+    VOLUME_ARGS+=(-v "${REPO_ROOT}:/workspace")
+    EDITABLE_ENV=(-e GEAK_EDITABLE=1)
+fi
+
 # Run new container in detached mode with persistent process
 echo "Creating and starting new container ${CONTAINER_NAME}..."
 docker run -d \
@@ -196,13 +218,9 @@ docker run -d \
     -e AMD_LLM_API_KEY="${AMD_LLM_API_KEY}" \
     -e AMD_LLM_BASE_URL="${AMD_LLM_BASE_URL}" \
     -e GEAK_MODEL="${GEAK_MODEL}" \
-    -v /cephfs:/cephfs \
+    "${EDITABLE_ENV[@]}" \
     --shm-size 8G \
-    -v "${REPO_ROOT}:/workspace" \
-    -v ${PARENT_DIR}:${PARENT_DIR} \
-    -v /mnt:/mnt \
-    -v /shared-nfs:/shared-nfs \
-    -v /shared-aig:/shared-aig \
+    "${VOLUME_ARGS[@]}" \
     -w /workspace \
     ${IMAGE_NAME}
 
