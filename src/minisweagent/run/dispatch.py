@@ -365,6 +365,7 @@ def run_task_batch(
         len(tasks),
         "".join(f"\n  - {t.label} (priority={t.priority})" for t in tasks),
     )
+    logger.info("[dim]Sub-agents are working — expect no output for several minutes.[/dim]")
 
     try:
         raw_results = ParallelAgent.run_parallel(

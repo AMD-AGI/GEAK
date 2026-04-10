@@ -137,6 +137,7 @@ def run_homogeneous_agent(
         "=" * 60,
     )
     logger.info("  repo=%s, output_dir=%s", final_repo, final_output_dir)
+    logger.info("[dim]Sub-agents are working — expect no output for several minutes.[/dim]")
 
     # Create and run ParallelAgent
     agent = ParallelAgent(model, env, **agent_config)
