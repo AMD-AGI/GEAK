@@ -607,7 +607,7 @@ class ParallelAgent(DefaultAgent):
             parallel_agent_config["mode"] = "yolo"
             parallel_agent_config["confirm_exit"] = False
 
-            log_file = parallel_patch_dir / f"agent_{agent_id}.log"
+            log_file = parallel_patch_dir / f"task_{agent_id}.log"
 
             # test_command should use relative paths, executed from worktree cwd
             # Path replacement kept for backward compatibility with absolute paths
@@ -669,7 +669,7 @@ class ParallelAgent(DefaultAgent):
                 f.write(init_msg)
                 f.flush()
 
-            _task_label = tasks[agent_id].label if tasks and agent_id < len(tasks) else f"agent_{agent_id}"
+            _task_label = tasks[agent_id].label if tasks and agent_id < len(tasks) else f"task_{agent_id}"
             logger.info(
                 "[dim]Sub-agent %d (%s) started on GPU %s[/dim]",
                 agent_id,
@@ -718,7 +718,7 @@ class ParallelAgent(DefaultAgent):
                 patches_by_agent = []
                 new_patch_paths: list[str] = []
                 for i in range(num_parallel):
-                    _label = tasks[i].label if tasks and i < len(tasks) else f"agent_{i}"
+                    _label = tasks[i].label if tasks and i < len(tasks) else f"task_{i}"
                     pdir = results_dir / (f"parallel_{i}" if not tasks else _label)
                     cur_patches = {p.name for p in pdir.glob("*.patch")} if pdir.is_dir() else set()
                     count = len(cur_patches)
@@ -730,7 +730,7 @@ class ParallelAgent(DefaultAgent):
                 total_patches = sum(c for _, c in patches_by_agent)
                 summary = ", ".join(f"{l}: {c}" for l, c in patches_by_agent if c > 0)
                 logger.info(
-                    "[dim][running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
+                    "[dim]\\[running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
                     elapsed / 60,
                     total_patches,
                     f" ({summary})" if summary else "",

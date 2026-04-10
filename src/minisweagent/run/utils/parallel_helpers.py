@@ -44,6 +44,13 @@ def _get_thread_log():
     return getattr(_thread_log_file, "file", None)
 
 
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub('', s)
+
+
 class _ThreadLocalStream:
     """Writes to thread-local log file when set, else to original stream."""
 
@@ -54,7 +61,7 @@ class _ThreadLocalStream:
         f = _get_thread_log()
         if f is not None:
             try:
-                f.write(s)
+                f.write(_strip_ansi(s))
                 f.flush()
             except Exception:
                 pass
@@ -102,7 +109,7 @@ def _install_logging_redirect():
             f = _get_thread_log()
             if f is not None:
                 try:
-                    f.write(self.format(record) + "\n")
+                    f.write(_strip_ansi(self.format(record)) + "\n")
                     f.flush()
                 except Exception:
                     self.handleError(record)
@@ -304,9 +311,9 @@ def run_parallel_heterogeneous(
     def run_spec_agent(agent_id: int, spec):
         """Run one agent from an AgentSpec."""
         if is_git_repo:
-            worktree_path = create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
+            worktree_path = create_worktree(repo_path, worktree_base / f"task_{agent_id}")
         else:
-            worktree_path = create_copy_workdir(repo_path, worktree_base / f"agent_{agent_id}")
+            worktree_path = create_copy_workdir(repo_path, worktree_base / f"task_{agent_id}")
             bootstrap_git_repo(worktree_path, console)
         worktree_path_str = str(worktree_path.resolve())
 
@@ -333,7 +340,7 @@ def run_parallel_heterogeneous(
         if spec.cost_limit:
             parallel_agent_config["cost_limit"] = spec.cost_limit
 
-        log_file = parallel_patch_dir / f"agent_{agent_id}.log"
+        log_file = parallel_patch_dir / f"task_{agent_id}.log"
 
         if parallel_agent_config.get("test_command"):
             parallel_agent_config["test_command"] = replace_paths(
@@ -745,7 +752,7 @@ def run_pool(
             total = sum(c for _, c in patches_by_task)
             summary = ", ".join(f"{l}: {c}" for l, c in patches_by_task if c > 0)
             logger.info(
-                "[dim][running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
+                "[dim]\\[running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
                 elapsed / 60,
                 total,
                 f" ({summary})" if summary else "",
