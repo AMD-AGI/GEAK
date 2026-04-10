@@ -158,9 +158,6 @@ def run_homogeneous_agent(
             console.print(
                 f"\n[bold green]Best patch:[/bold green] {best_result.patch_id} (agent {best_result.agent_id})"
             )
-            if best_result.llm_conclusion:
-                console.print(f"[bold green]Conclusion:[/bold green] {best_result.llm_conclusion}")
-                logger.info("Conclusion: %s", best_result.llm_conclusion)
         else:
             logger.info("Homogeneous run completed in %.0fs. No best patch selected.", _elapsed)
             console.print("\n[bold yellow]No best patch selected[/bold yellow]")
