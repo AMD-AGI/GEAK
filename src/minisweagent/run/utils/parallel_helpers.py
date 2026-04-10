@@ -742,6 +742,7 @@ def run_pool(
                 elapsed / 60,
                 total,
                 f" ({summary})" if summary else "",
+                extra={"progress_tick": True},
             )
 
     _progress_thread = threading.Thread(target=_report_progress, daemon=True)

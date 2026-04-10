@@ -596,7 +596,8 @@ def _run_task_agent(
             if template_vars.get(k)
         ]
         logger.info(
-            "[bold yellow]Starting task-generation agent[/bold yellow] (step_limit=%d, cost=%.1f, context=%s)",
+            "[bold yellow]Starting task-generation agent[/bold yellow] "
+            "(step_limit=%d, cost=%.1f, context=%s) — this may take a few minutes",
             tg_step_limit,
             tg_cost_limit,
             ", ".join(k.replace("_path", "") for k in _context_files) or "minimal",

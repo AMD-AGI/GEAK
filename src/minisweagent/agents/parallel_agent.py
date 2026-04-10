@@ -130,7 +130,6 @@ class ParallelAgent(DefaultAgent):
     ) -> BestPatchResult | None:
         """Select the best patch from multiple parallel runs using SelectPatchAgent."""
         logger.info("Selecting best patch from %d parallel runs via SelectPatchAgent.", num_parallel)
-        print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
 
         model = model_factory()
         _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
@@ -141,19 +140,17 @@ class ParallelAgent(DefaultAgent):
         det_result = rewrite_best_results(base_patch_dir)
         if det_result:
             best_patch_id = det_result.get("best_patch_id", best_patch_id)
-            print(
-                f"[ParallelAgent] Deterministic override: {best_patch_id} "
-                f"({det_result.get('best_patch_speedup', '?')}x)",
-                flush=True,
+            logger.info(
+                "Deterministic override: %s (%sx)",
+                best_patch_id,
+                det_result.get("best_patch_speedup", "?"),
             )
 
         if not best_patch_id:
             logger.warning("SelectPatchAgent did not produce best_results.json.")
-            print("[ParallelAgent] SelectPatchAgent did not produce best_results.json", flush=True)
             return None
 
         logger.info("Selected best patch: %s", best_patch_id)
-        print(f"[ParallelAgent] Selected best patch: {best_patch_id}", flush=True)
 
         try:
             # Read the best_results.json for additional details
@@ -191,7 +188,6 @@ class ParallelAgent(DefaultAgent):
             )
         except Exception as e:
             logger.warning("Failed to process best_results.json: %s", e)
-            print(f"[ParallelAgent] Failed to process best_results.json: {e}", flush=True)
             return None
 
     @staticmethod
@@ -718,6 +714,7 @@ class ParallelAgent(DefaultAgent):
                     elapsed / 60,
                     total_patches,
                     f" ({summary})" if summary else "",
+                    extra={"progress_tick": True},
                 )
 
         _progress_thread = threading.Thread(target=_report_progress, daemon=True)

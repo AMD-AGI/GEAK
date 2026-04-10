@@ -156,6 +156,24 @@ def run_llm_steps(
     return None
 
 
+def _log_final_summary(report) -> None:
+    """Log a human-readable conclusion at the end of a heterogeneous run."""
+    if report is None:
+        return
+    best_speedup = getattr(report, "best_speedup", None) or 0
+    best_patch = getattr(report, "best_patch", None) or "unknown"
+    best_round = getattr(report, "best_round", None) or "unknown"
+    summary = getattr(report, "summary", "") or ""
+    logger.info(
+        "Heterogeneous run completed. Best patch: %s (round %s, %.4fx speedup)",
+        best_patch,
+        best_round,
+        best_speedup,
+    )
+    if summary:
+        logger.info("Summary: %s", summary[:500])
+
+
 # ── Main entry point ─────────────────────────────────────────────────
 
 
@@ -336,7 +354,9 @@ def run_heterogeneous_orchestrator(
     try:
         if start_round <= 1:
             logger.info(
-                "\n[dim]%s[/dim]\n  [bold yellow]Exploration Phase[/bold yellow]\n[dim]%s[/dim]", "-" * 60, "-" * 60
+                "\n[dim]%s[/dim]\n  [bold yellow]Exploration Phase[/bold yellow] (this may take a few minutes)\n[dim]%s[/dim]",
+                "-" * 60,
+                "-" * 60,
             )
             _explore_t0 = time.monotonic()
             finalize_result = run_llm_steps(
@@ -366,6 +386,9 @@ def run_heterogeneous_orchestrator(
                 "=" * 60,
                 color,
             )
+
+            if ctx.get("starting_patch"):
+                logger.info("Starting from best patch so far: %s", ctx["starting_patch"])
 
             if is_last:
                 round_instruction = (
@@ -424,12 +447,14 @@ def run_heterogeneous_orchestrator(
 
             if finalize_result is not None:
                 logger.info("Finalizing run")
-                return finalize_run(
+                report = finalize_run(
                     ctx,
                     output_dir,
                     finalize_result=finalize_result,
                     round_eval=round_eval,
                 )
+                _log_final_summary(report)
+                return report
     finally:
         logger.debug("Restoring original model tools schema.")
         if original_tools is not None:
@@ -439,4 +464,6 @@ def run_heterogeneous_orchestrator(
 
     logger.info("Orchestrator completed all rounds without calling finalize - auto-selecting best result...")
 
-    return finalize_run(ctx, output_dir)
+    report = finalize_run(ctx, output_dir)
+    _log_final_summary(report)
+    return report

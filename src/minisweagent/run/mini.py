@@ -5,6 +5,7 @@
 import logging
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -348,6 +349,7 @@ def main(
     preprocess_output_dir, traj_output_path = _derive_output_dir_and_traj(output, kernel_name_for_output)
     preprocess_output_dir.mkdir(parents=True, exist_ok=True)
     add_file_handler(preprocess_output_dir / DEFAULT_LOG_FILENAME)
+    _run_t0 = time.monotonic()
     config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
     logger.info(
         "[dim]Logs and artifacts for this run are under '%s' "
@@ -476,6 +478,7 @@ def main(
             max_rounds=max_rounds or config.get("orchestrator", {}).get("max_rounds"),
             heterogeneous=True,
         )
+        logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
         return _final_report_to_bestpatchresult(report)
 
     # Homogeneous path only: num_parallel and metric are not passed to run_orchestrator.
@@ -505,7 +508,7 @@ def main(
         repo_path = p.resolve()
     logger.info("Resolved repo path: %s", repo_path)
 
-    return run_homogeneous_agent(
+    result = run_homogeneous_agent(
         config=config,
         task_content=task_content,
         model=model,
@@ -521,6 +524,8 @@ def main(
         model_name=model_name,
         console=console,
     )
+    logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
+    return result
 
 
 if __name__ == "__main__":

@@ -44,10 +44,22 @@ def _setup_root_logger() -> None:
     _silence_noisy_loggers()
 
 
+class _ProgressTickFilter(logging.Filter):
+    """Suppress transient progress-tick records from the file handler.
+
+    Progress threads tag their records with ``extra={"progress_tick": True}``.
+    The terminal (RichHandler) still shows every tick; only file output is filtered.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not getattr(record, "progress_tick", False)
+
+
 def add_file_handler(path: Path | str, level: int | None = None, *, print_path: bool = True) -> None:
     logger = logging.getLogger("minisweagent")
     handler = logging.FileHandler(path)
     handler.setLevel(level if level is not None else _get_log_level_from_env())
+    handler.addFilter(_ProgressTickFilter())
     formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
