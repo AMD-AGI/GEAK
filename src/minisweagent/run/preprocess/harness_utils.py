@@ -1107,6 +1107,7 @@ def execute_harness_validation(
     repo_root: str | None = None,
     gpu_id: int = 0,
     benchmark_extra_args: str | None = None,
+    use_uta_timeouts: bool = False,
 ) -> tuple[bool, list[str], list[dict]]:
     """Run the harness across all modes and return ``(ok, errors, results)``.
 
@@ -1121,6 +1122,12 @@ def execute_harness_validation(
         (e.g. ``"--iterations 50"``).  Passed via the
         ``GEAK_BENCHMARK_EXTRA_ARGS`` env var so both direct invocations
         and COMMANDMENT-based scripts use the same settings.
+    use_uta_timeouts:
+        When True, use ``UTA_MODE_TIMEOUTS`` instead of the default
+        ``MODE_TIMEOUTS``.  The UTA timeout for ``--correctness`` is more
+        relaxed (default 900 s, overridable via ``GEAK_UTA_CORRECTNESS_TIMEOUT``)
+        to handle kernels with expensive initialisation (e.g. physics sims)
+        that exceed the normal 300 s limit and cause the agent to retry forever.
 
     Returns
     -------
@@ -1131,7 +1138,7 @@ def execute_harness_validation(
     results : list[dict]
         Per-mode result dicts from :func:`run_harness`.
     """
-    from minisweagent.run.preprocess.run_harness import results_errors, run_harness
+    from minisweagent.run.preprocess.run_harness import UTA_MODE_TIMEOUTS, results_errors, run_harness
 
     env_overrides: dict[str, str] = {}
     # Keep validation fast: override iterations to a small number unless
@@ -1149,12 +1156,15 @@ def execute_harness_validation(
         if _iter_match:
             env_overrides["GEAK_BENCHMARK_ITERATIONS"] = _iter_match.group(1)
 
+    mode_timeouts = UTA_MODE_TIMEOUTS if use_uta_timeouts else None
+
     results = run_harness(
         harness_path,
         mode="all",
         repo_root=repo_root,
         gpu_id=gpu_id,
         env_overrides=env_overrides,
+        mode_timeouts=mode_timeouts,
     )
     if not isinstance(results, list):
         results = [results]
@@ -1245,11 +1255,15 @@ def create_validated_harness(
         logger.info("Harness static validation: OK")
 
         # Phase 2: runtime execution of all modes
+        # Use relaxed UTA timeouts here: complex kernels (e.g. physics sims)
+        # can exceed the normal 300 s correctness limit during init, causing
+        # the agent to retry in an infinite loop (issue #123).
         repo_root = str(repo) if repo else None
         exec_ok, exec_errors, harness_results = execute_harness_validation(
             harness,
             repo_root=repo_root,
             gpu_id=gpu_id,
+            use_uta_timeouts=True,
         )
         if exec_ok:
             try:
