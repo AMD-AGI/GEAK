@@ -99,7 +99,7 @@ Use GitHub **Draft PRs** when your work is not yet ready for formal review:
 
 ### 7. Code review
 
-- **At least 1 approval** from a maintainer is required to merge.
+- **At least 2 approval** from a maintainer is required to merge.
 - Address review comments with new commits (do not force-push during review so reviewers can see incremental changes).
 - Once approved, the **author** squash-merges via GitHub.
 
