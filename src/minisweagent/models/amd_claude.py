@@ -154,7 +154,7 @@ class AmdClaudeModel(AmdLlmModelBase):
         filtered_kwargs = {k: v for k, v in all_kwargs.items() if k in supported_params}
         filtered_kwargs["tools"] = convert_openai_tools_to_claude(
             self.tools,
-            cache_control=bool(self.config.set_cache_control),
+            cache_control=False,
         )
 
         system_message, anthropic_messages = self.format_messages(messages)
@@ -163,33 +163,13 @@ class AmdClaudeModel(AmdLlmModelBase):
             filtered_kwargs["max_tokens"] = 4096
 
         if self.config.set_cache_control:
-            # Cache system prompt
             if system_message and "system" not in filtered_kwargs:
                 filtered_kwargs["system"] = [
                     {
                         "type": "text",
                         "text": system_message,
-                        "cache_control": CACHE_CONTROL_EPHEMERAL,
                     }
                 ]
-
-            # Cache last user/tool-result message so the conversation
-            # prefix up to that point is reused on subsequent requests.
-            for msg in reversed(anthropic_messages):
-                if msg.get("role") != "user":
-                    continue
-                content = msg.get("content")
-                if isinstance(content, list) and content:
-                    content[-1] = {**content[-1], "cache_control": CACHE_CONTROL_EPHEMERAL}
-                elif isinstance(content, str) and content:
-                    msg["content"] = [
-                        {
-                            "type": "text",
-                            "text": content,
-                            "cache_control": CACHE_CONTROL_EPHEMERAL,
-                        }
-                    ]
-                break
         else:
             if system_message and "system" not in filtered_kwargs:
                 filtered_kwargs["system"] = system_message
