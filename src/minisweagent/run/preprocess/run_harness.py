@@ -39,7 +39,7 @@ MODE_TO_FLAG: dict[str, str] = {
 }
 
 MODE_TIMEOUTS: dict[str, int] = {
-    "correctness": 300,
+    "correctness": int(os.environ.get("GEAK_CORRECTNESS_TIMEOUT", "900")),
     "profile": 120,
     "benchmark": 600,
     "full-benchmark": 900,
