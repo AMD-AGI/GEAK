@@ -246,6 +246,83 @@ class SaveAndTestTool:
             current = parent
         return None
 
+    def _ensure_test_script_exists(self, test_command: str) -> str:
+        """If test_command references a missing _geak_test_cmd_*.sh, regenerate it.
+
+        When parallel agents run in worktrees, replace_paths rewrites the
+        script path from the original logs dir to the worktree, where the
+        script was never created.  We detect this and regenerate the script
+        from the COMMANDMENT in the current working directory.
+        """
+        import re as _re
+
+        match = _re.search(r"(/\S+/_geak_test_cmd_\S+\.sh)", test_command)
+        if not match:
+            return test_command
+
+        script_path = Path(match.group(1))
+        if script_path.exists():
+            return test_command
+
+        self._log(f"[SaveAndTest] Test script missing: {script_path}, regenerating from COMMANDMENT")
+
+        ctx = self.context
+        cwd = Path(ctx.cwd).resolve()
+        commandment = None
+
+        # Walk up from the missing script path to find the _logs root
+        # which always contains COMMANDMENT.md.  The script path looks like:
+        # <logs>/results/round_N/worktrees/slot_N_logs/_geak_test_cmd_*.sh
+        search_dir = script_path.parent
+        for _ in range(8):
+            candidate = search_dir / "COMMANDMENT.md"
+            if candidate.exists():
+                commandment = candidate
+                break
+            if search_dir.parent == search_dir:
+                break
+            search_dir = search_dir.parent
+
+        if not commandment:
+            for candidate in [cwd / "COMMANDMENT.md", cwd.parent / "COMMANDMENT.md"]:
+                if candidate.exists():
+                    commandment = candidate
+                    break
+
+        if not commandment and ctx.env_vars:
+            cmd_path = ctx.env_vars.get("GEAK_COMMANDMENT")
+            if cmd_path and Path(cmd_path).exists():
+                commandment = Path(cmd_path)
+
+        if not commandment:
+            self._log("[SaveAndTest] No COMMANDMENT found, cannot regenerate test script")
+            return test_command
+
+        from minisweagent.run.dispatch import _read_commandment_section
+
+        setup = _read_commandment_section(str(commandment), "SETUP")
+        correctness = _read_commandment_section(str(commandment), "CORRECTNESS")
+        benchmark = _read_commandment_section(str(commandment), "BENCHMARK")
+        if not benchmark:
+            benchmark = _read_commandment_section(str(commandment), "FULL_BENCHMARK")
+
+        if not correctness:
+            self._log("[SaveAndTest] COMMANDMENT has no CORRECTNESS section")
+            return test_command
+
+        lines = ["#!/usr/bin/env bash", "set -euo pipefail"]
+        if setup:
+            lines.append(setup)
+        lines.append(correctness)
+        if benchmark:
+            lines.append(benchmark)
+
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text("\n".join(lines) + "\n")
+        script_path.chmod(0o755)
+        self._log(f"[SaveAndTest] Regenerated test script: {script_path}")
+        return test_command
+
     @staticmethod
     def _is_truthy(value: Any) -> bool:
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
@@ -761,6 +838,11 @@ class SaveAndTestTool:
             repo_root = str(ctx.base_repo_path)
             if repo_root in test_command and ctx.cwd not in test_command:
                 test_command = test_command.replace(repo_root, ctx.cwd)
+
+        # If the test command is a _geak_test_cmd_*.sh script that doesn't exist
+        # (path was rewritten to worktree but script was only created in the
+        # original logs dir), regenerate it from the COMMANDMENT in the CWD.
+        test_command = self._ensure_test_script_exists(test_command)
         self._log(f"[SaveAndTest] Running: {test_command}")
 
         with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".txt") as tmp:
