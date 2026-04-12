@@ -525,6 +525,7 @@ class ParallelAgent(DefaultAgent):
                     if _wm_kernel_path:
                         try:
                             from minisweagent.memory.cross_session_memory import classify_kernel_category
+
                             _wm_kernel_cat = classify_kernel_category(_wm_kernel_path) or "unknown"
                         except Exception:
                             pass
