@@ -44,11 +44,11 @@ def _get_thread_log():
     return getattr(_thread_log_file, "file", None)
 
 
-_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _strip_ansi(s: str) -> str:
-    return _ANSI_RE.sub('', s)
+    return _ANSI_RE.sub("", s)
 
 
 class _ThreadLocalStream:

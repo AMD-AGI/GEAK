@@ -165,9 +165,7 @@ def run_homogeneous_agent(
         # Write final_report.json (aligned with heterogeneous output structure)
         speedup = best_result.best_speedup if best_result else None
         best_patch_path = (
-            str(best_result.patch_dir / best_result.patch_id)
-            if best_result and best_result.patch_dir
-            else None
+            str(best_result.patch_dir / best_result.patch_id) if best_result and best_result.patch_dir else None
         )
         report = {
             "status": "complete",
