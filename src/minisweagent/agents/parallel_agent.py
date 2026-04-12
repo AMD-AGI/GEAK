@@ -36,7 +36,8 @@ class BestPatchResult:
     agent_id: int
     patch_id: str
     test_output: str
-    metric_result: dict | None = None
+    best_speedup: float | None = None
+    best_patch_file: str | None = None
     patch_dir: Path | None = None
     llm_conclusion: str | None = None
 
@@ -170,20 +171,22 @@ class ParallelAgent(DefaultAgent):
                 agent_id = 0
                 patch_dir = base_patch_dir
 
-            # metric_result is no longer persisted (results.json removed); rely on test logs if needed
-            metric_result = None
-
             # Read test output if path provided
             test_output = ""
             test_output_path = best_results.get("best_patch_test_output")
             if test_output_path and Path(test_output_path).exists():
                 test_output = Path(test_output_path).read_text()
 
+            # Extract speedup from best_results.json (written by select patch agent)
+            raw_speedup = best_results.get("best_patch_speedup")
+            best_speedup = float(raw_speedup) if raw_speedup is not None else None
+
             return BestPatchResult(
                 agent_id=agent_id,
                 patch_id=patch_name,
                 test_output=test_output,
-                metric_result=metric_result,
+                best_speedup=best_speedup,
+                best_patch_file=best_results.get("best_patch_file"),
                 patch_dir=patch_dir,
                 llm_conclusion=best_results.get("llm_selection_analysis", ""),
             )

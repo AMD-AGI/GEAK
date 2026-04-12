@@ -100,7 +100,7 @@ class TestFinalReportToBestpatchresult:
         bpr = mini_module._final_report_to_bestpatchresult(report)
         assert bpr is not None
         assert bpr.patch_id == "patch_1"
-        assert bpr.metric_result["best_speedup"] == 1.5
+        assert bpr.best_speedup == 1.5
         assert bpr.llm_conclusion == "done"
         assert bpr.patch_dir == patch_file.parent
 

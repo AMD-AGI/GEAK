@@ -89,16 +89,13 @@ def _final_report_to_bestpatchresult(report: Any) -> BestPatchResult | None:
 
     best_patch = report_dict.get("best_patch")
     patch_path = Path(best_patch) if best_patch else None
+    raw_speedup = report_dict.get("best_speedup")
     return BestPatchResult(
         agent_id=0,
         patch_id=patch_path.stem if patch_path else "unknown",
         test_output="",
-        metric_result={
-            "best_speedup": report_dict.get("best_speedup"),
-            "best_round": report_dict.get("best_round"),
-            "best_task": report_dict.get("best_task"),
-            "status": report_dict.get("status"),
-        },
+        best_speedup=float(raw_speedup) if raw_speedup is not None else None,
+        best_patch_file=str(patch_path) if patch_path else None,
         patch_dir=patch_path.parent if patch_path else None,
         llm_conclusion=str(report_dict.get("summary") or ""),
     )

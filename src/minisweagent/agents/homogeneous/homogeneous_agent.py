@@ -163,14 +163,16 @@ def run_homogeneous_agent(
             console.print("\n[bold yellow]No best patch selected[/bold yellow]")
 
         # Write final_report.json (aligned with heterogeneous output structure)
+        speedup = best_result.best_speedup if best_result else None
+        best_patch_path = (
+            str(best_result.patch_dir / best_result.patch_id)
+            if best_result and best_result.patch_dir
+            else None
+        )
         report = {
             "status": "complete",
-            "best_patch": str(best_result.patch_dir / best_result.patch_id)
-            if best_result and best_result.patch_dir
-            else None,
-            "best_speedup": best_result.metric_result.get("best_speedup")
-            if best_result and best_result.metric_result
-            else None,
+            "best_patch": best_result.best_patch_file or best_patch_path if best_result else None,
+            "best_speedup": speedup,
             "summary": best_result.llm_conclusion if best_result else "No best patch selected",
         }
         report_path = final_output_dir / "final_report.json"
