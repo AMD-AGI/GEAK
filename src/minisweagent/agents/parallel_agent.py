@@ -459,6 +459,11 @@ class ParallelAgent(DefaultAgent):
             parallel_agent_config["mode"] = "yolo"
             parallel_agent_config["confirm_exit"] = False
 
+            # Pop working-memory artifact paths before passing to agent constructor.
+            _wm_bm_path = parallel_agent_config.pop("_wm_baseline_metrics", None)
+            _wm_bb_path = parallel_agent_config.pop("_wm_benchmark_baseline", None)
+            _wm_kernel_path = parallel_agent_config.pop("_wm_kernel_path", None)
+
             log_file = parallel_patch_dir / f"task_{agent_id}.log"
 
             # test_command should use relative paths, executed from worktree cwd
@@ -504,6 +509,74 @@ class ParallelAgent(DefaultAgent):
                     agent._setup_save_and_test_context()
             if hasattr(agent, "log_file"):
                 agent.log_file = log_file
+
+            # Initialise in-session working memory for homogeneous agents.
+            # Mirrors the setup in parallel_helpers.py used by the heterogeneous
+            # pool runner so both modes benefit from the same memory system.
+            try:
+                from minisweagent.memory.integration import is_working_memory_enabled
+
+                if is_working_memory_enabled() and _wm_bm_path:
+                    from minisweagent.memory.working_memory import WorkingMemory
+
+                    _wm_notebook_dir = str(Path(_wm_bm_path).resolve().parent / "_working_memory")
+                    # Derive kernel category from path pattern or kernel_path
+                    _wm_kernel_cat = "unknown"
+                    if _wm_kernel_path:
+                        try:
+                            from minisweagent.memory.cross_session_memory import classify_kernel_category
+                            _wm_kernel_cat = classify_kernel_category(_wm_kernel_path) or "unknown"
+                        except Exception:
+                            pass
+                    if _wm_kernel_cat == "unknown" and _wm_bm_path:
+                        _km = re.search(r"geak_eval_L\d+_(.+?)_\d{8}_\d{6}", _wm_bm_path)
+                        if _km:
+                            _wm_kernel_cat = _km.group(1)
+                    _wm = WorkingMemory(
+                        kernel_category=_wm_kernel_cat,
+                        max_steps=parallel_agent_config.get(
+                            "step_limit", int(os.environ.get("GEAK_AGENT_STEP_LIMIT", "100"))
+                        ),
+                        notebook_dir=_wm_notebook_dir,
+                        notebook_writer_id=f"homo-agent-{agent_id}",
+                    )
+                    _wm.load_baseline_from_artifacts(
+                        baseline_metrics_path=_wm_bm_path,
+                        benchmark_baseline_path=_wm_bb_path,
+                    )
+                    _wm.sync_notebook_baseline()
+                    # Generate profiler diagnosis from baseline_metrics top_kernels
+                    if Path(_wm_bm_path).exists():
+                        try:
+                            _bm2 = json.loads(Path(_wm_bm_path).read_text())
+                            _top = _bm2.get("top_kernels", [])
+                            if len(_top) > 3:
+                                _target = _top[0] if _top else {}
+                                _target_pct = _target.get("pct_of_total", 0)
+                                _ext_pct = 100 - _target_pct
+                                _top_summary = "; ".join(
+                                    f"{k.get('name', '?')[:40]}: {k.get('duration_us', 0):.1f}us ({k.get('pct_of_total', 0):.0f}%)"
+                                    for k in _top[:3]
+                                )
+                                if _ext_pct > 50:
+                                    _wm.profiler_diagnosis = (
+                                        f"[ARCHITECTURE ALERT] Profiler shows {len(_top)} sub-kernels. "
+                                        f"Top 3: {_top_summary}. "
+                                        f"No single kernel dominates (largest is {_target_pct:.0f}%). "
+                                        "This usually means the entry point dispatches to UNFUSED external library calls. "
+                                        "FIRST ACTION: Check triton_op() for try/except that falls through to aiter or other libraries. "
+                                        "Bypass to use the local fused kernel. Also check for repeat_interleave or .contiguous() calls."
+                                    )
+                                elif _target_pct > 60:
+                                    _wm.profiler_diagnosis = (
+                                        f"[PROFILER] Target kernel ({_target.get('name', '?')[:40]}) dominates at {_target_pct:.0f}%. "
+                                        "Focus optimization on the kernel body itself."
+                                    )
+                        except Exception:
+                            pass
+                    agent._working_memory = _wm
+            except Exception:
+                pass
 
             with open(log_file, "w", encoding="utf-8") as f:
                 f.write(f"Agent {agent_id} Conversation Log\n")

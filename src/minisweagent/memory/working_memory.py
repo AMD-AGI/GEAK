@@ -584,7 +584,7 @@ class WorkingMemory:
         if self.steps_since_improvement > 8 and self.current_step > self.max_steps * 0.4:
             parts.append(
                 f"[SUBMIT NOW] Best={self.best_speedup:.2f}x at step {self.best_speedup_step}. "
-                f"No improvement in {self.steps_since_improvement} steps. Submit and let next round try differently."
+                f"No improvement in {self.steps_since_improvement} steps. Save your best patch and submit now."
             )
         else:
             progress = self.get_progress_signal()

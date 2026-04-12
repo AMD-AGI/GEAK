@@ -595,6 +595,11 @@ def main(
     agent_config["metric"] = metric
     agent_config["patch_output_dir"] = str(preprocess_output_dir)
     logger.debug("Homogeneous agent_config: %s", agent_config)
+    # Working memory artifacts — prefixed with _wm_ so parallel_agent.py can pop
+    # them before passing **agent_config to the agent constructor.
+    agent_config["_wm_baseline_metrics"] = str(preprocess_output_dir / "baseline_metrics.json")
+    agent_config["_wm_benchmark_baseline"] = str(preprocess_output_dir / "benchmark_baseline.txt")
+    agent_config["_wm_kernel_path"] = str(preprocess_ctx.get("kernel_path", ""))
 
     repo_path = repo or config.get("patch", {}).get("repo")
     if repo_path:
