@@ -164,10 +164,15 @@ def _stage2_text_similarity(
             and exp.kernel_category == query_category
         ) else 0.0
 
-        bn_boost = 0.10 if (
-            query_bottleneck and query_bottleneck != "unknown"
-            and exp.bottleneck_type == query_bottleneck
-        ) else 0.0
+        if query_bottleneck and query_bottleneck != "unknown":
+            if exp.bottleneck_type == query_bottleneck:
+                bn_boost = 0.25
+            elif exp.bottleneck_type != "unknown":
+                bn_boost = -0.15
+            else:
+                bn_boost = 0.0
+        else:
+            bn_boost = 0.0
 
         success_boost = 0.05 if exp.success and exp.best_speedup > 1.05 else 0.0
 

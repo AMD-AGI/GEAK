@@ -168,3 +168,57 @@ def _change_label(change_category: str) -> str:
         "wrapper": "dispatch/wrapper changes",
     }
     return labels.get(change_category, change_category)
+
+
+def reflect_on_transfer(
+    seed_experience: "ExperienceRecord",
+    test_experience: "ExperienceRecord",
+    backend: Any,
+) -> None:
+    """After a cross-kernel transfer experiment, create/update a StrategySkill
+    reflecting what transferred and what didn't.
+
+    Called after a test kernel run that had access to seed experiences.
+    """
+    seed_sp = seed_experience.best_speedup
+    test_sp = test_experience.best_speedup
+
+    transferred = test_sp > 1.02
+
+    common_patterns = []
+    if seed_experience.what_worked and test_experience.what_worked:
+        seed_strats = {w.split(":")[0].strip() for w in seed_experience.what_worked if ":" in w}
+        test_strats = {w.split(":")[0].strip() for w in test_experience.what_worked if ":" in w}
+        common_patterns = list(seed_strats & test_strats)
+
+    skill = StrategySkill(
+        title=f"Transfer: {seed_experience.kernel_category} -> {test_experience.kernel_category}",
+        kernel_categories=list({seed_experience.kernel_category, test_experience.kernel_category}),
+        bottleneck_types=list({seed_experience.bottleneck_type, test_experience.bottleneck_type}),
+        kernel_languages=[seed_experience.kernel_language],
+        strategy_description=(
+            f"Strategies from {seed_experience.kernel_name} ({seed_sp:.2f}x) "
+            f"{'transferred successfully' if transferred else 'did not transfer'} "
+            f"to {test_experience.kernel_name} ({test_sp:.2f}x). "
+            f"Common patterns: {', '.join(common_patterns) if common_patterns else 'none identified'}."
+        ),
+        change_category=seed_experience.best_change_category,
+        expected_speedup=f"{test_sp:.2f}x" if transferred else "no improvement",
+        evidence_count=2,
+        success_rate=1.0 if transferred else 0.0,
+        contraindications=(
+            [f"Does not transfer between {seed_experience.bottleneck_type}-bound and {test_experience.bottleneck_type}-bound kernels"]
+            if not transferred and seed_experience.bottleneck_type != test_experience.bottleneck_type
+            else []
+        ),
+        source_records=[seed_experience.record_id, test_experience.record_id],
+    )
+
+    try:
+        backend.store_skill(skill)
+        logger.info(
+            "Reflection skill created: %s (transferred=%s, test_speedup=%.2fx)",
+            skill.title, transferred, test_sp,
+        )
+    except Exception as exc:
+        logger.warning("Failed to store reflection skill: %s", exc)

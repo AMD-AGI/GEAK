@@ -189,7 +189,7 @@ def _exploration_nudges(
 
 
 def _best_code_insights(experiences: list[ExperienceRecord]) -> str:
-    """Extract the most useful code change insights from top experiences."""
+    """Extract reusable code patterns from top experiences as actionable templates."""
     best = None
     best_speedup = 0.0
     for exp in experiences:
@@ -200,26 +200,62 @@ def _best_code_insights(experiences: list[ExperienceRecord]) -> str:
     if not best:
         return ""
 
-    parts = [f"**Code insights from {best.kernel_name} ({best.best_speedup:.2f}x speedup):**"]
+    parts = [f"**Proven code patterns from {best.kernel_name} ({best.best_speedup:.2f}x speedup):**"]
 
     if best.code_changes_summary:
-        parts.append(f"  Changes: {best.code_changes_summary[:300]}")
+        parts.append(f"  Summary: {best.code_changes_summary[:300]}")
 
     if best.patch_content:
-        snippet = best.patch_content[:800]
-        # Show only the most relevant diff hunks (added lines with optimization keywords)
-        relevant_lines = []
-        for line in snippet.splitlines():
-            if line.startswith("+") and not line.startswith("+++"):
-                body = line[1:].strip()
-                if body and len(body) > 5 and not body.startswith("#"):
-                    relevant_lines.append(body)
-        if relevant_lines:
-            parts.append("  Key code additions:")
-            for rl in relevant_lines[:8]:
-                parts.append(f"    + {rl}")
+        templates = _extract_code_templates(best.patch_content)
+        if templates:
+            parts.append("  **Reusable code templates (copy and adapt):**")
+            for name, code in templates[:3]:
+                parts.append(f"  *{name}*:")
+                for line in code.splitlines()[:8]:
+                    parts.append(f"    {line}")
 
     return "\n".join(parts)
+
+
+def _extract_code_templates(patch_content: str) -> list[tuple[str, str]]:
+    """Extract self-contained code blocks from a patch as reusable templates."""
+    templates: list[tuple[str, str]] = []
+
+    added_lines = []
+    for line in patch_content.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            added_lines.append(line[1:])
+
+    current_block: list[str] = []
+    current_name = ""
+
+    for line in added_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            if current_block and current_name:
+                templates.append((current_name, "\n".join(current_block)))
+                current_block = []
+                current_name = ""
+            continue
+
+        if stripped.startswith("def ") or stripped.startswith("class "):
+            if current_block and current_name:
+                templates.append((current_name, "\n".join(current_block)))
+            current_name = stripped.split("(")[0].replace("def ", "").replace("class ", "")
+            current_block = [line]
+        elif (stripped.endswith("= {}") or stripped.endswith("= []")) and "=" in stripped:
+            var_name = stripped.split("=")[0].strip()
+            if current_block and current_name:
+                templates.append((current_name, "\n".join(current_block)))
+            current_name = f"Cache: {var_name}"
+            current_block = [line]
+        elif current_block:
+            current_block.append(line)
+
+    if current_block and current_name:
+        templates.append((current_name, "\n".join(current_block)))
+
+    return templates
 
 
 def _infer_category_from_text(text: str) -> str:

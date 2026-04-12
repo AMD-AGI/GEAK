@@ -42,6 +42,10 @@ def extract_experience(**kwargs: Any) -> ExperienceRecord:
     report_dir = _resolve_report_dir(patch_file, kernel_path)
 
     what_worked, what_failed, dead_ends, trajectory = _extract_notebook_insights(report_dir)
+    all_task_outcomes = _extract_all_task_outcomes(report_dir)
+    what_worked.extend(all_task_outcomes.get("worked", []))
+    what_failed.extend(all_task_outcomes.get("failed", []))
+    dead_ends.extend(all_task_outcomes.get("dead_ends", []))
     key_insight, best_change_category = _extract_report_insights(report_dir)
     hardware = _extract_hardware(profiling_metrics)
     language = _infer_language(kernel_path)
@@ -391,6 +395,53 @@ def _extract_notebook_insights(report_dir: Path | None) -> tuple[list[str], list
         _dedup(dead_ends)[:8],
         trajectory,
     )
+
+
+def _extract_all_task_outcomes(report_dir: Path | None) -> dict[str, list[str]]:
+    """Scan ALL round/task directories for outcomes, not just the best task."""
+    result: dict[str, list[str]] = {"worked": [], "failed": [], "dead_ends": []}
+    if not report_dir:
+        return result
+
+    results_dir = report_dir / "results"
+    if not results_dir.is_dir():
+        return result
+
+    seen_strategies: set[str] = set()
+
+    for round_dir in sorted(results_dir.glob("round_*")):
+        if not round_dir.is_dir():
+            continue
+        round_name = round_dir.name
+
+        for task_dir in sorted(round_dir.iterdir()):
+            if not task_dir.is_dir() or task_dir.name == "worktrees":
+                continue
+
+            br_file = task_dir / "best_results.json"
+            if not br_file.exists():
+                continue
+
+            try:
+                br = json.loads(br_file.read_text())
+                speedup = float(br.get("best_patch_speedup", 0))
+                task_name = task_dir.name
+                analysis = str(br.get("llm_selection_analysis", ""))[:150]
+
+                if task_name in seen_strategies:
+                    continue
+                seen_strategies.add(task_name)
+
+                if speedup > 1.02:
+                    result["worked"].append(f"{round_name}/{task_name}: {speedup:.3f}x")
+                elif speedup < 0.98 and speedup > 0:
+                    result["failed"].append(f"{round_name}/{task_name}: {speedup:.3f}x regression")
+                    if analysis:
+                        result["dead_ends"].append(f"{task_name}: {analysis[:100]}")
+            except Exception:
+                continue
+
+    return result
 
 
 def _extract_round_eval_insights(
