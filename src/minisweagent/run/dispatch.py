@@ -360,12 +360,12 @@ def run_task_batch(
     )
     # endregion
 
-    logger.info(
-        "[bold yellow]Running %d sub-agent(s) in parallel:[/bold yellow]%s",
-        len(tasks),
-        "".join(f"\n  - {t.label} (priority={t.priority})" for t in tasks),
-    )
-    logger.info("[dim]Sub-agents are working — expect no output for several minutes.[/dim]")
+    _task_list = "".join(f"\n  - {t.label} (priority={t.priority})" for t in tasks)
+    logger.info("Running %d sub-agent(s) in parallel:%s", len(tasks), _task_list)
+    logger.info("Sub-agents are working — expect no output for several minutes.")
+    if console:
+        console.print(f"[bold yellow]Running {len(tasks)} sub-agent(s) in parallel:[/bold yellow]{_task_list}")
+        console.print("[dim]Sub-agents are working — expect no output for several minutes.[/dim]")
 
     try:
         raw_results = ParallelAgent.run_parallel(

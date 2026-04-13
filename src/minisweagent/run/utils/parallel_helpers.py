@@ -64,7 +64,7 @@ class _ThreadLocalStream:
                 f.write(_strip_ansi(s))
                 f.flush()
             except Exception:
-                pass
+                pass  # I/O redirect must not raise; silently drop
         else:
             self._original.write(s)
             self._original.flush()
@@ -75,7 +75,7 @@ class _ThreadLocalStream:
             try:
                 f.flush()
             except Exception:
-                pass
+                pass  # I/O redirect must not raise; silently drop
         else:
             self._original.flush()
 
@@ -154,7 +154,7 @@ def replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
     # (e.g. "<repo>/optimization_logs/<run>/worktrees/agent_X/..."),
     # collapse that whole prefix back to the current worktree root first.
     # This prevents path "nesting" when replacement is applied more than once.
-    prev_worktree_pat = re.compile(re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/(?:agent|slot)_\d+")
+    prev_worktree_pat = re.compile(re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/(?:agent|slot|task)_\d+")
     text = prev_worktree_pat.sub(worktree_path_str, text)
 
     # Replace repo path (resolved and unresolved forms) with worktree path
@@ -165,7 +165,7 @@ def replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
     # Keep slot/agent id in any remaining /worktrees/ segments aligned
     # with this worktree.
     return re.sub(
-        r"/worktrees/(?:agent|slot)_\d+",
+        r"/worktrees/(?:agent|slot|task)_\d+",
         f"/worktrees/{worktree_path.name}",
         text,
     )
@@ -271,7 +271,7 @@ def create_copy_workdir(src: Path, dst: Path) -> Path:
         try:
             shutil.rmtree(dst)
         except Exception:
-            pass
+            pass  # best-effort cleanup before copytree
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src, dst, symlinks=True)
     return dst
@@ -602,7 +602,8 @@ def run_pool(
                     if _wm_bm_path:
                         try:
                             _wm_notebook_dir = str(Path(_wm_bm_path).resolve().parent / "_working_memory")
-                        except Exception:
+                        except Exception as exc:
+                            logger.debug("WM notebook dir resolution failed: %s", exc)
                             _wm_notebook_dir = None
                     # Extract kernel name from baseline_metrics path
                     _wm_kernel_cat = "unknown"
@@ -648,18 +649,18 @@ def run_pool(
                                         f"[PROFILER] Target kernel ({_target.get('name', '?')[:40]}) dominates at {_target_pct:.0f}%. "
                                         "Focus optimization on the kernel body itself."
                                     )
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Profiler diagnosis from baseline_metrics failed: %s", exc)
                     agent._working_memory = _wm
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("WorkingMemory init failed for task %d: %s", task_id, exc)
 
             with open(log_file, "w", encoding="utf-8") as f:
                 f.write(f"Task {task_id} ({label}) Conversation Log\n")
                 f.write(f"GPU: {hip_devices} | Priority: {task.priority} | Language: {task.kernel_language}\n")
                 f.write("=" * 60 + "\n\n")
 
-            logger.info("[dim]Sub-agent %d (%s) started on GPU %s[/dim]", task_id, label, hip_devices)
+            logger.info("Sub-agent %d (%s) started on GPU %s", task_id, label, hip_devices)
             _agent_t0 = time.monotonic()
             exit_status, result, extra_info = None, None, None
             with redirect_output_fn(log_file):
@@ -695,8 +696,8 @@ def run_pool(
                     )
                     if _diff.returncode == 0 and _diff.stdout.strip():
                         (task_patch_dir / "patch_0.patch").write_text(_diff.stdout)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Auto-extract patch via git diff failed: %s", exc)
 
             # region agent log
             emit_debug_log(
@@ -752,14 +753,14 @@ def run_pool(
             total = sum(c for _, c in patches_by_task)
             summary = ", ".join(f"{l}: {c}" for l, c in patches_by_task if c > 0)
             logger.info(
-                "[dim]\\[running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
+                "[running %.1fmin] Sub-agents working: %d total patches%s",
                 elapsed / 60,
                 total,
                 f" ({summary})" if summary else "",
                 extra={"progress_tick": True},
             )
             for pp in new_patch_paths:
-                logger.info("[dim]  New patch: %s[/dim]", pp)
+                logger.info("  New patch: %s", pp)
 
     _progress_thread = threading.Thread(target=_report_progress, daemon=True)
     _progress_thread.start()

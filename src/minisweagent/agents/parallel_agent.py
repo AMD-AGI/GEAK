@@ -483,7 +483,7 @@ class ParallelAgent(DefaultAgent):
         # collapse that whole prefix back to the current worktree root first.
         # This prevents path "nesting" when replacement is applied more than once.
         prev_worktree_pat = re.compile(
-            re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/(?:agent|slot)_\d+"
+            re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/(?:agent|slot|task)_\d+"
         )
         text = prev_worktree_pat.sub(worktree_path_str, text)
 
@@ -495,7 +495,7 @@ class ParallelAgent(DefaultAgent):
         # Keep slot id in any remaining /worktrees/slot_<id> segments aligned
         # with this worktree.
         return re.sub(
-            r"/worktrees/(?:agent|slot)_\d+",
+            r"/worktrees/(?:agent|slot|task)_\d+",
             f"/worktrees/{worktree_path.name}",
             text,
         )
@@ -674,7 +674,7 @@ class ParallelAgent(DefaultAgent):
 
             _task_label = tasks[agent_id].label if tasks and agent_id < len(tasks) else f"task_{agent_id}"
             logger.info(
-                "[dim]Sub-agent %d (%s) started on GPU %s[/dim]",
+                "Sub-agent %d (%s) started on GPU %s",
                 agent_id,
                 _task_label,
                 new_env.get("GEAK_GPU_DEVICE", "?"),
@@ -733,14 +733,14 @@ class ParallelAgent(DefaultAgent):
                 total_patches = sum(c for _, c in patches_by_agent)
                 summary = ", ".join(f"{l}: {c}" for l, c in patches_by_agent if c > 0)
                 logger.info(
-                    "[dim]\\[running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
+                    "[running %.1fmin] Sub-agents working: %d total patches%s",
                     elapsed / 60,
                     total_patches,
                     f" ({summary})" if summary else "",
                     extra={"progress_tick": True},
                 )
                 for pp in new_patch_paths:
-                    logger.info("[dim]  New patch: %s[/dim]", pp)
+                    logger.info("  New patch: %s", pp)
 
         _progress_thread = threading.Thread(target=_report_progress, daemon=True)
         _progress_thread.start()

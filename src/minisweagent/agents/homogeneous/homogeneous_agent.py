@@ -124,15 +124,18 @@ def run_homogeneous_agent(
     # Get model config for factory
     model_config = config.get("model", {})
 
+    _banner = "=" * 60
     logger.info(
-        "\n[bold cyan]%s[/bold cyan]\n  [bold]Homogeneous Agent[/bold] (%d agents, GPUs %s)\n[bold cyan]%s[/bold cyan]",
-        "=" * 60,
-        final_num_parallel,
-        final_gpu_ids,
-        "=" * 60,
+        "\n%s\n  Homogeneous Agent (%d agents, GPUs %s)\n%s",
+        _banner, final_num_parallel, final_gpu_ids, _banner,
     )
     logger.info("  repo=%s, output_dir=%s", final_repo, final_output_dir)
-    logger.info("[dim]Sub-agents are working — expect no output for several minutes.[/dim]")
+    logger.info("Sub-agents are working — expect no output for several minutes.")
+    console.print(
+        f"\n[bold cyan]{_banner}[/bold cyan]\n  [bold]Homogeneous Agent[/bold] ({final_num_parallel} agents, GPUs {final_gpu_ids})\n[bold cyan]{_banner}[/bold cyan]"
+    )
+    console.print(f"  repo={final_repo}, output_dir={final_output_dir}")
+    console.print("[dim]Sub-agents are working — expect no output for several minutes.[/dim]")
 
     # Create and run ParallelAgent
     agent = ParallelAgent(model, env, **agent_config)
@@ -168,8 +171,8 @@ def run_homogeneous_agent(
             str(best_result.patch_dir / best_result.patch_id) if best_result and best_result.patch_dir else None
         )
         report = {
-            "status": "complete",
-            "best_patch": best_result.best_patch_file or best_patch_path if best_result else None,
+            "status": "complete" if best_result else "complete_no_patch",
+            "best_patch": (best_result.best_patch_file or best_patch_path) if best_result else None,
             "best_speedup": speedup,
             "summary": best_result.llm_conclusion if best_result else "No best patch selected",
         }
@@ -180,6 +183,17 @@ def run_homogeneous_agent(
     except Exception as e:
         logger.error("Homogeneous agent failed: %s", e, exc_info=True)
         console.print(f"[bold red]Error:[/bold red] {e}")
+        error_report = {
+            "status": "error",
+            "best_patch": None,
+            "best_speedup": None,
+            "summary": str(e),
+        }
+        error_report_path = final_output_dir / "final_report.json"
+        try:
+            error_report_path.write_text(json.dumps(error_report, indent=2, default=str))
+        except Exception:
+            logger.debug("Failed to write error report to %s", error_report_path)
         raise
 
     return best_result

@@ -791,7 +791,7 @@ class SaveAndTestTool:
                 try:
                     Path(f).unlink(missing_ok=True)
                 except Exception:
-                    pass
+                    pass  # best-effort temp file cleanup
 
     def _format_output(
         self,

@@ -153,7 +153,7 @@ class MCPToolBridge:
             try:
                 self._run_async(self._client.stop())
             except Exception:
-                pass
+                pass  # shutdown must not raise
         loop = self._loop
         if loop is None or loop.is_closed():
             return

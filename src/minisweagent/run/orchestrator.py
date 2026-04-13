@@ -26,6 +26,14 @@ from minisweagent.run.pipeline_helpers import DEFAULT_HETEROGENEOUS, DEFAULT_PIP
 logger = logging.getLogger(__name__)
 
 
+def _max_rounds_source(max_rounds: int, env_value: str | None) -> str:
+    """Return 'arg', 'env', or 'default' indicating where max_rounds came from."""
+    default = int(env_value) if env_value else 5
+    if max_rounds != default:
+        return "arg"
+    return "env" if env_value else "default"
+
+
 def run_orchestrator(
     preprocess_ctx: dict[str, Any],
     gpu_ids: list[int],
@@ -69,9 +77,7 @@ def run_orchestrator(
         "run_orchestrator: output_dir=%s, max_rounds=%d (source=%s), start_round=%d, heterogeneous=%s",
         _out,
         max_rounds,
-        "arg"
-        if (max_rounds != int(_env_rounds or "5") if _env_rounds else max_rounds != 5)
-        else ("env" if _env_rounds else "default"),
+        _max_rounds_source(max_rounds, _env_rounds),
         start_round,
         heterogeneous,
     )

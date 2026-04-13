@@ -123,6 +123,8 @@ class DefaultAgent:
         self.patch_counter = 0
         self.log_file: Path | None = None
         self.base_repo_path: Path | None = None
+        # Incremental trajectory writing (traj.json)
+        self._traj_last_saved_idx: int = -1
         # Initialize tool runtime with strategy manager settings
         # Subclasses (like StrategyAgent) can override _get_strategy_callback() for UI notifications
         self.toolruntime = ToolRuntime(
@@ -272,6 +274,7 @@ class DefaultAgent:
         """Run step() until agent is finished. Return exit status & message"""
         self.extra_template_vars |= {"task": task, **kwargs}
         self.messages = []
+        self._traj_last_saved_idx = -1
         if self.config.use_skills:
             self.config.system_template += self.skillruntime.build_system_prompt()
         self.add_message("system", self.render_template(self.config.system_template))
@@ -298,7 +301,44 @@ class DefaultAgent:
                 self._run_select_patch_agent()
                 return e_type.__name__, e_msg
             finally:
-                pass
+                self._save_traj()
+
+    def _save_traj(self):
+        """Incrementally append new messages to `traj.json` (JSONL style).
+
+        Notes:
+        - Writes only newly-added messages since the last call.
+        - In parallel runs, each agent writes under its own `parallel_{idx}/` dir
+          because `patch_output_dir` is set per agent.
+        """
+        if not self.messages:
+            return
+
+        # Prefer patch_output_dir (parallel-aware). Fall back to log_file dir, then cwd.
+        base_dir: Path
+        if getattr(self.config, "patch_output_dir", None):
+            base_dir = Path(self.config.patch_output_dir).resolve()
+        elif self.log_file:
+            base_dir = self.log_file.parent.resolve()
+        else:
+            base_dir = Path(getattr(self.env.config, "cwd", None) or os.getcwd()).resolve()
+
+        traj_path = base_dir / "traj.json"
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        start_idx = self._traj_last_saved_idx + 1
+        if start_idx >= len(self.messages):
+            return
+
+        try:
+            with open(traj_path, "a", encoding="utf-8") as f:
+                for i in range(start_idx, len(self.messages)):
+                    f.write(json.dumps(self.messages[i], ensure_ascii=False, default=str) + "\n")
+                f.flush()
+            self._traj_last_saved_idx = len(self.messages) - 1
+        except Exception as exc:
+            logger.debug("_save_traj: best-effort traj write failed: %s", exc)
+            return
 
     def step(self) -> dict:
         """Query the LM, execute the action, return the observation."""

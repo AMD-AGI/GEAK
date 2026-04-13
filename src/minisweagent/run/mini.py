@@ -162,7 +162,8 @@ def main(
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
     config = yaml.safe_load(base_config_path.read_text(encoding="utf-8")) or {}
     if config:
-        logger.info("Loaded base config from [bold green]'%s'[/bold green]", base_config_path.name)
+        logger.info("Loaded base config from '%s'", base_config_path.name)
+        console.print(f"Loaded base config from [bold green]'{base_config_path.name}'[/bold green]")
     else:
         logger.warning(
             "Base config %s: null or empty YAML file.",
@@ -172,9 +173,9 @@ def main(
     config_path = config_spec or (builtin_config_dir / "geak.yaml")
     user_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if user_config:
-        logger.info(
-            "Loaded user config from [bold green]'%s'[/bold green] [dim](final override)[/dim]",
-            config_path.name,
+        logger.info("Loaded user config from '%s' (final override)", config_path.name)
+        console.print(
+            f"Loaded user config from [bold green]'{config_path.name}'[/bold green] [dim](final override)[/dim]"
         )
     else:
         logger.warning(
@@ -212,14 +213,16 @@ def main(
 
     model = get_model(model_name, config.get("model", {}))
     _model_name = getattr(model.config, "model_name", "unknown")
-    logger.info("Using model: [bold cyan]%s[/bold cyan]", _model_name)
+    logger.info("Using model: %s", _model_name)
+    console.print(f"Using model: [bold cyan]{_model_name}[/bold cyan]")
 
     task_content = task
     if task:
         task_path = Path(task)
         if task_path.exists() and task_path.is_file():
             task_content = task_path.read_text(encoding="utf-8")
-            logger.info("[bold green]Read task from file: %s[/bold green]", task_path)
+            logger.info("Read task from file: %s", task_path)
+            console.print(f"[bold green]Read task from file: {task_path}[/bold green]")
         elif not task.strip():
             task_content = None
             logger.info("Task content is empty.")
@@ -245,7 +248,8 @@ def main(
     if task_content:
         from minisweagent.run.utils.task_parser import parse_pipeline_params
 
-        logger.info("[bold cyan]Checking task for pipeline parameters...[/bold cyan]")
+        logger.info("Checking task for pipeline parameters...")
+        console.print("[bold cyan]Checking task for pipeline parameters...[/bold cyan]")
         pipeline_params = parse_pipeline_params(task_content, model)
         logger.debug("pipeline_params: %s", pipeline_params)
 
@@ -307,7 +311,8 @@ def main(
     if config_spec is None and parsed_config.get("config"):
         _task_config_path = get_config_path(Path(parsed_config["config"]))
         if _task_config_path and _task_config_path.exists():
-            logger.info("[dim]Applying config from task: '%s'[/dim]", _task_config_path)
+            logger.info("Applying config from task: '%s'", _task_config_path)
+            console.print(f"[dim]Applying config from task: '{_task_config_path}'[/dim]")
             _task_yaml = yaml.safe_load(_task_config_path.read_text(encoding="utf-8"))
             _task_user_config = _task_yaml or {}
             if not _task_yaml:
@@ -320,7 +325,8 @@ def main(
     if model_name is None and parsed_config.get("model"):
         model_name = parsed_config["model"]
         model = get_model(model_name, config.get("model", {}))
-        logger.info("Using model (from task): [bold cyan]%s[/bold cyan]", model_name)
+        logger.info("Using model (from task): %s", model_name)
+        console.print(f"Using model (from task): [bold cyan]{model_name}[/bold cyan]")
 
     if output is None and parsed_config.get("output_dir"):
         output = Path(parsed_config["output_dir"])
@@ -328,9 +334,8 @@ def main(
 
     kernel_target = kernel_url or parsed_config.get("kernel_url") or parsed_config.get("kernel_name")
     if not kernel_target:
-        logger.error(
-            "[red]Error: missing kernel target. Provide --kernel-url or include kernel info in task.[/red]"
-        )
+        logger.error("Error: missing kernel target. Provide --kernel-url or include kernel info in task.")
+        console.print("[red]Error: missing kernel target. Provide --kernel-url or include kernel info in task.[/red]")
         raise typer.Exit(1)
 
     parsed_gpu_ids = parse_gpu_ids(gpu_ids)
@@ -355,9 +360,13 @@ def main(
     _run_t0 = time.monotonic()
     config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
     logger.info(
-        "[dim]Logs and artifacts for this run are under '%s' "
-        "(e.g. optimization_logs/<kernel>_<timestamp>/).[/dim]",
+        "Logs and artifacts for this run are under '%s' "
+        "(e.g. optimization_logs/<kernel>_<timestamp>/).",
         preprocess_output_dir,
+    )
+    console.print(
+        f"[dim]Logs and artifacts for this run are under '{preprocess_output_dir}' "
+        "(e.g. optimization_logs/<kernel>_<timestamp>/).[/dim]"
     )
 
     # Display the *resolved* configuration (CLI overrides auto-detection).
@@ -386,7 +395,8 @@ def main(
         env_class = get_environment_class(env_type)
         env = env_class(**_env_kwargs)
     except Exception as e:
-        logger.error("[red]Error: failed to initialize env.type=%s: %s[/red]", env_type, e)
+        logger.error("Error: failed to initialize env.type=%s: %s", env_type, e)
+        console.print(f"[red]Error: failed to initialize env.type={env_type}: {e}[/red]")
         raise typer.Exit(1)
 
     harness_spec = config.get("patch", {}).get("harness")
@@ -394,7 +404,8 @@ def main(
         promoted = _try_promote_to_harness(test_command)
         if promoted:
             harness_spec = promoted
-            logger.info("[bold cyan]Promoted test command to validated harness: %s[/bold cyan]", promoted)
+            logger.info("Promoted test command to validated harness: %s", promoted)
+            console.print(f"[bold cyan]Promoted test command to validated harness: {promoted}[/bold cyan]")
 
     _preprocess_kwargs = dict(
         kernel_url=kernel_target,
@@ -411,9 +422,8 @@ def main(
             preprocess_ctx = run_preprocessor(**_preprocess_kwargs, harness=harness_spec)
         except RuntimeError as exc:
             if "harness" in str(exc).lower():
-                logger.warning(
-                    "[yellow]Harness validation failed, falling back to eval_command: %s[/yellow]", exc
-                )
+                logger.warning("Harness validation failed, falling back to eval_command: %s", exc)
+                console.print(f"[yellow]Harness validation failed, falling back to eval_command: {exc}[/yellow]")
                 preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
             else:
                 raise

@@ -559,8 +559,8 @@ def _run_task_agent(
             combined_memory = "\n\n".join(part.strip() for part in (_wm_ctx, _mem or "") if part and str(part).strip())
             if combined_memory:
                 template_vars["memory_context"] = combined_memory
-        except Exception as _mem_exc:
-            logger.warning("Memory assembly failed in task generator: %s", _mem_exc)
+        except Exception as exc:
+            logger.warning("Memory assembly failed in task generator: %s", exc)
 
         _kernel_meta = {
             "file_path": kernel_path,
@@ -596,7 +596,7 @@ def _run_task_agent(
             if template_vars.get(k)
         ]
         logger.info(
-            "[bold yellow]Starting task-generation agent[/bold yellow] "
+            "Starting task-generation agent "
             "(step_limit=%d, cost=%.1f, context=%s) — this may take a few minutes",
             tg_step_limit,
             tg_cost_limit,
@@ -612,7 +612,7 @@ def _run_task_agent(
 
         if exit_type == "Submitted":
             logger.info(
-                "[bold green]Task-generation agent completed[/bold green] in %.1fs (%d chars).",
+                "Task-generation agent completed in %.1fs (%d chars).",
                 _elapsed,
                 len(exit_msg),
             )
