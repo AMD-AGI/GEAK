@@ -634,15 +634,42 @@ def _generate_c_like_python_harness(
 
 
         def _extract_latency_ms(output: str, fallback_ms: float) -> float:
+            marker = re.search(r"GEAK_RESULT_LATENCY_MS=([\\d.]+(?:[eE][+-]?\\d+)?)", output)
+            if marker:
+                return float(marker.group(1))
+
+            def _to_ms(value: str, unit: str) -> float:
+                scale = {{"us": 1.0 / 1000.0, "µs": 1.0 / 1000.0, "ms": 1.0, "s": 1000.0}}[unit.lower()]
+                return float(value) * scale
+
+            shape_latencies = [
+                _to_ms(match.group(1), match.group(2))
+                for match in re.finditer(
+                    r"Perf:\\s*([\\d.]+(?:[eE][+-]?\\d+)?)\\s*(us|µs|ms|s)(?:/launch)?\\s*\\(([^)]+)\\)",
+                    output,
+                    re.IGNORECASE,
+                )
+            ]
+            if shape_latencies:
+                return statistics.geometric_mean(shape_latencies)
+
+            perf_launch_latencies = [
+                _to_ms(match.group(1), match.group(2))
+                for match in re.finditer(
+                    r"^\\s*Perf:\\s*([\\d.]+(?:[eE][+-]?\\d+)?)\\s*(us|µs|ms|s)(?:/launch)?\\s*$",
+                    output,
+                    re.IGNORECASE | re.MULTILINE,
+                )
+            ]
+            if perf_launch_latencies:
+                return statistics.geometric_mean(perf_launch_latencies)
+
             patterns = (
-                (r"GEAK_RESULT_LATENCY_MS=([\\d.]+(?:e[+-]?\\d+)?)", 1.0),
-                (r"Perf:\\s*([\\d.]+(?:e[+-]?\\d+)?)\\s*us/launch", 1.0 / 1000.0),
-                (r"Perf:\\s*([\\d.]+(?:e[+-]?\\d+)?)\\s*ms/launch", 1.0),
-                (r"TOTAL_KERNEL_TIME_MS:\\s*([\\d.]+(?:e[+-]?\\d+)?)", 1.0),
-                (r"BENCHMARK_LATENCY_MS:\\s*([\\d.]+(?:e[+-]?\\d+)?)", 1.0),
+                (r"TOTAL_KERNEL_TIME_MS\\s*[:=]\\s*([\\d.]+(?:[eE][+-]?\\d+)?)", 1.0),
+                (r"BENCHMARK_LATENCY_MS\\s*[:=]\\s*([\\d.]+(?:[eE][+-]?\\d+)?)", 1.0),
             )
             for pattern, scale in patterns:
-                match = re.search(pattern, output)
+                match = re.search(pattern, output, re.IGNORECASE)
                 if match:
                     return float(match.group(1)) * scale
             return fallback_ms

@@ -14,6 +14,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from minisweagent.run.benchmark_output import (
+    compute_shape_speedups,
+    extract_latency_ms,
+    parse_shape_latencies_ms,
+)
+
 _OVERALL_SPEEDUP_RE = re.compile(
     r"Overall:\s*([0-9]+(?:\.[0-9]+)?)x\s*"
     r"\(([0-9]+(?:\.[0-9]+)?)\s*ms\s*->\s*([0-9]+(?:\.[0-9]+)?)\s*ms\)",
@@ -40,16 +46,20 @@ def _sanitize_writer_id(writer_id: str) -> str:
     return cleaned.strip("-") or "default"
 
 
-def parse_speedup_report(text: str, baseline_ms: float | None = None) -> dict[str, Any]:
+def parse_speedup_report(
+    text: str,
+    baseline_ms: float | None = None,
+    baseline_shape_latencies_ms: dict[str, float] | None = None,
+) -> dict[str, Any]:
     """Parse the save_and_test speedup summary block.
 
     Returns a dict containing an optional overall speedup and a per-shape map.
     Missing information is represented with ``None`` / empty dicts.
 
     When ``baseline_ms`` is supplied (from the notebook's stored baseline),
-    speedup is computed from ``candidate_ms / baseline_ms`` even when the
+    speedup is computed from ``baseline_ms / candidate_ms`` even when the
     ``Overall: Xx (Y ms -> Z ms)`` line is absent -- e.g. when the harness
-    only prints ``GEAK_RESULT_LATENCY_MS=<number>``.
+    only prints raw shape latencies such as HIP ``Perf: ... (shape_*)`` lines.
     """
 
     report: dict[str, Any] = {
@@ -68,9 +78,7 @@ def parse_speedup_report(text: str, baseline_ms: float | None = None) -> dict[st
         report["candidate_ms"] = float(overall.group(3))
 
     if report["candidate_ms"] is None:
-        lat_match = re.search(r"GEAK_RESULT_LATENCY_MS=([\d.]+(?:e[+-]?\d+)?)", text)
-        if lat_match:
-            report["candidate_ms"] = float(lat_match.group(1))
+        report["candidate_ms"] = extract_latency_ms(text)
 
     if report["overall_speedup"] is None and report["candidate_ms"] is not None:
         bl = report["baseline_ms"] or baseline_ms
@@ -85,6 +93,10 @@ def parse_speedup_report(text: str, baseline_ms: float | None = None) -> dict[st
             "baseline_ms": float(match.group(3)),
             "candidate_ms": float(match.group(4)),
         }
+    if not per_shape and baseline_shape_latencies_ms:
+        candidate_shape_latencies = parse_shape_latencies_ms(text)
+        if candidate_shape_latencies:
+            per_shape = compute_shape_speedups(baseline_shape_latencies_ms, candidate_shape_latencies)
     report["per_shape"] = per_shape
     return report
 
@@ -114,12 +126,14 @@ class WorkingNotebook:
         baseline_latency_ms: float | None,
         bottleneck_type: str | None,
         kernel_category: str | None,
+        shape_latencies_ms: dict[str, float] | None = None,
     ) -> None:
         self.append_event(
             "baseline",
             baseline_latency_ms=baseline_latency_ms,
             bottleneck_type=bottleneck_type,
             kernel_category=kernel_category,
+            shape_latencies_ms=shape_latencies_ms or {},
         )
 
     def record_attempt(
@@ -147,8 +161,12 @@ class WorkingNotebook:
         message: str | None = None,
         step: int | None = None,
     ) -> None:
-        stored_baseline = self._get_stored_baseline_ms()
-        parsed = parse_speedup_report(output, baseline_ms=stored_baseline)
+        stored_baseline, stored_shapes = self._get_stored_baseline_data()
+        parsed = parse_speedup_report(
+            output,
+            baseline_ms=stored_baseline,
+            baseline_shape_latencies_ms=stored_shapes,
+        )
         self.append_event(
             "result",
             strategy=strategy,
@@ -163,10 +181,10 @@ class WorkingNotebook:
             per_shape=parsed.get("per_shape", {}),
         )
 
-    def _get_stored_baseline_ms(self) -> float | None:
-        """Read the baseline latency from this notebook's event log."""
+    def _get_stored_baseline_data(self) -> tuple[float | None, dict[str, float]]:
+        """Read baseline latency and per-shape latencies from this notebook."""
         if not self.writer_path.exists():
-            return None
+            return None, {}
         try:
             with open(self.writer_path, encoding="utf-8") as f:
                 for line in f:
@@ -176,11 +194,19 @@ class WorkingNotebook:
                     event = json.loads(line)
                     if event.get("kind") == "baseline":
                         val = _safe_float(event.get("baseline_latency_ms"))
+                        shape_latencies: dict[str, float] = {}
+                        raw_shapes = event.get("shape_latencies_ms")
+                        if isinstance(raw_shapes, dict):
+                            shape_latencies = {
+                                str(shape): float(lat)
+                                for shape, lat in raw_shapes.items()
+                                if _safe_float(lat) is not None and float(lat) > 0
+                            }
                         if val is not None and val > 0:
-                            return val
+                            return val, shape_latencies
         except (OSError, json.JSONDecodeError):
             pass
-        return None
+        return None, {}
 
     def record_round_evaluation(
         self,

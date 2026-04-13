@@ -28,7 +28,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from minisweagent.memory.working_notebook import WorkingNotebook, summarize_working_notebook
+from minisweagent.memory.working_notebook import (
+    WorkingNotebook,
+    parse_speedup_report,
+    summarize_working_notebook,
+)
+from minisweagent.run.benchmark_output import extract_latency_ms, parse_shape_latencies_ms
 
 MAX_WORKING_MEMORY_TOKENS = 800
 MAX_INSIGHTS = 15
@@ -74,6 +79,7 @@ class WorkingMemory:
     speedup_history: list[tuple[int, float]] = field(default_factory=list)
     steps_since_improvement: int = 0
     baseline_latency_ms: float = 0.0
+    baseline_shape_latencies_ms: dict[str, float] = field(default_factory=dict)
     best_latency_ms: float = 0.0
     bottleneck_type: str = ""
     latency_history: list[float] = field(default_factory=list)
@@ -214,13 +220,17 @@ class WorkingMemory:
             if bm.get("bottleneck"):
                 self.bottleneck_type = str(bm["bottleneck"])
 
-        harness_latency = self._extract_harness_baseline(benchmark_baseline_path)
+        harness_latency, harness_shapes = self._extract_harness_baseline_data(benchmark_baseline_path)
         if harness_latency is not None:
             self.baseline_latency_ms = harness_latency
+        if harness_shapes:
+            self.baseline_shape_latencies_ms = harness_shapes
 
     @staticmethod
-    def _extract_harness_baseline(benchmark_baseline_path: str | None) -> float | None:
-        """Extract GEAK_RESULT_LATENCY_MS from harness artifacts.
+    def _extract_harness_baseline_data(
+        benchmark_baseline_path: str | None,
+    ) -> tuple[float | None, dict[str, float]]:
+        """Extract canonical baseline latency and shapes from harness artifacts.
 
         Checks ``benchmark_baseline.txt`` first, then falls back to the
         benchmark entry in ``harness_results.json`` (sibling file).
@@ -228,12 +238,11 @@ class WorkingMemory:
         from pathlib import Path
 
         if benchmark_baseline_path and Path(benchmark_baseline_path).exists():
-            m = re.search(
-                r"GEAK_RESULT_LATENCY_MS=([\d.]+(?:e[+-]?\d+)?)",
-                Path(benchmark_baseline_path).read_text(),
-            )
-            if m:
-                return float(m.group(1))
+            text = Path(benchmark_baseline_path).read_text()
+            latency_ms = extract_latency_ms(text)
+            shape_latencies = parse_shape_latencies_ms(text)
+            if latency_ms is not None or shape_latencies:
+                return latency_ms, shape_latencies
 
         # Fallback: harness_results.json in the same directory
         if benchmark_baseline_path:
@@ -245,16 +254,15 @@ class WorkingMemory:
                     entries = json.loads(harness_results.read_text())
                     for entry in entries if isinstance(entries, list) else []:
                         if entry.get("mode") in ("benchmark", "full-benchmark") and entry.get("success"):
-                            m = re.search(
-                                r"GEAK_RESULT_LATENCY_MS=([\d.]+(?:e[+-]?\d+)?)",
-                                entry.get("stdout", ""),
-                            )
-                            if m:
-                                return float(m.group(1))
+                            stdout = entry.get("stdout", "")
+                            latency_ms = extract_latency_ms(stdout)
+                            shape_latencies = parse_shape_latencies_ms(stdout)
+                            if latency_ms is not None or shape_latencies:
+                                return latency_ms, shape_latencies
                 except (json.JSONDecodeError, ValueError):
                     pass
 
-        return None
+        return None, {}
 
     def sync_notebook_baseline(self) -> None:
         """Persist the current baseline metadata into the working notebook."""
@@ -264,6 +272,7 @@ class WorkingMemory:
             baseline_latency_ms=self.baseline_latency_ms or None,
             bottleneck_type=self.bottleneck_type or None,
             kernel_category=self.kernel_category or None,
+            shape_latencies_ms=self.baseline_shape_latencies_ms or None,
         )
 
     def remember_pending_change(self, strategy: str, change_category: str) -> None:
@@ -310,35 +319,38 @@ class WorkingMemory:
             self._track_errors(output, returncode)
             return
 
-        overall = re.search(r"Overall:\s*([0-9]+(?:\.[0-9]+)?)x", output, re.IGNORECASE)
-        if overall:
-            speedup = float(overall.group(1))
-            prev_best = self.best_speedup
-            self.update_speedup(speedup)
-            if speedup > prev_best:
+        parsed = parse_speedup_report(
+            output,
+            baseline_ms=self.baseline_latency_ms or None,
+            baseline_shape_latencies_ms=self.baseline_shape_latencies_ms or None,
+        )
+        candidate_raw = parsed.get("candidate_ms")
+        baseline_raw = parsed.get("baseline_ms")
+        speedup_raw = parsed.get("overall_speedup")
+        candidate_ms = float(candidate_raw) if candidate_raw is not None else None
+        parsed_baseline_ms = float(baseline_raw) if baseline_raw is not None else None
+        overall_speedup = float(speedup_raw) if speedup_raw is not None else None
+
+        prev_best = self.best_speedup
+        baseline_for_speedup = parsed_baseline_ms or self.baseline_latency_ms
+        if baseline_for_speedup and baseline_for_speedup > 0:
+            self.baseline_latency_ms = baseline_for_speedup
+
+        if candidate_ms is not None and candidate_ms > 0:
+            if self.baseline_latency_ms > 0:
+                self.update_latency(candidate_ms)
+            else:
+                self.latency_history.append(candidate_ms)
+                if self.best_latency_ms <= 0 or candidate_ms < self.best_latency_ms:
+                    self.best_latency_ms = candidate_ms
+            if self.best_speedup > prev_best:
                 self.best_strategy = self.pending_strategy
                 self.best_change_category = self.pending_change_category
-
-        # Fallback: extract latency from various benchmark formats
-        if not overall and self.baseline_latency_ms > 0:
-            lat_ms = None
-            lat_match = re.search(r"GEAK_RESULT_LATENCY_MS=(\d+\.?\d*)", output)
-            if lat_match:
-                lat_ms = float(lat_match.group(1))
-            if lat_ms is None:
-                geo_match = re.search(r"[Gg]eo\s*mean:\s*(\d+\.\d+)\s*ms", output)
-                if geo_match:
-                    lat_ms = float(geo_match.group(1))
-            if lat_ms is None:
-                shape_lats = re.findall(r":\s*(\d+\.\d+)\s*ms", output)
-                if len(shape_lats) >= 2:
-                    lat_ms = float(shape_lats[-1])
-            if lat_ms is not None and lat_ms > 0:
-                prev_best = self.best_speedup
-                self.update_latency(lat_ms)
-                if self.baseline_latency_ms / lat_ms > prev_best:
-                    self.best_strategy = self.pending_strategy
-                    self.best_change_category = self.pending_change_category
+        elif overall_speedup is not None and overall_speedup > 0:
+            self.update_speedup(overall_speedup)
+            if overall_speedup > prev_best:
+                self.best_strategy = self.pending_strategy
+                self.best_change_category = self.pending_change_category
 
         self._track_errors(output, returncode)
 
@@ -785,17 +797,20 @@ def extract_insight_from_tool_result(tool_name: str, output: str, returncode: in
         tag = "WIN" if sp > 1.0 else "OK"
         return Insight(step=0, tag=tag, message=f"OpenEvolve best: {sp:.2f}x")
 
-    # Custom benchmark: "Geo mean: 0.024120ms" or "geo mean: X.XXms"
-    geo_match = re.search(r"[Gg]eo\s*mean:\s*(\d+\.\d+)\s*ms", output)
-    if geo_match:
-        lat = float(geo_match.group(1))
-        return Insight(step=0, tag="OK", message=f"Benchmark latency: {lat:.4f}ms")
-
-    # Shape-specific latencies: "hd=256 tn=1: 0.0238ms" — take last as summary
-    shape_lats = re.findall(r":\s*(\d+\.\d+)\s*ms", output)
-    if len(shape_lats) >= 2:
-        lat = float(shape_lats[-1])
-        return Insight(step=0, tag="OK", message=f"Benchmark latency: {lat:.4f}ms")
+    # Generic benchmark outputs (geo mean, HIP Perf lines, shape tables, etc.)
+    benchmark_like = (
+        "perf:" in output_lower
+        or "geomean" in output_lower
+        or "geo mean" in output_lower
+        or "latency" in output_lower
+        or "benchmark" in output_lower
+        or "total_kernel_time_ms" in output_lower
+        or bool(parse_shape_latencies_ms(output))
+    )
+    if benchmark_like:
+        lat = extract_latency_ms(output)
+        if lat is not None:
+            return Insight(step=0, tag="OK", message=f"Benchmark latency: {lat:.4f}ms")
 
     # Generic latency after keywords: "latency: X.XXms", "time: X.XXms"
     lat_generic = re.search(r"(?:latency|result|time)[:\s]+(\d+\.\d+)\s*ms", output, re.IGNORECASE)

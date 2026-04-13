@@ -20,201 +20,19 @@ import re
 from pathlib import Path
 from typing import Any
 
+from minisweagent.run import benchmark_output as _benchmark_output
+
 logger = logging.getLogger(__name__)
 
-
-def parse_median_latency_ms(output: str) -> float | None:
-    """Extract median latency (ms) from harness benchmark output."""
-    m = re.search(
-        r"(?:[Mm]edian\s+(?:latency|time)[\w\s]*|total\s+median\s+time)\s*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms",
-        output,
-        re.IGNORECASE,
-    )
-    return float(m.group(1)) if m else None
-
-
-def parse_total_kernel_time_ms(output: str) -> float | None:
-    """Extract TOTAL_KERNEL_TIME_MS or BENCHMARK_LATENCY_MS from harness benchmark output."""
-    m = re.search(
-        r"(?:TOTAL_KERNEL_TIME_MS|BENCHMARK_LATENCY_MS):\s*([\d.]+(?:e[+-]?\d+)?)",
-        output,
-    )
-    return float(m.group(1)) if m else None
-
-
-def _parse_benchmark_metric(output: str) -> float | None:
-    """Extract from BENCHMARK_METRIC:, median_latency_ms:, or Geomean (ms): lines."""
-    for pat in (
-        r"BENCHMARK_METRIC:\s*median_latency_ms=([\d.]+(?:e[+-]?\d+)?)",
-        r"median_latency_ms:\s*([\d.]+(?:e[+-]?\d+)?)",
-        r"Geomean\s*\(ms\)\s*:\s*([\d.]+(?:e[+-]?\d+)?)",
-    ):
-        m = re.search(pat, output, re.IGNORECASE)
-        if m:
-            return float(m.group(1))
-    return None
-
-
-def parse_google_benchmark_ms(output: str) -> float | None:
-    """Parse Google Benchmark format: <name> <iters> <latency> ms."""
-    m = re.search(r"^\S+\s+\d+\s+([\d.]+(?:e[+-]?\d+)?)\s+ms", output, re.MULTILINE)
-    return float(m.group(1)) if m else None
-
-
-def parse_shape_count(output: str) -> int | None:
-    """Extract shape count from harness benchmark output."""
-    m = re.search(r"(\d+)\s+shapes", output, re.IGNORECASE)
-    return int(m.group(1)) if m else None
-
-
-def parse_shape_latencies_ms(output: str) -> dict[str, float]:
-    """Extract per-shape latencies from harness benchmark output.
-
-    Expected format:
-        ``(32,4096): 0.0503 ms``
-    """
-    shape_latencies: dict[str, float] = {}
-    for m in re.finditer(r"^\s*(\([^)]*\)):\s*([\d.]+(?:e[+-]?\d+)?)\s*ms\s*$", output, re.MULTILINE):
-        shape_latencies[m.group(1)] = float(m.group(2))
-    return shape_latencies
-
-
-def extract_benchmark_config_lines(output: str) -> list[str] | None:
-    """Extract benchmark config fingerprint lines from harness output.
-
-    Captures the config/shape identifiers from each benchmark line,
-    stripping timing numbers so only the problem description remains.
-    This allows comparing whether baseline and candidate ran on the
-    same benchmark configurations, regardless of kernel language or
-    variable naming conventions.
-
-    Works by finding lines that contain timing data (e.g. '0.0342ms')
-    and extracting the config prefix before the first timing number.
-
-    Examples of lines matched:
-        'B=1 H=32 NQ=16 N_CTX=[512] ...  2.11ms   0.10ms  21.37x *'
-        '(1, 16), k=2       0.0196ms   0.0335ms     0.58x'
-        'Config (B=256,H=1024)   0.072ms  ...'
-
-    Returns a sorted list of config identifiers, or None if no configs found.
-    """
-    configs: list[str] = []
-    # Match lines with at least one timing value: "0.0342ms", "0.0342 ms", or
-    # bare floats like "0.0342" in columns (common in table-formatted output).
-    timing_pattern = re.compile(r"\d+\.\d+(?:ms|us|µs|s|x)?")
-    for line in output.splitlines():
-        line = line.strip()
-        if not line or line.startswith(("-", "=", "#", "Status", "Geometric", "GEAK_")):
-            continue
-        if not timing_pattern.search(line):
-            continue
-        # Skip header/summary lines
-        if any(kw in line.lower() for kw in ("comparing", "running", "warmup", "median", "geomean", "mean")):
-            continue
-        # Extract config prefix: everything before the first timing value.
-        # Handles multiple output formats:
-        #   "M=128, N=16  0.0747  0.0474  1.58x"   → "M=128, N=16"
-        #   "B=1 H=32 ... 2.11ms 0.10ms 21.37x"    → "B=1 H=32 ..."
-        #   "(2, 4, 64): kernel=0.0411 ms | ref=..."→ "(2, 4, 64)"
-        # Split on: =<float>, :<whitespace><float>, or <whitespace><float>
-        config_part = re.split(r"(?<=[=:])\s*\d+\.\d+|\s+\d+\.\d+", line)[0].strip()
-        # Clean trailing separators and labels that precede timing values
-        config_part = re.sub(r"[\s:|]+$", "", config_part)
-        config_part = re.sub(r"\s*\|\s*\w+$", "", config_part)
-        config_part = re.sub(r":\s*\w+=$", "", config_part)
-        if config_part and len(config_part) > 3:
-            configs.append(config_part)
-    return sorted(configs) if configs else None
-
-
-def _universal_latency_fallback(text: str) -> float | None:
-    """Last-resort: find a number near latency-related keywords in the last
-    30 lines of output. Handles formats like 'Overall Median: 0.052ms'."""
-    keywords = {"median", "overall", "geomean", "latency", "total"}
-    candidates: list[float] = []
-    lines = text.strip().splitlines()
-    for line in lines[-30:]:
-        lower = line.lower()
-        if not any(kw in lower for kw in keywords):
-            continue
-        for m in re.finditer(r"([\d.]+(?:e[+-]?\d+)?)\s*ms", line):
-            val = float(m.group(1))
-            if 0.0001 < val < 100000:
-                candidates.append(val)
-    return candidates[-1] if candidates else None
-
-
-def _extract_latency(text: str) -> float | None:
-    """Extract latency from benchmark output.
-
-    Priority:
-    1. GEAK_RESULT_LATENCY_MS=<number> (standardized marker, always correct)
-    2. Legacy format parsers (TOTAL_KERNEL_TIME_MS, BENCHMARK_METRIC, etc.)
-    3. Universal fallback: last number near latency keywords in output
-    """
-    m = re.search(r"GEAK_RESULT_LATENCY_MS=([\d.]+(?:e[+-]?\d+)?)", text)
-    if m:
-        return float(m.group(1))
-
-    val = parse_total_kernel_time_ms(text)
-    if val is not None:
-        return val
-    val = _parse_benchmark_metric(text)
-    if val is not None:
-        return val
-    val = parse_median_latency_ms(text)
-    if val is not None:
-        return val
-    val = parse_google_benchmark_ms(text)
-    if val is not None:
-        return val
-
-    return _universal_latency_fallback(text)
-
-
-def extract_latency_ms(text: str) -> float | None:
-    """Public wrapper for standardized latency extraction."""
-    return _extract_latency(text)
-
-
-def extract_reported_speedup(text: str) -> float | None:
-    """Extract a reported speedup scalar from benchmark output.
-
-    Supported markers include:
-    - ``GEAK_RESULT_GEOMEAN_SPEEDUP=<number>``
-    - ``GEAK_RESULT_SPEEDUP=<number>``
-    - ``Geometric mean speedup: <number>x``
-    - ``Speedup (geomean): <number>x``
-    """
-
-    for pat in (
-        r"GEAK_RESULT_GEOMEAN_SPEEDUP=([\d.]+(?:e[+-]?\d+)?)",
-        r"GEAK_RESULT_SPEEDUP=([\d.]+(?:e[+-]?\d+)?)",
-        r"Geometric mean speedup:\s*([\d.]+(?:e[+-]?\d+)?)x",
-        r"Speedup\s*\(geomean\)\s*:\s*([\d.]+(?:e[+-]?\d+)?)x",
-    ):
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            return float(m.group(1))
-    return None
-
-
-def compute_shape_speedups(
-    baseline_shapes_ms: dict[str, float],
-    candidate_shapes_ms: dict[str, float],
-) -> dict[str, dict[str, float]]:
-    """Compute per-shape speedups for the overlap between baseline and candidate."""
-    results: dict[str, dict[str, float]] = {}
-    for shape, baseline_ms in baseline_shapes_ms.items():
-        candidate_ms = candidate_shapes_ms.get(shape)
-        if candidate_ms is None or baseline_ms <= 0 or candidate_ms <= 0:
-            continue
-        results[shape] = {
-            "baseline_ms": round(baseline_ms, 6),
-            "candidate_ms": round(candidate_ms, 6),
-            "speedup": round(baseline_ms / candidate_ms, 6),
-        }
-    return results
+compute_shape_speedups = _benchmark_output.compute_shape_speedups
+extract_benchmark_config_lines = _benchmark_output.extract_benchmark_config_lines
+extract_latency_ms = _benchmark_output.extract_latency_ms
+extract_reported_speedup = _benchmark_output.extract_reported_speedup
+parse_google_benchmark_ms = _benchmark_output.parse_google_benchmark_ms
+parse_median_latency_ms = _benchmark_output.parse_median_latency_ms
+parse_shape_count = _benchmark_output.parse_shape_count
+parse_shape_latencies_ms = _benchmark_output.parse_shape_latencies_ms
+parse_total_kernel_time_ms = _benchmark_output.parse_total_kernel_time_ms
 
 
 def _find_original_baseline_ms(patch_dir: Path) -> float | None:
@@ -229,7 +47,7 @@ def _find_original_baseline_ms(patch_dir: Path) -> float | None:
         bl = d / "benchmark_baseline.txt"
         if bl.is_file():
             text = bl.read_text()
-            lat = _extract_latency(text)
+            lat = extract_latency_ms(text)
             if lat is not None and lat > 0:
                 return lat
         parent = d.parent
@@ -262,7 +80,7 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
             baseline_shape_latencies = parse_shape_latencies_ms(baseline_text)
     elif baseline_file.exists():
         baseline_text = baseline_file.read_text()
-        baseline_ms = _extract_latency(baseline_text)
+        baseline_ms = extract_latency_ms(baseline_text)
         baseline_source = "patch_0_test.txt (FALLBACK)"
         baseline_shape_latencies = parse_shape_latencies_ms(baseline_text)
     else:
@@ -291,7 +109,7 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
             continue
 
         candidate_text = test_file.read_text()
-        candidate_ms = _extract_latency(candidate_text)
+        candidate_ms = extract_latency_ms(candidate_text)
         if candidate_ms is None or candidate_ms <= 0:
             continue
         candidate_shape_latencies = parse_shape_latencies_ms(candidate_text)

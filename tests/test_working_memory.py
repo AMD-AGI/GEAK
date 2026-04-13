@@ -279,7 +279,7 @@ class TestExtractInsight:
         output = "hd=128: 0.0200ms\nhd=256: 0.0300ms"
         ins = extract_insight_from_tool_result("bash", output, 0)
         assert ins is not None
-        assert "0.0300" in ins.message  # takes last
+        assert "0.0245" in ins.message  # geomean across shapes
 
     def test_generic_error(self):
         output = "Something went wrong\nSegmentation fault"
