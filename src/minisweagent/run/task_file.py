@@ -145,6 +145,37 @@ def _ensure_safe_directory(repo_path: Path, env: dict[str, str] | None = None) -
             pass
 
 
+def _copy_nested_git_repos(repo_path: Path, worktree_path: Path) -> None:
+    """Copy nested git repositories that are invisible to the top-level repo.
+
+    `git worktree add` and `git ls-files` skip directories containing their own
+    `.git`. This function finds all such nested repos under *repo_path* and
+    copies them into *worktree_path* so the worktree has a complete snapshot.
+    """
+    repo_path = repo_path.resolve()
+    worktree_path = worktree_path.resolve()
+    top_git = repo_path / ".git"
+
+    for dirpath, dirnames, _filenames in os.walk(repo_path):
+        current = Path(dirpath)
+        # Skip the top-level .git directory itself and anything inside worktrees
+        if current == top_git or ".git" in current.parts[len(repo_path.parts) :]:
+            dirnames.clear()
+            continue
+
+        if ".git" in dirnames or (current / ".git").is_file():
+            # current is a nested git repo root — skip descending further
+            # via os.walk (copytree will handle the full subtree).
+            dirnames.clear()
+
+            rel = current.relative_to(repo_path)
+            dst = worktree_path / rel
+            if dst.exists():
+                shutil.rmtree(dst)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(current, dst, symlinks=True)
+
+
 def _copy_untracked_files(repo_path: Path, worktree_path: Path, env: dict[str, str] | None = None) -> None:
     """Copy untracked files from repo to worktree."""
     run_env = env if env is not None else None
@@ -331,6 +362,7 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
     _ensure_safe_directory(worktree_path, git_env)
     _apply_dirty_tracked_changes(repo_path, worktree_path, git_env)
     _copy_untracked_files(repo_path, worktree_path, git_env)
+    _copy_nested_git_repos(repo_path, worktree_path)
     return worktree_path
 
 
