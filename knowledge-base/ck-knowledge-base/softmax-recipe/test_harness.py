@@ -114,7 +114,7 @@ def call_kernel(
     warmup: int = 5,
     nrepeat: int = 50,
 ) -> float:
-    """Call run_kernel from a loaded .so. Returns time in ms (0 if not timing)."""
+    """Call run_kernel from a loaded .so.  Returns time in ms (0 if not timing)."""
     ndims = x.ndim
     lengths = (ctypes.c_int64 * ndims)(*x.shape)
     strides = (ctypes.c_int64 * ndims)(*x.stride())
@@ -157,7 +157,7 @@ def benchmark_kernel(
     shape: list[int],
     reduce_dim: int,
     warmup: int = 5,
-    nrepeat: int = 20,
+    nrepeat: int = 50,
 ) -> float:
     """Time the kernel. Returns average time in ms, or -1 if unsupported."""
     x = torch.randn(shape, dtype=torch.float16, device="cpu").to("cuda") # IMPORTANT: Use device='cpu' then .to('cuda') to avoid polluting the profiler trace with RNG/memset kernels.
@@ -314,7 +314,7 @@ def mode_benchmark(
 
 
 def get_iterations(args_iterations: int | None) -> int:
-    """Resolve iteration count: CLI flag -> env var -> default 20."""
+    """Resolve iteration count: CLI flag -> env var -> default 50."""
     if args_iterations is not None:
         return args_iterations
     env_val = os.environ.get("GEAK_BENCHMARK_ITERATIONS")
@@ -323,7 +323,7 @@ def get_iterations(args_iterations: int | None) -> int:
             return int(env_val)
         except ValueError:
             pass
-    return 20
+    return 50
 
 
 def main():
@@ -335,7 +335,7 @@ def main():
     modes.add_argument("--benchmark", action="store_true", help="Benchmark on HARNESS_SHAPES")
     modes.add_argument("--full-benchmark", action="store_true", help="Benchmark on ALL_SHAPES")
 
-    parser.add_argument("--iterations", type=int, default=None, help="Timed iterations (default: env GEAK_BENCHMARK_ITERATIONS or 20)")
+    parser.add_argument("--iterations", type=int, default=None, help="Timed iterations (default: env GEAK_BENCHMARK_ITERATIONS or 50)")
     parser.add_argument("--reduce-dim", type=int, default=-1, help="Reduction dimension (default: last dim)")
     parser.add_argument(
         "--kernel-dir",

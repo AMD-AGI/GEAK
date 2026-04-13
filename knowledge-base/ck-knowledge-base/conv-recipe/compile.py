@@ -2,7 +2,7 @@
 """Build kernel .so files with GPU architecture auto-detected from PyTorch.
 
 Usage:
-    python3 /path/to/compile.py # build all (works from any cwd if invoked by path)
+    ./compile.py                # build all
     ./compile.py optimized      # rebuild only optimized kernel
     ./compile.py clean          # clean build artifacts
     ./compile.py --arch gfx942  # override auto-detection
@@ -11,11 +11,6 @@ Usage:
 import argparse
 import subprocess
 import sys
-from pathlib import Path
-
-# Directory containing this script (so `make` finds Makefile and sources when
-# invoked as `python3 /abs/path/to/compile.py` from any cwd).
-_IMPL_DIR = Path(__file__).resolve().parent
 
 
 def detect_arch() -> str:
@@ -50,7 +45,7 @@ def main():
     print(f"GPU architecture: {arch}")
 
     cmd = ["make", f"ARCH={arch}"] + args.targets
-    sys.exit(subprocess.call(cmd, cwd=str(_IMPL_DIR)))
+    sys.exit(subprocess.call(cmd))
 
 
 if __name__ == "__main__":
