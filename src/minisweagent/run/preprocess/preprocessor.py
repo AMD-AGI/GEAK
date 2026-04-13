@@ -467,9 +467,7 @@ def run_preprocessor(
         perf_cmd = eval_command
 
     # ── 1. resolve-kernel-url ────────────────────────────────────────
-    logger.info("--- Step 1/7: Resolve kernel URL ---")
-    if console:
-        console.print("[bold cyan]--- Step 1/7: Resolve kernel URL ---[/bold cyan]")
+    logger.info("[bold cyan]--- Step 1/7: Resolve kernel URL ---[/bold cyan]")
 
     from minisweagent.run.preprocess.resolve_kernel_url import resolve_kernel_url
 
@@ -537,9 +535,7 @@ def run_preprocessor(
         (output_dir / "resolved.json").write_text(json.dumps(resolved, indent=2, default=str))
 
         # ── 2. codebase context ──────────────────────────────────────────
-        logger.info("--- Step 2/7: Codebase context ---")
-        if console:
-            console.print("[bold cyan]--- Step 2/7: Codebase context ---[/bold cyan]")
+        logger.info("[bold cyan]--- Step 2/7: Codebase context ---[/bold cyan]")
 
         from minisweagent.run.preprocess.codebase_context import generate_codebase_context
 
@@ -552,9 +548,7 @@ def run_preprocessor(
         logger.info("  CODEBASE_CONTEXT.md written (%d bytes)", codebase_context_path.stat().st_size)
 
         # ── 3. test-discovery (automated_test_discovery MCP) ────────────
-        logger.info("--- Step 3/7: Test discovery ---")
-        if console:
-            console.print("[bold cyan]--- Step 3/7: Test discovery ---[/bold cyan]")
+        logger.info("[bold cyan]--- Step 3/7: Test discovery ---[/bold cyan]")
 
         _ensure_mcp_importable()
         atd_server = importlib.import_module("automated_test_discovery.server")
@@ -573,9 +567,7 @@ def run_preprocessor(
         try:
             disc_dict = _discover_fn(**_discovery_kwargs)
         except Exception as exc:
-            logger.warning("Test discovery failed: %s", exc)
-            if console:
-                console.print(f"[yellow]Test discovery failed: {exc}[/yellow]")
+            logger.warning(f"[yellow]Test discovery failed: {exc}[/yellow]")
 
         ctx["discovery"] = disc_dict
         (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))
@@ -774,9 +766,7 @@ def run_preprocessor(
                 hypothesis_id="H6",
             )
             # endregion
-            logger.info("--- Step 3b/3c: UnitTestAgent (harness creation + execution) ---")
-            if console:
-                console.print("[bold cyan]--- Step 3b/3c: UnitTestAgent (harness creation + execution) ---[/bold cyan]")
+            logger.info("[bold cyan]--- Step 3b/3c: UnitTestAgent (harness creation + execution) ---[/bold cyan]")
             try:
                 from minisweagent.run.preprocess.discovery_types import DiscoveryResult
                 from minisweagent.run.preprocess.unit_test_agent import format_discovery_for_agent
@@ -869,9 +859,10 @@ def run_preprocessor(
                     except Exception as exc:
                         logger.warning("Shape fixer failed: %s", exc, exc_info=True)
             except Exception as exc:
-                logger.warning("UnitTestAgent failed (%s), falling back to discovery", exc, exc_info=True)
-                if console:
-                    console.print(f"[yellow]UnitTestAgent failed ({exc}), falling back to discovery[/yellow]")
+                logger.warning(
+                    f"[yellow]UnitTestAgent failed ({exc}), falling back to discovery[/yellow]",
+                    exc_info=True,
+                )
                 test_command = None
                 harness_results = None
 
@@ -940,9 +931,7 @@ def run_preprocessor(
             extract_harness_path(test_command) if test_command else None
         )
         if harness_path_for_baseline and harness_results:
-            logger.info("--- Step 4/7: Baseline collection ---")
-            if console:
-                console.print("[bold cyan]--- Step 4/7: Baseline collection ---[/bold cyan]")
+            logger.info("[bold cyan]--- Step 4/7: Baseline collection ---[/bold cyan]")
             extra = f"--iterations {eval_iters}"
             logger.info("  Re-running all modes with %s for baselines...", extra)
             bl_ok, bl_errors, baseline_results = execute_harness_validation(
@@ -982,9 +971,7 @@ def run_preprocessor(
             logger.info("  Test command: %s", test_command)
 
     # ── 5. kernel-profile (via profiler-mcp) ─────────────────────────
-    logger.info("--- Step 5/7: Kernel profiling (Metrix instrumented) ---")
-    if console:
-        console.print("[bold cyan]--- Step 5/7: Kernel profiling (Metrix instrumented) ---[/bold cyan]")
+    logger.info("[bold cyan]--- Step 5/7: Kernel profiling (Metrix instrumented) ---[/bold cyan]")
 
     _profile_t0 = time.monotonic()
     profiling: dict[str, Any] | None = None
@@ -1036,9 +1023,7 @@ def run_preprocessor(
                     workdir=_cwd,
                 )
             except Exception as exc:
-                logger.warning("Profiling failed: %s", exc, exc_info=True)
-                if console:
-                    console.print(f"[yellow]Profiling failed: {exc}[/yellow]")
+                logger.warning(f"[yellow]Profiling failed: {exc}[/yellow]", exc_info=True)
 
             logger.info("  Capturing benchmark baseline from performance_command...")
             try:
@@ -1074,9 +1059,7 @@ def run_preprocessor(
         try:
             profiling = run_baseline_profile(test_command, gpu_id=gpu_id)
         except Exception as exc:
-            logger.warning("Profiling failed: %s", exc, exc_info=True)
-            if console:
-                console.print(f"[yellow]Profiling failed: {exc}[/yellow]")
+            logger.warning(f"[yellow]Profiling failed: {exc}[/yellow]", exc_info=True)
     else:
         logger.info("  Skipping profiling (no test command found)")
 
@@ -1093,9 +1076,7 @@ def run_preprocessor(
             logger.info("  Profiling complete in %.0fs", _profile_elapsed)
 
     # ── 6. baseline-metrics ──────────────────────────────────────────
-    logger.info("--- Step 6/7: Baseline metrics ---")
-    if console:
-        console.print("[bold cyan]--- Step 6/7: Baseline metrics ---[/bold cyan]")
+    logger.info("[bold cyan]--- Step 6/7: Baseline metrics ---[/bold cyan]")
 
     baseline_metrics: dict[str, Any] | None = None
     if profiling and profiling.get("success", True):
@@ -1107,9 +1088,7 @@ def run_preprocessor(
             bn = baseline_metrics.get("bottleneck", "?")
             logger.info("  Baseline: %s µs, bottleneck=%s", dur, bn)
         except Exception as exc:
-            logger.warning("Baseline metrics failed: %s", exc, exc_info=True)
-            if console:
-                console.print(f"[yellow]Baseline metrics failed: {exc}[/yellow]")
+            logger.warning(f"[yellow]Baseline metrics failed: {exc}[/yellow]", exc_info=True)
     else:
         logger.info("  Skipping baseline metrics (no profiling data)")
 
@@ -1147,9 +1126,7 @@ def run_preprocessor(
             logger.info("  Baseline metrics saved to %s", repo_baseline_path)
 
     # ── 7. commandment ───────────────────────────────────────────────
-    logger.info("--- Step 7/7: Commandment ---")
-    if console:
-        console.print("[bold cyan]--- Step 7/7: Commandment ---[/bold cyan]")
+    logger.info("[bold cyan]--- Step 7/7: Commandment ---[/bold cyan]")
 
     commandment: str | None = None
     if eval_command:
@@ -1166,9 +1143,7 @@ def run_preprocessor(
             ctx["test_command"] = eval_command
             logger.info("  COMMANDMENT.md generated (from eval command)")
         except Exception as exc:
-            logger.warning("Commandment from command failed: %s", exc, exc_info=True)
-            if console:
-                console.print(f"[yellow]Commandment from command failed: {exc}[/yellow]")
+            logger.warning(f"[yellow]Commandment from command failed: {exc}[/yellow]", exc_info=True)
     elif test_command:
         # Triton-style: generate COMMANDMENT from harness
         try:
@@ -1186,9 +1161,7 @@ def run_preprocessor(
             )
             logger.info("  COMMANDMENT.md generated (from harness)")
         except Exception as exc:
-            logger.warning("Commandment failed: %s", exc, exc_info=True)
-            if console:
-                console.print(f"[yellow]Commandment failed: {exc}[/yellow]")
+            logger.warning(f"[yellow]Commandment failed: {exc}[/yellow]", exc_info=True)
     else:
         logger.info("  Skipping commandment (no test command or eval command)")
 

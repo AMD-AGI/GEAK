@@ -154,7 +154,9 @@ def replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:
     # (e.g. "<repo>/optimization_logs/<run>/worktrees/agent_X/..."),
     # collapse that whole prefix back to the current worktree root first.
     # This prevents path "nesting" when replacement is applied more than once.
-    prev_worktree_pat = re.compile(re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/(?:agent|slot|task)_\d+")
+    prev_worktree_pat = re.compile(
+        re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/(?:agent|slot|task)_\d+"
+    )
     text = prev_worktree_pat.sub(worktree_path_str, text)
 
     # Replace repo path (resolved and unresolved forms) with worktree path
@@ -660,7 +662,7 @@ def run_pool(
                 f.write(f"GPU: {hip_devices} | Priority: {task.priority} | Language: {task.kernel_language}\n")
                 f.write("=" * 60 + "\n\n")
 
-            logger.info("Sub-agent %d (%s) started on GPU %s", task_id, label, hip_devices)
+            logger.info("[dim]Sub-agent %d (%s) started on GPU %s[/dim]", task_id, label, hip_devices)
             _agent_t0 = time.monotonic()
             exit_status, result, extra_info = None, None, None
             with redirect_output_fn(log_file):
@@ -753,14 +755,14 @@ def run_pool(
             total = sum(c for _, c in patches_by_task)
             summary = ", ".join(f"{l}: {c}" for l, c in patches_by_task if c > 0)
             logger.info(
-                "[running %.1fmin] Sub-agents working: %d total patches%s",
+                "[dim]\\[running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
                 elapsed / 60,
                 total,
                 f" ({summary})" if summary else "",
                 extra={"progress_tick": True},
             )
             for pp in new_patch_paths:
-                logger.info("  New patch: %s", pp)
+                logger.debug("[dim]  New patch: %s[/dim]", pp)
 
     _progress_thread = threading.Thread(target=_report_progress, daemon=True)
     _progress_thread.start()

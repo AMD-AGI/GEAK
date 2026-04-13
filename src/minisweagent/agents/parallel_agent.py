@@ -674,7 +674,7 @@ class ParallelAgent(DefaultAgent):
 
             _task_label = tasks[agent_id].label if tasks and agent_id < len(tasks) else f"task_{agent_id}"
             logger.info(
-                "Sub-agent %d (%s) started on GPU %s",
+                "[dim]Sub-agent %d (%s) started on GPU %s[/dim]",
                 agent_id,
                 _task_label,
                 new_env.get("GEAK_GPU_DEVICE", "?"),
@@ -733,14 +733,14 @@ class ParallelAgent(DefaultAgent):
                 total_patches = sum(c for _, c in patches_by_agent)
                 summary = ", ".join(f"{l}: {c}" for l, c in patches_by_agent if c > 0)
                 logger.info(
-                    "[running %.1fmin] Sub-agents working: %d total patches%s",
+                    "[dim]\\[running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
                     elapsed / 60,
                     total_patches,
                     f" ({summary})" if summary else "",
                     extra={"progress_tick": True},
                 )
                 for pp in new_patch_paths:
-                    logger.info("  New patch: %s", pp)
+                    logger.debug("[dim]  New patch: %s[/dim]", pp)
 
         _progress_thread = threading.Thread(target=_report_progress, daemon=True)
         _progress_thread.start()

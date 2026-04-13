@@ -52,7 +52,7 @@ def run_llm_steps(
 
     while step < max_steps:
         step += 1
-        logger.debug("%s step %d", phase, step)
+        logger.debug("[dim]%s step %d[/dim]", phase, step)
 
         if _wm and phase != "explore":
             _wm.update_step(step, 0.0)
@@ -115,7 +115,7 @@ def run_llm_steps(
         result_str = dispatch_tool_call(ctx, tool_name, tool_args, phase=phase)
         _elapsed = time.monotonic() - _t0
         if _elapsed > 5.0:
-            logger.info("Tool %s completed in %.1fs", tool_name, _elapsed)
+            logger.info("[dim]Tool %s completed in %.1fs[/dim]", tool_name, _elapsed)
 
         messages.append(
             {
@@ -145,7 +145,7 @@ def run_llm_steps(
             except json.JSONDecodeError:
                 logger.warning("Finalize payload is not valid JSON; wrapping as summary text.")
                 report = {"summary": result_str}
-            logger.info("Orchestrator: Optimisation finalised.")
+            logger.info("[bold green]Orchestrator: Optimisation finalised.[/bold green]")
             return report
 
     logger.warning(
@@ -314,10 +314,12 @@ def run_heterogeneous_orchestrator(
     )
 
     start_label = f"rounds {start_round}-{max_rounds}" if start_round > 1 else f"{max_rounds} rounds"
-    _banner = "=" * 60
     logger.info(
-        "\n%s\n  Heterogeneous Orchestrator (%s, %d GPUs)\n%s",
-        _banner, start_label, len(gpu_ids), _banner,
+        "\n[bold cyan]%s[/bold cyan]\n  [bold]Heterogeneous Orchestrator[/bold] (%s, %d GPUs)\n[bold cyan]%s[/bold cyan]",
+        "=" * 60,
+        start_label,
+        len(gpu_ids),
+        "=" * 60,
     )
 
     messages: list[dict] = [
@@ -352,7 +354,7 @@ def run_heterogeneous_orchestrator(
     try:
         if start_round <= 1:
             logger.info(
-                "\n%s\n  Exploration Phase (this may take a few minutes)\n%s",
+                "\n[dim]%s[/dim]\n  [bold yellow]Exploration Phase[/bold yellow] (this may take a few minutes)\n[dim]%s[/dim]",
                 "-" * 60,
                 "-" * 60,
             )
@@ -364,17 +366,25 @@ def run_heterogeneous_orchestrator(
                 phase="explore",
             )
             _explore_elapsed = time.monotonic() - _explore_t0
-            logger.info("Exploration completed in %.0fs.", _explore_elapsed)
+            logger.info("[bold green]Exploration completed[/bold green] in %.0fs.", _explore_elapsed)
             if finalize_result is not None:
                 return finalize_result
 
         for round_num in range(start_round, max_rounds + 1):
             is_last = round_num == max_rounds
-            final_tag = " (FINAL)" if is_last else ""
-            _banner = "=" * 60
+            final_tag = " [bold red](FINAL)[/bold red]" if is_last else ""
+            color = "bold green" if not is_last else "bold red"
             logger.info(
-                "\n%s\n  Round %d/%d%s\n%s",
-                _banner, round_num, max_rounds, final_tag, _banner,
+                "\n[%s]%s[/%s]\n  [bold]Round %d/%d[/bold]%s\n[%s]%s[/%s]",
+                color,
+                "=" * 60,
+                color,
+                round_num,
+                max_rounds,
+                final_tag,
+                color,
+                "=" * 60,
+                color,
             )
 
             if ctx.get("starting_patch"):

@@ -44,6 +44,7 @@ def _decode_captured_output(stdout_b: bytes | None, stderr_b: bytes | None) -> s
             return _OUTPUT_UNREADABLE
     return ""
 
+
 # Matches shell redirect / heredoc patterns that write to COMMANDMENT.md,
 # e.g. ``cat > path/COMMANDMENT.md``, ``tee path/COMMANDMENT.md``,
 # ``> path/COMMANDMENT.md << 'EOF'``.

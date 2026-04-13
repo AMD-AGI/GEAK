@@ -596,7 +596,7 @@ def _run_task_agent(
             if template_vars.get(k)
         ]
         logger.info(
-            "Starting task-generation agent "
+            "[bold yellow]Starting task-generation agent[/bold yellow] "
             "(step_limit=%d, cost=%.1f, context=%s) — this may take a few minutes",
             tg_step_limit,
             tg_cost_limit,
@@ -612,7 +612,7 @@ def _run_task_agent(
 
         if exit_type == "Submitted":
             logger.info(
-                "Task-generation agent completed in %.1fs (%d chars).",
+                "[bold green]Task-generation agent completed[/bold green] in %.1fs (%d chars).",
                 _elapsed,
                 len(exit_msg),
             )

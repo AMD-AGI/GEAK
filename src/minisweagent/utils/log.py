@@ -7,6 +7,7 @@ package modules, import ``logger`` from this module.
 
 import logging
 import os
+import re
 from pathlib import Path
 
 from rich.logging import RichHandler
@@ -55,12 +56,31 @@ class _ProgressTickFilter(logging.Filter):
         return not getattr(record, "progress_tick", False)
 
 
+class _MarkupStrippingFormatter(logging.Formatter):
+    """Strip Rich markup tags so log files contain plain text.
+
+    The terminal handler (RichHandler) renders ``[bold cyan]...[/bold cyan]``
+    as ANSI colours.  File handlers should not see those tags.  This formatter
+    removes only known Rich style keywords to avoid false positives on
+    legitimate bracket content like ``[0]`` or ``[ARCHITECTURE ALERT]``.
+    """
+
+    _RICH_TAG_RE = re.compile(
+        r"\[/\]"
+        r"|\[/?(?:bold|dim|italic|underline|red|green|blue|cyan|yellow|magenta|white|black|not)"
+        r"(?:\s+(?:bold|dim|italic|underline|red|green|blue|cyan|yellow|magenta|white|black|not))*\]"
+    )
+
+    def format(self, record: logging.LogRecord) -> str:
+        return self._RICH_TAG_RE.sub("", super().format(record))
+
+
 def add_file_handler(path: Path | str, level: int | None = None, *, print_path: bool = True) -> None:
     logger = logging.getLogger("minisweagent")
     handler = logging.FileHandler(path)
     handler.setLevel(level if level is not None else _get_log_level_from_env())
     handler.addFilter(_ProgressTickFilter())
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    formatter = _MarkupStrippingFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     if print_path:

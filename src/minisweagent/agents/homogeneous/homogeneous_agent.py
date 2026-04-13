@@ -124,18 +124,15 @@ def run_homogeneous_agent(
     # Get model config for factory
     model_config = config.get("model", {})
 
-    _banner = "=" * 60
     logger.info(
-        "\n%s\n  Homogeneous Agent (%d agents, GPUs %s)\n%s",
-        _banner, final_num_parallel, final_gpu_ids, _banner,
+        "\n[bold cyan]%s[/bold cyan]\n  [bold]Homogeneous Agent[/bold] (%d agents, GPUs %s)\n[bold cyan]%s[/bold cyan]",
+        "=" * 60,
+        final_num_parallel,
+        final_gpu_ids,
+        "=" * 60,
     )
     logger.info("  repo=%s, output_dir=%s", final_repo, final_output_dir)
-    logger.info("Sub-agents are working — expect no output for several minutes.")
-    console.print(
-        f"\n[bold cyan]{_banner}[/bold cyan]\n  [bold]Homogeneous Agent[/bold] ({final_num_parallel} agents, GPUs {final_gpu_ids})\n[bold cyan]{_banner}[/bold cyan]"
-    )
-    console.print(f"  repo={final_repo}, output_dir={final_output_dir}")
-    console.print("[dim]Sub-agents are working — expect no output for several minutes.[/dim]")
+    logger.info("[dim]Sub-agents are working — expect no output for several minutes.[/dim]")
 
     # Create and run ParallelAgent
     agent = ParallelAgent(model, env, **agent_config)
