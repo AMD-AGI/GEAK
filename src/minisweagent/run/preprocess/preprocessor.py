@@ -567,7 +567,7 @@ def run_preprocessor(
         try:
             disc_dict = _discover_fn(**_discovery_kwargs)
         except Exception as exc:
-            logger.warning(f"[yellow]Test discovery failed: {exc}[/yellow]")
+            logger.warning("[yellow]Test discovery failed: %s[/yellow]", exc)
 
         ctx["discovery"] = disc_dict
         (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))
@@ -1023,7 +1023,7 @@ def run_preprocessor(
                     workdir=_cwd,
                 )
             except Exception as exc:
-                logger.warning(f"[yellow]Profiling failed: {exc}[/yellow]", exc_info=True)
+                logger.warning("[yellow]Profiling failed: %s[/yellow]", exc, exc_info=True)
 
             logger.info("  Capturing benchmark baseline from performance_command...")
             try:
@@ -1059,7 +1059,7 @@ def run_preprocessor(
         try:
             profiling = run_baseline_profile(test_command, gpu_id=gpu_id)
         except Exception as exc:
-            logger.warning(f"[yellow]Profiling failed: {exc}[/yellow]", exc_info=True)
+            logger.warning("[yellow]Profiling failed: %s[/yellow]", exc, exc_info=True)
     else:
         logger.info("  Skipping profiling (no test command found)")
 
@@ -1088,7 +1088,7 @@ def run_preprocessor(
             bn = baseline_metrics.get("bottleneck", "?")
             logger.info("  Baseline: %s µs, bottleneck=%s", dur, bn)
         except Exception as exc:
-            logger.warning(f"[yellow]Baseline metrics failed: {exc}[/yellow]", exc_info=True)
+            logger.warning("[yellow]Baseline metrics failed: %s[/yellow]", exc, exc_info=True)
     else:
         logger.info("  Skipping baseline metrics (no profiling data)")
 
@@ -1143,7 +1143,7 @@ def run_preprocessor(
             ctx["test_command"] = eval_command
             logger.info("  COMMANDMENT.md generated (from eval command)")
         except Exception as exc:
-            logger.warning(f"[yellow]Commandment from command failed: {exc}[/yellow]", exc_info=True)
+            logger.warning("[yellow]Commandment from command failed: %s[/yellow]", exc, exc_info=True)
     elif test_command:
         # Triton-style: generate COMMANDMENT from harness
         try:
@@ -1161,7 +1161,7 @@ def run_preprocessor(
             )
             logger.info("  COMMANDMENT.md generated (from harness)")
         except Exception as exc:
-            logger.warning(f"[yellow]Commandment failed: {exc}[/yellow]", exc_info=True)
+            logger.warning("[yellow]Commandment failed: %s[/yellow]", exc, exc_info=True)
     else:
         logger.info("  Skipping commandment (no test command or eval command)")
 
