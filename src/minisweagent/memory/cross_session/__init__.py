@@ -76,6 +76,15 @@ def record(**kwargs: Any) -> None:
         from minisweagent.memory.cross_session.extractor import extract_experience
 
         experience = extract_experience(**kwargs)
+
+        min_speedup = float(_get_config().min_store_speedup)
+        if experience.best_speedup < min_speedup:
+            logger.debug(
+                "Skipping experience (%.3fx < %.2fx threshold): %s",
+                experience.best_speedup, min_speedup, experience.record_id,
+            )
+            return
+
         backend.store_experience(experience)
         logger.debug("Stored cross-session experience: %s", experience.record_id)
     except Exception as exc:

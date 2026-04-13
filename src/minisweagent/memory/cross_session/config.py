@@ -30,6 +30,7 @@ class CrossSessionConfig:
     context_max_tokens: int = 800
     consolidation_threshold: int = 10
     request_timeout: float = 5.0
+    min_store_speedup: float = 1.10
 
     @property
     def is_remote(self) -> bool:
@@ -51,6 +52,8 @@ class CrossSessionConfig:
         timeout = float(os.environ.get("GEAK_MEMORY_TIMEOUT", "5.0"))
         limit = int(os.environ.get("GEAK_MEMORY_RETRIEVAL_LIMIT", "30"))
 
+        min_speedup = float(os.environ.get("GEAK_MEMORY_MIN_SPEEDUP", "1.10"))
+
         return cls(
             enabled=True,
             url=url,
@@ -58,4 +61,5 @@ class CrossSessionConfig:
             api_key=api_key,
             retrieval_limit=limit,
             request_timeout=timeout,
+            min_store_speedup=min_speedup,
         )
