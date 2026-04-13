@@ -1,8 +1,23 @@
-.git
-__pycache__
-*.pyc
-*.egg-info
-.pytest_cache
-optimization_logs
-*.log
-.claude
+# Ignore everything by default — Dockerfile COPYs only what it needs,
+# but .dockerignore still filters the build context sent to the daemon.
+*
+
+# Allow only what the build requires
+!pyproject.toml
+!README.md
+!LICENSE.md
+!Makefile
+!src/
+!mcp_tools/
+!skills/
+!docs/
+!knowledge-base/
+!entrypoint.sh
+
+# Exclude artifacts that sneak in under allowed directories
+mcp_tools/**/.rocprofv3
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+**/.pytest_cache
+**/.ruff_cache

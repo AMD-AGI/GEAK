@@ -22,7 +22,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+from minisweagent import get_repo_root
+
+_REPO_ROOT = get_repo_root()
 
 REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
 
