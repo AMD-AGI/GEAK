@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -442,14 +443,9 @@ def run_preprocessor(
         profiling, baseline_metrics, commandment, test_command,
         kernel_path, repo_root, harness_path
     """
+    _preprocess_t0 = time.monotonic()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    def _print(msg: str) -> None:
-        if console:
-            console.print(msg)
-        else:
-            print(msg, file=sys.stderr)
 
     ctx: dict[str, Any] = {}
 
@@ -471,11 +467,7 @@ def run_preprocessor(
         perf_cmd = eval_command
 
     # ── 1. resolve-kernel-url ────────────────────────────────────────
-    _print(
-        "[bold cyan]--- Step 1/7: Resolve kernel URL ---[/bold cyan]"
-        if console
-        else "--- Step 1/7: Resolve kernel URL ---"
-    )
+    logger.info("[bold cyan]--- Step 1/7: Resolve kernel URL ---[/bold cyan]")
 
     from minisweagent.run.preprocess.resolve_kernel_url import resolve_kernel_url
 
@@ -517,11 +509,11 @@ def run_preprocessor(
             if _split_valid:
                 harness = _new_harness
 
-    _print(f"  Kernel: {kernel_path}")
+    logger.info("  Kernel: %s", kernel_path)
 
     # ── Fast path for eval_command: skip Steps 2-4 ───────────────────
     if eval_command:
-        _print("  [eval_command mode] Skipping Steps 2-4 (codebase context, discovery, harness selection)")
+        logger.info("  [eval_command mode] Skipping Steps 2-4 (codebase context, discovery, baseline collection)")
         ctx["codebase_context_path"] = None
         ctx["discovery"] = {}
         ctx["test_command"] = eval_command
@@ -543,11 +535,7 @@ def run_preprocessor(
         (output_dir / "resolved.json").write_text(json.dumps(resolved, indent=2, default=str))
 
         # ── 2. codebase context ──────────────────────────────────────────
-        _print(
-            "[bold cyan]--- Step 2/7: Codebase context ---[/bold cyan]"
-            if console
-            else "--- Step 2/7: Codebase context ---"
-        )
+        logger.info("[bold cyan]--- Step 2/7: Codebase context ---[/bold cyan]")
 
         from minisweagent.run.preprocess.codebase_context import generate_codebase_context
 
@@ -557,12 +545,10 @@ def run_preprocessor(
             output_dir=output_dir,
         )
         ctx["codebase_context_path"] = str(codebase_context_path)
-        _print(f"  CODEBASE_CONTEXT.md written ({codebase_context_path.stat().st_size} bytes)")
+        logger.info("  CODEBASE_CONTEXT.md written (%d bytes)", codebase_context_path.stat().st_size)
 
         # ── 3. test-discovery (automated_test_discovery MCP) ────────────
-        _print(
-            "[bold cyan]--- Step 3/7: Test discovery ---[/bold cyan]" if console else "--- Step 3/7: Test discovery ---"
-        )
+        logger.info("[bold cyan]--- Step 3/7: Test discovery ---[/bold cyan]")
 
         _ensure_mcp_importable()
         atd_server = importlib.import_module("automated_test_discovery.server")
@@ -581,19 +567,14 @@ def run_preprocessor(
         try:
             disc_dict = _discover_fn(**_discovery_kwargs)
         except Exception as exc:
-            logger.warning("Test discovery failed: %s", exc)
-            _print(
-                f"  [yellow]Warning: Test discovery failed: {exc}[/yellow]"
-                if console
-                else f"  Warning: Test discovery failed: {exc}"
-            )
+            logger.warning("[yellow]Test discovery failed: %s[/yellow]", exc)
 
         ctx["discovery"] = disc_dict
         (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))
 
         tests = disc_dict.get("tests", [])
         benchmarks = disc_dict.get("benchmarks", [])
-        _print(f"  Tests found: {len(tests)}")
+        logger.info("  Tests found: %d", len(tests))
 
         # ── 3b. UnitTestAgent: create a proper test harness ─────────────
         # The MCP discovery finds test files but doesn't create a validated
@@ -648,11 +629,11 @@ def run_preprocessor(
             selected_harness_source = "harness"
             testcase_selection["selected_source"] = selected_harness_source
             testcase_selection["deterministic_resolution"] = deterministic_meta
-            _print(f"  Using deterministic harness: {deterministic_path}")
+            logger.info("  Using deterministic harness: %s", deterministic_path)
             for r in harness_results:
                 status = "PASS" if r["success"] else "FAIL"
-                _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
-            _print("  Deterministic harness execution: ALL MODES PASSED")
+                logger.info("  Harness --%s: %s (%ss)", r["mode"], status, r["duration_s"])
+            logger.info("  Deterministic harness execution: ALL MODES PASSED")
 
         if testcase_cache_entry is not None:
             try:
@@ -692,11 +673,11 @@ def run_preprocessor(
                                 selected_harness_source = "canonical_cache"
                                 testcase_selection["reused_cache"] = True
                                 testcase_selection["selected_source"] = selected_harness_source
-                                _print(f"  Reusing canonical testcase harness: {candidate_harness}")
+                                logger.info("  Reusing canonical testcase harness: %s", candidate_harness)
                                 for r in harness_results:
                                     status = "PASS" if r["success"] else "FAIL"
-                                    _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
-                                _print("  Canonical harness execution: ALL MODES PASSED")
+                                    logger.info("  Harness --%s: %s (%ss)", r["mode"], status, r["duration_s"])
+                                logger.info("  Canonical harness execution: ALL MODES PASSED")
             except Exception as exc:
                 testcase_selection["cache_error"] = str(exc)
 
@@ -740,11 +721,11 @@ def run_preprocessor(
                     ctx["harness_path"] = candidate_harness
                     selected_harness_source = source
                     testcase_selection["selected_source"] = source
-                    _print(f"  Using discovered harness directly: {candidate_harness}")
+                    logger.info("  Using discovered harness directly: %s", candidate_harness)
                     for r in harness_results:
                         status = "PASS" if r["success"] else "FAIL"
-                        _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
-                    _print("  Harness execution: ALL MODES PASSED")
+                        logger.info("  Harness --%s: %s (%ss)", r["mode"], status, r["duration_s"])
+                    logger.info("  Harness execution: ALL MODES PASSED")
                     # region agent log
                     emit_debug_log(
                         "preprocessor.py:run_preprocessor:harness_fast_path",
@@ -767,6 +748,10 @@ def run_preprocessor(
                     # endregion
                     break
                 except Exception:
+                    logger.debug(
+                        "Harness candidate validation failed; trying next candidate",
+                        exc_info=True,
+                    )
                     continue
 
         if test_command is None and _uta_model and repo_root:
@@ -781,11 +766,7 @@ def run_preprocessor(
                 hypothesis_id="H6",
             )
             # endregion
-            _print(
-                "[bold cyan]--- Step 3b/3c: UnitTestAgent (harness creation + execution) ---[/bold cyan]"
-                if console
-                else "--- Step 3b/3c: UnitTestAgent (harness creation + execution) ---"
-            )
+            logger.info("[bold cyan]--- Step 3b/3c: UnitTestAgent (harness creation + execution) ---[/bold cyan]")
             try:
                 from minisweagent.run.preprocess.discovery_types import DiscoveryResult
                 from minisweagent.run.preprocess.unit_test_agent import format_discovery_for_agent
@@ -826,16 +807,16 @@ def run_preprocessor(
                     test_command = test_command.replace(extract_harness_path(test_command), _uta_harness)
                 selected_harness_source = "unit_test_agent"
                 testcase_selection["selected_source"] = selected_harness_source
-                _print(f"  UnitTestAgent test_command: {test_command}")
-                _print("  Harness static validation: OK")
+                logger.info("  UnitTestAgent test_command: %s", test_command)
+                logger.info("  Harness static validation: OK")
                 for r in harness_results:
                     status = "PASS" if r["success"] else "FAIL"
-                    _print(f"  Harness --{r['mode']}: {status} ({r['duration_s']}s)")
-                _print("  Harness execution: ALL MODES PASSED")
+                    logger.info("  Harness --%s: %s (%ss)", r["mode"], status, r["duration_s"])
+                logger.info("  Harness execution: ALL MODES PASSED")
 
                 # ── 3d. Shape fixer: verify shapes match benchmark/test file ──
                 if (benchmarks or tests) and _uta_model:
-                    _print("--- Step 3d: Shape fixer (verify shapes) ---")
+                    logger.info("--- Step 3d: Shape fixer (verify shapes) ---")
                     try:
                         from minisweagent.run.preprocess.shape_fixer_agent import run_shape_fixer
 
@@ -845,13 +826,13 @@ def run_preprocessor(
                         _shapes_source_file = harness_file.parent / "harness_shapes_source.txt"
                         if _shapes_source_file.is_file():
                             bench_file = Path(_shapes_source_file.read_text().strip())
-                            _print(f"  Shape source (from UTA): {bench_file}")
+                            logger.info("  Shape source (from UTA): %s", bench_file)
                         if (bench_file is None or not bench_file.is_file()) and benchmarks:
                             bench_file = Path(benchmarks[0]["file"])
-                            _print(f"  Shape source (top benchmark): {bench_file}")
+                            logger.info("  Shape source (top benchmark): %s", bench_file)
                         if (bench_file is None or not bench_file.is_file()) and tests:
                             bench_file = Path(tests[0]["file"])
-                            _print(f"  Shape source (fallback to top test): {bench_file}")
+                            logger.info("  Shape source (fallback to top test): %s", bench_file)
                         if harness_file.is_file() and bench_file is not None and bench_file.is_file():
                             shapes_ok = run_shape_fixer(
                                 model=_uta_model,
@@ -863,28 +844,25 @@ def run_preprocessor(
                                 gpu_id=gpu_id,
                             )
                             if shapes_ok:
-                                _print("  Shape verification: OK")
+                                logger.info("  Shape verification: OK")
                                 ok_revalidate, _, harness_results = execute_harness_validation(
                                     str(harness_file),
                                     repo_root=repo_root,
                                     gpu_id=gpu_id,
                                 )
                                 if ok_revalidate:
-                                    _print("  Re-validation after shape fix: ALL MODES PASSED")
+                                    logger.info("  Re-validation after shape fix: ALL MODES PASSED")
                                 else:
-                                    _print("  Re-validation after shape fix: FAILED (reverting)")
+                                    logger.info("  Re-validation after shape fix: FAILED (reverting)")
                             else:
-                                _print("  Shape fixer did not complete successfully")
+                                logger.info("  Shape fixer did not complete successfully")
                     except Exception as exc:
-                        _print(f"  Shape fixer failed: {exc}")
                         logger.warning("Shape fixer failed: %s", exc, exc_info=True)
             except Exception as exc:
-                _print(
-                    f"  [yellow]UnitTestAgent failed ({exc}), falling back to discovery[/yellow]"
-                    if console
-                    else f"  UnitTestAgent failed ({exc}), falling back to discovery"
+                logger.warning(
+                    f"[yellow]UnitTestAgent failed ({exc}), falling back to discovery[/yellow]",
+                    exc_info=True,
                 )
-                logger.warning("UnitTestAgent failed: %s", exc, exc_info=True)
                 test_command = None
                 harness_results = None
 
@@ -899,12 +877,12 @@ def run_preprocessor(
                 test_command = focused_cmd
                 selected_harness_source = "fallback_focused_test"
                 testcase_selection["selected_source"] = selected_harness_source
-                _print(f"  Falling back to discovery focused test: {test_command}")
+                logger.info("  Falling back to discovery focused test: %s", test_command)
             elif tests:
                 test_command = tests[0]["command"]
                 selected_harness_source = "fallback_discovery_test"
                 testcase_selection["selected_source"] = selected_harness_source
-                _print(f"  Falling back to discovery test: {test_command}")
+                logger.info("  Falling back to discovery test: %s", test_command)
 
         ctx["test_command"] = test_command
         ctx["harness_results"] = harness_results
@@ -938,8 +916,8 @@ def run_preprocessor(
         # Used by test_harness_variance.py to validate harness shapes quickly.
         _harness_only = os.environ.get("GEAK_HARNESS_ONLY", "").strip() == "1"
         if _harness_only:
-            _print("GEAK_HARNESS_ONLY=1 -- skipping profiling, baseline, commandment")
-            _print("Preprocessing complete (harness only). Artefacts written to: " + str(output_dir))
+            logger.info("GEAK_HARNESS_ONLY=1 -- skipping profiling, baseline, commandment")
+            logger.info("Preprocessing complete (harness only). Artefacts written to: %s", output_dir)
             return ctx
 
         # Collect a canonical benchmark baseline using the same iteration count the
@@ -953,8 +931,9 @@ def run_preprocessor(
             extract_harness_path(test_command) if test_command else None
         )
         if harness_path_for_baseline and harness_results:
+            logger.info("[bold cyan]--- Step 4/7: Baseline collection ---[/bold cyan]")
             extra = f"--iterations {eval_iters}"
-            _print(f"  Re-running all modes with {extra} for baselines...")
+            logger.info("  Re-running all modes with %s for baselines...", extra)
             bl_ok, bl_errors, baseline_results = execute_harness_validation(
                 harness_path_for_baseline,
                 repo_root=repo_root,
@@ -963,9 +942,9 @@ def run_preprocessor(
             )
             for r in baseline_results:
                 status = "PASS" if r["success"] else "FAIL"
-                _print(f"    --{r['mode']}: {status} ({r['duration_s']}s)")
+                logger.info("    --%s: %s (%ss)", r["mode"], status, r["duration_s"])
             if not bl_ok:
-                _print(f"  WARNING: baseline re-run had failures: {bl_errors}")
+                logger.warning("  Baseline re-run had failures: %s", bl_errors)
             for r in baseline_results:
                 if r["mode"] == "benchmark" and r["success"]:
                     benchmark_baseline = r["stdout"]
@@ -989,21 +968,18 @@ def run_preprocessor(
         ctx["full_benchmark_baseline"] = full_benchmark_baseline
 
         if test_command:
-            _print(f"  Test command: {test_command}")
+            logger.info("  Test command: %s", test_command)
 
     # ── 5. kernel-profile (via profiler-mcp) ─────────────────────────
-    _print(
-        "[bold cyan]--- Step 5/7: Kernel profiling (Metrix instrumented) ---[/bold cyan]"
-        if console
-        else "--- Step 5/7: Kernel profiling (Metrix instrumented) ---"
-    )
+    logger.info("[bold cyan]--- Step 5/7: Kernel profiling (Metrix instrumented) ---[/bold cyan]")
 
+    _profile_t0 = time.monotonic()
     profiling: dict[str, Any] | None = None
     if eval_command:
         _cwd = str(repo_root) if repo_root else None
 
         if correctness_cmd:
-            _print(f"  Running correctness_command: {correctness_cmd}")
+            logger.info("  Running correctness_command: %s", correctness_cmd)
             import subprocess
 
             result = subprocess.run(
@@ -1029,9 +1005,9 @@ def run_preprocessor(
                 )
 
         if not perf_cmd:
-            _print("  Skipping profiling (no performance_command in eval_command)")
+            logger.info("  Skipping profiling (no performance_command in eval_command)")
         else:
-            _print(f"  Profiling with performance_command: {perf_cmd}")
+            logger.info("  Profiling with performance_command: %s", perf_cmd)
             try:
                 _ensure_mcp_importable()
                 profiler_server = importlib.import_module("profiler_mcp.server")
@@ -1047,10 +1023,9 @@ def run_preprocessor(
                     workdir=_cwd,
                 )
             except Exception as exc:
-                _print(f"  [yellow]Profiling failed: {exc}[/yellow]" if console else f"  Profiling failed: {exc}")
-                logger.warning("Profiling failed: %s", exc, exc_info=True)
+                logger.warning("[yellow]Profiling failed: %s[/yellow]", exc, exc_info=True)
 
-            _print("  Capturing benchmark baseline from performance_command...")
+            logger.info("  Capturing benchmark baseline from performance_command...")
             try:
                 import subprocess
 
@@ -1067,13 +1042,12 @@ def run_preprocessor(
                     full_benchmark_baseline = result.stdout
                     (output_dir / "benchmark_baseline.txt").write_text(result.stdout)
                     (output_dir / "full_benchmark_baseline.txt").write_text(result.stdout)
-                    _print(f"  Baseline saved to benchmark_baseline.txt ({len(result.stdout)} bytes)")
+                    logger.info("  Baseline saved to benchmark_baseline.txt (%d bytes)", len(result.stdout))
                 else:
-                    _print(f"  Baseline capture: FAILED (returncode={result.returncode})")
+                    logger.warning("  Baseline capture: FAILED (returncode=%d)", result.returncode)
                     if result.stderr:
-                        _print(f"  stderr: {result.stderr[:500]}")
+                        logger.warning("  stderr: %s", result.stderr[:500])
             except Exception as baseline_exc:
-                _print(f"  Baseline capture failed: {baseline_exc}")
                 logger.warning("Baseline capture failed: %s", baseline_exc, exc_info=True)
 
         ctx["benchmark_baseline"] = benchmark_baseline
@@ -1085,11 +1059,11 @@ def run_preprocessor(
         try:
             profiling = run_baseline_profile(test_command, gpu_id=gpu_id)
         except Exception as exc:
-            _print(f"  [yellow]Profiling failed: {exc}[/yellow]" if console else f"  Profiling failed: {exc}")
-            logger.warning("Profiling failed: %s", exc, exc_info=True)
+            logger.warning("[yellow]Profiling failed: %s[/yellow]", exc, exc_info=True)
     else:
-        _print("  Skipping profiling (no test command found)")
+        logger.info("  Skipping profiling (no test command found)")
 
+    _profile_elapsed = time.monotonic() - _profile_t0
     ctx["profiling"] = profiling
     if profiling:
         (output_dir / "profile.json").write_text(json.dumps(profiling, indent=2, default=str))
@@ -1097,14 +1071,12 @@ def run_preprocessor(
         if repo_root:
             repo_profile_path = Path(repo_root) / "profile.json"
             repo_profile_path.write_text(json.dumps(profiling, indent=2, default=str))
-            _print(f"  Profiling complete (also saved to {repo_profile_path})")
+            logger.info("  Profiling complete in %.0fs (also saved to %s)", _profile_elapsed, repo_profile_path)
         else:
-            _print("  Profiling complete")
+            logger.info("  Profiling complete in %.0fs", _profile_elapsed)
 
     # ── 6. baseline-metrics ──────────────────────────────────────────
-    _print(
-        "[bold cyan]--- Step 6/7: Baseline metrics ---[/bold cyan]" if console else "--- Step 6/7: Baseline metrics ---"
-    )
+    logger.info("[bold cyan]--- Step 6/7: Baseline metrics ---[/bold cyan]")
 
     baseline_metrics: dict[str, Any] | None = None
     if profiling and profiling.get("success", True):
@@ -1114,14 +1086,11 @@ def run_preprocessor(
             baseline_metrics = build_baseline_metrics(profiling, include_all=True)
             dur = baseline_metrics.get("duration_us", "?")
             bn = baseline_metrics.get("bottleneck", "?")
-            _print(f"  Baseline: {dur} µs, bottleneck={bn}")
+            logger.info("  Baseline: %s µs, bottleneck=%s", dur, bn)
         except Exception as exc:
-            _print(
-                f"  [yellow]Baseline metrics failed: {exc}[/yellow]" if console else f"  Baseline metrics failed: {exc}"
-            )
-            logger.warning("Baseline metrics failed: %s", exc, exc_info=True)
+            logger.warning("[yellow]Baseline metrics failed: %s[/yellow]", exc, exc_info=True)
     else:
-        _print("  Skipping baseline metrics (no profiling data)")
+        logger.info("  Skipping baseline metrics (no profiling data)")
 
     ctx["baseline_metrics"] = baseline_metrics
 
@@ -1154,10 +1123,10 @@ def run_preprocessor(
         if repo_root:
             repo_baseline_path = Path(repo_root) / "baseline_metrics.json"
             repo_baseline_path.write_text(json.dumps(baseline_metrics, indent=2, default=str))
-            _print(f"  Baseline metrics saved to {repo_baseline_path}")
+            logger.info("  Baseline metrics saved to %s", repo_baseline_path)
 
     # ── 7. commandment ───────────────────────────────────────────────
-    _print("[bold cyan]--- Step 7/7: Commandment ---[/bold cyan]" if console else "--- Step 7/7: Commandment ---")
+    logger.info("[bold cyan]--- Step 7/7: Commandment ---[/bold cyan]")
 
     commandment: str | None = None
     if eval_command:
@@ -1172,14 +1141,9 @@ def run_preprocessor(
                 repo_root=repo_root,
             )
             ctx["test_command"] = eval_command
-            _print("  COMMANDMENT.md generated (from eval command)")
+            logger.info("  COMMANDMENT.md generated (from eval command)")
         except Exception as exc:
-            _print(
-                f"  [yellow]Commandment from command failed: {exc}[/yellow]"
-                if console
-                else f"  Commandment from command failed: {exc}"
-            )
-            logger.warning("Commandment from command failed: %s", exc, exc_info=True)
+            logger.warning("[yellow]Commandment from command failed: %s[/yellow]", exc, exc_info=True)
     elif test_command:
         # Triton-style: generate COMMANDMENT from harness
         try:
@@ -1195,12 +1159,11 @@ def run_preprocessor(
                 repo_root=repo_root,
                 kernel_language=_kl,
             )
-            _print("  COMMANDMENT.md generated (from harness)")
+            logger.info("  COMMANDMENT.md generated (from harness)")
         except Exception as exc:
-            _print(f"  [yellow]Commandment failed: {exc}[/yellow]" if console else f"  Commandment failed: {exc}")
-            logger.warning("Commandment generation failed: %s", exc, exc_info=True)
+            logger.warning("[yellow]Commandment failed: %s[/yellow]", exc, exc_info=True)
     else:
-        _print("  Skipping commandment (no test command or eval command)")
+        logger.info("  Skipping commandment (no test command or eval command)")
 
     ctx["commandment"] = commandment
     if commandment:
@@ -1247,8 +1210,8 @@ def run_preprocessor(
     )
     # endregion
 
-    _print("")
-    _print("Preprocessing complete. Artefacts written to: " + str(output_dir))
+    _preprocess_elapsed = time.monotonic() - _preprocess_t0
+    logger.info("Preprocessing complete in %.0fs. Artefacts written to: %s", _preprocess_elapsed, output_dir)
     return ctx
 
 

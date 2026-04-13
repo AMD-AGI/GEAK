@@ -1,6 +1,7 @@
 """Basic agent class. See https://mini-swe-agent.com/latest/advanced/control_flow/ for visual explanation."""
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -13,6 +14,8 @@ from jinja2 import StrictUndefined, Template
 from minisweagent import Environment, Model
 from minisweagent.skills.skill_runtime import SkillRuntime
 from minisweagent.tools.tools_runtime import ToolRuntime
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -226,8 +229,8 @@ class DefaultAgent:
                 log_content = self._format_log_entry(role, content, **kwargs)
                 with open(self.log_file, "a", encoding="utf-8") as f:
                     f.write(log_content)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("add_message: log file write failed: %s", exc)
 
     def _format_log_entry(self, role: str, content: str, **kwargs) -> str:
         """Build a human-readable log entry."""
@@ -333,8 +336,8 @@ class DefaultAgent:
                     f.write(json.dumps(self.messages[i], ensure_ascii=False, default=str) + "\n")
                 f.flush()
             self._traj_last_saved_idx = len(self.messages) - 1
-        except Exception:
-            # Best-effort: never block the agent on telemetry logging.
+        except Exception as exc:
+            logger.debug("_save_traj: best-effort traj write failed: %s", exc)
             return
 
     def step(self) -> dict:
@@ -487,7 +490,7 @@ class DefaultAgent:
                                             try:
                                                 tool_args = json.loads(tool_args)
                                             except Exception:
-                                                pass
+                                                pass  # non-JSON tool args; handled below
                                         if isinstance(tool_args, dict):
                                             edit_keys = (
                                                 "old_str",
@@ -506,8 +509,8 @@ class DefaultAgent:
                                         # Prefer real edit payloads over assistant prose so WM labels
                                         # are driven by the diff, not by task/context text.
                                         last_assistant = "\n".join(payloads)
-                                except Exception:
-                                    pass
+                                except Exception as exc:
+                                    logger.debug("_handle_tool_result: WM edit extraction failed: %s", exc)
                             break
                     strat = extract_strategy_from_edit(last_assistant)
                     if strat:
@@ -515,8 +518,8 @@ class DefaultAgent:
                         _wm.record_strategy(strat, True)
                         _wm.record_change_category(change_type)
                         _wm.remember_pending_change(strat, change_type)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("_handle_tool_result: working memory integration failed: %s", exc)
 
         return result
 
@@ -562,7 +565,8 @@ class DefaultAgent:
 
             # Final deterministic override as safety net
             rewrite_best_results(base_patch_dir)
-        except Exception:
+        except Exception as exc:
+            logger.debug("_run_select_patch_agent: failed: %s", exc)
             return
 
     def execute_action(self, action: dict) -> dict:
@@ -595,7 +599,7 @@ class DefaultAgent:
                 with open(self.log_file, "a", encoding="utf-8") as f:
                     f.write(message + "\n")
                     f.flush()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("_log_message: file write failed: %s", exc)
         else:
             print(message, flush=True)

@@ -259,14 +259,14 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
             env=git_env,
         )
     except Exception:
-        pass
+        pass  # best-effort worktree prune; failure is harmless
 
     # Remove directory if it still exists
     if worktree_path.exists():
         try:
             shutil.rmtree(worktree_path)
         except Exception:
-            pass
+            pass  # best-effort directory cleanup
 
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_safe_directory(repo_path, git_env)

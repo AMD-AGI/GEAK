@@ -3,10 +3,13 @@
 This agent extends StrategyAgent for command-line usage with rich console output.
 """
 
+import logging
+
 from rich.console import Console
 
 from minisweagent.agents.strategy_agent import StrategyAgent
 
+logger = logging.getLogger(__name__)
 console = Console(highlight=False)
 
 
@@ -23,6 +26,7 @@ class StrategyInteractiveAgent(StrategyAgent):
         file_path = strategy_data.get("filePath", "")
 
         console.print(f"\n[bold green]Strategy list updated:[/bold green] {len(strategies)} strategies")
+        logger.info("Strategy list updated: %d strategies (file: %s)", len(strategies), file_path)
         console.print(f"[dim]File: {file_path}[/dim]")
 
         # Show summary of strategies

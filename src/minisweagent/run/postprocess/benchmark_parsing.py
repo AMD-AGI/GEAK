@@ -247,6 +247,7 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
     if original_bl is not None:
         baseline_ms = original_bl
         baseline_source = "benchmark_baseline.txt"
+        logger.debug("compute_best_patch(%s): using benchmark_baseline.txt (%.4f ms).", patch_dir.name, original_bl)
         baseline_file_path = next(
             (p for p in [patch_dir, *patch_dir.parents] if (p / "benchmark_baseline.txt").is_file()), None
         )
@@ -257,11 +258,14 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
         baseline_text = baseline_file.read_text()
         baseline_ms = extract_latency_ms(baseline_text)
         baseline_source = "patch_0_test.txt (FALLBACK)"
+        logger.debug("compute_best_patch(%s): fallback to patch_0_test.txt baseline.", patch_dir.name)
         baseline_shape_latencies = parse_shape_latencies_ms(baseline_text)
     else:
+        logger.debug("compute_best_patch(%s): no baseline found; returning None.", patch_dir.name)
         return None
 
     if baseline_ms is None or baseline_ms <= 0:
+        logger.debug("compute_best_patch(%s): invalid baseline_ms=%s; returning None.", patch_dir.name, baseline_ms)
         return None
 
     best_speedup = 0.0
@@ -301,6 +305,11 @@ def compute_best_patch(patch_dir: Path) -> dict[str, Any] | None:
             best_shape_speedups = compute_shape_speedups(baseline_shape_latencies, candidate_shape_latencies)
 
     if best_patch_id is None or best_speedup <= 1.0:
+        logger.debug(
+            "compute_best_patch(%s): no patch beat baseline (best_speedup=%.4f).",
+            patch_dir.name,
+            best_speedup,
+        )
         return None
 
     return {
@@ -350,6 +359,7 @@ def rewrite_best_results(patch_dir: Path) -> dict[str, Any] | None:
             pf = existing.get("best_patch_file")
 
             if pf and Path(pf).exists() and Path(pf).stat().st_size == 0:
+                logger.warning("rewrite_best_results(%s): empty patch; clamping speedup to 1.0.", patch_dir.name)
                 existing["best_patch_speedup"] = 1.0
                 existing["llm_selection_analysis"] = (
                     existing.get("llm_selection_analysis") or ""
@@ -358,6 +368,11 @@ def rewrite_best_results(patch_dir: Path) -> dict[str, Any] | None:
                 return existing
 
             if original_bl is not None:
+                logger.info(
+                    "rewrite_best_results(%s): no patch beat true baseline %.4f ms; clamping to 1.0.",
+                    patch_dir.name,
+                    original_bl,
+                )
                 existing["best_patch_speedup"] = 1.0
                 existing["baseline_latency_ms"] = original_bl
                 existing["baseline_source"] = "benchmark_baseline.txt"
@@ -368,7 +383,7 @@ def rewrite_best_results(patch_dir: Path) -> dict[str, Any] | None:
                 return existing
 
             return existing
-        except (json.JSONDecodeError, ValueError):
-            pass
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.debug("rewrite_best_results(%s): failed to read existing best_results.json: %s", patch_dir.name, exc)
 
     return None

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -94,8 +95,8 @@ def tool_generate_tasks(
             if _eval_path.exists():
                 try:
                     _round_evals.append(json.loads(_eval_path.read_text()))
-                except (json.JSONDecodeError, OSError):
-                    pass
+                except (json.JSONDecodeError, OSError) as exc:
+                    logger.debug("tool_generate_tasks: could not load prior round eval %s: %s", _eval_path.name, exc)
     if _round_evals:
         kwargs["round_evaluations"] = _round_evals
 
@@ -239,6 +240,8 @@ def tool_dispatch_tasks(
         return json.dumps({"error": "No task files found"})
 
     task_paths = [Path(f) for f in task_files]
+    logger.info("[bold yellow]Dispatching %d task(s)[/bold yellow] across GPU(s) %s.", len(task_paths), gpu_ids)
+    _dispatch_t0 = time.monotonic()
     stages = _group_task_files_by_dispatch_stage(task_paths)
     round_match = None
     for tf in task_paths[:1]:
@@ -250,6 +253,7 @@ def tool_dispatch_tasks(
 
     all_results: list[dict] = []
     for stage_name, stage_tasks in stages:
+        logger.info("tool_dispatch_tasks: running stage '%s' (%d tasks).", stage_name, len(stage_tasks))
         stage_result = run_task_batch(
             task_files=stage_tasks,
             gpu_ids=gpu_ids,
@@ -264,12 +268,20 @@ def tool_dispatch_tasks(
             }
         )
         if _stage_found_improvement(results_base, stage_tasks):
+            logger.info(
+                "tool_dispatch_tasks: improvement found in stage '%s'; skipping lower-priority stages.", stage_name
+            )
             for remaining_stage, _remaining_tasks in stages:
                 if remaining_stage == stage_name:
                     continue
                 if _dispatch_stage_name(0) == remaining_stage:
                     continue
             break
+
+    _dispatch_elapsed = time.monotonic() - _dispatch_t0
+    logger.info(
+        "[bold green]Dispatch completed[/bold green] in %.1fs (%d stages).", _dispatch_elapsed, len(all_results)
+    )
 
     return json.dumps(
         {
@@ -304,7 +316,10 @@ def tool_collect_results(
 
     from minisweagent.agents.heterogeneous.result_scanning import scan_previous_results
 
+    logger.debug("tool_collect_results: scanning %s", base)
     summary = scan_previous_results(base)
+    if not summary:
+        logger.info("tool_collect_results: no results found in %s.", base)
     return summary if summary else "No results found."
 
 
@@ -331,7 +346,9 @@ def tool_finalize(
         "best_patch": best_patch,
         "total_speedup": total_speedup,
     }
-    (output_dir / "final_report.json").write_text(json.dumps(report, indent=2, default=str))
+    report_path = output_dir / "final_report.json"
+    report_path.write_text(json.dumps(report, indent=2, default=str))
+    logger.info("tool_finalize: wrote LLM final report to %s (speedup=%s).", report_path.name, total_speedup)
     return json.dumps(report, default=str)
 
 
@@ -352,6 +369,7 @@ def dispatch_tool_call(
     """
     ORCHESTRATION_TOOLS = {"generate_tasks", "dispatch_tasks", "collect_results", "finalize"}
     if phase == "explore" and tool_name in ORCHESTRATION_TOOLS:
+        logger.debug("dispatch_tool_call: blocked %s during explore phase.", tool_name)
         return json.dumps(
             {
                 "error": f"Cannot call {tool_name} during exploration phase. "

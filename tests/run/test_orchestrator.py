@@ -41,7 +41,6 @@ class TestRunOrchestrator:
                 heterogeneous=True,
                 max_rounds=3,
                 start_round=2,
-                console=None,
             )
 
         assert out is sentinel
@@ -54,8 +53,7 @@ class TestRunOrchestrator:
         assert args[4] == Path(ctx["output_dir"]).resolve()
         assert args[5] == 3
         assert args[6] == 2
-        assert callable(args[7])  # _print
-        assert args[8] is None  # console
+        assert len(args) == 7
 
     def test_max_rounds_defaults_from_env_when_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

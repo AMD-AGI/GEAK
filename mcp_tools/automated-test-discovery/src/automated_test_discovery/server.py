@@ -11,11 +11,14 @@ No configuration files needed - uses content-based detection.
 """
 
 import json
+import logging
 import os
 import re
 import sys
 import textwrap
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from mcp.server.fastmcp import FastMCP
 
@@ -178,8 +181,8 @@ def _relevance_score(file_path: Path, kernel_path: Path, kernel_name: str, kerne
                 score += 1.0
             elif depth_from_shared <= 4:
                 score += 0.3
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("_relevance_score: path resolution failed for %s: %s", file_path.name, exc)
 
     return score
 
@@ -190,8 +193,8 @@ def _is_kernel_file(path: Path) -> bool:
         for pattern in KERNEL_PATTERNS:
             if re.search(pattern, content):
                 return True
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("_is_kernel_file: could not read %s: %s", path.name, exc)
     return False
 
 
@@ -300,9 +303,7 @@ def _imports_triton_kernels(content: str, file_path: Path, _depth: int = 0) -> b
     if _depth > 2:
         return False
 
-    import_re = re.compile(
-        r"^\s*from\s+([\w.]+)\s+import\s", re.MULTILINE
-    )
+    import_re = re.compile(r"^\s*from\s+([\w.]+)\s+import\s", re.MULTILINE)
 
     search_dirs = [file_path.parent]
     for sp in sys.path:
@@ -352,7 +353,8 @@ def _init_llm_client():
                 "anthropic-version": "2023-10-16",
             },
         )
-    except Exception:
+    except Exception as exc:
+        logger.debug("_init_llm_client: LLM gateway unavailable: %s", exc)
         return None
 
 
@@ -381,7 +383,8 @@ def _llm_finalize_discovery(
     # Read kernel source (truncated)
     try:
         kernel_source = kernel_file.read_text()
-    except Exception:
+    except Exception as exc:
+        logger.warning("_llm_finalize_discovery: could not read kernel %s: %s", kernel_file, exc)
         return None
 
     # Read top test candidate (if any)
@@ -454,7 +457,8 @@ def _llm_finalize_discovery(
             result_text = re.sub(r"^```\w*\n?", "", result_text)
             result_text = re.sub(r"\n?```$", "", result_text)
         result = json.loads(result_text)
-    except Exception:
+    except Exception as exc:
+        logger.warning("_llm_finalize_discovery: LLM call or JSON parse failed: %s", exc)
         return None
 
     # Write the focused test script
@@ -599,18 +603,22 @@ def discover(
                 "functions": kernel_functions,
             },
             "workspace": str(_expand_workspace(path)),
-            "tests": [{
-                "file": harness,
-                "name": harness_name,
-                "confidence": 10.0,
-                "command": f"python {harness} --correctness",
-            }],
-            "benchmarks": [{
-                "file": harness,
-                "name": harness_name,
-                "confidence": 10.0,
-                "command": f"python {harness} --benchmark",
-            }],
+            "tests": [
+                {
+                    "file": harness,
+                    "name": harness_name,
+                    "confidence": 10.0,
+                    "command": f"python {harness} --correctness",
+                }
+            ],
+            "benchmarks": [
+                {
+                    "file": harness,
+                    "name": harness_name,
+                    "confidence": 10.0,
+                    "command": f"python {harness} --benchmark",
+                }
+            ],
             "total_tests_found": 1,
             "total_benchmarks_found": 1,
             "summary": f"Discovery skipped (harness provided: {harness_name})",
@@ -751,7 +759,8 @@ def discover(
     try:
         content = path.read_text()
         kernel_type = _get_kernel_type(content, path.suffix, path)
-    except Exception:
+    except Exception as exc:
+        logger.warning("discover: could not read kernel file %s: %s", path, exc)
         content = ""
         kernel_type = "unknown"
 
@@ -797,8 +806,8 @@ def discover(
                         if kf in test_content:
                             relevance += 2.0
                             break
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("discover: could not read candidate %s: %s", file_path.name, exc)
 
             test_score = _score_as_test(file_path)
             if test_score >= 0.3:

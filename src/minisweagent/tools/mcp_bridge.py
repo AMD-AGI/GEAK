@@ -117,7 +117,7 @@ class MCPToolBridge:
 
             self._client = MCPClient(self.server_name, self.server_config)
             await self._client.start()
-            logger.info(f"MCPToolBridge: started {self.server_name}")
+            logger.debug("MCPToolBridge: started %s", self.server_name)
         return self._client
 
     # ------------------------------------------------------------------
@@ -153,7 +153,7 @@ class MCPToolBridge:
             try:
                 self._run_async(self._client.stop())
             except Exception:
-                pass
+                pass  # shutdown must not raise
         loop = self._loop
         if loop is None or loop.is_closed():
             return
