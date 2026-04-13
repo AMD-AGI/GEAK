@@ -38,7 +38,10 @@ agent:
     - **GEMM / Linear**: Use `compile_preshuffle_gemm_a8()` from `kernels.preshuffle_gemm`.
       CRITICAL: B-matrix must be preshuffled with `shuffle_weight(B.contiguous(), layout=(16, 16))` from `tests.utils`.
       All tensor args must be `.view(-1)`. Scales: `torch.empty(0, device=dev, dtype=torch.float32)` for fp16.
-    - **Attention / SDPA**: Use `build_flash_attn_func_module()` from `kernels.flash_attn_func`.
+    - **Attention / SDPA**: ALWAYS use `build_flash_attn_func_module()` from `kernels.flash_attn_func`
+      when head_dim>=64, head_dim%32==0, seq_len%128==0. NEVER decompose attention into separate
+      GEMM+softmax+GEMM calls when flash attention fits — decomposed is 5-10x slower.
+      NEVER use Python for-loops over batch*heads to call GEMM one at a time.
       Builder: `build_flash_attn_func_module(num_heads=H, head_dim=D, causal=True, dtype_str="f16")`.
       Launcher: `fn(Q.view(-1), K.view(-1), V.view(-1), O.view(-1), batch_size, seq_len, stream=stream)`.
       Note: num_heads is baked in at build time, NOT passed at launch time.
@@ -84,8 +87,8 @@ agent:
     - Use `save_and_test` to validate your translation
     - FlyDSL IS installed — do NOT create flycompute.py shims or mock modules
 
-  cost_limit: 8.0
-  step_limit: 50
+  cost_limit: 0
+  step_limit: 200
 
 model:
   model_class: amd_llm

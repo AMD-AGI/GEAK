@@ -70,9 +70,28 @@ and `seq_len` as runtime parameters (not `num_heads`).
 - Supports f16 and bf16
 - Auto-selects BLOCK_M (128 or 256) based on num_heads
 
+### CRITICAL: Never Decompose When Flash Attention Fits
+
+If head_dim >= 64, head_dim % 32 == 0, and seq_len % 128 == 0:
+**YOU MUST use `build_flash_attn_func_module()`**. Do NOT decompose into
+separate GEMM + softmax + GEMM calls. Decomposed attention with Python
+for-loops over batch*heads is 5-10x slower than flash attention.
+
+**Anti-pattern (DO NOT DO THIS):**
+```python
+# BAD: Python loop over batch*heads calling GEMM one at a time
+for i in range(batch_size * num_heads):
+    gemm_fn(scores[i], Q[i], K[i], ...)
+softmax_fn(scores, attn_weights, ...)
+for i in range(batch_size * num_heads):
+    gemm_fn(output[i], attn_weights[i], V[i], ...)
+```
+
 ### Strategy 2: Decomposed Attention with Pre-built Kernels
 
-When flash attention constraints aren't met, decompose into pre-built components:
+ONLY when flash attention constraints are NOT met (head_dim < 64, head_dim
+not divisible by 32, or seq_len not divisible by 128), decompose into
+pre-built components:
 
 ```python
 from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
