@@ -23,7 +23,7 @@ from fastmcp import FastMCP
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP(
-    name="memory",
+    name="cross-session-memory",
     instructions=(
         "Cross-session memory for kernel optimization. "
         "Use search_memory to find strategies that worked on similar kernels. "
