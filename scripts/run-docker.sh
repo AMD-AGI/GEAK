@@ -222,7 +222,7 @@ docker run -d \
     --shm-size 8G \
     "${VOLUME_ARGS[@]}" \
     -w /workspace \
-    ${IMAGE_NAME}
+    "${IMAGE_NAME}"
 
 # Now exec into the running container
 echo "Entering container ${CONTAINER_NAME}..."

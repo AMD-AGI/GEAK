@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -6,6 +7,8 @@ from pathlib import Path
 import yaml
 
 from minisweagent import get_repo_root
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,6 +42,7 @@ class SkillRuntime:
 
     def _discover_skills(self, skills_root: Path) -> dict:
         if not skills_root.is_dir():
+            logger.debug("Skills directory not found: %s", skills_root)
             return {}
         skills = []
         for p in skills_root.iterdir():

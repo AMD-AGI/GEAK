@@ -20,9 +20,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from minisweagent import get_repo_root
+
+logger = logging.getLogger(__name__)
 
 _REPO_ROOT = get_repo_root()
 

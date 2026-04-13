@@ -5,11 +5,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from minisweagent import get_repo_root
+
 
 def get_preprocess_repo_root() -> Path:
     """Return the repository root for files living under ``run/preprocess``."""
 
-    return Path(__file__).resolve().parents[4]
+    return get_repo_root()
 
 
 def ensure_preprocess_mcp_importable(*subdirs: str) -> None:

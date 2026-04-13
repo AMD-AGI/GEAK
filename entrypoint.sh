@@ -14,8 +14,11 @@ echo ""
 # live host code is picked up instead of the baked-in site-packages copies.
 if [ "${GEAK_EDITABLE}" = "1" ]; then
     echo "📝 Editable mode: re-installing packages from /workspace..."
-    make -C /workspace install-dev
-    echo "✅ Editable installs complete"
+    if ! make -C /workspace install-dev; then
+        echo "❌ Editable install failed — container will use baked-in packages"
+    else
+        echo "✅ Editable installs complete"
+    fi
     echo ""
 fi
 
