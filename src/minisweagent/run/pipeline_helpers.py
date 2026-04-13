@@ -20,9 +20,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from minisweagent import get_repo_root
+
 logger = logging.getLogger(__name__)
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_REPO_ROOT = get_repo_root()
 
 REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
 

@@ -2,11 +2,11 @@
 MCP server configuration registry.
 """
 
-from pathlib import Path
 from typing import Any
 
-# Get the msa root directory (mcp-client is in mcp_tools/mcp-client)
-MSA_ROOT = Path(__file__).parent.parent.parent.parent.parent
+from minisweagent import get_repo_root
+
+MSA_ROOT = get_repo_root()
 
 # MCP server configurations
 MCP_SERVERS = {
