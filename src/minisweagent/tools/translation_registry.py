@@ -41,6 +41,8 @@ class TranslationPair:
     kb_category_files: dict[str, str] = field(default_factory=dict)
     env_setup: Callable[[Path], dict[str, str]] = field(default=lambda: _noop_env_setup)
     max_rounds: int = 10
+    perf_fail_threshold: float = 0.5
+    perf_warn_threshold: float = 0.8
     supported: bool = True
 
 

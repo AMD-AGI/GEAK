@@ -24,6 +24,47 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _parse_timing_from_harness_output(
+    stdout: str,
+    result: dict[str, Any],
+    _print,
+) -> None:
+    """Extract latency metrics from harness stdout into *result* dict.
+
+    Parses ``PyTorch reference latency:``, ``FlyDSL candidate latency:``,
+    and ``Speedup:`` lines.  Computes speedup from the two latencies if
+    the explicit ``Speedup:`` line is missing.
+    """
+    import re
+
+    ref_match = re.search(r"PyTorch reference latency:\s*([\d.]+)\s*ms", stdout)
+    cand_match = re.search(r"FlyDSL candidate latency:\s*([\d.]+)\s*ms", stdout)
+    speedup_match = re.search(r"Speedup:\s*([\d.]+)x", stdout)
+
+    if ref_match:
+        result["translation_pytorch_latency_ms"] = float(ref_match.group(1))
+    if cand_match:
+        result["translation_flydsl_latency_ms"] = float(cand_match.group(1))
+    if speedup_match:
+        result["translation_speedup"] = float(speedup_match.group(1))
+    elif ref_match and cand_match:
+        pt_val = float(ref_match.group(1))
+        fly_val = float(cand_match.group(1))
+        if fly_val > 0:
+            result["translation_speedup"] = round(pt_val / fly_val, 2)
+
+    if not cand_match and stdout:
+        _print("  Could not parse FlyDSL latency from harness output")
+        for _line in stdout.strip().splitlines()[-5:]:
+            _print(f"    stdout: {_line}")
+
+    _print(
+        f"  PyTorch: {result.get('translation_pytorch_latency_ms', 'N/A')}ms | "
+        f"FlyDSL: {result.get('translation_flydsl_latency_ms', 'N/A')}ms | "
+        f"Speedup: {result.get('translation_speedup', 'N/A')}x"
+    )
+
+
 def run_translation(
     kernel_path: Path,
     output_dir: Path,
@@ -245,7 +286,11 @@ def run_translation(
 
         best_attempt = candidate_path
 
-        # Validate the candidate externally
+        # External validation: run the harness independently (follows
+        # main-branch pattern).  The harness has DEFAULT_CANDIDATE baked
+        # in so --correctness mode tests the actual FlyDSL translation.
+        # _run_single uses bash -lc to source /etc/profile.d/* for
+        # FlyDSL env setup.
         harness_result = run_harness(
             str(harness_path),
             mode="correctness",
@@ -260,39 +305,44 @@ def run_translation(
             result["translation_success"] = True
             result["translation_kernel_path"] = str(candidate_path)
 
-            # Run performance comparison (harness with --flydsl-kernel)
-            _print("  Running performance comparison...")
-            try:
-                import subprocess as _sp
-                perf_cmd = [
-                    sys.executable, str(harness_path),
-                    "--flydsl-kernel", str(candidate_path),
-                ]
-                from minisweagent.run.preprocess.run_harness import _build_env
-                perf_env = _build_env(str(repo_root), gpu_id, env_overrides)
-                perf_proc = _sp.run(
-                    perf_cmd, capture_output=True, text=True,
-                    timeout=300, env=perf_env, cwd=str(repo_root),
-                )
-                perf_out = perf_proc.stdout
-                import re
-                ref_match = re.search(r"PyTorch reference latency:\s*([\d.]+)\s*ms", perf_out)
-                cand_match = re.search(r"FlyDSL candidate latency:\s*([\d.]+)\s*ms", perf_out)
-                speedup_match = re.search(r"Speedup:\s*([\d.]+)x", perf_out)
-                if ref_match:
-                    result["translation_pytorch_latency_ms"] = float(ref_match.group(1))
-                if cand_match:
-                    result["translation_flydsl_latency_ms"] = float(cand_match.group(1))
-                if speedup_match:
-                    result["translation_speedup"] = float(speedup_match.group(1))
-                _print(f"  PyTorch: {result.get('translation_pytorch_latency_ms', 'N/A')}ms | "
-                       f"FlyDSL: {result.get('translation_flydsl_latency_ms', 'N/A')}ms | "
-                       f"Speedup: {result.get('translation_speedup', 'N/A')}x")
-            except Exception as exc:
-                _print(f"  Performance comparison failed: {exc}")
+            # Parse timing from the validation run's stdout — the harness
+            # prints latencies and speedup when the candidate is tested.
+            _parse_timing_from_harness_output(
+                harness_result.get("stdout", ""), result, _print,
+            )
 
-            # -- Self-review: force agent to enumerate remaining PyTorch ops --
-            _print("  Running self-review (PyTorch op audit)...")
+            # -- Performance regression gate --
+            perf_fail_threshold = pair.perf_fail_threshold if hasattr(pair, "perf_fail_threshold") else 0.5
+            perf_warn_threshold = pair.perf_warn_threshold if hasattr(pair, "perf_warn_threshold") else 0.8
+            speedup_val = result.get("translation_speedup")
+
+            if speedup_val is not None and speedup_val < perf_fail_threshold:
+                pt_ms = result.get("translation_pytorch_latency_ms", "?")
+                fly_ms = result.get("translation_flydsl_latency_ms", "?")
+                _print(
+                    f"  PERF REGRESSION: {speedup_val:.2f}x "
+                    f"(threshold {perf_fail_threshold}x) — retrying"
+                )
+                result["translation_success"] = False
+                result["translation_kernel_path"] = None
+                best_attempt_errors.append(
+                    f"Performance regression: {speedup_val:.2f}x speedup "
+                    f"(PyTorch {pt_ms}ms vs FlyDSL {fly_ms}ms). "
+                    f"Your translation is {1/speedup_val:.1f}x SLOWER than PyTorch. "
+                    f"Avoid Python for-loops over batch dimensions. "
+                    f"Use build_flash_attn_func_module for attention patterns, "
+                    f"compile_preshuffle_gemm_a8 for batched GEMM. "
+                    f"Never decompose what a single pre-built kernel can handle."
+                )
+                continue
+            elif speedup_val is not None and speedup_val < perf_warn_threshold:
+                _print(
+                    f"  PERF WARNING: {speedup_val:.2f}x "
+                    f"(below {perf_warn_threshold}x warn threshold)"
+                )
+
+            # -- Self-review: audit ops + efficiency --
+            _print("  Running self-review (op + efficiency audit)...")
             review_ok = _run_self_review(
                 candidate_path=candidate_path,
                 harness_path=harness_path,
@@ -309,7 +359,6 @@ def run_translation(
             )
 
             if review_ok:
-                # Re-run perf after potential rewrites
                 if review_ok == "rewritten":
                     _print("  Self-review rewrote candidate. Re-checking correctness...")
                     recheck = run_harness(
@@ -328,6 +377,9 @@ def run_translation(
                         )
                         continue
                     _print("  Self-review rewrite still correct")
+                    _parse_timing_from_harness_output(
+                        recheck.get("stdout", ""), result, _print,
+                    )
                 result["translation_self_review"] = "passed"
                 break
             else:
@@ -362,18 +414,19 @@ def run_translation(
 
 
 _SELF_REVIEW_PROMPT = """\
-## Translation Self-Review: PyTorch Compute Op Audit
+## Translation Self-Review: Op Audit + Efficiency Check
 
-The FlyDSL translation below passed correctness. Your job is to audit it
-for **unnecessary PyTorch fallbacks** — operations where FlyDSL provides an
-equivalent that should be used instead.
+The FlyDSL translation below passed correctness. Audit it for:
+1. **Unnecessary PyTorch fallbacks** — PyTorch ops where FlyDSL has an equivalent.
+2. **Suboptimal FlyDSL usage** — using low-level FlyDSL primitives when a
+   higher-level pre-built kernel exists, or inefficient patterns.
 
 ### Translated code ({candidate_path}):
 ```python
 {candidate_code}
 ```
 
-### Instructions
+### Part A — PyTorch Fallback Audit
 
 1. **Enumerate** every call in the code that performs GPU *compute* via
    PyTorch (e.g. `torch.matmul`, `F.relu`, `nn.Linear(...)`, `@` operator
@@ -395,16 +448,45 @@ equivalent that should be used instead.
    | # | PyTorch Operation | Verdict | Reason |
    |---|-------------------|---------|--------|
 
-4. If **any** operation is marked REPLACE, rewrite `{candidate_path}` with
-   ALL replacements applied, then verify correctness:
-   ```
-   python {harness_path} {harness_flag} {candidate_path}
-   ```
+### Part B — Efficiency Audit
 
-5. If **no** operation needs replacement, state "ALL OPS JUSTIFIED" and do
-   NOT modify the file.
+Check for these anti-patterns and fix them:
 
-Think step by step. Be strict — the goal is maximum FlyDSL utilisation.
+1. **Python for-loops over batch dimensions** calling GEMM/softmax one at a
+   time. This is extremely slow. Use batched APIs or restructure as a single
+   larger GEMM call.
+
+2. **Decomposed attention** (separate GEMM for Q@K^T, softmax, GEMM for @V)
+   when `build_flash_attn_func_module()` could be used instead. Flash
+   attention is always preferred when constraints are met (head_dim>=64,
+   head_dim%32==0, seq_len%128==0).
+
+3. **Duplicate custom kernels** — e.g. using PyTorch `F.relu` in some places
+   and a FlyDSL relu kernel in others within the same model. Use the FlyDSL
+   kernel everywhere.
+
+4. **Missing pre-built kernel usage** — using custom `@flyc.kernel` for
+   operations that have pre-built equivalents (softmax, layernorm, rmsnorm).
+
+If you find any Part B issue, mark it in a second table:
+
+   | # | Issue | Current Code | Fix |
+   |---|-------|-------------|-----|
+
+### Actions
+
+- If **any** operation from Part A is marked REPLACE, or **any** Part B
+  issue is found: rewrite `{candidate_path}` with ALL fixes applied, then
+  verify correctness:
+  ```
+  python {harness_path} {harness_flag} {candidate_path}
+  ```
+
+- If nothing needs fixing, state "ALL OPS JUSTIFIED — NO EFFICIENCY ISSUES"
+  and do NOT modify the file.
+
+Think step by step. Be strict — the goal is maximum FlyDSL utilisation and
+optimal performance.
 """
 
 
@@ -628,19 +710,28 @@ def compare_outputs(ref_output, cand_output, rtol=1e-3, atol=1e-3):
     return True
 
 
+DEFAULT_CANDIDATE = "{candidate_path}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Translation comparison harness")
-    parser.add_argument("{candidate_flag}", dest="candidate", nargs="?", default=None,
+    parser.add_argument("{candidate_flag}", dest="candidate", nargs="?",
+                        default=None,
                         help="Path to FlyDSL candidate kernel")
     parser.add_argument("--correctness", action="store_true",
-                        help="Run baseline correctness check only")
+                        help="Run correctness check (uses default candidate if no explicit path)")
     parser.add_argument("--profile", action="store_true",
-                        help="Run in profile mode (same as correctness for translation)")
+                        help="Run in profile mode")
     parser.add_argument("--benchmark", action="store_true",
                         help="Run benchmark mode")
     parser.add_argument("--full-benchmark", action="store_true",
                         help="Run full benchmark mode")
     args = parser.parse_args()
+
+    candidate = args.candidate
+    if candidate is None and (args.correctness or args.profile
+                              or args.benchmark or args.full_benchmark):
+        candidate = DEFAULT_CANDIDATE
 
     torch.manual_seed(42)
 
@@ -648,9 +739,9 @@ def main():
     ref_model, ref_inputs, ref_output, ref_latency = run_reference()
     print(f"PyTorch reference latency: {{ref_latency:.3f}} ms")
 
-    if args.candidate:
-        print(f"Running FlyDSL candidate: {{args.candidate}}")
-        cand_output, cand_latency = run_candidate(args.candidate, ref_inputs)
+    if candidate and Path(candidate).exists():
+        print(f"Running FlyDSL candidate: {{candidate}}")
+        cand_output, cand_latency = run_candidate(candidate, ref_inputs)
         print(f"FlyDSL candidate latency: {{cand_latency:.3f}} ms")
 
         print("Comparing outputs...")
@@ -662,6 +753,9 @@ def main():
 
         if speedup < 0.5:
             print("WARNING: FlyDSL candidate is significantly slower than PyTorch reference")
+    elif candidate:
+        print(f"WARNING: Candidate file not found: {{candidate}}")
+        print("CORRECTNESS: PASS (baseline only)")
     else:
         print("CORRECTNESS: PASS (baseline only)")
 
