@@ -107,6 +107,31 @@ class LocalSQLiteBackend:
         for idx_sql in _CREATE_INDEXES:
             conn.execute(idx_sql)
         conn.commit()
+        self._seed_from_knowledge_base()
+
+    def _seed_from_knowledge_base(self) -> None:
+        """Auto-populate an empty DB from the bundled knowledge_base.json."""
+        conn = self._get_conn()
+        count = conn.execute("SELECT COUNT(*) FROM experiences").fetchone()[0]
+        if count > 0:
+            return
+
+        kb_path = Path(__file__).parent.parent / "knowledge_base.json"
+        if not kb_path.exists():
+            return
+
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            data = json.loads(kb_path.read_text())
+            experiences = data.get("experiences", [])
+            for exp_dict in experiences:
+                record = ExperienceRecord.from_dict(exp_dict)
+                self.store_experience(record)
+            logger.info("Seeded %d experiences from knowledge_base.json", len(experiences))
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Failed to seed from knowledge_base.json: %s", exc)
 
     # ── Experience CRUD ──────────────────────────────────────────────
 
