@@ -144,8 +144,14 @@ def _flydsl_env_setup(repo_root: Path, flydsl_repo: Path | None = None) -> dict[
     for root in search_roots:
         fly_python = root / "build-fly" / "python_packages"
         if fly_python.is_dir():
+            tests_dir = root / "tests"
+            paths = [str(fly_python), str(root)]
+            if tests_dir.is_dir():
+                paths.append(str(tests_dir))
             existing = os.environ.get("PYTHONPATH", "")
-            overrides["PYTHONPATH"] = f"{fly_python}:{root}:{existing}" if existing else f"{fly_python}:{root}"
+            if existing:
+                paths.append(existing)
+            overrides["PYTHONPATH"] = ":".join(paths)
 
             mlir_lib = fly_python / "flydsl" / "_mlir" / "_mlir_libs"
             if mlir_lib.is_dir():
