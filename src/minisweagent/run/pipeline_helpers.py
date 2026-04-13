@@ -903,6 +903,6 @@ def run_baseline_profile(test_command: str, gpu_id: int = 0) -> dict:
         command=profile_cmd,
         backend="metrix",
         num_replays=3,
-        quick=True,
+        quick=False,
         gpu_devices=str(gpu_id),
     )
