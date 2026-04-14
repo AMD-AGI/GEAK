@@ -501,8 +501,11 @@ def _run_self_review(
                 "role": "system",
                 "content": (
                     "You are a GPU kernel translation reviewer specialising in "
-                    "FlyDSL (AMD's Python DSL for MI300X). Respond with ONLY "
-                    "valid JSON. No markdown fences, no commentary outside JSON."
+                    "FlyDSL (AMD's Python DSL for MI300X).\n\n"
+                    "CRITICAL: Your entire response must be a single JSON object. "
+                    "Do NOT include any text before or after the JSON. "
+                    "Do NOT wrap it in markdown code fences. "
+                    "Start your response with { and end with }."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -512,12 +515,16 @@ def _run_self_review(
         return False
 
     content = response.get("content", "") if isinstance(response, dict) else ""
-
-    # Strip markdown code fences if the model wrapped its response
     content = content.strip()
-    fence_match = re.match(r"^```(?:json)?\s*\n?(.*?)\n?\s*```$", content, re.DOTALL)
+
+    # Try to extract JSON from the response — handle fences and prose preambles
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", content, re.DOTALL)
     if fence_match:
         content = fence_match.group(1).strip()
+    elif not content.startswith("{"):
+        brace_pos = content.find("{")
+        if brace_pos >= 0:
+            content = content[brace_pos:]
 
     try:
         parsed = json.loads(content)
