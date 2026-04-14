@@ -37,6 +37,16 @@ tools:
 
 RAG is **disabled by default**. If you skip this step, the `query` and `optimize` tools will not be available to the agent.
 
+### Step 4 (Optional): Add custom knowledge documents
+
+To add your own optimization documents to the knowledge base, place `.md` files under `knowledge-base/amd-knowledge-base/layer-6-extended/optimize-guides/`, then rebuild the index:
+
+```bash
+python scripts/build_index.py --force
+```
+
+Use Markdown files with clear heading hierarchy (`#`, `##`, `###`). The indexer splits documents by heading structure, which yields better retrieval results.
+
 ### Startup checks
 
 When `rag: true`, GEAK performs two checks before running the pipeline:
