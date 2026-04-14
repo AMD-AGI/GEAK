@@ -345,16 +345,9 @@ def run_translation(
             _print("  Running self-review (op + efficiency audit)...")
             review_ok = _run_self_review(
                 candidate_path=candidate_path,
-                harness_path=harness_path,
                 pair=pair,
                 model=_model,
-                repo_root=repo_root,
-                output_dir=output_dir,
-                env_overrides=env_overrides,
                 kb_content=kb_content,
-                agent_config_dict=agent_config_dict,
-                round_num=round_num,
-                gpu_id=gpu_id,
                 _print=_print,
             )
 
@@ -380,13 +373,15 @@ def run_translation(
                     _parse_timing_from_harness_output(
                         recheck.get("stdout", ""), result, _print,
                     )
-                result["translation_self_review"] = "passed"
+                    result["translation_self_review"] = "passed_with_changes"
+                else:
+                    result["translation_self_review"] = "passed"
                 break
             else:
                 _print("  Self-review failed — continuing to next round")
                 result["translation_success"] = False
                 result["translation_kernel_path"] = None
-                best_attempt_errors.append("Self-review agent failed or broke correctness")
+                best_attempt_errors.append("Self-review failed (parse error or no rewritten code)")
                 continue
         else:
             stderr_tail = harness_result.get("stderr", "")[-500:]
@@ -414,146 +409,147 @@ def run_translation(
 
 
 _SELF_REVIEW_PROMPT = """\
-## Translation Self-Review: Op Audit + Efficiency Check
+You are reviewing a FlyDSL translation of a PyTorch GPU kernel that passed correctness.
 
-The FlyDSL translation below passed correctness. Audit it for:
-1. **Unnecessary PyTorch fallbacks** — PyTorch ops where FlyDSL has an equivalent.
-2. **Suboptimal FlyDSL usage** — using low-level FlyDSL primitives when a
-   higher-level pre-built kernel exists, or inefficient patterns.
+## FlyDSL Knowledge Base
+{kb_content}
 
-### Translated code ({candidate_path}):
+## Translated code ({candidate_path}):
 ```python
 {candidate_code}
 ```
 
-### Part A — PyTorch Fallback Audit
+## Part A — PyTorch Fallback Audit
 
-1. **Enumerate** every call in the code that performs GPU *compute* via
-   PyTorch (e.g. `torch.matmul`, `F.relu`, `nn.Linear(...)`, `@` operator
-   for matrix multiplication, `F.softmax`, `F.scaled_dot_product_attention`,
-   `torch.sum`, `torch.mean`, etc.).
+Enumerate every call that performs GPU **compute** via PyTorch (e.g.
+`torch.matmul`, `F.relu`, `nn.Linear(...)`, `@` for matrix multiply,
+`F.softmax`, `F.scaled_dot_product_attention`, `torch.sum`, `torch.mean`).
 
-   Ignore non-compute helpers: `import torch`, `torch.empty`, `torch.zeros`,
-   `torch.no_grad`, `.cuda()`, `.contiguous()`, `.view()`, `.reshape()`,
-   dtype/device helpers, and `torch.Tensor` type annotations.
+Ignore non-compute helpers: `import torch`, `torch.empty`, `torch.zeros`,
+`torch.no_grad`, `.cuda()`, `.contiguous()`, `.view()`, `.reshape()`,
+dtype/device helpers, `torch.Tensor` type annotations.
 
-2. For **each** compute operation produce a verdict:
-   - **REPLACE** — FlyDSL has an equivalent. You MUST rewrite the code to
-     use it. Consult the knowledge base for the correct FlyDSL API.
-   - **KEEP** — FlyDSL genuinely has no equivalent (e.g. `nn.Conv2d`,
-     `nn.BatchNorm2d`, `F.max_pool2d`). Briefly explain why.
+For each, decide:
+- **REPLACE** — FlyDSL has an equivalent. Provide the FlyDSL replacement.
+- **KEEP** — FlyDSL has no equivalent (e.g. `nn.Conv2d`, `nn.BatchNorm2d`,
+  `F.max_pool2d`). Briefly explain why.
 
-3. Present the enumeration as a table:
+## Part B — Efficiency Audit
 
-   | # | PyTorch Operation | Verdict | Reason |
-   |---|-------------------|---------|--------|
-
-### Part B — Efficiency Audit
-
-Check for these anti-patterns and fix them:
-
-1. **Python for-loops over batch dimensions** calling GEMM/softmax one at a
-   time. This is extremely slow. Use batched APIs or restructure as a single
-   larger GEMM call.
-
-2. **Decomposed attention** (separate GEMM for Q@K^T, softmax, GEMM for @V)
-   when `build_flash_attn_func_module()` could be used instead. Flash
-   attention is always preferred when constraints are met (head_dim>=64,
+Check for:
+1. **Python for-loops over batch dimensions** — extremely slow; restructure
+   as a single batched call.
+2. **Decomposed attention** (Q@K^T, softmax, @V separately) when
+   `build_flash_attn_func_module()` could replace it (head_dim>=64,
    head_dim%32==0, seq_len%128==0).
+3. **Duplicate kernels** — mixing PyTorch and FlyDSL for the same op.
+4. **Missing pre-built kernels** — custom `@flyc.kernel` for ops with
+   pre-built equivalents (softmax, layernorm, rmsnorm).
 
-3. **Duplicate custom kernels** — e.g. using PyTorch `F.relu` in some places
-   and a FlyDSL relu kernel in others within the same model. Use the FlyDSL
-   kernel everywhere.
+## Required JSON Response
 
-4. **Missing pre-built kernel usage** — using custom `@flyc.kernel` for
-   operations that have pre-built equivalents (softmax, layernorm, rmsnorm).
+Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
+{{
+  "fallback_audit": [
+    {{"op": "<pytorch call>", "line": <approx line number>, "verdict": "KEEP" or "REPLACE", "reason": "<brief>", "flydsl_replacement": "<FlyDSL API or null>"}}
+  ],
+  "efficiency_issues": [
+    {{"issue": "<description>", "current_code": "<snippet>", "fix": "<description>"}}
+  ],
+  "verdict": "pass" or "rewrite",
+  "reasoning": "<one sentence summary>",
+  "rewritten_code": "<FULL rewritten file contents if verdict=rewrite, else null>"
+}}
 
-If you find any Part B issue, mark it in a second table:
-
-   | # | Issue | Current Code | Fix |
-   |---|-------|-------------|-----|
-
-### Actions
-
-- If **any** operation from Part A is marked REPLACE, or **any** Part B
-  issue is found: rewrite `{candidate_path}` with ALL fixes applied, then
-  verify correctness:
-  ```
-  python {harness_path} {harness_flag} {candidate_path}
-  ```
-
-- If nothing needs fixing, state "ALL OPS JUSTIFIED — NO EFFICIENCY ISSUES"
-  and do NOT modify the file.
-
-Think step by step. Be strict — the goal is maximum FlyDSL utilisation and
-optimal performance.
+Rules:
+- verdict="rewrite" if ANY fallback_audit entry has verdict="REPLACE" or ANY
+  efficiency_issues exist. Otherwise verdict="pass".
+- rewritten_code must be the COMPLETE file (not a diff/patch), ready to write
+  directly. Include all imports, class definitions, helper functions.
+- Be strict — maximise FlyDSL utilisation and performance.
 """
 
 
 def _run_self_review(
     *,
     candidate_path: Path,
-    harness_path: Path,
     pair,
     model,
-    repo_root: Path,
-    output_dir: Path,
-    env_overrides: dict[str, str],
     kb_content: str,
-    agent_config_dict: dict,
-    round_num: int,
-    gpu_id: int,
     _print,
 ) -> str | bool:
-    """Run the self-review agent on a correct translation.
+    """Single-call self-review: audit translated code for PyTorch fallbacks
+    and efficiency issues via one LLM query.
 
     Returns:
-    - ``"rewritten"`` if the agent modified the candidate file
-    - ``True`` if all ops are justified (no changes)
-    - ``False`` if the review agent failed
+    - ``"rewritten"`` if the LLM produced a rewritten candidate
+    - ``True`` if all ops are justified (no changes needed)
+    - ``False`` if the review failed (parse error, exception, etc.)
     """
-    from minisweagent.agents.translation_agent import run_translation_agent
+    import re
 
     candidate_code = candidate_path.read_text()
     prompt = _SELF_REVIEW_PROMPT.format(
         candidate_path=candidate_path,
         candidate_code=candidate_code,
-        harness_path=harness_path,
-        harness_flag=pair.harness_candidate_flag,
+        kb_content=kb_content,
     )
 
-    review_config = dict(agent_config_dict)
-    review_config["step_limit"] = min(agent_config_dict.get("step_limit", 50), 20)
-    review_config["cost_limit"] = min(agent_config_dict.get("cost_limit", 8.0), 3.0)
-
-    review_log_dir = output_dir / f"round_{round_num}_self_review"
-    test_cmd = f"{sys.executable} {harness_path} {pair.harness_candidate_flag} {candidate_path}"
-
     try:
-        exit_status, _ = run_translation_agent(
-            model=model,
-            repo_root=repo_root,
-            agent_config=review_config,
-            task=prompt,
-            kb_content=kb_content,
-            env_overrides=env_overrides or None,
-            test_command=test_cmd,
-            log_dir=review_log_dir,
-            log_name=f"translation_agent_round_{round_num}_self_review.log",
-        )
+        response = model.query([
+            {
+                "role": "system",
+                "content": (
+                    "You are a GPU kernel translation reviewer specialising in "
+                    "FlyDSL (AMD's Python DSL for MI300X). Respond with ONLY "
+                    "valid JSON. No markdown fences, no commentary outside JSON."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ])
     except Exception as exc:
-        _print(f"  Self-review agent error: {exc}")
+        _print(f"  Self-review query error: {exc}")
         return False
 
-    _print(f"  Self-review exit: {exit_status}")
+    content = response.get("content", "") if isinstance(response, dict) else ""
 
-    new_code = candidate_path.read_text()
-    if new_code != candidate_code:
-        _print("  Self-review modified the candidate")
+    # Strip markdown code fences if the model wrapped its response
+    content = content.strip()
+    fence_match = re.match(r"^```(?:json)?\s*\n?(.*?)\n?\s*```$", content, re.DOTALL)
+    if fence_match:
+        content = fence_match.group(1).strip()
+
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError) as exc:
+        _print(f"  Self-review JSON parse error: {exc}")
+        _print(f"  Raw response (first 500 chars): {content[:500]}")
+        return False
+
+    verdict = parsed.get("verdict", "pass")
+    reasoning = parsed.get("reasoning", "")
+    fallback_audit = parsed.get("fallback_audit", [])
+    efficiency_issues = parsed.get("efficiency_issues", [])
+
+    n_replace = sum(1 for f in fallback_audit if f.get("verdict") == "REPLACE")
+    n_keep = sum(1 for f in fallback_audit if f.get("verdict") == "KEEP")
+    _print(
+        f"  Self-review: {n_replace} REPLACE, {n_keep} KEEP, "
+        f"{len(efficiency_issues)} efficiency issues"
+    )
+    _print(f"  Self-review reasoning: {reasoning}")
+
+    if verdict == "rewrite":
+        rewritten = parsed.get("rewritten_code")
+        if not rewritten or not rewritten.strip():
+            _print("  Self-review verdict=rewrite but no rewritten_code provided")
+            return False
+        candidate_path.write_text(rewritten)
+        _print("  Self-review wrote rewritten candidate")
         return "rewritten"
-    else:
-        _print("  Self-review: all ops justified (no changes)")
-        return True
+
+    _print("  Self-review: all ops justified (no changes)")
+    return True
 
 
 def _create_translation_harness(
