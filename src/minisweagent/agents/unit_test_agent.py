@@ -67,9 +67,10 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
     ),
     "ck": (
         "This is a Composable Kernel (CK) kernel.\n"
-        "- A build step is REQUIRED before running tests. Include build step in the TEST_COMMAND.\n"
-        "- IMPORTANT: Read GEAK/knowledge-base/ck-knowledge-base/standalone-test-harness-recipe/README.md. Follow the recipe to create the standalone build and test harness."
-    ),
+        "- A standalone build system for the target kernel is required. Do not use the existing CK repository build system.\n"
+        "- IMPORTANT: Read GEAK/knowledge-base/ck-knowledge-base/standalone-test-harness-recipe/README.md. Always follow the recipe to create a standalone build system and test harness.\n"
+        "- TEST_COMMAND must include a compile step before running the test harness.\n"
+        "- TEST_COMMAND for CK example: `python3 <ABSOLUTE_PATH_TO_WORKDIR>/compile.py && python3 <ABSOLUTE_PATH_TO_HARNESS_DIR>/test_harness.py --correctness && python3 <ABSOLUTE_PATH_TO_HARNESS_DIR>/test_harness.py --benchmark`"
     "asm": (
         "This is a precompiled HSACO assembly kernel.\n"
         "- The assembly binary CANNOT be modified or recompiled.\n"
