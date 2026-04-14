@@ -5,6 +5,7 @@ correct shapes from the benchmark file. Runs after the UnitTestAgent
 produces a harness and BEFORE runtime validation.
 """
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
 from minisweagent.run.preprocess.config_loader import load_preprocess_agent_config
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -80,6 +83,7 @@ def run_shape_fixer(
     try:
         agent_config, _ = load_preprocess_agent_config("mini_shape_fixer")
     except Exception:
+        logger.debug("Failed to load preprocess agent config for mini_shape_fixer", exc_info=True)
         agent_config = {}
 
     env = LocalEnvironment(**LocalEnvironmentConfig(cwd=str(repo)).__dict__)

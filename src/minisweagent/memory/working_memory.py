@@ -20,10 +20,13 @@ Inspired by:
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from minisweagent.memory.working_notebook import WorkingNotebook, summarize_working_notebook
 
@@ -98,7 +101,8 @@ class WorkingMemory:
                     self.notebook_dir,
                     writer_id=self.notebook_writer_id or "default",
                 )
-            except Exception:
+            except Exception as exc:
+                logger.debug("WorkingMemory: WorkingNotebook init failed: %s", exc)
                 self._notebook = None
 
     def update_step(self, step: int, cost: float):

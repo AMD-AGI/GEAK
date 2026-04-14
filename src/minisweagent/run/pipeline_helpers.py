@@ -20,9 +20,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from minisweagent import get_repo_root
+
 logger = logging.getLogger(__name__)
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_REPO_ROOT = get_repo_root()
 
 REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
 
@@ -720,6 +722,7 @@ def _gpu_arch_context(profiling_path: str) -> list[str]:
     try:
         data = _json.loads(Path(profiling_path).read_text())
     except Exception:
+        logger.debug("Could not read or parse profiling JSON at %s", profiling_path, exc_info=True)
         return []
 
     results = data.get("results", [])
@@ -876,7 +879,7 @@ def inject_pipeline_context(
                 ctx.append(_mem_ctx.strip())
                 ctx.append("")
     except Exception:
-        pass
+        logger.debug("Could not assemble optimization memory context", exc_info=True)
 
     enriched = "\n".join(ctx) + "\n" + task_body
     return enriched, cfg

@@ -4,9 +4,9 @@ Combines full software development workflow with RAG tools for AMD GPU optimizat
 Merged version: combines v1's multi-round strategy with v2's specific query guidelines.
 """
 
-from pathlib import Path
+from minisweagent import get_repo_root
 
-_MINI_SWE_ROOT = Path(__file__).resolve().parents[3]
+_MINI_SWE_ROOT = get_repo_root()
 _ENV_INSTALL_DOC = str(_MINI_SWE_ROOT / "docs" / "env_install.md")
 
 SYSTEM_TEMPLATE = """You are a helpful assistant that can interact with a computer. You also have access to AMD GPU optimization tools through RAG.

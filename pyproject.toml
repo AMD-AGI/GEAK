@@ -46,19 +46,19 @@ dependencies = [
     "anthropic",
     "google-genai",
     "openai != 1.100.0,!=1.100.1",  # https://github.com/SWE-agent/mini-swe-agent/issues/446
-    "mcp[cli]>=1.2.0",  # required by automated test discovery MCP server
-    "fastmcp>=0.2.0",  # required by profiler-mcp and metrix-mcp
     "metrix @ git+https://github.com/AMDResearch/intellikit.git@bcbfa0252df9d55f3aab68c95dd3ce45ccbe5b46#subdirectory=metrix",  # AMD GPU profiling — pinned for production stability
 ]
 
 [project.optional-dependencies]
-# MCP tool packages under mcp_tools/ — installed as local path dependencies.
-# pip install -e '.[mcp]' installs these alongside the main package.
-# Paths are resolved via [tool.uv.sources] below (uv) or pip install -e mcp_tools/* directly.
+# MCP tool packages and their transitive deps.
+# Local package names resolve via [tool.uv.sources] (uv only).
+# With pip, use `make install` or `make install-dev` instead.
 mcp = [
     "automated-test-discovery",
     "metrix-mcp",
     "profiler-mcp",
+    "mcp[cli]>=1.2.0",
+    "fastmcp>=0.2.0",
 ]
 
 # LangChain hybrid retrieval for AMD GPU knowledge base (embedding + BM25 + reranker)

@@ -2,16 +2,21 @@
 
 import concurrent.futures
 import json
+import logging
+import os
 import re
 import shutil
 import subprocess
-import sys
+import threading
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from minisweagent import Environment, Model
+
+logger = logging.getLogger(__name__)
 from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.agents.select_patch_agent import run_select_patch
 from minisweagent.run.task_file import _neutralize_nested_git_repos, create_worktree
@@ -32,7 +37,8 @@ class BestPatchResult:
     agent_id: int
     patch_id: str
     test_output: str
-    metric_result: dict | None = None
+    best_speedup: float | None = None
+    best_patch_file: str | None = None
     patch_dir: Path | None = None
     llm_conclusion: str | None = None
 
@@ -109,10 +115,14 @@ class ParallelAgent(DefaultAgent):
         )
         if console:
             console.print(f"\n[bold green]Selecting best patch from {num_parallel} parallel runs...[/bold green]")
-        best_result = self._select_best_from_parallel_runs(base_patch_dir, num_parallel, metric, model_factory)
-        if best_result and console and best_result.llm_conclusion:
-            console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
-            console.print(best_result.llm_conclusion)
+        logger.info("Selecting best patch from %d parallel runs...", num_parallel)
+        results_dir = base_patch_dir / "results" / "round_1"
+        best_result = self._select_best_from_parallel_runs(results_dir, num_parallel, metric, model_factory)
+        if best_result and best_result.llm_conclusion:
+            if console:
+                console.print("\n[bold cyan]LLM Conclusion:[/bold cyan]")
+                console.print(best_result.llm_conclusion)
+            logger.info("LLM Conclusion: %s", best_result.llm_conclusion)
 
         # Return the best result object
         return best_result
@@ -122,7 +132,7 @@ class ParallelAgent(DefaultAgent):
         base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory
     ) -> BestPatchResult | None:
         """Select the best patch from multiple parallel runs using SelectPatchAgent."""
-        print("[ParallelAgent] Using SelectPatchAgent for patch selection...", flush=True)
+        logger.info("Selecting best patch from %d parallel runs via SelectPatchAgent.", num_parallel)
 
         model = model_factory()
         _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
@@ -133,17 +143,17 @@ class ParallelAgent(DefaultAgent):
         det_result = rewrite_best_results(base_patch_dir)
         if det_result:
             best_patch_id = det_result.get("best_patch_id", best_patch_id)
-            print(
-                f"[ParallelAgent] Deterministic override: {best_patch_id} "
-                f"({det_result.get('best_patch_speedup', '?')}x)",
-                flush=True,
+            logger.info(
+                "Deterministic override: %s (%sx)",
+                best_patch_id,
+                det_result.get("best_patch_speedup", "?"),
             )
 
         if not best_patch_id:
-            print("[ParallelAgent] SelectPatchAgent did not produce best_results.json", flush=True)
+            logger.warning("SelectPatchAgent did not produce best_results.json.")
             return None
 
-        print(f"[ParallelAgent] Selected best patch: {best_patch_id}", flush=True)
+        logger.info("Selected best patch: %s", best_patch_id)
 
         try:
             # Read the best_results.json for additional details
@@ -162,25 +172,27 @@ class ParallelAgent(DefaultAgent):
                 agent_id = 0
                 patch_dir = base_patch_dir
 
-            # metric_result is no longer persisted (results.json removed); rely on test logs if needed
-            metric_result = None
-
             # Read test output if path provided
             test_output = ""
             test_output_path = best_results.get("best_patch_test_output")
             if test_output_path and Path(test_output_path).exists():
                 test_output = Path(test_output_path).read_text()
 
+            # Extract speedup from best_results.json (written by select patch agent)
+            raw_speedup = best_results.get("best_patch_speedup")
+            best_speedup = float(raw_speedup) if raw_speedup is not None else None
+
             return BestPatchResult(
                 agent_id=agent_id,
                 patch_id=patch_name,
                 test_output=test_output,
-                metric_result=metric_result,
+                best_speedup=best_speedup,
+                best_patch_file=best_results.get("best_patch_file"),
                 patch_dir=patch_dir,
                 llm_conclusion=best_results.get("llm_selection_analysis", ""),
             )
         except Exception as e:
-            print(f"[ParallelAgent] Failed to process best_results.json: {e}", flush=True)
+            logger.warning("Failed to process best_results.json: %s", e)
             return None
 
     @staticmethod
@@ -224,7 +236,8 @@ class ParallelAgent(DefaultAgent):
                 text=True,
             )
             return result.returncode == 0
-        except Exception:
+        except Exception as exc:
+            logger.debug("_has_valid_head: check failed for %s: %s", repo_path, exc)
             return False
 
     @staticmethod
@@ -253,7 +266,8 @@ class ParallelAgent(DefaultAgent):
                     shutil.rmtree(git_dir)
                 else:
                     git_dir.unlink()
-            except Exception:
+            except Exception as exc:
+                logger.debug("_init_as_git_repo: failed to remove invalid .git in %s: %s", repo_path, exc)
                 pass
 
         try:
@@ -317,7 +331,9 @@ class ParallelAgent(DefaultAgent):
         # (e.g. "<repo>/optimization_logs/<run>/worktrees/agent_X/..."),
         # collapse that whole prefix back to the current worktree root first.
         # This prevents path "nesting" when replacement is applied more than once.
-        prev_worktree_pat = re.compile(re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/agent_\d+")
+        prev_worktree_pat = re.compile(
+            re.escape(repo_path_str) + r"/optimization_logs/\S*/worktrees/(?:agent|slot|task)_\d+"
+        )
         text = prev_worktree_pat.sub(worktree_path_str, text)
 
         # Replace repo path (resolved and unresolved forms) with worktree path
@@ -325,11 +341,11 @@ class ParallelAgent(DefaultAgent):
         if str(repo_path) != repo_path_str:
             text = text.replace(str(repo_path), worktree_path_str)
 
-        # Keep agent id in any remaining /worktrees/agent_<id> segments aligned
+        # Keep slot id in any remaining /worktrees/slot_<id> segments aligned
         # with this worktree.
         return re.sub(
-            r"/worktrees/agent_\d+",
-            f"/worktrees/agent_{worktree_path.name.split('_')[-1]}",
+            r"/worktrees/(?:agent|slot|task)_\d+",
+            f"/worktrees/{worktree_path.name}",
             text,
         )
 
@@ -396,27 +412,36 @@ class ParallelAgent(DefaultAgent):
             )
 
         # Homogeneous mode (original behavior)
-        if console:
-            console.print(f"[bold green]Running {num_parallel} parallel patch agents...[/bold green]")
+        logger.debug("Running %d parallel patch agents...", num_parallel)
 
         base_patch_dir = base_patch_dir.resolve()
-        worktree_base = base_patch_dir / "worktrees"
+        results_dir = base_patch_dir / "results" / "round_1"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        worktree_base = results_dir / "worktrees"
         worktree_base.mkdir(parents=True, exist_ok=True)
         repo_path_resolved = repo_path.resolve()
         repo_path_str = str(repo_path_resolved)
 
+        # Write task files (aligned with heterogeneous tasks/ structure)
+        tasks_dir = base_patch_dir / "tasks" / "round_1"
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(num_parallel):
+            task_path = tasks_dir / f"parallel_{i}.md"
+            task_path.write_text(f"---\nlabel: parallel_{i}\n---\n\n{task_content}\n")
+        logger.debug("Wrote %d task files to %s", num_parallel, tasks_dir)
+
         # Initialize non-git repos as git repos for unified worktree management
         if not is_git_repo:
-            if console:
-                console.print("[bold yellow]Initializing non-git repo as git for worktree management...[/bold yellow]")
+            logger.info("Initializing non-git repo as git for worktree management...")
             cls._init_as_git_repo(repo_path_resolved)
             is_git_repo = True  # Now it's a git repo
 
         if gpu_ids and len(gpu_ids) < num_parallel:
-            if console:
-                console.print(
-                    f"[bold yellow]Warning: Only {len(gpu_ids)} GPU IDs provided for {num_parallel} parallel agents. Some agents will not have GPU isolation.[/bold yellow]"
-                )
+            logger.warning(
+                "Only %d GPU IDs for %d parallel agents; some agents will not have GPU isolation.",
+                len(gpu_ids),
+                num_parallel,
+            )
 
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
@@ -424,10 +449,9 @@ class ParallelAgent(DefaultAgent):
             worktree_path = create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             worktree_path_str = str(worktree_path.resolve())
 
-            if console:
-                console.print(f"[bold green]Created worktree for agent {agent_id}: {worktree_path}[/bold green]")
+            logger.debug("Created worktree for agent %d: %s", agent_id, worktree_path)
 
-            parallel_patch_dir = (base_patch_dir / f"parallel_{agent_id}").resolve()
+            parallel_patch_dir = (results_dir / f"parallel_{agent_id}").resolve()
             parallel_patch_dir.mkdir(parents=True, exist_ok=True)
             parallel_agent_config = agent_config.copy()
             parallel_agent_config["patch_output_dir"] = str(parallel_patch_dir)
@@ -435,7 +459,7 @@ class ParallelAgent(DefaultAgent):
             parallel_agent_config["mode"] = "yolo"
             parallel_agent_config["confirm_exit"] = False
 
-            log_file = parallel_patch_dir / f"agent_{agent_id}.log"
+            log_file = parallel_patch_dir / f"task_{agent_id}.log"
 
             # test_command should use relative paths, executed from worktree cwd
             # Path replacement kept for backward compatibility with absolute paths
@@ -461,13 +485,7 @@ class ParallelAgent(DefaultAgent):
                 new_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
                 new_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
                 new_env["GEAK_GPU_DEVICE"] = str(gpu_id)
-                if console:
-                    # Use lock to ensure console output completes before stdout redirection
-                    with _stdout_lock:
-                        console.print(f"[bold green]Parallel agent {agent_id} using GPU {gpu_id}[/bold green]")
-                        # Force flush to ensure output is written before redirection
-                        if hasattr(sys.stdout, "flush"):
-                            sys.stdout.flush()
+                logger.debug("Parallel agent %d assigned GPU %d", agent_id, gpu_id)
             env_config_dict["env"] = new_env
             parallel_env = type(base_env)(**env_config_dict)
 
@@ -503,6 +521,14 @@ class ParallelAgent(DefaultAgent):
                 f.write(init_msg)
                 f.flush()
 
+            _task_label = tasks[agent_id].label if tasks and agent_id < len(tasks) else f"task_{agent_id}"
+            logger.info(
+                "[dim]Sub-agent %d (%s) started on GPU %s[/dim]",
+                agent_id,
+                _task_label,
+                new_env.get("GEAK_GPU_DEVICE", "?"),
+            )
+            _agent_t0 = time.monotonic()
             exit_status, result, extra_info = None, None, None
             with redirect_output_fn(log_file):
                 try:
@@ -519,11 +545,55 @@ class ParallelAgent(DefaultAgent):
                         save_traj_fn(
                             agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info
                         )
+            _agent_elapsed = time.monotonic() - _agent_t0
+            logger.info(
+                "Sub-agent %d (%s) finished in %.0fs (exit=%s)",
+                agent_id,
+                _task_label,
+                _agent_elapsed,
+                exit_status,
+            )
 
             return agent_id, agent, exit_status, result
 
-        # Run parallel agents
+        # Run parallel agents with periodic progress reporting
         results = []
+        _progress_stop = threading.Event()
+        _dispatch_t0 = time.monotonic()
+
+        def _report_progress():
+            """Periodically scan patch dirs and report sub-agent progress."""
+            _interval = float(os.environ.get("GEAK_PROGRESS_INTERVAL", "30"))
+            _prev_patches: dict[str, set[str]] = {}  # label -> set of patch filenames
+            while not _progress_stop.wait(_interval):
+                elapsed = time.monotonic() - _dispatch_t0
+                patches_by_agent = []
+                new_patch_paths: list[str] = []
+                for i in range(num_parallel):
+                    _label = tasks[i].label if tasks and i < len(tasks) else f"task_{i}"
+                    pdir = results_dir / (f"parallel_{i}" if not tasks else _label)
+                    cur_patches = {p.name for p in pdir.glob("*.patch")} if pdir.is_dir() else set()
+                    count = len(cur_patches)
+                    patches_by_agent.append((_label, count))
+                    prev = _prev_patches.get(_label, set())
+                    for pname in sorted(cur_patches - prev):
+                        new_patch_paths.append(str(pdir / pname))
+                    _prev_patches[_label] = cur_patches
+                total_patches = sum(c for _, c in patches_by_agent)
+                summary = ", ".join(f"{l}: {c}" for l, c in patches_by_agent if c > 0)
+                logger.info(
+                    "[dim]\\[running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
+                    elapsed / 60,
+                    total_patches,
+                    f" ({summary})" if summary else "",
+                    extra={"progress_tick": True},
+                )
+                for pp in new_patch_paths:
+                    logger.debug("[dim]  New patch: %s[/dim]", pp)
+
+        _progress_thread = threading.Thread(target=_report_progress, daemon=True)
+        _progress_thread.start()
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel) as executor:
             futures = {executor.submit(run_single_agent, i): i for i in range(num_parallel)}
             for future in concurrent.futures.as_completed(futures):
@@ -532,7 +602,8 @@ class ParallelAgent(DefaultAgent):
                     results.append(result)
                 except Exception as e:
                     agent_id = futures[future]
-                    from minisweagent.utils.log import logger
+                    logger.error("Error in parallel agent %d: %s", agent_id, e, exc_info=True)
 
-                    logger.error(f"Error in parallel agent {agent_id}: {e}", exc_info=True)
+        _progress_stop.set()
+        _progress_thread.join(timeout=2)
         return results

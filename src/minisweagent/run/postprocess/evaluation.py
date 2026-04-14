@@ -155,6 +155,7 @@ def build_eval_env(
     env["PYTHONPATH"] = f"{work_dir}:{repo_root}:{env.get('PYTHONPATH', '')}"
     alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF", "")
     if "expandable_segments" in alloc_conf:
+        logger.debug("build_eval_env: removing PYTORCH_CUDA_ALLOC_CONF with expandable_segments.")
         env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
     return env
 
@@ -353,6 +354,8 @@ def _check_config_mismatch(
             round_eval[section_key]["config_mismatch_detail"] = (
                 f"baseline={len(baseline_configs)} configs, candidate={len(candidate_configs)} configs"
             )
+        else:
+            logger.debug("_check_config_mismatch: both sides have matching configs.")
     elif candidate_configs or baseline_configs:
         candidate_shapes = parse_shape_count(candidate_stdout)
         baseline_shapes = parse_shape_count(baseline_text)
@@ -363,6 +366,8 @@ def _check_config_mismatch(
                 candidate_shapes,
             )
             round_eval[section_key]["shape_count_warning"] = f"baseline={baseline_shapes}, candidate={candidate_shapes}"
+    else:
+        logger.debug("_check_config_mismatch: neither side has config lines; skipping comparison.")
 
 
 def run_profile(
@@ -584,8 +589,10 @@ def evaluate_round_best(
     all_have_kernel_time = all(c["kernel_time_ms"] is not None for c in candidates)
     if all_have_kernel_time:
         best = min(candidates, key=lambda c: c["kernel_time_ms"])  # type: ignore[arg-type]
+        logger.debug("evaluate_round_best: selecting by min kernel_time_ms (%d candidates).", len(candidates))
     else:
         best = max(candidates, key=lambda c: c["speedup"])
+        logger.debug("evaluate_round_best: selecting by max speedup (%d candidates).", len(candidates))
 
     best_task: str = best["task"]
     best_patch_file: str = best["patch_file"]

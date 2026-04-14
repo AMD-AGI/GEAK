@@ -10,6 +10,7 @@ CLI tools can create isolated work directories.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -326,14 +327,14 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
             env=git_env,
         )
     except Exception:
-        pass
+        pass  # best-effort worktree prune; failure is harmless
 
     # Remove directory if it still exists
     if worktree_path.exists():
         try:
             shutil.rmtree(worktree_path)
         except Exception:
-            pass
+            pass  # best-effort directory cleanup
 
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_safe_directory(repo_path, git_env)
@@ -411,14 +412,32 @@ def create_worktree_with_patch(
     worktree_path: Path,
     patch_file: str | Path,
 ) -> Path:
-    """Create a git worktree and apply a starting patch.
+    """Create a git worktree and apply a cumulative starting patch.
 
     Used to make round N+1 agents start from round N's best kernel.
+
+    The starting patch is *cumulative* -- it encodes the full delta from
+    HEAD to the desired base state (including all prior round changes).
+    We therefore skip the dirty-tracked / untracked sync that
+    ``create_worktree`` normally performs; those synced changes would
+    conflict with the patch's own context lines, causing ``git apply``
+    to fail with "patch does not apply" or "already exists".
     """
-    wt = create_worktree(repo_path, worktree_path)
+    log = logging.getLogger(__name__)
+
     patch_path = Path(patch_file)
     if not patch_path.exists() or patch_path.stat().st_size == 0:
-        return wt
+        log.info(
+            "No valid starting patch (%s); creating worktree with dirty/untracked sync",
+            patch_file,
+        )
+        return create_worktree(repo_path, worktree_path)
+
+    log.info(
+        "Creating clean-HEAD worktree (no dirty sync) for cumulative starting patch: %s",
+        Path(patch_file).name,
+    )
+    wt = _create_worktree_clean(repo_path, worktree_path)
     git_env = get_git_safe_env(worktree_path.parent)
     patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     result, removed_paths = apply_patch_with_generated_helper_fallback(
@@ -427,21 +446,89 @@ def create_worktree_with_patch(
         env=git_env,
     )
     if result.returncode != 0:
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "Failed to apply starting patch %s: %s",
+        log.warning(
+            "Failed to apply starting patch %s on clean HEAD: %s",
             patch_file,
             result.stderr[:500],
         )
     elif removed_paths:
-        import logging
-
-        logging.getLogger(__name__).warning(
+        log.warning(
             "Applied starting patch after stripping generated helper artifacts: %s",
             ", ".join(removed_paths[:5]),
         )
+    else:
+        log.info("Starting patch applied successfully on clean HEAD worktree")
     return wt
+
+
+def _create_worktree_clean(repo_path: Path, worktree_path: Path) -> Path:
+    """Create a git worktree at HEAD without syncing dirty or untracked files.
+
+    This is used by ``create_worktree_with_patch`` where a cumulative patch
+    will be applied on top of a pristine HEAD checkout.  Skipping the
+    dirty/untracked sync avoids conflicts between the main repo's working
+    tree state and the patch's context lines.
+    """
+    log = logging.getLogger(__name__)
+    worktree_str = str(worktree_path.resolve())
+    git_env = get_git_safe_env(worktree_path.parent)
+
+    _cleanup_existing_worktree(repo_path, worktree_path, worktree_str, git_env)
+
+    if worktree_path.exists():
+        shutil.rmtree(worktree_path, ignore_errors=True)
+
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_safe_directory(repo_path, git_env)
+
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(worktree_path)],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=git_env,
+    )
+    _ensure_safe_directory(worktree_path, git_env)
+    log.info("Clean-HEAD worktree created at %s (no dirty/untracked sync)", worktree_path)
+    return worktree_path
+
+
+def _cleanup_existing_worktree(
+    repo_path: Path,
+    worktree_path: Path,
+    worktree_str: str,
+    git_env: dict[str, str],
+) -> None:
+    """Remove a previously registered worktree, falling back to prune."""
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=git_env,
+        )
+        if not any(worktree_str in line or str(worktree_path) in line for line in result.stdout.splitlines()):
+            return
+        subprocess.run(
+            ["git", "worktree", "remove", str(worktree_path), "--force"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=git_env,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=repo_path,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=git_env,
+        )
 
 
 def replace_paths(text: str, repo_path: Path, worktree_path: Path) -> str:

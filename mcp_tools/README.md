@@ -4,17 +4,26 @@ This directory is where you add **Model Context Protocol** servers that the GEAK
 
 ## Installation
 
-`fastmcp` and `mcp[cli]` are core dependencies — installed automatically with `pip install -e .`.
-
-The three MCP server packages in this directory (`automated-test-discovery`, `metrix-mcp`, `profiler-mcp`) are **not** installed by default. Install them with:
+### With uv (recommended for development)
 
 ```bash
-pip install -e ‘.[mcp]’   # MCP servers only
+uv pip install -e '.[mcp]'   # main package + MCP servers
 # or
-pip install -e ‘.[full]’  # everything
+uv pip install -e '.[full]'  # everything
 ```
 
-Without this, the agent will fail with `ModuleNotFoundError` when it tries to start these servers.
+### With pip (or inside Docker)
+
+Use the Makefile, which installs the main package first, then each MCP server explicitly:
+
+```bash
+make install-dev   # editable install for development
+make install       # non-editable (used by Dockerfile)
+```
+
+`fastmcp` and `mcp[cli]` are in the `[mcp]` optional group. With pip, `fastmcp` is installed transitively — each MCP server package declares `fastmcp>=0.2.0` as its own dependency.
+
+Without installing the MCP servers, the agent will fail with `ModuleNotFoundError` when it tries to start them.
 
 ## Directory and module naming
 

@@ -1,11 +1,14 @@
 """Interactive configuration editor for auto-detected settings."""
 
+import logging
 import sys
 from pathlib import Path
 from select import select
 from typing import Any
 
 from minisweagent.run.utils.task_parser import generate_patch_output_dir
+
+logger = logging.getLogger(__name__)
 
 
 def input_with_timeout(prompt: str, timeout_s: float, default: str) -> tuple[str, bool]:
@@ -86,6 +89,10 @@ def display_config_with_sources(merged_config: dict, console):
     # Show conflicts if any
     conflicts = merged_config.get("_conflicts", {})
     if conflicts:
+        logger.debug(
+            "Parallel config display: conflicting fields (prompt/cli/yaml differ): %s",
+            sorted(conflicts.keys()),
+        )
         lines.append("\n[bold yellow]⚠ Conflicts detected:[/bold yellow]")
         for field, sources in conflicts.items():
             lines.append(f"  {field}:")
@@ -112,18 +119,25 @@ def display_config_with_sources(merged_config: dict, console):
         lines.append(f"  {key + ':':<20} {value}{source_label}")
 
     lines.append("=" * 80)
-    console.print("\n".join(lines))
+    _config_text = "\n".join(lines)
+    console.print(_config_text)
+    logger.info("Configuration display:\n%s", _config_text)
 
 
 def interactive_config_edit_with_sources(merged_config: dict, console) -> tuple[dict, str, bool]:
     """Interactive configuration editor with source tracking and conflict warnings."""
+    conflicts = merged_config.get("_conflicts", {})
+    logger.debug(
+        "interactive_config_edit_with_sources: starting (conflict_fields=%s)",
+        sorted(conflicts.keys()) if conflicts else [],
+    )
     display_config_with_sources(merged_config, console)
 
     # Show conflicts warning if any
-    conflicts = merged_config.get("_conflicts", {})
     if conflicts:
         console.print("\n[bold yellow]⚠ Configuration conflicts detected (see above).[/bold yellow]")
         console.print("[dim]Prompt-detected values will be used by default (highest priority).[/dim]")
+        logger.info("Configuration conflicts detected on fields: %s", sorted(conflicts.keys()))
 
     current_config = {k: v for k, v in merged_config.items() if not k.startswith("_")}
     current_patch_dir = merged_config["_patch_output_dir"]
@@ -134,13 +148,17 @@ def interactive_config_edit_with_sources(merged_config: dict, console) -> tuple[
         )
         user_input, timed_out = input_with_timeout("Your choice: ", timeout_s=60, default="y")
         user_input = user_input.strip().lower()
+        logger.info("User input: %r (timed_out=%s)", user_input, timed_out)
         if timed_out:
+            logger.debug("Parallel config prompt: no input for 60s; defaulting to proceed (y).")
             console.print("[dim]No input for 60s, defaulting to 'y'.[/dim]")
 
         if not user_input or user_input == "y":
+            logger.info("Parallel config prompt: user confirmed proceed.")
             return current_config, current_patch_dir, True
 
         elif user_input == "q":
+            logger.info("Parallel config prompt: user chose abort (q).")
             return current_config, current_patch_dir, False
 
         elif user_input == "h":
@@ -151,6 +169,7 @@ def interactive_config_edit_with_sources(merged_config: dict, console) -> tuple[
             field_name, value = parse_edit_command(user_input)
 
             if field_name is None:
+                logger.debug("Parallel config prompt: invalid edit command: %r", user_input)
                 console.print(
                     "[bold red]Invalid command format. Use --field=value (e.g., --test_command=python test.py)[/bold red]"
                 )
@@ -159,10 +178,12 @@ def interactive_config_edit_with_sources(merged_config: dict, console) -> tuple[
 
             current_config[field_name] = value
             console.print(f"[bold green]✓ Updated {field_name} = {value}[/bold green]")
+            logger.info("Parallel config prompt: updated %s = %s", field_name, value)
 
             if field_name == "kernel_name":
                 current_patch_dir = generate_patch_output_dir(value)
                 console.print(f"[bold green]✓ Updated patch_output_dir = {current_patch_dir}[/bold green]")
+                logger.info("Updated patch_output_dir = %s", current_patch_dir)
 
             # Update merged_config for next display
             merged_config[field_name] = value
@@ -172,6 +193,7 @@ def interactive_config_edit_with_sources(merged_config: dict, console) -> tuple[
 
         else:
             console.print(f"[bold red]Unknown command: '{user_input}'. Type 'h' for available commands.[/bold red]")
+            logger.info("Parallel config prompt: unknown command: %r", user_input)
             continue
 
 
@@ -187,59 +209,60 @@ def interactive_config_edit(parsed_config: dict, patch_output_dir: str, console)
 
     current_config = parsed_config.copy()
     current_patch_dir = patch_output_dir
+    logger.debug("interactive_config_edit: starting (keys=%s)", sorted(current_config.keys()))
 
     while True:
-        # Display current configuration
-        console.print(display_parsed_config(current_config, current_patch_dir))
+        _config_display = display_parsed_config(current_config, current_patch_dir)
+        console.print(_config_display)
+        logger.info("Parsed config display:\n%s", _config_display)
 
-        # Prompt for input
         console.print(
             "\n[bold cyan]Options:[/bold cyan] (y) to proceed, (q) to abort, (h) for help, or --field=value to edit"
         )
         user_input, timed_out = input_with_timeout("Your choice: ", timeout_s=60, default="y")
         user_input = user_input.strip().lower()
+        logger.info("User input: %r (timed_out=%s)", user_input, timed_out)
         if timed_out:
+            logger.debug("Parsed-config prompt: no input for 60s; defaulting to proceed (y).")
             console.print("[dim]No input for 60s, defaulting to 'y'.[/dim]")
 
-        # Handle different inputs
         if not user_input or user_input == "y":
-            # Proceed with current config
+            logger.info("Parsed-config prompt: user confirmed proceed.")
             return current_config, current_patch_dir, True
 
         elif user_input == "q":
-            # Abort
+            logger.info("Parsed-config prompt: user chose abort (q).")
             return current_config, current_patch_dir, False
 
         elif user_input == "h":
-            # Show help
             console.print(display_edit_help())
             continue
 
         elif user_input.startswith("--"):
-            # Edit command
             field_name, value = parse_edit_command(user_input)
 
             if field_name is None:
+                logger.debug("Parsed-config prompt: invalid edit command: %r", user_input)
                 console.print(
                     "[bold red]Invalid command format. Use --field=value (e.g., --test_command=python test.py)[/bold red]"
                 )
                 console.print("[dim]Type 'h' to see all available commands[/dim]")
                 continue
 
-            # Update configuration
             current_config[field_name] = value
             console.print(f"[bold green]✓ Updated {field_name} = {value}[/bold green]")
+            logger.info("Parsed-config prompt: updated %s = %s", field_name, value)
 
-            # Regenerate patch output dir if kernel_name changed
             if field_name == "kernel_name":
                 current_patch_dir = generate_patch_output_dir(value)
                 console.print(f"[bold green]✓ Updated patch_output_dir = {current_patch_dir}[/bold green]")
+                logger.info("Updated patch_output_dir = %s", current_patch_dir)
 
-            # Show updated config in next iteration
             continue
 
         else:
             console.print(f"[bold red]Unknown command: '{user_input}'. Type 'h' for available commands.[/bold red]")
+            logger.info("Parsed-config prompt: unknown command: %r", user_input)
             continue
 
 
@@ -257,24 +280,34 @@ def apply_config_changes(
     Only updates arguments that are not already set by command-line.
     Returns updated values.
     """
+    filled_from_parsed: list[str] = []
     # Override command-line arguments with auto-detected values (if not already specified)
     if not repo and parsed_config.get("repo"):
         repo = Path(parsed_config["repo"])
+        filled_from_parsed.append("repo")
 
     if not test_command and parsed_config.get("test_command"):
         test_command = parsed_config["test_command"]
+        filled_from_parsed.append("test_command")
 
     if not metric and parsed_config.get("metric"):
         metric = parsed_config["metric"]
+        filled_from_parsed.append("metric")
 
     if num_parallel is None and parsed_config.get("num_parallel"):
         num_parallel = parsed_config["num_parallel"]
+        filled_from_parsed.append("num_parallel")
 
     if not gpu_ids and parsed_config.get("gpu_ids"):
         gpu_ids = parsed_config["gpu_ids"]
+        filled_from_parsed.append("gpu_ids")
 
     if not patch_output and parsed_config.get("_patch_output_dir"):
         patch_output = Path(parsed_config["_patch_output_dir"])
+        filled_from_parsed.append("patch_output")
+
+    if filled_from_parsed:
+        logger.debug("apply_config_changes: filled CLI args from parsed task config: %s", filled_from_parsed)
 
     return repo, test_command, metric, num_parallel, gpu_ids, patch_output
 
@@ -330,6 +363,8 @@ def load_and_merge_configs(
 
     # Step 1: Collect values from all sources
     parallel_config = config.get("parallel_config") or {}
+    if parallel_config:
+        logger.debug("load_and_merge_configs: YAML parallel_config keys present: %s", sorted(parallel_config.keys()))
 
     # Source 1: CLI arguments (if provided)
     if repo:
@@ -381,9 +416,12 @@ def load_and_merge_configs(
 
         # Always run auto-detect if there's task content (to show user what was detected)
         if missing_in_cli_yaml:
-            console.print(
-                f"[bold cyan]Auto-detecting configuration from task: {', '.join(missing_in_cli_yaml)}...[/bold cyan]"
+            logger.info(
+                "Auto-detecting parallel fields from task (missing on CLI/YAML): %s",
+                ", ".join(missing_in_cli_yaml),
             )
+            _auto_msg = f"Auto-detecting configuration from task: {', '.join(missing_in_cli_yaml)}..."
+            console.print(f"[bold cyan]{_auto_msg}[/bold cyan]")
             parsed_config = parse_task_info(task_content, model)
 
             # Source 3: Prompt auto-detect (highest priority)
@@ -420,6 +458,9 @@ def load_and_merge_configs(
             values = list(sources.values())
             if len({str(v) for v in values}) > 1:
                 conflicts[field] = sources
+
+    if conflicts:
+        logger.debug("load_and_merge_configs: source conflicts on fields: %s", sorted(conflicts.keys()))
 
     # Apply merged configuration
     repo_value, repo_source = get_highest_priority(config_sources["repo"])
@@ -458,12 +499,19 @@ def load_and_merge_configs(
 
     # Step 4: Interactive confirmation (unless in yolo mode)
     if not yolo and (parsed_config or conflicts):
+        logger.debug(
+            "load_and_merge_configs: interactive merge (auto-detect=%s, conflicts=%s)",
+            parsed_config is not None,
+            bool(conflicts),
+        )
         updated_config, updated_patch_dir, proceed = interactive_config_edit_with_sources(merged_config, console)
 
         if not proceed:
+            logger.warning("Parallel configuration merge aborted by user.")
             console.print("[bold red]Aborted by user.[/bold red]")
             return None, None, None, None, None, None, None
 
+        logger.debug("load_and_merge_configs: user confirmed merged parallel configuration.")
         # Apply user-confirmed values
         repo = Path(updated_config["repo"]) if updated_config.get("repo") else None
         test_command = updated_config.get("test_command")
@@ -473,6 +521,10 @@ def load_and_merge_configs(
         patch_output = Path(updated_patch_dir) if updated_patch_dir else None
         kernel_name = updated_config.get("kernel_name")
     elif yolo and (parsed_config or missing_in_cli_yaml):
+        logger.info(
+            "Yolo mode: applying merged parallel config without interactive confirmation (auto-detect=%s).",
+            parsed_config is not None,
+        )
         # In yolo mode, just display and auto-apply
         display_config_with_sources(merged_config, console)
         repo = repo_value
@@ -482,8 +534,12 @@ def load_and_merge_configs(
         gpu_ids = gpu_ids_value
         patch_output = patch_output_value
     else:
+        logger.info(
+            "Using parallel configuration from CLI and/or YAML only (no interactive merge; task auto-detect skipped or not needed)."
+        )
         # No auto-detect needed and no conflicts
         console.print("[bold green]Using configuration from command-line and/or config file.[/bold green]")
+        logger.info("Using configuration from command-line and/or config file (no interactive merge needed).")
         repo = repo_value
         test_command = test_command_value
         metric = metric_value
@@ -497,9 +553,14 @@ def load_and_merge_configs(
         try:
             parsed_gpu_ids = [int(gpu_id.strip()) for gpu_id in gpu_ids.split(",") if gpu_id.strip()]
         except ValueError:
+            logger.warning(
+                "Invalid GPU IDs string %r (expected comma-separated integers); falling back to [0].",
+                gpu_ids,
+            )
             console.print(
                 f"[bold red]Warning: Invalid GPU IDs format '{gpu_ids}'. Expected comma-separated integers (e.g., '0,1,2,3'). Using default \\[0].[/bold red]"
             )
+            logger.warning("Invalid GPU IDs format %r; using default [0].", gpu_ids)
             parsed_gpu_ids = [0]
     else:
         # Try to get from config file
@@ -513,10 +574,16 @@ def load_and_merge_configs(
                         int(gpu_id.strip()) for gpu_id in str(config_gpu_ids).split(",") if gpu_id.strip()
                     ]
                 except ValueError:
+                    logger.warning(
+                        "Invalid patch.gpu_ids in config %r; falling back to [0].",
+                        config_gpu_ids,
+                    )
                     parsed_gpu_ids = [0]
         else:
             # Default to GPU 0
             parsed_gpu_ids = [0]
+
+    logger.debug("load_and_merge_configs: resolved GPU ids: %s", parsed_gpu_ids)
 
     return repo, test_command, metric, num_parallel, parsed_gpu_ids, patch_output, kernel_name
 
@@ -544,19 +611,26 @@ def prompt_missing_pipeline_params(
 
     # Already have what we need
     if kernel_url or preprocess_dir:
+        logger.info(
+            "Pipeline params: kernel_url or preprocess_dir already set; skipping missing-param prompt.",
+        )
         _display_pipeline_params(pipeline_params, console)
         return pipeline_params, True
 
     # No pipeline intent detected
     if not pipeline_intent:
+        logger.debug("Pipeline params: no pipeline_intent in task; not prompting for kernel path.")
         return pipeline_params, False
 
     # Pipeline intent detected but kernel_url is missing
     if yolo:
-        # Can't prompt in yolo mode — fall back to legacy
+        logger.info(
+            "Pipeline intent detected but kernel_url missing; yolo mode cannot prompt — using legacy agent path.",
+        )
         return pipeline_params, False
 
     # Show what was extracted and prompt for kernel path
+    logger.info("Pipeline mode: prompting for missing kernel_url (interactive).")
     console.print("\n[bold cyan]Pipeline optimization detected from your task.[/bold cyan]")
     _display_pipeline_params(pipeline_params, console)
     console.print("[bold yellow]Kernel file path is required to run the pipeline.[/bold yellow]")
@@ -566,12 +640,18 @@ def prompt_missing_pipeline_params(
         timeout_s=60.0,
         default="",
     )
+    logger.info("Kernel path prompt: answer=%r, timed_out=%s", answer, timed_out)
 
     if timed_out or not answer.strip():
+        if timed_out:
+            logger.info("Pipeline kernel path prompt timed out; using legacy agent mode.")
+        else:
+            logger.info("Pipeline kernel path empty; using legacy agent mode.")
         console.print("[dim]No kernel path provided — using legacy agent mode.[/dim]")
         return pipeline_params, False
 
     pipeline_params["kernel_url"] = answer.strip()
+    logger.info("Pipeline kernel_url set from user input; proceeding in pipeline mode.")
     return pipeline_params, True
 
 
@@ -590,3 +670,4 @@ def _display_pipeline_params(params: dict, console) -> None:
     console.print("[dim]Pipeline parameters:[/dim]")
     for key, value in fields:
         console.print(f"  [dim]{key}:[/dim] {value}")
+    logger.info("Pipeline parameters: %s", {k: v for k, v in fields})

@@ -21,10 +21,6 @@ from typing import Any
 from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 
 mcp = FastMCP(
     name="profiler",
@@ -40,11 +36,11 @@ mcp = FastMCP(
 # Command normalisation
 # ---------------------------------------------------------------------------
 
-_SHELL_META = re.compile(r'[&|;$`(){}<>!\\]|&&|\|\||<<|>>|\bcd\b|\bsource\b|\bexport\b')
+_SHELL_META = re.compile(r"[&|;$`(){}<>!\\]|&&|\|\||<<|>>|\bcd\b|\bsource\b|\bexport\b")
 
 # Detects inline env-var assignment: "VAR=value command ..."
 # rocprofv3 treats "VAR=value" as the executable name and crashes.
-_INLINE_ENV = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=\S+\s')
+_INLINE_ENV = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+\s")
 
 
 def _normalize_command(command: str) -> str:
@@ -105,6 +101,7 @@ def _profile_with_metrix(
             cwd=cwd,
         )
     except Exception as e:
+        logger.warning("Metrix profiling failed: %s", e)
         return {
             "success": False,
             "backend": "metrix",
@@ -246,9 +243,7 @@ def profile_kernel(
             # rocprof-compute returns: "analysis" with text output
         }
     """
-    logger.info("=" * 60)
-    logger.info(f"Profiler MCP: backend={backend}, command={command}")
-    logger.info("=" * 60)
+    logger.info("Profiler MCP: backend=%s, command=%s", backend, command)
 
     command = _normalize_command(command)
 

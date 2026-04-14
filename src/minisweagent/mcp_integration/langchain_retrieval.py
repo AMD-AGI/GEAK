@@ -9,8 +9,10 @@ This module provides semantic search using:
 No dependency on amd_ai_devtool.
 """
 
+import logging
 import pickle
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,8 @@ import numpy as np
 DEFAULT_INDEX_PATH = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
 DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-large"
+
+logger = logging.getLogger(__name__)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -339,12 +343,21 @@ class HybridRetriever:
         # Log RRF score statistics
         if merged_with_rrf:
             rrf_scores = [rrf_score for _, _, _, rrf_score in merged_with_rrf]
-            import sys
 
             top3_scores = rrf_scores[:3] if len(rrf_scores) >= 3 else rrf_scores
             print(f"  [RRF] Merged: {len(merged_with_rrf)} unique candidates", file=sys.stderr)
+            logger.debug(
+                "  [RRF] Merged: %s unique candidates",
+                len(merged_with_rrf),
+            )
             print(f"  [RRF] Top-3 scores: {[f'{s:.4f}' for s in top3_scores]}", file=sys.stderr)
+            logger.debug("  [RRF] Top-3 scores: %s", [f"{s:.4f}" for s in top3_scores])
             print(f"  [RRF] Score range: {min(rrf_scores):.4f} - {max(rrf_scores):.4f}", file=sys.stderr)
+            logger.debug(
+                "  [RRF] Score range: %.4f - %.4f",
+                min(rrf_scores),
+                max(rrf_scores),
+            )
 
             # Quality distribution
             excellent = sum(1 for s in rrf_scores if s >= 0.014)
@@ -352,6 +365,13 @@ class HybridRetriever:
             fair = sum(1 for s in rrf_scores if 0.005 <= s < 0.010)
             weak = sum(1 for s in rrf_scores if s < 0.005)
             print(f"  [RRF] Quality: Excellent: {excellent}, Good: {good}, Fair: {fair}, Weak: {weak}", file=sys.stderr)
+            logger.debug(
+                "  [RRF] Quality: Excellent: %s, Good: %s, Fair: %s, Weak: %s",
+                excellent,
+                good,
+                fair,
+                weak,
+            )
 
         if not merged_with_rrf:
             return []
@@ -362,10 +382,12 @@ class HybridRetriever:
             merged = [(doc, source, orig_score) for doc, source, orig_score, _ in merged_with_rrf]
             reranked = self._rerank(query, merged, len(merged))
             print(f"  [Rerank] Enabled, reranked {len(reranked)} candidates", file=sys.stderr)
+            logger.debug("  [Rerank] Enabled, reranked %s candidates", len(reranked))
         else:
             # Skip reranking, use RRF scores directly
             reranked = [(doc, rrf_score, source, orig_score) for doc, source, orig_score, rrf_score in merged_with_rrf]
             print(f"  [Rerank] DISABLED, using RRF scores for {len(reranked)} candidates", file=sys.stderr)
+            logger.debug("  [Rerank] DISABLED, using RRF scores for %s candidates", len(reranked))
 
         # Stage 4: Apply filters
         filtered = []

@@ -1,9 +1,14 @@
 import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+
+from minisweagent import get_repo_root
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -16,8 +21,7 @@ class SkillDescriptor:
 
 class SkillRuntime:
     def __init__(self):
-        repo_root = Path(__file__).resolve().parent.parent.parent.parent
-        skills_dir = repo_root / "skills"
+        skills_dir = get_repo_root() / "skills"
         self.skills = self._discover_skills(skills_dir)
 
     def _extract_yaml_frontmatter(self, markdown: str) -> dict:
@@ -37,6 +41,9 @@ class SkillRuntime:
         return SkillDescriptor(name=fm["name"], description=fm["description"], path=skill_path, loaded=False)
 
     def _discover_skills(self, skills_root: Path) -> dict:
+        if not skills_root.is_dir():
+            logger.debug("Skills directory not found: %s", skills_root)
+            return {}
         skills = []
         for p in skills_root.iterdir():
             if p.is_dir() and (p / "SKILL.md").exists():

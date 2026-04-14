@@ -416,7 +416,8 @@ class TestParallelAgentIntegration:
             agent_id=0,
             patch_id="patch_0",
             test_output="Test passed",
-            metric_result={"speedup": 1.5},
+            best_speedup=1.5,
+            best_patch_file="/tmp/patches/patch_0.patch",
             patch_dir=Path("/tmp/patches"),
             llm_conclusion="Patch 0 is best",
         )
@@ -424,7 +425,8 @@ class TestParallelAgentIntegration:
         assert result.agent_id == 0
         assert result.patch_id == "patch_0"
         assert result.test_output == "Test passed"
-        assert result.metric_result == {"speedup": 1.5}
+        assert result.best_speedup == 1.5
+        assert result.best_patch_file == "/tmp/patches/patch_0.patch"
         assert result.patch_dir == Path("/tmp/patches")
         assert result.llm_conclusion == "Patch 0 is best"
 

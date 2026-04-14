@@ -1,35 +1,24 @@
-FROM lmsysorg/sglang:v0.5.6.post1-rocm700-mi35x
+FROM lmsysorg/sglang:v0.5.9-rocm700-mi35x
 
-# Install git if not present
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git make && rm -rf /var/lib/apt/lists/*
 
-# Copy and install GEAK-agent
+# Copy installable sources first (cache-friendly — changes here rebuild pip install)
 WORKDIR /workspace
-COPY . .
-RUN pip install -e .
+COPY pyproject.toml README.md LICENSE.md Makefile ./
+COPY src/ src/
+COPY mcp_tools/ mcp_tools/
 
-# Install MCP dependencies
-RUN pip install fastmcp
-
-# Install Metrix from AMD intellikit (required by metrix-mcp)
-RUN git clone https://github.com/AMDResearch/intellikit.git /tmp/intellikit \
-    && cd /tmp/intellikit/metrix \
-    && pip install -e . \
-    && cd /workspace
-
-# Install MCP tools (only those with pyproject.toml; mcp-client removed from this branch)
-RUN pip install -e mcp_tools/metrix-mcp/ && \
-    pip install -e mcp_tools/profiler-mcp/
+RUN make install
 
 # Verify core imports
-RUN python3 -c "from profiler_mcp.server import profile_kernel; print('Core imports verified')"
+RUN python3 -c "from profiler_mcp.server import profile_kernel; from metrix import Metrix; print('Core imports verified')"
 
-# Verify metrix is available
-RUN python3 -c "from metrix import Metrix; print('✅ Metrix installed')" || echo "⚠️  Metrix not available (will be needed for profiling)"
+# Runtime assets (not needed for install; changes only rebuild cheap COPY layers)
+COPY skills/ skills/
+COPY docs/ docs/
+COPY knowledge-base/ knowledge-base/
+COPY entrypoint.sh ./
 
-# Add entrypoint script for runtime configuration and health checks
-COPY entrypoint.sh /workspace/entrypoint.sh
 RUN chmod +x /workspace/entrypoint.sh
-
 ENTRYPOINT ["/workspace/entrypoint.sh"]
 CMD ["tail", "-f", "/dev/null"]
