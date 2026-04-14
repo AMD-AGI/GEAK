@@ -363,6 +363,7 @@ def run_parallel_heterogeneous(
             "GEAK_WORK_DIR": worktree_path_str,
             "GEAK_REPO_ROOT": str(repo_path.resolve()),
             "GEAK_GPU_DEVICE": spec.hip_visible_devices,
+            "TORCH_EXTENSIONS_DIR": worktree_path_str + "/.torch_extensions",
         }
 
         parallel_env = type(base_env)(**env_config_dict)
@@ -372,6 +373,11 @@ def run_parallel_heterogeneous(
             parallel_output = output.parent / f"{output.stem}_parallel_{agent_id}{output.suffix}"
 
         agent = spec.agent_class(parallel_model, parallel_env, **parallel_agent_config)
+        # Restrict file-modifying tools to the worktree
+        if hasattr(agent, "toolruntime"):
+            agent.toolruntime.set_allowed_path(worktree_path_str)
+        if hasattr(agent, "extra_template_vars"):
+            agent.extra_template_vars["worktree_path"] = worktree_path_str
         if hasattr(agent, "base_repo_path"):
             agent.base_repo_path = repo_path_resolved
         if hasattr(agent, "log_file"):
@@ -550,6 +556,7 @@ def run_pool(
                 "GEAK_WORK_DIR": wt_path_str,
                 "GEAK_REPO_ROOT": str(repo_path.resolve()),
                 "GEAK_GPU_DEVICE": hip_devices,
+                "TORCH_EXTENSIONS_DIR": wt_path_str + "/.torch_extensions",
             }
             geak_harness = patched_env.get("GEAK_HARNESS")
             if isinstance(geak_harness, str) and geak_harness:
@@ -585,6 +592,11 @@ def run_pool(
             _wm_bb_path = cfg.pop("benchmark_baseline", None)
 
             agent = task.agent_class(parallel_model, parallel_env, **cfg)
+            # Restrict file-modifying tools to the worktree
+            if hasattr(agent, "toolruntime"):
+                agent.toolruntime.set_allowed_path(wt_path_str)
+            if hasattr(agent, "extra_template_vars"):
+                agent.extra_template_vars["worktree_path"] = wt_path_str
             if hasattr(agent, "base_repo_path"):
                 agent.base_repo_path = repo_path_resolved
             if hasattr(agent, "log_file"):

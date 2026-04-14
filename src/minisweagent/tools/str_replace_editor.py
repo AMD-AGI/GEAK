@@ -8,9 +8,13 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 
+_WRITE_COMMANDS = frozenset({"create", "str_replace", "insert"})
+
+
 class str_replace_editor:
     def __init__(self) -> None:
         self.tool_py = Path(__file__).parent / "editor_tool.py"
+        self._allowed_path: str | None = None
 
     def __call__(
         self,
@@ -24,6 +28,19 @@ class str_replace_editor:
         insert_line: int | None = None,
         **kwargs: object,
     ) -> dict[str, str | int]:
+        # Enforce worktree boundary for write operations
+        if self._allowed_path and command in _WRITE_COMMANDS:
+            resolved = str(Path(path).resolve())
+            allowed = str(Path(self._allowed_path).resolve())
+            if not resolved.startswith(allowed + os.sep) and resolved != allowed:
+                return {
+                    "output": (
+                        f"Path {path} is outside the allowed worktree ({self._allowed_path}). "
+                        f"All file modifications must stay inside the current worktree."
+                    ),
+                    "returncode": 1,
+                }
+
         cmd: list[str] = [sys.executable, str(self.tool_py), command, path]
 
         file_text_path: str | None = None

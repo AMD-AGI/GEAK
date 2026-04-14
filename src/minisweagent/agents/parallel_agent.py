@@ -630,6 +630,7 @@ class ParallelAgent(DefaultAgent):
             new_env = dict(env_config_dict.get("env") or {})
             new_env[repo_path_str] = worktree_path_str
             new_env["GEAK_WORK_DIR"] = worktree_path_str
+            new_env["TORCH_EXTENSIONS_DIR"] = worktree_path_str + "/.torch_extensions"
             new_env["GEAK_REPO_ROOT"] = repo_path_str
             if gpu_ids and agent_id < len(gpu_ids):
                 gpu_id = gpu_ids[agent_id]
@@ -645,9 +646,13 @@ class ParallelAgent(DefaultAgent):
                 parallel_output = output.parent / f"{output.stem}_parallel_{agent_id}{output.suffix}"
 
             agent = agent_class(parallel_model, parallel_env, **parallel_agent_config)
+            # Restrict file-modifying tools to the worktree
+            if hasattr(agent, "toolruntime"):
+                agent.toolruntime.set_allowed_path(worktree_path_str)
             # Set agent attributes if they exist (for ParallelAgent compatibility)
             if hasattr(agent, "extra_template_vars"):
                 agent.extra_template_vars[repo_path_str] = worktree_path_str
+                agent.extra_template_vars["worktree_path"] = worktree_path_str
             if hasattr(agent, "base_repo_path"):
                 agent.base_repo_path = repo_path_resolved
                 # Re-initialize test_perf context with updated base_repo_path

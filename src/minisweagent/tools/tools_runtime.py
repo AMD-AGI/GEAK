@@ -205,6 +205,12 @@ class ToolRuntime:
         if bash is not None:
             bash._cwd = cwd
 
+    def set_allowed_path(self, path: str | None) -> None:
+        """Restrict file-modifying tools to only write inside *path* (the worktree root)."""
+        editor = self._tool_table.get("str_replace_editor")
+        if editor is not None:
+            editor._allowed_path = path
+
     def set_codebase_context(self, context: str | None) -> None:
         """Store codebase context and propagate to SubAgentTool if present."""
         self._codebase_context = context
