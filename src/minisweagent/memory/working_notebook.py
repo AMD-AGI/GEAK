@@ -40,11 +40,16 @@ def _sanitize_writer_id(writer_id: str) -> str:
     return cleaned.strip("-") or "default"
 
 
-def parse_speedup_report(text: str) -> dict[str, Any]:
+def parse_speedup_report(text: str, baseline_ms: float | None = None) -> dict[str, Any]:
     """Parse the save_and_test speedup summary block.
 
     Returns a dict containing an optional overall speedup and a per-shape map.
     Missing information is represented with ``None`` / empty dicts.
+
+    When ``baseline_ms`` is supplied (from the notebook's stored baseline),
+    speedup is computed from ``candidate_ms / baseline_ms`` even when the
+    ``Overall: Xx (Y ms -> Z ms)`` line is absent -- e.g. when the harness
+    only prints ``GEAK_RESULT_LATENCY_MS=<number>``.
     """
 
     report: dict[str, Any] = {
@@ -62,11 +67,16 @@ def parse_speedup_report(text: str) -> dict[str, Any]:
         report["baseline_ms"] = float(overall.group(2))
         report["candidate_ms"] = float(overall.group(3))
 
-    # Fallback: extract candidate latency from GEAK_RESULT_LATENCY_MS
     if report["candidate_ms"] is None:
-        lat_match = re.search(r"GEAK_RESULT_LATENCY_MS=(\d+\.?\d*)", text)
+        lat_match = re.search(r"GEAK_RESULT_LATENCY_MS=([\d.]+(?:e[+-]?\d+)?)", text)
         if lat_match:
             report["candidate_ms"] = float(lat_match.group(1))
+
+    if report["overall_speedup"] is None and report["candidate_ms"] is not None:
+        bl = report["baseline_ms"] or baseline_ms
+        if bl is not None and bl > 0 and report["candidate_ms"] > 0:
+            report["overall_speedup"] = round(bl / report["candidate_ms"], 6)
+            report["baseline_ms"] = bl
 
     per_shape: dict[str, dict[str, float]] = {}
     for match in _PER_SHAPE_RE.finditer(text):
@@ -137,7 +147,8 @@ class WorkingNotebook:
         message: str | None = None,
         step: int | None = None,
     ) -> None:
-        parsed = parse_speedup_report(output)
+        stored_baseline = self._get_stored_baseline_ms()
+        parsed = parse_speedup_report(output, baseline_ms=stored_baseline)
         self.append_event(
             "result",
             strategy=strategy,
@@ -151,6 +162,25 @@ class WorkingNotebook:
             candidate_ms=parsed.get("candidate_ms"),
             per_shape=parsed.get("per_shape", {}),
         )
+
+    def _get_stored_baseline_ms(self) -> float | None:
+        """Read the baseline latency from this notebook's event log."""
+        if not self.writer_path.exists():
+            return None
+        try:
+            with open(self.writer_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    event = json.loads(line)
+                    if event.get("kind") == "baseline":
+                        val = _safe_float(event.get("baseline_latency_ms"))
+                        if val is not None and val > 0:
+                            return val
+        except (OSError, json.JSONDecodeError):
+            pass
+        return None
 
     def record_round_evaluation(
         self,

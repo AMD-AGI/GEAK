@@ -74,7 +74,9 @@ cd GEAK
 AMD_LLM_API_KEY=<YOUR_KEY> bash scripts/run-docker.sh
 # (or)
 # Local
-pip install -e .
+pip install -e .          # core package (includes fastmcp and mcp[cli])
+pip install -e '.[mcp]'   # + MCP tool servers (profiler, test-discovery, metrix)
+pip install -e '.[full]'  # everything (MCP tools + dev + langchain)
 
 # Set model name and key. In the case of docker-based setup, export the API key before
 # running scripts/run-docker.sh.

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import logging
 import os
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.utils.save import save_traj
 
+logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_GITHUB_CONFIG_PATH", builtin_config_dir / "github_issue.yaml"))
 console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich", add_completion=False)
@@ -52,6 +54,7 @@ def main(
 
     config_path = get_config_path(config)
     console.print(f"Loading agent config from [bold green]'{config_path}'[/bold green]")
+    logger.info("Loading agent config from '%s'", config_path)
     _config = yaml.safe_load(config_path.read_text())
     _agent_config = _config.setdefault("agent", {})
     if yolo:
@@ -78,6 +81,7 @@ def main(
         exit_status, result = agent.run(task)
     except KeyboardInterrupt:
         console.print("\n[bold red]KeyboardInterrupt -- goodbye[/bold red]")
+        logger.info("KeyboardInterrupt received.")
     finally:
         save_traj(agent, Path("traj.json"), exit_status=exit_status, result=result)
     return agent

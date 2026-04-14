@@ -8,7 +8,26 @@ from typing import Any, Literal
 from minisweagent.models import GLOBAL_MODEL_STATS
 from minisweagent.tools.tools_runtime import get_tools_list
 
-logger = logging.getLogger("amd_llm")
+logger = logging.getLogger(__name__)
+
+# When ``profiling`` is false, strip both the built-in ``profiling`` tool and the
+# MCP ``profile_kernel`` tool (same pairing as ``mini.py`` / ``disabled_tools``).
+_PROFILING_TOOL_NAMES: frozenset[str] = frozenset({"profiling", "profile_kernel"})
+
+
+def filter_tools_for_amd_config(
+    tools: list[dict[str, Any]],
+    *,
+    profiling: bool,
+    bash_tool: bool,
+) -> list[dict[str, Any]]:
+    """Drop tools gated by ``AmdLlmModelConfig.profiling`` / ``bash_tool``."""
+    out = tools
+    if not profiling:
+        out = [t for t in out if t.get("name") not in _PROFILING_TOOL_NAMES]
+    if not bash_tool:
+        out = [t for t in out if t.get("name") != "bash"]
+    return out
 
 
 @dataclass
@@ -21,6 +40,7 @@ class AmdLlmModelConfig:
     cost_per_1k_input_tokens: float = 0.01
     cost_per_1k_output_tokens: float = 0.01
     set_cache_control: Literal["default_end"] | None = "default_end"
+    tool_cache_control: bool = False
     reasoning: dict[str, Any] = field(default_factory=dict)
     bash_tool: bool = True
     profiling: bool = False
@@ -61,12 +81,11 @@ class AmdLlmModelBase:
         self.config = config
         self.cost = 0.0
         self.n_calls = 0
-        # Load tools list
-        self.tools = get_tools_list(use_strategy_manager=self.config.use_strategy_manager)
-        if not self.config.profiling:
-            self.tools = [tool for tool in self.tools if tool["name"] != "profiling"]
-        if not self.config.bash_tool:
-            self.tools = [tool for tool in self.tools if tool["name"] != "bash"]
+        self.tools = filter_tools_for_amd_config(
+            get_tools_list(use_strategy_manager=self.config.use_strategy_manager),
+            profiling=self.config.profiling,
+            bash_tool=self.config.bash_tool,
+        )
         self._init_client()
 
     # ------------------------------------------------------------------
@@ -154,6 +173,14 @@ class AmdLlmModelBase:
             content["extra"] = {"response": response_dump}
 
         return content
+
+    def set_tools(self, tools: list[dict[str, Any]]) -> None:
+        """Replace the active tool schema (used by strategy / heterogeneous agents)."""
+        self.tools = filter_tools_for_amd_config(
+            tools,
+            profiling=self.config.profiling,
+            bash_tool=self.config.bash_tool,
+        )
 
     def get_template_vars(self):
         return asdict(self.config) | {"n_model_calls": self.n_calls, "model_cost": self.cost}

@@ -140,7 +140,8 @@ class AmdOpenAIModel(AmdLlmModelBase):
                         item_text = getattr(item, "text", None)
                         if item_type == "output_text" and isinstance(item_text, str) and item_text:
                             content_parts.append(item_text)
-                    except Exception:
+                    except Exception as exc:
+                        logger.debug("Skipping response output item: %s", exc)
                         continue
             if content_parts:
                 output_dict["content"] = "".join(content_parts)

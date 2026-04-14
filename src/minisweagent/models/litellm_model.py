@@ -25,7 +25,7 @@ from tenacity import (
 )
 
 from minisweagent.models import GLOBAL_MODEL_STATS
-from minisweagent.models.amd_base import AmdLlmModelConfig
+from minisweagent.models.amd_base import AmdLlmModelConfig, filter_tools_for_amd_config
 from minisweagent.models.utils.cache_control import set_cache_control
 from minisweagent.tools.tools_runtime import get_tools_list
 
@@ -57,6 +57,8 @@ LITELLM_COMPLETION_PARAM_KEYS: frozenset[str] = frozenset(
         # OpenAI / gateway “reasoning effort” style configs used in GEAK YAML.
         "reasoning_effort",
         "reasoning",
+        # Anthropic extended thinking (e.g. {"type": "enabled", "budget_tokens": 10000}).
+        "thinking",
     }
 )
 
@@ -211,12 +213,7 @@ def _filter_default_tools(
     profiling: bool,
     bash_tool: bool,
 ) -> list[dict[str, Any]]:
-    out = tools
-    if not profiling:
-        out = [t for t in out if t.get("name") != "profiling"]
-    if not bash_tool:
-        out = [t for t in out if t.get("name") != "bash"]
-    return out
+    return filter_tools_for_amd_config(tools, profiling=profiling, bash_tool=bash_tool)
 
 
 @dataclass

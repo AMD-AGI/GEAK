@@ -20,10 +20,13 @@ On top of the base InteractiveAgent this class adds:
    registered MCP tool bridges on top of that.
 """
 
+import logging
 import sys
 
 from minisweagent.agents.interactive import InteractiveAgent
 from minisweagent.tools.tools_runtime import ToolRuntime
+
+logger = logging.getLogger(__name__)
 
 
 class StrategyAgent(InteractiveAgent):
@@ -55,6 +58,8 @@ class StrategyAgent(InteractiveAgent):
             patch_output_dir=self.config.patch_output_dir,
             tool_profile=self.config.tool_profile,
         )
+        if self.config.disabled_tools:
+            self.toolruntime.disable_tools(self.config.disabled_tools)
         self._setup_save_and_test_context()
 
         if self.config.disabled_tools:
@@ -74,10 +79,10 @@ class StrategyAgent(InteractiveAgent):
             model_impl = getattr(self.model, "_impl", self.model)
             model_impl.tools = self.toolruntime.get_tools_schema()
 
-        print(
-            f"[DEBUG] StrategyAgent initialized (profile={self.config.tool_profile}, "
-            f"strategy_file={self.config.strategy_file_path})",
-            file=sys.stderr,
+        logger.debug(
+            "StrategyAgent initialized (profile=%s, strategy_file=%s)",
+            self.config.tool_profile,
+            self.config.strategy_file_path,
         )
 
         self._send_initial_strategy_data()

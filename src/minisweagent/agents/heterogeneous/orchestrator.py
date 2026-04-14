@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -36,8 +37,6 @@ def run_llm_steps(
     model,
     messages: list[dict],
     ctx: dict[str, Any],
-    _print,
-    console,
     *,
     phase: str,
 ) -> dict[str, Any] | None:
@@ -53,7 +52,7 @@ def run_llm_steps(
 
     while step < max_steps:
         step += 1
-        _print(f"[dim]{phase} step {step}[/dim]" if console else f"{phase} step {step}")
+        logger.debug("[dim]%s step %d[/dim]", phase, step)
 
         if _wm and phase != "explore":
             _wm.update_step(step, 0.0)
@@ -61,7 +60,10 @@ def run_llm_steps(
             if _wm_text and not any("[Working Memory" in m.get("content", "") for m in messages[-3:]):
                 messages.append({"role": "user", "content": f"[Working Memory Update]\n{_wm_text}"})
 
+        _t0 = time.monotonic()
         response = model.query(messages)
+        _elapsed = time.monotonic() - _t0
+        logger.debug("%s step %d: model.query returned in %.1fs", phase, step, _elapsed)
 
         content_text = response.get("content", "") if isinstance(response, dict) else ""
         tool_call = response.get("tools") if isinstance(response, dict) else None
@@ -82,7 +84,9 @@ def run_llm_steps(
                     hypothesis_id="H3",
                 )
             if content_text:
-                _print(f"  Orchestrator: {content_text[:300]}")
+                _first_line = content_text.strip().split("\n", 1)[0][:200]
+                _suffix = "..." if len(content_text.strip()) > len(_first_line) else ""
+                logger.info("  Orchestrator: %s%s", _first_line, _suffix)
             messages.append({"role": "assistant", "content": content_text})
             return None
 
@@ -94,9 +98,10 @@ def run_llm_steps(
             try:
                 tool_args = json.loads(tool_args)
             except json.JSONDecodeError:
+                logger.warning("Bad JSON in tool_args for %s; resetting to empty dict.", tool_name)
                 tool_args = {}
 
-        _print(f"  Tool: {tool_name}({json.dumps(tool_args)[:200]})")
+        logger.debug("  Tool: %s(%s)", tool_name, json.dumps(tool_args)[:200])
 
         messages.append(
             {
@@ -106,7 +111,11 @@ def run_llm_steps(
             }
         )
 
+        _t0 = time.monotonic()
         result_str = dispatch_tool_call(ctx, tool_name, tool_args, phase=phase)
+        _elapsed = time.monotonic() - _t0
+        if _elapsed > 5.0:
+            logger.info("[dim]Tool %s completed in %.1fs[/dim]", tool_name, _elapsed)
 
         messages.append(
             {
@@ -116,7 +125,7 @@ def run_llm_steps(
             }
         )
 
-        _print(f"  Result: {result_str[:300]}")
+        logger.debug("  Result: %s", result_str[:300])
 
         if _wm:
             try:
@@ -127,28 +136,42 @@ def run_llm_steps(
                 insight = extract_insight_from_tool_result(tool_name, result_str, 0)
                 if insight:
                     _wm.ingest_insight(insight)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Working-memory insight extraction failed for %s: %s", tool_name, exc)
 
         if tool_name == "finalize":
             try:
                 report = json.loads(result_str)
             except json.JSONDecodeError:
+                logger.warning("Finalize payload is not valid JSON; wrapping as summary text.")
                 report = {"summary": result_str}
-            _print(
-                "[bold green]Orchestrator: Optimisation finalised.[/bold green]"
-                if console
-                else "Orchestrator: Optimisation finalised."
-            )
+            logger.info("[bold green]Orchestrator: Optimisation finalised.[/bold green]")
             return report
 
     logger.warning(
-        "Orchestrator hit step limit (%d) for phase %s -- proceeding to next phase",
+        "Orchestrator hit step limit (%d) for phase %s — proceeding to next phase",
         max_steps,
         phase,
     )
-    _print(f"  Step limit ({max_steps}) reached for {phase}, moving on...")
     return None
+
+
+def _log_final_summary(report) -> None:
+    """Log a human-readable conclusion at the end of a heterogeneous run."""
+    if report is None:
+        return
+    best_speedup = getattr(report, "best_speedup", None) or 0
+    best_patch = getattr(report, "best_patch", None) or "unknown"
+    best_round = getattr(report, "best_round", None) or "unknown"
+    summary = getattr(report, "summary", "") or ""
+    logger.info(
+        "Heterogeneous run completed. Best patch: %s (round %s, %.4fx speedup)",
+        best_patch,
+        best_round,
+        best_speedup,
+    )
+    if summary:
+        logger.info("Summary: %s", summary[:500])
 
 
 # ── Main entry point ─────────────────────────────────────────────────
@@ -162,8 +185,6 @@ def run_heterogeneous_orchestrator(
     output_dir: Path,
     max_rounds: int,
     start_round: int,
-    _print,
-    console,
 ) -> dict[str, Any]:
     """Run the heterogeneous orchestrator with LLM-driven tool calling.
 
@@ -179,13 +200,14 @@ def run_heterogeneous_orchestrator(
     from minisweagent.tools.tools_runtime import ToolRuntime
 
     disc_dict = preprocess_ctx.get("discovery") or {}
-    kernel_path = preprocess_ctx.get("kernel_path", "")
+    kernel_path = str(preprocess_ctx.get("kernel_path", ""))
     kernel_meta = _extract_kernel_meta(disc_dict, kernel_path)
 
     preprocess_dir = output_dir
     for candidate in ("resolved.json", "discovery.json", "profile.json"):
         if (output_dir / candidate).exists():
             preprocess_dir = output_dir
+            logger.debug("preprocess_dir set to output_dir (found %s).", candidate)
             break
 
     toolruntime = ToolRuntime(tool_profile="full", use_strategy_manager=True)
@@ -209,18 +231,28 @@ def run_heterogeneous_orchestrator(
     model_impl.tools = tools_schema
 
     bm = preprocess_ctx.get("baseline_metrics") or {}
+    if not bm:
+        logger.warning("No baseline metrics found in preprocess_ctx; using empty dict.")
     bm_summary = json.dumps(bm, indent=2, default=str) if bm else "Not available"
 
     prof = preprocess_ctx.get("profiling") or {}
+    if not prof:
+        logger.warning("No profiling data found in preprocess_ctx; using empty dict.")
     prof_summary = json.dumps(prof, indent=2, default=str)[:2000] if prof else "Not available"
 
     cmd = preprocess_ctx.get("commandment") or ""
+    if not cmd:
+        logger.error("No commandment found in preprocess_ctx.")
+        raise ValueError("No commandment found in preprocess_ctx.")
     cmd_excerpt = cmd[:1500] + ("..." if len(cmd) > 1500 else "") if cmd else "Not available"
 
     codebase_ctx = ""
     _codebase_ctx_path = preprocess_dir / "CODEBASE_CONTEXT.md"
     if _codebase_ctx_path.exists():
         codebase_ctx = _codebase_ctx_path.read_text().strip()
+        logger.debug("Loaded CODEBASE_CONTEXT.md (%d bytes) from %s", len(codebase_ctx), preprocess_dir)
+    else:
+        logger.warning("CODEBASE_CONTEXT.md not found in preprocess_dir; using empty string.")
 
     _memory_context = ""
     try:
@@ -228,16 +260,15 @@ def run_heterogeneous_orchestrator(
             assemble_memory_context,
         )
 
-        _bm = preprocess_ctx.get("baseline_metrics") or {}
         _memory_context = assemble_memory_context(
-            kernel_path=str(preprocess_ctx.get("kernel_path", "")),
-            bottleneck_type=_bm.get("bottleneck"),
-            profiling_metrics=_bm,
+            kernel_path=kernel_path,
+            bottleneck_type=bm.get("bottleneck"),
+            profiling_metrics=bm,
         )
         if _memory_context:
             _memory_context = "### Optimization Memory (from past runs)\n" + _memory_context
-    except Exception as _mem_exc:
-        logger.debug("Memory context assembly failed: %s", _mem_exc)
+    except Exception as exc:
+        logger.debug("Memory context assembly failed: %s", exc)
 
     _working_mem = None
     try:
@@ -253,25 +284,21 @@ def run_heterogeneous_orchestrator(
                 WorkingMemory,
             )
 
-            _kpath = str(preprocess_ctx.get("kernel_path", ""))
             _wm_notebook_dir = str(output_dir / "_working_memory")
             _working_mem = WorkingMemory(
-                kernel_category=classify_kernel_category(_kpath) if _kpath else "unknown",
+                kernel_category=classify_kernel_category(kernel_path) if kernel_path else "unknown",
                 max_steps=int(os.getenv("GEAK_AGENT_STEP_LIMIT", "100")),
                 notebook_dir=_wm_notebook_dir,
                 notebook_writer_id="orchestrator",
             )
-            _bm_dict = preprocess_ctx.get("baseline_metrics") or {}
-            if _bm_dict.get("bottleneck"):
-                _working_mem.bottleneck_type = str(_bm_dict["bottleneck"])
-            if _bm_dict.get("benchmark_duration_us"):
-                _working_mem.baseline_latency_ms = float(_bm_dict["benchmark_duration_us"]) / 1000.0
-            elif _bm_dict.get("duration_us"):
-                _working_mem.baseline_latency_ms = float(_bm_dict["duration_us"]) / 1000.0
+            _working_mem.load_baseline_from_artifacts(
+                baseline_metrics_path=str(output_dir / "baseline_metrics.json"),
+                benchmark_baseline_path=str(output_dir / "benchmark_baseline.txt"),
+            )
             _working_mem.sync_notebook_baseline()
             ctx["working_memory"] = _working_mem
-    except Exception as _wm_exc:
-        logger.debug("WorkingMemory init failed: %s", _wm_exc)
+    except Exception as exc:
+        logger.debug("WorkingMemory init failed: %s", exc)
 
     instance_msg = INSTANCE_TEMPLATE.format(
         kernel_path=str(preprocess_ctx.get("kernel_path", "N/A")),
@@ -287,10 +314,12 @@ def run_heterogeneous_orchestrator(
     )
 
     start_label = f"rounds {start_round}-{max_rounds}" if start_round > 1 else f"{max_rounds} rounds"
-    _print(
-        f"[bold cyan]--- Orchestrator starting ({start_label}, {len(gpu_ids)} GPUs) ---[/bold cyan]"
-        if console
-        else f"--- Orchestrator starting ({start_label}, {len(gpu_ids)} GPUs) ---"
+    logger.info(
+        "\n[bold cyan]%s[/bold cyan]\n  [bold]Heterogeneous Orchestrator[/bold] (%s, %d GPUs)\n[bold cyan]%s[/bold cyan]",
+        "=" * 60,
+        start_label,
+        len(gpu_ids),
+        "=" * 60,
     )
 
     messages: list[dict] = [
@@ -299,6 +328,7 @@ def run_heterogeneous_orchestrator(
     ]
 
     if start_round > 1:
+        logger.info("Resuming from round %d; loading prior evaluations 1..%d.", start_round, start_round - 1)
         for prev_round in range(1, start_round):
             eval_path = output_dir / f"round_{prev_round}_evaluation.json"
             if eval_path.exists():
@@ -317,28 +347,48 @@ def run_heterogeneous_orchestrator(
                             ),
                         }
                     )
-                    _print(f"  Loaded prior evaluation: {eval_path.name}")
+                    logger.info("  Loaded prior evaluation: %s", eval_path.name)
                 except (json.JSONDecodeError, OSError) as exc:
-                    _print(f"  Warning: could not load {eval_path.name}: {exc}")
+                    logger.warning("  Could not load %s: %s", eval_path.name, exc)
 
     try:
         if start_round <= 1:
-            _print("[bold cyan]--- Exploration phase ---[/bold cyan]" if console else "--- Exploration phase ---")
+            logger.info(
+                "\n[dim]%s[/dim]\n  [bold yellow]Exploration Phase[/bold yellow] (this may take a few minutes)\n[dim]%s[/dim]",
+                "-" * 60,
+                "-" * 60,
+            )
+            _explore_t0 = time.monotonic()
             finalize_result = run_llm_steps(
                 model,
                 messages,
                 ctx,
-                _print,
-                console,
                 phase="explore",
             )
+            _explore_elapsed = time.monotonic() - _explore_t0
+            logger.info("[bold green]Exploration completed[/bold green] in %.0fs.", _explore_elapsed)
             if finalize_result is not None:
                 return finalize_result
 
         for round_num in range(start_round, max_rounds + 1):
             is_last = round_num == max_rounds
-            round_header = f"--- Round {round_num}/{max_rounds}{' (final round)' if is_last else ''} ---"
-            _print(f"[bold cyan]{round_header}[/bold cyan]" if console else round_header)
+            final_tag = " [bold red](FINAL)[/bold red]" if is_last else ""
+            color = "bold green" if not is_last else "bold red"
+            logger.info(
+                "\n[%s]%s[/%s]\n  [bold]Round %d/%d[/bold]%s\n[%s]%s[/%s]",
+                color,
+                "=" * 60,
+                color,
+                round_num,
+                max_rounds,
+                final_tag,
+                color,
+                "=" * 60,
+                color,
+            )
+
+            if ctx.get("starting_patch"):
+                logger.info("Starting from best patch so far: %s", ctx["starting_patch"])
 
             if is_last:
                 round_instruction = (
@@ -359,16 +409,19 @@ def run_heterogeneous_orchestrator(
                 )
             messages.append({"role": "user", "content": round_instruction})
 
+            _round_t0 = time.monotonic()
             finalize_result = run_llm_steps(
                 model,
                 messages,
                 ctx,
-                _print,
-                console,
                 phase=f"round_{round_num}",
             )
+            _round_elapsed = time.monotonic() - _round_t0
+            logger.info("Round %d LLM loop completed in %.0fs.", round_num, _round_elapsed)
 
             round_eval = post_round_evaluate(ctx, round_num, output_dir)
+            logger.info("Round %d post-evaluation complete.", round_num)
+
             if round_eval:
                 if _working_mem:
                     round_eval_dict = round_eval.to_dict() if hasattr(round_eval, "to_dict") else round_eval
@@ -393,13 +446,17 @@ def run_heterogeneous_orchestrator(
                 )
 
             if finalize_result is not None:
-                return finalize_run(
+                logger.info("Finalizing run")
+                report = finalize_run(
                     ctx,
                     output_dir,
                     finalize_result=finalize_result,
                     round_eval=round_eval,
                 )
+                _log_final_summary(report)
+                return report
     finally:
+        logger.debug("Restoring original model tools schema.")
         if original_tools is not None:
             model_impl.tools = original_tools
         elif hasattr(model_impl, "tools"):
@@ -407,4 +464,6 @@ def run_heterogeneous_orchestrator(
 
     logger.info("Orchestrator completed all rounds without calling finalize - auto-selecting best result...")
 
-    return finalize_run(ctx, output_dir)
+    report = finalize_run(ctx, output_dir)
+    _log_final_summary(report)
+    return report

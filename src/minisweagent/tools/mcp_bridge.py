@@ -20,13 +20,13 @@ import atexit
 import json
 import logging
 import threading
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_GEAK_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_MCP_TOOLS_ROOT = _GEAK_ROOT / "mcp_tools"
+from minisweagent import get_repo_root
+
+_MCP_TOOLS_ROOT = get_repo_root() / "mcp_tools"
 
 
 class MCPToolBridge:
@@ -117,7 +117,7 @@ class MCPToolBridge:
 
             self._client = MCPClient(self.server_name, self.server_config)
             await self._client.start()
-            logger.info(f"MCPToolBridge: started {self.server_name}")
+            logger.debug("MCPToolBridge: started %s", self.server_name)
         return self._client
 
     # ------------------------------------------------------------------
@@ -153,7 +153,7 @@ class MCPToolBridge:
             try:
                 self._run_async(self._client.stop())
             except Exception:
-                pass
+                pass  # shutdown must not raise
         loop = self._loop
         if loop is None or loop.is_closed():
             return
@@ -192,8 +192,7 @@ class MCPToolBridge:
     @staticmethod
     def _default_config(server_name: str) -> dict[str, Any]:
         """Build default server config from well-known MCP server locations."""
-        repo_root = Path(__file__).resolve().parent.parent.parent.parent
-        mcp_dir = repo_root / "mcp_tools" / server_name
+        mcp_dir = get_repo_root() / "mcp_tools" / server_name
 
         if not mcp_dir.exists():
             raise FileNotFoundError(f"MCP server directory not found: {mcp_dir}. Provide explicit server_config.")

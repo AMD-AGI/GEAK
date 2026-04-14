@@ -2,6 +2,29 @@
 
 This directory is where you add **Model Context Protocol** servers that the GEAK agent can call as ordinary tools. Each subdirectory here is one server package. The main application discovers those packages automatically, starts them as subprocesses, and merges their tool definitions into the agent’s tool list.
 
+## Installation
+
+### With uv (recommended for development)
+
+```bash
+uv pip install -e '.[mcp]'   # main package + MCP servers
+# or
+uv pip install -e '.[full]'  # everything
+```
+
+### With pip (or inside Docker)
+
+Use the Makefile, which installs the main package first, then each MCP server explicitly:
+
+```bash
+make install-dev   # editable install for development
+make install       # non-editable (used by Dockerfile)
+```
+
+`fastmcp` and `mcp[cli]` are in the `[mcp]` optional group. With pip, `fastmcp` is installed transitively — each MCP server package declares `fastmcp>=0.2.0` as its own dependency.
+
+Without installing the MCP servers, the agent will fail with `ModuleNotFoundError` when it tries to start them.
+
 ## Directory and module naming
 
 Use a **hyphenated** folder name for the server (for example, `profiler-mcp`). GEAK maps that name to a **Python package** by replacing hyphens with underscores (`profiler_mcp`).

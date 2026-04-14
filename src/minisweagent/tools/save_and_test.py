@@ -1,6 +1,7 @@
 """Save-and-test tool: saves patches and runs correctness + benchmark tests."""
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,8 @@ from minisweagent.run.postprocess.benchmark_parsing import (
     parse_shape_latencies_ms,
 )
 from minisweagent.run.utils.generated_artifacts import generated_helper_excludes
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -372,6 +375,7 @@ class SaveAndTestTool:
 
                 metrics = build_baseline_metrics(raw_result, include_all=True)
             except Exception:
+                logger.debug("build_baseline_metrics failed; using empty metrics", exc_info=True)
                 metrics = {}
         return raw_result, metrics
 
@@ -787,7 +791,7 @@ class SaveAndTestTool:
                 try:
                     Path(f).unlink(missing_ok=True)
                 except Exception:
-                    pass
+                    pass  # best-effort temp file cleanup
 
     def _format_output(
         self,

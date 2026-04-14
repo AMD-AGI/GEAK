@@ -1,6 +1,7 @@
 """Basic agent class. See https://mini-swe-agent.com/latest/advanced/control_flow/ for visual explanation."""
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -11,7 +12,10 @@ from pathlib import Path
 from jinja2 import StrictUndefined, Template
 
 from minisweagent import Environment, Model
+from minisweagent.skills.skill_runtime import SkillRuntime
 from minisweagent.tools.tools_runtime import ToolRuntime
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -54,6 +58,7 @@ class AgentConfig:
     # RAG postprocessor wrapping
     rag_enable_postprocessor: bool = False
     source_file_paths: list[str] | None = None
+    use_skills: bool = False
 
 
 # Unified observation truncation for both bash output and tool call results (head + tail).
@@ -169,6 +174,7 @@ class DefaultAgent:
             )
         if self.config.codebase_context:
             self.toolruntime.set_codebase_context(self.config.codebase_context)
+        self.skillruntime = SkillRuntime()
 
     def _get_strategy_file(self) -> str:
         """Get the strategy file path.
@@ -231,8 +237,8 @@ class DefaultAgent:
                 log_content = self._format_log_entry(role, content, **kwargs)
                 with open(self.log_file, "a", encoding="utf-8") as f:
                     f.write(log_content)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("add_message: log file write failed: %s", exc)
 
     def _format_log_entry(self, role: str, content: str, **kwargs) -> str:
         """Build a human-readable log entry."""
@@ -278,6 +284,8 @@ class DefaultAgent:
         self.extra_template_vars["tool_names"] = set(self.toolruntime._tool_table.keys())
         self.messages = []
         self._traj_last_saved_idx = -1
+        if self.config.use_skills:
+            self.config.system_template += self.skillruntime.build_system_prompt()
         self.add_message("system", self.render_template(self.config.system_template))
         self.add_message("user", self.render_template(self.config.instance_template))
 
@@ -337,8 +345,8 @@ class DefaultAgent:
                     f.write(json.dumps(self.messages[i], ensure_ascii=False, default=str) + "\n")
                 f.flush()
             self._traj_last_saved_idx = len(self.messages) - 1
-        except Exception:
-            # Best-effort: never block the agent on telemetry logging.
+        except Exception as exc:
+            logger.debug("_save_traj: best-effort traj write failed: %s", exc)
             return
 
     def step(self) -> dict:
@@ -411,10 +419,16 @@ class DefaultAgent:
 
     def parse_action(self, response: dict) -> dict:
         """Parse the action from the message. Returns the action."""
+        all_action = {
+            "output": "",
+            "returncode": 0,
+        }
         content = response.get("content", "")
         actions = re.findall(r"```bash\s*\n(.*?)\n```", content, re.DOTALL) if content else []
         if len(actions) == 1:
-            return self.execute_action({"action": actions[0].strip(), **response})
+            bash_action = self.execute_action({"action": actions[0].strip(), **response})
+            all_action["output"] += bash_action["output"]
+            all_action["returncode"] = max(all_action["returncode"], bash_action["returncode"])
         if response.get("tools"):
             from minisweagent.tools.submit import Submitted as ToolSubmitted
 
@@ -424,8 +438,17 @@ class DefaultAgent:
             except ToolSubmitted as e:
                 raise Submitted(str(e))
             # Handle tool results (sync state, etc.)
-            return self._handle_tool_result(result)
-        raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
+            tool_action = self._handle_tool_result(result)
+            all_action["output"] += tool_action["output"]
+            all_action["returncode"] = max(all_action["returncode"], tool_action["returncode"])
+        if self.config.use_skills:
+            skills_action = self.skillruntime.load_skill(response)
+            all_action["output"] += skills_action["output"]
+            all_action["returncode"] = max(all_action["returncode"], skills_action["returncode"])
+        if all_action["output"] or all_action["returncode"] == 0:
+            return all_action
+        else:
+            raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
 
     def _handle_tool_result(self, result: dict) -> dict:
         """Handle tool results. Submit tool raises Submitted, save_and_test handles itself."""
@@ -476,7 +499,7 @@ class DefaultAgent:
                                             try:
                                                 tool_args = json.loads(tool_args)
                                             except Exception:
-                                                pass
+                                                pass  # non-JSON tool args; handled below
                                         if isinstance(tool_args, dict):
                                             edit_keys = (
                                                 "old_str",
@@ -495,8 +518,8 @@ class DefaultAgent:
                                         # Prefer real edit payloads over assistant prose so WM labels
                                         # are driven by the diff, not by task/context text.
                                         last_assistant = "\n".join(payloads)
-                                except Exception:
-                                    pass
+                                except Exception as exc:
+                                    logger.debug("_handle_tool_result: WM edit extraction failed: %s", exc)
                             break
                     strat = extract_strategy_from_edit(last_assistant)
                     if strat:
@@ -504,8 +527,8 @@ class DefaultAgent:
                         _wm.record_strategy(strat, True)
                         _wm.record_change_category(change_type)
                         _wm.remember_pending_change(strat, change_type)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("_handle_tool_result: working memory integration failed: %s", exc)
 
         return result
 
@@ -551,7 +574,8 @@ class DefaultAgent:
 
             # Final deterministic override as safety net
             rewrite_best_results(base_patch_dir)
-        except Exception:
+        except Exception as exc:
+            logger.debug("_run_select_patch_agent: failed: %s", exc)
             return
 
     def execute_action(self, action: dict) -> dict:
@@ -584,7 +608,7 @@ class DefaultAgent:
                 with open(self.log_file, "a", encoding="utf-8") as f:
                     f.write(message + "\n")
                     f.flush()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("_log_message: file write failed: %s", exc)
         else:
             print(message, flush=True)

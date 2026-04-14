@@ -17,12 +17,15 @@ The heavy lifting is done by profiler-mcp; this module adds:
 import argparse
 import importlib
 import json
+import logging
 import sys
 from pathlib import Path
 
 from minisweagent.run.preprocess.repo_paths import ensure_preprocess_mcp_importable
 
 ensure_preprocess_mcp_importable("mcp_tools/profiler-mcp/src", "mcp_tools/metrix-mcp/src")
+
+logger = logging.getLogger(__name__)
 
 EXAMPLES = """
 Examples (metrix backend, default):
@@ -371,11 +374,11 @@ def main():
         try:
             discovery_cmd = _extract_command_from_discovery(args.from_discovery)
         except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"ERROR: {e}", file=sys.stderr)
+            logger.error("ERROR: %s", e)
             sys.exit(1)
         if not command:
             command = discovery_cmd
-        print(f"[kernel-profile] Using command from discovery: {command}", file=sys.stderr)
+        logger.info("[kernel-profile] Using command from discovery: %s", command)
 
     if not command:
         parser.error("command is required (positional or via --from-discovery)")
@@ -401,16 +404,16 @@ def main():
         output_text = json.dumps(result, indent=2)
         if args.output:
             Path(args.output).write_text(output_text + "\n")
-            print(f"Wrote {args.output}", file=sys.stderr)
+            logger.info("Wrote %s", args.output)
         else:
             print(output_text)
     else:
         for gpu_result in result["results"]:
             if len(result["results"]) > 1:
                 device_id = gpu_result.get("device_id", "?")
-                print(f"\n{'=' * 70}")
-                print(f"GPU {device_id}")
-                print(f"{'=' * 70}")
+                logger.info("\n%s", "=" * 70)
+                logger.info("GPU %s", device_id)
+                logger.info("%s", "=" * 70)
             _display_single_gpu_result(gpu_result)
 
 
@@ -418,50 +421,50 @@ def _display_single_gpu_result(result):
     """Display results for a single GPU."""
     if result.get("gpu_info", {}).get("detected"):
         gpu = result["gpu_info"]
-        print(f"\nGPU: {gpu.get('vendor', 'Unknown')} {gpu.get('model', 'Unknown')}")
-        print(f"Architecture: {gpu.get('architecture', 'Unknown')}")
+        logger.info("\nGPU: %s %s", gpu.get("vendor", "Unknown"), gpu.get("model", "Unknown"))
+        logger.info("Architecture: %s", gpu.get("architecture", "Unknown"))
         if "compute_units" in gpu:
-            print(f"Compute Units: {gpu['compute_units']}")
+            logger.info("Compute Units: %s", gpu["compute_units"])
         if "peak_hbm_bandwidth_gbs" in gpu:
-            print(f"Peak HBM BW: {gpu['peak_hbm_bandwidth_gbs']:.1f} GB/s")
+            logger.info("Peak HBM BW: %.1f GB/s", gpu["peak_hbm_bandwidth_gbs"])
         if "fp32_tflops" in gpu:
-            print(f"Peak FP32: {gpu['fp32_tflops']:.1f} TFLOPS")
+            logger.info("Peak FP32: %.1f TFLOPS", gpu["fp32_tflops"])
 
     kernels = result["kernels"]
 
     if len(kernels) > 1:
-        print(f"\n{'=' * 70}")
-        print(f"Found {len(kernels)} kernels")
-        print(f"{'=' * 70}\n")
+        logger.info("\n%s", "=" * 70)
+        logger.info("Found %s kernels", len(kernels))
+        logger.info("%s\n", "=" * 70)
 
     for i, kernel in enumerate(kernels):
         if len(kernels) > 1:
-            print(f"[{i}] {kernel['name']}")
+            logger.info("[%s] %s", i, kernel["name"])
         else:
-            print(f"\nKernel: {kernel['name']}")
+            logger.info("\nKernel: %s", kernel["name"])
 
         indent = "  " if len(kernels) > 1 else ""
-        print(f"{indent}Bottleneck: {kernel['bottleneck']}")
+        logger.info("%sBottleneck: %s", indent, kernel["bottleneck"])
 
         if kernel.get("observations"):
-            print(f"{indent}Observations:")
+            logger.info("%sObservations:", indent)
             for obs in kernel["observations"]:
-                print(f"{indent}  {obs}")
+                logger.info("%s  %s", indent, obs)
 
         if kernel.get("metrics"):
             metric_label = f"Metrics ({len(kernel['metrics'])} total):" if not indent else "Metrics:"
-            print(f"{indent}{metric_label}")
+            logger.info("%s%s", indent, metric_label)
             for name, value in sorted(kernel["metrics"].items()):
                 if isinstance(value, float):
-                    print(f"{indent}  {name}: {value:.2f}")
+                    logger.info("%s  %s: %.2f", indent, name, value)
                 else:
-                    print(f"{indent}  {name}: {value}")
+                    logger.info("%s  %s: %s", indent, name, value)
         else:
-            print(f"{indent}No metrics captured")
-        print()
+            logger.info("%sNo metrics captured", indent)
+        logger.info("")
 
     if len(kernels) > 1:
-        print(f"{'=' * 70}\n")
+        logger.info("%s\n", "=" * 70)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ import logging
 
 from minisweagent.models.amd_base import AmdLlmModelConfig
 
-logger = logging.getLogger("amd_llm")
+logger = logging.getLogger(__name__)
 
 
 class AmdLlmModel:
@@ -41,14 +41,17 @@ class AmdLlmModel:
             from minisweagent.models.amd_openai import AmdOpenAIModel
 
             self._impl = AmdOpenAIModel(config)
+            logger.debug("LLM backend: OpenAI (gpt), model_name=%s", config.model_name)
         elif "claude" in config.model_name:
             from minisweagent.models.amd_claude import AmdClaudeModel
 
             self._impl = AmdClaudeModel(config)
+            logger.debug("LLM backend: Anthropic (claude), model_name=%s", config.model_name)
         elif "gemini" in config.model_name:
             from minisweagent.models.amd_gemini import AmdGeminiModel
 
             self._impl = AmdGeminiModel(config)
+            logger.debug("LLM backend: Google (gemini), model_name=%s", config.model_name)
         else:
             raise ValueError(f"Unsupported model: {config.model_name}")
 
@@ -79,6 +82,10 @@ class AmdLlmModel:
     # ------------------------------------------------------------------
     # Forwarded methods
     # ------------------------------------------------------------------
+
+    def set_tools(self, tools: list[dict]) -> None:
+        """Replace the active tool schema (forwarded to the vendor implementation)."""
+        self._impl.set_tools(tools)
 
     def query(self, messages: list[dict], **kwargs) -> dict:
         return self._impl.query(messages, **kwargs)

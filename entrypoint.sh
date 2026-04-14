@@ -10,6 +10,18 @@ unset HIP_VISIBLE_DEVICES
 echo "🚀 GEAK-agent container initializing..."
 echo ""
 
+# Editable mode: re-install packages from the mounted /workspace so that
+# live host code is picked up instead of the baked-in site-packages copies.
+if [ "${GEAK_EDITABLE}" = "1" ]; then
+    echo "📝 Editable mode: re-installing packages from /workspace..."
+    if ! make -C /workspace install-dev; then
+        echo "❌ Editable install failed — container will use baked-in packages"
+    else
+        echo "✅ Editable installs complete"
+    fi
+    echo ""
+fi
+
 # Setup mini-swe-agent config from environment variables
 mkdir -p /root/.config/mini-swe-agent
 
@@ -39,8 +51,8 @@ else
 fi
 
 # Check modular pipeline CLIs
-for tool in resolve-kernel-url test-discovery commandment validate-commandment \
-            baseline-metrics task-generator select-patch; do
+for tool in resolve-kernel-url commandment validate-commandment \
+            baseline-metrics task-generator; do
     if command -v "$tool" > /dev/null 2>&1; then
         echo "✅ ${tool}: OK"
     else
@@ -55,66 +67,6 @@ if geak --help > /dev/null 2>&1; then
 else
     echo "❌ geak (mini-swe-agent): FAILED"
     FAILED_CHECKS=$((FAILED_CHECKS + 1))
-fi
-
-# Check MCP server bridges (verify they can start and list tools)
-echo ""
-echo "🔍 Checking MCP server bridges..."
-
-python3 -c "
-import sys
-sys.path.insert(0, '/workspace/mcp_tools/profiler-mcp/src')
-sys.path.insert(0, '/workspace/mcp_tools/metrix-mcp/src')
-sys.path.insert(0, '/workspace/mcp_tools/mcp-client/src')
-sys.path.insert(0, '/workspace/src')
-
-servers = {
-    'profiler-mcp': 'profile_kernel',
-}
-import asyncio
-from mcp_client import MCPClient
-from pathlib import Path
-
-async def check_server(name, expected_tool):
-    repo = Path('/workspace/mcp_tools') / name
-    module = name.replace('-', '_')
-    config = {
-        'command': ['python3', '-m', f'{module}.server'],
-        'cwd': str(repo),
-        'env': {'PYTHONPATH': str(repo / 'src')},
-    }
-    try:
-        async with MCPClient(name, config) as client:
-            tools = await asyncio.wait_for(client.list_tools(), timeout=30)
-            tool_names = [t.get('name', '') for t in tools] if tools else []
-            if expected_tool in tool_names:
-                print(f'OK {name} ({len(tool_names)} tools)')
-                return True
-            else:
-                print(f'WARN {name}: {expected_tool} not in {tool_names}')
-                return True  # server started, just missing expected tool
-    except Exception as e:
-        print(f'FAIL {name}: {e}')
-        return False
-
-async def main():
-    failed = 0
-    for name, tool in servers.items():
-        ok = await check_server(name, tool)
-        if not ok:
-            failed += 1
-    return failed
-
-failed = asyncio.run(main())
-sys.exit(failed)
-" 2>&1 || true
-
-MCP_RESULT=$?
-if [ $MCP_RESULT -eq 0 ]; then
-    echo "✅ All MCP server bridges healthy"
-else
-    echo "⚠️  $MCP_RESULT MCP server(s) failed health check"
-    FAILED_CHECKS=$((FAILED_CHECKS + MCP_RESULT))
 fi
 
 # Summary

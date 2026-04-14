@@ -22,6 +22,24 @@ from minisweagent.utils.log import logger
 
 package_dir = Path(__file__).resolve().parent
 
+
+def get_repo_root() -> Path:
+    """Locate the GEAK repository root.
+
+    Checks, in order: GEAK_ROOT env var, /workspace (Docker convention),
+    then __file__-relative (works for editable installs where source is
+    in the repo tree).
+    """
+    if env_root := os.environ.get("GEAK_ROOT"):
+        p = Path(env_root)
+        if p.is_dir():
+            return p
+    workspace = Path("/workspace")
+    if (workspace / "pyproject.toml").exists():
+        return workspace
+    return package_dir.parent.parent
+
+
 global_config_dir = Path(os.getenv("MSWEA_GLOBAL_CONFIG_DIR") or user_config_dir("mini-swe-agent"))
 global_config_dir.mkdir(parents=True, exist_ok=True)
 global_config_file = Path(global_config_dir) / ".env"

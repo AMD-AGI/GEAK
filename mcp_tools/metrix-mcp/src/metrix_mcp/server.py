@@ -16,9 +16,11 @@ from fastmcp import FastMCP
 
 from .core import MetrixTool
 
-# Setup logging
+# Setup logging — do NOT call basicConfig here; the parent process
+# (GEAK) configures handlers.  Adding basicConfig forces INFO on every
+# third-party logger and floods the console with per-counter output
+# from the metrix package.
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 # Create MCP server
 mcp = FastMCP(
@@ -82,15 +84,14 @@ def _profile_kernel_impl(
         }
     """
     try:
-        logger.info("=" * 60)
-        logger.info("Metrix MCP Tool Called")
-        logger.info("=" * 60)
-        logger.info(f"Command: {command}")
-        logger.info(f"GPU devices: {gpu_devices or 'default'}")
-        logger.info(f"Profile mode: {'quick' if quick else 'memory (full)'}")
-        logger.info(f"Num replays: {num_replays}")
-        logger.info(f"Kernel filter: {kernel_filter or 'None'}")
-        logger.info(f"Auto select: {auto_select}")
+        logger.info(
+            "Metrix MCP: backend=metrix, command=%s, gpu=%s, mode=%s, replays=%d",
+            command,
+            gpu_devices or "default",
+            "quick" if quick else "memory",
+            num_replays,
+        )
+        logger.debug("kernel_filter=%s, auto_select=%s", kernel_filter, auto_select)
 
         # Initialize MetrixTool
         tool = MetrixTool(gpu_devices=gpu_devices)
@@ -100,11 +101,8 @@ def _profile_kernel_impl(
             command=command, num_replays=num_replays, kernel_filter=kernel_filter, auto_select=auto_select, quick=quick
         )
 
-        logger.info("=" * 60)
-        logger.info("✓ Profiling Complete!")
-        logger.info(f"  Profiled {sum(len(r['kernels']) for r in result['results'])} kernel(s)")
-        logger.info(f"  Across {len(result['results'])} GPU(s)")
-        logger.info("=" * 60)
+        total_kernels = sum(len(r["kernels"]) for r in result["results"])
+        logger.info("Profiling complete: %d kernel(s) across %d GPU(s)", total_kernels, len(result["results"]))
 
         full_result = {"success": True, **result}
 
