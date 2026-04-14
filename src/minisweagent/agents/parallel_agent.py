@@ -14,7 +14,7 @@ from typing import Any
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.agents.select_patch_agent import run_select_patch
-from minisweagent.run.task_file import create_worktree
+from minisweagent.run.task_file import _neutralize_nested_git_repos, create_worktree
 from minisweagent.run.utils.parallel_helpers import (
     _stdout_lock as _stdout_lock,
 )
@@ -213,37 +213,6 @@ class ParallelAgent(DefaultAgent):
                 pass
 
     @staticmethod
-    def _create_worktree(repo_path: Path, worktree_path: Path) -> Path:
-        """Create a git worktree, cleaning up any existing one first."""
-        return create_worktree(repo_path, worktree_path)
-
-    @staticmethod
-    def _neutralize_nested_git_repos(repo_path: Path) -> list[Path]:
-        """Rename .git directories in nested repos to .git.bak.
-
-        This prevents git from treating nested directories as submodules,
-        allowing all content to be properly added to the parent repo.
-
-        Returns list of paths that were renamed (for potential restoration).
-        """
-        renamed = []
-        for git_dir in repo_path.rglob(".git"):
-            # Skip the repo's own .git (if it exists)
-            if git_dir.parent == repo_path:
-                continue
-            # Only process directories (not .git files from worktrees)
-            if git_dir.is_dir():
-                backup_path = git_dir.parent / ".git.bak"
-                try:
-                    if backup_path.exists():
-                        shutil.rmtree(backup_path)
-                    git_dir.rename(backup_path)
-                    renamed.append(backup_path)
-                except Exception:
-                    pass  # Best effort
-        return renamed
-
-    @staticmethod
     def _has_valid_head(repo_path: Path) -> bool:
         """Check if the git repo has a valid HEAD (at least one commit)."""
         try:
@@ -290,7 +259,7 @@ class ParallelAgent(DefaultAgent):
         try:
             # Neutralize nested git repos first (rename .git -> .git.bak)
             # This ensures nested content is added as regular files, not submodules
-            ParallelAgent._neutralize_nested_git_repos(repo_path)
+            _neutralize_nested_git_repos(repo_path)
 
             # Initialize git repo (use --initial-branch to ensure new repo creation)
             subprocess.run(
@@ -452,7 +421,7 @@ class ParallelAgent(DefaultAgent):
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
             # All repos use git worktree (non-git repos are initialized as git above)
-            worktree_path = cls._create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
+            worktree_path = create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
             worktree_path_str = str(worktree_path.resolve())
 
             if console:

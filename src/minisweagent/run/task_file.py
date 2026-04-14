@@ -145,6 +145,29 @@ def _ensure_safe_directory(repo_path: Path, env: dict[str, str] | None = None) -
             pass
 
 
+def _neutralize_nested_git_repos(root: Path) -> list[Path]:
+    """Rename ``.git`` dirs in nested repos to ``.git.bak``.
+
+    This turns nested git repos / submodules into plain directories so that
+    git treats their content as regular files.
+    """
+    root = root.resolve()
+    renamed: list[Path] = []
+    for git_dir in root.rglob(".git"):
+        if git_dir.parent == root:
+            continue
+        if git_dir.is_dir():
+            backup = git_dir.parent / ".git.bak"
+            try:
+                if backup.exists():
+                    shutil.rmtree(backup)
+                git_dir.rename(backup)
+                renamed.append(backup)
+            except Exception:
+                pass
+    return renamed
+
+
 def _copy_nested_git_repos(repo_path: Path, worktree_path: Path) -> None:
     """Copy nested git repositories that are invisible to the top-level repo.
 
@@ -377,6 +400,9 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
     _apply_dirty_tracked_changes(repo_path, worktree_path, git_env)
     _copy_untracked_files(repo_path, worktree_path, git_env)
     _copy_nested_git_repos(repo_path, worktree_path)
+    # Neutralize .git dirs in copied nested repos so the worktree's git
+    # treats their content as regular files (clean diffs, no gitlink noise).
+    _neutralize_nested_git_repos(worktree_path)
     return worktree_path
 
 

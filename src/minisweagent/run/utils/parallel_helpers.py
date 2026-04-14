@@ -23,7 +23,11 @@ from typing import Any
 
 from minisweagent.agents.default import TerminatingException
 from minisweagent.debug_runtime import emit_debug_log
-from minisweagent.run.task_file import create_worktree, create_worktree_with_patch
+from minisweagent.run.task_file import (
+    _neutralize_nested_git_repos,
+    create_worktree,
+    create_worktree_with_patch,
+)
 
 # ============================================================================
 # Thread-local stdout/stderr redirection
@@ -209,6 +213,10 @@ def bootstrap_git_repo(repo_path: Path, console=None) -> bool:
                 gitignore_path.write_text(existing + "\n" + gitignore_content)
         else:
             gitignore_path.write_text(gitignore_content)
+
+        # Neutralize nested git repos so their content is added as regular files
+        # instead of gitlink/submodule entries.
+        _neutralize_nested_git_repos(repo_path)
 
         subprocess.run(
             ["git", "add", "-A"],

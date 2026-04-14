@@ -16,6 +16,7 @@ from minisweagent.agents.homogeneous.homogeneous_agent import (
     run_homogeneous_agent,
 )
 from minisweagent.agents.parallel_agent import BestPatchResult, ParallelAgent
+from minisweagent.run.task_file import create_worktree
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models.test_models import DeterministicModel
 
@@ -432,7 +433,7 @@ class TestParallelAgentIntegration:
         worktree_path = temp_git_repo.parent / "worktree_test"
 
         try:
-            result = ParallelAgent._create_worktree(temp_git_repo, worktree_path)
+            result = create_worktree(temp_git_repo, worktree_path)
             assert result.exists()
             assert (result / "test.py").exists()
         finally:
