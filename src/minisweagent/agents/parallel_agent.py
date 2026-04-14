@@ -446,7 +446,7 @@ class ParallelAgent(DefaultAgent):
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
             # All repos use git worktree (non-git repos are initialized as git above)
-            worktree_path = create_worktree(repo_path, worktree_base / f"agent_{agent_id}")
+            worktree_path = create_worktree(repo_path, worktree_base / f"slot_{agent_id}")
             worktree_path_str = str(worktree_path.resolve())
 
             logger.debug("Created worktree for agent %d: %s", agent_id, worktree_path)
