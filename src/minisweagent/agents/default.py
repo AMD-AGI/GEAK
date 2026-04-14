@@ -55,8 +55,6 @@ class AgentConfig:
     # Interactive/exit behaviour (set by --exit-immediately)
     confirm_exit: bool = True
     disabled_tools: list[str] = field(default_factory=list)
-    # RAG postprocessor wrapping
-    rag_enable_postprocessor: bool = False
     source_file_paths: list[str] | None = None
     use_skills: bool = False
 
@@ -139,12 +137,11 @@ class DefaultAgent:
         )
         if self.config.disabled_tools:
             self.toolruntime.disable_tools(self.config.disabled_tools)
-        # Wrap RAG MCP tools with postprocessor filter if enabled
-        if self.config.rag_enable_postprocessor:
-            try:
-                self.toolruntime.wrap_rag_tools_with_postprocessor()
-            except Exception:
-                pass
+        # Always wrap RAG MCP tools with postprocessor filter
+        try:
+            self.toolruntime.wrap_rag_tools_with_postprocessor()
+        except Exception:
+            pass
         # Propagate agent's env vars (HIP_VISIBLE_DEVICES etc.) to tools
         agent_env = getattr(self.env.config, "env", None)
         if agent_env:

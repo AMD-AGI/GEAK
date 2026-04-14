@@ -512,9 +512,6 @@ def main(
     logger.info("Using metric: %s", metric)
 
     agent_config = dict(config.get("agent", {}))
-    # Pass RAG postprocessor config to agent
-    if rag_enabled and tools_cfg.get("rag_enable_postprocessor", False):
-        agent_config["rag_enable_postprocessor"] = True
     agent_config["save_patch"] = True
     agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
     agent_config["metric"] = metric

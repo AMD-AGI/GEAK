@@ -29,4 +29,3 @@ tools:
   profiling: false
   profiling_type: profiling
   rag: true
-  rag_enable_postprocessor: true

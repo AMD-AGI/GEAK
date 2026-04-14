@@ -32,7 +32,6 @@ Edit `src/minisweagent/config/geak.yaml`:
 ```yaml
 tools:
   rag: true                      # Enable RAG tools (query, optimize)
-  rag_enable_postprocessor: true  # Optional: LLM post-processing of RAG results
 ```
 
 RAG is **disabled by default**. If you skip this step, the `query` and `optimize` tools will not be available to the agent.
@@ -56,13 +55,11 @@ When `rag: true`, GEAK performs two checks before running the pipeline:
 
 ## Postprocessor
 
-When `rag_enable_postprocessor: true`, RAG retrieval results are post-processed by an LLM before being returned to the agent. The postprocessor (defined in `src/minisweagent/tools/rag_postprocessor.py`):
+When RAG is enabled (`rag: true`), retrieval results are automatically post-processed by an LLM before being returned to the agent. The postprocessor (defined in `src/minisweagent/tools/rag_postprocessor.py`):
 
 - Filters out irrelevant chunks
 - Removes duplicates
 - Reorganizes content into a structured format
-
-This is optional. Set to `false` to return raw retrieval results directly.
 
 ## Directory Structure
 
