@@ -496,6 +496,7 @@ def main(
         )
         logger.debug("Task content after commandment prepend: %s", task_content)
 
+        preprocess_ctx["rag_enabled"] = rag_enabled
         report = run_orchestrator(
             preprocess_ctx=preprocess_ctx,
             gpu_ids=parsed_gpu_ids,

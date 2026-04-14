@@ -211,6 +211,14 @@ def run_heterogeneous_orchestrator(
             break
 
     toolruntime = ToolRuntime(tool_profile="full", use_strategy_manager=True)
+    rag_enabled = preprocess_ctx.get("rag_enabled", False)
+    if not rag_enabled:
+        toolruntime.disable_tools(["query", "optimize"])
+    else:
+        try:
+            toolruntime.wrap_rag_tools_with_postprocessor()
+        except Exception:
+            pass
 
     ctx: dict[str, Any] = {
         **preprocess_ctx,

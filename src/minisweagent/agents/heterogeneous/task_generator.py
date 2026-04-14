@@ -446,7 +446,8 @@ def _run_task_agent(
 
     workspace = Path(workspace_path) if workspace_path else Path(kernel_path).parent
 
-    read_only_tools = [t for t in get_tools_list() if t["name"] in ("str_replace_editor", "submit")]
+    _allowed_names = {"str_replace_editor", "submit", "query", "optimize"}
+    read_only_tools = [t for t in get_tools_list() if t["name"] in _allowed_names]
     # AmdLlmModel forwards set_tools() to its _impl; snapshot the actual target.
     _model_target = getattr(model, "_impl", model)
     original_tools = list(_model_target.tools) if hasattr(_model_target, "tools") else None
