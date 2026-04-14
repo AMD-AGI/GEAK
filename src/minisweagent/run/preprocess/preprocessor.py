@@ -985,6 +985,7 @@ def run_preprocessor(
             result = subprocess.run(
                 correctness_cmd,
                 shell=True,
+                executable="/bin/bash",
                 capture_output=True,
                 text=True,
                 timeout=3600,
@@ -1032,6 +1033,7 @@ def run_preprocessor(
                 result = subprocess.run(
                     perf_cmd,
                     shell=True,
+                    executable="/bin/bash",
                     capture_output=True,
                     text=True,
                     timeout=benchmark_timeout,

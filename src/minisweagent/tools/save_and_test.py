@@ -500,6 +500,7 @@ class SaveAndTestTool:
                 "*.egg-info/",
                 "*.so",
                 ".geak_resolved/",
+                ".git.bak/",
                 *self._generated_helper_excludes(),
             ]
             exclude_args = " ".join(f"':(exclude){entry}'" for entry in excludes)
