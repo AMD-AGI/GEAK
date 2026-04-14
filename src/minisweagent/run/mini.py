@@ -156,9 +156,15 @@ def main(
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs."),
     test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command"),
+    target_language: str | None = typer.Option(None, "--target-language", help="Target language for kernel optimization (e.g. flydsl). When omitted, FlyDSL-specific paths are disabled."),
 ):
     # fmt: on
     del visual
+
+    if target_language:
+        os.environ["GEAK_TARGET_LANGUAGE"] = target_language
+    else:
+        os.environ.pop("GEAK_TARGET_LANGUAGE", None)
 
     configure_if_first_time()
 
@@ -336,7 +342,14 @@ def main(
         if kp.exists() and kp.is_file():
             from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
 
-            inferred = _normalize_kernel_type(_infer_kernel_type(kp))
+            raw_inferred = _infer_kernel_type(kp)
+            if raw_inferred not in {"triton", "hip", "unknown"} and target_language != raw_inferred:
+                console.print(
+                    f"[bold red]Error: {raw_inferred} kernel detected but --target-language {raw_inferred} was not specified.[/bold red]\n"
+                    f"  Add --target-language {raw_inferred} to enable {raw_inferred} optimization."
+                )
+                raise typer.Exit(1)
+            inferred = _normalize_kernel_type(raw_inferred)
             if inferred in {"hip", "triton"}:
                 kernel_type = inferred
                 logger.info("Updated kernel_type using kernel path: %s", kernel_type)

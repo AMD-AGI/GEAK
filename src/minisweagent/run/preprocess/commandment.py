@@ -41,6 +41,7 @@ from __future__ import annotations
 # Import validate_commandment directly from the sibling module to avoid
 # pulling in the full minisweagent.tools package (whose __init__.py imports
 # heavy dependencies like typer via strategy_manager).
+import os
 import re
 from pathlib import Path
 
@@ -152,7 +153,12 @@ def _detect_build_command(repo_root: Path) -> str:
 
 
 def _detect_flydsl_paths(repo_root: Path) -> tuple[str, str] | None:
-    """Return (build_packages_dir, mlir_libs_dir) if FlyDSL build artifacts exist."""
+    """Return (build_packages_dir, mlir_libs_dir) if FlyDSL build artifacts exist.
+
+    Gated by ``GEAK_TARGET_LANGUAGE=flydsl`` so Triton/HIP runs are never affected.
+    """
+    if os.environ.get("GEAK_TARGET_LANGUAGE") != "flydsl":
+        return None
     for candidate in (repo_root, repo_root.parent):
         build_pkg = candidate / "build-fly" / "python_packages"
         mlir_libs = build_pkg / "flydsl" / "_mlir" / "_mlir_libs"
