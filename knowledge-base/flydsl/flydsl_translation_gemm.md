@@ -164,6 +164,12 @@ Only fall back to PyTorch GEMM (`torch.matmul`, `F.linear`) when:
 1. **Batched matmul** (`torch.bmm`) — no FlyDSL batched GEMM yet
 2. **Very small dimensions** where GEMM kernel overhead exceeds compute
 3. **Conv2d / pooling** — these are NOT GEMM (no FlyDSL equivalent)
+4. **fp32 precision required** — Check the dtype table above. If the kernel uses
+   fp32 GEMM and the table has no fp32 output type, use `torch.mm` directly.
+   Do not waste steps trying to make fp16 GEMM work — fp16 truncation in a large
+   GEMM (e.g. 8192×8192) feeding into a reduction will fail tolerance.
+   Use FlyDSL for all non-GEMM operations (reductions, element-wise).
 
 **Do NOT use PyTorch fallback for standard `nn.Linear` or `torch.matmul(A, B)` —
-these should use `compile_preshuffle_gemm_a8`.**
+these should use `compile_preshuffle_gemm_a8`** (unless fp32 precision is required
+and the dtype table has no fp32 row).

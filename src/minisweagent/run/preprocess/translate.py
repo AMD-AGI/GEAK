@@ -361,11 +361,15 @@ def run_translation(
                 break
 
             _print("  Running self-review (op + efficiency audit)...")
+            approved = _detect_approved_fallbacks(candidate_path, kb_content)
+            if approved:
+                _print(f"  Pre-approved fallbacks: {[a['op'] for a in approved]}")
             review_result = _run_self_review(
                 candidate_path=candidate_path,
                 pair=pair,
                 model=_model,
                 kb_content=kb_content,
+                approved_fallbacks=approved,
                 _print=_print,
             )
 
@@ -436,6 +440,79 @@ def run_translation(
     return result
 
 
+_NO_EQUIVALENT_OPS = frozenset({
+    "nn.Conv2d", "nn.Conv3d", "F.conv2d", "F.conv3d",
+    "nn.BatchNorm2d", "F.batch_norm",
+    "nn.MaxPool2d", "F.max_pool2d",
+    "nn.AvgPool2d", "F.avg_pool2d",
+})
+
+_GEMM_OPS = frozenset({
+    "torch.mm", "torch.matmul", "torch.bmm", "torch.addmm",
+})
+
+
+def _detect_approved_fallbacks(
+    candidate_path: Path,
+    kb_content: str,
+) -> list[dict]:
+    """Deterministic check for PyTorch ops that are valid fallbacks.
+
+    Scans the candidate code and KB dtype table to build a list of
+    pre-approved fallbacks.  No LLM involved — pure Python heuristics.
+    """
+    import re as _re
+
+    code = candidate_path.read_text()
+    code_lines = [
+        ln for ln in code.splitlines()
+        if not ln.lstrip().startswith("#")
+    ]
+    code_no_comments = "\n".join(code_lines)
+
+    approved: list[dict] = []
+    seen_ops: set[str] = set()
+
+    # --- fp32 GEMM detection ---
+    kb_has_fp32 = bool(_re.search(r'\|\s*"?fp32"?\s*\|', kb_content))
+    if not kb_has_fp32:
+        has_half_cast = bool(_re.search(
+            r"\.half\(\)|\.to\(torch\.float16\)|\.bfloat16\(\)|\.to\(torch\.bfloat16\)",
+            code_no_comments,
+        ))
+        for op in ("torch.mm", "torch.matmul", "torch.addmm"):
+            if op in code_no_comments and op not in seen_ops:
+                if op == "torch.mm" and has_half_cast:
+                    continue
+                seen_ops.add(op)
+                approved.append({
+                    "op": op,
+                    "reason": "fp32_precision",
+                    "detail": "FlyDSL preshuffle_gemm has no fp32 output type",
+                })
+
+    # --- Batched matmul ---
+    if "torch.bmm" in code_no_comments and "torch.bmm" not in seen_ops:
+        seen_ops.add("torch.bmm")
+        approved.append({
+            "op": "torch.bmm",
+            "reason": "batched_matmul",
+            "detail": "FlyDSL has no batched GEMM",
+        })
+
+    # --- No-equivalent ops (static list) ---
+    for op in _NO_EQUIVALENT_OPS:
+        if op in code_no_comments and op not in seen_ops:
+            seen_ops.add(op)
+            approved.append({
+                "op": op,
+                "reason": "no_equivalent",
+                "detail": "no FlyDSL equivalent",
+            })
+
+    return approved
+
+
 _SELF_REVIEW_PROMPT = """\
 You are reviewing a FlyDSL translation of a PyTorch GPU kernel that passed correctness.
 
@@ -448,21 +525,30 @@ You are reviewing a FlyDSL translation of a PyTorch GPU kernel that passed corre
 ```
 
 ## Part A — PyTorch Fallback Audit
-
+{approved_fallbacks_section}
 Enumerate every call that performs GPU **compute** via PyTorch (e.g.
-`torch.matmul`, `F.relu`, `nn.Linear(...)`, `@` for matrix multiply,
-`F.softmax`, `F.scaled_dot_product_attention`, `torch.sum`, `torch.mean`).
+`torch.matmul`, `torch.mm`, `torch.bmm`, `torch.addmm`, `F.relu`,
+`nn.Linear(...)`, `@` for matrix multiply, `F.softmax`,
+`F.scaled_dot_product_attention`, `torch.sum`, `torch.mean`).
 
 Ignore non-compute helpers: `import torch`, `torch.empty`, `torch.zeros`,
 `torch.no_grad`, `.cuda()`, `.contiguous()`, `.view()`, `.reshape()`,
 dtype/device helpers, `torch.Tensor` type annotations.
 
 For each, decide:
-- **REPLACE** — FlyDSL has an equivalent. Provide the FlyDSL replacement.
-- **KEEP** — FlyDSL has no equivalent (e.g. `nn.Conv2d`, `nn.BatchNorm2d`,
-  `F.max_pool2d`). Briefly explain why.
+- **REPLACE** — FlyDSL has an equivalent AND the op is NOT pre-approved above.
+  Provide the FlyDSL replacement.
+- **KEEP** — FlyDSL has no equivalent, or the op is pre-approved. Specify a
+  reason category:
+  - `"fp32_precision"` — FlyDSL equivalent exists but doesn't support the
+    required dtype (e.g. fp32 GEMM)
+  - `"no_equivalent"` — No FlyDSL equivalent (Conv2d, BatchNorm2d, etc.)
+  - `"batched_matmul"` — FlyDSL has no batched GEMM
+  - `"other"` — Explain why
 
 ## Part B — Efficiency Audit
+
+Do NOT flag pre-approved fallback ops as efficiency issues.
 
 Check for:
 1. **Python for-loops over batch dimensions** — extremely slow; restructure
@@ -479,7 +565,7 @@ Check for:
 Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
 {{
   "fallback_audit": [
-    {{"op": "<pytorch call>", "line": <approx line number>, "verdict": "KEEP" or "REPLACE", "reason": "<brief>", "flydsl_replacement": "<FlyDSL API or null>"}}
+    {{"op": "<pytorch call>", "line": <approx line number>, "verdict": "KEEP" or "REPLACE", "reason": "<fp32_precision|no_equivalent|batched_matmul|other|brief>", "flydsl_replacement": "<FlyDSL API or null>"}}
   ],
   "efficiency_issues": [
     {{"issue": "<description>", "current_code": "<snippet>", "fix": "<description>"}}
@@ -501,6 +587,7 @@ def _run_self_review(
     pair,
     model,
     kb_content: str,
+    approved_fallbacks: list[dict] | None = None,
     _print,
 ) -> dict | bool:
     """Single-call self-review: audit translated code for PyTorch fallbacks
@@ -511,11 +598,29 @@ def _run_self_review(
     """
     import re
 
+    # Build the pre-approved fallbacks section for the prompt
+    if approved_fallbacks:
+        lines = [
+            "\n### Pre-Approved Fallbacks (DO NOT mark as REPLACE)",
+            "The following PyTorch ops have been verified as acceptable fallbacks "
+            "for this kernel:",
+        ]
+        for af in approved_fallbacks:
+            lines.append(f"- {af['op']} ({af['reason']}: {af['detail']})")
+        lines.append(
+            "\nAny op listed above MUST be marked KEEP with the given reason "
+            "category. Do NOT suggest replacements for these ops.\n"
+        )
+        approved_section = "\n".join(lines)
+    else:
+        approved_section = ""
+
     candidate_code = candidate_path.read_text()
     prompt = _SELF_REVIEW_PROMPT.format(
         candidate_path=candidate_path,
         candidate_code=candidate_code,
         kb_content=kb_content,
+        approved_fallbacks_section=approved_section,
     )
 
     try:
@@ -561,6 +666,32 @@ def _run_self_review(
     reasoning = parsed.get("reasoning", "")
     fallback_audit = parsed.get("fallback_audit", [])
     efficiency_issues = parsed.get("efficiency_issues", [])
+
+    # Safety filter: override REPLACE verdicts on pre-approved ops
+    n_overridden = 0
+    if approved_fallbacks:
+        approved_ops = {af["op"] for af in approved_fallbacks}
+        for item in fallback_audit:
+            if item.get("verdict") == "REPLACE":
+                op = item.get("op", "")
+                if any(aop in op for aop in approved_ops):
+                    item["verdict"] = "KEEP"
+                    item["reason"] = "pre-approved fallback (overridden)"
+                    item["flydsl_replacement"] = None
+                    n_overridden += 1
+        # Also filter efficiency issues that reference pre-approved ops
+        filtered_eff = []
+        for iss in efficiency_issues:
+            text = f"{iss.get('issue', '')} {iss.get('current_code', '')}"
+            if not any(aop in text for aop in approved_ops):
+                filtered_eff.append(iss)
+        n_eff_filtered = len(efficiency_issues) - len(filtered_eff)
+        efficiency_issues = filtered_eff
+        if n_overridden or n_eff_filtered:
+            _print(
+                f"  Safety filter: overrode {n_overridden} REPLACE→KEEP, "
+                f"removed {n_eff_filtered} efficiency issues (pre-approved ops)"
+            )
 
     n_replace = sum(1 for f in fallback_audit if f.get("verdict") == "REPLACE")
     n_keep = sum(1 for f in fallback_audit if f.get("verdict") == "KEEP")

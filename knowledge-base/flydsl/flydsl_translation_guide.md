@@ -325,7 +325,8 @@ What operation type?
 ├── LayerNorm / RMSNorm
 │   └── Use build_layernorm_module() / build_rmsnorm_module()
 ├── GEMM / Linear / torch.matmul
-│   └── Use compile_preshuffle_gemm_a8() [NOT torch.matmul / F.linear]
+│   ├── fp32 required? Check GEMM dtype table. No fp32 → use torch.mm
+│   └── fp16/bf16 → Use compile_preshuffle_gemm_a8() [NOT torch.matmul / F.linear]
 ├── Attention (self-attention, SDPA, Flash)
 │   └── Use build_flash_attn_func_module() from kernels.flash_attn_func
 │       (fallback to decomposed GEMM+softmax if constraints not met)
@@ -338,4 +339,5 @@ What operation type?
 
 **IMPORTANT**: Do NOT use `torch.matmul`, `F.linear`, `nn.Linear`, or
 `F.scaled_dot_product_attention` when FlyDSL pre-built kernels are available.
-PyTorch fallback is ONLY acceptable for Conv2d, MaxPool2d, BatchNorm2d.
+PyTorch fallback is ONLY acceptable for Conv2d, MaxPool2d, BatchNorm2d,
+and fp32 GEMM when the dtype table has no fp32 output type (use `torch.mm`).
