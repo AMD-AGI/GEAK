@@ -40,10 +40,13 @@ class TranslationPair:
     kb_translation_files: list[str]
     kb_category_files: dict[str, str] = field(default_factory=dict)
     env_setup: Callable[[Path], dict[str, str]] = field(default=lambda: _noop_env_setup)
-    max_rounds: int = 10
+    max_attempts: int = 3
     perf_fail_threshold: float = 0.5
     perf_warn_threshold: float = 0.8
     supported: bool = True
+    self_review: bool = True
+    review_triggers_retry: bool = True
+    review_retry_on_efficiency: bool = True
 
 
 def _noop_env_setup(_repo_root: Path) -> dict[str, str]:
@@ -335,7 +338,7 @@ _PYTORCH_TO_FLYDSL = TranslationPair(
         "attention": "flydsl/flydsl_translation_attention.md",
     },
     env_setup=_flydsl_env_setup,
-    max_rounds=10,
+    max_attempts=3,
 )
 
 

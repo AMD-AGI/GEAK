@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -240,13 +241,22 @@ def run_translation(
         f"- Run correctness checks with: `python {harness_path} {pair.harness_candidate_flag} {candidate_path}`\n"
     )
 
+    # -- Resolve self-review flags (env vars override TranslationPair defaults) --
+    _sr = os.environ.get("GEAK_SELF_REVIEW")
+    do_self_review = (_sr == "1") if _sr is not None else pair.self_review
+    _rt = os.environ.get("GEAK_REVIEW_TRIGGERS_RETRY")
+    review_triggers_retry = (_rt == "1") if _rt is not None else pair.review_triggers_retry
+    _re = os.environ.get("GEAK_REVIEW_RETRY_ON_EFFICIENCY")
+    review_retry_on_efficiency = (_re == "1") if _re is not None else pair.review_retry_on_efficiency
+
     # -- Translation loop --
     best_attempt: Path | None = None
     best_attempt_errors: list[str] = []
+    first_passing_code: str | None = None
     t0 = time.monotonic()
 
-    for round_num in range(1, pair.max_rounds + 1):
-        _print(f"  Round {round_num}/{pair.max_rounds}...")
+    for round_num in range(1, pair.max_attempts + 1):
+        _print(f"  Round {round_num}/{pair.max_attempts}...")
 
         round_task = task
         if round_num > 1 and best_attempt_errors:
@@ -341,9 +351,17 @@ def run_translation(
                     f"(below {perf_warn_threshold}x warn threshold)"
                 )
 
+            # -- Save the first passing candidate --
+            if first_passing_code is None:
+                first_passing_code = candidate_path.read_text()
+
             # -- Self-review: audit ops + efficiency --
+            if not do_self_review:
+                result["translation_self_review"] = "skipped"
+                break
+
             _print("  Running self-review (op + efficiency audit)...")
-            review_ok = _run_self_review(
+            review_result = _run_self_review(
                 candidate_path=candidate_path,
                 pair=pair,
                 model=_model,
@@ -351,38 +369,40 @@ def run_translation(
                 _print=_print,
             )
 
-            if review_ok:
-                if review_ok == "rewritten":
-                    _print("  Self-review rewrote candidate. Re-checking correctness...")
-                    recheck = run_harness(
-                        str(harness_path),
-                        mode="correctness",
-                        repo_root=str(repo_root),
-                        gpu_id=gpu_id,
-                        env_overrides=env_overrides,
-                    )
-                    if not recheck["success"]:
-                        _print("  Self-review broke correctness — continuing to next round")
-                        result["translation_success"] = False
-                        result["translation_kernel_path"] = None
-                        best_attempt_errors.append(
-                            "Self-review rewrite broke correctness"
-                        )
-                        continue
-                    _print("  Self-review rewrite still correct")
-                    _parse_timing_from_harness_output(
-                        recheck.get("stdout", ""), result, _print,
-                    )
-                    result["translation_self_review"] = "passed_with_changes"
-                else:
-                    result["translation_self_review"] = "passed"
+            if review_result is False:
+                _print("  Self-review failed (parse error) — keeping translation")
+                result["translation_self_review"] = "review_error"
                 break
-            else:
-                _print("  Self-review failed — continuing to next round")
-                result["translation_success"] = False
-                result["translation_kernel_path"] = None
-                best_attempt_errors.append("Self-review failed (parse error or no rewritten code)")
-                continue
+
+            result["translation_review_findings"] = review_result
+
+            has_replace = review_result["n_replace"] > 0
+            has_efficiency = len(review_result["efficiency_issues"]) > 0
+
+            if not has_replace and not has_efficiency:
+                result["translation_self_review"] = "passed"
+                break
+
+            if not review_triggers_retry:
+                _print("  Self-review found issues but review_triggers_retry=False — accepting")
+                result["translation_self_review"] = "passed_with_issues"
+                break
+
+            should_retry = has_replace
+            if review_retry_on_efficiency:
+                should_retry = should_retry or has_efficiency
+
+            if not should_retry:
+                _print("  Self-review found efficiency issues only (retry_on_efficiency=False) — accepting")
+                result["translation_self_review"] = "passed_with_issues"
+                break
+
+            _print("  Self-review found issues — feeding back to translation agent")
+            feedback = _format_review_feedback(review_result)
+            best_attempt_errors.append(feedback)
+            result["translation_success"] = False
+            result["translation_kernel_path"] = None
+            continue
         else:
             stderr_tail = harness_result.get("stderr", "")[-500:]
             best_attempt_errors.append(f"Correctness check failed:\n{stderr_tail}")
@@ -391,11 +411,19 @@ def run_translation(
     elapsed = time.monotonic() - t0
     result["translation_elapsed_s"] = round(elapsed, 1)
 
+    # -- Fallback: restore first passing candidate if review retries exhausted rounds --
+    if not result["translation_success"] and first_passing_code is not None:
+        _print("  Restoring first passing candidate (review retries exhausted)")
+        candidate_path.write_text(first_passing_code)
+        result["translation_success"] = True
+        result["translation_kernel_path"] = str(candidate_path)
+        result["translation_self_review"] = "accepted_with_issues"
+
     if not result["translation_success"] and best_attempt and best_attempt.exists():
         saved = output_dir / f"best_attempt_{candidate_filename}"
         best_attempt.rename(saved)
         result["translation_best_attempt_path"] = str(saved)
-        _print(f"  Translation failed after {pair.max_rounds} rounds. Best attempt saved to {saved}")
+        _print(f"  Translation failed after {pair.max_attempts} attempts. Best attempt saved to {saved}")
 
     if result["translation_success"]:
         _print(f"  Translation successful in {result['translation_rounds_used']} rounds ({elapsed:.1f}s)")
@@ -456,17 +484,14 @@ Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
   "efficiency_issues": [
     {{"issue": "<description>", "current_code": "<snippet>", "fix": "<description>"}}
   ],
-  "verdict": "pass" or "rewrite",
-  "reasoning": "<one sentence summary>",
-  "rewritten_code": "<FULL rewritten file contents if verdict=rewrite, else null>"
+  "reasoning": "<one sentence summary>"
 }}
 
 Rules:
-- verdict="rewrite" if ANY fallback_audit entry has verdict="REPLACE" or ANY
-  efficiency_issues exist. Otherwise verdict="pass".
-- rewritten_code must be the COMPLETE file (not a diff/patch), ready to write
-  directly. Include all imports, class definitions, helper functions.
-- Be strict — maximise FlyDSL utilisation and performance.
+- For each PyTorch compute call, verdict must be REPLACE (FlyDSL has equivalent)
+  or KEEP (no FlyDSL equivalent). Be strict and accurate.
+- efficiency_issues should list concrete performance problems, not style nits.
+- Do NOT include rewritten code. Only provide the audit findings.
 """
 
 
@@ -477,14 +502,12 @@ def _run_self_review(
     model,
     kb_content: str,
     _print,
-) -> str | bool:
+) -> dict | bool:
     """Single-call self-review: audit translated code for PyTorch fallbacks
     and efficiency issues via one LLM query.
 
-    Returns:
-    - ``"rewritten"`` if the LLM produced a rewritten candidate
-    - ``True`` if all ops are justified (no changes needed)
-    - ``False`` if the review failed (parse error, exception, etc.)
+    Returns a dict with structured findings, or ``False`` on failure.
+    Never modifies the candidate file.
     """
     import re
 
@@ -501,23 +524,25 @@ def _run_self_review(
                 "role": "system",
                 "content": (
                     "You are a GPU kernel translation reviewer specialising in "
-                    "FlyDSL (AMD's Python DSL for MI300X).\n\n"
-                    "CRITICAL: Your entire response must be a single JSON object. "
-                    "Do NOT include any text before or after the JSON. "
-                    "Do NOT wrap it in markdown code fences. "
-                    "Start your response with { and end with }."
+                    "FlyDSL (AMD's Python DSL for MI300X)."
                 ),
             },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": prompt + (
+                "\n\nIMPORTANT REMINDER: Respond with ONLY a JSON object. "
+                "No explanation, no markdown fences. Start with { and end with }."
+            )},
         ])
     except Exception as exc:
         _print(f"  Self-review query error: {exc}")
         return False
 
-    content = response.get("content", "") if isinstance(response, dict) else ""
+    content = ""
+    if isinstance(response, dict):
+        content = response.get("content", "") or ""
+        if not content.strip():
+            _print(f"  Self-review: empty content, response keys={list(response.keys())}")
     content = content.strip()
 
-    # Try to extract JSON from the response — handle fences and prose preambles
     fence_match = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", content, re.DOTALL)
     if fence_match:
         content = fence_match.group(1).strip()
@@ -530,10 +555,9 @@ def _run_self_review(
         parsed = json.loads(content)
     except (json.JSONDecodeError, TypeError) as exc:
         _print(f"  Self-review JSON parse error: {exc}")
-        _print(f"  Raw response (first 500 chars): {content[:500]}")
+        _print(f"  Raw response length={len(content)}, first 500 chars: {content[:500]}")
         return False
 
-    verdict = parsed.get("verdict", "pass")
     reasoning = parsed.get("reasoning", "")
     fallback_audit = parsed.get("fallback_audit", [])
     efficiency_issues = parsed.get("efficiency_issues", [])
@@ -546,17 +570,29 @@ def _run_self_review(
     )
     _print(f"  Self-review reasoning: {reasoning}")
 
-    if verdict == "rewrite":
-        rewritten = parsed.get("rewritten_code")
-        if not rewritten or not rewritten.strip():
-            _print("  Self-review verdict=rewrite but no rewritten_code provided")
-            return False
-        candidate_path.write_text(rewritten)
-        _print("  Self-review wrote rewritten candidate")
-        return "rewritten"
+    return {
+        "n_replace": n_replace,
+        "n_keep": n_keep,
+        "fallback_audit": fallback_audit,
+        "efficiency_issues": efficiency_issues,
+        "reasoning": reasoning,
+    }
 
-    _print("  Self-review: all ops justified (no changes)")
-    return True
+
+def _format_review_feedback(review: dict) -> str:
+    """Format structured review findings as feedback for the translation agent."""
+    parts = ["Self-review found the following issues:\n"]
+    for item in review.get("fallback_audit", []):
+        if item.get("verdict") == "REPLACE":
+            parts.append(
+                f"- {item.get('op', '?')}: should use FlyDSL "
+                f"'{item.get('flydsl_replacement', '?')}' instead of PyTorch. "
+                f"{item.get('reason', '')}"
+            )
+    for item in review.get("efficiency_issues", []):
+        parts.append(f"- Efficiency: {item.get('issue', '')}")
+    parts.append("\nFix these issues in your new translation attempt.")
+    return "\n".join(parts)
 
 
 def _create_translation_harness(
