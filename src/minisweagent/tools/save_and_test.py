@@ -505,6 +505,7 @@ class SaveAndTestTool:
                 ".torch_extensions/",
                 ".ninja_deps",
                 ".ninja_log",
+                ".git.bak/",
                 *self._generated_helper_excludes(),
             ]
             exclude_args = " ".join(f"':(exclude){entry}'" for entry in excludes)
