@@ -37,6 +37,8 @@ def retrieve_context(
     """Run the full retrieval funnel and return formatted context."""
     kernel_category = _infer_category(kernel_path)
     language = _infer_language(kernel_path)
+    logger.info("Retriever: category=%s language=%s bottleneck=%s path=...%s",
+                kernel_category, language, bottleneck_type, kernel_path[-80:])
 
     # Stage 1: fetch all candidates (broad)
     candidates = backend.search_experiences(limit=limit)
@@ -45,7 +47,7 @@ def retrieve_context(
 
     # Stage 2: text similarity scoring
     query_terms = _build_query_terms(kernel_path, kernel_category, bottleneck_type)
-    scored = _stage2_text_similarity(candidates, query_terms, kernel_category, bottleneck_type)
+    scored = _stage2_text_similarity(candidates, query_terms, kernel_category, bottleneck_type, language)
 
     # Stage 3: re-rank with diversity
     top = _stage3_rerank_diverse(scored, top_k=top_k)
@@ -70,6 +72,7 @@ def retrieve_context(
         skills=skills,
         query_category=kernel_category,
         query_bottleneck=bottleneck_type,
+        query_language=language,
     )
 
 
@@ -97,6 +100,10 @@ def _build_query_terms(kernel_path: str, category: str, bottleneck: str) -> set[
         "compute": {"compute", "flops", "mfma", "arithmetic", "intensity"},
         "latency": {"latency", "launch", "overhead", "pipeline", "stall"},
         "fusion": {"fuse", "fused", "fusion", "merge", "combine", "single-pass"},
+        "spatial_search": {
+            "nearest", "neighbor", "radius", "spatial", "distance",
+            "point_cloud", "interpolate", "search", "gather", "scatter",
+        },
     }
     expanded: set[str] = set()
     for term in terms:
@@ -118,13 +125,17 @@ def _experience_text(exp: ExperienceRecord) -> str:
         exp.key_insight,
         exp.trajectory_sketch,
         exp.code_changes_summary,
+        exp.profiling_insight,
+        exp.kernel_url,
+        exp.kernel_structure,
     ]
     parts.extend(exp.what_worked)
     parts.extend(exp.what_failed)
     parts.extend(exp.dead_ends)
-    # Include keywords from patch content (not the full diff, just identifiers)
+    parts.extend(exp.round_insights)
+    for strat in exp.strategies:
+        parts.append(strat.get("task", ""))
     if exp.patch_content:
-        import re
         code_words = re.findall(r'\b[a-zA-Z_]\w{3,}\b', exp.patch_content[:2000])
         parts.extend(code_words[:50])
     return " ".join(p for p in parts if p).lower()
@@ -150,6 +161,7 @@ def _stage2_text_similarity(
     query_terms: set[str],
     query_category: str,
     query_bottleneck: str,
+    query_language: str = "",
 ) -> list[tuple[float, ExperienceRecord]]:
     """Score each candidate by text similarity + soft boosts."""
     scored: list[tuple[float, ExperienceRecord]] = []
@@ -158,7 +170,6 @@ def _stage2_text_similarity(
         doc_text = _experience_text(exp)
         text_sim = _text_similarity(query_terms, doc_text)
 
-        # Soft boosts (not hard filters)
         cat_boost = 0.15 if (
             query_category and query_category != "unknown"
             and exp.kernel_category == query_category
@@ -174,12 +185,22 @@ def _stage2_text_similarity(
         else:
             bn_boost = 0.0
 
+        exp_lang = getattr(exp, "kernel_language", "") or ""
+        if query_language and query_language != "unknown" and exp_lang:
+            lang_boost = 0.20 if exp_lang == query_language else -0.10
+        else:
+            lang_boost = 0.0
+
         success_boost = 0.05 if exp.success and exp.best_speedup > 1.05 else 0.0
 
-        total = text_sim + cat_boost + bn_boost + success_boost
+        total = text_sim + cat_boost + bn_boost + lang_boost + success_boost
         scored.append((total, exp))
 
     scored.sort(key=lambda x: -x[0])
+    if scored:
+        logger.info("Retriever scoring: top=%s(%.3f) bottom=%s(%.3f)",
+                     scored[0][1].kernel_name, scored[0][0],
+                     scored[-1][1].kernel_name, scored[-1][0])
     return scored
 
 

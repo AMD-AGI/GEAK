@@ -99,7 +99,13 @@ Output directory: {output_dir}
 ---
 
 Begin by reading the kernel source and profiling data to understand the
-optimisation landscape.  Then follow the round instructions.
+optimisation landscape.  If cross-session memory is provided above,
+critically evaluate each past strategy: compare its code diff against
+YOUR kernel's actual code structure, bottleneck type, and data flow.
+Only adopt strategies where the underlying patterns genuinely match.
+Adapt the general approach to fit your kernel — do not blindly copy
+parameters or techniques from a different kernel.
+Then follow the round instructions.
 """
 
 
@@ -295,6 +301,11 @@ Generate optimization tasks for the kernel at {{ kernel_path }}.
 {% endif %}
 {% if memory_context %}
 ## Optimization Memory (from past kernel optimization runs)
+**Use critically**: These strategies worked on SIMILAR kernels, not this exact one.
+Compare each strategy's code pattern against THIS kernel's actual architecture
+before generating tasks.  If the past kernel's bottleneck was in a different
+code path than yours, skip those strategies and generate tasks based on YOUR
+profiling data instead.
 {{ memory_context }}
 {% endif %}
 {% if workload_guidance %}

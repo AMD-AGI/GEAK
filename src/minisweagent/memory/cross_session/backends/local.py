@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS experiences (
     trajectory_sketch TEXT NOT NULL DEFAULT '',
     patch_content    TEXT NOT NULL DEFAULT '',
     code_changes_summary TEXT NOT NULL DEFAULT '',
+    kernel_url       TEXT NOT NULL DEFAULT '',
+    profiling_insight TEXT NOT NULL DEFAULT '',
+    original_kernel_code TEXT NOT NULL DEFAULT '',
+    baseline_benchmark TEXT NOT NULL DEFAULT '',
+    kernel_structure TEXT NOT NULL DEFAULT '',
     patch_file       TEXT NOT NULL DEFAULT '',
     final_report_path TEXT NOT NULL DEFAULT '',
     notebook_dir     TEXT NOT NULL DEFAULT '',
@@ -43,7 +48,10 @@ CREATE TABLE IF NOT EXISTS experiences (
     profiling_metrics TEXT NOT NULL DEFAULT '{}',
     what_worked      TEXT NOT NULL DEFAULT '[]',
     what_failed      TEXT NOT NULL DEFAULT '[]',
-    dead_ends        TEXT NOT NULL DEFAULT '[]'
+    dead_ends        TEXT NOT NULL DEFAULT '[]',
+    round_insights   TEXT NOT NULL DEFAULT '[]',
+    strategies       TEXT NOT NULL DEFAULT '[]',
+    agent_reasoning_samples TEXT NOT NULL DEFAULT '[]'
 );
 """
 
@@ -75,7 +83,10 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_exp_timestamp ON experiences(timestamp);",
 ]
 
-_JSON_FIELDS_EXP = {"top_kernels", "profiling_metrics", "what_worked", "what_failed", "dead_ends"}
+_JSON_FIELDS_EXP = {
+    "top_kernels", "profiling_metrics", "what_worked", "what_failed", "dead_ends",
+    "round_insights", "strategies", "agent_reasoning_samples",
+}
 _JSON_FIELDS_SKILL = {"kernel_categories", "bottleneck_types", "kernel_languages", "contraindications", "source_records"}
 
 

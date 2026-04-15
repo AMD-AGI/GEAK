@@ -58,8 +58,18 @@ class ExperienceRecord:
     trajectory_sketch: str = ""
 
     # Code artifacts (the most transferable knowledge)
-    patch_content: str = ""  # actual diff/patch text that produced the speedup
-    code_changes_summary: str = ""  # human-readable summary of what changed in the code
+    patch_content: str = ""
+    code_changes_summary: str = ""
+
+    # Rich v6 fields (full context for cross-session transfer)
+    kernel_url: str = ""
+    profiling_insight: str = ""
+    original_kernel_code: str = ""
+    baseline_benchmark: str = ""
+    kernel_structure: str = ""
+    round_insights: list[str] = field(default_factory=list)
+    strategies: list[dict[str, Any]] = field(default_factory=list)
+    agent_reasoning_samples: list[str] = field(default_factory=list)
 
     # Linkage
     patch_file: str = ""
