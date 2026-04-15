@@ -501,7 +501,6 @@ def main(
             kernel_path=_kernel_path,
             bottleneck_type=_bm.get("bottleneck", ""),
             profiling_metrics=_bm,
-            compact=True,
         )
         if _mem_ctx:
             task_content = (
