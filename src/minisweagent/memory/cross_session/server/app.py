@@ -10,7 +10,6 @@ Or:  geak memory serve --port 8642
 from __future__ import annotations
 
 import os
-from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel

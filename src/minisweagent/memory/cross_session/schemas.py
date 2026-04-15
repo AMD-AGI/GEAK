@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from typing import Any
 
@@ -81,7 +81,7 @@ class ExperienceRecord:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ExperienceRecord:
-        known = {f.name for f in cls.__dataclass_fields__.values()}
+        known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in d.items() if k in known}
         return cls(**filtered)
 
@@ -116,7 +116,7 @@ class StrategySkill:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> StrategySkill:
-        known = {f.name for f in cls.__dataclass_fields__.values()}
+        known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in d.items() if k in known}
         return cls(**filtered)
 

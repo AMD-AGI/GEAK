@@ -88,7 +88,7 @@ def _build_skill(
     else:
         expected = "no improvement observed"
 
-    languages = sorted(set(e.kernel_language for e in experiences if e.kernel_language != "unknown"))
+    languages = sorted({e.kernel_language for e in experiences if e.kernel_language != "unknown"})
 
     title = f"{_label(bottleneck)}-bound {category}: {_change_label(change_category)}"
     description = _build_description(change_category, successes, experiences)
@@ -171,8 +171,8 @@ def _change_label(change_category: str) -> str:
 
 
 def reflect_on_transfer(
-    seed_experience: "ExperienceRecord",
-    test_experience: "ExperienceRecord",
+    seed_experience: ExperienceRecord,
+    test_experience: ExperienceRecord,
     backend: Any,
 ) -> None:
     """After a cross-kernel transfer experiment, create/update a StrategySkill

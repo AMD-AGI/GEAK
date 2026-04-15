@@ -7,11 +7,7 @@ Keeps context under ~15K chars to avoid drowning the kernel's own code.
 
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Any
-
 from minisweagent.memory.cross_session.schemas import ExperienceRecord, StrategySkill
-
 
 _MAX_CONTEXT_FULL = 30_000
 _MAX_CONTEXT_COMPACT = 5_000
@@ -106,7 +102,6 @@ def _format_compact(exp: ExperienceRecord, exp_dict: dict) -> str:
         improved = [s for s in strategies if s.get("speedup", 0) > 1.0]
         improved.sort(key=lambda s: -s["speedup"])
         if improved:
-            lines = [f"  {s['task']} ({s['speedup']}x)" for s in improved[:5]]
             parts.append("Worked: " + ", ".join(
                 f"{s['task']}={s['speedup']}x" for s in improved[:5]
             ))
@@ -170,7 +165,7 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict) -> str:
                 if code:
                     parts.append(f"```diff\n{code[:4000]}\n```")
             if len(improved) > 3:
-                parts.append(f"\n*Also worked:* " + ", ".join(
+                parts.append("\n*Also worked:* " + ", ".join(
                     f"{s['task']}={s['speedup']}x" for s in improved[3:]
                 ))
 
@@ -182,7 +177,7 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict) -> str:
                 if code:
                     parts.append(f"```diff\n{code[:3000]}\n```")
             if len(regressed) > 2:
-                parts.append(f"\n*Also regressed:* " + ", ".join(
+                parts.append("\n*Also regressed:* " + ", ".join(
                     f"{s['task']}={s['speedup']}x" for s in regressed[2:]
                 ))
     else:
