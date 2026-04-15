@@ -151,6 +151,7 @@ def _extract_patch_content(patch_file: str, report_dir: Path | None) -> tuple[st
 
     if not patch_text:
         import glob
+
         for root in search_roots:
             # Try all patch patterns in priority order
             for pattern in (
@@ -194,11 +195,14 @@ def _extract_patch_content(patch_file: str, report_dir: Path | None) -> tuple[st
 
             if orig.exists():
                 import subprocess
+
                 for wt_kernel in wt_kernels:
                     try:
                         diff_result = subprocess.run(
                             ["diff", "-u", str(orig), str(wt_kernel)],
-                            capture_output=True, text=True, timeout=5,
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
                         )
                         if diff_result.stdout.strip() and len(diff_result.stdout) > 20:
                             patch_text = diff_result.stdout
@@ -244,13 +248,32 @@ def _summarize_patch(patch_text: str) -> str:
     if added_code:
         parts.append(f"Added {len(added_code)} code lines")
         # Show the most distinctive added lines (likely the optimization)
-        key_adds = [l for l in added_code if any(
-            kw in l.lower() for kw in (
-                "block", "tile", "warp", "tl.", "triton", "autotune",
-                "config", "shared", "cache", "fuse", "vectori", "mfma",
-                "atomic", "reduce", "parallel", "unroll", "pipeline",
+        key_adds = [
+            l
+            for l in added_code
+            if any(
+                kw in l.lower()
+                for kw in (
+                    "block",
+                    "tile",
+                    "warp",
+                    "tl.",
+                    "triton",
+                    "autotune",
+                    "config",
+                    "shared",
+                    "cache",
+                    "fuse",
+                    "vectori",
+                    "mfma",
+                    "atomic",
+                    "reduce",
+                    "parallel",
+                    "unroll",
+                    "pipeline",
+                )
             )
-        )]
+        ]
         if key_adds:
             parts.append("Key additions: " + "; ".join(key_adds[:3]))
     if removed_code:
@@ -266,10 +289,7 @@ def _extract_numeric_metrics(profiling_metrics: dict) -> dict[str, Any]:
     metrics = profiling_metrics.get("metrics", profiling_metrics)
     if not isinstance(metrics, dict):
         return {}
-    return {
-        k: v for k, v in metrics.items()
-        if isinstance(v, (int, float)) and v is not None
-    }
+    return {k: v for k, v in metrics.items() if isinstance(v, (int, float)) and v is not None}
 
 
 def _extract_hardware(profiling_metrics: dict) -> str:

@@ -81,7 +81,9 @@ def record(**kwargs: Any) -> None:
         if experience.best_speedup < min_speedup:
             logger.debug(
                 "Skipping experience (%.3fx < %.2fx threshold): %s",
-                experience.best_speedup, min_speedup, experience.record_id,
+                experience.best_speedup,
+                min_speedup,
+                experience.record_id,
             )
             return
 

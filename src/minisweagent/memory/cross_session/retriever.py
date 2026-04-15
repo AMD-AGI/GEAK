@@ -37,8 +37,13 @@ def retrieve_context(
     """Run the full retrieval funnel and return formatted context."""
     kernel_category = _infer_category(kernel_path)
     language = _infer_language(kernel_path)
-    logger.info("Retriever: category=%s language=%s bottleneck=%s path=...%s",
-                kernel_category, language, bottleneck_type, kernel_path[-80:])
+    logger.info(
+        "Retriever: category=%s language=%s bottleneck=%s path=...%s",
+        kernel_category,
+        language,
+        bottleneck_type,
+        kernel_path[-80:],
+    )
 
     # Stage 1: fetch all candidates (broad)
     candidates = backend.search_experiences(limit=limit)
@@ -58,14 +63,14 @@ def retrieve_context(
         (_text_similarity(query_terms, _experience_text(exp)) for _, exp in scored),
         default=0.0,
     )
-    has_category_match = (
-        kernel_category != "unknown"
-        and any(exp.kernel_category == kernel_category for _, exp in scored)
+    has_category_match = kernel_category != "unknown" and any(
+        exp.kernel_category == kernel_category for _, exp in scored
     )
     if not has_category_match and best_text_sim < _MIN_TEXT_SIM:
         logger.info(
             "Retriever: no category match and best text_sim=%.4f < %.2f, skipping",
-            best_text_sim, _MIN_TEXT_SIM,
+            best_text_sim,
+            _MIN_TEXT_SIM,
         )
         return ""
 
@@ -124,8 +129,16 @@ def _build_query_terms(kernel_path: str, category: str, bottleneck: str) -> set[
         "latency": {"latency", "launch", "overhead", "pipeline", "stall"},
         "fusion": {"fuse", "fused", "fusion", "merge", "combine", "single-pass"},
         "spatial_search": {
-            "nearest", "neighbor", "radius", "spatial", "distance",
-            "point_cloud", "interpolate", "search", "gather", "scatter",
+            "nearest",
+            "neighbor",
+            "radius",
+            "spatial",
+            "distance",
+            "point_cloud",
+            "interpolate",
+            "search",
+            "gather",
+            "scatter",
         },
     }
     expanded: set[str] = set()
@@ -159,7 +172,7 @@ def _experience_text(exp: ExperienceRecord) -> str:
     for strat in exp.strategies:
         parts.append(strat.get("task", ""))
     if exp.patch_content:
-        code_words = re.findall(r'\b[a-zA-Z_]\w{3,}\b', exp.patch_content[:2000])
+        code_words = re.findall(r"\b[a-zA-Z_]\w{3,}\b", exp.patch_content[:2000])
         parts.extend(code_words[:50])
     return " ".join(p for p in parts if p).lower()
 
@@ -193,10 +206,9 @@ def _stage2_text_similarity(
         doc_text = _experience_text(exp)
         text_sim = _text_similarity(query_terms, doc_text)
 
-        cat_boost = 0.15 if (
-            query_category and query_category != "unknown"
-            and exp.kernel_category == query_category
-        ) else 0.0
+        cat_boost = (
+            0.15 if (query_category and query_category != "unknown" and exp.kernel_category == query_category) else 0.0
+        )
 
         if query_bottleneck and query_bottleneck != "unknown":
             if exp.bottleneck_type == query_bottleneck:
@@ -221,9 +233,13 @@ def _stage2_text_similarity(
 
     scored.sort(key=lambda x: -x[0])
     if scored:
-        logger.info("Retriever scoring: top=%s(%.3f) bottom=%s(%.3f)",
-                     scored[0][1].kernel_name, scored[0][0],
-                     scored[-1][1].kernel_name, scored[-1][0])
+        logger.info(
+            "Retriever scoring: top=%s(%.3f) bottom=%s(%.3f)",
+            scored[0][1].kernel_name,
+            scored[0][0],
+            scored[-1][1].kernel_name,
+            scored[-1][0],
+        )
     return scored
 
 
@@ -247,10 +263,7 @@ def _stage3_rerank_diverse(
 
         if cat_count >= 2:
             adjusted = score * 0.5
-            remaining = [
-                (s, e) for s, e in scored
-                if e not in selected and (e.best_change_category or "other") != cat
-            ]
+            remaining = [(s, e) for s, e in scored if e not in selected and (e.best_change_category or "other") != cat]
             if remaining and remaining[0][0] > adjusted:
                 continue
 
@@ -264,18 +277,30 @@ def _infer_category(kernel_path: str) -> str:
     """Quick category inference from path."""
     try:
         from minisweagent.memory.cross_session_memory import classify_kernel_category
+
         return classify_kernel_category(kernel_path)
     except ImportError:
         pass
 
     p = kernel_path.lower()
     for tag, cat in [
-        ("gemm", "gemm"), ("matmul", "gemm"), ("attention", "attention"),
-        ("mla", "attention"), ("sdpa", "attention"), ("norm", "normalization"),
-        ("rms", "normalization"), ("moe", "moe"), ("expert", "moe"),
-        ("rope", "positional_encoding"), ("rotary", "positional_encoding"),
-        ("topk", "topk"), ("softmax", "softmax"), ("reduce", "reduction"),
-        ("ff", "ffn"), ("feedforward", "ffn"), ("linear", "gemm"),
+        ("gemm", "gemm"),
+        ("matmul", "gemm"),
+        ("attention", "attention"),
+        ("mla", "attention"),
+        ("sdpa", "attention"),
+        ("norm", "normalization"),
+        ("rms", "normalization"),
+        ("moe", "moe"),
+        ("expert", "moe"),
+        ("rope", "positional_encoding"),
+        ("rotary", "positional_encoding"),
+        ("topk", "topk"),
+        ("softmax", "softmax"),
+        ("reduce", "reduction"),
+        ("ff", "ffn"),
+        ("feedforward", "ffn"),
+        ("linear", "gemm"),
     ]:
         if tag in p:
             return cat
@@ -293,15 +318,51 @@ def _infer_language(kernel_path: str) -> str:
     return "unknown"
 
 
-_NOISE_WORDS = frozenset({
-    "int", "float", "void", "const", "return", "bool", "auto", "char",
-    "include", "define", "pragma", "ifdef", "endif", "nullptr", "true",
-    "false", "this", "struct", "class", "template", "typename", "static",
-    "inline", "extern", "restrict", "volatile", "unsigned", "size_t",
-    "blockidx", "blockdim", "threadidx", "griddim", "warpsize",
-    "hipstream_t", "cudastream_t", "hipstream", "cudastream",
-    "hiperror_t", "cudaerror_t", "hipmalloc", "cudamalloc",
-})
+_NOISE_WORDS = frozenset(
+    {
+        "int",
+        "float",
+        "void",
+        "const",
+        "return",
+        "bool",
+        "auto",
+        "char",
+        "include",
+        "define",
+        "pragma",
+        "ifdef",
+        "endif",
+        "nullptr",
+        "true",
+        "false",
+        "this",
+        "struct",
+        "class",
+        "template",
+        "typename",
+        "static",
+        "inline",
+        "extern",
+        "restrict",
+        "volatile",
+        "unsigned",
+        "size_t",
+        "blockidx",
+        "blockdim",
+        "threadidx",
+        "griddim",
+        "warpsize",
+        "hipstream_t",
+        "cudastream_t",
+        "hipstream",
+        "cudastream",
+        "hiperror_t",
+        "cudaerror_t",
+        "hipmalloc",
+        "cudamalloc",
+    }
+)
 
 
 def _extract_source_terms(kernel_path: str, max_tokens: int = 80) -> set[str]:

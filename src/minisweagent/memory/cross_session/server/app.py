@@ -54,6 +54,7 @@ class SkillIn(BaseModel):
 
 # ── Experience endpoints ─────────────────────────────────────────────
 
+
 @app.post("/api/v1/experiences", dependencies=[Depends(_check_auth)])
 def create_experience(body: ExperienceIn, backend=Depends(_get_backend)):
     from minisweagent.memory.cross_session.schemas import ExperienceRecord
@@ -94,6 +95,7 @@ def search_experiences(
 
 # ── Skill endpoints ──────────────────────────────────────────────────
 
+
 @app.post("/api/v1/skills", dependencies=[Depends(_check_auth)])
 def create_skill(body: SkillIn, backend=Depends(_get_backend)):
     from minisweagent.memory.cross_session.schemas import StrategySkill
@@ -127,6 +129,7 @@ def search_skills(
 
 
 # ── Stats & consolidation ────────────────────────────────────────────
+
 
 @app.get("/api/v1/stats", dependencies=[Depends(_check_auth)])
 def get_stats(backend=Depends(_get_backend)):

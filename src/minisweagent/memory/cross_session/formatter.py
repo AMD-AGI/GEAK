@@ -12,6 +12,7 @@ from minisweagent.memory.cross_session.schemas import ExperienceRecord, Strategy
 _MAX_CONTEXT_FULL = 30_000
 _MAX_CONTEXT_COMPACT = 5_000
 
+
 def format_landscape_context(
     experiences: list[ExperienceRecord],
     skills: list[StrategySkill],
@@ -102,14 +103,10 @@ def _format_compact(exp: ExperienceRecord, exp_dict: dict) -> str:
         improved = [s for s in strategies if s.get("speedup", 0) > 1.0]
         improved.sort(key=lambda s: -s["speedup"])
         if improved:
-            parts.append("Worked: " + ", ".join(
-                f"{s['task']}={s['speedup']}x" for s in improved[:5]
-            ))
+            parts.append("Worked: " + ", ".join(f"{s['task']}={s['speedup']}x" for s in improved[:5]))
         regressed = [s for s in strategies if 0 < s.get("speedup", 0) < 1.0]
         if regressed:
-            parts.append("Avoid: " + ", ".join(
-                f"{s['task']}={s['speedup']}x" for s in regressed[:3]
-            ))
+            parts.append("Avoid: " + ", ".join(f"{s['task']}={s['speedup']}x" for s in regressed[:3]))
 
     return "\n".join(p for p in parts if p)
 
@@ -165,9 +162,7 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict) -> str:
                 if code:
                     parts.append(f"```diff\n{code[:4000]}\n```")
             if len(improved) > 3:
-                parts.append("\n*Also worked:* " + ", ".join(
-                    f"{s['task']}={s['speedup']}x" for s in improved[3:]
-                ))
+                parts.append("\n*Also worked:* " + ", ".join(f"{s['task']}={s['speedup']}x" for s in improved[3:]))
 
         if regressed:
             parts.append(f"\n**Strategies that REGRESSED ({len(regressed)} total, showing worst 2 with code):**")
@@ -177,9 +172,7 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict) -> str:
                 if code:
                     parts.append(f"```diff\n{code[:3000]}\n```")
             if len(regressed) > 2:
-                parts.append("\n*Also regressed:* " + ", ".join(
-                    f"{s['task']}={s['speedup']}x" for s in regressed[2:]
-                ))
+                parts.append("\n*Also regressed:* " + ", ".join(f"{s['task']}={s['speedup']}x" for s in regressed[2:]))
     else:
         code_section = _best_code_insights_legacy(exp)
         if code_section:

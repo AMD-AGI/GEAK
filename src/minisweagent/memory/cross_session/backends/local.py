@@ -84,10 +84,22 @@ _CREATE_INDEXES = [
 ]
 
 _JSON_FIELDS_EXP = {
-    "top_kernels", "profiling_metrics", "what_worked", "what_failed", "dead_ends",
-    "round_insights", "strategies", "agent_reasoning_samples",
+    "top_kernels",
+    "profiling_metrics",
+    "what_worked",
+    "what_failed",
+    "dead_ends",
+    "round_insights",
+    "strategies",
+    "agent_reasoning_samples",
 }
-_JSON_FIELDS_SKILL = {"kernel_categories", "bottleneck_types", "kernel_languages", "contraindications", "source_records"}
+_JSON_FIELDS_SKILL = {
+    "kernel_categories",
+    "bottleneck_types",
+    "kernel_languages",
+    "contraindications",
+    "source_records",
+}
 
 
 class LocalSQLiteBackend:
@@ -133,6 +145,7 @@ class LocalSQLiteBackend:
 
         try:
             import logging
+
             logger = logging.getLogger(__name__)
             data = json.loads(kb_path.read_text())
             experiences = data.get("experiences", [])
@@ -142,6 +155,7 @@ class LocalSQLiteBackend:
             logger.info("Seeded %d experiences from knowledge_base.json", len(experiences))
         except Exception as exc:
             import logging
+
             logging.getLogger(__name__).warning("Failed to seed from knowledge_base.json: %s", exc)
 
     # ── Experience CRUD ──────────────────────────────────────────────

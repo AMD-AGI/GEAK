@@ -130,7 +130,7 @@ def _build_description(
 
     n_total = len(all_exps)
     n_success = len(successes)
-    parts.append(f"Track record: {n_success}/{n_total} successful ({100*n_success//n_total}%)")
+    parts.append(f"Track record: {n_success}/{n_total} successful ({100 * n_success // n_total}%)")
 
     best = max(successes, key=lambda e: e.best_speedup) if successes else None
     if best and best.trajectory_sketch:
@@ -207,7 +207,9 @@ def reflect_on_transfer(
         evidence_count=2,
         success_rate=1.0 if transferred else 0.0,
         contraindications=(
-            [f"Does not transfer between {seed_experience.bottleneck_type}-bound and {test_experience.bottleneck_type}-bound kernels"]
+            [
+                f"Does not transfer between {seed_experience.bottleneck_type}-bound and {test_experience.bottleneck_type}-bound kernels"
+            ]
             if not transferred and seed_experience.bottleneck_type != test_experience.bottleneck_type
             else []
         ),
@@ -218,7 +220,9 @@ def reflect_on_transfer(
         backend.store_skill(skill)
         logger.info(
             "Reflection skill created: %s (transferred=%s, test_speedup=%.2fx)",
-            skill.title, transferred, test_sp,
+            skill.title,
+            transferred,
+            test_sp,
         )
     except Exception as exc:
         logger.warning("Failed to store reflection skill: %s", exc)

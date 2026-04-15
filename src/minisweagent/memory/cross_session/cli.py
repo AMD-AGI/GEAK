@@ -22,7 +22,10 @@ def _get_backend():
 
     backend = get_backend()
     if backend is None:
-        print("Cross-session memory is disabled. Set GEAK_CROSS_SESSION_MEMORY_URL or unset GEAK_MEMORY_NO_CROSS_SESSION.", file=sys.stderr)
+        print(
+            "Cross-session memory is disabled. Set GEAK_CROSS_SESSION_MEMORY_URL or unset GEAK_MEMORY_NO_CROSS_SESSION.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     return backend
 

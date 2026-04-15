@@ -254,6 +254,7 @@ def task_file_to_agent_task(task_file: Path):
 
     try:
         from minisweagent.memory.integration import assemble_memory_context, is_memory_enabled
+
         if is_memory_enabled():
             _bm = baseline_metrics or {}
             _mem_ctx = assemble_memory_context(
