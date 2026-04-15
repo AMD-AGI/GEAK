@@ -69,3 +69,43 @@ Use `DeviceGemm_Xdl_CShuffle` or `DeviceGemmMultipleD_Xdl_CShuffle` with empty D
 - Add R output pointers: `std::array<void*, NumR>{p_r0, ...}`
 - Add QsElementOp, RsElementOp, RsThreadReduceOp, RsGlobalReduceOp
 - Initialize R buffers before launch (numeric lowest for Max, zero for Sum)
+
+## Directory structure
+
+The files must be on the same level as the target kernel. The generated test harness will be used by
+optimizer agents which are given the original target kernel location. The optimizer agents will make a
+worktree copy (GEAK_WORK_DIR) of the target kernel folder and make edits, compile and test in the worktree folder.
+
+For the example target kernel the original directory is `rocm-libraries/projects/composablekernel/example/03_gemm_bias_relu/gemm_bias_relu_xdl_fp16.cpp`.
+
+Therefore, your generated files (excluding test harness) must be in:
+
+```
+rocm-libraries/
+└── projects/
+    └── composablekernel/
+        └─── example/
+            └── 03_gemm_bias_relu/
+                │   gemm_bias_relu_xdl_fp16.cpp (Target kernel already exist, it's not generated.)
+                │   baseline.cpp
+                │   optimized.cpp
+                │   compile.py
+                │   Makefile
+                │   ...
+```
+
+The optimizer agent's output directory, including the worktree will look like:
+
+```
+example_run
+├── worktrees
+│   └── agent_0
+│       │   gemm_bias_relu_xdl_fp16.cpp
+│       │   baseline.cpp
+│       │   optimized.cpp
+│       │   compile.py
+│       │   Makefile
+│       │   ...
+├── test_harness.py
+│   ...
+```

@@ -100,3 +100,43 @@ what `DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle::MakeArgument` expects.
 ### Backward Weight (example 20, DeviceGroupedConvBwdWeight)
 - Different device op header
 - May require `split_k` parameter
+
+## Directory structure
+
+The files must be on the same level as the target kernel. The generated test harness will be used by
+optimizer agents which are given the original target kernel location. The optimizer agents will make a
+worktree copy (GEAK_WORK_DIR) of the target kernel folder and make edits, compile and test in the worktree folder.
+
+For the example target kernel the original directory is `rocm-libraries/projects/composablekernel/example/09_convnd_fwd/convnd_fwd_xdl_fp16.cpp`.
+
+Therefore, your generated files (excluding test harness) must be in:
+
+```
+rocm-libraries/
+└── projects/
+    └── composablekernel/
+        └─── example/
+            └── 09_convnd_fwd/
+                │   convnd_fwd_xdl_fp16.cpp (Target kernel already exist, it's not generated.)
+                │   baseline.cpp
+                │   optimized.cpp
+                │   compile.py
+                │   Makefile
+                │   ...
+```
+
+The optimizer agent's output directory, including the worktree will look like:
+
+```
+example_run
+├── worktrees
+│   └── agent_0
+│       │   convnd_fwd_xdl_fp16.cpp
+│       │   baseline.cpp
+│       │   optimized.cpp
+│       │   compile.py
+│       │   Makefile
+│       │   ...
+├── test_harness.py
+│   ...
+```
