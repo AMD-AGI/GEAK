@@ -13,7 +13,8 @@ from typing import Any
 from minisweagent.memory.cross_session.schemas import ExperienceRecord, StrategySkill
 
 
-_MAX_CONTEXT_CHARS = 30_000
+_MAX_CONTEXT_FULL = 30_000
+_MAX_CONTEXT_COMPACT = 5_000
 
 def format_landscape_context(
     experiences: list[ExperienceRecord],
@@ -21,8 +22,14 @@ def format_landscape_context(
     query_category: str = "",
     query_bottleneck: str = "",
     query_language: str = "",
+    compact: bool = False,
 ) -> str:
-    """Format experiences into a concise context block with reasoning guidance."""
+    """Format experiences into a context block with reasoning guidance.
+
+    compact=True produces a lightweight summary (strategy names + speedups,
+    no code diffs) suitable for homogeneous agents that can't do multi-step
+    strategy reasoning.
+    """
     if not experiences and not skills:
         return ""
 
@@ -34,12 +41,13 @@ def format_landscape_context(
     parts.append(_build_reasoning_guidance(lang))
     parts.append("")
 
-    budget = _MAX_CONTEXT_CHARS
+    budget = _MAX_CONTEXT_COMPACT if compact else _MAX_CONTEXT_FULL
+    fmt_fn = _format_compact if compact else _format_single_experience
     for exp in experiences:
         exp_dict = exp.to_dict() if hasattr(exp, "to_dict") else {}
-        chunk = _format_single_experience(exp, exp_dict)
+        chunk = fmt_fn(exp, exp_dict)
         if budget - len(chunk) < 0 and parts:
-            parts.append(f"\n*(context budget reached — {n - experiences.index(exp)} more experiences omitted)*")
+            parts.append(f"\n*(budget reached — {n - experiences.index(exp)} more omitted)*")
             break
         budget -= len(chunk)
         parts.append(chunk)
@@ -76,6 +84,39 @@ def _build_reasoning_guidance(lang: str) -> str:
         "kernel's bottleneck is in quantization/dequantization, skip the GEMM "
         "strategies and look for quant-related patterns instead."
     )
+
+
+def _format_compact(exp: ExperienceRecord, exp_dict: dict) -> str:
+    """Lightweight format: key insight + strategy names with speedups, no code diffs.
+
+    For agents that get the full task + memory in a single message and can't
+    do multi-step reasoning about which strategies to adopt.
+    """
+    parts: list[str] = []
+    kn = exp.kernel_name or "unknown"
+    sp = exp.best_speedup
+    parts.append(f"## {kn} ({sp:.2f}x, {exp.bottleneck_type}-bound)")
+
+    key_insight = exp.key_insight or exp_dict.get("key_insight", "")
+    if key_insight:
+        parts.append(f"*{key_insight}*")
+
+    strategies = exp_dict.get("strategies", [])
+    if strategies:
+        improved = [s for s in strategies if s.get("speedup", 0) > 1.0]
+        improved.sort(key=lambda s: -s["speedup"])
+        if improved:
+            lines = [f"  {s['task']} ({s['speedup']}x)" for s in improved[:5]]
+            parts.append("Worked: " + ", ".join(
+                f"{s['task']}={s['speedup']}x" for s in improved[:5]
+            ))
+        regressed = [s for s in strategies if 0 < s.get("speedup", 0) < 1.0]
+        if regressed:
+            parts.append("Avoid: " + ", ".join(
+                f"{s['task']}={s['speedup']}x" for s in regressed[:3]
+            ))
+
+    return "\n".join(p for p in parts if p)
 
 
 def _format_single_experience(exp: ExperienceRecord, exp_dict: dict) -> str:

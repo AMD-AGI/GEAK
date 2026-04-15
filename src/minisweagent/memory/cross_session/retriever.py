@@ -33,6 +33,7 @@ def retrieve_context(
     profiling_metrics: dict[str, Any] | None = None,
     limit: int = 30,
     top_k: int = 5,
+    compact: bool = False,
 ) -> str:
     """Run the full retrieval funnel and return formatted context."""
     kernel_category = _infer_category(kernel_path)
@@ -93,11 +94,12 @@ def retrieve_context(
         query_category=kernel_category,
         query_bottleneck=bottleneck_type,
         query_language=language,
+        compact=compact,
     )
 
 
 def _build_query_terms(kernel_path: str, category: str, bottleneck: str) -> set[str]:
-    """Build a set of query keywords from the kernel context."""
+    """Build query keywords from kernel path AND source code identifiers."""
     terms: set[str] = set()
 
     path_lower = kernel_path.lower()
@@ -109,6 +111,8 @@ def _build_query_terms(kernel_path: str, category: str, bottleneck: str) -> set[
         terms.add(category)
     if bottleneck and bottleneck != "unknown":
         terms.add(bottleneck)
+
+    terms.update(_extract_source_terms(kernel_path))
 
     _DOMAIN_SYNONYMS = {
         "attention": {"attention", "attn", "mla", "sdpa", "softmax", "qkv", "kv", "rope"},
@@ -288,3 +292,40 @@ def _infer_language(kernel_path: str) -> str:
     if any(k in p for k in (".cu", "cuda")):
         return "cuda"
     return "unknown"
+
+
+_NOISE_WORDS = frozenset({
+    "int", "float", "void", "const", "return", "bool", "auto", "char",
+    "include", "define", "pragma", "ifdef", "endif", "nullptr", "true",
+    "false", "this", "struct", "class", "template", "typename", "static",
+    "inline", "extern", "restrict", "volatile", "unsigned", "size_t",
+    "blockidx", "blockdim", "threadidx", "griddim", "warpsize",
+    "hipstream_t", "cudastream_t", "hipstream", "cudastream",
+    "hiperror_t", "cudaerror_t", "hipmalloc", "cudamalloc",
+})
+
+
+def _extract_source_terms(kernel_path: str, max_tokens: int = 80) -> set[str]:
+    """Extract meaningful identifiers from kernel source code.
+
+    Reads the first ~4KB of the kernel file and pulls out C/HIP/Triton
+    identifiers (function names, variable names, algorithmic keywords).
+    These terms dramatically improve retrieval relevance compared to
+    path-only matching.
+    """
+    from pathlib import Path
+
+    p = Path(kernel_path)
+    if not p.is_file():
+        return set()
+
+    try:
+        text = p.read_text(errors="ignore")[:4096]
+    except Exception:
+        return set()
+
+    raw = set(re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]{3,}\b", text))
+    terms = {w.lower() for w in raw} - _NOISE_WORDS
+    if len(terms) > max_tokens:
+        terms = set(sorted(terms)[:max_tokens])
+    return terms

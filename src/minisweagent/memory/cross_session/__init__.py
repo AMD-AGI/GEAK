@@ -108,6 +108,7 @@ def retrieve(**kwargs: Any) -> str:
             profiling_metrics=kwargs.get("profiling_metrics") or {},
             limit=cfg.retrieval_limit,
             top_k=cfg.retrieval_top_k,
+            compact=bool(kwargs.get("compact", False)),
         )
     except Exception as exc:
         logger.debug("Cross-session retrieve failed (non-fatal): %s", exc)
