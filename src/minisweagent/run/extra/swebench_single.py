@@ -1,6 +1,5 @@
 """Run on a single SWE-Bench instance."""
 
-import traceback
 from pathlib import Path
 
 import typer
@@ -15,7 +14,6 @@ from minisweagent.run.extra.swebench import (
     DATASET_MAPPING,
     get_sb_environment,
 )
-
 from minisweagent.utils.log import logger
 
 app = typer.Typer(add_completion=False)
@@ -64,15 +62,10 @@ def main(
         **({"mode": "yolo"} | config.get("agent", {})),
     )
 
-    exit_status, result, extra_info = None, None, None
     try:
-        exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
+        agent.run(instance["problem_statement"])  # type: ignore[arg-type]
     except Exception as e:
         logger.error(f"Error processing instance {instance_spec}: {e}", exc_info=True)
-        exit_status, result = type(e).__name__, str(e)
-        extra_info = {"traceback": traceback.format_exc()}
-    finally:
-        pass
 
 
 if __name__ == "__main__":

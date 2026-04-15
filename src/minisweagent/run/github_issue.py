@@ -14,7 +14,6 @@ from minisweagent.environments.docker import DockerEnvironment
 from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
 
-
 logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_GITHUB_CONFIG_PATH", builtin_config_dir / "github_issue.yaml"))
 console = Console(highlight=False)

@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-
 _WRITE_COMMANDS = frozenset({"create", "str_replace", "insert"})
 
 

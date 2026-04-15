@@ -9,7 +9,6 @@ import random
 import re
 import threading
 import time
-import traceback
 from pathlib import Path
 
 import typer
@@ -24,7 +23,6 @@ from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments import get_environment
 from minisweagent.models import get_model
 from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
-
 from minisweagent.utils.log import add_file_handler, logger
 
 _HELP_TEXT = """Run mini-SWE-agent on SWEBench instances.
@@ -127,10 +125,8 @@ def process_instance(
 ) -> None:
     """Process a single SWEBench instance."""
     instance_id = instance["instance_id"]
-    instance_dir = output_dir / instance_id
     # avoid inconsistent state if something here fails and there's leftover previous files
     remove_from_preds_file(output_dir / "preds.json", instance_id)
-    # traj.json writing is disabled
     model = get_model(config=config.get("model", {}))
     task = instance["problem_statement"]
 
@@ -138,7 +134,6 @@ def process_instance(
     progress_manager.update_instance_status(instance_id, "Pulling/starting docker")
 
     agent = None
-    extra_info = None
 
     try:
         env = get_sb_environment(config, instance)
@@ -153,7 +148,6 @@ def process_instance(
     except Exception as e:
         logger.error(f"Error processing instance {instance_id}: {e}", exc_info=True)
         exit_status, result = type(e).__name__, str(e)
-        extra_info = {"traceback": traceback.format_exc()}
     finally:
         update_preds_file(output_dir / "preds.json", instance_id, model.config.model_name, result)
         progress_manager.on_instance_end(instance_id, exit_status)
