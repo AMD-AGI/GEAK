@@ -49,6 +49,26 @@ def retrieve_context(
     query_terms = _build_query_terms(kernel_path, kernel_category, bottleneck_type)
     scored = _stage2_text_similarity(candidates, query_terms, kernel_category, bottleneck_type, language)
 
+    # Relevance gate: require at least one genuine relevance signal before
+    # injecting memory. Language boost alone isn't enough -- it causes
+    # irrelevant same-language experiences to distract the agent.
+    # Signals: (a) known category match, OR (b) meaningful text overlap.
+    _MIN_TEXT_SIM = 0.05
+    best_text_sim = max(
+        (_text_similarity(query_terms, _experience_text(exp)) for _, exp in scored),
+        default=0.0,
+    )
+    has_category_match = (
+        kernel_category != "unknown"
+        and any(exp.kernel_category == kernel_category for _, exp in scored)
+    )
+    if not has_category_match and best_text_sim < _MIN_TEXT_SIM:
+        logger.info(
+            "Retriever: no category match and best text_sim=%.4f < %.2f, skipping",
+            best_text_sim, _MIN_TEXT_SIM,
+        )
+        return ""
+
     # Stage 3: re-rank with diversity
     top = _stage3_rerank_diverse(scored, top_k=top_k)
     if not top:

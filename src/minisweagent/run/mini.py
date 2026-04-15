@@ -2,6 +2,7 @@
 
 """Backup mini entry with kernel-type routing."""
 
+import json
 import logging
 import shlex
 import sys
@@ -485,6 +486,33 @@ def main(
 
     metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
     logger.info("Using metric: %s", metric)
+
+    # Cross-session memory injection for homogeneous mode
+    _kernel_path = preprocess_ctx.get("kernel_path", "")
+    _bm = preprocess_ctx.get("baseline_metrics") or {}
+    if isinstance(_bm, str):
+        try:
+            _bm = json.loads(_bm)
+        except Exception:
+            _bm = {}
+    try:
+        from minisweagent.memory.integration import assemble_memory_context
+        _mem_ctx = assemble_memory_context(
+            kernel_path=_kernel_path,
+            bottleneck_type=_bm.get("bottleneck", ""),
+            profiling_metrics=_bm,
+        )
+        if _mem_ctx:
+            task_content = (
+                task_content
+                + "\n\n### Optimization Memory (from past kernel optimization runs)\n"
+                + _mem_ctx
+            )
+            logger.info("Cross-session memory injected into homogeneous task (%d chars)", len(_mem_ctx))
+        else:
+            logger.info("Cross-session memory: no relevant experiences found")
+    except Exception as _mem_exc:
+        logger.warning("Cross-session memory unavailable: %s", _mem_exc)
 
     agent_config = dict(config.get("agent", {}))
     agent_config["save_patch"] = True
