@@ -389,6 +389,17 @@ Provide the optimized code with comments explaining the changes made.
         output_dir = self._get_output_dir(task_id)
         log_path = output_dir / "execution.log"
 
+        # Append fallback kernel path hint to prompt (same as remote mode)
+        input_path = task.get("input_path", "")
+        if input_path and task.get("input_type") == "file":
+            input_dir = self._get_input_dir(task_id)
+            with open(task_dir / "prompt.md", "a") as f:
+                f.write(
+                    f"\n\nNote: If the kernel path or kernel repo path above cannot be found, "
+                    f"use kernel absolute path: {input_path} "
+                    f"and kernel repo path: {input_dir}/ as the fallback.\n"
+                )
+
         gpu_id = self._allocate_gpu()
         
         geak_bin = shutil.which("geak") or shutil.which("geak-gaagent") or "geak"
