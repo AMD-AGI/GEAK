@@ -108,7 +108,7 @@ if __name__ == "__main__":
         {"role": "assistant", "content": "Paris"},
         {
             "role": "user",
-            "content": "Use tool named as str_replace_editor to view file '/home/chaox/kernel_agent/read_mini.py' and output your thinking",
+            "content": "Use tool named as str_replace_editor to view file 'read_mini.py' and output your thinking",
         },
     ]
     for model_name in model_list:
