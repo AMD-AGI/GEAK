@@ -499,12 +499,17 @@ class SaveAndTestTool:
                 ".pytest_cache/",
                 "*.egg-info/",
                 "*.so",
+                "*.o",
+                "*.a",
                 ".geak_resolved/",
+                ".torch_extensions/",
+                ".ninja_deps",
+                ".ninja_log",
                 *self._generated_helper_excludes(),
             ]
             exclude_args = " ".join(f"':(exclude){entry}'" for entry in excludes)
             result = subprocess.run(
-                f"git add -N . && git diff --binary -- . {exclude_args}",
+                f"git add -N . && git diff -- . {exclude_args}",
                 cwd=cwd,
                 capture_output=True,
                 text=True,

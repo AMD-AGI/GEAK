@@ -23,6 +23,7 @@ from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments import get_environment_class
 from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
+from minisweagent.run.apply_patch import apply_best_patch
 from minisweagent.run.orchestrator import run_orchestrator
 from minisweagent.run.preprocess.preprocessor import run_preprocessor
 from minisweagent.run.utils.task_parser import _resolve_path_case, display_parsed_config, parse_task_info
@@ -481,6 +482,12 @@ def main(
             heterogeneous=True,
         )
         logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
+
+        _apply_repo = repo or Path(preprocess_ctx.get("repo_root", ""))
+        if _apply_repo and Path(_apply_repo).is_dir():
+            logger.info("Applying best patch to original repo: %s", _apply_repo)
+            apply_best_patch(preprocess_output_dir / "final_report.json", Path(_apply_repo))
+
         return _final_report_to_bestpatchresult(report)
 
     metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
@@ -519,6 +526,11 @@ def main(
         console=console,
     )
     logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
+
+    if repo_path and Path(repo_path).is_dir():
+        logger.info("Applying best patch to original repo: %s", repo_path)
+        apply_best_patch(preprocess_output_dir / "final_report.json", Path(repo_path))
+
     return result
 
 

@@ -13,7 +13,7 @@ from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments.docker import DockerEnvironment
 from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
-from minisweagent.run.utils.save import save_traj
+
 
 logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = Path(os.getenv("MSWEA_GITHUB_CONFIG_PATH", builtin_config_dir / "github_issue.yaml"))
@@ -83,7 +83,7 @@ def main(
         console.print("\n[bold red]KeyboardInterrupt -- goodbye[/bold red]")
         logger.info("KeyboardInterrupt received.")
     finally:
-        save_traj(agent, Path("traj.json"), exit_status=exit_status, result=result)
+        pass
     return agent
 
 

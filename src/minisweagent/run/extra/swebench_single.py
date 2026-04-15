@@ -15,7 +15,7 @@ from minisweagent.run.extra.swebench import (
     DATASET_MAPPING,
     get_sb_environment,
 )
-from minisweagent.run.utils.save import save_traj
+
 from minisweagent.utils.log import logger
 
 app = typer.Typer(add_completion=False)
@@ -72,7 +72,7 @@ def main(
         exit_status, result = type(e).__name__, str(e)
         extra_info = {"traceback": traceback.format_exc()}
     finally:
-        save_traj(agent, output, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
+        pass
 
 
 if __name__ == "__main__":

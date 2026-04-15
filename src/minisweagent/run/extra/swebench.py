@@ -24,7 +24,7 @@ from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments import get_environment
 from minisweagent.models import get_model
 from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
-from minisweagent.run.utils.save import save_traj
+
 from minisweagent.utils.log import add_file_handler, logger
 
 _HELP_TEXT = """Run mini-SWE-agent on SWEBench instances.
@@ -130,7 +130,7 @@ def process_instance(
     instance_dir = output_dir / instance_id
     # avoid inconsistent state if something here fails and there's leftover previous files
     remove_from_preds_file(output_dir / "preds.json", instance_id)
-    (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
+    # traj.json writing is disabled
     model = get_model(config=config.get("model", {}))
     task = instance["problem_statement"]
 
@@ -155,15 +155,6 @@ def process_instance(
         exit_status, result = type(e).__name__, str(e)
         extra_info = {"traceback": traceback.format_exc()}
     finally:
-        save_traj(
-            agent,
-            instance_dir / f"{instance_id}.traj.json",
-            exit_status=exit_status,
-            result=result,
-            extra_info=extra_info,
-            instance_id=instance_id,
-            print_fct=logger.info,
-        )
         update_preds_file(output_dir / "preds.json", instance_id, model.config.model_name, result)
         progress_manager.on_instance_end(instance_id, exit_status)
 
