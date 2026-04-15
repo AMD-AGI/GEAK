@@ -46,6 +46,7 @@ def _ensure_mcp_collected() -> None:
         logger.warning("MCP tool collection failed; MCP tools will be unavailable: %s", exc)
         _mcp_tools = []
 
+
 _TOOL_PROFILES: dict[str, set[str] | None] = {
     "full": None,
     "swe": {
