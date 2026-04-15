@@ -19,6 +19,7 @@ from minisweagent import Environment, Model
 logger = logging.getLogger(__name__)
 from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.agents.select_patch_agent import run_select_patch
+from minisweagent.run.task_file import _neutralize_nested_git_repos, create_worktree
 from minisweagent.run.utils.parallel_helpers import (
     _stdout_lock as _stdout_lock,
 )
@@ -224,158 +225,6 @@ class ParallelAgent(DefaultAgent):
                 pass
 
     @staticmethod
-    def _create_worktree(repo_path: Path, worktree_path: Path) -> Path:
-        """Create a git worktree, cleaning up any existing one first."""
-        worktree_str = str(worktree_path.resolve())
-
-        # Clean up any existing worktree
-        try:
-            result = subprocess.run(
-                ["git", "worktree", "list"],
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            worktree_exists = any(
-                worktree_str in line or str(worktree_path) in line for line in result.stdout.splitlines()
-            )
-
-            if worktree_exists:
-                try:
-                    subprocess.run(
-                        ["git", "worktree", "remove", str(worktree_path), "--force"],
-                        cwd=repo_path,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                    )
-                except subprocess.CalledProcessError:
-                    subprocess.run(
-                        ["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True
-                    )
-        except subprocess.CalledProcessError:
-            subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
-        except Exception as exc:
-            logger.debug("_create_worktree: cleanup failed for %s: %s", worktree_path, exc)
-
-        # Remove directory if it still exists
-        if worktree_path.exists():
-            try:
-                shutil.rmtree(worktree_path)
-            except Exception as exc:
-                logger.debug("_create_worktree: rmtree failed for %s: %s", worktree_path, exc)
-
-        worktree_path.parent.mkdir(parents=True, exist_ok=True)
-        ParallelAgent._ensure_safe_directory(repo_path)
-
-        # Create new worktree with detached HEAD to avoid branch name conflicts
-        try:
-            subprocess.run(
-                ["git", "worktree", "add", "--detach", str(worktree_path)],
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr if e.stderr else (e.stdout if e.stdout else str(e))
-            if "missing but already registered worktree" in error_msg.lower():
-                subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
-                subprocess.run(
-                    ["git", "worktree", "add", "--detach", "-f", str(worktree_path)],
-                    cwd=repo_path,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            elif "dubious ownership" in error_msg.lower():
-                ParallelAgent._ensure_safe_directory(repo_path)
-                ParallelAgent._ensure_safe_directory(worktree_path)
-                subprocess.run(
-                    ["git", "worktree", "add", "--detach", str(worktree_path)],
-                    cwd=repo_path,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            elif "already used by worktree" in error_msg.lower():
-                # Branch name conflict - remove old worktree and retry
-                subprocess.run(["git", "worktree", "prune"], cwd=repo_path, check=False, capture_output=True, text=True)
-                # Extract branch name from error message if possible, otherwise use worktree path
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(worktree_path)],
-                    cwd=repo_path,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                subprocess.run(
-                    ["git", "worktree", "add", "--detach", str(worktree_path)],
-                    cwd=repo_path,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            else:
-                raise RuntimeError(f"Failed to create worktree: {error_msg}") from e
-
-        # Ensure worktree path is also marked as safe
-        ParallelAgent._ensure_safe_directory(worktree_path)
-
-        # Copy untracked files from repo to worktree (e.g., newly created test files)
-        ParallelAgent._copy_untracked_files(repo_path, worktree_path)
-
-        return worktree_path
-
-    @staticmethod
-    def _copy_untracked_files(repo_path: Path, worktree_path: Path) -> None:
-        """Copy untracked files from repo to worktree."""
-        try:
-            result = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard"],
-                cwd=repo_path,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            untracked_files = [f.strip() for f in result.stdout.splitlines() if f.strip()]
-            for rel_path in untracked_files:
-                src = repo_path / rel_path
-                dst = worktree_path / rel_path
-                if src.is_file():
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst)
-        except subprocess.CalledProcessError:
-            pass  # If git command fails, skip copying untracked files
-
-    @staticmethod
-    def _neutralize_nested_git_repos(repo_path: Path) -> list[Path]:
-        """Rename .git directories in nested repos to .git.bak.
-
-        This prevents git from treating nested directories as submodules,
-        allowing all content to be properly added to the parent repo.
-
-        Returns list of paths that were renamed (for potential restoration).
-        """
-        renamed = []
-        for git_dir in repo_path.rglob(".git"):
-            # Skip the repo's own .git (if it exists)
-            if git_dir.parent == repo_path:
-                continue
-            # Only process directories (not .git files from worktrees)
-            if git_dir.is_dir():
-                backup_path = git_dir.parent / ".git.bak"
-                try:
-                    if backup_path.exists():
-                        shutil.rmtree(backup_path)
-                    git_dir.rename(backup_path)
-                    renamed.append(backup_path)
-                except Exception as exc:
-                    logger.debug("_neutralize_nested_git_repos: rename failed for %s: %s", git_dir, exc)
-        return renamed
-
-    @staticmethod
     def _has_valid_head(repo_path: Path) -> bool:
         """Check if the git repo has a valid HEAD (at least one commit)."""
         try:
@@ -424,7 +273,7 @@ class ParallelAgent(DefaultAgent):
         try:
             # Neutralize nested git repos first (rename .git -> .git.bak)
             # This ensures nested content is added as regular files, not submodules
-            ParallelAgent._neutralize_nested_git_repos(repo_path)
+            _neutralize_nested_git_repos(repo_path)
 
             # Initialize git repo (use --initial-branch to ensure new repo creation)
             subprocess.run(
@@ -597,7 +446,7 @@ class ParallelAgent(DefaultAgent):
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
             # All repos use git worktree (non-git repos are initialized as git above)
-            worktree_path = cls._create_worktree(repo_path, worktree_base / f"slot_{agent_id}")
+            worktree_path = create_worktree(repo_path, worktree_base / f"slot_{agent_id}")
             worktree_path_str = str(worktree_path.resolve())
 
             logger.debug("Created worktree for agent %d: %s", agent_id, worktree_path)
