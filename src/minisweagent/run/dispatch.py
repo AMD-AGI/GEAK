@@ -253,18 +253,17 @@ def task_file_to_agent_task(task_file: Path):
     )
 
     try:
-        from minisweagent.memory.integration import assemble_memory_context, is_memory_enabled
+        from minisweagent.memory.integration import assemble_memory_context
 
-        if is_memory_enabled():
-            _bm = baseline_metrics or {}
-            _mem_ctx = assemble_memory_context(
-                kernel_path=meta.get("kernel_path", ""),
-                bottleneck_type=_bm.get("bottleneck", ""),
-                profiling_metrics=_bm,
-            )
-            if _mem_ctx and len(_mem_ctx) > 50:
-                body += "\n\n## Optimization Patterns from Similar Kernels (cross-session memory)\n" + _mem_ctx
-                logger.info("Cross-session memory injected into sub-agent task (%d chars)", len(_mem_ctx))
+        _bm = baseline_metrics or {}
+        _mem_ctx = assemble_memory_context(
+            kernel_path=meta.get("kernel_path", ""),
+            bottleneck_type=_bm.get("bottleneck", ""),
+            profiling_metrics=_bm,
+        )
+        if _mem_ctx and len(_mem_ctx) > 50:
+            body += "\n\n## Optimization Patterns from Similar Kernels (cross-session memory)\n" + _mem_ctx
+            logger.info("Cross-session memory injected into sub-agent task (%d chars)", len(_mem_ctx))
     except Exception:
         pass
 
