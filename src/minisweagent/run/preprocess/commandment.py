@@ -41,7 +41,6 @@ from __future__ import annotations
 # Import validate_commandment directly from the sibling module to avoid
 # pulling in the full minisweagent.tools package (whose __init__.py imports
 # heavy dependencies like typer via strategy_manager).
-import os
 import re
 from pathlib import Path
 
@@ -150,7 +149,6 @@ def _detect_build_command(repo_root: Path) -> str:
     if (repo_root / "Makefile").exists():
         return "cd ${GEAK_WORK_DIR} && make 2>&1 | tail -5"
     return "cd ${GEAK_WORK_DIR} && pip install -e . --no-deps --no-build-isolation 2>&1 | tail -5"
-
 
 
 def _generate_simple(
