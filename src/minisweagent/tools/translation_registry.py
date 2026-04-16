@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -169,82 +168,6 @@ def _flydsl_env_setup(repo_root: Path, flydsl_repo: Path | None = None) -> dict[
 
 
 # ---------------------------------------------------------------------------
-# GPU auto-detection via rocminfo
-# ---------------------------------------------------------------------------
-
-def detect_target_gpu() -> tuple[str | None, str | None]:
-    """Detect AMD GPU architecture via ``rocminfo``.
-
-    Parses both the ``Name:`` field (for gfx arch) and ``Marketing Name:``
-    (for human-readable model like "AMD Instinct MI300X").
-
-    Returns (gfx_name, gpu_model) or (None, None) if unavailable.
-    """
-    try:
-        result = subprocess.run(
-            ["rocminfo"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return None, None
-
-        gfx: str | None = None
-        marketing: str | None = None
-
-        for line in result.stdout.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("Name:") and gfx is None:
-                match = re.search(r"(gfx\d+\w*)", stripped)
-                if match:
-                    gfx = match.group(1)
-            elif stripped.startswith("Marketing Name:") and gfx is not None:
-                raw = stripped.split(":", 1)[1].strip()
-                if raw:
-                    parts = raw.replace("AMD Instinct", "").strip().split()
-                    marketing = parts[0] if parts else raw
-                break
-
-        if gfx:
-            return gfx, marketing or gfx
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return None, None
-
-
-def _extract_gpu_specs_section(gpu_model: str) -> str | None:
-    """Extract the section for *gpu_model* from ``cdna-architecture.md``."""
-    kb_root = Path(__file__).resolve().parents[3] / "knowledge-base"
-    cdna_path = kb_root / "amd-knowledge-base" / "layer-1-hardware" / "amd-gpu-arch" / "cdna-architecture.md"
-    if not cdna_path.exists():
-        logger.warning("cdna-architecture.md not found at %s", cdna_path)
-        return None
-
-    text = cdna_path.read_text()
-    pattern = re.compile(
-        rf"(#{1,6}\s+.*{re.escape(gpu_model)}.*?\n)(.*?)(?=\n#{1,6}\s|\Z)",
-        re.DOTALL | re.IGNORECASE,
-    )
-    match = pattern.search(text)
-    if match:
-        return (match.group(1) + match.group(2)).strip()
-
-    logger.info("No section found for GPU model %s in cdna-architecture.md", gpu_model)
-    return None
-
-
-def get_gpu_specs() -> str | None:
-    """Detect GPU and return the relevant specs section, or None."""
-    gfx, model = detect_target_gpu()
-    if not model:
-        logger.info("GPU auto-detection unavailable; no hardware specs will be injected")
-        return None
-    logger.info("Detected GPU: %s (%s)", model, gfx)
-    return _extract_gpu_specs_section(model)
-
-
-# ---------------------------------------------------------------------------
 # KB content loading
 # ---------------------------------------------------------------------------
 
@@ -268,7 +191,6 @@ def _strip_frontmatter(content: str) -> str:
 def load_translation_kb(
     pair: TranslationPair,
     categories: list[str],
-    gpu_specs: str | None,
     flydsl_repo: Path | None = None,
 ) -> str:
     """Load KB content for translation agent prompt injection.
@@ -285,9 +207,6 @@ def load_translation_kb(
     """
     kb_root = Path(__file__).resolve().parents[3] / "knowledge-base"
     sections: list[str] = []
-
-    if gpu_specs:
-        sections.append(f"<hardware_specs>\n{gpu_specs}\n</hardware_specs>")
 
     if flydsl_repo:
         for doc_path in _FLYDSL_REPO_DOCS:

@@ -118,7 +118,6 @@ def run_translation(
     from minisweagent.tools.translation_registry import (
         REGISTRY,
         detect_kernel_categories,
-        get_gpu_specs,
         load_translation_kb,
     )
 
@@ -183,11 +182,9 @@ def run_translation(
 
     # -- Load KB content --
     categories = detect_kernel_categories(kernel_path)
-    gpu_specs = get_gpu_specs()
     kb_content = load_translation_kb(
         pair,
         categories,
-        gpu_specs,
         flydsl_repo=flydsl_repo,
     )
     _print(f"  KB loaded: {len(kb_content)} chars, categories={categories}")
