@@ -46,6 +46,24 @@ python scripts/build_index.py --force
 
 Use Markdown files with clear heading hierarchy (`#`, `##`, `###`). The indexer splits documents by heading structure, which yields better retrieval results.
 
+### Step 5 (Optional): Add reverse-knowledge to the knowledge base
+
+**Reverse knowledge** is generated under `mcp_tools/rag-mcp/knowledge-base/amd-knowledge-base/layer-6-extended/optimize-guides/user-case/user/` (per-kernel folders and simplified Markdown). From the **GEAK repo root**, run:
+
+```bash
+bash scripts/run-reverse_knowledge.sh <baseline_path> <optimized_path>   # two trees to compare
+bash scripts/run-reverse_knowledge.sh <path_to_git_repo>                   # one Git repo (commit history)
+bash scripts/run-reverse_knowledge.sh --help
+```
+
+Behavior is defined in `src/minisweagent/config/mini_reverse_kl.yaml`. 
+
+After adding or changing files there, rebuild the index:
+
+```bash
+python scripts/build_index.py --force
+```
+
 ### Startup checks
 
 When `rag: true`, GEAK performs two checks before running the pipeline:
