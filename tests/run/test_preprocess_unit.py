@@ -504,6 +504,15 @@ class TestUnitTestAgentPrompt:
         assert "Do NOT use broad recursive searches" in task
         assert "find /" in task
 
+    def test_prompt_mentions_tensor_contract_preservation(self):
+        from minisweagent.run.preprocess.config_loader import load_preprocess_agent_config
+
+        agent_cfg, _ = load_preprocess_agent_config("mini_unit_test_agent")
+        prompt = agent_cfg["system_template"]
+
+        assert "full execution contract" in prompt
+        assert "Do NOT normalize all tensors to a single dtype" in prompt
+
 
 class TestShapeFixerTermination:
 
@@ -533,6 +542,64 @@ class TestShapeFixerTermination:
         with patch.object(DefaultAgent, "query", return_value={"content": "SHAPES_FIXED"}):
             with pytest.raises(Submitted, match="SHAPES_FIXED"):
                 agent.query()
+
+
+class TestShapeFixerPrompt:
+
+    @pytest.fixture(autouse=True)
+    def _setup_path(self):
+        import sys
+        repo = Path(__file__).resolve().parent.parent.parent
+        if str(repo / "src") not in sys.path:
+            sys.path.insert(0, str(repo / "src"))
+
+    def test_shape_fixer_prompt_mentions_validation_and_minimal_fix(self):
+        from minisweagent.run.preprocess.config_loader import load_preprocess_agent_config
+
+        agent_cfg, _ = load_preprocess_agent_config("mini_shape_fixer")
+        prompt = agent_cfg["system_template"]
+
+        assert "validation commands are provided" in prompt
+        assert "smallest source-faithful fix" in prompt
+        assert "Do NOT normalize all tensors to a single dtype" in prompt
+
+    def test_run_shape_fixer_task_includes_validation_feedback(self):
+        from minisweagent.run.preprocess.shape_fixer_agent import run_shape_fixer
+
+        captured = {}
+
+        def _fake_run(self, task):
+            captured["task"] = task
+            return "Submitted", "SHAPES_FIXED"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            harness = repo / "test_harness.py"
+            source = repo / "bench_kernel.py"
+            kernel = repo / "kernel.py"
+            harness.write_text("print('harness')\n")
+            source.write_text("print('bench')\n")
+            kernel.write_text("print('kernel')\n")
+
+            with patch("minisweagent.run.preprocess.shape_fixer_agent.ShapeFixerAgent.run", new=_fake_run):
+                ok = run_shape_fixer(
+                    model=object(),
+                    repo=repo,
+                    harness_path=harness,
+                    benchmark_file=source,
+                    kernel_path=kernel,
+                    gpu_id=7,
+                    validation_feedback=["--correctness mode failed (exit code 1):\nValueError: demo"],
+                )
+
+        assert ok is True
+        task = captured["task"]
+        assert "PREVIOUS REVALIDATION FAILURES" in task
+        assert "ValueError: demo" in task
+        assert "HIP_VISIBLE_DEVICES=7 GEAK_BENCHMARK_ITERATIONS=5 python" in task
+        assert "--correctness" in task
+        assert "--profile" in task
+        assert "--benchmark" in task
 
 
 class TestHarnessRestore:

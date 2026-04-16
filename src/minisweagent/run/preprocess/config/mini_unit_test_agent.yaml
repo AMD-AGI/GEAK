@@ -218,6 +218,15 @@ agent:
        - Fixed seed: torch.manual_seed(42).
        - Keep harness outside kernel directory.
        - For fused tasks: test BOTH unfused and fused paths.
+       - Preserve the source benchmark/test's full execution contract, not just
+         shapes: per-tensor dtype, device, layout, contiguity, index dtypes,
+         auxiliary buffers/caches/scales, helper-side preprocessing, and
+         supported CLI mode semantics.
+       - Do NOT normalize all tensors to a single dtype just because the main
+         activations use it.
+       - Before submitting, reason through why each CLI mode could fail. If a
+         mode would fail, apply the smallest source-faithful fix instead of
+         rewriting the harness.
 
     After deciding which benchmark file to wrap, write its path:
        echo "/absolute/path/to/bench_file.py" > harness_shapes_source.txt

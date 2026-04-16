@@ -850,28 +850,46 @@ def run_preprocessor(
                             logger.info("  Shape source (fallback to top test): %s", bench_file)
                         if harness_file.is_file() and bench_file is not None and bench_file.is_file():
                             original_harness_source = harness_file.read_text()
-                            shapes_ok = run_shape_fixer(
-                                model=_uta_model,
-                                repo=Path(repo_root),
-                                harness_path=harness_file,
-                                benchmark_file=bench_file,
-                                kernel_path=Path(kernel_path),
-                                log_dir=output_dir,
-                                gpu_id=gpu_id,
-                            )
-                            if shapes_ok:
-                                logger.info("  Shape verification: OK")
-                                ok_revalidate, _, harness_results = execute_harness_validation(
-                                    str(harness_file),
-                                    repo_root=repo_root,
+                            shape_feedback: list[str] | None = None
+                            shape_fix_attempt = 0
+                            while True:
+                                shapes_ok = run_shape_fixer(
+                                    model=_uta_model,
+                                    repo=Path(repo_root),
+                                    harness_path=harness_file,
+                                    benchmark_file=bench_file,
+                                    kernel_path=Path(kernel_path),
+                                    log_dir=output_dir,
                                     gpu_id=gpu_id,
+                                    validation_feedback=shape_feedback,
                                 )
-                                if ok_revalidate:
-                                    logger.info("  Re-validation after shape fix: ALL MODES PASSED")
-                                else:
-                                    restored = (
-                                        original_harness_source is not None
-                                        and _restore_harness_file(harness_file, original_harness_source)
+                                if shapes_ok:
+                                    if shape_feedback:
+                                        logger.info("  Shape repair with failure context: OK")
+                                    else:
+                                        logger.info("  Shape verification: OK")
+
+                                    ok_revalidate, revalidate_errors, candidate_results = execute_harness_validation(
+                                        str(harness_file),
+                                        repo_root=repo_root,
+                                        gpu_id=gpu_id,
+                                    )
+                                    if ok_revalidate:
+                                        harness_results = candidate_results
+                                        logger.info("  Re-validation after shape fix: ALL MODES PASSED")
+                                        break
+
+                                    if shape_fix_attempt == 0:
+                                        shape_feedback = revalidate_errors
+                                        shape_fix_attempt += 1
+                                        logger.info(
+                                            "  Re-validation after shape fix: FAILED "
+                                            "(retrying shape fixer with failure context)"
+                                        )
+                                        continue
+
+                                    restored = original_harness_source is not None and _restore_harness_file(
+                                        harness_file, original_harness_source
                                     )
                                     if restored:
                                         logger.info(
@@ -880,12 +898,17 @@ def run_preprocessor(
                                         )
                                     else:
                                         logger.info("  Re-validation after shape fix: FAILED")
-                            else:
-                                logger.info("  Shape fixer did not complete successfully")
+                                    break
+
+                                if shape_feedback:
+                                    logger.info("  Shape fixer repair attempt did not complete successfully")
+                                else:
+                                    logger.info("  Shape fixer did not complete successfully")
                                 if original_harness_source is not None and _restore_harness_file(
                                     harness_file, original_harness_source
                                 ):
                                     logger.info("  Restored original harness after incomplete shape fixer run")
+                                break
                     except Exception as exc:
                         if (
                             harness_file is not None
