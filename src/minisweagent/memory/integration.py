@@ -5,7 +5,7 @@ Environment toggles:
   GEAK_MEMORY_NO_WORKING=1           -- disable within-session working memory
   GEAK_MEMORY_NO_CROSS_SESSION=1     -- disable cross-session memory entirely
   GEAK_MEMORY_NO_RETRIEVE=1          -- disable reading from knowledge base
-  GEAK_MEMORY_NO_RECORD=1            -- disable writing to knowledge base
+  GEAK_MEMORY_RECORD=1               -- enable writing to knowledge base (off by default)
   GEAK_CROSS_SESSION_MEMORY_URL=...  -- point to shared memory server
   GEAK_MEMORY_MIN_SPEEDUP=1.10       -- minimum speedup to store (default 1.10x)
 """
@@ -32,8 +32,12 @@ def is_retrieve_enabled() -> bool:
 
 
 def is_record_enabled() -> bool:
-    """Check if writing to the knowledge base is enabled."""
-    return is_memory_enabled() and not _is_disabled("GEAK_MEMORY_NO_RECORD")
+    """Check if writing to the knowledge base is enabled.
+
+    Off by default -- set GEAK_MEMORY_RECORD=1 to enable.
+    """
+    val = os.environ.get("GEAK_MEMORY_RECORD", "").strip()
+    return is_memory_enabled() and val in ("1", "true", "yes")
 
 
 def is_working_memory_enabled() -> bool:

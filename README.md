@@ -260,6 +260,20 @@ Automatically selects the best result across runs:
 
 ---
 
+## Cross-Session Memory Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `GEAK_MEMORY_DISABLE=1` | off | Disable all memory (working + cross-session) |
+| `GEAK_MEMORY_NO_WORKING=1` | off | Disable within-session working memory |
+| `GEAK_MEMORY_NO_CROSS_SESSION=1` | off | Disable cross-session memory entirely |
+| `GEAK_MEMORY_NO_RETRIEVE=1` | off | Disable reading from the knowledge base |
+| `GEAK_MEMORY_RECORD=1` | off | Enable writing run insights to the knowledge base after each run |
+| `GEAK_MEMORY_MIN_SPEEDUP=1.10` | 1.10 | Minimum speedup required to store an experience |
+| `GEAK_CROSS_SESSION_MEMORY_URL=<url>` | unset | Point to a shared memory server (default: local SQLite) |
+
+By default, within-session working memory and cross-session knowledge base **retrieval** are enabled. Recording (writing insights back to the KB after each run) is **off by default** — set `GEAK_MEMORY_RECORD=1` to enable it.
+
 ## Contributing
 
 We appreciate all contributions. If you are planning to contribute bug fixes, feel free to open a pull request without opening an issue first.
