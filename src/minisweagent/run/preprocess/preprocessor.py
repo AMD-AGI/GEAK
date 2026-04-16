@@ -169,6 +169,19 @@ def _focused_harness_candidate(disc_dict: dict[str, Any]) -> tuple[str, str] | N
     return focused_cmd, focused_harness
 
 
+def _restore_harness_file(harness_path: Path, original_source: str) -> bool:
+    try:
+        if not harness_path.is_file():
+            return False
+        current_source = harness_path.read_text()
+        if current_source == original_source:
+            return False
+        harness_path.write_text(original_source)
+        return True
+    except OSError:
+        return False
+
+
 def _normalize_candidate_identifier(value: str | Path) -> str:
     text = Path(str(value)).stem.lower()
     for prefix in ("benchmark_", "bench_", "test_", "focused_", "example_"):
@@ -817,6 +830,8 @@ def run_preprocessor(
                 # ── 3d. Shape fixer: verify shapes match benchmark/test file ──
                 if (benchmarks or tests) and _uta_model:
                     logger.info("--- Step 3d: Shape fixer (verify shapes) ---")
+                    harness_file: Path | None = None
+                    original_harness_source: str | None = None
                     try:
                         from minisweagent.run.preprocess.shape_fixer_agent import run_shape_fixer
 
@@ -834,6 +849,7 @@ def run_preprocessor(
                             bench_file = Path(tests[0]["file"])
                             logger.info("  Shape source (fallback to top test): %s", bench_file)
                         if harness_file.is_file() and bench_file is not None and bench_file.is_file():
+                            original_harness_source = harness_file.read_text()
                             shapes_ok = run_shape_fixer(
                                 model=_uta_model,
                                 repo=Path(repo_root),
@@ -853,10 +869,30 @@ def run_preprocessor(
                                 if ok_revalidate:
                                     logger.info("  Re-validation after shape fix: ALL MODES PASSED")
                                 else:
-                                    logger.info("  Re-validation after shape fix: FAILED (reverting)")
+                                    restored = (
+                                        original_harness_source is not None
+                                        and _restore_harness_file(harness_file, original_harness_source)
+                                    )
+                                    if restored:
+                                        logger.info(
+                                            "  Re-validation after shape fix: FAILED "
+                                            "(restored original harness and kept the pre-fix validation results)"
+                                        )
+                                    else:
+                                        logger.info("  Re-validation after shape fix: FAILED")
                             else:
                                 logger.info("  Shape fixer did not complete successfully")
+                                if original_harness_source is not None and _restore_harness_file(
+                                    harness_file, original_harness_source
+                                ):
+                                    logger.info("  Restored original harness after incomplete shape fixer run")
                     except Exception as exc:
+                        if (
+                            harness_file is not None
+                            and original_harness_source is not None
+                            and _restore_harness_file(harness_file, original_harness_source)
+                        ):
+                            logger.info("  Restored original harness after shape fixer failure")
                         logger.warning("Shape fixer failed: %s", exc, exc_info=True)
             except Exception as exc:
                 logger.warning(

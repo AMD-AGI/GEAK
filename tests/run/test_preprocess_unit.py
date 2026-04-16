@@ -292,7 +292,21 @@ class TestExecuteHarnessEnvVars:
                 call_kwargs = mock_run.call_args
                 env = call_kwargs.kwargs.get("env_overrides", {})
                 assert env.get("GEAK_BENCHMARK_ITERATIONS") == "30"
-                assert env.get("GEAK_BENCHMARK_EXTRA_ARGS") == "--iterations 30"
+                assert env.get("GEAK_BENCHMARK_EXTRA_ARGS") is None
+        os.unlink(f.name)
+
+    def test_preserves_non_iteration_extra_args(self):
+        from minisweagent.run.pipeline_helpers import execute_harness_validation
+        with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+            f.write("pass")
+            f.flush()
+            with patch("minisweagent.run.preprocess.run_harness.run_harness") as mock_run:
+                mock_run.return_value = [{"mode": "correctness", "success": True, "returncode": 0, "stdout": "", "stderr": "", "duration_s": 0.1}]
+                execute_harness_validation(f.name, benchmark_extra_args="--warmup 7")
+                call_kwargs = mock_run.call_args
+                env = call_kwargs.kwargs.get("env_overrides", {})
+                assert env.get("GEAK_BENCHMARK_ITERATIONS") is None
+                assert env.get("GEAK_BENCHMARK_EXTRA_ARGS") == "--warmup 7"
         os.unlink(f.name)
 
 
@@ -455,6 +469,92 @@ class TestImports:
     def test_commandment_import(self):
         from minisweagent.run.preprocess.commandment import generate_commandment
         assert callable(generate_commandment)
+
+
+class TestUnitTestAgentPrompt:
+
+    @pytest.fixture(autouse=True)
+    def _setup_path(self):
+        import sys
+        repo = Path(__file__).resolve().parent.parent.parent
+        if str(repo / "src") not in sys.path:
+            sys.path.insert(0, str(repo / "src"))
+
+    def test_prompt_scopes_instructions_to_geak_relative_path(self):
+        from minisweagent.run.preprocess.unit_test_agent import run_unit_test_agent
+
+        captured = {}
+
+        def _fake_run(self, task):
+            captured["task"] = task
+            return "Submitted", "TEST_COMMAND: python /tmp/test_harness.py --correctness"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            with patch("minisweagent.run.preprocess.unit_test_agent.UnitTestAgent.run", new=_fake_run):
+                run_unit_test_agent(
+                    model=object(),
+                    repo=repo,
+                    kernel_name="demo_kernel",
+                )
+
+        task = captured["task"]
+        assert "src/minisweagent/run/preprocess/INSTRUCTIONS.md" in task
+        assert "not inside the target kernel repository" in task
+        assert "Do NOT use broad recursive searches" in task
+        assert "find /" in task
+
+
+class TestShapeFixerTermination:
+
+    @pytest.fixture(autouse=True)
+    def _setup_path(self):
+        import sys
+        repo = Path(__file__).resolve().parent.parent.parent
+        if str(repo / "src") not in sys.path:
+            sys.path.insert(0, str(repo / "src"))
+
+    def test_shape_fixer_agent_submits_on_plaintext_verdict(self):
+        from minisweagent.agents.default import DefaultAgent, Submitted
+        from minisweagent.run.preprocess.shape_fixer_agent import ShapeFixerAgent
+
+        class _DummyModel:
+            n_calls = 0
+            cost = 0.0
+
+        class _DummyEnvConfig:
+            cwd = str(Path.cwd())
+            env = {}
+
+        class _DummyEnv:
+            config = _DummyEnvConfig()
+
+        agent = ShapeFixerAgent(_DummyModel(), _DummyEnv(), system_template="shape fixer")
+        with patch.object(DefaultAgent, "query", return_value={"content": "SHAPES_FIXED"}):
+            with pytest.raises(Submitted, match="SHAPES_FIXED"):
+                agent.query()
+
+
+class TestHarnessRestore:
+
+    @pytest.fixture(autouse=True)
+    def _setup_path(self):
+        import sys
+        repo = Path(__file__).resolve().parent.parent.parent
+        if str(repo / "src") not in sys.path:
+            sys.path.insert(0, str(repo / "src"))
+
+    def test_restore_harness_file_reverts_mutation(self):
+        from minisweagent.run.preprocess.preprocessor import _restore_harness_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            harness = Path(tmp) / "harness.py"
+            harness.write_text("print('mutated')\n")
+
+            restored = _restore_harness_file(harness, "print('original')\n")
+
+            assert restored is True
+            assert harness.read_text() == "print('original')\n"
 
 
 # ===================================================================

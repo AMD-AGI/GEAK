@@ -5,12 +5,17 @@ correct shapes from the benchmark file. Runs after the UnitTestAgent
 produces a harness and BEFORE runtime validation.
 """
 
+from __future__ import annotations
+
 import logging
+import os
+import signal
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from minisweagent import Environment, Model
-from minisweagent.agents.default import AgentConfig, DefaultAgent
+from minisweagent.agents.default import AgentConfig, DefaultAgent, Submitted
 from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
 from minisweagent.run.preprocess.config_loader import load_preprocess_agent_config
 
@@ -25,6 +30,16 @@ class ShapeFixerConfig(AgentConfig):
 class ShapeFixerAgent(DefaultAgent):
     def __init__(self, model: Model, env: Environment, **kwargs):
         super().__init__(model, env, config_class=ShapeFixerConfig, **kwargs)
+
+    def query(self) -> dict:
+        """Terminate immediately when the model emits a final shape verdict."""
+        response = super().query()
+        content = (response.get("content") or "").strip()
+        if not response.get("tools") and not self._will_use_bash(response):
+            for verdict in ("SHAPES_VERIFIED", "SHAPES_FIXED"):
+                if verdict in content:
+                    raise Submitted(verdict)
+        return response
 
 
 SYSTEM_PROMPT = """\
@@ -67,6 +82,35 @@ Step 3: Compare EXACT sampled semantics, not just the config universe.
 
 That is all. Do not run anything. Do not explore. Just read and compare.
 """
+
+
+class ShapeFixerTimeoutError(RuntimeError):
+    """Raised when the shape fixer exceeds its wall-clock timeout."""
+
+
+def _shape_fixer_timeout_handler(_signum, _frame) -> None:
+    raise ShapeFixerTimeoutError("Shape fixer timed out")
+
+
+@contextmanager
+def _shape_fixer_timeout(timeout_s: int):
+    if timeout_s <= 0 or os.name == "nt" or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    try:
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, _shape_fixer_timeout_handler)
+        signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    except (AttributeError, ValueError):
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def run_shape_fixer(
@@ -116,7 +160,9 @@ def run_shape_fixer(
         f"correct is NOT sufficient if sampled modes drift. Fix if needed.\n"
     )
 
-    exit_status, result = agent.run(task)
+    timeout_s = int(os.environ.get("GEAK_SHAPE_FIXER_TIMEOUT", "300"))
+    with _shape_fixer_timeout(timeout_s):
+        exit_status, result = agent.run(task)
 
     if "SHAPES_VERIFIED" in (result or ""):
         return True

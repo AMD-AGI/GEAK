@@ -38,8 +38,8 @@ agent:
         exact same sampled cases. Print SHAPES_FIXED. Stop.
 
     That is all. Do not run anything. Do not explore. Just read and compare.
-  step_limit: 0.0
-  cost_limit: 0.0
+  step_limit: 80
+  cost_limit: 5.0
   instance_template: |
     Your task is: {{task}}
   action_observation_template: |
