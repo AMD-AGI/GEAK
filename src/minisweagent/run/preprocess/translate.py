@@ -227,8 +227,21 @@ def run_translation(
         _print(f"  [red]{msg}[/red]" if console else f"  ERROR: {msg}")
         return result
 
+    # -- Resolve translation mode (env var overrides TranslationPair default) --
+    _fm = os.environ.get("GEAK_FAITHFUL")
+    faithful = (_fm == "1") if _fm is not None else pair.faithful
+    result["translation_faithful"] = faithful
+    _print(f"  Translation mode: {'faithful' if faithful else 'optimized'}")
+
     # -- Build task prompt --
     source_code = kernel_path.read_text()
+    faithful_req = (
+        "- **Faithful translation**: translate each operation 1:1 to its FlyDSL "
+        "equivalent. Do NOT restructure, combine, or algebraically simplify the "
+        "computation graph (e.g. do NOT replace matmul+sum with a mat-vec shortcut). "
+        "The translated code must perform the same sequence of operations as the "
+        "original, only swapping implementations (PyTorch → FlyDSL where supported).\n"
+    ) if faithful else ""
     task = (
         f"Translate the following PyTorch kernel to FlyDSL.\n\n"
         f"## Source kernel ({kernel_path.name})\n"
@@ -236,6 +249,7 @@ def run_translation(
         f"## Requirements\n"
         f"- Write the FlyDSL translation to: {candidate_path}\n"
         f"- The translation must preserve the exact same numerical output as the PyTorch original.\n"
+        f"{faithful_req}"
         f"- Use the FlyDSL API described in the knowledge base below.\n"
         f"- The test harness is at: {harness_path}\n"
         f"- Run correctness checks with: `python {harness_path} {pair.harness_candidate_flag} {candidate_path}`\n"
