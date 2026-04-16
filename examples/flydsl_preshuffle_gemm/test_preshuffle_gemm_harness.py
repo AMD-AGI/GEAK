@@ -3,7 +3,7 @@
 # Self-contained test harness for FlyDSL preshuffle GEMM kernel.
 # Supports --correctness, --benchmark, --full-benchmark, --profile.
 #
-# Focuses on FP8 per-token quantised GEMM (the primary optimisation target).
+# Covers FP8, INT8, and BF16 GEMM configs across small and large shapes.
 # Dependencies: flydsl, torch (with ROCm).
 
 import argparse
@@ -33,14 +33,27 @@ DTYPE_FP8 = torch.float8_e4m3fn if "gfx95" in ARCH else torch.float8_e4m3fnuz
 
 # (M, N, K, tile_m, tile_n, tile_k, in_dtype)
 ALL_CONFIGS = [
+    # fp8
     (16, 5120, 8192, 16, 64, 512, "fp8"),
     (33, 1024, 2048, 32, 64, 512, "fp8"),
     (5120, 5120, 8320, 64, 256, 128, "fp8"),
     (5120, 2048, 8320, 128, 128, 128, "fp8"),
     (9728, 8192, 8320, 128, 128, 128, "fp8"),
     (5133, 5120, 8320, 64, 256, 128, "fp8"),
+    # int8
+    (16, 5120, 8192, 16, 64, 512, "int8"),
+    (33, 1024, 2048, 32, 64, 512, "int8"),
+    (5120, 5120, 8320, 64, 256, 128, "int8"),
+    (5120, 2048, 8320, 128, 128, 128, "int8"),
+    (9728, 8192, 8320, 128, 128, 128, "int8"),
+    (5133, 5120, 8320, 64, 256, 128, "int8"),
+    # bf16
     (16, 5120, 8192, 16, 64, 512, "bf16"),
+    (33, 1024, 2048, 32, 64, 512, "bf16"),
     (5120, 5120, 8320, 64, 256, 128, "bf16"),
+    (5120, 2048, 8320, 128, 128, 128, "bf16"),
+    (9728, 8192, 8320, 128, 128, 128, "bf16"),
+    (5133, 5120, 8320, 64, 256, 128, "bf16"),
 ]
 
 
