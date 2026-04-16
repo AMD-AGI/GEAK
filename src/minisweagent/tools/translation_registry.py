@@ -44,7 +44,6 @@ class TranslationPair:
     perf_fail_threshold: float = 0.5
     perf_warn_threshold: float = 0.8
     supported: bool = True
-    faithful: bool = True
     self_review: bool = True
     review_triggers_retry: bool = True
     review_retry_on_efficiency: bool = True
