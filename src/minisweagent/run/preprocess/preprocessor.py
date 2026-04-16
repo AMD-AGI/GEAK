@@ -526,6 +526,12 @@ def run_preprocessor(
 
     logger.info("  Kernel: %s", kernel_path)
 
+    def _print(msg: str) -> None:
+        if console:
+            console.print(msg)
+        else:
+            print(msg, file=sys.stderr)
+
     # ── --translate-only lightweight path: translate and exit early ──
     if translate_only:
         _print(
