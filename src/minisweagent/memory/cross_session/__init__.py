@@ -90,7 +90,7 @@ def record(**kwargs: Any) -> None:
         backend.store_experience(experience)
         logger.debug("Stored cross-session experience: %s", experience.record_id)
     except Exception as exc:
-        logger.debug("Cross-session record failed (non-fatal): %s", exc)
+        logger.warning("Cross-session record failed: %s", exc)
 
 
 def retrieve(**kwargs: Any) -> str:
@@ -113,5 +113,5 @@ def retrieve(**kwargs: Any) -> str:
             compact=bool(kwargs.get("compact", False)),
         )
     except Exception as exc:
-        logger.debug("Cross-session retrieve failed (non-fatal): %s", exc)
+        logger.warning("Cross-session retrieve failed: %s", exc)
         return ""

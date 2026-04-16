@@ -66,7 +66,8 @@ def assemble_memory_context(**kwargs) -> str:
         from minisweagent.memory.cross_session import retrieve
 
         return retrieve(**kwargs)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Cross-session memory retrieval failed: %s", exc)
         return ""
 
 

@@ -264,8 +264,8 @@ def task_file_to_agent_task(task_file: Path):
         if _mem_ctx and len(_mem_ctx) > 50:
             body += "\n\n## Optimization Patterns from Similar Kernels (cross-session memory)\n" + _mem_ctx
             logger.info("Cross-session memory injected into sub-agent task (%d chars)", len(_mem_ctx))
-    except Exception:
-        pass
+    except Exception as _mem_exc:
+        logger.warning("Cross-session memory injection failed in dispatch: %s", _mem_exc)
 
     if meta.get("starting_patch"):
         cfg["starting_patch"] = meta["starting_patch"]

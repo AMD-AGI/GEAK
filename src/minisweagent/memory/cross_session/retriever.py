@@ -88,8 +88,8 @@ def retrieve_context(
             language=language if language != "unknown" else None,
             limit=5,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("search_skills failed (non-fatal): %s", exc)
 
     # Stage 4: format as landscape
     return format_landscape_context(
