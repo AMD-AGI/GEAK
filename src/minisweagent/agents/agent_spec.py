@@ -24,11 +24,9 @@ def _agent_type_to_class() -> dict[str, type]:
     Lazy import to avoid circular dependencies at module level.
     """
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
-    from minisweagent.agents.translation_agent import TranslationAgent
 
     return {
         "strategy_agent": StrategyInteractiveAgent,
-        "translation_agent": TranslationAgent,
     }
 
 
@@ -37,7 +35,7 @@ def _agent_class_to_type() -> dict[type, str]:
     return {cls: name for name, cls in _agent_type_to_class().items()}
 
 
-ALL_AGENT_TYPES: frozenset[str] = frozenset({"strategy_agent", "translation_agent"})
+ALL_AGENT_TYPES: frozenset[str] = frozenset({"strategy_agent"})
 
 _DEFAULT_FALLBACK_AGENT = "strategy_agent"
 
