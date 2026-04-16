@@ -260,6 +260,17 @@ Automatically selects the best result across runs:
 
 ---
 
+## Cross-Session Memory Flags
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `GEAK_MEMORY_DISABLE=1` | off | Turn off all memory (within-session + cross-session) |
+| `GEAK_USE_KNOWLEDGE_BASE=0` | on | Turn off reading past insights from the knowledge base |
+| `GEAK_SAVE_TO_KNOWLEDGE_BASE=1` | off | Turn on saving run insights to the knowledge base after each run |
+| `GEAK_MEMORY_MIN_SPEEDUP=1.10` | 1.10 | Minimum speedup required to save an experience |
+
+By default, the knowledge base is **read** (agents see past insights) but **not written** (run results are not saved back). Set `GEAK_SAVE_TO_KNOWLEDGE_BASE=1` to start building the knowledge base from your runs.
+
 ## Contributing
 
 We appreciate all contributions. If you are planning to contribute bug fixes, feel free to open a pull request without opening an issue first.

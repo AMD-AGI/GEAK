@@ -191,4 +191,8 @@ optimization_logs/*
 .vscode/
 
 # MkDocs build output (deployed via GitHub Actions, not committed)
-site/
+site/.rocprofv3/
+mcp_tools/profiler-mcp/.rocprofv3/
+.geak_resolved/
+runs/
+dummy_run*.py

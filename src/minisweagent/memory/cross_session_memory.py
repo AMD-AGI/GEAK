@@ -21,4 +21,7 @@ def classify_kernel_category(kernel_path: str) -> str:
     for tag in ("rope", "rotary"):
         if tag in path_lower:
             return "positional_encoding"
+    for tag in ("nearest", "neighbor", "spatial", "radius"):
+        if tag in path_lower:
+            return "spatial_search"
     return "unknown"
