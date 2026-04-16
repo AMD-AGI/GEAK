@@ -388,10 +388,10 @@ def execute_harness_validation(
     Parameters
     ----------
     benchmark_extra_args:
-        Extra CLI args appended to benchmark/full-benchmark invocations
-        (e.g. ``"--iterations 50"``).  Passed via the
-        ``GEAK_BENCHMARK_EXTRA_ARGS`` env var so both direct invocations
-        and COMMANDMENT-based scripts use the same settings.
+        Extra benchmark tuning args. ``--iterations N`` is normalized into
+        ``GEAK_BENCHMARK_ITERATIONS`` so harnesses do not need to expose it
+        as a CLI flag. Any remaining args are passed via
+        ``GEAK_BENCHMARK_EXTRA_ARGS``.
 
     Returns
     -------
@@ -410,15 +410,19 @@ def execute_harness_validation(
     if not benchmark_extra_args:
         env_overrides["GEAK_BENCHMARK_ITERATIONS"] = "5"
     else:
-        env_overrides["GEAK_BENCHMARK_EXTRA_ARGS"] = benchmark_extra_args
-        # Extract --iterations N from extra_args and also set the env var
-        # so harnesses that read GEAK_BENCHMARK_ITERATIONS (instead of
-        # parsing --iterations from argv) get the right count.
         import re as _re
 
-        _iter_match = _re.search(r"--iterations\s+(\d+)", benchmark_extra_args)
+        remaining_extra_args = benchmark_extra_args.strip()
+        _iter_match = _re.search(r"(?:^|\s)--iterations\s+(\d+)(?=\s|$)", remaining_extra_args)
         if _iter_match:
             env_overrides["GEAK_BENCHMARK_ITERATIONS"] = _iter_match.group(1)
+            remaining_extra_args = _re.sub(
+                r"(?:^|\s)--iterations\s+\d+(?=\s|$)",
+                " ",
+                remaining_extra_args,
+            ).strip()
+        if remaining_extra_args:
+            env_overrides["GEAK_BENCHMARK_EXTRA_ARGS"] = remaining_extra_args
 
     results = run_harness(
         harness_path,

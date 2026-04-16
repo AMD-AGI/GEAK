@@ -199,6 +199,17 @@ script that imports the kernel, creates test inputs, and provides
    x = torch.randn(S, B, H, D, dtype=torch.float16, device='cpu').to('cuda')
    ```
 
+9. **Preserve the source benchmark/test's full execution contract, not just
+   shapes.**
+   - Keep per-tensor semantics independent: dtype, device, layout,
+     contiguity, index dtypes, auxiliary buffers/caches/scales, and any
+     helper-side preprocessing.
+   - Do NOT normalize every tensor to the main activation dtype just because
+     the benchmark uses that dtype for `query`, `key`, or other primary
+     activations.
+   - If a harness mode fails, understand why it fails before editing. Prefer
+     the smallest source-faithful fix over rewriting working harness logic.
+
 **Language-specific test harness notes:**
 
 When the kernel is NOT a Python/Triton kernel, the test harness approach varies:
