@@ -26,7 +26,12 @@ from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.orchestrator import run_orchestrator
 from minisweagent.run.preprocess.preprocessor import run_preprocessor
-from minisweagent.run.utils.task_parser import _resolve_path_case, display_parsed_config, parse_task_info
+from minisweagent.run.utils.task_parser import (
+    _resolve_path_case,
+    display_parsed_config,
+    extract_user_constraints,
+    parse_task_info,
+)
 from minisweagent.utils.log import DEFAULT_LOG_FILENAME, add_file_handler
 
 logger = logging.getLogger(__name__)
@@ -465,12 +470,33 @@ def main(
             logger.error(error_message)
             raise RuntimeError(error_message)
 
-        task_content = f"{commandment}\n\n---\n\n{task_content}"
-        logger.info(
-            "Prepended COMMANDMENT.md to task content (total length %d chars).",
-            len(task_content),
-        )
-        logger.debug("Task content after commandment prepend: %s", task_content)
+        preprocess_ctx["user_instructions"] = task_content
+
+        extracted = extract_user_constraints(task_content, model)
+        _addendum_parts: list[str] = []
+        if extracted["constraints"]:
+            _addendum_parts.append("## USER-SPECIFIED CONSTRAINTS\n\nThese are mandatory. Violation means rejection.\n")
+            _addendum_parts.extend(f"- {c}" for c in extracted["constraints"])
+        if extracted["directives"]:
+            _addendum_parts.append(
+                "\n## PRESCRIBED OPTIMIZATION DIRECTIVES\n\n"
+                "These are the user's prescribed optimization strategies. Prioritize them, but\n"
+                "also explore additional directions beyond these.\n"
+                "NOTE: Any performance numbers in the original user request come from full-model\n"
+                "profiling under different conditions. Use ONLY the GEAK-measured baseline metrics\n"
+                "for before/after speedup comparisons.\n"
+            )
+            _addendum_parts.extend(f"- {d}" for d in extracted["directives"])
+        if _addendum_parts:
+            preprocess_ctx["commandment"] = commandment + "\n\n" + "\n".join(_addendum_parts)
+            _commandment_path = preprocess_output_dir / "COMMANDMENT.md"
+            _commandment_path.write_text(preprocess_ctx["commandment"], encoding="utf-8")
+            logger.info(
+                "Enriched commandment with %d constraints and %d directives (written to %s).",
+                len(extracted["constraints"]),
+                len(extracted["directives"]),
+                _commandment_path,
+            )
 
         report = run_orchestrator(
             preprocess_ctx=preprocess_ctx,
