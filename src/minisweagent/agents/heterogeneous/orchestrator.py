@@ -330,8 +330,21 @@ def run_heterogeneous_orchestrator(
         "=" * 60,
     )
 
+    if rag_enabled:
+        rag_tools_desc = (
+            "\n\n**Knowledge Base Lookup** (Recommended)\n"
+            "- Use `query` tool to search for optimization techniques, "
+            "hardware-specific tips, and code patterns relevant to this kernel\n"
+            "- Use `optimize` tool to get targeted optimization suggestions "
+            "based on your kernel type and bottleneck analysis\n"
+            "- Integrate retrieved knowledge into your strategy planning\n"
+        )
+    else:
+        rag_tools_desc = ""
+    system_prompt = SYSTEM_PROMPT.format(rag_tools_description=rag_tools_desc)
+
     messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": instance_msg},
     ]
 

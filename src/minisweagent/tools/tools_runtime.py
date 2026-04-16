@@ -71,6 +71,7 @@ def get_tools_list(use_strategy_manager: bool = False) -> list:
     Returns:
         List of tool definitions for the API.
     """
+    _ensure_mcp_collected()
     excluded = set()
     if not use_strategy_manager:
         excluded.add("strategy_manager")

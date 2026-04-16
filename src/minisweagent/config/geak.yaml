@@ -28,4 +28,4 @@ model:
 tools:
   profiling: false
   profiling_type: profiling
-  rag: false
+  rag: true
