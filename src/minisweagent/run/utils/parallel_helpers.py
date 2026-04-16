@@ -559,16 +559,6 @@ def run_pool(
                 "GEAK_REPO_ROOT": str(repo_path.resolve()),
                 "GEAK_GPU_DEVICE": hip_devices,
             }
-            _repo_resolved = repo_path.resolve()
-            for _candidate in (_repo_resolved, _repo_resolved.parent):
-                _build_pkg = _candidate / "build-fly" / "python_packages"
-                _mlir_libs = _build_pkg / "flydsl" / "_mlir" / "_mlir_libs"
-                if _mlir_libs.is_dir():
-                    _pp = patched_env.get("PYTHONPATH", "")
-                    patched_env["PYTHONPATH"] = f"{_build_pkg}:{_candidate}:{_pp}" if _pp else f"{_build_pkg}:{_candidate}"
-                    _ld = patched_env.get("LD_LIBRARY_PATH", "")
-                    patched_env["LD_LIBRARY_PATH"] = f"{_mlir_libs}:{_ld}" if _ld else str(_mlir_libs)
-                    break
             geak_harness = patched_env.get("GEAK_HARNESS")
             if isinstance(geak_harness, str) and geak_harness:
                 patched_env["GEAK_HARNESS"] = replace_paths(geak_harness, repo_path, wt_path)

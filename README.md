@@ -131,6 +131,19 @@ geak --repo "$REPO" \
   --task "Optimize the MLA decode Triton kernel." 
 ```
 
+**Example: FlyDSL kernel `rmsnorm_kernel`**
+
+```bash
+# FlyDSL repo root (requires `pip install flydsl` in the environment)
+REPO="/path/to/FlyDSL"
+
+geak --repo "$REPO" \
+  --kernel-url "$REPO/kernels/rmsnorm_kernel.py" \
+  --target-language flydsl \
+  --task "Optimize the rmsnorm kernel." \
+  --yolo --exit-immediately
+```
+
 For more options and examples, see **[Quick start](docs/quick_start.md)**.
 
 

@@ -70,15 +70,6 @@ def _build_env(
     if repo_root:
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{repo_root}:{existing}" if existing else repo_root
-        for candidate in (Path(repo_root), Path(repo_root).parent):
-            mlir_libs = candidate / "build-fly" / "python_packages" / "flydsl" / "_mlir" / "_mlir_libs"
-            build_pkg = candidate / "build-fly" / "python_packages"
-            if mlir_libs.is_dir():
-                existing_ld = env.get("LD_LIBRARY_PATH", "")
-                env["LD_LIBRARY_PATH"] = f"{mlir_libs}:{existing_ld}" if existing_ld else str(mlir_libs)
-                if build_pkg.is_dir():
-                    env["PYTHONPATH"] = f"{build_pkg}:{candidate}:{env.get('PYTHONPATH', '')}"
-                break
 
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
     env["PYTHONUNBUFFERED"] = "1"

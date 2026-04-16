@@ -178,16 +178,6 @@ def build_eval_env(
             pp_parts.append(str(hp))
         except (OSError, ValueError):
             pass
-    for candidate in (Path(repo_root), Path(repo_root).parent):
-        mlir_libs = candidate / "build-fly" / "python_packages" / "flydsl" / "_mlir" / "_mlir_libs"
-        build_pkg = candidate / "build-fly" / "python_packages"
-        if mlir_libs.is_dir():
-            existing_ld = env.get("LD_LIBRARY_PATH", "")
-            env["LD_LIBRARY_PATH"] = f"{mlir_libs}:{existing_ld}" if existing_ld else str(mlir_libs)
-            if build_pkg.is_dir():
-                pp_parts.insert(0, str(build_pkg))
-                pp_parts.insert(1, str(candidate))
-            break
     pp_parts.append(env.get("PYTHONPATH", ""))
     env["PYTHONPATH"] = ":".join(p for p in pp_parts if p)
     alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF", "")
