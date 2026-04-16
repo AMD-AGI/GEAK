@@ -35,11 +35,9 @@ agent:
 
     ## Translation Strategy (in order of preference)
 
-    - **GEMM / Linear (fp16/bf16)**: Use `compile_preshuffle_gemm_a8()` from `kernels.preshuffle_gemm`.
+    - **GEMM / Linear**: Use `compile_preshuffle_gemm_a8()` from `kernels.preshuffle_gemm`.
       CRITICAL: B-matrix must be preshuffled with `shuffle_weight(B.contiguous(), layout=(16, 16))` from `tests.utils`.
       All tensor args must be `.view(-1)`. Scales: `torch.empty(0, device=dev, dtype=torch.float32)` for fp16.
-    - **GEMM / Linear (fp32)**: Use `torch.mm` directly — FlyDSL preshuffle GEMM has no fp32 output type.
-      Do NOT attempt fp16 GEMM when the kernel requires fp32 precision.
     - **Attention / SDPA**: ALWAYS use `build_flash_attn_func_module()` from `kernels.flash_attn_func`
       when head_dim>=64, head_dim%32==0, seq_len%128==0. NEVER decompose attention into separate
       GEMM+softmax+GEMM calls when flash attention fits — decomposed is 5-10x slower.
@@ -55,9 +53,8 @@ agent:
     - **Conv/Pool/BatchNorm**: Use `torch.nn.functional` (ONLY ops with no FlyDSL equivalent)
     - **Complex models**: Use FlyDSL for ALL ops except conv/pool/batchnorm
 
-    CRITICAL: For fp16/bf16 tensors, do NOT use torch.matmul, F.linear, nn.Linear, or F.scaled_dot_product_attention.
-    These ALL have FlyDSL pre-built replacements. PyTorch fallback is ONLY acceptable for Conv2d, MaxPool2d,
-    BatchNorm2d, and fp32 GEMM (use torch.mm).
+    CRITICAL: Do NOT use torch.matmul, F.linear, nn.Linear, or F.scaled_dot_product_attention.
+    These ALL have FlyDSL pre-built replacements. PyTorch fallback is ONLY for Conv2d, MaxPool2d, BatchNorm2d.
 
   instance_template: |
     ## Translation Task
