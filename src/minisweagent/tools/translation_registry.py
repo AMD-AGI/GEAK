@@ -44,9 +44,9 @@ class TranslationPair:
     perf_fail_threshold: float = 0.5
     perf_warn_threshold: float = 0.8
     supported: bool = True
-    self_review: bool = True
-    review_triggers_retry: bool = True
-    review_retry_on_efficiency: bool = True
+    self_review: bool = False
+    review_triggers_retry: bool = False
+    review_retry_on_efficiency: bool = False
 
 
 def _noop_env_setup(_repo_root: Path) -> dict[str, str]:
