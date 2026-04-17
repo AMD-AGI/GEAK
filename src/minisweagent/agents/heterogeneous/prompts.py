@@ -319,6 +319,22 @@ It is acceptable to leave some GPUs idle rather than padding the batch with
 low-priority wrapper / dispatch work.
 Each task uses 1 GPU.
 {% endif %}
+{% if base_task_context %}
+## User-Provided Context
+
+**IMPORTANT**:
+1. Any performance numbers below (durations, invocation counts, efficiency
+   percentages) come from the user's full-model profiling under different
+   conditions (batch sizes, graph replay, concurrency). They provide
+   qualitative context (e.g., "this kernel is memory-bound") but MUST NOT
+   be used as baselines for speedup comparison. Always use the GEAK-measured
+   baseline metrics from the baseline_metrics file for before/after comparisons.
+2. If the user prescribes optimization strategies below, prioritize them in
+   early rounds. But if prior round tasks already attempted a strategy,
+   do NOT regenerate it -- follow the deduplication rules in the system prompt.
+
+{{ base_task_context }}
+{% endif %}
 ## Instructions
 
 Read the profiling file first to understand the sub-kernel landscape. Then
@@ -327,8 +343,6 @@ dependency listed is in-repo code that could be an optimization target.
 Read the discovery file for additional kernel metadata, and consult the
 knowledge base for applicable strategies. Finally, submit your task list
 as JSON via the `submit` tool.
-
-{{ base_task_context }}
 """)
 
 

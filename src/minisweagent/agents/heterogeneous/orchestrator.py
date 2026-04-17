@@ -244,7 +244,7 @@ def run_heterogeneous_orchestrator(
     if not cmd:
         logger.error("No commandment found in preprocess_ctx.")
         raise ValueError("No commandment found in preprocess_ctx.")
-    cmd_excerpt = cmd[:1500] + ("..." if len(cmd) > 1500 else "") if cmd else "Not available"
+    cmd_excerpt = cmd[:4000] + ("..." if len(cmd) > 4000 else "") if cmd else "Not available"
 
     codebase_ctx = ""
     _codebase_ctx_path = preprocess_dir / "CODEBASE_CONTEXT.md"
