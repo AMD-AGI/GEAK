@@ -7,10 +7,82 @@ Keeps context under ~15K chars to avoid drowning the kernel's own code.
 
 from __future__ import annotations
 
+import re
+
 from minisweagent.memory.cross_session.schemas import ExperienceRecord, StrategySkill
 
 _MAX_CONTEXT_FULL = 30_000
 _MAX_CONTEXT_COMPACT = 5_000
+
+# Regexes for extracting high-signal optimization parameters from a winning
+# Triton patch. Each captured value is surfaced to the LLM as a short,
+# actionable ``key params`` list so it can apply the specific value directly
+# rather than having to parse a 5k-char diff.
+_PARAM_PATTERNS = [
+    ("num_warps", re.compile(r"num_warps\s*=\s*(\d+)")),
+    ("num_stages", re.compile(r"num_stages\s*=\s*(\d+)")),
+    ("BLOCK_SIZE", re.compile(r"BLOCK_(?:T|M|N|K|D|D_HALF)\s*=\s*(\d+)")),
+    ("XBLOCK", re.compile(r"XBLOCK\s*[:=]\s*(\d+)")),
+    ("dtype_cast", re.compile(r"\.to\(\s*tl\.(float32|float16|bfloat16|int32|int64|uint32|uint64)\s*\)")),
+    ("bitcast", re.compile(r"bitcast\s*=\s*True|tl\.(int32|uint32)\s*,\s*bitcast")),
+    ("tl_arange_dtype", re.compile(r"tl\.arange\([^)]*\)\.to\(\s*tl\.(int32|int64)\s*\)")),
+    (
+        "prealloc_output",
+        re.compile(r"torch\.empty\(|torch\.empty_like\(|output_tensor\s*\.copy_|prealloc", re.IGNORECASE),
+    ),
+    ("tl_constexpr_dtype", re.compile(r"tl\.constexpr\s*=\s*tl\.(int32|int64|float32|float16)")),
+    ("cuda_graph", re.compile(r"torch\.cuda\.CUDAGraph|cudagraph|cuda_graph", re.IGNORECASE)),
+    ("hip_extension", re.compile(r"torch\.utils\.cpp_extension\.load|load_inline\(|hipLaunchKernelGGL")),
+]
+
+
+def _extract_key_params(patch_text: str, max_params: int = 8) -> list[str]:
+    """Extract high-signal optimization parameters from a patch's ``+`` lines only.
+
+    We restrict matching to the lines added by the patch (``+`` prefix) so
+    the extracted values reflect what the winning change introduced, not
+    what the original code already had. Duplicates are deduped, and at
+    most ``max_params`` distinct params are returned.
+    """
+    if not patch_text:
+        return []
+
+    added_lines = [line[1:] for line in patch_text.splitlines() if line.startswith("+") and not line.startswith("+++")]
+    if not added_lines:
+        return []
+    added_text = "\n".join(added_lines)
+
+    found: list[str] = []
+    seen: set[str] = set()
+    for _label, pat in _PARAM_PATTERNS:
+        for m in pat.finditer(added_text):
+            val = m.group(0).strip()
+            if val in seen:
+                continue
+            seen.add(val)
+            found.append(val)
+            if len(found) >= max_params:
+                return found
+    return found
+
+
+def _build_adaptation_note(kb_kernel_name: str, target_kernel_path: str) -> str:
+    """Produce a short adaptation hint when the KB seed is a different kernel.
+
+    The LLM otherwise has to figure out that e.g. a monkey-patch for
+    ``aiter.ops.triton.fused_qk_rope_cat_and_cache_mla`` needs to be
+    translated into direct edits in a standalone ``kernel.py``.
+    """
+    if not kb_kernel_name or not target_kernel_path:
+        return ""
+    tgt_name = target_kernel_path.rsplit("/", 2)[-2] if "/" in target_kernel_path else ""
+    if not tgt_name or tgt_name.lower() == kb_kernel_name.lower():
+        return ""
+    return (
+        f"**Adaptation note:** KB patch was for `{kb_kernel_name}` (different kernel). "
+        f"Your target is `{tgt_name}` — apply the same *techniques* (the `key params` above), "
+        f"but translate the *structure* to your kernel's architecture rather than copying the patch verbatim."
+    )
 
 
 def format_landscape_context(
@@ -20,12 +92,17 @@ def format_landscape_context(
     query_bottleneck: str = "",
     query_language: str = "",
     compact: bool = False,
+    target_kernel_path: str = "",
 ) -> str:
     """Format experiences into a context block with reasoning guidance.
 
     compact=True produces a lightweight summary (strategy names + speedups,
     no code diffs) suitable for homogeneous agents that can't do multi-step
     strategy reasoning.
+
+    target_kernel_path, when provided, is used to emit a short adaptation
+    note when the KB seed kernel differs from the target kernel, so the
+    LLM knows to translate techniques rather than copy the patch verbatim.
     """
     if not experiences and not skills:
         return ""
@@ -39,10 +116,12 @@ def format_landscape_context(
     parts.append("")
 
     budget = _MAX_CONTEXT_COMPACT if compact else _MAX_CONTEXT_FULL
-    fmt_fn = _format_compact if compact else _format_single_experience
     for exp in experiences:
         exp_dict = exp.to_dict() if hasattr(exp, "to_dict") else {}
-        chunk = fmt_fn(exp, exp_dict)
+        if compact:
+            chunk = _format_compact(exp, exp_dict)
+        else:
+            chunk = _format_single_experience(exp, exp_dict, target_kernel_path=target_kernel_path)
         if budget - len(chunk) < 0 and parts:
             parts.append(f"\n*(budget reached — {n - experiences.index(exp)} more omitted)*")
             break
@@ -111,13 +190,18 @@ def _format_compact(exp: ExperienceRecord, exp_dict: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _format_single_experience(exp: ExperienceRecord, exp_dict: dict) -> str:
+def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kernel_path: str = "") -> str:
     """Format a single experience with all rich fields.
 
     Strategies are the single source of truth -- every strategy has a
     measured speedup AND the full code diff.  We split them into
     'what worked' (speedup > 1.0) and 'what regressed' (speedup < 1.0)
     so the agent sees both the code to copy and the code to avoid.
+
+    We also surface a short ``key params`` list extracted from the best
+    strategy's diff so the LLM can directly apply the specific numeric /
+    dtype values that made the winning patch work, without having to parse
+    the full 5k-char diff.
     """
     parts: list[str] = []
     kn = exp.kernel_name or "unknown"
@@ -128,6 +212,31 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict) -> str:
     key_insight = exp.key_insight if exp.key_insight else exp_dict.get("key_insight", "")
     if key_insight:
         parts.append(f"*{key_insight}*")
+
+    # Surface the specific optimization parameters from the best strategy's
+    # diff as a short actionable list. This gives the LLM the concrete
+    # values (num_warps, BLOCK_T, dtype casts, etc.) it should try, rather
+    # than requiring it to parse a 5k-char diff to extract them.
+    strategies_list = exp_dict.get("strategies", [])
+    best_patch_text = ""
+    if strategies_list:
+        improved_list = sorted(
+            [s for s in strategies_list if s.get("speedup", 0) > 1.0],
+            key=lambda s: -s["speedup"],
+        )
+        if improved_list:
+            best_patch_text = improved_list[0].get("after_code", "") or ""
+    if not best_patch_text:
+        best_patch_text = exp_dict.get("patch_content", "") or exp.patch_content or ""
+    key_params = _extract_key_params(best_patch_text) if best_patch_text else []
+    if key_params:
+        parts.append("\n**Key params from winning patch (apply these values directly):**")
+        for kp in key_params:
+            parts.append(f"  - {kp}")
+
+    adaptation = _build_adaptation_note(kn, target_kernel_path)
+    if adaptation:
+        parts.append(f"\n{adaptation}")
 
     profiling = exp_dict.get("profiling_insight", "")
     if profiling:

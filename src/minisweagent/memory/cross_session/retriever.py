@@ -99,6 +99,7 @@ def retrieve_context(
         query_bottleneck=bottleneck_type,
         query_language=language,
         compact=compact,
+        target_kernel_path=kernel_path,
     )
 
 
