@@ -672,9 +672,20 @@ def _search_workload_guidance(metrics: dict) -> list[str]:
     if "latency" not in bottleneck:
         return []
 
-    derived = metrics.get("metrics", {}) or {}
-    hbm_util = _safe_float(derived.get("memory.hbm_bandwidth_utilization"))
-    l2_hit = _safe_float(derived.get("memory.l2_hit_rate"))
+    top_kernels = metrics.get("top_kernels", [])
+    all_hbm = [
+        _safe_float((k.get("metrics", {}) or {}).get("memory.hbm_bandwidth_utilization"))
+        for k in top_kernels
+    ]
+    all_l2 = [
+        _safe_float((k.get("metrics", {}) or {}).get("memory.l2_hit_rate"))
+        for k in top_kernels
+    ]
+    # max HBM: if ANY selected kernel has significant bandwidth usage,
+    # the workload isn't purely latency-bound search -- don't dismiss bandwidth.
+    hbm_util = max((h for h in all_hbm if h is not None), default=None)
+    # min L2: worst-case across selected kernels for the display text.
+    l2_hit = min((h for h in all_l2 if h is not None), default=None)
     if hbm_util is not None and hbm_util >= 10.0:
         return []
 
@@ -719,6 +730,30 @@ def _bottleneck_guidance(bottleneck: str, metrics: dict) -> list[str]:
 # ── GPU architecture context from profiling data ─────────────────────
 
 
+def _format_gpu_info(gpu_info: dict) -> list[str]:
+    """Format GPU info dict into context lines for agent prompts."""
+    if not gpu_info:
+        return []
+    arch = gpu_info.get("architecture", gpu_info.get("gfx_version", "unknown"))
+    name = gpu_info.get("name", gpu_info.get("model", "AMD GPU"))
+    cus = gpu_info.get("compute_units", "?")
+    hbm_bw = gpu_info.get("peak_hbm_bandwidth_gbps", gpu_info.get("hbm_bandwidth", "?"))
+    lds_per_cu = gpu_info.get("lds_per_cu_kb", 64)
+    vgprs = gpu_info.get("vgprs_per_cu", 512)
+    return [
+        f"## GPU Architecture: {name} ({arch})",
+        f"- Architecture: {arch}",
+        f"- Compute Units: {cus}",
+        f"- Peak HBM bandwidth: {hbm_bw} GB/s",
+        f"- LDS per CU: {lds_per_cu} KB (32 banks on gfx9xx)",
+        f"- VGPRs per CU: {vgprs}",
+        "- Wavefront size: 64 (AMD default), some kernels can use 32",
+        "- MFMA (Matrix Fused Multiply-Add) instructions available for dense math",
+        "- Use these specs to guide your kernel optimizations (tile sizes, occupancy, LDS usage).",
+        "",
+    ]
+
+
 def _gpu_arch_context(profiling_path: str) -> list[str]:
     """Extract GPU architecture info from profile.json and format it."""
     import json as _json
@@ -740,28 +775,7 @@ def _gpu_arch_context(profiling_path: str) -> list[str]:
                 gpu_info = r["gpu_info"]
                 break
 
-    if not gpu_info:
-        return []
-
-    arch = gpu_info.get("architecture", gpu_info.get("gfx_version", "unknown"))
-    name = gpu_info.get("name", gpu_info.get("model", "AMD GPU"))
-    cus = gpu_info.get("compute_units", "?")
-    hbm_bw = gpu_info.get("peak_hbm_bandwidth_gbps", gpu_info.get("hbm_bandwidth", "?"))
-    lds_per_cu = gpu_info.get("lds_per_cu_kb", 64)
-    vgprs = gpu_info.get("vgprs_per_cu", 512)
-
-    return [
-        f"## GPU Architecture: {name} ({arch})",
-        f"- Architecture: {arch}",
-        f"- Compute Units: {cus}",
-        f"- Peak HBM bandwidth: {hbm_bw} GB/s",
-        f"- LDS per CU: {lds_per_cu} KB (32 banks on gfx9xx)",
-        f"- VGPRs per CU: {vgprs}",
-        "- Wavefront size: 64 (AMD default), some kernels can use 32",
-        "- MFMA (Matrix Fused Multiply-Add) instructions available for dense math",
-        "- Use these specs to guide your kernel optimizations (tile sizes, occupancy, LDS usage).",
-        "",
-    ]
+    return _format_gpu_info(gpu_info)
 
 
 # ── pipeline context injection ───────────────────────────────────────
@@ -817,29 +831,41 @@ def inject_pipeline_context(
         ctx.append("")
 
     if baseline_metrics:
-        dur = baseline_metrics.get("duration_us", "unknown")
+        dur = baseline_metrics.get("benchmark_duration_us", baseline_metrics.get("duration_us", "unknown"))
         bn = baseline_metrics.get("bottleneck", "unknown")
         ctx.append("## Baseline Performance (your optimization must improve on these)")
-        ctx.append(f"Total duration: {dur} us")
+        ctx.append(f"Duration: {dur} us")
         ctx.append(f"Bottleneck: {bn}")
         top = baseline_metrics.get("top_kernels", [])
         if top:
-            ctx.append("Top kernels by duration:")
+            ctx.append("Profiled kernels (selected as relevant to the optimization target):")
             for k in top[:5]:
+                km = k.get("metrics", {}) or {}
                 bn_tag = f" [{k['bottleneck']}]" if k.get("bottleneck") else ""
-                ctx.append(
-                    f"  - {k.get('name', '?')}: {k.get('duration_us', '?')} us ({k.get('pct_of_total', '?')}%){bn_tag}"
+                hbm = km.get("memory.hbm_bandwidth_utilization")
+                l2 = km.get("memory.l2_hit_rate")
+                line = (
+                    f"  - {k.get('name', '?')}: "
+                    f"{k.get('duration_us', '?')} us "
+                    f"({k.get('pct_of_selected', '?')}%){bn_tag}"
                 )
+                if hbm is not None:
+                    line += f"; HBM util={hbm:.1f}%"
+                if l2 is not None:
+                    line += f"; L2 hit={l2:.1f}%"
+                ctx.append(line)
+                for obs in k.get("observations", []):
+                    ctx.append(f"    - {obs}")
         ctx.append("")
 
         ctx.extend(_bottleneck_guidance(str(bn), baseline_metrics))
 
-    if profiling_path and Path(profiling_path).exists():
-        ctx.append(f"PROFILING DATA: {profiling_path}")
-        ctx.append("(Read this file for detailed per-kernel profiling metrics)")
-        ctx.append("")
-
-        ctx.extend(_gpu_arch_context(profiling_path))
+    # GPU arch: prefer baseline_metrics (always available for new runs),
+    # fall back to profile.json for old task files.
+    gpu_lines = _format_gpu_info(baseline_metrics.get("gpu_info", {})) if baseline_metrics else []
+    if not gpu_lines and profiling_path and Path(profiling_path).exists():
+        gpu_lines = _gpu_arch_context(profiling_path)
+    ctx.extend(gpu_lines)
 
     if benchmark_baseline:
         ctx.append("## Benchmark Baseline (compare your save_and_test output against this)")

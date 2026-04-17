@@ -15,14 +15,17 @@ def test_bottleneck_guidance_adds_search_specific_hip_hints() -> None:
     metrics = {
         "kernel_name": "rocprim::detail::binary_search lower_bound",
         "bottleneck": "latency",
-        "metrics": {
-            "memory.hbm_bandwidth_utilization": 0.3,
-            "memory.l2_hit_rate": 70.6,
-        },
         "top_kernels": [
             {
                 "name": "transform_kernel<binary_search<lower_bound>>",
                 "bottleneck": "latency",
+                "duration_us": 10.0,
+                "pct_of_selected": 100.0,
+                "observations": [],
+                "metrics": {
+                    "memory.hbm_bandwidth_utilization": 0.3,
+                    "memory.l2_hit_rate": 70.6,
+                },
             }
         ],
     }

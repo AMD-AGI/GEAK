@@ -150,11 +150,15 @@ class TestE2EPipelineSmoke:
         )
 
         # Required fields for OpenEvolve
-        assert baseline["duration_us"] == pytest.approx(8.5)
         assert baseline["kernel_name"] == "add_kernel_0d1d2d3d4"
         assert baseline["bottleneck"] == "memory"
-        assert baseline["metrics"]["duration_us"] == pytest.approx(8.5)
+        assert len(baseline["top_kernels"]) == 1
+        assert baseline["top_kernels"][0]["duration_us"] == pytest.approx(8.5)
+        assert baseline["top_kernels"][0]["metrics"]["duration_us"] == pytest.approx(8.5)
+        assert "pct_of_selected" in baseline["top_kernels"][0]
         assert len(baseline["observations"]) > 0
+        assert "duration_us" not in baseline
+        assert "metrics" not in baseline
 
     def test_step5_baseline_json_roundtrip(self):
         """Write baseline_metrics.json, read it back, parse as OpenEvolve would."""
@@ -172,7 +176,7 @@ class TestE2EPipelineSmoke:
                 loaded = json.load(f)
 
             # Simulate OpenEvolve reading the baseline
-            baseline_latency = loaded.get("duration_us", 0)
+            baseline_latency = loaded["top_kernels"][0]["duration_us"]
             assert baseline_latency > 0, "OpenEvolve would get duration_us=0!"
 
             # Simulate a candidate that's 1.5x faster
@@ -209,5 +213,5 @@ class TestE2EPipelineSmoke:
 
         # The output should be parseable JSON
         baseline = json.loads(baseline_result["output"])
-        assert baseline["duration_us"] > 0
+        assert baseline["top_kernels"][0]["duration_us"] > 0
         assert baseline["kernel_name"] == "add_kernel_0d1d2d3d4"

@@ -718,7 +718,16 @@ class TestPreprocessContractEnforcement:
         }))
         (out / "CODEBASE_CONTEXT.md").write_text("# Context")
         (out / "COMMANDMENT.md").write_text("# Commandment")
-        (out / "baseline_metrics.json").write_text(json.dumps({"duration_us": 100}))
+        (out / "baseline_metrics.json").write_text(json.dumps({
+            "benchmark_duration_us": 100000,
+            "duration_us": 100000,
+            "bottleneck": "memory",
+            "kernel_name": "test_kernel",
+            "kernel_names": ["test_kernel"],
+            "top_kernels": [{"name": "test_kernel", "duration_us": 100, "pct_of_selected": 100.0, "bottleneck": "memory", "metrics": {}, "observations": []}],
+            "total_profiled_kernels": 1,
+            "selection_mode": "all_kernels",
+        }))
         (out / "profile.json").write_text(json.dumps({"success": True}))
         (out / "harness_results.json").write_text(json.dumps([
             {"mode": "correctness", "success": True, "returncode": 0, "stdout": "", "stderr": "", "duration_s": 1.0},
@@ -738,7 +747,7 @@ class TestPreprocessContractEnforcement:
             "discovery": {"tests": [], "benchmarks": []},
             "codebase_context_path": str(out / "CODEBASE_CONTEXT.md"),
             "harness_results": [{"mode": "correctness", "success": True}],
-            "baseline_metrics": {"duration_us": 100},
+            "baseline_metrics": {"benchmark_duration_us": 100000, "duration_us": 100000, "bottleneck": "memory", "kernel_name": "test_kernel", "kernel_names": ["test_kernel"], "top_kernels": [{"name": "test_kernel", "duration_us": 100, "pct_of_selected": 100.0, "bottleneck": "memory", "metrics": {}, "observations": []}], "total_profiled_kernels": 1, "selection_mode": "all_kernels"},
             "commandment": "# Commandment",
             "testcase_selection": {"selected_source": "unit_test_agent"},
         }

@@ -20,14 +20,13 @@ Usage (Python):
         kernel_path="/path/to/kernel.py",
         kernel_name="my_kernel",
         kernel_type="triton",
-        profiling_path=Path("profile.json"),
         commandment_path=Path("COMMANDMENT.md"),
+        baseline_metrics_path=Path("baseline_metrics.json"),
     )
 
 Usage (CLI):
     python -m minisweagent.agents.heterogeneous.task_generator \\
         --kernel-path /path/to/kernel.py \\
-        --profiling profiler_output.json \\
         --commandment COMMANDMENT.md \\
         --baseline-metrics baseline_metrics.json
 """
@@ -184,7 +183,6 @@ def generate_tasks(
     kernel_language: str = "python",
     function_names: list[str] | None = None,
     workspace_path: str = "",
-    profiling_path: Path | None = None,
     commandment_path: Path | None = None,
     baseline_metrics_path: Path | None = None,
     deep_search_path: Path | None = None,
@@ -210,7 +208,6 @@ def generate_tasks(
         kernel_language: Source language (python, cpp, asm).
         function_names: Key function names within the kernel file.
         workspace_path: Working directory for the planning agent.
-        profiling_path: Path to kernel-profile JSON output.
         commandment_path: Path to COMMANDMENT.md.
         baseline_metrics_path: Path to baseline_metrics.json.
         deep_search_path: Path to deep search findings file.
@@ -242,7 +239,6 @@ def generate_tasks(
         workspace_path=workspace_path,
         base_task_context=base_task_context,
         model=model,
-        profiling_path=profiling_path,
         commandment_path=commandment_path,
         baseline_metrics_path=baseline_metrics_path,
         deep_search_path=deep_search_path,
@@ -277,7 +273,6 @@ def generate_tasks_from_content(
     kernel_language: str = "python",
     function_names: list[str] | None = None,
     workspace_path: str = "",
-    profiling_result: dict | None = None,
     commandment_content: str | None = None,
     baseline_metrics: dict | None = None,
     deep_search_content: str | None = None,
@@ -299,10 +294,6 @@ def generate_tasks_from_content(
     """
     tmp_files: list[Path] = []
     try:
-        profiling_path = _write_temp(json.dumps(profiling_result, indent=2), ".json") if profiling_result else None
-        if profiling_path:
-            tmp_files.append(profiling_path)
-
         commandment_path = _write_temp(commandment_content, ".md") if commandment_content else None
         if commandment_path:
             tmp_files.append(commandment_path)
@@ -327,7 +318,6 @@ def generate_tasks_from_content(
             kernel_language=kernel_language,
             function_names=function_names,
             workspace_path=workspace_path,
-            profiling_path=profiling_path,
             commandment_path=commandment_path,
             baseline_metrics_path=baseline_metrics_path,
             deep_search_path=deep_search_path,
@@ -357,7 +347,6 @@ def write_task_files(
     repo_root: str = "",
     commandment: str = "",
     baseline_metrics: str = "",
-    profiling: str = "",
     codebase_context: str = "",
     benchmark_baseline: str = "",
     test_command: str = "",
@@ -389,7 +378,6 @@ def write_task_files(
             "repo_root": repo_root,
             "commandment": commandment,
             "baseline_metrics": baseline_metrics,
-            "profiling": profiling,
             "codebase_context": codebase_context,
             "benchmark_baseline": benchmark_baseline,
             "starting_patch": starting_patch,
@@ -437,7 +425,6 @@ def _run_task_agent(
     workspace_path: str,
     base_task_context: str,
     model: Any,
-    profiling_path: Path | None,
     commandment_path: Path | None,
     baseline_metrics_path: Path | None,
     deep_search_path: Path | None,
@@ -522,7 +509,34 @@ def _run_task_agent(
                     evals_text += f"- Verified kernel time: {fb.get('kernel_time_ms', 'N/A')}ms\n"
                 profile = rev.get("profile_comparison", {})
                 if profile:
-                    evals_text += f"- Profile comparison: {json.dumps(profile, default=str)[:500]}\n"
+                    per_kernel = profile.get("per_kernel_deltas", [])
+                    if per_kernel:
+                        evals_text += "- Profile comparison (per-kernel):\n"
+                        for kd in per_kernel:
+                            status = kd.get("status", "present")
+                            if status == "eliminated":
+                                evals_text += (
+                                    f"  - {kd['name']}: ELIMINATED "
+                                    f"(was {kd.get('baseline_duration_us', '?')}us)\n"
+                                )
+                            elif status == "new":
+                                evals_text += (
+                                    f"  - {kd['name']}: NEW "
+                                    f"({kd.get('optimized_duration_us', '?')}us)\n"
+                                )
+                            else:
+                                ratio = kd.get("profile_time_ratio", "N/A")
+                                dur_change = kd.get("duration_us_change", "N/A")
+                                shift = kd.get("bottleneck_shift", "")
+                                shift_text = f" [bottleneck: {shift}]" if shift else ""
+                                evals_text += (
+                                    f"  - {kd['name']}: profile time ratio={ratio}x "
+                                    f"(delta={dur_change}us){shift_text}\n"
+                                )
+                    else:
+                        bn_shift = profile.get("bottleneck_shift", "")
+                        if bn_shift:
+                            evals_text += f"- Bottleneck shift: {bn_shift}\n"
                 evals_text += f"- Best patch: {rev.get('best_patch', 'N/A')}\n\n"
             round_evals_path = _write_temp(evals_text, "_round_evals.md")
             tmp_files.append(round_evals_path)
@@ -535,7 +549,6 @@ def _run_task_agent(
             "function_names": ", ".join(function_names) if function_names else "",
             "codebase_context_path": str(codebase_context_path) if codebase_context_path else "",
             "discovery_path": str(discovery_path) if discovery_path else "",
-            "profiling_path": str(profiling_path) if profiling_path else "",
             "commandment_path": str(commandment_path) if commandment_path else "",
             "baseline_metrics_path": str(baseline_metrics_path) if baseline_metrics_path else "",
             "knowledge_base_path": str(kb_path) if kb_path else "",
@@ -621,7 +634,6 @@ def _run_task_agent(
         _context_files = [
             k
             for k in (
-                "profiling_path",
                 "commandment_path",
                 "baseline_metrics_path",
                 "codebase_context_path",
@@ -783,7 +795,6 @@ def main():
         metavar="FILE",
         help="Read discovery.json and extract kernel-path and repo-root",
     )
-    parser.add_argument("--profiling", default=None, help="Path to kernel-profile JSON output")
     parser.add_argument("--commandment", default=None, help="Path to COMMANDMENT.md")
     parser.add_argument("--baseline-metrics", default=None, help="Path to baseline_metrics.json")
     parser.add_argument("--model", default=None, help="Model name (default: from config/env)")
@@ -914,7 +925,6 @@ def main():
     base_task_context = f"Optimize the kernel at {kernel_path} for maximum performance."
 
     # Resolve file paths (pass through to the agent, not loaded into memory)
-    profiling_path = Path(args.profiling).resolve() if args.profiling else None
     commandment_path = Path(args.commandment).resolve() if args.commandment else None
     baseline_metrics_path = Path(args.baseline_metrics).resolve() if args.baseline_metrics else None
     deep_search_path = Path(args.deep_search).resolve() if args.deep_search else None
@@ -933,7 +943,6 @@ def main():
         kernel_language=kernel_meta["kernel_language"],
         function_names=kernel_meta["function_names"],
         workspace_path=kernel_meta["workspace_path"],
-        profiling_path=profiling_path,
         commandment_path=commandment_path,
         baseline_metrics_path=baseline_metrics_path,
         deep_search_path=deep_search_path,
@@ -958,7 +967,6 @@ def main():
             repo_root=args.repo_root or "",
             commandment=args.commandment or "",
             baseline_metrics=args.baseline_metrics or "",
-            profiling=args.profiling or "",
             codebase_context=args.codebase_context or "",
             benchmark_baseline=args.benchmark_baseline or "",
             test_command=test_command or "",

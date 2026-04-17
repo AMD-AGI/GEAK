@@ -637,12 +637,13 @@ def run_pool(
                         try:
                             _bm2 = json.loads(Path(_wm_bm_path).read_text())
                             _top = _bm2.get("top_kernels", [])
-                            if len(_top) > 3:
+                            _n_profiled = _bm2.get("total_profiled_kernels", len(_top))
+                            if _n_profiled > 3:
                                 _target = _top[0] if _top else {}
-                                _target_pct = _target.get("pct_of_total", 0)
+                                _target_pct = _target.get("pct_of_all_gpu_time", _target.get("pct_of_selected", 0))
                                 _ext_pct = 100 - _target_pct
                                 _top_summary = "; ".join(
-                                    f"{k.get('name', '?')[:40]}: {k.get('duration_us', 0):.1f}us ({k.get('pct_of_total', 0):.0f}%)"
+                                    f"{k.get('name', '?')[:40]}: {k.get('duration_us', 0):.1f}us ({k.get('pct_of_all_gpu_time', k.get('pct_of_selected', 0)):.0f}%)"
                                     for k in _top[:3]
                                 )
                                 if _ext_pct > 50:

@@ -292,8 +292,7 @@ Generate optimization tasks for the kernel at {{ kernel_path }}.
 ## Files to read (use `str_replace_editor` with command "view")
 {% if codebase_context_path %}- **Codebase context** (repo layout, kernel dependency tree with optimization targets): {{ codebase_context_path }}
 {% endif %}{% if discovery_path %}- **Discovery** (kernel info, tests, benchmarks): {{ discovery_path }}
-{% endif %}{% if profiling_path %}- **Profiling** (sub-kernels, bottlenecks, metrics): {{ profiling_path }}
-{% endif %}{% if baseline_metrics_path %}- **Baseline metrics**: {{ baseline_metrics_path }}
+{% endif %}{% if baseline_metrics_path %}- **Baseline metrics** (per-kernel profiling metrics, bottlenecks, observations): {{ baseline_metrics_path }}
 {% endif %}{% if commandment_path %}- **COMMANDMENT.md** (evaluation contract): {{ commandment_path }}
 {% endif %}{% if knowledge_base_path %}- **Knowledge base** (optimization strategies): {{ knowledge_base_path }}
 {% endif %}{% if deep_search_path %}- **Deep search findings**: {{ deep_search_path }}
@@ -339,8 +338,9 @@ Each task uses 1 GPU.
 {% endif %}
 ## Instructions
 
-Read the profiling file first to understand the sub-kernel landscape. Then
-read the codebase context file for the kernel dependency tree -- every
+Read the baseline metrics file first to understand the per-kernel profiling
+landscape (bottlenecks, observations, HBM utilization). Then read the
+codebase context file for the kernel dependency tree -- every
 dependency listed is in-repo code that could be an optimization target.
 Read the discovery file for additional kernel metadata, and consult the
 knowledge base for applicable strategies. Finally, submit your task list

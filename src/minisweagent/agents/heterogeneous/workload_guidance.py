@@ -91,20 +91,45 @@ def _is_search_like_workload(kernel: dict[str, Any], baseline_metrics: dict[str,
 
 
 def _profiling_summary_lines(baseline_metrics: dict[str, Any]) -> list[str]:
-    metrics = baseline_metrics.get("metrics", {}) or {}
-    duration_us = _safe_float(baseline_metrics.get("duration_us"))
-    hbm_util = _safe_float(metrics.get("memory.hbm_bandwidth_utilization"))
-    l2_hit = _safe_float(metrics.get("memory.l2_hit_rate"))
-    bottleneck = _normalized_bottleneck(baseline_metrics)
-    return [
-        "Profiling summary:",
-        (
-            f"- Bottleneck: {bottleneck}"
-            f"; kernel duration: {_format_optional_float(duration_us, ' us')}"
-            f"; HBM utilization: {_format_optional_float(hbm_util, '%')}"
-            f"; L2 hit rate: {_format_optional_float(l2_hit, '%')}"
-        ),
-    ]
+    top_kernels = baseline_metrics.get("top_kernels", [])
+    if not top_kernels:
+        return ["Profiling summary: no kernel data available."]
+
+    lines = ["Profiling summary (per-kernel):"]
+    for k in top_kernels:
+        km = k.get("metrics", {}) or {}
+        hbm_util = _safe_float(km.get("memory.hbm_bandwidth_utilization"))
+        l2_hit = _safe_float(km.get("memory.l2_hit_rate"))
+        hbm_read = _safe_float(km.get("memory.hbm_read_bandwidth"))
+        hbm_write = _safe_float(km.get("memory.hbm_write_bandwidth"))
+        l1_hit = _safe_float(km.get("memory.l1_hit_rate"))
+        coalescing = _safe_float(km.get("memory.coalescing_efficiency"))
+
+        line = (
+            f"- {k.get('name', '?')}: "
+            f"bottleneck={k.get('bottleneck', '?')}"
+            f"; duration={_format_optional_float(_safe_float(k.get('duration_us')), ' us')}"
+            f" ({k.get('pct_of_selected', '?')}%)"
+            f"; HBM util={_format_optional_float(hbm_util, '%')}"
+            f"; L2 hit={_format_optional_float(l2_hit, '%')}"
+        )
+        extras = []
+        if hbm_read is not None:
+            extras.append(f"HBM read BW={hbm_read:.1f}")
+        if hbm_write is not None:
+            extras.append(f"HBM write BW={hbm_write:.1f}")
+        if l1_hit is not None:
+            extras.append(f"L1 hit={l1_hit:.1f}%")
+        if coalescing is not None:
+            extras.append(f"coalescing={coalescing:.1f}%")
+        if extras:
+            line += f"; {'; '.join(extras)}"
+        lines.append(line)
+
+        for obs in k.get("observations", []):
+            lines.append(f"  - {obs}")
+
+    return lines
 
 
 def _build_triton_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]) -> str:
@@ -187,10 +212,15 @@ def _build_triton_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, A
 
 
 def _build_hip_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]) -> str:
-    metrics = baseline_metrics.get("metrics", {}) or {}
+    top_kernels = baseline_metrics.get("top_kernels", [])
     bottleneck = _normalized_bottleneck(baseline_metrics)
-    hbm_util = _safe_float(metrics.get("memory.hbm_bandwidth_utilization"))
-    bandwidth_deprioritized = bottleneck == "latency" and (hbm_util is None or hbm_util < 10.0)
+    hbm_utils = [
+        _safe_float((k.get("metrics", {}) or {}).get("memory.hbm_bandwidth_utilization"))
+        for k in top_kernels
+    ]
+    hbm_utils_valid = [h for h in hbm_utils if h is not None]
+    max_hbm_util = max(hbm_utils_valid) if hbm_utils_valid else None
+    bandwidth_deprioritized = bottleneck == "latency" and (max_hbm_util is None or max_hbm_util < 10.0)
     is_search_like = _is_search_like_workload(kernel, baseline_metrics)
 
     prefer_first = [
@@ -272,13 +302,18 @@ def _build_hip_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]
     ]
 
     if is_search_like and bottleneck == "latency":
-        l2_hit = _safe_float(metrics.get("memory.l2_hit_rate"))
+        l2_hits = [
+            _safe_float((k.get("metrics", {}) or {}).get("memory.l2_hit_rate"))
+            for k in top_kernels
+        ]
+        l2_hit_valid = [h for h in l2_hits if h is not None]
+        min_l2 = min(l2_hit_valid) if l2_hit_valid else None
         lines.extend(
             [
                 "Search / pointer-chasing classifier:",
                 (
-                    f"- Evidence: bottleneck={bottleneck}; HBM utilization={_format_optional_float(hbm_util, '%')}; "
-                    f"L2 hit rate={_format_optional_float(l2_hit, '%')}"
+                    f"- Evidence: bottleneck={bottleneck}; max HBM utilization={_format_optional_float(max_hbm_util, '%')}; "
+                    f"min L2 hit rate={_format_optional_float(min_l2, '%')}"
                 ),
                 "- Treat this as latency-bound search work, so branchlessness, specialization, and cooperative search matter more than throughput tuning.",
             ]

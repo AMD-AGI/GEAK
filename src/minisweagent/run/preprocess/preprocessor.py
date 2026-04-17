@@ -1143,11 +1143,27 @@ def run_preprocessor(
     if profiling and profiling.get("success", True):
         try:
             from minisweagent.run.preprocess.baseline import build_baseline_metrics
+            from minisweagent.run.preprocess.kernel_selector import select_relevant_kernels
 
-            baseline_metrics = build_baseline_metrics(profiling, include_all=True)
-            dur = baseline_metrics.get("duration_us", "?")
+            _kname = Path(kernel_path).stem if kernel_path else ""
+            selected_names = select_relevant_kernels(
+                profiling,
+                kernel_name=_kname,
+                kernel_path=kernel_path,
+                model_factory=model_factory,
+            )
+            if selected_names:
+                logger.info("  LLM selected kernels (relevance order): %s", selected_names)
+                baseline_metrics = build_baseline_metrics(
+                    profiling, kernel_names=selected_names, preserve_order=True
+                )
+            else:
+                logger.info("  Kernel selection unavailable; using all kernels")
+                baseline_metrics = build_baseline_metrics(profiling, include_all=True)
+
             bn = baseline_metrics.get("bottleneck", "?")
-            logger.info("  Baseline: %s µs, bottleneck=%s", dur, bn)
+            n_kernels = len(baseline_metrics.get("top_kernels", []))
+            logger.info("  Baseline: %d kernel(s), bottleneck=%s", n_kernels, bn)
         except Exception as exc:
             logger.warning("[yellow]Baseline metrics failed: %s[/yellow]", exc, exc_info=True)
     else:
@@ -1155,9 +1171,9 @@ def run_preprocessor(
 
     ctx["baseline_metrics"] = baseline_metrics
 
-    # Enrich baseline_metrics with the canonical wall-clock benchmark so all
-    # consumers compare benchmark-vs-benchmark instead of mixing Metrix
-    # profile durations with wall-clock latencies.
+    # Enrich baseline_metrics with benchmark duration and ensure duration_us
+    # always has a value.  benchmark_duration_us is the canonical source;
+    # duration_us is set as an alias (or from profiler sum as fallback).
     if baseline_metrics is None:
         baseline_metrics = {}
     bb_path = output_dir / "benchmark_baseline.txt"
@@ -1168,15 +1184,18 @@ def run_preprocessor(
         _bm_val = extract_latency_ms(bb_text)
         if _bm_val is not None:
             baseline_metrics["benchmark_duration_us"] = _bm_val * 1000.0
-            # Preserve profiler value separately, then override duration_us with
-            # the harness-measured value so all consumers use the same source.
-            if "duration_us" in baseline_metrics:
-                baseline_metrics["profiler_duration_us"] = baseline_metrics["duration_us"]
-            baseline_metrics["duration_us"] = _bm_val * 1000.0
         _sm = _re.search(r"(\d+)\s+shapes", bb_text, _re.IGNORECASE)
         if _sm:
             baseline_metrics["benchmark_shape_count"] = int(_sm.group(1))
-        ctx["baseline_metrics"] = baseline_metrics
+
+    if "benchmark_duration_us" in baseline_metrics:
+        baseline_metrics["duration_us"] = baseline_metrics["benchmark_duration_us"]
+    else:
+        _top = baseline_metrics.get("top_kernels", [])
+        if _top:
+            baseline_metrics["duration_us"] = sum(k.get("duration_us", 0) for k in _top)
+
+    ctx["baseline_metrics"] = baseline_metrics
 
     if baseline_metrics:
         (output_dir / "baseline_metrics.json").write_text(json.dumps(baseline_metrics, indent=2, default=str))

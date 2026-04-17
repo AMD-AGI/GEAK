@@ -139,6 +139,8 @@ def process_instance(
 
     agent = None
     extra_info = None
+    exit_status = "never_started"
+    result = ""
 
     try:
         env = get_sb_environment(config, instance)

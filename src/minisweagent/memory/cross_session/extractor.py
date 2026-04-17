@@ -76,7 +76,6 @@ def extract_experience(**kwargs: Any) -> ExperienceRecord:
     round_insights = _extract_round_insights(report_dir, what_worked, what_failed)
     strategies = _extract_strategies_with_diffs(report_dir, kernel_path)
     agent_reasoning_samples = _extract_reasoning_samples(report_dir)
-
     return ExperienceRecord(
         kernel_path=kernel_path,
         kernel_name=kernel_name,
@@ -273,6 +272,11 @@ def _read_kernel_source(kernel_path: str) -> str:
         return ""
 
 
+=======
+    )
+
+
+>>>>>>> babbdb94 (feat: wire per-kernel profiling into baseline_metrics.json)
 def _resolve_report_dir(patch_file: str, kernel_path: str) -> Path | None:
     """Find the GEAK logs directory containing final_report.json and working notebook.
 
@@ -476,6 +480,24 @@ def _extract_numeric_metrics(profiling_metrics: dict) -> dict[str, Any]:
     """Extract only numeric metrics for fingerprinting (strip non-numeric fields)."""
     if not isinstance(profiling_metrics, dict):
         return {}
+    top_kernels = profiling_metrics.get("top_kernels", [])
+    if (
+        top_kernels
+        and isinstance(top_kernels, list)
+        and isinstance(top_kernels[0], dict)
+        and "metrics" in top_kernels[0]
+    ):
+        # First-wins: top_kernels is in relevance order (LLM-ranked), so the
+        # most-relevant kernel's metric value is used for each key.
+        merged: dict[str, Any] = {}
+        for k in top_kernels:
+            km = k.get("metrics", {})
+            if isinstance(km, dict):
+                for mk, mv in km.items():
+                    if isinstance(mv, (int, float)) and mv is not None and mk not in merged:
+                        merged[mk] = mv
+        return merged
+    # Fallback for old schema or direct metrics dict
     metrics = profiling_metrics.get("metrics", profiling_metrics)
     if not isinstance(metrics, dict):
         return {}

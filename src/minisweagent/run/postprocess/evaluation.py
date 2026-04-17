@@ -395,6 +395,7 @@ def run_profile(
     round_eval: dict[str, Any],
     round_num: int,
     results_dir: Path,
+    ctx: dict[str, Any] | None = None,
 ) -> None:
     """Run the COMMANDMENT PROFILE section, save output, compare against baseline.
 
@@ -404,6 +405,7 @@ def run_profile(
     and builds a comparison against ``baseline_metrics.json``.
     Mutates ``round_eval["profile_comparison"]`` in place.
     """
+    ctx = ctx or {}
     profile_script = build_eval_script(str(commandment_path), ["SETUP", "PROFILE"])
     if not profile_script:
         logger.warning("No PROFILE commands found in COMMANDMENT")
@@ -452,8 +454,26 @@ def run_profile(
         return
 
     from minisweagent.run.preprocess.baseline import build_baseline_metrics
+    from minisweagent.run.preprocess.kernel_selector import select_relevant_kernels
 
-    optimized_metrics = build_baseline_metrics(profile_result, include_all=True)
+    _kname = Path(ctx.get("kernel_path", "")).stem
+    _kpath = str(ctx.get("kernel_path", ""))
+    _model_factory = ctx.get("model_factory")
+
+    opt_selected = select_relevant_kernels(
+        profile_result,
+        kernel_name=_kname,
+        kernel_path=_kpath,
+        model_factory=_model_factory,
+        baseline_kernel_names=baseline_metrics.get("kernel_names", []),
+    )
+    if opt_selected:
+        optimized_metrics = build_baseline_metrics(
+            profile_result, kernel_names=opt_selected, preserve_order=True
+        )
+    else:
+        optimized_metrics = build_baseline_metrics(profile_result, include_all=True)
+
     comparison: dict[str, Any] = {
         "baseline": baseline_metrics,
         "optimized": optimized_metrics,
@@ -464,10 +484,71 @@ def run_profile(
     if base_bn != opt_bn:
         comparison["bottleneck_shift"] = f"{base_bn} -> {opt_bn}"
 
+    per_kernel_deltas = _build_per_kernel_deltas(baseline_metrics, optimized_metrics)
+    if per_kernel_deltas:
+        comparison["per_kernel_deltas"] = per_kernel_deltas
+
     comparison_path = results_dir / "profile_comparison.json"
     comparison_path.write_text(json.dumps(comparison, indent=2, default=str))
     round_eval["profile_comparison"] = comparison
     logger.info("Profile comparison saved to %s", comparison_path)
+
+
+def _build_per_kernel_deltas(
+    baseline: dict[str, Any], optimized: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Build per-kernel metric deltas between baseline and optimized profiles.
+
+    Pairs kernels by exact name.  Because baseline and optimized kernel sets
+    are independently LLM-selected, a renamed/fused kernel will appear as
+    "eliminated" + "new" rather than as a matched pair.  Downstream consumers
+    should interpret "eliminated" as "not found by name" rather than "kernel
+    was removed entirely."
+    """
+    base_by_name = {k["name"]: k for k in baseline.get("top_kernels", [])}
+    opt_by_name = {k["name"]: k for k in optimized.get("top_kernels", [])}
+
+    deltas: list[dict[str, Any]] = []
+
+    for name, base_k in base_by_name.items():
+        opt_k = opt_by_name.get(name)
+        if not opt_k:
+            deltas.append({
+                "name": name,
+                "status": "eliminated",
+                "baseline_duration_us": base_k.get("duration_us", 0),
+            })
+            continue
+        delta: dict[str, Any] = {"name": name, "status": "present"}
+        base_dur = base_k.get("duration_us", 0)
+        opt_dur = opt_k.get("duration_us", 0)
+        if base_dur:
+            delta["duration_us_change"] = round(opt_dur - base_dur, 3)
+            delta["profile_time_ratio"] = round(base_dur / opt_dur, 3) if opt_dur else None
+
+        base_m = base_k.get("metrics", {})
+        opt_m = opt_k.get("metrics", {})
+        for metric_key in ("memory.hbm_bandwidth_utilization", "memory.l2_hit_rate"):
+            bv = base_m.get(metric_key)
+            ov = opt_m.get(metric_key)
+            if bv is not None and ov is not None:
+                delta[f"{metric_key}_change"] = round(ov - bv, 2)
+
+        if base_k.get("bottleneck") != opt_k.get("bottleneck"):
+            delta["bottleneck_shift"] = (
+                f"{base_k.get('bottleneck')} -> {opt_k.get('bottleneck')}"
+            )
+        deltas.append(delta)
+
+    for name, opt_k in opt_by_name.items():
+        if name not in base_by_name:
+            deltas.append({
+                "name": name,
+                "status": "new",
+                "optimized_duration_us": opt_k.get("duration_us", 0),
+            })
+
+    return deltas
 
 
 def write_eval_results(
@@ -714,7 +795,7 @@ def evaluate_round_best(
 
     try:
         run_correctness_and_benchmark(eval_worktree, eval_env, commandment_path, pp_dir, round_eval, round_num)
-        run_profile(eval_worktree, eval_env, commandment_path, pp_dir, round_eval, round_num, results_dir)
+        run_profile(eval_worktree, eval_env, commandment_path, pp_dir, round_eval, round_num, results_dir, ctx=ctx)
     finally:
         cleanup_eval_worktree(repo_root, eval_worktree)
 

@@ -110,6 +110,7 @@ def build_baseline_metrics(
     kernel_indices: list[int] | None = None,
     include_all: bool = False,
     gpu_index: int = 0,
+    preserve_order: bool = False,
 ) -> dict:
     """Build a baseline_metrics dict from agent-chosen kernels.
 
@@ -117,10 +118,14 @@ def build_baseline_metrics(
 
     Args:
         profiler_result: Dict from ``kernel-profile --json`` (either backend).
-        kernel_names: Kernel names to include (exact match).
+        kernel_names: Kernel names to include (order preserved when
+            ``preserve_order=True``).
         kernel_indices: Kernel indices to include (0-based).
         include_all: If True, include all kernels.
         gpu_index: Which GPU result to read.
+        preserve_order: If True, keep the caller's ordering for
+            *kernel_names* (e.g. LLM relevance ranking).  If False
+            (default), ``_format_baseline`` sorts by duration descending.
 
     Returns:
         Dict ready to be written as ``baseline_metrics.json``.
@@ -150,10 +155,24 @@ def build_baseline_metrics(
         selected = [all_kernels[i] for i in kernel_indices]
     else:
         assert kernel_names is not None
-        name_set = set(kernel_names)
-        selected = [k for k in all_kernels if k["name"] in name_set]
-        found_names = {k["name"] for k in selected}
-        missing = name_set - found_names
+        # Preserve the caller's ordering (e.g. LLM relevance ranking).
+        # Dedupe requested names (LLM may return duplicates).
+        # If profiled entries share a name (aggregate_by_kernel=True should
+        # prevent this, but guard anyway), keep the first match.
+        name_to_kernel: dict[str, dict] = {}
+        for k in all_kernels:
+            name_to_kernel.setdefault(k["name"], k)
+        seen_names: set[str] = set()
+        selected = []
+        missing = []
+        for name in kernel_names:
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            if name in name_to_kernel:
+                selected.append(name_to_kernel[name])
+            else:
+                missing.append(name)
         if missing:
             available = [k["name"] for k in all_kernels]
             raise ValueError(f"Kernel(s) not found: {sorted(missing)}. Available: {available}")
@@ -161,19 +180,59 @@ def build_baseline_metrics(
     if not selected:
         raise ValueError("No kernels selected.")
 
-    return _format_baseline(selected)
-
-
-def _format_baseline(selected: list[dict]) -> dict:
-    """Format selected kernel(s) into the baseline_metrics.json structure."""
-    # Sort by duration descending for consistent dominant-kernel ordering
-    selected = sorted(
-        selected,
-        key=lambda k: k.get("duration_us", k.get("metrics", {}).get("duration_us", 0)),
-        reverse=True,
+    all_total_dur = sum(
+        k.get("duration_us", k.get("metrics", {}).get("duration_us", 0))
+        for k in all_kernels
     )
+    result = _format_baseline(
+        selected,
+        preserve_order=preserve_order,
+        all_kernels_total_dur=all_total_dur,
+    )
+    result["total_profiled_kernels"] = len(all_kernels)
+    result["selection_mode"] = "llm_selected" if preserve_order else "all_kernels"
 
-    aggregated = aggregate_metrics(selected)
+    # Carry gpu_info so downstream consumers don't need profile.json
+    gpu_results = profiler_result.get("results", [])
+    if gpu_results and gpu_index < len(gpu_results):
+        gpu_info = gpu_results[gpu_index].get("gpu_info")
+        if gpu_info:
+            result["gpu_info"] = gpu_info
+
+    return result
+
+
+def _format_baseline(
+    selected: list[dict],
+    *,
+    preserve_order: bool = False,
+    all_kernels_total_dur: float = 0,
+) -> dict:
+    """Format selected kernel(s) into the baseline_metrics.json structure.
+
+    Each ``top_kernels`` entry carries the full per-kernel ``metrics`` dict
+    and ``observations`` list.  There is **no** top-level aggregated
+    ``metrics`` dict -- consumers should iterate ``top_kernels`` instead.
+
+    Args:
+        selected: Kernel dicts to include.  When *preserve_order* is True
+            the input order is kept (e.g. LLM relevance ranking).
+        preserve_order: If False (default / legacy), sort by duration
+            descending.  If True, keep the caller's ordering.
+        all_kernels_total_dur: Total duration of ALL profiled kernels (not
+            just selected).  Used to compute ``pct_of_all_gpu_time`` for
+            fragmentation detection.  Omitted from entries when 0.
+    """
+    if not selected:
+        return {}
+
+    if not preserve_order:
+        selected = sorted(
+            selected,
+            key=lambda k: k.get("duration_us", k.get("metrics", {}).get("duration_us", 0)),
+            reverse=True,
+        )
+
     dominant = selected[0]
 
     if len(selected) == 1:
@@ -181,7 +240,6 @@ def _format_baseline(selected: list[dict]) -> dict:
     else:
         kernel_name = f"{dominant['name']}+{len(selected) - 1}"
 
-    # Merge observations (deduplicated, order-preserving)
     seen: set[str] = set()
     observations: list[str] = []
     for k in selected:
@@ -190,31 +248,33 @@ def _format_baseline(selected: list[dict]) -> dict:
                 seen.add(obs)
                 observations.append(obs)
 
-    canonical_dur = aggregated.get("duration_us_min", aggregated.get("duration_us", 0))
+    total_selected_dur = sum(
+        k.get("duration_us", k.get("metrics", {}).get("duration_us", 0))
+        for k in selected
+    ) or 1
 
-    total_dur = aggregated.get("duration_us", 0) or 1  # avoid div-by-zero
     top_kernels = []
     for k in selected:
         k_dur = k.get("duration_us", k.get("metrics", {}).get("duration_us", 0))
-        top_kernels.append(
-            {
-                "name": k["name"],
-                "duration_us": round(k_dur, 3),
-                "pct_of_total": round(100.0 * k_dur / total_dur, 1),
-                "bottleneck": k.get("bottleneck", "unknown"),
-            }
-        )
+        entry: dict = {
+            "name": k["name"],
+            "duration_us": round(k_dur, 3),
+            "pct_of_selected": round(100.0 * k_dur / total_selected_dur, 1),
+            "bottleneck": k.get("bottleneck", "unknown"),
+            "observations": k.get("observations", []),
+            "metrics": k.get("metrics", {}),
+        }
+        if all_kernels_total_dur > 0:
+            entry["pct_of_all_gpu_time"] = round(100.0 * k_dur / all_kernels_total_dur, 1)
+        top_kernels.append(entry)
 
     result = {
-        "duration_us": canonical_dur,
         "kernel_name": kernel_name,
         "kernel_names": [k["name"] for k in selected],
-        "metrics": aggregated,
         "bottleneck": dominant.get("bottleneck", "unknown"),
         "observations": observations,
         "top_kernels": top_kernels,
     }
-    # Sanitize NaN/inf values to ensure valid JSON output
     return _sanitize_value(result)
 
 

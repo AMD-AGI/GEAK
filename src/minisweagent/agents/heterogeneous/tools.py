@@ -67,7 +67,6 @@ def tool_generate_tasks(
 
     pp_dir = Path(ctx["preprocess_dir"])
     for attr, filename in [
-        ("profiling_path", "profile.json"),
         ("commandment_path", "COMMANDMENT.md"),
         ("baseline_metrics_path", "baseline_metrics.json"),
         ("discovery_path", "discovery.json"),
@@ -157,7 +156,6 @@ def tool_generate_tasks(
         repo_root=str(ctx.get("repo_root", "")),
         commandment=str(kwargs.get("commandment_path", "")),
         baseline_metrics=str(kwargs.get("baseline_metrics_path", "")),
-        profiling=str(kwargs.get("profiling_path", "")),
         codebase_context=str(kwargs.get("codebase_context_path", "")),
         benchmark_baseline=str(pp_dir / "benchmark_baseline.txt")
         if (pp_dir / "benchmark_baseline.txt").exists()

@@ -161,14 +161,17 @@ def test_build_workload_guidance_classifies_hip_search_as_latency_bound():
     baseline_metrics = {
         "kernel_name": "rocprim::detail::binary_search lower_bound",
         "bottleneck": "latency",
-        "metrics": {
-            "memory.hbm_bandwidth_utilization": 0.3,
-            "memory.l2_hit_rate": 70.6,
-        },
         "top_kernels": [
             {
                 "name": "transform_kernel<binary_search<lower_bound>>",
                 "bottleneck": "latency",
+                "duration_us": 10.0,
+                "pct_of_selected": 100.0,
+                "observations": [],
+                "metrics": {
+                    "memory.hbm_bandwidth_utilization": 0.3,
+                    "memory.l2_hit_rate": 70.6,
+                },
             }
         ],
     }
@@ -192,11 +195,17 @@ def test_build_workload_guidance_for_triton_deprioritizes_dispatch():
     baseline_metrics = {
         "kernel_name": "fused_rms_fp8",
         "bottleneck": "memory-bound",
-        "duration_us": 12.4,
-        "metrics": {
-            "memory.hbm_bandwidth_utilization": 71.2,
-            "memory.l2_hit_rate": 44.0,
-        },
+        "top_kernels": [{
+            "name": "fused_rms_fp8",
+            "bottleneck": "memory-bound",
+            "duration_us": 12.4,
+            "pct_of_selected": 100.0,
+            "observations": [],
+            "metrics": {
+                "memory.hbm_bandwidth_utilization": 71.2,
+                "memory.l2_hit_rate": 44.0,
+            },
+        }],
     }
 
     guidance = _build_workload_guidance(kernel, baseline_metrics)
