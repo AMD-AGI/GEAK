@@ -190,3 +190,11 @@ optimization_logs/*
 
 # MkDocs build output (deployed via GitHub Actions, not committed)
 site/
+baseline_metrics.json
+profile.json
+tests/test_data/
+optimized_silu.hip.cpp
+CLAUDE.md
+knowledge-base-descriptors/
+README-CN.md
+docs/superpowers/
