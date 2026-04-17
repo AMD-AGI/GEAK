@@ -157,7 +157,7 @@ def main(
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs."),
     test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command"),
-    target_language: str | None = typer.Option(None, "--target-language", help="Target language for kernel optimization (e.g. flydsl). When omitted, FlyDSL-specific paths are disabled."),
+    target_language: str | None = typer.Option(None, "--target-language", help="Target language for kernel optimization (e.g. flydsl)."),
 ):
     # fmt: on
     del visual

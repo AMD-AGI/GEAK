@@ -76,14 +76,15 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
     ),
     "flydsl": (
         "This is a FlyDSL kernel (Python DSL with @flyc.kernel / @flyc.jit, JIT-compiled via MLIR/ROCm).\n"
+        "- FlyDSL is pre-installed via `pip install flydsl`; no build-time path setup needed.\n"
         "- Import via Python package path (e.g. `from kernels.softmax_kernel import ...`). "
-        "Do NOT use importlib.util; rely on PYTHONPATH/LD_LIBRARY_PATH from COMMANDMENT SETUP.\n"
+        "Do NOT use importlib.util; rely on PYTHONPATH from COMMANDMENT SETUP.\n"
         "- Use `torch.testing.assert_close` for correctness. Reuse tolerances/shapes from tests/kernels/.\n"
         "- Benchmark with `torch.cuda.Event`. Include large shapes (e.g. (4096,8192), (8192,8192)) "
         "where GPU compute dominates; small shapes reflect JIT dispatch overhead, not kernel performance.\n"
         "- Optimize GPU kernel code inside @flyc.kernel only (tile sizes, memory access, vectorization, "
         "shared memory, fast math). Do NOT add Python dispatch caches or bypass wrappers.\n"
-        "- NEVER use sys.path.insert(); SETUP handles PYTHONPATH and LD_LIBRARY_PATH."
+        "- NEVER use sys.path.insert(); SETUP handles PYTHONPATH."
     ),
     "asm": (
         "This is a precompiled HSACO assembly kernel.\n"
