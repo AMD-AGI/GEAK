@@ -93,10 +93,27 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
 
     patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     # errors="replace" is the Unicode error handling mode for str.decode()
+
+    # Discover sibling sub-agent worktree object stores so a 3-way fallback
+    # can bridge patch-lineage mismatches (e.g. when sub-agents were seeded
+    # with a pre-wrapped kernel blob whose ancestry the eval worktree does
+    # not share). We walk up from the patch file, find the first ``worktrees``
+    # directory, and collect the ``.git/objects`` path of each slot.
+    sibling_alternates: list[Path] = []
+    for ancestor in patch_path.resolve().parents:
+        wt_root = ancestor / "worktrees"
+        if wt_root.is_dir():
+            for slot in sorted(wt_root.iterdir()):
+                objects_dir = slot / ".git" / "objects"
+                if objects_dir.is_dir():
+                    sibling_alternates.append(objects_dir)
+            break
+
     apply_result, removed_paths = apply_patch_with_generated_helper_fallback(
         patch_text=patch_text,
         cwd=eval_dir,
         env=git_env,
+        object_alternates=sibling_alternates,
     )
     if removed_paths:
         logger.warning(
