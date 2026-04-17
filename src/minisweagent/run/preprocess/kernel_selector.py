@@ -111,10 +111,12 @@ def select_relevant_kernels(
 
     try:
         model = model_factory()
-        response = model.query([
-            {"role": "system", "content": _KERNEL_SELECTION_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ])
+        response = model.query(
+            [
+                {"role": "system", "content": _KERNEL_SELECTION_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+        )
         names = _parse_json_array(response.get("content", ""))
         if names is None:
             logger.warning(

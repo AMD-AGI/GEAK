@@ -1418,14 +1418,8 @@ def _search_workload_guidance(metrics: dict) -> list[str]:
         return []
 
     top_kernels = metrics.get("top_kernels", [])
-    all_hbm = [
-        _safe_float((k.get("metrics", {}) or {}).get("memory.hbm_bandwidth_utilization"))
-        for k in top_kernels
-    ]
-    all_l2 = [
-        _safe_float((k.get("metrics", {}) or {}).get("memory.l2_hit_rate"))
-        for k in top_kernels
-    ]
+    all_hbm = [_safe_float((k.get("metrics", {}) or {}).get("memory.hbm_bandwidth_utilization")) for k in top_kernels]
+    all_l2 = [_safe_float((k.get("metrics", {}) or {}).get("memory.l2_hit_rate")) for k in top_kernels]
     # max HBM: if ANY kernel uses bandwidth, don't classify as pure search.
     hbm_util = max((h for h in all_hbm if h is not None), default=None)
     # min L2: worst-case for display text.

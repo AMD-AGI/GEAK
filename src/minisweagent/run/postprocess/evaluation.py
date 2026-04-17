@@ -468,9 +468,7 @@ def run_profile(
         baseline_kernel_names=baseline_metrics.get("kernel_names", []),
     )
     if opt_selected:
-        optimized_metrics = build_baseline_metrics(
-            profile_result, kernel_names=opt_selected, preserve_order=True
-        )
+        optimized_metrics = build_baseline_metrics(profile_result, kernel_names=opt_selected, preserve_order=True)
     else:
         optimized_metrics = build_baseline_metrics(profile_result, include_all=True)
 
@@ -494,9 +492,7 @@ def run_profile(
     logger.info("Profile comparison saved to %s", comparison_path)
 
 
-def _build_per_kernel_deltas(
-    baseline: dict[str, Any], optimized: dict[str, Any]
-) -> list[dict[str, Any]]:
+def _build_per_kernel_deltas(baseline: dict[str, Any], optimized: dict[str, Any]) -> list[dict[str, Any]]:
     """Build per-kernel metric deltas between baseline and optimized profiles.
 
     Pairs kernels by exact name.  Because baseline and optimized kernel sets
@@ -513,11 +509,13 @@ def _build_per_kernel_deltas(
     for name, base_k in base_by_name.items():
         opt_k = opt_by_name.get(name)
         if not opt_k:
-            deltas.append({
-                "name": name,
-                "status": "eliminated",
-                "baseline_duration_us": base_k.get("duration_us", 0),
-            })
+            deltas.append(
+                {
+                    "name": name,
+                    "status": "eliminated",
+                    "baseline_duration_us": base_k.get("duration_us", 0),
+                }
+            )
             continue
         delta: dict[str, Any] = {"name": name, "status": "present"}
         base_dur = base_k.get("duration_us", 0)
@@ -535,18 +533,18 @@ def _build_per_kernel_deltas(
                 delta[f"{metric_key}_change"] = round(ov - bv, 2)
 
         if base_k.get("bottleneck") != opt_k.get("bottleneck"):
-            delta["bottleneck_shift"] = (
-                f"{base_k.get('bottleneck')} -> {opt_k.get('bottleneck')}"
-            )
+            delta["bottleneck_shift"] = f"{base_k.get('bottleneck')} -> {opt_k.get('bottleneck')}"
         deltas.append(delta)
 
     for name, opt_k in opt_by_name.items():
         if name not in base_by_name:
-            deltas.append({
-                "name": name,
-                "status": "new",
-                "optimized_duration_us": opt_k.get("duration_us", 0),
-            })
+            deltas.append(
+                {
+                    "name": name,
+                    "status": "new",
+                    "optimized_duration_us": opt_k.get("duration_us", 0),
+                }
+            )
 
     return deltas
 

@@ -673,14 +673,8 @@ def _search_workload_guidance(metrics: dict) -> list[str]:
         return []
 
     top_kernels = metrics.get("top_kernels", [])
-    all_hbm = [
-        _safe_float((k.get("metrics", {}) or {}).get("memory.hbm_bandwidth_utilization"))
-        for k in top_kernels
-    ]
-    all_l2 = [
-        _safe_float((k.get("metrics", {}) or {}).get("memory.l2_hit_rate"))
-        for k in top_kernels
-    ]
+    all_hbm = [_safe_float((k.get("metrics", {}) or {}).get("memory.hbm_bandwidth_utilization")) for k in top_kernels]
+    all_l2 = [_safe_float((k.get("metrics", {}) or {}).get("memory.l2_hit_rate")) for k in top_kernels]
     # max HBM: if ANY selected kernel has significant bandwidth usage,
     # the workload isn't purely latency-bound search -- don't dismiss bandwidth.
     hbm_util = max((h for h in all_hbm if h is not None), default=None)

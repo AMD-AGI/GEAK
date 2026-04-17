@@ -1049,9 +1049,7 @@ class SaveAndTestTool:
                 for k in top[:3]:
                     dur = k.get("duration_us")
                     if isinstance(dur, (int, float)):
-                        lines.append(
-                            f"  {k.get('name', '?')}: {dur:.3f} us [{k.get('bottleneck', '?')}]"
-                        )
+                        lines.append(f"  {k.get('name', '?')}: {dur:.3f} us [{k.get('bottleneck', '?')}]")
             elif bottleneck:
                 lines.append(f"Bottleneck: {bottleneck}")
         elif patch_profile.get("reason"):

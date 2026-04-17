@@ -516,14 +516,10 @@ def _run_task_agent(
                             status = kd.get("status", "present")
                             if status == "eliminated":
                                 evals_text += (
-                                    f"  - {kd['name']}: ELIMINATED "
-                                    f"(was {kd.get('baseline_duration_us', '?')}us)\n"
+                                    f"  - {kd['name']}: ELIMINATED (was {kd.get('baseline_duration_us', '?')}us)\n"
                                 )
                             elif status == "new":
-                                evals_text += (
-                                    f"  - {kd['name']}: NEW "
-                                    f"({kd.get('optimized_duration_us', '?')}us)\n"
-                                )
+                                evals_text += f"  - {kd['name']}: NEW ({kd.get('optimized_duration_us', '?')}us)\n"
                             else:
                                 ratio = kd.get("profile_time_ratio", "N/A")
                                 dur_change = kd.get("duration_us_change", "N/A")

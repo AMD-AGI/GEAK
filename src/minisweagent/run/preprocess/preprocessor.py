@@ -1154,9 +1154,7 @@ def run_preprocessor(
             )
             if selected_names:
                 logger.info("  LLM selected kernels (relevance order): %s", selected_names)
-                baseline_metrics = build_baseline_metrics(
-                    profiling, kernel_names=selected_names, preserve_order=True
-                )
+                baseline_metrics = build_baseline_metrics(profiling, kernel_names=selected_names, preserve_order=True)
             else:
                 logger.info("  Kernel selection unavailable; using all kernels")
                 baseline_metrics = build_baseline_metrics(profiling, include_all=True)

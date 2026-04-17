@@ -214,10 +214,7 @@ def _build_triton_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, A
 def _build_hip_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]) -> str:
     top_kernels = baseline_metrics.get("top_kernels", [])
     bottleneck = _normalized_bottleneck(baseline_metrics)
-    hbm_utils = [
-        _safe_float((k.get("metrics", {}) or {}).get("memory.hbm_bandwidth_utilization"))
-        for k in top_kernels
-    ]
+    hbm_utils = [_safe_float((k.get("metrics", {}) or {}).get("memory.hbm_bandwidth_utilization")) for k in top_kernels]
     hbm_utils_valid = [h for h in hbm_utils if h is not None]
     max_hbm_util = max(hbm_utils_valid) if hbm_utils_valid else None
     bandwidth_deprioritized = bottleneck == "latency" and (max_hbm_util is None or max_hbm_util < 10.0)
@@ -302,10 +299,7 @@ def _build_hip_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]
     ]
 
     if is_search_like and bottleneck == "latency":
-        l2_hits = [
-            _safe_float((k.get("metrics", {}) or {}).get("memory.l2_hit_rate"))
-            for k in top_kernels
-        ]
+        l2_hits = [_safe_float((k.get("metrics", {}) or {}).get("memory.l2_hit_rate")) for k in top_kernels]
         l2_hit_valid = [h for h in l2_hits if h is not None]
         min_l2 = min(l2_hit_valid) if l2_hit_valid else None
         lines.extend(

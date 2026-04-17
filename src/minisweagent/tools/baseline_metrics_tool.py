@@ -31,6 +31,7 @@ class BaselineMetricsTool:
             {output: str, returncode: int}
         """
         import warnings
+
         warnings.warn(
             "Direct build_baseline_metrics() produces a minimal schema without "
             "benchmark_duration_us, gpu_info, or selection_mode. Use the preprocessor "

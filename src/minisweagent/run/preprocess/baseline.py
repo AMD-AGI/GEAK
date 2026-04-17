@@ -180,10 +180,7 @@ def build_baseline_metrics(
     if not selected:
         raise ValueError("No kernels selected.")
 
-    all_total_dur = sum(
-        k.get("duration_us", k.get("metrics", {}).get("duration_us", 0))
-        for k in all_kernels
-    )
+    all_total_dur = sum(k.get("duration_us", k.get("metrics", {}).get("duration_us", 0)) for k in all_kernels)
     result = _format_baseline(
         selected,
         preserve_order=preserve_order,
@@ -248,10 +245,7 @@ def _format_baseline(
                 seen.add(obs)
                 observations.append(obs)
 
-    total_selected_dur = sum(
-        k.get("duration_us", k.get("metrics", {}).get("duration_us", 0))
-        for k in selected
-    ) or 1
+    total_selected_dur = sum(k.get("duration_us", k.get("metrics", {}).get("duration_us", 0)) for k in selected) or 1
 
     top_kernels = []
     for k in selected:
