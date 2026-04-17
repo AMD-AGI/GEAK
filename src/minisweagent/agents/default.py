@@ -140,8 +140,8 @@ class DefaultAgent:
         # Always wrap RAG MCP tools with postprocessor filter
         try:
             self.toolruntime.wrap_rag_tools_with_postprocessor()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to wrap RAG tools with RAG postprocessor: %s", e)
         # Propagate agent's env vars (HIP_VISIBLE_DEVICES etc.) to tools
         agent_env = getattr(self.env.config, "env", None)
         if agent_env:

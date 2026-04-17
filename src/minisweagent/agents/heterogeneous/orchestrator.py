@@ -217,8 +217,8 @@ def run_heterogeneous_orchestrator(
     else:
         try:
             toolruntime.wrap_rag_tools_with_postprocessor()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to wrap RAG tools with RAG postprocessor: %s", e)
 
     ctx: dict[str, Any] = {
         **preprocess_ctx,

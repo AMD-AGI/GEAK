@@ -68,8 +68,8 @@ class StrategyAgent(InteractiveAgent):
         # Re-apply RAG postprocessor wrapping after ToolRuntime rebuild
         try:
             self.toolruntime.wrap_rag_tools_with_postprocessor()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to wrap RAG tools with RAG postprocessor: %s", e)
 
         # Override model tools so the LLM only sees dispatchable tools
         if hasattr(self.model, "set_tools"):

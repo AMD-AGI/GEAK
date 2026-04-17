@@ -255,7 +255,7 @@ def main(
                     f"  python {_build_script} --force"
                 )
             logger.info("RAG index built successfully.")
-    if not rag_enabled:
+    else:
         disabled_tools.append("query")
         disabled_tools.append("optimize")
 
