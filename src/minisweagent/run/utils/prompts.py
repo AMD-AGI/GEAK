@@ -66,3 +66,56 @@ Return ONLY a valid JSON object. Example:
 Here is the task content:
 {task_content}
 """
+
+EXTRACT_USER_CONSTRAINTS_TEMPLATE = """Analyze the following optimization task and extract mandatory constraints and prescribed optimization directives.
+
+Extract TWO categories:
+
+1. **constraints**: Hard rules that MUST NOT be violated (rejection criteria).
+   Look for:
+   - Function name constraints ("function name MUST be exactly X", "do NOT rename")
+   - Signature constraints ("function signature MUST be identical")
+   - Numerical correctness requirements ("output must be numerically identical")
+   - Compatibility constraints ("keep all template parameters compatible")
+   - Forbidden actions ("do NOT modify the test harness")
+   - Any other explicit MUST / MUST NOT / DO NOT rules
+
+2. **directives**: Prescribed optimization strategies that agents SHOULD follow as their primary approach, while retaining freedom to explore additional directions beyond these.
+   Look for:
+   - Specific optimization strategies ("tune block sizes", "optimize shared memory usage")
+   - Memory access guidance ("improve memory coalescing", "vectorize loads/stores")
+   - Architecture-specific tuning ("tune for MI355X gfx950 304 CUs")
+   - Performance targets ("close efficiency gap toward 75-100% of peak HBM bandwidth")
+
+Do NOT extract:
+- Hardware descriptions without an actionable directive
+- Model-level or end-to-end profiling numbers (e.g., "89.72 ms across 12288 invocations",
+  "4.77% of total GPU compute time", "38.57% of 8.0 TB/s peak HBM bandwidth"). These come
+  from full-model benchmarking under different conditions and MUST NOT be used as baselines
+  for comparison. GEAK runs its own isolated baseline measurements.
+- Workload context descriptions ("LLM inference serving", "decode path")
+- File paths or kernel identifiers
+
+IMPORTANT: Performance targets like "close efficiency gap toward 75-100% of peak bandwidth"
+are valid directives. But absolute numbers from the user's profiling (durations, invocation
+counts, efficiency percentages) are NOT — they reflect a different measurement environment.
+
+Return ONLY a valid JSON object. Example:
+{{
+  "constraints": [
+    "The output function name MUST be EXACTLY: topkGatingSoftmax. Do NOT rename it.",
+    "The function signature MUST be IDENTICAL to the original.",
+    "Output must be numerically identical to the original."
+  ],
+  "directives": [
+    "Tune block sizes and wave occupancy for MI355X gfx950 (304 CUs).",
+    "Optimize shared memory (LDS) usage for expert gating softmax.",
+    "Improve memory coalescing for top-k routing output writes."
+  ]
+}}
+
+If a category has no items, return an empty list for it.
+
+Here is the task content:
+{task_content}
+"""

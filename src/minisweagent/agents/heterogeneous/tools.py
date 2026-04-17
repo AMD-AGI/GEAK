@@ -39,8 +39,21 @@ def tool_generate_tasks(
     taskgen_model = ctx["model_factory"]() if ctx.get("model_factory") else ctx["model"]
 
     kernel_meta = ctx.get("kernel_meta") or {}
+    _MAX_BASE_TASK_CONTEXT = 4000
+    _user_instr = ctx.get("user_instructions", "")
+    if len(_user_instr) > _MAX_BASE_TASK_CONTEXT:
+        _cutoff = _user_instr.rfind("\n\n", 0, _MAX_BASE_TASK_CONTEXT)
+        if _cutoff < _MAX_BASE_TASK_CONTEXT // 2:
+            _cutoff = _MAX_BASE_TASK_CONTEXT
+        _user_instr = _user_instr[:_cutoff] + "\n\n[... truncated ...]"
+        logger.warning(
+            "Truncated user_instructions from %d to %d chars for task generator.",
+            len(ctx.get("user_instructions", "")),
+            _cutoff,
+        )
+
     kwargs: dict[str, Any] = {
-        "base_task_context": "",
+        "base_task_context": _user_instr,
         "agent_class": ctx["agent_class"],
         "model": taskgen_model,
         "kernel_path": kernel_meta.get("kernel_path", str(ctx.get("kernel_path", ""))),

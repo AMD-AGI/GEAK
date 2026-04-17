@@ -44,11 +44,13 @@ agent:
        This resolves all dependency issues upfront. Do NOT manually search for packages.
     3) Your task context contains **pre-scanned discovery results** from an automated scan.
        Review the Kernel Analysis, discovered test files, and language-specific guidance provided.
-    4) **If `src/minisweagent/run/preprocess/INSTRUCTIONS.md` exists** in the repository, read sections 1a and 1b for:
+    4) GEAK's harness instructions live at the repo-relative path
+       `src/minisweagent/run/preprocess/INSTRUCTIONS.md` inside the GEAK repo.
+       This file may not exist inside the target kernel repository.
+       If you can read that exact relative path directly, use sections 1a and 1b for:
        - Test harness requirements (the `--correctness`, `--profile`, `--benchmark`, `--full-benchmark` modes)
        - COMMANDMENT format rules (the harness will be referenced in COMMANDMENT.md)
-       Follow these rules when creating or adapting the test harness.
-       If `src/minisweagent/run/preprocess/INSTRUCTIONS.md` does not exist, follow the rules in this system prompt instead.
+       If that exact path is not directly readable, follow the rules in this system prompt instead.
     5) Determine the **absolute path** of the repo root (run `pwd` or use task context).
     6) If discovery found high-confidence existing tests or benchmarks, **read and validate them first**:
        - If a benchmark script exists (e.g. `benchmarks/benchmark_*.py`), read it — it shows the correct import pattern and shapes.
@@ -56,7 +58,9 @@ agent:
        - If it needs adaptation (adding `--profile` mode, `GEAK_RESULT_LATENCY_MS` output), adapt it.
        - Prefer adapting existing tests/benchmarks over creating new ones from scratch.
     7) Do NOT use interactive terminal programs (`view`, `less`, `vi`, `vim`, etc.).
-    8) Do NOT waste steps searching for packages with `find`. If step 2 succeeded, imports should work.
+    8) Do NOT waste steps searching for packages or `INSTRUCTIONS.md` with `find`.
+       In particular, never use broad searches like `find /` or `find .`.
+       Use the provided GEAK repo-relative path directly, or continue with the rules in this prompt.
     9) For multi-file kernel repos: the `pip install -e .` in step 2 handles PYTHONPATH. If not installable, add the repo root to sys.path in the harness.
 
     Part 2: Creating a new test harness
@@ -214,6 +218,15 @@ agent:
        - Fixed seed: torch.manual_seed(42).
        - Keep harness outside kernel directory.
        - For fused tasks: test BOTH unfused and fused paths.
+       - Preserve the source benchmark/test's full execution contract, not just
+         shapes: per-tensor dtype, device, layout, contiguity, index dtypes,
+         auxiliary buffers/caches/scales, helper-side preprocessing, and
+         supported CLI mode semantics.
+       - Do NOT normalize all tensors to a single dtype just because the main
+         activations use it.
+       - Before submitting, reason through why each CLI mode could fail. If a
+         mode would fail, apply the smallest source-faithful fix instead of
+         rewriting the harness.
 
     After deciding which benchmark file to wrap, write its path:
        echo "/absolute/path/to/bench_file.py" > harness_shapes_source.txt

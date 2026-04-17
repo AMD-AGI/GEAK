@@ -796,12 +796,3 @@ class ProfilingAnalyzer:
             "output": result.stdout.strip() or result.stderr.strip(),
             "returncode": 1,
         }
-
-
-if __name__ == "__main__":
-    repo = "/data/yueliu14/mini-swe-agent/rocPRIM_block_run_length_decode/build"
-    profiling_cmd = './benchmark/benchmark_block_run_length_decode --benchmark_filter="int,int,1,100"'
-    output_path = "/data/yueliu14/mini-swe-agent/rocprof_test_results"
-    kernel_profiling = ProfilingAnalyzer(profiling_type="profiling")
-    response = kernel_profiling(profiling_workdir=repo, profiling_cmd=profiling_cmd)
-    print(response["output"])

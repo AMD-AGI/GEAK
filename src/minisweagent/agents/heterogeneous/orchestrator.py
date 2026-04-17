@@ -252,7 +252,7 @@ def run_heterogeneous_orchestrator(
     if not cmd:
         logger.error("No commandment found in preprocess_ctx.")
         raise ValueError("No commandment found in preprocess_ctx.")
-    cmd_excerpt = cmd[:1500] + ("..." if len(cmd) > 1500 else "") if cmd else "Not available"
+    cmd_excerpt = cmd[:4000] + ("..." if len(cmd) > 4000 else "") if cmd else "Not available"
 
     codebase_ctx = ""
     _codebase_ctx_path = preprocess_dir / "CODEBASE_CONTEXT.md"
@@ -275,8 +275,11 @@ def run_heterogeneous_orchestrator(
         )
         if _memory_context:
             _memory_context = "### Optimization Memory (from past runs)\n" + _memory_context
-    except Exception as exc:
-        logger.debug("Memory context assembly failed: %s", exc)
+            logger.info("Cross-session memory context injected (%d chars)", len(_memory_context))
+        else:
+            logger.info("Cross-session memory: no relevant experiences found")
+    except Exception as _mem_exc:
+        logger.warning("Cross-session memory assembly failed: %s", _mem_exc)
 
     _working_mem = None
     try:

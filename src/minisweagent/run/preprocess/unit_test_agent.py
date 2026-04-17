@@ -28,6 +28,9 @@ class UnitTestAgent(DefaultAgent):
         super().__init__(model, env, config_class=UnitTestAgentConfig, **kwargs)
 
 
+_GEAK_PREPROCESS_INSTRUCTIONS_RELATIVE_PATH = "src/minisweagent/run/preprocess/INSTRUCTIONS.md"
+
+
 def _extract_test_command(text: str) -> str:
     match = re.search(r"TEST_COMMAND:\s*(.+)\s*$", text.strip(), re.MULTILINE)
     if not match:
@@ -212,8 +215,11 @@ def run_unit_test_agent(
     task = (
         f"Create a fixed test harness for kernel: {kernel_name}\n"
         f"Repository: {repo}\n\n"
-        f"IMPORTANT: Read src/minisweagent/run/preprocess/INSTRUCTIONS.md in the repository for test harness requirements\n"
-        f"and COMMANDMENT format rules before creating the harness."
+        f"IMPORTANT: The GEAK tooling instructions live at the repo-relative path "
+        f"{_GEAK_PREPROCESS_INSTRUCTIONS_RELATIVE_PATH} inside the GEAK repo, not inside the target kernel repository.\n"
+        f"Use that exact relative path for harness requirements and COMMANDMENT rules if it is directly readable.\n"
+        f"Do NOT use broad recursive searches such as `find /`, `find .`, or other global filesystem scans to locate it.\n"
+        f"If that exact path is not directly readable, follow the harness and COMMANDMENT rules already provided in your system prompt."
     )
     if preferred_harness_path is not None:
         task += (

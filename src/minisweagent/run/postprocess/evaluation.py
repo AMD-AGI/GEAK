@@ -573,6 +573,31 @@ def evaluate_round_best(
         )
 
     if not candidates:
+        # Fallback: check for best_patch.diff directly in the round directory.
+        # The heterogeneous orchestrator LLM sometimes creates patches directly
+        # (e.g. when dispatch_tasks fails and it edits kernel.py manually).
+        for diff_name in ("best_patch.diff", "best_patch.patch"):
+            fallback_patch = results_dir / diff_name
+            if fallback_patch.exists() and fallback_patch.stat().st_size > 0:
+                logger.info(
+                    "Round %d: no best_results.json found, but found fallback patch: %s",
+                    round_num,
+                    fallback_patch,
+                )
+                candidates.append(
+                    {
+                        "task": "orchestrator_direct",
+                        "patch_file": str(fallback_patch),
+                        "speedup": 1.0,
+                        "kernel_time_ms": None,
+                        "per_shape_speedups": {},
+                        "baseline_shape_latency_ms": {},
+                        "candidate_shape_latency_ms": {},
+                    }
+                )
+                break
+
+    if not candidates:
         logger.info("Round %d: no valid candidates for evaluation", round_num)
         no_improvement_eval = {
             "round": round_num,

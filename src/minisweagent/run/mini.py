@@ -2,6 +2,7 @@
 
 """Backup mini entry with kernel-type routing."""
 
+import json
 import logging
 import shlex
 import subprocess
@@ -26,7 +27,12 @@ from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.orchestrator import run_orchestrator
 from minisweagent.run.preprocess.preprocessor import run_preprocessor
-from minisweagent.run.utils.task_parser import _resolve_path_case, display_parsed_config, parse_task_info
+from minisweagent.run.utils.task_parser import (
+    _resolve_path_case,
+    display_parsed_config,
+    extract_user_constraints,
+    parse_task_info,
+)
 from minisweagent.utils.log import DEFAULT_LOG_FILENAME, add_file_handler
 
 logger = logging.getLogger(__name__)
@@ -512,12 +518,33 @@ def main(
             logger.error(error_message)
             raise RuntimeError(error_message)
 
-        task_content = f"{commandment}\n\n---\n\n{task_content}"
-        logger.info(
-            "Prepended COMMANDMENT.md to task content (total length %d chars).",
-            len(task_content),
-        )
-        logger.debug("Task content after commandment prepend: %s", task_content)
+        preprocess_ctx["user_instructions"] = task_content
+
+        extracted = extract_user_constraints(task_content, model)
+        _addendum_parts: list[str] = []
+        if extracted["constraints"]:
+            _addendum_parts.append("## USER-SPECIFIED CONSTRAINTS\n\nThese are mandatory. Violation means rejection.\n")
+            _addendum_parts.extend(f"- {c}" for c in extracted["constraints"])
+        if extracted["directives"]:
+            _addendum_parts.append(
+                "\n## PRESCRIBED OPTIMIZATION DIRECTIVES\n\n"
+                "These are the user's prescribed optimization strategies. Prioritize them, but\n"
+                "also explore additional directions beyond these.\n"
+                "NOTE: Any performance numbers in the original user request come from full-model\n"
+                "profiling under different conditions. Use ONLY the GEAK-measured baseline metrics\n"
+                "for before/after speedup comparisons.\n"
+            )
+            _addendum_parts.extend(f"- {d}" for d in extracted["directives"])
+        if _addendum_parts:
+            preprocess_ctx["commandment"] = commandment + "\n\n" + "\n".join(_addendum_parts)
+            _commandment_path = preprocess_output_dir / "COMMANDMENT.md"
+            _commandment_path.write_text(preprocess_ctx["commandment"], encoding="utf-8")
+            logger.info(
+                "Enriched commandment with %d constraints and %d directives (written to %s).",
+                len(extracted["constraints"]),
+                len(extracted["directives"]),
+                _commandment_path,
+            )
 
         preprocess_ctx["rag_enabled"] = rag_enabled
         report = run_orchestrator(
@@ -534,6 +561,33 @@ def main(
 
     metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
     logger.info("Using metric: %s", metric)
+
+    # Cross-session memory injection for homogeneous mode
+    _kernel_path = preprocess_ctx.get("kernel_path", "")
+    _bm = preprocess_ctx.get("baseline_metrics") or {}
+    if isinstance(_bm, str):
+        try:
+            _bm = json.loads(_bm)
+        except Exception:
+            _bm = {}
+    try:
+        from minisweagent.memory.integration import assemble_memory_context
+        _mem_ctx = assemble_memory_context(
+            kernel_path=_kernel_path,
+            bottleneck_type=_bm.get("bottleneck", ""),
+            profiling_metrics=_bm,
+        )
+        if _mem_ctx:
+            task_content = (
+                task_content
+                + "\n\n### Optimization Memory (from past kernel optimization runs)\n"
+                + _mem_ctx
+            )
+            logger.info("Cross-session memory injected into homogeneous task (%d chars)", len(_mem_ctx))
+        else:
+            logger.info("Cross-session memory: no relevant experiences found")
+    except Exception as _mem_exc:
+        logger.warning("Cross-session memory unavailable: %s", _mem_exc)
 
     agent_config = dict(config.get("agent", {}))
     agent_config["save_patch"] = True
