@@ -4,6 +4,8 @@
 
 import logging
 import shlex
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -204,27 +206,49 @@ def main(
     # RAG MCP toggle: disable RAG tools when rag is not enabled
     rag_enabled = tools_cfg.get("rag", False)
     if rag_enabled:
-        # Fail fast: check that rag-mcp package is installed
+        # Auto-install rag-mcp package if missing
         try:
             import rag_mcp  # noqa: F401
         except ImportError:
-            msg = (
-                "RAG is enabled in config but rag-mcp package is not installed.\n\n"
-                "Please install it:\n"
-                "  pip install -e mcp_tools/rag-mcp"
+            logger.info("rag-mcp package not found, installing automatically...")
+            _rag_mcp_path = Path(__file__).resolve().parents[3] / "mcp_tools" / "rag-mcp"
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-e", str(_rag_mcp_path)],
+                capture_output=True, text=True,
             )
-            raise RuntimeError(msg)
-        # Fail fast: check that the semantic index has been built
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Auto-install of rag-mcp failed.\n\n"
+                    f"stderr:\n{result.stderr}\n\n"
+                    "Please install manually:\n"
+                    f"  pip install -e {_rag_mcp_path}"
+                )
+            logger.info("rag-mcp installed successfully.")
+            # Refresh sys.path so the newly installed package is discoverable
+            import importlib
+            import site
+            importlib.invalidate_caches()
+            site.main()
+            import rag_mcp  # noqa: F401
+        # Auto-build semantic index if missing
         _index_path = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
         _has_faiss = (_index_path / "index.faiss").exists() or (_index_path / "faiss.index").exists()
         _has_pkl = bool(list(_index_path.glob("*.pkl"))) if _index_path.exists() else False
         if not (_has_faiss and _has_pkl):
-            raise RuntimeError(
-                "RAG is enabled in config but the semantic index was not found at:\n"
-                f"  {_index_path}\n\n"
-                "Please build the index first:\n"
-                "  python scripts/build_index.py --force"
+            logger.info("RAG index not found at %s, building automatically...", _index_path)
+            _build_script = Path(__file__).resolve().parents[3] / "scripts" / "build_index.py"
+            result = subprocess.run(
+                [sys.executable, str(_build_script), "--force"],
+                capture_output=True, text=True,
             )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Auto-build of RAG index failed.\n\n"
+                    f"stderr:\n{result.stderr}\n\n"
+                    "Please build manually:\n"
+                    f"  python {_build_script} --force"
+                )
+            logger.info("RAG index built successfully.")
     if not rag_enabled:
         disabled_tools.append("query")
         disabled_tools.append("optimize")
