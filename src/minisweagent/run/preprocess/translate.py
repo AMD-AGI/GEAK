@@ -171,6 +171,7 @@ def run_translation(
     _model = model
     if _model is None and model_name is None and model_config.get("model_name"):
         from minisweagent.models import get_model
+
         _print(f"  Using model from agent config: {model_config['model_name']}")
         _model = get_model(model_config["model_name"], config=model_config)
     if _model is None:
@@ -312,7 +313,9 @@ def run_translation(
             # Parse timing from the validation run's stdout — the harness
             # prints latencies and speedup when the candidate is tested.
             _parse_timing_from_harness_output(
-                harness_result.get("stdout", ""), result, _print,
+                harness_result.get("stdout", ""),
+                result,
+                _print,
             )
 
             # -- Performance regression gate --
@@ -323,16 +326,13 @@ def run_translation(
             if speedup_val is not None and speedup_val < perf_fail_threshold:
                 pt_ms = result.get("translation_pytorch_latency_ms", "?")
                 fly_ms = result.get("translation_flydsl_latency_ms", "?")
-                _print(
-                    f"  PERF REGRESSION: {speedup_val:.2f}x "
-                    f"(threshold {perf_fail_threshold}x) — retrying"
-                )
+                _print(f"  PERF REGRESSION: {speedup_val:.2f}x (threshold {perf_fail_threshold}x) — retrying")
                 result["translation_success"] = False
                 result["translation_kernel_path"] = None
                 best_attempt_errors.append(
                     f"Performance regression: {speedup_val:.2f}x speedup "
                     f"(PyTorch {pt_ms}ms vs FlyDSL {fly_ms}ms). "
-                    f"Your translation is {1/speedup_val:.1f}x SLOWER than PyTorch. "
+                    f"Your translation is {1 / speedup_val:.1f}x SLOWER than PyTorch. "
                     f"Avoid Python for-loops over batch dimensions. "
                     f"Use build_flash_attn_func_module for attention patterns, "
                     f"compile_preshuffle_gemm_a8 for batched GEMM. "
@@ -340,10 +340,7 @@ def run_translation(
                 )
                 continue
             elif speedup_val is not None and speedup_val < perf_warn_threshold:
-                _print(
-                    f"  PERF WARNING: {speedup_val:.2f}x "
-                    f"(below {perf_warn_threshold}x warn threshold)"
-                )
+                _print(f"  PERF WARNING: {speedup_val:.2f}x (below {perf_warn_threshold}x warn threshold)")
 
             # -- Save the first passing candidate --
             if first_passing_code is None:
@@ -427,23 +424,34 @@ def run_translation(
         _print(f"  Translation successful in {result['translation_rounds_used']} rounds ({elapsed:.1f}s)")
 
     # Write result metadata
-    (output_dir / "translation_result.json").write_text(
-        json.dumps(result, indent=2, default=str)
-    )
+    (output_dir / "translation_result.json").write_text(json.dumps(result, indent=2, default=str))
 
     return result
 
 
-_NO_EQUIVALENT_OPS = frozenset({
-    "nn.Conv2d", "nn.Conv3d", "F.conv2d", "F.conv3d",
-    "nn.BatchNorm2d", "F.batch_norm",
-    "nn.MaxPool2d", "F.max_pool2d",
-    "nn.AvgPool2d", "F.avg_pool2d",
-})
+_NO_EQUIVALENT_OPS = frozenset(
+    {
+        "nn.Conv2d",
+        "nn.Conv3d",
+        "F.conv2d",
+        "F.conv3d",
+        "nn.BatchNorm2d",
+        "F.batch_norm",
+        "nn.MaxPool2d",
+        "F.max_pool2d",
+        "nn.AvgPool2d",
+        "F.avg_pool2d",
+    }
+)
 
-_GEMM_OPS = frozenset({
-    "torch.mm", "torch.matmul", "torch.bmm", "torch.addmm",
-})
+_GEMM_OPS = frozenset(
+    {
+        "torch.mm",
+        "torch.matmul",
+        "torch.bmm",
+        "torch.addmm",
+    }
+)
 
 
 def _detect_approved_fallbacks(
@@ -458,10 +466,7 @@ def _detect_approved_fallbacks(
     import re as _re
 
     code = candidate_path.read_text()
-    code_lines = [
-        ln for ln in code.splitlines()
-        if not ln.lstrip().startswith("#")
-    ]
+    code_lines = [ln for ln in code.splitlines() if not ln.lstrip().startswith("#")]
     code_no_comments = "\n".join(code_lines)
 
     approved: list[dict] = []
@@ -470,39 +475,47 @@ def _detect_approved_fallbacks(
     # --- fp32 GEMM detection ---
     kb_has_fp32 = bool(_re.search(r'\|\s*"?fp32"?\s*\|', kb_content))
     if not kb_has_fp32:
-        has_half_cast = bool(_re.search(
-            r"\.half\(\)|\.to\(torch\.float16\)|\.bfloat16\(\)|\.to\(torch\.bfloat16\)",
-            code_no_comments,
-        ))
+        has_half_cast = bool(
+            _re.search(
+                r"\.half\(\)|\.to\(torch\.float16\)|\.bfloat16\(\)|\.to\(torch\.bfloat16\)",
+                code_no_comments,
+            )
+        )
         for op in ("torch.mm", "torch.matmul", "torch.addmm"):
             if op in code_no_comments and op not in seen_ops:
                 if op == "torch.mm" and has_half_cast:
                     continue
                 seen_ops.add(op)
-                approved.append({
-                    "op": op,
-                    "reason": "fp32_precision",
-                    "detail": "FlyDSL preshuffle_gemm has no fp32 output type",
-                })
+                approved.append(
+                    {
+                        "op": op,
+                        "reason": "fp32_precision",
+                        "detail": "FlyDSL preshuffle_gemm has no fp32 output type",
+                    }
+                )
 
     # --- Batched matmul ---
     if "torch.bmm" in code_no_comments and "torch.bmm" not in seen_ops:
         seen_ops.add("torch.bmm")
-        approved.append({
-            "op": "torch.bmm",
-            "reason": "batched_matmul",
-            "detail": "FlyDSL has no batched GEMM",
-        })
+        approved.append(
+            {
+                "op": "torch.bmm",
+                "reason": "batched_matmul",
+                "detail": "FlyDSL has no batched GEMM",
+            }
+        )
 
     # --- No-equivalent ops (static list) ---
     for op in _NO_EQUIVALENT_OPS:
         if op in code_no_comments and op not in seen_ops:
             seen_ops.add(op)
-            approved.append({
-                "op": op,
-                "reason": "no_equivalent",
-                "detail": "no FlyDSL equivalent",
-            })
+            approved.append(
+                {
+                    "op": op,
+                    "reason": "no_equivalent",
+                    "detail": "no FlyDSL equivalent",
+                }
+            )
 
     return approved
 
@@ -596,8 +609,7 @@ def _run_self_review(
     if approved_fallbacks:
         lines = [
             "\n### Pre-Approved Fallbacks (DO NOT mark as REPLACE)",
-            "The following PyTorch ops have been verified as acceptable fallbacks "
-            "for this kernel:",
+            "The following PyTorch ops have been verified as acceptable fallbacks for this kernel:",
         ]
         for af in approved_fallbacks:
             lines.append(f"- {af['op']} ({af['reason']}: {af['detail']})")
@@ -618,19 +630,25 @@ def _run_self_review(
     )
 
     try:
-        response = model.query([
-            {
-                "role": "system",
-                "content": (
-                    "You are a GPU kernel translation reviewer specialising in "
-                    "FlyDSL (AMD's Python DSL for MI300X)."
-                ),
-            },
-            {"role": "user", "content": prompt + (
-                "\n\nIMPORTANT REMINDER: Respond with ONLY a JSON object. "
-                "No explanation, no markdown fences. Start with { and end with }."
-            )},
-        ])
+        response = model.query(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a GPU kernel translation reviewer specialising in "
+                        "FlyDSL (AMD's Python DSL for MI300X)."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                    + (
+                        "\n\nIMPORTANT REMINDER: Respond with ONLY a JSON object. "
+                        "No explanation, no markdown fences. Start with { and end with }."
+                    ),
+                },
+            ]
+        )
     except Exception as exc:
         _print(f"  Self-review query error: {exc}")
         return False
@@ -689,10 +707,7 @@ def _run_self_review(
 
     n_replace = sum(1 for f in fallback_audit if f.get("verdict") == "REPLACE")
     n_keep = sum(1 for f in fallback_audit if f.get("verdict") == "KEEP")
-    _print(
-        f"  Self-review: {n_replace} REPLACE, {n_keep} KEEP, "
-        f"{len(efficiency_issues)} efficiency issues"
-    )
+    _print(f"  Self-review: {n_replace} REPLACE, {n_keep} KEEP, {len(efficiency_issues)} efficiency issues")
     _print(f"  Self-review reasoning: {reasoning}")
 
     return {
@@ -951,7 +966,8 @@ def main() -> None:
         help="Target language (default: flydsl)",
     )
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         default=None,
         help="Output directory (default: <kernel_dir>/translation_output)",
     )
@@ -967,7 +983,8 @@ def main() -> None:
         help="Repository root path",
     )
     parser.add_argument(
-        "-m", "--model",
+        "-m",
+        "--model",
         default=None,
         help="Model name for translation agent",
     )
@@ -1006,6 +1023,7 @@ def main() -> None:
 
     try:
         from rich.console import Console
+
         console = Console()
     except ImportError:
         console = None
