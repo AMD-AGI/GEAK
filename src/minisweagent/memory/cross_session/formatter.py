@@ -26,10 +26,7 @@ _PARAM_PATTERNS = [
     ("dtype_cast", re.compile(r"\.to\(\s*tl\.(float32|float16|bfloat16|int32|int64|uint32|uint64)\s*\)")),
     ("bitcast", re.compile(r"bitcast\s*=\s*True|tl\.(int32|uint32)\s*,\s*bitcast")),
     ("tl_arange_dtype", re.compile(r"tl\.arange\([^)]*\)\.to\(\s*tl\.(int32|int64)\s*\)")),
-    (
-        "prealloc_output",
-        re.compile(r"torch\.empty\(|torch\.empty_like\(|output_tensor\s*\.copy_|prealloc", re.IGNORECASE),
-    ),
+    ("prealloc_output", re.compile(r"torch\.empty\(|torch\.empty_like\(|output_tensor\s*\.copy_|prealloc", re.IGNORECASE)),
     ("tl_constexpr_dtype", re.compile(r"tl\.constexpr\s*=\s*tl\.(int32|int64|float32|float16)")),
     ("cuda_graph", re.compile(r"torch\.cuda\.CUDAGraph|cudagraph|cuda_graph", re.IGNORECASE)),
     ("hip_extension", re.compile(r"torch\.utils\.cpp_extension\.load|load_inline\(|hipLaunchKernelGGL")),
@@ -112,6 +109,14 @@ def format_landscape_context(
     n = len(experiences)
     parts.append(f"### Cross-Session Memory (from {n} similar kernel{'s' if n != 1 else ''})")
     parts.append("")
+
+    # Lead with a concrete, imperative directive based on the single best KB
+    # entry so the LLM sees an actionable first-move before any caveats.
+    top_hint = _build_top_hint(experiences, target_kernel_path) if experiences else ""
+    if top_hint:
+        parts.append(top_hint)
+        parts.append("")
+
     parts.append(_build_reasoning_guidance(lang))
     parts.append("")
 
@@ -129,6 +134,44 @@ def format_landscape_context(
         parts.append(chunk)
 
     return "\n".join(parts)
+
+
+def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str) -> str:
+    """Emit an imperative first-move suggestion derived from the top KB entry.
+
+    Shows:
+      * winning kernel name and verified speedup
+      * up to 3 key params extracted from the winning patch
+      * a compact directive to try this approach BEFORE exploring alternatives
+    """
+    if not experiences:
+        return ""
+    top = experiences[0]
+    speedup = getattr(top, "best_speedup", 0.0) or 0.0
+    if not top.success or speedup <= 1.03:
+        return ""
+
+    patch_text = getattr(top, "best_patch", "") or ""
+    params = _extract_key_params(patch_text, max_params=3) if patch_text else []
+    params_str = "; ".join(params) if params else "(see Key params below)"
+
+    target_name = ""
+    if target_kernel_path:
+        tail = target_kernel_path.rstrip("/").rsplit("/", 1)[-1]
+        if tail.endswith(".py"):
+            parts_ = target_kernel_path.rstrip("/").split("/")
+            target_name = parts_[-2] if len(parts_) >= 2 else tail
+        else:
+            target_name = tail
+
+    kernel_hint = f" on `{target_name}`" if target_name else ""
+    return (
+        f"**FIRST-MOVE STRATEGY** — the highest-similarity KB entry "
+        f"(`{top.kernel_name}`, verified **{speedup:.2f}x** speedup) "
+        f"used: {params_str}. **Try this pattern FIRST{kernel_hint}** "
+        f"before exploring other strategies; if it doesn't transfer, "
+        f"fall back to the alternatives listed below."
+    )
 
 
 def _guess_language(experiences: list[ExperienceRecord]) -> str:

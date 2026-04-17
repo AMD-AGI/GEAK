@@ -52,7 +52,14 @@ def retrieve_context(
 
     # Stage 2: text similarity scoring
     query_terms = _build_query_terms(kernel_path, kernel_category, bottleneck_type)
-    scored = _stage2_text_similarity(candidates, query_terms, kernel_category, bottleneck_type, language)
+    scored = _stage2_text_similarity(
+        candidates,
+        query_terms,
+        kernel_category,
+        bottleneck_type,
+        language,
+        target_kernel_path=kernel_path,
+    )
 
     # Relevance gate: require at least one genuine relevance signal before
     # injecting memory. Language boost alone isn't enough -- it causes
@@ -193,12 +200,70 @@ def _text_similarity(query_terms: set[str], doc_text: str) -> float:
     return len(overlap) / (len(query_terms) + len(doc_words) - len(overlap))
 
 
+def _kernel_stem_overlap(target_path: str, kb_kernel_name: str) -> float:
+    """Compute a fine-grained name-stem overlap between the target kernel's
+    path and a KB experience's kernel name.
+
+    Returns a boost in [0.0, 0.30] proportional to the number of shared
+    distinctive tokens (len >= 3, stopwords removed). This makes same-family
+    seeds — e.g. ``fused_rms_fp8`` vs ``fast_rms_layernorm`` (shared:
+    ``rms``), or ``fused_qkv_rope`` vs ``fused_qk_rope_cache_mla``
+    (shared: ``fused``, ``rope``) — rank above random same-language
+    experiences even when path-level text_sim is noisy.
+    """
+
+    if not target_path or not kb_kernel_name:
+        return 0.0
+
+    stopwords = {"the", "and", "kernel", "triton", "hip", "py", "cpp", "cu", "tasks", "geak", "eval"}
+
+    def _tokens(s: str) -> set[str]:
+        out: set[str] = set()
+        for w in re.split(r"[/_.\-\s]+", s.lower()):
+            if len(w) >= 3 and w not in stopwords:
+                out.add(w)
+        return out
+
+    # Target tokens: only the trailing directory name (kernel family)
+    tail = target_path.rstrip("/").rsplit("/", 1)[-1]
+    if tail.endswith(".py"):
+        tail = target_path.rstrip("/").rsplit("/", 2)[-2] if "/" in target_path else tail
+    tgt_tokens = _tokens(tail)
+    if not tgt_tokens:
+        return 0.0
+    kb_tokens = _tokens(kb_kernel_name)
+    if not kb_tokens:
+        return 0.0
+
+    overlap = tgt_tokens & kb_tokens
+    if not overlap:
+        return 0.0
+    # Scale: 1 token shared → +0.10, 2 → +0.20, 3+ → +0.30
+    return min(0.30, 0.10 * len(overlap))
+
+
+def _scaled_success_boost(speedup: float, success: bool) -> float:
+    """Reward KB experiences that achieved higher verified speedups — these
+    contain more transferable signal than marginal 1.05x wins.
+    """
+    if not success or speedup <= 1.05:
+        return 0.0
+    if speedup >= 2.5:
+        return 0.20
+    if speedup >= 1.5:
+        return 0.10
+    if speedup >= 1.2:
+        return 0.07
+    return 0.05
+
+
 def _stage2_text_similarity(
     candidates: list[ExperienceRecord],
     query_terms: set[str],
     query_category: str,
     query_bottleneck: str,
     query_language: str = "",
+    target_kernel_path: str = "",
 ) -> list[tuple[float, ExperienceRecord]]:
     """Score each candidate by text similarity + soft boosts."""
     scored: list[tuple[float, ExperienceRecord]] = []
@@ -227,9 +292,10 @@ def _stage2_text_similarity(
         else:
             lang_boost = 0.0
 
-        success_boost = 0.05 if exp.success and exp.best_speedup > 1.05 else 0.0
+        success_boost = _scaled_success_boost(exp.best_speedup, bool(exp.success))
+        stem_boost = _kernel_stem_overlap(target_kernel_path, exp.kernel_name)
 
-        total = text_sim + cat_boost + bn_boost + lang_boost + success_boost
+        total = text_sim + cat_boost + bn_boost + lang_boost + success_boost + stem_boost
         scored.append((total, exp))
 
     scored.sort(key=lambda x: -x[0])
