@@ -11,8 +11,14 @@ import re
 
 from minisweagent.memory.cross_session.schemas import ExperienceRecord, StrategySkill
 
-_MAX_CONTEXT_FULL = 30_000
-_MAX_CONTEXT_COMPACT = 5_000
+_MAX_CONTEXT_FULL = 60_000
+_MAX_CONTEXT_COMPACT = 8_000
+
+_MAX_BEST_PATCH_CHARS = 8_000
+_MAX_REGRESSION_PATCH_CHARS = 3_500
+_TOP_IMPROVED_STRATEGIES = 5
+_TOP_REGRESSED_STRATEGIES = 3
+_MAX_BASELINE_BENCHMARK_CHARS = 3_500
 
 # Regexes for extracting high-signal optimization parameters from a winning
 # Triton patch. Each captured value is surfaced to the LLM as a short,
@@ -90,6 +96,7 @@ def format_landscape_context(
     query_language: str = "",
     compact: bool = False,
     target_kernel_path: str = "",
+    rag_snippets: list[dict] | None = None,
 ) -> str:
     """Format experiences into a context block with reasoning guidance.
 
@@ -100,8 +107,14 @@ def format_landscape_context(
     target_kernel_path, when provided, is used to emit a short adaptation
     note when the KB seed kernel differs from the target kernel, so the
     LLM knows to translate techniques rather than copy the patch verbatim.
+
+    rag_snippets, when provided, injects a short "Domain KB" section of
+    external AMD/ROCm/Triton reference knowledge retrieved from the
+    rag-mcp markdown corpus (BM25-ranked against the target kernel's
+    source). Complements the experience-based memory above with domain
+    grounding.
     """
-    if not experiences and not skills:
+    if not experiences and not skills and not rag_snippets:
         return ""
 
     lang = query_language or _guess_language(experiences)
@@ -115,6 +128,12 @@ def format_landscape_context(
     top_hint = _build_top_hint(experiences, target_kernel_path) if experiences else ""
     if top_hint:
         parts.append(top_hint)
+        parts.append("")
+
+    # Domain-KB block (complementary signal: AMD aiter reports, Triton-on-ROCm
+    # guides, kernel-family case studies). Kept compact: top 2 snippets.
+    if rag_snippets:
+        parts.append(_build_rag_block(rag_snippets, target_kernel_path))
         parts.append("")
 
     parts.append(_build_reasoning_guidance(lang))
@@ -134,6 +153,38 @@ def format_landscape_context(
         parts.append(chunk)
 
     return "\n".join(parts)
+
+
+def _build_rag_block(snippets: list[dict], target_kernel_path: str) -> str:
+    """Format the Domain-KB block from rag_hook.query_rag() results.
+
+    Each snippet contributes ~1200-1500 chars. Top-2 default keeps the
+    block bounded (~3000 chars total).
+    """
+    if not snippets:
+        return ""
+    lines: list[str] = []
+    lines.append(
+        "### Domain KB (AMD aiter / Triton-on-ROCm — complementary reference):"
+    )
+    lines.append(
+        "*These snippets are retrieved from the AMD GPU knowledge base "
+        "(rag-mcp) based on operation overlap with your kernel. Use them "
+        "for hardware-specific tuning hints (warp size, HBM bandwidth, "
+        "MFMA intrinsics, etc.) NOT as patches to copy. They are NOT from "
+        "successful runs — they are reference material.*"
+    )
+    lines.append("")
+    for idx, snip in enumerate(snippets, 1):
+        title = snip.get("title", "")[:140]
+        layer = snip.get("layer", "unknown")
+        path = snip.get("path", "")
+        body = snip.get("body", "")
+        lines.append(f"**[KB-{idx}] {title}**  (from `{path}`, {layer})")
+        lines.append("")
+        lines.append(body.strip())
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str) -> str:
@@ -287,7 +338,7 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
 
     baseline_bm = exp_dict.get("baseline_benchmark", "")
     if baseline_bm:
-        parts.append(f"\n**Baseline per-shape benchmark:**\n```\n{baseline_bm[:1500]}\n```")
+        parts.append(f"\n**Baseline per-shape benchmark:**\n```\n{baseline_bm[:_MAX_BASELINE_BENCHMARK_CHARS]}\n```")
 
     round_insights = exp_dict.get("round_insights", [])
     if round_insights:
@@ -307,24 +358,36 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
         )
 
         if improved:
-            parts.append(f"\n**Strategies that WORKED ({len(improved)} total, showing top 3 with code):**")
-            for s in improved[:3]:
+            parts.append(
+                f"\n**Strategies that WORKED ({len(improved)} total, showing top "
+                f"{_TOP_IMPROVED_STRATEGIES} with code):**"
+            )
+            for s in improved[:_TOP_IMPROVED_STRATEGIES]:
                 parts.append(f"\n### {s['round']}/{s['task']} — {s['speedup']}x")
                 code = s.get("after_code", "")
                 if code:
-                    parts.append(f"```diff\n{code[:4000]}\n```")
-            if len(improved) > 3:
-                parts.append("\n*Also worked:* " + ", ".join(f"{s['task']}={s['speedup']}x" for s in improved[3:]))
+                    parts.append(f"```diff\n{code[:_MAX_BEST_PATCH_CHARS]}\n```")
+            if len(improved) > _TOP_IMPROVED_STRATEGIES:
+                parts.append(
+                    "\n*Also worked:* "
+                    + ", ".join(f"{s['task']}={s['speedup']}x" for s in improved[_TOP_IMPROVED_STRATEGIES:])
+                )
 
         if regressed:
-            parts.append(f"\n**Strategies that REGRESSED ({len(regressed)} total, showing worst 2 with code):**")
-            for s in regressed[:2]:
+            parts.append(
+                f"\n**Strategies that REGRESSED ({len(regressed)} total, showing worst "
+                f"{_TOP_REGRESSED_STRATEGIES} with code):**"
+            )
+            for s in regressed[:_TOP_REGRESSED_STRATEGIES]:
                 parts.append(f"\n### AVOID: {s['round']}/{s['task']} — {s['speedup']}x (regression)")
                 code = s.get("after_code", "")
                 if code:
-                    parts.append(f"```diff\n{code[:3000]}\n```")
-            if len(regressed) > 2:
-                parts.append("\n*Also regressed:* " + ", ".join(f"{s['task']}={s['speedup']}x" for s in regressed[2:]))
+                    parts.append(f"```diff\n{code[:_MAX_REGRESSION_PATCH_CHARS]}\n```")
+            if len(regressed) > _TOP_REGRESSED_STRATEGIES:
+                parts.append(
+                    "\n*Also regressed:* "
+                    + ", ".join(f"{s['task']}={s['speedup']}x" for s in regressed[_TOP_REGRESSED_STRATEGIES:])
+                )
     else:
         code_section = _best_code_insights_legacy(exp)
         if code_section:

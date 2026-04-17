@@ -15,6 +15,7 @@ kernel regardless of whether profiling metrics match.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
@@ -98,6 +99,25 @@ def retrieve_context(
     except Exception as exc:
         logger.debug("search_skills failed (non-fatal): %s", exc)
 
+    # Stage 3b: domain-KB retrieval (rag-mcp markdown corpus).
+    # Complementary signal to experiences; may return [] cleanly if
+    # KB unavailable or no match. Disabled via GEAK_RAG_HOOK_DISABLE=1.
+    rag_snippets: list[dict] = []
+    if os.environ.get("GEAK_RAG_HOOK_DISABLE", "").lower() not in ("1", "true", "yes"):
+        try:
+            from minisweagent.memory.cross_session.rag_hook import query_rag
+
+            rag_snippets = query_rag(kernel_path=kernel_path, top_k=2)
+            if rag_snippets:
+                logger.info(
+                    "RAG hook: returned %d snippets; top=%s (score=%.2f)",
+                    len(rag_snippets),
+                    rag_snippets[0].get("title", ""),
+                    rag_snippets[0].get("score", 0.0),
+                )
+        except Exception as exc:
+            logger.debug("RAG hook failed (non-fatal): %s", exc)
+
     # Stage 4: format as landscape
     return format_landscape_context(
         experiences=top,
@@ -107,6 +127,7 @@ def retrieve_context(
         query_language=language,
         compact=compact,
         target_kernel_path=kernel_path,
+        rag_snippets=rag_snippets,
     )
 
 
