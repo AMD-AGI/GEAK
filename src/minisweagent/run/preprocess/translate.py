@@ -201,9 +201,6 @@ def run_translation(
     candidate_filename = pair.candidate_filename_fn(kernel_stem)
     candidate_path = output_dir / candidate_filename
 
-    # -- Build the test command that the agent will use via save_and_test --
-    test_command = f"{sys.executable} {{harness}} {pair.harness_candidate_flag} {{candidate}}"
-
     # -- Create translation harness --
     _print("  Creating translation harness...")
     harness_path = output_dir / f"test_{kernel_stem}_translation_harness.py"
@@ -740,7 +737,6 @@ def _create_translation_harness(
     harness creation (run_pytorch_translation_agent) can be used for more
     complex kernels.
     """
-    source_code = kernel_path.read_text()
     harness_code = _generate_minimal_translation_harness(
         kernel_path=kernel_path,
         candidate_path=candidate_path,

@@ -17,7 +17,6 @@ The layered design mirrors :mod:`~minisweagent.agents.unit_test_agent`:
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
