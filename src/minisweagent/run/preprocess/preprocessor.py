@@ -558,10 +558,7 @@ def run_preprocessor(
             _print(f"  Translated kernel: {ctx['kernel_path']}")
         else:
             _errors = translation_result.get("translation_errors", [])
-            _print(
-                "  [red]Translation failed[/red]" if console
-                else "  Translation failed"
-            )
+            _print("  [red]Translation failed[/red]" if console else "  Translation failed")
             for _e in (_errors or [])[-3:]:
                 _print(f"    {_e}")
         ctx["translate_only"] = True
@@ -1017,11 +1014,7 @@ def run_preprocessor(
 
         # ── Step 4: Translation (conditional, after UTA) ─────────────
         if target_language:
-            _print(
-                "[bold cyan]--- Step 4: Translation ---[/bold cyan]"
-                if console
-                else "--- Step 4: Translation ---"
-            )
+            _print("[bold cyan]--- Step 4: Translation ---[/bold cyan]" if console else "--- Step 4: Translation ---")
             from minisweagent.run.preprocess.translate import run_translation
 
             translation_output_dir = output_dir / "translation"
