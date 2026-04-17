@@ -23,52 +23,8 @@ GEAK is an agent-driven framework for end-to-end GPU kernel optimization in real
 
 ## Architecture
 
-Simplified data flow for a typical `geak` run:
+![GEAK Framework](docs/assets/GEAK_framework.png)
 
-```mermaid
-%%{init: {"theme": "neutral", "flowchart": {"curve": "basis", "padding": 6, "nodeSpacing": 28, "rankSpacing": 32}, "themeVariables": {"fontSize": "11px", "fontFamily": "ui-sans-serif, system-ui, sans-serif"}}}%%
-flowchart TB
-  subgraph Inputs
-    direction LR
-    R[Git repository]
-    K[Kernel path / URL]
-    T[Task description]
-  end
-
-  subgraph Setup["Setup in GEAK"]
-    direction TB
-    CFG[Config merge + model]
-    PRE[Preprocessor → harness · metrics · discovery]
-  end
-
-  subgraph OptRun["Optimization run"]
-    direction LR
-    LLM[LLM]
-    TOOL[Built-in tools]
-    ENV[Environment / subprocess]
-    LLM --> TOOL --> ENV
-  end
-
-  subgraph POSTPROC["Postprocess"]
-    SEL[Validation + best patch selection]
-  end
-
-  subgraph OUT["Output"]
-    OP[(optimization_logs · patches · trajectories)]
-  end
-
-  Inputs --> Setup
-  CFG --> OptRun
-  PRE --> OptRun
-  OptRun --> POSTPROC
-  POSTPROC --> OUT
-
-  style Inputs fill:#eff6ff,stroke:#2563eb,stroke-width:1px,color:#1e40af
-  style Setup fill:#fffbeb,stroke:#d97706,stroke-width:1px,color:#92400e
-  style OptRun fill:#ecfdf5,stroke:#059669,stroke-width:1px,color:#065f46
-  style POSTPROC fill:#faf5ff,stroke:#7c3aed,stroke-width:1px,color:#5b21b6
-  style OUT fill:#fef2f2,stroke:#dc2626,stroke-width:1px,color:#991b1b
-```
 
 ---
 
