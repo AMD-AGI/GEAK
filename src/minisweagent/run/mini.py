@@ -5,6 +5,7 @@
 import json
 import logging
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -77,8 +78,6 @@ def _derive_output_dir(output: Path | None, kernel_name: str | None) -> Path:
         from minisweagent.run.utils.task_parser import generate_patch_output_dir
 
         return (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
-
-    output = output.resolve()
 
     if output.suffix:
         return output.parent
@@ -161,8 +160,7 @@ def main(
     # fmt: on
     del visual
 
-    if sys.stdin.isatty():
-        configure_if_first_time()
+    configure_if_first_time()
 
     # 1) Config merge — explicit UTF-8 avoids locale-dependent decoding for YAML on some platforms
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
@@ -210,6 +208,56 @@ def main(
     if tools_cfg.get("profiling") is False:
         disabled_tools.append("profiling")
         disabled_tools.append("profile_kernel")
+
+    # RAG MCP toggle: disable RAG tools when rag is not enabled
+    rag_enabled = tools_cfg.get("rag", False)
+    if rag_enabled:
+        # Auto-install rag-mcp package if missing
+        try:
+            import rag_mcp  # noqa: F401
+        except ImportError:
+            logger.info("rag-mcp package not found, installing automatically...")
+            _rag_mcp_path = Path(__file__).resolve().parents[3] / "mcp_tools" / "rag-mcp"
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-e", str(_rag_mcp_path)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Auto-install of rag-mcp failed.\n\n"
+                    f"stderr:\n{result.stderr}\n\n"
+                    "Please install manually:\n"
+                    f"  pip install -e {_rag_mcp_path}"
+                )
+            logger.info("rag-mcp installed successfully.")
+            # Refresh sys.path so the newly installed package is discoverable
+            import importlib
+            import site
+            importlib.invalidate_caches()
+            site.main()
+            import rag_mcp  # noqa: F401
+        # Auto-build semantic index if missing
+        _index_path = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
+        _has_faiss = (_index_path / "index.faiss").exists() or (_index_path / "faiss.index").exists()
+        _has_pkl = bool(list(_index_path.glob("*.pkl"))) if _index_path.exists() else False
+        if not (_has_faiss and _has_pkl):
+            logger.info("RAG index not found at %s, building automatically...", _index_path)
+            _build_script = Path(__file__).resolve().parents[3] / "scripts" / "build_index.py"
+            result = subprocess.run(
+                [sys.executable, str(_build_script), "--force"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Auto-build of RAG index failed.\n\n"
+                    f"stderr:\n{result.stderr}\n\n"
+                    "Please build manually:\n"
+                    f"  python {_build_script} --force"
+                )
+            logger.info("RAG index built successfully.")
+    else:
+        disabled_tools.append("query")
+        disabled_tools.append("optimize")
 
     if disabled_tools:
         config.setdefault("agent", {}).setdefault("disabled_tools", [])
@@ -498,6 +546,7 @@ def main(
                 _commandment_path,
             )
 
+        preprocess_ctx["rag_enabled"] = rag_enabled
         report = run_orchestrator(
             preprocess_ctx=preprocess_ctx,
             gpu_ids=parsed_gpu_ids,

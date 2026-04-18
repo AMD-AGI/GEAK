@@ -58,6 +58,17 @@ export ANTHROPIC_API_KEY="YOUR_KEY"
 export AMD_LLM_API_KEY="YOUR_KEY"
 ```
 
+### RAG Knowledge Base (Optional)
+
+GPU/ROCm/HIP optimization knowledge base, powered by hybrid retrieval (FAISS + BM25 + reranker).
+
+```bash
+pip install -e mcp_tools/rag-mcp
+python scripts/build_index.py --force
+```
+
+See **[RAG MCP Server](mcp_tools/rag-mcp/README.md)** for configuration and usage details.
+
 ### Usage
 
 #### Basic (single-agent) GPU kernel optimization

@@ -181,8 +181,6 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
-rocPRIM_*/
-2025*/
 *patch
 *txt
 optimization_logs/*
@@ -191,7 +189,22 @@ optimization_logs/*
 .vscode/
 
 # MkDocs build output (deployed via GitHub Actions, not committed)
-site/.rocprofv3/
+site/
+baseline_metrics.json
+profile.json
+tests/test_data/
+optimized_silu.hip.cpp
+CLAUDE.md
+knowledge-base-descriptors/
+README-CN.md
+docs/superpowers/
+.specstory/
+HIP_Shared_Memory_Optimization_Best_Practices.md
+examples/add_kernel/
+examples/matmul_kernel/
+hip_shared_memory_best_practices.md
+test_harness.py
+.rocprofv3/
 mcp_tools/profiler-mcp/.rocprofv3/
 .geak_resolved/
 runs/

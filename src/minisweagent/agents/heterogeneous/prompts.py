@@ -16,7 +16,7 @@ You have been given the results of a preprocessing pipeline:
 
 You also have access to **bash** (execute shell commands),
 **str_replace_editor** (view / edit files), **profile_kernel** (GPU
-profiling), and **strategy_manager**.  Use these only when you need to
+profiling), and **strategy_manager**.{rag_tools_description}  Use these only when you need to
 inspect artefacts, debug a failure, or gather information the
 orchestration tools above cannot provide.
 
@@ -148,6 +148,8 @@ optimization approach, then submit your task list as JSON via the
    bottlenecks, makes edits, then tests and profiles. Best for targeted
    edits, autotune configs, algorithmic rewrites, and any optimization
    where the agent should read-think-edit-test-profile on its own.
+
+__RAG_TOOLS_SECTION__
 
 ## PRIORITY DIRECTIVE -- KERNEL ALGORITHMIC IMPROVEMENT IS THE PRIMARY GOAL
 

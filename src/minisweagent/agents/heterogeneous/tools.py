@@ -113,6 +113,9 @@ def tool_generate_tasks(
     if _round_evals:
         kwargs["round_evaluations"] = _round_evals
 
+    kwargs["output_dir"] = Path(ctx["output_dir"])
+    kwargs["rag_enabled"] = ctx.get("rag_enabled", False)
+
     emit_debug_log(
         "heterogeneous_orchestrator:tool_generate_tasks:before_gen",
         "Invoking task generator with orchestrator model",

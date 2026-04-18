@@ -137,6 +137,11 @@ class DefaultAgent:
         )
         if self.config.disabled_tools:
             self.toolruntime.disable_tools(self.config.disabled_tools)
+        # Always wrap RAG MCP tools with postprocessor filter
+        try:
+            self.toolruntime.wrap_rag_tools_with_postprocessor()
+        except Exception as e:
+            logger.warning("Failed to wrap RAG tools with RAG postprocessor: %s", e)
         # Propagate agent's env vars (HIP_VISIBLE_DEVICES etc.) to tools
         agent_env = getattr(self.env.config, "env", None)
         if agent_env:
@@ -273,6 +278,7 @@ class DefaultAgent:
     def run(self, task: str, **kwargs) -> tuple[str, str]:
         """Run step() until agent is finished. Return exit status & message"""
         self.extra_template_vars |= {"task": task, **kwargs}
+        self.extra_template_vars["tool_names"] = set(self.toolruntime._tool_table.keys())
         self.messages = []
         self._traj_last_saved_idx = -1
         if self.config.use_skills:
