@@ -149,6 +149,76 @@ DISCOVERED_WINNERS = [
         ),
         "tags": ["persistent-cta", "tile-scheduler", "atomic-add", "splitk", "fp4-gemm"],
     },
+    # === fused_qkv_rope strategies (synthetic seeds based on aiter + sglang RAG reports) ===
+    {
+        "kernel_name": "fused_qkv_rope",
+        "kernel_url": "triton2triton/geak_eval/L3/fused_qkv_rope",
+        "kernel_category": "positional_encoding",
+        "bottleneck_type": "memory",
+        "best_strategy": "fused-rope-with-kv-cache-write-eliminate-copy",
+        "baseline_latency_ms": 0.0563,
+        "best_latency_ms": 0.0469,
+        "best_speedup": 1.20,
+        "key_insight": (
+            "From sglang RoPE report: fuse RoPE application with the KV cache write step in one kernel, "
+            "eliminating the separate memory copy. The fused_qkv_split_qk_rope kernel currently writes Q, K "
+            "separately after rope rotation — combine all 3 (Q write + K write + cache write) into a single "
+            "tl.store loop using contiguous output strides. Eliminates ~30% of the global-memory writes."
+        ),
+        "tags": ["fuse-rope-kv-cache", "single-store-pass", "rope"],
+    },
+    {
+        "kernel_name": "fused_qkv_rope",
+        "kernel_url": "triton2triton/geak_eval/L3/fused_qkv_rope",
+        "kernel_category": "positional_encoding",
+        "bottleneck_type": "memory",
+        "best_strategy": "vectorized-cos-sin-load-half-block",
+        "baseline_latency_ms": 0.0563,
+        "best_latency_ms": 0.0489,
+        "best_speedup": 1.15,
+        "key_insight": (
+            "The cos/sin tables are read with strided indexing in fused_qkv_split_qk_rope_kernel. "
+            "Restructure the inner loop to load cos/sin ONCE per BLOCK_D_HALF, then compute "
+            "x_rotated = x_pe * cos + x_pe_other * sin in registers. "
+            "This converts 4x scalar gather into 2x vectorized load, halving HBM bandwidth for the cos/sin path."
+        ),
+        "tags": ["vectorized-load", "cos-sin-cache", "rope"],
+    },
+    {
+        "kernel_name": "fused_qkv_rope",
+        "kernel_url": "triton2triton/geak_eval/L3/fused_qkv_rope",
+        "kernel_category": "positional_encoding",
+        "bottleneck_type": "memory",
+        "best_strategy": "head-dim-coalesced-load-store",
+        "baseline_latency_ms": 0.0563,
+        "best_latency_ms": 0.0507,
+        "best_speedup": 1.11,
+        "key_insight": (
+            "Reorder the kernel's pointer arithmetic so head_dim is the contiguous (innermost) "
+            "stride for both load and store. Many qkv kernels split H first then D, causing strided "
+            "global loads. Pattern: stride_qkv_d should be 1 for the input tensor; transpose at the "
+            "Python wrapper level if needed. Yields ~1.1x from coalesced HBM access."
+        ),
+        "tags": ["coalesced-access", "head-dim-contiguous", "rope"],
+    },
+    {
+        "kernel_name": "fused_qkv_rope",
+        "kernel_url": "triton2triton/geak_eval/L3/fused_qkv_rope",
+        "kernel_category": "positional_encoding",
+        "bottleneck_type": "memory",
+        "best_strategy": "single-pass-fused-norm-rope-quant",
+        "baseline_latency_ms": 0.0563,
+        "best_latency_ms": 0.0413,
+        "best_speedup": 1.36,
+        "key_insight": (
+            "From aiter qk_norm_rope_cache_quant report: fuse 4 ops into one kernel — "
+            "(1) RMSNorm on Q and K, (2) RoPE on Q and K, (3) KV cache write, (4) FP8 quant. "
+            "Single load + single write per token instead of 4 separate kernel launches. "
+            "For fused_qkv_split_qk_rope: even fusing just (2)+(3) saves a full read/write pass. "
+            "Eliminates intermediate buffer allocation; everything stays in registers."
+        ),
+        "tags": ["multi-op-fusion", "single-launch", "rope", "qkv"],
+    },
 ]
 
 
