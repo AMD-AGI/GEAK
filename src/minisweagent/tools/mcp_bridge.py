@@ -274,7 +274,9 @@ def _populate_mcp_bridges() -> None:
             logger.debug("Skipping MCP server %r: directory layout not found", name)
         except Exception as e:
             logger.warning("Could not create MCPToolBridge for %r: %s", name, e)
-            print(f"[MCP] {name}: failed to load. Install dependencies following the instructions in the README.md file.")
+            print(
+                f"[MCP] {name}: failed to load. Install dependencies following the instructions in the README.md file."
+            )
     return _mcp_bridges
 
 
