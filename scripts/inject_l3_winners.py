@@ -219,6 +219,146 @@ DISCOVERED_WINNERS = [
         ),
         "tags": ["multi-op-fusion", "single-launch", "rope", "qkv"],
     },
+    # === ADDITIONAL discovered winners (from later runs) ===
+    {
+        "kernel_name": "fused_rms_fp8",
+        "kernel_url": "triton2triton/geak_eval/L3/fused_rms_fp8",
+        "kernel_category": "normalization",
+        "bottleneck_type": "memory",
+        "best_strategy": "tiled-n-dimension-loop-quant",
+        "baseline_latency_ms": 0.0795,
+        "best_latency_ms": 0.0490,
+        "best_speedup": 1.622,
+        "key_insight": (
+            "Tile the N dimension with an explicit Python-style loop in Triton (Triton statically "
+            "unrolls the loop), processing BLOCK_N elements at a time inside the quant pass. "
+            "Reduces register pressure vs vectorized-everything approach, and allows software pipelining. "
+            "TRANSFERS to: any memory-bound kernel with a quant or reduce pass over a large dimension. "
+            "Combine with welford-style reduction for >1.6x on RMS/LayerNorm/Softmax variants."
+        ),
+        "tags": ["tile-n-loop", "register-control", "quant", "transferable"],
+    },
+    {
+        "kernel_name": "fused_rms_fp8",
+        "kernel_url": "triton2triton/geak_eval/L3/fused_rms_fp8",
+        "kernel_category": "normalization",
+        "bottleneck_type": "memory",
+        "best_strategy": "apply-best-patch-then-shape-specialized-small-m",
+        "baseline_latency_ms": 0.0810,
+        "best_latency_ms": 0.0541,
+        "best_speedup": 1.50,
+        "key_insight": (
+            "Multi-tier patch: combine the round 4 best patch with shape-specialized variants "
+            "for small M (M=1, M=8, M=32). Add a `if M < 32: use_specialized_kernel()` dispatch. "
+            "Each shape gets its OWN Triton kernel with constexpr BLOCK_M tuned for that shape. "
+            "TRANSFERS to: any kernel with extreme-aspect-ratio shape distributions (small batch + "
+            "large hidden) where one-size-fits-all autotune underperforms shape-specific configs."
+        ),
+        "tags": ["shape-specialization", "small-m", "patch-stacking", "transferable"],
+    },
+    {
+        "kernel_name": "fused_rms_fp8",
+        "kernel_url": "triton2triton/geak_eval/L3/fused_rms_fp8",
+        "kernel_category": "normalization",
+        "bottleneck_type": "memory",
+        "best_strategy": "two-pass-reduction-tree-rms-quant",
+        "baseline_latency_ms": 0.0810,
+        "best_latency_ms": 0.0529,
+        "best_speedup": 1.531,
+        "key_insight": (
+            "Two-pass reduction TREE: pass 1 computes per-row sum-of-squares with hierarchical "
+            "tree reduction (warp-shuffle for first level, shared mem for warp-cross-warp). "
+            "Pass 2 normalizes + quantizes with fewer thread-divergent branches. "
+            "Avoids the global-memory atomic accumulation path that simpler single-pass uses. "
+            "TRANSFERS to: any kernel where the bottleneck is reduction granularity > BLOCK_SIZE. "
+            "Pattern is the GPU equivalent of CUB's BlockReduce + WarpReduce ladder."
+        ),
+        "tags": ["reduction-tree", "warp-shuffle", "two-pass", "transferable"],
+    },
+    {
+        "kernel_name": "fused_rms_fp8",
+        "kernel_url": "triton2triton/geak_eval/L3/fused_rms_fp8",
+        "kernel_category": "normalization",
+        "bottleneck_type": "memory",
+        "best_strategy": "hip-kernel-rewrite-latency-bound",
+        "baseline_latency_ms": 0.0810,
+        "best_latency_ms": 0.0564,
+        "best_speedup": 1.436,
+        "key_insight": (
+            "Variant of hip-raw-kernel-latency-bypass: rewrite the entire Triton kernel body "
+            "as an inlined HIP __global__ function with __launch_bounds__(256, 4). "
+            "Removes Triton's MLIR/PTX overhead AND lets you use HIP-specific intrinsics "
+            "(__builtin_amdgcn_ds_swizzle for warp reduce, __ockl_get_group_id for grid, "
+            "__shared__ for explicit LDS). For LATENCY-bound kernels (small problem size), "
+            "this can save 1.4-1.8x vs equivalent Triton."
+        ),
+        "tags": ["hip-rewrite", "intrinsics", "launch-bounds", "latency-bound", "transferable"],
+    },
+    {
+        "kernel_name": "fused_rms_fp8",
+        "kernel_url": "triton2triton/geak_eval/L3/fused_rms_fp8",
+        "kernel_category": "normalization",
+        "bottleneck_type": "memory",
+        "best_strategy": "fused-norm-quant-single-multiply-chain",
+        "baseline_latency_ms": 0.0795,
+        "best_latency_ms": 0.0487,
+        "best_speedup": 1.632,
+        "key_insight": (
+            "Algebraic fusion: combine the three multiply chains "
+            "(normalize: x * inv_var, weight: x * w, quant: x * scale_recip) "
+            "into a SINGLE pre-computed combined_scale = inv_var * w * scale_recip. "
+            "Then do x * combined_scale ONCE. Saves 2 register multiplies per element. "
+            "TRANSFERS to: any norm + scale + quant chain (LayerNorm + LoRA, GroupNorm + scale, etc.)."
+        ),
+        "tags": ["algebraic-fusion", "single-multiply", "norm-scale-quant", "transferable"],
+    },
+    # === Additional gemm winner from observation ===
+    {
+        "kernel_name": "gemm_a16wfp4",
+        "kernel_url": "triton2triton/geak_eval/L3/gemm_a16wfp4",
+        "kernel_category": "gemm",
+        "bottleneck_type": "compute",
+        "best_strategy": "triton-precompute-quant-separate-kernel",
+        "baseline_latency_ms": 0.1733,
+        "best_latency_ms": 0.1214,
+        "best_speedup": 1.428,
+        "key_insight": (
+            "Separate the quant step into a DEDICATED prequant kernel that fires once per weight tensor "
+            "and stores results to a buffer. The main GEMM then reads pre-quantized data. "
+            "Trades extra HBM traffic (writing prequant buffer) for SIMPLER inner GEMM kernel "
+            "with fewer instructions per accumulation step. Net win when weights are reused multiple "
+            "times (decode workloads with many tokens). TRANSFERS to: gemm_a8w8_blockscale, "
+            "gemm_afp4wfp4, fp8_blockwise_mm, any quant-then-matmul pattern."
+        ),
+        "tags": ["separate-prequant-kernel", "buffer-reuse", "weight-quant", "transferable"],
+    },
+    # === Universal "meta-insights" applicable to many kernel categories ===
+    {
+        "kernel_name": "META_universal_techniques",
+        "kernel_url": "META",
+        "kernel_category": "meta",
+        "kernel_language": "triton",
+        "bottleneck_type": "memory",
+        "best_strategy": "META-cross-kernel-transferable-techniques",
+        "baseline_latency_ms": 1.0,
+        "best_latency_ms": 0.5,
+        "best_speedup": 2.0,
+        "key_insight": (
+            "Universal patterns observed to transfer across kernel families:\n"
+            "1. WARP-SHUFFLE reductions (vs tl.sum) — 1.2-1.8x for any tl.sum/tl.max/tl.min over axis<=128\n"
+            "2. HIP RAW REWRITE for latency-bound (small total work) kernels — eliminates Triton dispatch\n"
+            "3. ALGEBRAIC FUSION of multiply chains — combine inv_var*w*scale into one constant\n"
+            "4. WRAPPER FUSION — embed Python-side strides/allocations into kernel preamble\n"
+            "5. PERSISTENT CTA — single program_id covers grid, iterate over tiles internally\n"
+            "6. BITWISE SCALE manipulation — replace log2/exp2/floor with int32 IEEE-754 ops\n"
+            "7. TWO-PASS REDUCTION TREE — warp-then-shared-mem hierarchy for axes > BLOCK_SIZE\n"
+            "8. SHAPE SPECIALIZATION — separate kernel per shape regime (small M, large M)\n"
+            "9. ELIMINATE RESHAPE — direct group/flat indexing instead of tl.reshape passes\n"
+            "10. SINGLE-PASS FUSION of norm+quant+rope+cache_write — kill intermediate buffers\n"
+            "Use these as a CHECKLIST when the agent's natural exploration plateaus."
+        ),
+        "tags": ["meta", "checklist", "universal", "transferable"],
+    },
 ]
 
 
