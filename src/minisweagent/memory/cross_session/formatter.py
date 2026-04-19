@@ -8,6 +8,7 @@ Keeps context under ~15K chars to avoid drowning the kernel's own code.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from minisweagent.memory.cross_session.schemas import ExperienceRecord, StrategySkill
 
@@ -203,21 +204,73 @@ def _build_rag_block(snippets: list[dict], target_kernel_path: str) -> str:
     return "\n".join(lines)
 
 
+def _classify_kb_match(top, target_kernel_path: str) -> tuple[str, str]:
+    """Classify how confidently the KB entry matches the current target kernel.
+
+    Returns ``(tag, hint)`` where:
+      - ``tag`` is a short bracketed annotation (e.g. ``[SAME CODE — diff
+        applies verbatim]``) inserted into the FIRST-MOVE label.
+      - ``hint`` is a short verb hint (``apply verbatim`` / ``adapt to
+        your kernel``) used in the decision prompt.
+
+    Identity is determined by CODE, not by name. Names like
+    ``fused_qkv_rope`` and ``fused_qkv_MLA`` are organizational labels;
+    actual semantics live in the source. We compare the KB entry's
+    ``original_kernel_code`` to the current ``kernel.py`` content:
+
+      * Exact match → SAME CODE → patch applies verbatim
+      * KB entry has stored code, doesn't match → DIFFERENT CODE → diff
+        likely won't apply cleanly; technique may still transfer
+      * KB entry has no stored code → fall back to name comparison as
+        a weaker prior (logged as `[name-only match]`)
+    """
+    target_name = ""
+    if target_kernel_path:
+        tail = target_kernel_path.rstrip("/").rsplit("/", 1)[-1]
+        if tail.endswith(".py"):
+            parts_ = target_kernel_path.rstrip("/").split("/")
+            target_name = parts_[-2] if len(parts_) >= 2 else tail
+        else:
+            target_name = tail
+    name_match = bool(
+        target_name and top.kernel_name and target_name.lower() == top.kernel_name.lower()
+    )
+
+    kb_code = (getattr(top, "original_kernel_code", "") or "").strip()
+    cur_code = ""
+    if target_kernel_path:
+        try:
+            cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            cur_code = ""
+
+    if kb_code and cur_code:
+        if kb_code == cur_code:
+            return " [SAME CODE — diff applies verbatim]", "apply verbatim"
+        if name_match:
+            return (
+                " [SAME KERNEL NAME, DIFFERENT CODE — review diff for applicability]",
+                "review diff against your current code; apply if compatible, else adapt",
+            )
+        return "", "adapt to your kernel (code differs from KB entry's source)"
+
+    if name_match:
+        return " [name-only match — no code stored, treat as related kernel]", "adapt to your kernel"
+    return "", "adapt to your kernel"
+
+
 def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str) -> str:
     """Emit a concise top-hit label and a single decision prompt.
 
-    Design principle: present the data (verified speedup, kernel name,
-    same-kernel-or-not, key params, full diff below); let the agent
-    decide based on the diff + the current kernel.py + the profiling
-    output whether the strategy is applicable. If yes, apply as first
-    priority. If no, the agent is free to optimize from its own analysis
-    without penalty.
+    Design principle: present the data (verified speedup, code-identity tag,
+    key params, full diff below); let the agent decide based on the diff
+    + the current kernel.py + the profiling output whether the strategy
+    is applicable. If yes, apply as first priority. If no, the agent is
+    free to optimize from its own analysis without penalty.
 
-    This avoids both extremes:
-    - Too prescriptive: "always try this first" — wastes rounds when the
-      KB hint is obviously inapplicable.
-    - Too passive: "here's an experience" — under-leverages strong same-
-      kernel verified patches.
+    Identity is determined by CODE comparison, not name matching, since
+    names like ``fused_qkv_rope`` and ``fused_qkv_MLA`` are organizational
+    labels and the actual semantics live in the source.
     """
     if not experiences:
         return ""
@@ -230,28 +283,16 @@ def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str
     params = _extract_key_params(patch_text, max_params=3) if patch_text else []
     params_str = "; ".join(params) if params else "see diff below"
 
-    target_name = ""
-    if target_kernel_path:
-        tail = target_kernel_path.rstrip("/").rsplit("/", 1)[-1]
-        if tail.endswith(".py"):
-            parts_ = target_kernel_path.rstrip("/").split("/")
-            target_name = parts_[-2] if len(parts_) >= 2 else tail
-        else:
-            target_name = tail
-
-    is_same_kernel = (
-        target_name and top.kernel_name and target_name.lower() == top.kernel_name.lower()
-    )
-    same_kernel_tag = " [SAME KERNEL — diff applies verbatim]" if is_same_kernel else ""
+    match_tag, application_hint = _classify_kb_match(top, target_kernel_path)
 
     return (
         f"**KB top hit**: `{top.kernel_name}` verified **{speedup:.2f}x**"
-        f"{same_kernel_tag}. Key params: {params_str}. Full diff below.\n\n"
+        f"{match_tag}. Key params: {params_str}. Full diff below.\n\n"
         f"**Decide**: based on (a) the diff below, (b) your current kernel.py "
         f"code, and (c) the profiling output — does this strategy apply to "
         f"the current kernel? If YES, make it your first priority "
-        f"({'apply verbatim' if is_same_kernel else 'adapt to your kernel'}). "
-        f"If NO, optimize from your own analysis directly without trying it."
+        f"({application_hint}). If NO, optimize from your own analysis "
+        f"directly without trying it."
     )
 
 
