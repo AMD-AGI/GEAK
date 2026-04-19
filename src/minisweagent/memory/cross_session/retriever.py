@@ -25,6 +25,11 @@ from minisweagent.memory.cross_session.schemas import ExperienceRecord
 
 logger = logging.getLogger(__name__)
 
+# Single-source-of-truth speedup threshold (mirrors config.min_store_speedup
+# and formatter._SPEEDUP_THRESHOLD). Any strategy >= this is "WORKED";
+# below 1.0 is "REGRESSED"; in-between is "MARGINAL".
+_SPEEDUP_THRESHOLD = float(os.environ.get("GEAK_MEMORY_MIN_SPEEDUP", "1.10"))
+
 
 def retrieve_context(
     backend: MemoryBackend,
@@ -265,9 +270,11 @@ def _kernel_stem_overlap(target_path: str, kb_kernel_name: str) -> float:
 
 def _scaled_success_boost(speedup: float, success: bool) -> float:
     """Reward KB experiences that achieved higher verified speedups — these
-    contain more transferable signal than marginal 1.05x wins.
+    contain more transferable signal than borderline wins. The lower bound
+    ``_SPEEDUP_THRESHOLD`` mirrors the KB-write threshold (1.10x), so any
+    entry that survived KB filtering qualifies for at least the base boost.
     """
-    if not success or speedup <= 1.05:
+    if not success or speedup < _SPEEDUP_THRESHOLD:
         return 0.0
     if speedup >= 2.5:
         return 0.20

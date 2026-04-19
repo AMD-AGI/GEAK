@@ -21,6 +21,13 @@ _TOP_IMPROVED_STRATEGIES = 5
 _TOP_REGRESSED_STRATEGIES = 3
 _MAX_BASELINE_BENCHMARK_CHARS = 3_500
 
+# Single-source-of-truth speedup threshold for classifying strategies as
+# WORKED vs MARGINAL vs REGRESSED. Mirrors the KB inclusion threshold
+# (``min_store_speedup`` in config.py / ``GEAK_MEMORY_MIN_SPEEDUP`` env var
+# / ``min_speedup_threshold`` in knowledge_base.json). Default 1.10x.
+import os as _os
+_SPEEDUP_THRESHOLD = float(_os.environ.get("GEAK_MEMORY_MIN_SPEEDUP", "1.10"))
+
 # Regexes for extracting high-signal optimization parameters from a winning
 # Triton patch. Each captured value is surfaced to the LLM as a short,
 # actionable ``key params`` list so it can apply the specific value directly
@@ -318,7 +325,7 @@ def _format_compact(exp: ExperienceRecord, exp_dict: dict) -> str:
 
     strategies = exp_dict.get("strategies", [])
     if strategies:
-        improved = [s for s in strategies if s.get("speedup", 0) > 1.0]
+        improved = [s for s in strategies if s.get("speedup", 0) >= _SPEEDUP_THRESHOLD]
         improved.sort(key=lambda s: -s["speedup"])
         if improved:
             parts.append("Worked: " + ", ".join(f"{s['task']}={s['speedup']}x" for s in improved[:5]))
@@ -334,7 +341,7 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
 
     Strategies are the single source of truth -- every strategy has a
     measured speedup AND the full code diff.  We split them into
-    'what worked' (speedup > 1.0) and 'what regressed' (speedup < 1.0)
+    'what worked' (speedup >= _SPEEDUP_THRESHOLD = 1.10x) and 'what regressed' (speedup < 1.0)
     so the agent sees both the code to copy and the code to avoid.
 
     We also surface a short ``key params`` list extracted from the best
@@ -360,7 +367,7 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
     best_patch_text = ""
     if strategies_list:
         improved_list = sorted(
-            [s for s in strategies_list if s.get("speedup", 0) > 1.0],
+            [s for s in strategies_list if s.get("speedup", 0) >= _SPEEDUP_THRESHOLD],
             key=lambda s: -s["speedup"],
         )
         if improved_list:
@@ -394,7 +401,7 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
     strategies = exp_dict.get("strategies", [])
     if strategies:
         improved = sorted(
-            [s for s in strategies if s.get("speedup", 0) > 1.0],
+            [s for s in strategies if s.get("speedup", 0) >= _SPEEDUP_THRESHOLD],
             key=lambda s: -s["speedup"],
         )
         regressed = sorted(
