@@ -169,6 +169,32 @@ class SaveAndTestTool:
                 test_returncode,
                 patch_profile=patch_profile,
             )
+            # Strong feedback when no code changes were captured: this is
+            # almost always a sub-agent bug where the strategy was
+            # described in the tool-call but kernel.py was never edited.
+            # Surfacing this prominently in the tool output (instead of
+            # only as a [SaveAndTest] log line) helps the agent recognise
+            # and correct the mistake within the same round.
+            if not patch_content.strip():
+                no_change_warning = (
+                    "\n\n"
+                    "============================================================\n"
+                    "WARNING: NO CODE CHANGES DETECTED in your worktree.\n"
+                    "------------------------------------------------------------\n"
+                    "This save_and_test call captured an EMPTY patch (0 bytes).\n"
+                    "The benchmark above ran on the BASELINE (unmodified) kernel.py.\n"
+                    "\n"
+                    "To test an optimization, you must EDIT kernel.py BEFORE\n"
+                    "calling save_and_test:\n"
+                    "  1. Use the `edit` / `str_replace` / `write` tool to modify\n"
+                    "     kernel.py with your optimization, OR\n"
+                    "  2. `git apply` a patch file you have prepared.\n"
+                    "\n"
+                    "save_and_test runs `git diff` to capture your changes — if\n"
+                    "no files were modified, there is nothing to test or verify.\n"
+                    "============================================================\n"
+                )
+                output = output + no_change_warning
             return {"output": output, "returncode": 0 if test_passed else 1}
 
         except subprocess.TimeoutExpired:
