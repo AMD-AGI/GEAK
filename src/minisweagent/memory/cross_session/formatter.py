@@ -204,12 +204,23 @@ def _build_rag_block(snippets: list[dict], target_kernel_path: str) -> str:
 
 
 def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str) -> str:
-    """Emit an imperative first-move suggestion derived from the top KB entry.
+    """Emit an imperative first-move directive derived from the top KB entry.
 
-    Shows:
-      * winning kernel name and verified speedup
-      * up to 3 key params extracted from the winning patch
-      * a compact directive to try this approach BEFORE exploring alternatives
+    The directive distinguishes two cases:
+
+    * SAME-KERNEL: the top KB entry's ``kernel_name`` matches the target
+      kernel's directory name (verified patch on YOUR exact kernel.py).
+      Action: APPLY VERBATIM via ``str_replace`` / ``write`` / ``git apply``.
+      The verified speedup is reproducible.
+
+    * DIFFERENT-KERNEL: the top KB entry is from a related kernel.
+      Action: TRANSLATE the technique below to your kernel's structure.
+      The exact diff will not apply — adapt signatures / variable names
+      / imports while preserving the optimization pattern (e.g. warp
+      shuffle reduction, persistent CTA, bitwise scale).
+
+    Both cases produce a strong, concrete first action so the agent
+    does not waste a round re-discovering known-good strategies.
     """
     if not experiences:
         return ""
@@ -231,13 +242,32 @@ def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str
         else:
             target_name = tail
 
-    kernel_hint = f" on `{target_name}`" if target_name else ""
+    is_same_kernel = (
+        target_name and top.kernel_name and target_name.lower() == top.kernel_name.lower()
+    )
+
+    if is_same_kernel:
+        return (
+            f"**FIRST-MOVE — APPLY VERIFIED PATCH DIRECTLY** — KB has a verified "
+            f"**{speedup:.2f}x** patch for YOUR EXACT kernel "
+            f"(`{top.kernel_name}`, key params: {params_str}). "
+            f"This patch was measured on the same kernel.py file you are now "
+            f"optimizing. ACTION: locate the diff block below "
+            f"(### round_*/{top.best_strategy or 'task'}), then apply it to "
+            f"kernel.py via `str_replace` or `write` or `git apply`. The "
+            f"verified speedup is reproducible. Use round 1 to apply + verify, "
+            f"then push further in rounds 2-5."
+        )
     return (
-        f"**FIRST-MOVE STRATEGY** — the highest-similarity KB entry "
-        f"(`{top.kernel_name}`, verified **{speedup:.2f}x** speedup) "
-        f"used: {params_str}. **Try this pattern FIRST{kernel_hint}** "
-        f"before exploring other strategies; if it doesn't transfer, "
-        f"fall back to the alternatives listed below."
+        f"**FIRST-MOVE — TRANSLATE TECHNIQUE FROM RELATED KERNEL** — KB's "
+        f"highest-similarity entry is `{top.kernel_name}` "
+        f"(verified **{speedup:.2f}x** on a different kernel) using: "
+        f"{params_str}. ACTION{f' on `{target_name}`' if target_name else ''}: "
+        f"translate the *technique* (not the literal diff — signatures will "
+        f"differ) into your kernel.py. Common transferable patterns: warp-shuffle "
+        f"reduction, persistent CTA scheduling, bitwise scale ops, fused "
+        f"norm+quant single pass, HIP raw kernel for latency-bound. Commit to "
+        f"the technique in round 1; iterate in rounds 2-5."
     )
 
 
