@@ -204,16 +204,20 @@ def _build_rag_block(snippets: list[dict], target_kernel_path: str) -> str:
 
 
 def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str) -> str:
-    """Emit a single unified first-move directive derived from the top KB entry.
+    """Emit a concise top-hit label and a single decision prompt.
 
-    Contract with the agent: TRY the KB insight first (apply verbatim if
-    same kernel, adapt if different). If after Round 1 the patch fails to
-    apply OR doesn't improve the verified speedup, the agent is free to
-    pursue other strategies based on its own profiling/code analysis.
+    Design principle: present the data (verified speedup, kernel name,
+    same-kernel-or-not, key params, full diff below); let the agent
+    decide based on the diff + the current kernel.py + the profiling
+    output whether the strategy is applicable. If yes, apply as first
+    priority. If no, the agent is free to optimize from its own analysis
+    without penalty.
 
-    Both same-kernel and different-kernel cases use the same imperative
-    structure so the agent has a consistent contract to reason about,
-    only the application method (verbatim vs adapt) differs.
+    This avoids both extremes:
+    - Too prescriptive: "always try this first" — wastes rounds when the
+      KB hint is obviously inapplicable.
+    - Too passive: "here's an experience" — under-leverages strong same-
+      kernel verified patches.
     """
     if not experiences:
         return ""
@@ -224,7 +228,7 @@ def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str
 
     patch_text = getattr(top, "best_patch", "") or ""
     params = _extract_key_params(patch_text, max_params=3) if patch_text else []
-    params_str = "; ".join(params) if params else "(see Key params below)"
+    params_str = "; ".join(params) if params else "see diff below"
 
     target_name = ""
     if target_kernel_path:
@@ -238,25 +242,16 @@ def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str
     is_same_kernel = (
         target_name and top.kernel_name and target_name.lower() == top.kernel_name.lower()
     )
-
-    application_note = (
-        "Apply the diff below VERBATIM via `str_replace` / `write` / `git apply` "
-        "(it was measured on this exact kernel.py)."
-        if is_same_kernel
-        else "Adapt the technique to your kernel.py (signatures will differ — "
-        "preserve the optimization pattern, e.g. warp-shuffle reduction, "
-        "persistent CTA, bitwise scale, fused single-pass)."
-    )
+    same_kernel_tag = " [SAME KERNEL — diff applies verbatim]" if is_same_kernel else ""
 
     return (
-        f"**FIRST-MOVE STRATEGY** — KB's top hit: `{top.kernel_name}` verified "
-        f"**{speedup:.2f}x** speedup; key params: {params_str}.\n\n"
-        f"**Round 1 ACTION** — try this first: {application_note} "
-        f"Then run save_and_test to confirm the speedup.\n\n"
-        f"**Rounds 2-5** — IF the verified speedup doesn't improve over "
-        f"baseline, you're free to explore other strategies based on the "
-        f"profiling output, kernel structure, and your own analysis. "
-        f"The KB hint is a strong prior, NOT a constraint."
+        f"**KB top hit**: `{top.kernel_name}` verified **{speedup:.2f}x**"
+        f"{same_kernel_tag}. Key params: {params_str}. Full diff below.\n\n"
+        f"**Decide**: based on (a) the diff below, (b) your current kernel.py "
+        f"code, and (c) the profiling output — does this strategy apply to "
+        f"the current kernel? If YES, make it your first priority "
+        f"({'apply verbatim' if is_same_kernel else 'adapt to your kernel'}). "
+        f"If NO, optimize from your own analysis directly without trying it."
     )
 
 
