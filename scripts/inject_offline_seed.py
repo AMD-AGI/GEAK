@@ -25,29 +25,25 @@ from pathlib import Path
 
 DEFAULT_KB = Path(__file__).resolve().parents[1] / "src" / "minisweagent" / "memory" / "cross_session" / "knowledge_base.json"
 
-_AKA_ROOTS = (
-    "/home/sapmajum/work/repos/AgentKernelArena/tasks",
-    "/data/sapmajum/AgentKernelArena/tasks",
-)
 
+def _load_kernel_source(source_arg: str) -> str:
+    """Load kernel.py source from an explicit path or file argument.
 
-def _read_kernel_source_for_url(kernel_url: str) -> str:
-    """Read kernel.py source from one of the standard AKA task tree roots.
-
-    Returns the kernel.py contents if found, else "". Used to populate
-    ``original_kernel_code`` so retrieval can do code-based identity
-    matching.
+    The KB stores actual source content (not paths) so it remains
+    portable across machines. This loader takes an explicit argument:
+    a file path the caller has access to. Returns "" if the file is
+    missing or unreadable. Callers should pass the file they used to
+    generate the patch — the source the patch was measured against.
     """
-    if not kernel_url:
+    if not source_arg:
         return ""
-    for root in _AKA_ROOTS:
-        candidate = Path(root) / kernel_url / "kernel.py"
-        if candidate.is_file():
-            try:
-                return candidate.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-    return ""
+    p = Path(source_arg)
+    if not p.is_file():
+        return ""
+    try:
+        return p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 _RE_VERIFIED = re.compile(
@@ -113,6 +109,7 @@ def build_seed_record(
     kernel_language: str = "triton",
     key_insight: str = "",
     extra_strategies: list[dict] | None = None,
+    original_kernel_code: str = "",
 ) -> dict:
     now_utc = datetime.now(timezone.utc).isoformat()
     record_id = f"{kernel_name}_synthetic_v{int(datetime.now(timezone.utc).timestamp())}"
@@ -171,7 +168,7 @@ def build_seed_record(
             f"- Full benchmark geomean: {parsed['baseline_latency_ms']:.4f} ms -> {parsed['best_latency_ms']:.4f} ms"
         ),
         "profiling_insight": f"Baseline latency: {parsed['baseline_latency_ms']:.6f}ms (geomean).",
-        "original_kernel_code": _read_kernel_source_for_url(kernel_url),
+        "original_kernel_code": original_kernel_code,
         "baseline_benchmark": "",
         "kernel_structure": f"Triton kernel, {kernel_category} category",
         "round_insights": [
@@ -200,7 +197,18 @@ def main() -> int:
     ap.add_argument("--kernel-name", help="override parsed kernel name")
     ap.add_argument("--kernel-category", required=True)
     ap.add_argument("--bottleneck-type", required=True)
-    ap.add_argument("--kernel-url", default="", help="relative kernel URL (e.g. triton2triton/geak_eval/L2/fast_rms_layernorm)")
+    ap.add_argument(
+        "--kernel-url",
+        default="",
+        help="optional provenance label for the kernel (e.g. triton2triton/geak_eval/L2/fast_rms_layernorm); not used for any logic",
+    )
+    ap.add_argument(
+        "--kernel-source-file",
+        default="",
+        help="path to the kernel.py file the patch was measured against; "
+             "its contents will be stored verbatim as original_kernel_code "
+             "(URLs/paths are NOT used at retrieval time — KB is portable)",
+    )
     ap.add_argument("--kernel-language", default="triton")
     ap.add_argument("--key-insight", default="")
     ap.add_argument("--kb", default=str(DEFAULT_KB), type=Path)
@@ -208,8 +216,17 @@ def main() -> int:
 
     parsed = parse_log(args.log)
     kernel_name = args.kernel_name or parsed["kernel_name"]
+    original_kernel_code = _load_kernel_source(args.kernel_source_file)
+    if not original_kernel_code:
+        print(
+            f"[inject] WARNING: --kernel-source-file not provided or unreadable; "
+            f"original_kernel_code will be empty for {kernel_name}. "
+            f"Code-based identity matching at retrieval will fall back to name match.",
+            file=sys.stderr,
+        )
     record = build_seed_record(
         parsed,
+        original_kernel_code=original_kernel_code,
         kernel_name=kernel_name,
         kernel_category=args.kernel_category,
         bottleneck_type=args.bottleneck_type,

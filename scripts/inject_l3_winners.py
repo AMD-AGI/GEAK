@@ -17,30 +17,29 @@ from pathlib import Path
 
 DEFAULT_KB = Path(__file__).resolve().parents[1] / "src" / "minisweagent" / "memory" / "cross_session" / "knowledge_base.json"
 
-# Common locations for the AgentKernelArena tasks tree (we try them in order).
-_AKA_ROOTS = (
-    "/home/sapmajum/work/repos/AgentKernelArena/tasks",
-    "/data/sapmajum/AgentKernelArena/tasks",
-)
 
+def _read_kernel_source(source_file: str) -> str:
+    """Read kernel.py source from an explicit file path.
 
-def _read_kernel_source(kernel_url: str) -> str:
-    """Read kernel.py source from one of the standard AKA task tree roots.
+    Each winner spec in DISCOVERED_WINNERS may include a
+    ``kernel_source_file`` key with an absolute path to the kernel.py
+    file the patch was measured against. The contents are stored
+    verbatim as ``original_kernel_code`` so the KB is portable across
+    machines (URLs / paths are NOT used at retrieval time).
 
-    ``kernel_url`` is a relative path like
-    ``triton2triton/geak_eval/L3/fused_qkv_rope``. Returns the kernel.py
-    contents if the file is found, else "".
+    Returns "" if the file is missing or unreadable; the caller will
+    emit a warning so the injector knows code-based identity will fall
+    back to name match.
     """
-    if not kernel_url:
+    if not source_file:
         return ""
-    for root in _AKA_ROOTS:
-        candidate = Path(root) / kernel_url / "kernel.py"
-        if candidate.is_file():
-            try:
-                return candidate.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-    return ""
+    p = Path(source_file)
+    if not p.is_file():
+        return ""
+    try:
+        return p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 # Hand-curated from observed winning runs (canonical ROCm 7.0).
 # Each entry: kernel_name, kernel_url, kernel_category, bottleneck_type,
@@ -422,7 +421,7 @@ def build_record(winner: dict, idx: int) -> dict:
             f"- Tags: {', '.join(winner.get('tags', []))}"
         ),
         "profiling_insight": f"Baseline latency: {winner['baseline_latency_ms']:.6f}ms (geomean).",
-        "original_kernel_code": _read_kernel_source(winner.get("kernel_url", "")),
+        "original_kernel_code": _read_kernel_source(winner.get("kernel_source_file", "")),
         "baseline_benchmark": "",
         "kernel_structure": f"Triton kernel, {winner['kernel_category']} category",
         "round_insights": [
