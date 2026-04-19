@@ -961,7 +961,10 @@ class SaveAndTestTool:
     def _save_patch_file(self, patch_name: str, patch_content: str):
         output_dir = Path(self.context.patch_output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / f"{patch_name}.patch").write_text(patch_content)
+        patch_path = output_dir / f"{patch_name}.patch"
+        if not patch_content.strip() and patch_path.exists() and patch_path.stat().st_size > 0:
+            return
+        patch_path.write_text(patch_content)
 
     def _save_test_output(self, patch_name: str, test_output: str):
         output_dir = Path(self.context.patch_output_dir)
