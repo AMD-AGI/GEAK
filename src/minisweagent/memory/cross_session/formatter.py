@@ -70,17 +70,33 @@ def _extract_key_params(patch_text: str, max_params: int = 8) -> list[str]:
 
 
 def _build_adaptation_note(kb_kernel_name: str, target_kernel_path: str) -> str:
-    """Produce a short adaptation hint when the KB seed is a different kernel.
+    """Produce a tailored note based on whether KB entry is same/different kernel.
 
-    The LLM otherwise has to figure out that e.g. a monkey-patch for
-    ``aiter.ops.triton.fused_qk_rope_cat_and_cache_mla`` needs to be
+    For SAME-kernel KB entries (e.g. previously-verified fused_qkv_rope
+    patches retrieved when optimizing fused_qkv_rope), emit a strong
+    "directly applicable" message that overrides the default conservative
+    "translate techniques" guidance in the agent prompt. The patch was
+    measured on this exact file in a prior run and can be applied verbatim
+    via ``str_replace`` / ``write`` / ``git apply``.
+
+    For DIFFERENT-kernel KB entries, keep the "translate techniques"
+    guidance — the LLM otherwise has to figure out that e.g. a monkey-patch
+    for ``aiter.ops.triton.fused_qk_rope_cat_and_cache_mla`` needs to be
     translated into direct edits in a standalone ``kernel.py``.
     """
     if not kb_kernel_name or not target_kernel_path:
         return ""
     tgt_name = target_kernel_path.rsplit("/", 2)[-2] if "/" in target_kernel_path else ""
-    if not tgt_name or tgt_name.lower() == kb_kernel_name.lower():
+    if not tgt_name:
         return ""
+    if tgt_name.lower() == kb_kernel_name.lower():
+        return (
+            f"**SAME-KERNEL VERIFIED PATCH** — the patch above was measured on the "
+            f"EXACT kernel you are optimizing (`{tgt_name}`) in a prior run. "
+            f"Apply it DIRECTLY via `str_replace` / `write` / `git apply` to reproduce "
+            f"the verified speedup. Do NOT 'translate' or rewrite — copy the diff "
+            f"verbatim, then iterate from there if you want to push further."
+        )
     return (
         f"**Adaptation note:** KB patch was for `{kb_kernel_name}` (different kernel). "
         f"Your target is `{tgt_name}` — apply the same *techniques* (the `key params` above), "
