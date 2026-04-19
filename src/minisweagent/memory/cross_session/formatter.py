@@ -70,38 +70,37 @@ def _extract_key_params(patch_text: str, max_params: int = 8) -> list[str]:
     return found
 
 
-def _build_adaptation_note(kb_kernel_name: str, target_kernel_path: str) -> str:
-    """Produce a tailored note based on whether KB entry is same/different kernel.
+def _build_adaptation_note(exp, target_kernel_path: str) -> str:
+    """Produce a per-experience adaptation note based on CODE comparison.
 
-    For SAME-kernel KB entries (e.g. previously-verified fused_qkv_rope
-    patches retrieved when optimizing fused_qkv_rope), emit a strong
-    "directly applicable" message that overrides the default conservative
-    "translate techniques" guidance in the agent prompt. The patch was
-    measured on this exact file in a prior run and can be applied verbatim
-    via ``str_replace`` / ``write`` / ``git apply``.
+    Code identity is the source of truth — names are organizational labels
+    that don't reflect semantic equivalence (e.g. ``fused_qkv_rope`` and
+    ``fused_qkv_MLA`` may share a name suffix but have completely different
+    code).
 
-    For DIFFERENT-kernel KB entries, keep the "translate techniques"
-    guidance — the LLM otherwise has to figure out that e.g. a monkey-patch
-    for ``aiter.ops.triton.fused_qk_rope_cat_and_cache_mla`` needs to be
-    translated into direct edits in a standalone ``kernel.py``.
+    Compares the experience's stored ``original_kernel_code`` against the
+    current ``target_kernel_path`` content:
+      * Codes match exactly → "verified for this exact code; apply verbatim"
+      * Codes differ (or unavailable) → "related kernel; adapt the technique"
     """
-    if not kb_kernel_name or not target_kernel_path:
+    if not target_kernel_path:
         return ""
-    tgt_name = target_kernel_path.rsplit("/", 2)[-2] if "/" in target_kernel_path else ""
-    if not tgt_name:
-        return ""
-    if tgt_name.lower() == kb_kernel_name.lower():
+    kb_code = (getattr(exp, "original_kernel_code", "") or "").strip()
+    cur_code = ""
+    try:
+        cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        cur_code = ""
+    if kb_code and cur_code and kb_code == cur_code:
         return (
-            f"**SAME-KERNEL VERIFIED PATCH** — the patch above was measured on the "
-            f"EXACT kernel you are optimizing (`{tgt_name}`) in a prior run. "
-            f"Apply it DIRECTLY via `str_replace` / `write` / `git apply` to reproduce "
-            f"the verified speedup. Do NOT 'translate' or rewrite — copy the diff "
-            f"verbatim, then iterate from there if you want to push further."
+            "**SAME CODE — VERIFIED PATCH** — the patch above was measured on the "
+            "EXACT same source you are optimizing now. Apply it directly via "
+            "`str_replace` / `write` / `git apply` to reproduce the verified speedup."
         )
     return (
-        f"**Adaptation note:** KB patch was for `{kb_kernel_name}` (different kernel). "
-        f"Your target is `{tgt_name}` — apply the same *techniques* (the `key params` above), "
-        f"but translate the *structure* to your kernel's architecture rather than copying the patch verbatim."
+        "**Adaptation note:** the patch above was measured on a related kernel "
+        "with different source. Apply the *technique* (key params above), but "
+        "translate signatures / variable names / control flow to fit your kernel."
     )
 
 
@@ -205,37 +204,23 @@ def _build_rag_block(snippets: list[dict], target_kernel_path: str) -> str:
 
 
 def _classify_kb_match(top, target_kernel_path: str) -> tuple[str, str]:
-    """Classify how confidently the KB entry matches the current target kernel.
+    """Classify the KB entry purely by CODE comparison.
 
-    Returns ``(tag, hint)`` where:
-      - ``tag`` is a short bracketed annotation (e.g. ``[SAME CODE — diff
-        applies verbatim]``) inserted into the FIRST-MOVE label.
-      - ``hint`` is a short verb hint (``apply verbatim`` / ``adapt to
-        your kernel``) used in the decision prompt.
+    Names are organizational labels and don't reflect semantic equivalence
+    (e.g. ``fused_qkv_rope`` and ``fused_qkv_MLA`` may share name tokens
+    but have completely different code; the same name might also refer to
+    different versions of the same kernel as it evolves). This function
+    only looks at code content:
 
-    Identity is determined by CODE, not by name. Names like
-    ``fused_qkv_rope`` and ``fused_qkv_MLA`` are organizational labels;
-    actual semantics live in the source. We compare the KB entry's
-    ``original_kernel_code`` to the current ``kernel.py`` content:
+      * KB entry's stored ``original_kernel_code`` matches the current
+        ``target_kernel_path`` content exactly → SAME CODE, patch applies
+        verbatim. The verified speedup is reproducible.
+      * Otherwise → RELATED KERNEL — present the technique, agent adapts.
 
-      * Exact match → SAME CODE → patch applies verbatim
-      * KB entry has stored code, doesn't match → DIFFERENT CODE → diff
-        likely won't apply cleanly; technique may still transfer
-      * KB entry has no stored code → fall back to name comparison as
-        a weaker prior (logged as `[name-only match]`)
+    Returns ``(tag, hint)`` where ``tag`` is a short bracketed annotation
+    inserted into the FIRST-MOVE label, and ``hint`` is the verb hint
+    used in the decision prompt.
     """
-    target_name = ""
-    if target_kernel_path:
-        tail = target_kernel_path.rstrip("/").rsplit("/", 1)[-1]
-        if tail.endswith(".py"):
-            parts_ = target_kernel_path.rstrip("/").split("/")
-            target_name = parts_[-2] if len(parts_) >= 2 else tail
-        else:
-            target_name = tail
-    name_match = bool(
-        target_name and top.kernel_name and target_name.lower() == top.kernel_name.lower()
-    )
-
     kb_code = (getattr(top, "original_kernel_code", "") or "").strip()
     cur_code = ""
     if target_kernel_path:
@@ -243,20 +228,9 @@ def _classify_kb_match(top, target_kernel_path: str) -> tuple[str, str]:
             cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
             cur_code = ""
-
-    if kb_code and cur_code:
-        if kb_code == cur_code:
-            return " [SAME CODE — diff applies verbatim]", "apply verbatim"
-        if name_match:
-            return (
-                " [SAME KERNEL NAME, DIFFERENT CODE — review diff for applicability]",
-                "review diff against your current code; apply if compatible, else adapt",
-            )
-        return "", "adapt to your kernel (code differs from KB entry's source)"
-
-    if name_match:
-        return " [name-only match — no code stored, treat as related kernel]", "adapt to your kernel"
-    return "", "adapt to your kernel"
+    if kb_code and cur_code and kb_code == cur_code:
+        return " [SAME CODE — diff applies verbatim]", "apply verbatim"
+    return "", "adapt the technique to your kernel (KB entry was measured on different code)"
 
 
 def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str) -> str:
@@ -399,7 +373,7 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
         for kp in key_params:
             parts.append(f"  - {kp}")
 
-    adaptation = _build_adaptation_note(kn, target_kernel_path)
+    adaptation = _build_adaptation_note(exp, target_kernel_path)
     if adaptation:
         parts.append(f"\n{adaptation}")
 
