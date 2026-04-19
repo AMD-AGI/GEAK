@@ -54,6 +54,12 @@ def extract_experience(**kwargs: Any) -> ExperienceRecord:
     if not best_change_category and strategy_name:
         best_change_category = _classify_strategy(strategy_name)
 
+    # Capture the kernel's source code at the time of optimization. This
+    # enables code-based identity matching at retrieval time so the agent
+    # knows whether a stored patch will apply verbatim, vs. needing
+    # adaptation to a different version of the same kernel.
+    original_kernel_code = _read_kernel_source(kernel_path)
+
     return ExperienceRecord(
         kernel_path=kernel_path,
         kernel_name=kernel_name,
@@ -80,7 +86,18 @@ def extract_experience(**kwargs: Any) -> ExperienceRecord:
         patch_file=patch_file,
         final_report_path=str(report_dir / "final_report.json") if report_dir else "",
         notebook_dir=str(report_dir / "_working_memory") if report_dir else "",
+        original_kernel_code=original_kernel_code,
     )
+
+
+def _read_kernel_source(kernel_path: str) -> str:
+    """Read the kernel source file at ``kernel_path``. Returns "" if missing."""
+    if not kernel_path:
+        return ""
+    try:
+        return Path(kernel_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def _resolve_report_dir(patch_file: str, kernel_path: str) -> Path | None:

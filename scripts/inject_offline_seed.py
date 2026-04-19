@@ -25,6 +25,30 @@ from pathlib import Path
 
 DEFAULT_KB = Path(__file__).resolve().parents[1] / "src" / "minisweagent" / "memory" / "cross_session" / "knowledge_base.json"
 
+_AKA_ROOTS = (
+    "/home/sapmajum/work/repos/AgentKernelArena/tasks",
+    "/data/sapmajum/AgentKernelArena/tasks",
+)
+
+
+def _read_kernel_source_for_url(kernel_url: str) -> str:
+    """Read kernel.py source from one of the standard AKA task tree roots.
+
+    Returns the kernel.py contents if found, else "". Used to populate
+    ``original_kernel_code`` so retrieval can do code-based identity
+    matching.
+    """
+    if not kernel_url:
+        return ""
+    for root in _AKA_ROOTS:
+        candidate = Path(root) / kernel_url / "kernel.py"
+        if candidate.is_file():
+            try:
+                return candidate.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+    return ""
+
 
 _RE_VERIFIED = re.compile(
     r"Verified speedup:\s*(?P<speedup>[0-9.]+)x\s*\((?P<base>[0-9.]+)\s*ms\s*->\s*(?P<opt>[0-9.]+)\s*ms\)"
@@ -147,7 +171,7 @@ def build_seed_record(
             f"- Full benchmark geomean: {parsed['baseline_latency_ms']:.4f} ms -> {parsed['best_latency_ms']:.4f} ms"
         ),
         "profiling_insight": f"Baseline latency: {parsed['baseline_latency_ms']:.6f}ms (geomean).",
-        "original_kernel_code": "",
+        "original_kernel_code": _read_kernel_source_for_url(kernel_url),
         "baseline_benchmark": "",
         "kernel_structure": f"Triton kernel, {kernel_category} category",
         "round_insights": [
