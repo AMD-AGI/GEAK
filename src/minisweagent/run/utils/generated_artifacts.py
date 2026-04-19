@@ -309,6 +309,62 @@ def _try_three_way_with_alternates(
     return result
 
 
+_DIFF_RUN_HEADER_RE = re.compile(
+    r"^(---|\+\+\+)\s+([^\t\n]+)(\t[^\n]*)?$",
+    re.MULTILINE,
+)
+
+
+def normalize_patch_paths(patch_text: str, target_basename: str = "kernel.py") -> str:
+    """Convert ``diff -ruN`` style headers (absolute paths) into git-style.
+
+    ``diff -ruN`` produces headers like::
+
+        --- /home/user/repo/.../kernel.py    2026-04-17 19:10:02 +0000
+        +++ kernel.py                        2026-04-19 01:21:00 +0000
+
+    ``git apply`` expects::
+
+        --- a/kernel.py
+        +++ b/kernel.py
+
+    This function rewrites any ``--- /abs/path/<basename>`` and
+    ``+++ <basename>`` (or ``+++ /abs/path/<basename>``) headers into the
+    git-style equivalent so the patch applies cleanly in any worktree
+    where the target file lives at the same relative path.
+
+    Returns the patch text unchanged if it already uses git-style headers
+    (no absolute-path header found). Safe to call multiple times.
+    """
+    if not patch_text or "--- " not in patch_text:
+        return patch_text
+
+    needs_normalization = False
+    for line in patch_text.splitlines()[:20]:  # only look at the head
+        if line.startswith(("--- /", "+++ /")):
+            needs_normalization = True
+            break
+        if line.startswith("--- ") and target_basename in line and " a/" not in line:
+            needs_normalization = True
+            break
+
+    if not needs_normalization:
+        return patch_text
+
+    def _rewrite(match: re.Match[str]) -> str:
+        prefix = match.group(1)  # --- or +++
+        path = match.group(2).strip()
+        # Extract just the basename (strip absolute path)
+        basename = Path(path).name if path != "/dev/null" else path
+        if basename == "/dev/null":
+            return f"{prefix} /dev/null"
+        side = "a" if prefix == "---" else "b"
+        return f"{prefix} {side}/{basename}"
+
+    normalized = _DIFF_RUN_HEADER_RE.sub(_rewrite, patch_text)
+    return normalized
+
+
 def apply_patch_with_generated_helper_fallback(
     *,
     patch_text: str,
@@ -340,6 +396,24 @@ def apply_patch_with_generated_helper_fallback(
     )
     if result.returncode == 0:
         return result, []
+
+    # NEW: try path-normalization for diff-ruN-style absolute-path headers
+    # (e.g. "--- /home/user/repo/.../kernel.py" instead of "--- a/kernel.py").
+    # Some sub-agent worktrees fall through the git-repo detection in
+    # save_and_test._get_patch_content and use ``diff -ruN`` which produces
+    # absolute paths that ``git apply`` cannot resolve.
+    normalized = normalize_patch_paths(patch_text)
+    if normalized != patch_text:
+        norm_result = subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", "--binary", "-"],
+            cwd=str(cwd),
+            input=normalized,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if norm_result.returncode == 0:
+            return norm_result, []
 
     sanitized_patch, removed_paths = strip_generated_helper_sections(patch_text)
     if not removed_paths:

@@ -23,6 +23,85 @@ from minisweagent.run.utils.generated_artifacts import generated_helper_excludes
 logger = logging.getLogger(__name__)
 
 
+def _normalize_diff_ruN_to_git(patch_text: str, base_repo: Path, cwd: Path) -> str:
+    """Rewrite ``diff -ruN`` headers (absolute paths) to git-style relative.
+
+    ``diff -ruN /abs/base /abs/cwd`` produces headers like::
+
+        diff -ruN /abs/base/kernel.py /abs/cwd/kernel.py
+        --- /abs/base/kernel.py    2026-04-17 19:10:02 +0000
+        +++ /abs/cwd/kernel.py     2026-04-19 01:21:00 +0000
+
+    ``git apply`` rejects these because it can't find ``/abs/base/kernel.py``.
+    Rewrite to::
+
+        diff --git a/kernel.py b/kernel.py
+        --- a/kernel.py
+        +++ b/kernel.py
+
+    The relative path is derived by stripping the ``base_repo`` / ``cwd``
+    prefix from each header line. Returns the input unchanged if no
+    rewrite is needed.
+    """
+    if not patch_text:
+        return patch_text
+    base_str = str(Path(base_repo).resolve()).rstrip("/")
+    cwd_str = str(Path(cwd).resolve()).rstrip("/")
+
+    out_lines: list[str] = []
+    rewrote = False
+    for line in patch_text.splitlines():
+        if line.startswith("diff -ruN "):
+            # Try to derive the relative path of the changed file from the
+            # second argument (the cwd-side path).
+            parts = line.split()
+            if len(parts) >= 4:
+                rel = parts[-1]
+                if rel.startswith(cwd_str + "/"):
+                    rel = rel[len(cwd_str) + 1:]
+                elif rel.startswith(base_str + "/"):
+                    rel = rel[len(base_str) + 1:]
+                out_lines.append(f"diff --git a/{rel} b/{rel}")
+                rewrote = True
+                continue
+        if line.startswith("--- "):
+            payload = line[4:].split("\t", 1)[0].strip()
+            if payload == "/dev/null":
+                out_lines.append("--- /dev/null")
+                continue
+            rel = payload
+            for prefix in (base_str + "/", cwd_str + "/"):
+                if rel.startswith(prefix):
+                    rel = rel[len(prefix):]
+                    break
+            else:
+                # Fall back to basename if neither prefix matches.
+                rel = Path(payload).name
+            out_lines.append(f"--- a/{rel}")
+            rewrote = True
+            continue
+        if line.startswith("+++ "):
+            payload = line[4:].split("\t", 1)[0].strip()
+            if payload == "/dev/null":
+                out_lines.append("+++ /dev/null")
+                continue
+            rel = payload
+            for prefix in (base_str + "/", cwd_str + "/"):
+                if rel.startswith(prefix):
+                    rel = rel[len(prefix):]
+                    break
+            else:
+                rel = Path(payload).name
+            out_lines.append(f"+++ b/{rel}")
+            rewrote = True
+            continue
+        out_lines.append(line)
+
+    if not rewrote:
+        return patch_text
+    return "\n".join(out_lines) + ("\n" if patch_text.endswith("\n") else "")
+
+
 @dataclass
 class SaveAndTestContext:
     """Context required for save_and_test tool execution."""
@@ -612,7 +691,12 @@ class SaveAndTestTool:
                 text=True,
                 timeout=30,
             )
-            return result.stdout
+            # Normalize ``diff -ruN`` headers into git-style relative paths
+            # so that ``git apply`` in the eval worktree can apply the patch
+            # without choking on absolute paths like
+            # ``--- /home/user/repo/.../kernel.py``. Otherwise eval fails
+            # with "kernel.py: No such file or directory".
+            return _normalize_diff_ruN_to_git(result.stdout, ctx.base_repo_path, cwd)
 
         return ""
 
