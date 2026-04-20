@@ -1,6 +1,6 @@
 """Tool JSON schemas for the heterogeneous orchestrator LLM."""
 
-_ORCHESTRATOR_SWE_TOOLS = {"bash", "str_replace_editor", "profile_kernel", "strategy_manager"}
+_ORCHESTRATOR_SWE_TOOLS = {"bash", "str_replace_editor", "profile_kernel", "strategy_manager", "query", "optimize"}
 
 _ORCHESTRATOR_ONLY_TOOLS: list[dict] = [
     {

@@ -211,6 +211,14 @@ def run_heterogeneous_orchestrator(
             break
 
     toolruntime = ToolRuntime(tool_profile="full", use_strategy_manager=True)
+    rag_enabled = preprocess_ctx.get("rag_enabled", False)
+    if not rag_enabled:
+        toolruntime.disable_tools(["query", "optimize"])
+    else:
+        try:
+            toolruntime.wrap_rag_tools_with_postprocessor()
+        except Exception as e:
+            logger.warning("Failed to wrap RAG tools with RAG postprocessor: %s", e)
 
     ctx: dict[str, Any] = {
         **preprocess_ctx,
@@ -244,7 +252,7 @@ def run_heterogeneous_orchestrator(
     if not cmd:
         logger.error("No commandment found in preprocess_ctx.")
         raise ValueError("No commandment found in preprocess_ctx.")
-    cmd_excerpt = cmd[:1500] + ("..." if len(cmd) > 1500 else "") if cmd else "Not available"
+    cmd_excerpt = cmd[:4000] + ("..." if len(cmd) > 4000 else "") if cmd else "Not available"
 
     codebase_ctx = ""
     _codebase_ctx_path = preprocess_dir / "CODEBASE_CONTEXT.md"
@@ -267,8 +275,11 @@ def run_heterogeneous_orchestrator(
         )
         if _memory_context:
             _memory_context = "### Optimization Memory (from past runs)\n" + _memory_context
-    except Exception as exc:
-        logger.debug("Memory context assembly failed: %s", exc)
+            logger.info("Cross-session memory context injected (%d chars)", len(_memory_context))
+        else:
+            logger.info("Cross-session memory: no relevant experiences found")
+    except Exception as _mem_exc:
+        logger.warning("Cross-session memory assembly failed: %s", _mem_exc)
 
     _working_mem = None
     try:
@@ -322,8 +333,21 @@ def run_heterogeneous_orchestrator(
         "=" * 60,
     )
 
+    if rag_enabled:
+        rag_tools_desc = (
+            "\n\n**Knowledge Base Lookup** (Recommended)\n"
+            "- Use `query` tool to search for optimization techniques, "
+            "hardware-specific tips, and code patterns relevant to this kernel\n"
+            "- Use `optimize` tool to get targeted optimization suggestions "
+            "based on your kernel type and bottleneck analysis\n"
+            "- Integrate retrieved knowledge into your strategy planning\n"
+        )
+    else:
+        rag_tools_desc = ""
+    system_prompt = SYSTEM_PROMPT.format(rag_tools_description=rag_tools_desc)
+
     messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": instance_msg},
     ]
 

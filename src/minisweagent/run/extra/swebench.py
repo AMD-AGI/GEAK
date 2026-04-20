@@ -193,7 +193,7 @@ def main(
     output_path = Path(output)
     output_path.mkdir(parents=True, exist_ok=True)
     logger.info(f"Results will be saved to {output_path}")
-    add_file_handler(output_path / "minisweagent.log")
+    add_file_handler(output_path / DEFAULT_LOG_FILENAME)
 
     dataset_path = DATASET_MAPPING.get(subset, subset)
     logger.info(f"Loading dataset {dataset_path}, split {split}...")

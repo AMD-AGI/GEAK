@@ -274,6 +274,9 @@ def _populate_mcp_bridges() -> None:
             logger.debug("Skipping MCP server %r: directory layout not found", name)
         except Exception as e:
             logger.warning("Could not create MCPToolBridge for %r: %s", name, e)
+            print(
+                f"[MCP] {name}: failed to load. Install dependencies following the instructions in the README.md file."
+            )
     return _mcp_bridges
 
 
@@ -328,6 +331,10 @@ def collect_mcp_tools() -> tuple[list[MCPToolBridge], list[dict[str, Any]]]:
             raw = bridge.tool_list()
         except Exception as e:
             logger.warning("tool_list failed for %r: %s", bridge.server_name, e)
+            print(
+                f"[MCP] {bridge.server_name}: tool discovery failed. "
+                f"Check dependencies: pip install -e mcp_tools/{bridge.server_name}"
+            )
             continue
 
         tools = _coerce_mcp_tool_list(raw)

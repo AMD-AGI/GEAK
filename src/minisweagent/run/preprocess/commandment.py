@@ -181,16 +181,16 @@ def _generate_simple(
             "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
             "export HIP_VISIBLE_DEVICES=%s\\n"
             "export AITER_JIT_DIR=%s/.aiter_jit\\n"
-            'exec python3 "$@"\\n\' '
-            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
+            'cd "%s" && exec python3 "$@"\\n\' '
+            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" "${GEAK_WORK_DIR}" '
             "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
         )
     else:
         setup_section = (
             "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
             "export HIP_VISIBLE_DEVICES=%s\\n"
-            'exec python3 "$@"\\n\' '
-            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
+            'cd "%s" && exec python3 "$@"\\n\' '
+            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
             "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
         )
 
@@ -259,8 +259,8 @@ def _generate_inner_kernel(
     harness_abs = str(harness_path.resolve())
     setup_lines.append(
         f"printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${{PYTHONPATH}}\\n"
-        f'export HIP_VISIBLE_DEVICES=%s\\nexec python3 {harness_abs} "$@"\\n\' '
-        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" > ${GEAK_WORK_DIR}/run_harness.sh '
+        f'export HIP_VISIBLE_DEVICES=%s\\ncd "%s" && exec python3 {harness_abs} "$@"\\n\' '
+        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" > ${GEAK_WORK_DIR}/run_harness.sh '
         "&& chmod +x ${GEAK_WORK_DIR}/run_harness.sh"
     )
 

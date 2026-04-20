@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from minisweagent.run.utils.prompts import (
+    EXTRACT_USER_CONSTRAINTS_TEMPLATE,
     JSON_EXTRACTION_SYSTEM_PROMPT,
     PARSE_PIPELINE_PARAMS_USER_TEMPLATE,
     PARSE_TASK_INFO_USER_TEMPLATE,
@@ -285,6 +286,57 @@ def parse_pipeline_params(task_content: str, model) -> dict:
             exc_info=logger.isEnabledFor(logging.DEBUG),
         )
         return _EMPTY_PIPELINE_PARAMS.copy()
+
+
+_EMPTY_USER_CONSTRAINTS: dict[str, list[str]] = {"constraints": [], "directives": []}
+
+
+def extract_user_constraints(task_content: str, model) -> dict[str, list[str]]:
+    """Extract mandatory constraints and optimization directives from task text via LLM.
+
+    Returns dict with:
+        "constraints": list of hard rules (violation = rejection)
+        "directives": list of prescribed optimization strategies (should follow, may explore beyond)
+    """
+    prompt = EXTRACT_USER_CONSTRAINTS_TEMPLATE.format(task_content=task_content)
+    logger.debug("extract_user_constraints: querying model (task_content length=%d chars)", len(task_content))
+
+    try:
+        response = model.query(
+            [
+                {"role": "system", "content": JSON_EXTRACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+        )
+        parsed = _load_json_object_from_model_response(response, log_prefix="extract_user_constraints")
+    except json.JSONDecodeError as e:
+        logger.warning("extract_user_constraints: model response JSON decode failed: %s", e)
+        return _EMPTY_USER_CONSTRAINTS.copy()
+    except Exception as e:
+        logger.warning(
+            "extract_user_constraints: unexpected error (%s): %s",
+            type(e).__name__,
+            e,
+            exc_info=logger.isEnabledFor(logging.DEBUG),
+        )
+        return _EMPTY_USER_CONSTRAINTS.copy()
+
+    constraints = parsed.get("constraints", [])
+    directives = parsed.get("directives", [])
+    if not isinstance(constraints, list):
+        constraints = []
+    if not isinstance(directives, list):
+        directives = []
+    result = {
+        "constraints": [str(c) for c in constraints if c],
+        "directives": [str(d) for d in directives if d],
+    }
+    logger.debug(
+        "extract_user_constraints: extracted %d constraints, %d directives.",
+        len(result["constraints"]),
+        len(result["directives"]),
+    )
+    return result
 
 
 def generate_patch_output_dir(kernel_name: str | None, base_dir: str = "optimization_logs") -> str:

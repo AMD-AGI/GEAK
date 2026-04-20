@@ -57,6 +57,8 @@ _TOOL_PROFILES: dict[str, set[str] | None] = {
         "profile_kernel",
         "baseline_metrics",
         "strategy_manager",
+        "query",
+        "optimize",
     },
 }
 
@@ -69,6 +71,7 @@ def get_tools_list(use_strategy_manager: bool = False) -> list:
     Returns:
         List of tool definitions for the API.
     """
+    _ensure_mcp_collected()
     excluded = set()
     if not use_strategy_manager:
         excluded.add("strategy_manager")
@@ -88,7 +91,6 @@ class ToolRuntime:
         patch_output_dir: str | None = None,
         tool_profile: str = "full",
     ):
-        _ensure_mcp_collected()
         self._tool_profile = tool_profile
 
         # Each ToolRuntime gets its OWN set of MCP bridge instances so that
@@ -120,6 +122,8 @@ class ToolRuntime:
                 )
             if "profile_kernel" in allowed:
                 self._register_profiler_mcp()
+            if "query" in allowed or "optimize" in allowed:
+                self._register_rag_mcp(allowed)
             self._sub_agent_tool = None
         else:
             if use_strategy_manager:
@@ -159,6 +163,27 @@ class ToolRuntime:
         self.use_strategy_manager = use_strategy_manager
         self._codebase_context: str | None = None
 
+    def wrap_rag_tools_with_postprocessor(self) -> None:
+        """Wrap RAG MCP tools with RAGPostProcessor for result filtering."""
+        from minisweagent.tools.rag_postprocessor import RAGPostProcessor, RAGPostProcessorConfig
+
+        postprocessor = RAGPostProcessor(RAGPostProcessorConfig(enabled=True))
+
+        def _wrap(tool_callable):
+            def wrapper(**kwargs):
+                result = tool_callable(**kwargs)
+                output = result.get("output", "")
+                if output and result.get("returncode") == 0:
+                    query = kwargs.get("topic") or kwargs.get("code_type") or ""
+                    result["output"] = postprocessor.process(output, query=query)
+                return result
+
+            return wrapper
+
+        for name in list(self._tool_table):
+            if name in ("query", "optimize"):
+                self._tool_table[name] = _wrap(self._tool_table[name])
+
     @staticmethod
     def _create_own_bridges() -> list:
         """Create a fresh set of MCPToolBridge instances for this ToolRuntime."""
@@ -175,6 +200,15 @@ class ToolRuntime:
         for bridge in self._mcp_bridges:
             if bridge.server_name == "profiler-mcp":
                 self._tool_table["profile_kernel"] = bridge.tool("profile_kernel")
+                return
+
+    def _register_rag_mcp(self, allowed: set[str] | None = None):
+        """Register RAG MCP tools (query, optimize) from rag-mcp server."""
+        for bridge in self._mcp_bridges:
+            if bridge.server_name == "rag-mcp":
+                for tool_name in ("query", "optimize"):
+                    if allowed is None or tool_name in allowed:
+                        self._tool_table[tool_name] = bridge.tool(tool_name)
                 return
 
     def _register_mcp_tools(self):

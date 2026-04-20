@@ -114,7 +114,6 @@ subagent = create_rag_filter_subagent(
 See `examples/test_subagent.py` for complete examples:
 
 ```bash
-cd /home/ethany/three_projects_clean/gpu-agent-workspace/mini-swe-agent
 python examples/test_subagent.py
 ```
 

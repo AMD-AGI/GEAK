@@ -34,7 +34,7 @@ class InteractiveAgentConfig(AgentConfig):
     """If the agent wants to finish, do we ask for confirmation from user?"""
     # Strategy agent compatibility (ignored by InteractiveAgent but allows config sharing)
     strategy_file_path: str | None = None
-    tool_profile: str = "swe"
+    tool_profile: str = "full"
     """ToolRuntime profile: 'swe' for reduced tool set, 'full' for all tools."""
 
     def __post_init__(self) -> None:
