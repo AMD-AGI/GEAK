@@ -8,7 +8,6 @@ Keeps context under ~15K chars to avoid drowning the kernel's own code.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 from minisweagent.memory.cross_session.schemas import ExperienceRecord, StrategySkill
 
@@ -98,11 +97,9 @@ def _code_fingerprint(code: str) -> str:
 def format_landscape_context(
     experiences: list[ExperienceRecord],
     skills: list[StrategySkill] | None = None,
-    query_category: str = "",
     query_bottleneck: str = "",
-    query_language: str = "",
     compact: bool = False,
-    target_kernel_path: str = "",
+    target_code: str = "",
 ) -> str:
     """Format cross-session experiences into an "added context" block.
 
@@ -111,17 +108,17 @@ def format_landscape_context(
       * compact=False — full evidence per entry: baseline kernel_structure,
         strategies per round with diffs, profiler insights, dead-ends.
 
-    ``target_kernel_path`` enables an exact-code-match check that only
-    emits an imperative reference note when the stored baseline code is
-    byte-identical to the current kernel.py (i.e. the diff will apply
-    verbatim). For all other cases the entries are shown below as
-    reference; the agent forms its own plan and uses them for informed
-    cross-reference, not as directives to follow.
+    ``target_code`` is the raw source of the kernel being optimized right
+    now. It is used to emit the agent's own fingerprint at the top of the
+    context so the agent can compare it to each KB entry's stored code
+    fingerprint and decide verbatim vs translate. The retriever never
+    reads the filesystem; the caller is responsible for supplying the
+    source.
     """
     if not experiences and not skills:
         return ""
 
-    lang = query_language or _guess_language(experiences)
+    lang = _guess_language(experiences)
     parts: list[str] = []
     n = len(experiences)
     parts.append(f"### Cross-Session Memory (from {n} similar kernel{'s' if n != 1 else ''})")
@@ -133,13 +130,9 @@ def format_landscape_context(
     # patch is guaranteed to apply and is expected to reproduce the
     # measured speedup -- the agent reads that off the evidence directly,
     # no prescriptive banner required.
-    if target_kernel_path:
-        try:
-            cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace")
-            parts.append(f"**Your kernel fingerprint**: `{target_kernel_path}` → {_code_fingerprint(cur_code)}")
-            parts.append("")
-        except OSError:
-            pass
+    if target_code:
+        parts.append(f"**Your kernel fingerprint**: {_code_fingerprint(target_code)}")
+        parts.append("")
 
     parts.append(_build_reasoning_guidance(lang))
     parts.append("")
@@ -147,11 +140,7 @@ def format_landscape_context(
     budget = _MAX_CONTEXT_COMPACT if compact else _MAX_CONTEXT_FULL
     for exp in experiences:
         exp_dict = exp.to_dict() if hasattr(exp, "to_dict") else {}
-        chunk = (
-            _format_compact(exp, exp_dict)
-            if compact
-            else _format_single_experience(exp, exp_dict, target_kernel_path=target_kernel_path)
-        )
+        chunk = _format_compact(exp, exp_dict) if compact else _format_single_experience(exp, exp_dict)
         if budget - len(chunk) < 0 and parts:
             parts.append(f"\n*(budget reached — {n - experiences.index(exp)} more omitted)*")
             break
@@ -159,15 +148,6 @@ def format_landscape_context(
         parts.append(chunk)
 
     return "\n".join(parts)
-
-
-def _classify_kb_match(top, target_kernel_path: str) -> tuple[str, str]:
-    """Deprecated helper, kept as no-op for backward compat.
-
-    Classification is now handled by the agent itself via per-entry
-    code_fingerprint + hardware + bottleneck evidence.
-    """
-    return "", ""
 
 
 def _guess_language(experiences: list[ExperienceRecord]) -> str:
@@ -239,7 +219,7 @@ def _format_compact(exp: ExperienceRecord, exp_dict: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kernel_path: str = "") -> str:
+def _format_single_experience(exp: ExperienceRecord, exp_dict: dict) -> str:
     """Format a single experience with all rich fields.
 
     Strategies are the single source of truth -- every strategy has a
