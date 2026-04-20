@@ -211,30 +211,45 @@ def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str
     """
     if not experiences:
         return ""
-    top = experiences[0]
-    speedup = getattr(top, "best_speedup", 0.0) or 0.0
-    if not top.success or speedup <= 1.03:
-        return ""
-
-    # ONLY emit a hint for exact-code matches (verbatim-applicable patches).
-    # For cross-kernel transfers, stay silent — the agent will see the diffs
-    # in the body and decide whether to adapt them on its own.
     if not target_kernel_path:
         return ""
     try:
         cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return ""
-    kb_code = (getattr(top, "original_kernel_code", "") or "").strip()
-    if not kb_code or kb_code != cur_code:
+
+    # Find the highest-speedup experience whose ``original_kernel_code`` is
+    # byte-identical to the current kernel — i.e. whose stored diff WILL
+    # apply verbatim (guaranteed). We scan across all retrieved experiences
+    # rather than only ``experiences[0]`` because the retriever's ranking
+    # is text-similarity driven and may float a lower-speedup entry to the
+    # top even when a higher-speedup entry on the IDENTICAL source exists.
+    best_match = None
+    best_sp = 0.0
+    for exp in experiences:
+        if not getattr(exp, "success", False):
+            continue
+        sp = float(getattr(exp, "best_speedup", 0.0) or 0.0)
+        if sp <= 1.03:
+            continue
+        kb_code = (getattr(exp, "original_kernel_code", "") or "").strip()
+        if kb_code and kb_code == cur_code and sp > best_sp:
+            best_match, best_sp = exp, sp
+
+    if best_match is None:
         return ""
 
     return (
-        f"**Reference**: KB has a verbatim-applicable patch for this exact code "
-        f"at `{top.kernel_name}` verified **{speedup:.2f}x**. "
-        f"You may apply it as a starting point if you judge it appropriate. "
-        f"If you have a fundamentally different optimization in mind, pursue "
-        f"that instead — the KB diff is reference material, not a mandate."
+        f"**EXACT-CODE MATCH FOUND**: The KB contains a patch that was measured on "
+        f"byte-identical source to your current kernel.py — strategy "
+        f"`{best_match.best_strategy}` verified **{best_sp:.2f}x** speedup. "
+        f"The diff is reproduced verbatim below. Because the baseline code is "
+        f"IDENTICAL, applying this diff directly (via `str_replace` / `write` / "
+        f"`git apply`) is expected to reproduce the measured speedup exactly.\n\n"
+        f"This does not prescribe behavior: if your analysis of the current "
+        f"kernel + profile suggests a fundamentally different optimization with "
+        f"higher potential, pursue that instead. Treat the KB patch as a strong, "
+        f"free starting-point candidate — one option among your own ideas."
     )
 
 
