@@ -12,14 +12,14 @@ from pathlib import Path
 
 from minisweagent.memory.cross_session.schemas import ExperienceRecord, StrategySkill
 
-_MAX_CONTEXT_FULL = 20_000  # was 60_000 — reduced to avoid prompt dilution
-_MAX_CONTEXT_COMPACT = 4_000  # was 8_000 — same reason
+_MAX_CONTEXT_FULL = 40_000  # raised from 20k so the 20-40kB winning patches aren't truncated
+_MAX_CONTEXT_COMPACT = 8_000  # raised from 4k to surface more strategy names with their speedups
 
-_MAX_BEST_PATCH_CHARS = 4_000  # was 8_000 — show enough to reason, not enough to dominate
-_MAX_REGRESSION_PATCH_CHARS = 1_500  # was 3_500
-_TOP_IMPROVED_STRATEGIES = 3  # was 5
-_TOP_REGRESSED_STRATEGIES = 2  # was 3 — dead-ends are reference, not focus
-_MAX_BASELINE_BENCHMARK_CHARS = 1_500  # was 3_500
+_MAX_BEST_PATCH_CHARS = 8_000  # raised from 4k — full diffs for top-3 winners fit directly
+_MAX_REGRESSION_PATCH_CHARS = 2_000  # raised from 1.5k — dead-ends still useful as code-level anti-patterns
+_TOP_IMPROVED_STRATEGIES = 5  # raised from 3 — agent sees more of the working space
+_TOP_REGRESSED_STRATEGIES = 3  # raised from 2 — more anti-patterns to avoid
+_MAX_BASELINE_BENCHMARK_CHARS = 2_000  # raised from 1.5k
 
 # Single-source-of-truth speedup threshold for classifying strategies as
 # WORKED vs MARGINAL vs REGRESSED. Mirrors the KB inclusion threshold
@@ -129,6 +129,7 @@ def format_landscape_context(
 
     # Provide the agent's own kernel fingerprint + hardware so it can
     # cross-reference generically against each KB entry below.
+    cur_code = ""
     if target_kernel_path:
         try:
             cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace")
@@ -136,6 +137,16 @@ def format_landscape_context(
             parts.append("")
         except OSError:
             pass
+
+    # EXACT-CODE-MATCH banner: fires only when one of the retrieved KB
+    # entries stores an ``original_kernel_code`` that is byte-identical to
+    # the current kernel.py. In that case the stored patch_content will
+    # apply verbatim and reproduces the measured speedup on this hardware.
+    # Guard clause so this never fires for cross-kernel transfers.
+    exact_match = _find_exact_code_match(experiences, cur_code) if cur_code else None
+    if exact_match is not None:
+        parts.append(_build_exact_match_banner(exact_match))
+        parts.append("")
 
     parts.append(_build_reasoning_guidance(lang))
     parts.append("")
@@ -155,6 +166,65 @@ def format_landscape_context(
         parts.append(chunk)
 
     return "\n".join(parts)
+
+
+def _find_exact_code_match(experiences: list[ExperienceRecord], target_code: str) -> ExperienceRecord | None:
+    """Return the best byte-identical-source entry from the retrieved set.
+
+    "Best" = highest verified speedup among entries whose stored
+    ``original_kernel_code`` exactly matches (under whitespace
+    normalization) the target kernel's current source. Returns ``None``
+    if no entry matches.
+    """
+    import hashlib
+
+    if not target_code:
+        return None
+
+    def _norm(s: str) -> str:
+        return "\n".join(line.strip() for line in s.splitlines() if line.strip())
+
+    target_hash = hashlib.sha256(_norm(target_code).encode()).hexdigest()
+    candidates: list[ExperienceRecord] = []
+    for exp in experiences:
+        kb_code = getattr(exp, "original_kernel_code", "") or ""
+        if not kb_code:
+            continue
+        if hashlib.sha256(_norm(kb_code).encode()).hexdigest() == target_hash:
+            candidates.append(exp)
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda e: e.best_speedup)
+
+
+def _build_exact_match_banner(exp: ExperienceRecord) -> str:
+    """Compose the EXACT-CODE-MATCH banner for a byte-identical entry.
+
+    Emitted only when the retrieved KB entry's stored baseline source
+    matches the current kernel.py byte-for-byte. In that case the KB's
+    ``patch_content`` applies verbatim and the ``best_speedup`` is a
+    hard lower bound on what the agent can achieve -- applying the patch
+    directly should reproduce it exactly (modulo run-to-run benchmark
+    noise).
+    """
+    strat = exp.best_strategy or "(unnamed)"
+    sp = exp.best_speedup
+    baseline_ms = getattr(exp, "baseline_latency_ms", 0) or 0
+    best_ms = getattr(exp, "best_latency_ms", 0) or 0
+    patch_len = len(getattr(exp, "patch_content", "") or "")
+    return (
+        "> **EXACT-CODE-MATCH FOUND** — one retrieved KB entry stores this "
+        f"exact kernel.py byte-for-byte. That entry's winning patch "
+        f"(`{strat}`, {patch_len:,} bytes) achieved a **verified "
+        f"{sp:.4f}x** speedup on this hardware ({baseline_ms:.4f} ms → "
+        f"{best_ms:.4f} ms). Applying its `patch_content` verbatim via "
+        "`str_replace` / `write` / `git apply` is expected to reproduce "
+        "that speedup on Round 1 — no adaptation required. Subsequent "
+        "rounds can still explore other strategies if the agent believes "
+        "more headroom remains; this banner is a concrete first move, "
+        "not a ceiling."
+    )
 
 
 def _classify_kb_match(top, target_kernel_path: str) -> tuple[str, str]:
