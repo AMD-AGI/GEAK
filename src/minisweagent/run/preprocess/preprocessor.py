@@ -1037,8 +1037,18 @@ def run_preprocessor(
     if eval_command:
         _cwd = str(repo_root) if repo_root else None
 
+        # Build a subprocess env that pins the child to the assigned GPU, so
+        # torch/HIP init is deterministic regardless of parent-process state
+        # (mirrors run_harness.py behavior). Fixes sporadic
+        # "No HIP GPUs are available" during Step 5 correctness on multi-GPU
+        # hosts when the parent leaves no HIP_VISIBLE_DEVICES set.
+        import os as _os_env
+        _step5_env = _os_env.environ.copy()
+        _step5_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+        _step5_env.setdefault("PYTHONUNBUFFERED", "1")
+
         if correctness_cmd:
-            logger.info("  Running correctness_command: %s", correctness_cmd)
+            logger.info("  Running correctness_command: %s (HIP_VISIBLE_DEVICES=%s)", correctness_cmd, gpu_id)
             import subprocess
 
             result = subprocess.run(
@@ -1049,6 +1059,7 @@ def run_preprocessor(
                 text=True,
                 timeout=3600,
                 cwd=_cwd,
+                env=_step5_env,
             )
             (output_dir / "correctness_stdout.txt").write_text(result.stdout or "")
             (output_dir / "correctness_stderr.txt").write_text(result.stderr or "")
@@ -1097,6 +1108,7 @@ def run_preprocessor(
                     text=True,
                     timeout=benchmark_timeout,
                     cwd=_cwd,
+                    env=_step5_env,
                 )
                 if result.returncode == 0:
                     benchmark_baseline = result.stdout
