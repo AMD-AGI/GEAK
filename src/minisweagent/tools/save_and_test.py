@@ -58,9 +58,9 @@ def _normalize_diff_ruN_to_git(patch_text: str, base_repo: Path, cwd: Path) -> s
             if len(parts) >= 4:
                 rel = parts[-1]
                 if rel.startswith(cwd_str + "/"):
-                    rel = rel[len(cwd_str) + 1:]
+                    rel = rel[len(cwd_str) + 1 :]
                 elif rel.startswith(base_str + "/"):
-                    rel = rel[len(base_str) + 1:]
+                    rel = rel[len(base_str) + 1 :]
                 out_lines.append(f"diff --git a/{rel} b/{rel}")
                 rewrote = True
                 continue
@@ -72,7 +72,7 @@ def _normalize_diff_ruN_to_git(patch_text: str, base_repo: Path, cwd: Path) -> s
             rel = payload
             for prefix in (base_str + "/", cwd_str + "/"):
                 if rel.startswith(prefix):
-                    rel = rel[len(prefix):]
+                    rel = rel[len(prefix) :]
                     break
             else:
                 # Fall back to basename if neither prefix matches.
@@ -88,7 +88,7 @@ def _normalize_diff_ruN_to_git(patch_text: str, base_repo: Path, cwd: Path) -> s
             rel = payload
             for prefix in (base_str + "/", cwd_str + "/"):
                 if rel.startswith(prefix):
-                    rel = rel[len(prefix):]
+                    rel = rel[len(prefix) :]
                     break
             else:
                 rel = Path(payload).name
