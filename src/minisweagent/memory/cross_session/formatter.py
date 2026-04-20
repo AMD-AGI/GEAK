@@ -250,24 +250,47 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
 
     parts.append(f"## {kn} ({sp:.2f}x speedup, {exp.bottleneck_type}-bound)")
 
-    # Generic evidence header: everything the agent needs to judge whether
-    # this entry applies to its current kernel. No special-case banner
-    # for byte-identical code — the agent can compare the fingerprint
-    # below against its own fingerprint (shown above the entries) and
-    # make its own call.
+    # Generic evidence header — everything the agent needs to judge whether
+    # this entry applies. No special-case banner for byte-identical code:
+    # the agent compares the fingerprints and other dimensions below against
+    # its own context and makes the call.
     hw = getattr(exp, "hardware", "") or exp_dict.get("hardware", "")
+    category = exp_dict.get("kernel_category", "") or ""
+    language = exp_dict.get("kernel_language", "") or ""
     baseline_ms = getattr(exp, "baseline_latency_ms", 0) or 0
     best_ms = getattr(exp, "best_latency_ms", 0) or 0
     code_fp = _code_fingerprint(exp_dict.get("original_kernel_code", "") or "")
+    best_strat = exp_dict.get("best_strategy", "") or ""
+    change_cat = exp_dict.get("best_change_category", "") or ""
+    kstruct = exp_dict.get("kernel_structure", "") or ""
+    timestamp = exp_dict.get("timestamp", "") or ""
+
     parts.append(
-        f"**Evidence**: hardware={hw or 'unknown'} | "
-        f"baseline={baseline_ms:.4f}ms → best={best_ms:.4f}ms | "
-        f"code_fingerprint={code_fp}"
+        f"**Context**: hardware=`{hw or 'unknown'}` | language=`{language}` | "
+        f"category=`{category}` | recorded={timestamp[:10] if timestamp else '?'}"
     )
+    parts.append(
+        f"**Performance**: baseline={baseline_ms:.4f}ms → best={best_ms:.4f}ms "
+        f"({sp:.4f}x, {exp.bottleneck_type}-bound)"
+    )
+    parts.append(
+        f"**Code fingerprint**: `{code_fp}`  ← compare byte-for-byte to your own fingerprint above"
+    )
+    if kstruct:
+        parts.append(f"**Kernel structure**: {kstruct}")
+    if best_strat:
+        parts.append(
+            f"**Best strategy**: `{best_strat}`"
+            + (f" (change_category={change_cat})" if change_cat else "")
+        )
 
     key_insight = exp.key_insight if exp.key_insight else exp_dict.get("key_insight", "")
     if key_insight:
-        parts.append(f"*{key_insight}*")
+        parts.append(f"*Technique: {key_insight}*")
+
+    change_summary = exp_dict.get("code_changes_summary", "") or ""
+    if change_summary and len(change_summary) > 20:
+        parts.append(f"*What the winning diff actually does: {change_summary[:600]}*")
 
     # Surface the specific optimization parameters from the best strategy's
     # diff as a short actionable list. This gives the LLM the concrete
@@ -293,6 +316,16 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
     profiling = exp_dict.get("profiling_insight", "")
     if profiling:
         parts.append(f"\n**Profiling insight:** {profiling}")
+
+    prof_metrics = exp_dict.get("profiling_metrics", {}) or {}
+    if prof_metrics and isinstance(prof_metrics, dict):
+        keep = {k: v for k, v in prof_metrics.items()
+                if k in ("bottleneck_type", "baseline_latency_ms", "best_latency_ms",
+                         "speedup", "benchmark_iterations", "shapes_count",
+                         "warmup_iterations", "note")}
+        if keep:
+            parts.append("**Profiling metrics (numeric):** " +
+                         ", ".join(f"{k}={v}" for k, v in keep.items()))
 
     baseline_bm = exp_dict.get("baseline_benchmark", "")
     if baseline_bm:
