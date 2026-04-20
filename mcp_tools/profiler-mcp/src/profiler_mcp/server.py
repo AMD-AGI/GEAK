@@ -20,6 +20,9 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+
+from minisweagent.run.utils.gpu_arch import guard_rocprof_compute
+
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP(
@@ -244,6 +247,13 @@ def profile_kernel(
         }
     """
     logger.info("Profiler MCP: backend=%s, command=%s", backend, command)
+
+    backend, rdna_arch = guard_rocprof_compute(backend)
+    if rdna_arch:
+        logger.warning(
+            "rocprof-compute does not support RDNA (%s). Falling back to metrix backend.",
+            rdna_arch,
+        )
 
     command = _normalize_command(command)
 
