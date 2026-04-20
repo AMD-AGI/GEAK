@@ -104,24 +104,23 @@ def retrieve_context(
     except Exception as exc:
         logger.debug("search_skills failed (non-fatal): %s", exc)
 
-    # Stage 3b: domain-KB retrieval (rag-mcp markdown corpus).
-    # Complementary signal to experiences; may return [] cleanly if
-    # KB unavailable or no match. Disabled via GEAK_RAG_HOOK_DISABLE=1.
+    # NOTE: Lightweight RAG hook removed. The official RAG path is the
+    # rag-mcp MCP server (PR #90) exposing ``query`` and ``optimize`` tools.
+    # The agent calls those tools on demand rather than receiving a
+    # pre-injected snippet at run start. Enable via ``tools.rag: true`` in
+    # geak.yaml and run:
+    #   pip install -e mcp_tools/rag-mcp
+    #   python scripts/build_index.py --force
+    #
+    # The two paths now have clear, non-overlapping roles:
+    #   - Cross-session memory KB: per-kernel verified experiences (real
+    #     diffs, original_kernel_code, profiler insights, dead-ends,
+    #     round trajectories) — INJECTED at task start so the agent has
+    #     concrete past evidence to cross-reference.
+    #   - rag-mcp ``query`` / ``optimize``: GENERIC GPU/ROCm/HIP knowledge
+    #     base (AMD aiter customer-case reports, optimization guides) —
+    #     PULLED on demand by the agent when it needs background reading.
     rag_snippets: list[dict] = []
-    if os.environ.get("GEAK_RAG_HOOK_DISABLE", "").lower() not in ("1", "true", "yes"):
-        try:
-            from minisweagent.memory.cross_session.rag_hook import query_rag
-
-            rag_snippets = query_rag(kernel_path=kernel_path, top_k=2)
-            if rag_snippets:
-                logger.info(
-                    "RAG hook: returned %d snippets; top=%s (score=%.2f)",
-                    len(rag_snippets),
-                    rag_snippets[0].get("title", ""),
-                    rag_snippets[0].get("score", 0.0),
-                )
-        except Exception as exc:
-            logger.debug("RAG hook failed (non-fatal): %s", exc)
 
     # Stage 4: format as landscape
     return format_landscape_context(
