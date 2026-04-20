@@ -12,14 +12,14 @@ from pathlib import Path
 
 from minisweagent.memory.cross_session.schemas import ExperienceRecord, StrategySkill
 
-_MAX_CONTEXT_FULL = 60_000
-_MAX_CONTEXT_COMPACT = 8_000
+_MAX_CONTEXT_FULL = 20_000  # was 60_000 — reduced to avoid prompt dilution
+_MAX_CONTEXT_COMPACT = 4_000  # was 8_000 — same reason
 
-_MAX_BEST_PATCH_CHARS = 8_000
-_MAX_REGRESSION_PATCH_CHARS = 3_500
-_TOP_IMPROVED_STRATEGIES = 5
-_TOP_REGRESSED_STRATEGIES = 3
-_MAX_BASELINE_BENCHMARK_CHARS = 3_500
+_MAX_BEST_PATCH_CHARS = 4_000  # was 8_000 — show enough to reason, not enough to dominate
+_MAX_REGRESSION_PATCH_CHARS = 1_500  # was 3_500
+_TOP_IMPROVED_STRATEGIES = 3  # was 5
+_TOP_REGRESSED_STRATEGIES = 2  # was 3 — dead-ends are reference, not focus
+_MAX_BASELINE_BENCHMARK_CHARS = 1_500  # was 3_500
 
 # Single-source-of-truth speedup threshold for classifying strategies as
 # WORKED vs MARGINAL vs REGRESSED. Mirrors the KB inclusion threshold
@@ -241,17 +241,17 @@ def _classify_kb_match(top, target_kernel_path: str) -> tuple[str, str]:
 
 
 def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str) -> str:
-    """Emit a concise top-hit label and a single decision prompt.
+    """Emit a concise reference label only when an EXACT code match exists.
 
-    Design principle: present the data (verified speedup, code-identity tag,
-    key params, full diff below); let the agent decide based on the diff
-    + the current kernel.py + the profiling output whether the strategy
-    is applicable. If yes, apply as first priority. If no, the agent is
-    free to optimize from its own analysis without penalty.
+    Design (passive RAG style): the KB is REFERENCE material, not a directive.
+    Only emit a "top hit" hint when the stored ``original_kernel_code`` is
+    byte-identical to the current kernel — i.e. the diff is GUARANTEED to
+    apply verbatim. For all other cases the diffs are still shown below as
+    optional reference; the agent decides applicability without prompting.
 
-    Identity is determined by CODE comparison, not name matching, since
-    names like ``fused_qkv_rope`` and ``fused_qkv_MLA`` are organizational
-    labels and the actual semantics live in the source.
+    This avoids biasing the agent toward incremental KB-style strategies
+    when fundamentally different (and potentially better) optimizations
+    are reachable from scratch on the actual current kernel.
     """
     if not experiences:
         return ""
@@ -260,20 +260,25 @@ def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str
     if not top.success or speedup <= 1.03:
         return ""
 
-    patch_text = getattr(top, "best_patch", "") or ""
-    params = _extract_key_params(patch_text, max_params=3) if patch_text else []
-    params_str = "; ".join(params) if params else "see diff below"
-
-    match_tag, application_hint = _classify_kb_match(top, target_kernel_path)
+    # ONLY emit a hint for exact-code matches (verbatim-applicable patches).
+    # For cross-kernel transfers, stay silent — the agent will see the diffs
+    # in the body and decide whether to adapt them on its own.
+    if not target_kernel_path:
+        return ""
+    try:
+        cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    kb_code = (getattr(top, "original_kernel_code", "") or "").strip()
+    if not kb_code or kb_code != cur_code:
+        return ""
 
     return (
-        f"**KB top hit**: `{top.kernel_name}` verified **{speedup:.2f}x**"
-        f"{match_tag}. Key params: {params_str}. Full diff below.\n\n"
-        f"**Decide**: based on (a) the diff below, (b) your current kernel.py "
-        f"code, and (c) the profiling output — does this strategy apply to "
-        f"the current kernel? If YES, make it your first priority "
-        f"({application_hint}). If NO, optimize from your own analysis "
-        f"directly without trying it."
+        f"**Reference**: KB has a verbatim-applicable patch for this exact code "
+        f"at `{top.kernel_name}` verified **{speedup:.2f}x**. "
+        f"You may apply it as a starting point if you judge it appropriate. "
+        f"If you have a fundamentally different optimization in mind, pursue "
+        f"that instead — the KB diff is reference material, not a mandate."
     )
 
 
@@ -286,25 +291,22 @@ def _guess_language(experiences: list[ExperienceRecord]) -> str:
 
 
 def _build_reasoning_guidance(lang: str) -> str:
-    if lang == "hip":
-        return (
-            "**IMPORTANT**: These are from SIMILAR but NOT identical HIP kernels. "
-            "Before adopting any strategy below, compare the code diff against "
-            "YOUR kernel's actual architecture. Only use strategies where the "
-            "underlying HIP patterns match (same __global__ kernel structure, "
-            "same data access patterns, same bottleneck). For example, LDS tiling "
-            "with SoA layout transfers well between spatial search kernels that "
-            "iterate over point clouds, but a warp-parallel scan for KNN may not "
-            "help a gather/scatter kernel with different access patterns."
-        )
+    """Lightweight passive reference framing — no directives, no biasing.
+
+    The previous version of this guidance prescribed how the agent should
+    weight the KB content (compare patterns, skip non-matching strategies).
+    That bias caused the agent to anchor on KB strategies even when better
+    optimizations were available from scratch.
+
+    The new framing simply notes that the entries below are reference
+    material; the agent reasons about applicability based on its own
+    analysis of the current kernel, with no nudging from the KB.
+    """
     return (
-        "**IMPORTANT**: These are from SIMILAR but NOT identical kernels. "
-        "Before adopting any strategy below, compare the code diff against "
-        "YOUR kernel's actual architecture. Only use strategies where the "
-        "underlying Triton patterns match (same tl.dot loop, same data types, "
-        "same bottleneck). If the KB kernel uses split-K for GEMM but your "
-        "kernel's bottleneck is in quantization/dequantization, skip the GEMM "
-        "strategies and look for quant-related patterns instead."
+        "*Below: reference material from past optimization runs (similar but not "
+        "identical kernels). Treat these as DOCUMENTATION you can consult, not "
+        "instructions to follow. Form your own optimization plan from the actual "
+        "kernel code + profile, then optionally consult these for ideas.*"
     )
 
 
