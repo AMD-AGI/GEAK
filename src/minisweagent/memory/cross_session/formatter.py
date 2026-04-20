@@ -77,38 +77,17 @@ def _extract_key_params(patch_text: str, max_params: int = 8) -> list[str]:
     return found
 
 
-def _build_adaptation_note(exp, target_kernel_path: str) -> str:
-    """Produce a per-experience adaptation note based on CODE comparison.
+def _code_fingerprint(code: str) -> str:
+    """Short structural fingerprint the agent can compare across entries.
 
-    Code identity is the source of truth — names are organizational labels
-    that don't reflect semantic equivalence (e.g. ``fused_qkv_rope`` and
-    ``fused_qkv_MLA`` may share a name suffix but have completely different
-    code).
-
-    Compares the experience's stored ``original_kernel_code`` against the
-    current ``target_kernel_path`` content:
-      * Codes match exactly → "verified for this exact code; apply verbatim"
-      * Codes differ (or unavailable) → "related kernel; adapt the technique"
+    Returns ``"{byte_length}B, sha256=abcdef12..."``. Lets the agent judge
+    identity by comparing fingerprints rather than requiring us to inject
+    a special-case banner.
     """
-    if not target_kernel_path:
-        return ""
-    kb_code = (getattr(exp, "original_kernel_code", "") or "").strip()
-    cur_code = ""
-    try:
-        cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        cur_code = ""
-    if kb_code and cur_code and kb_code == cur_code:
-        return (
-            "**SAME CODE — VERIFIED PATCH** — the patch above was measured on the "
-            "EXACT same source you are optimizing now. Apply it directly via "
-            "`str_replace` / `write` / `git apply` to reproduce the verified speedup."
-        )
-    return (
-        "**Adaptation note:** the patch above was measured on a related kernel "
-        "with different source. Apply the *technique* (key params above), but "
-        "translate signatures / variable names / control flow to fit your kernel."
-    )
+    import hashlib
+    if not code:
+        return "absent"
+    return f"{len(code)}B, sha256={hashlib.sha256(code.encode()).hexdigest()[:12]}"
 
 
 def format_landscape_context(
@@ -143,10 +122,18 @@ def format_landscape_context(
     parts.append(f"### Cross-Session Memory (from {n} similar kernel{'s' if n != 1 else ''})")
     parts.append("")
 
-    top_hint = _build_top_hint(experiences, target_kernel_path) if experiences else ""
-    if top_hint:
-        parts.append(top_hint)
-        parts.append("")
+    # Provide the agent's own kernel fingerprint + hardware so it can
+    # cross-reference generically against each KB entry below.
+    if target_kernel_path:
+        try:
+            cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace")
+            parts.append(
+                f"**Your kernel fingerprint**: `{target_kernel_path}` "
+                f"→ {_code_fingerprint(cur_code)}"
+            )
+            parts.append("")
+        except OSError:
+            pass
 
     parts.append(_build_reasoning_guidance(lang))
     parts.append("")
@@ -167,90 +154,12 @@ def format_landscape_context(
 
 
 def _classify_kb_match(top, target_kernel_path: str) -> tuple[str, str]:
-    """Classify the KB entry purely by CODE comparison.
+    """Deprecated helper, kept as no-op for backward compat.
 
-    Names are organizational labels and don't reflect semantic equivalence
-    (e.g. ``fused_qkv_rope`` and ``fused_qkv_MLA`` may share name tokens
-    but have completely different code; the same name might also refer to
-    different versions of the same kernel as it evolves). This function
-    only looks at code content:
-
-      * KB entry's stored ``original_kernel_code`` matches the current
-        ``target_kernel_path`` content exactly → SAME CODE, patch applies
-        verbatim. The verified speedup is reproducible.
-      * Otherwise → RELATED KERNEL — present the technique, agent adapts.
-
-    Returns ``(tag, hint)`` where ``tag`` is a short bracketed annotation
-    inserted into the FIRST-MOVE label, and ``hint`` is the verb hint
-    used in the decision prompt.
+    Classification is now handled by the agent itself via per-entry
+    code_fingerprint + hardware + bottleneck evidence.
     """
-    kb_code = (getattr(top, "original_kernel_code", "") or "").strip()
-    cur_code = ""
-    if target_kernel_path:
-        try:
-            cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            cur_code = ""
-    if kb_code and cur_code and kb_code == cur_code:
-        return " [SAME CODE — diff applies verbatim]", "apply verbatim"
-    return "", "adapt the technique to your kernel (KB entry was measured on different code)"
-
-
-def _build_top_hint(experiences: list[ExperienceRecord], target_kernel_path: str) -> str:
-    """Emit a concise reference label only when an EXACT code match exists.
-
-    Design (passive RAG style): the KB is REFERENCE material, not a directive.
-    Only emit a "top hit" hint when the stored ``original_kernel_code`` is
-    byte-identical to the current kernel — i.e. the diff is GUARANTEED to
-    apply verbatim. For all other cases the diffs are still shown below as
-    optional reference; the agent decides applicability without prompting.
-
-    This avoids biasing the agent toward incremental KB-style strategies
-    when fundamentally different (and potentially better) optimizations
-    are reachable from scratch on the actual current kernel.
-    """
-    if not experiences:
-        return ""
-    if not target_kernel_path:
-        return ""
-    try:
-        cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        return ""
-
-    # Find the highest-speedup experience whose ``original_kernel_code`` is
-    # byte-identical to the current kernel — i.e. whose stored diff WILL
-    # apply verbatim (guaranteed). We scan across all retrieved experiences
-    # rather than only ``experiences[0]`` because the retriever's ranking
-    # is text-similarity driven and may float a lower-speedup entry to the
-    # top even when a higher-speedup entry on the IDENTICAL source exists.
-    best_match = None
-    best_sp = 0.0
-    for exp in experiences:
-        if not getattr(exp, "success", False):
-            continue
-        sp = float(getattr(exp, "best_speedup", 0.0) or 0.0)
-        if sp <= 1.03:
-            continue
-        kb_code = (getattr(exp, "original_kernel_code", "") or "").strip()
-        if kb_code and kb_code == cur_code and sp > best_sp:
-            best_match, best_sp = exp, sp
-
-    if best_match is None:
-        return ""
-
-    return (
-        f"**EXACT-CODE MATCH FOUND**: The KB contains a patch that was measured on "
-        f"byte-identical source to your current kernel.py — strategy "
-        f"`{best_match.best_strategy}` verified **{best_sp:.2f}x** speedup. "
-        f"The diff is reproduced verbatim below. Because the baseline code is "
-        f"IDENTICAL, applying this diff directly (via `str_replace` / `write` / "
-        f"`git apply`) is expected to reproduce the measured speedup exactly.\n\n"
-        f"This does not prescribe behavior: if your analysis of the current "
-        f"kernel + profile suggests a fundamentally different optimization with "
-        f"higher potential, pursue that instead. Treat the KB patch as a strong, "
-        f"free starting-point candidate — one option among your own ideas."
-    )
+    return "", ""
 
 
 def _guess_language(experiences: list[ExperienceRecord]) -> str:
@@ -276,17 +185,21 @@ def _build_reasoning_guidance(lang: str) -> str:
     based on that informed comparison.
     """
     return (
-        "*Below is ADDED CONTEXT from past optimization runs (similar — not "
-        "identical — kernels). Each entry includes: the baseline kernel.py "
-        "of that past run, the strategies tried per round, the actual code "
-        "diffs (winning + regressions), measured speedups, dead-ends to "
-        "avoid, profiler insights, and the round-by-round trajectory.*\n\n"
-        "*Examine each entry: compare its baseline code to YOUR current "
-        "kernel.py, its bottleneck to YOUR profile output, its diffs to "
-        "what would actually apply here. Then make an informed decision: "
-        "adopt verbatim if applicable, adapt the technique if partially "
-        "applicable, or set aside and proceed with your own analysis. The "
-        "KB does not prescribe — it informs.*"
+        "*Below: evidence from past optimization runs. Each entry reports its "
+        "hardware, baseline→best latency, bottleneck, code_fingerprint "
+        "(`Nbytes, sha256=...`), key_insight, extracted key params, "
+        "profiler insight, round-by-round results, winning diffs, and "
+        "regression diffs to avoid.*\n\n"
+        "*How to use this generically: compare each entry's "
+        "`code_fingerprint` to YOUR kernel's fingerprint (shown above) — "
+        "byte-match means the diff applies verbatim and the speedup is "
+        "reproducible; differ means treat the diff as a technique to "
+        "translate. Compare hardware + bottleneck + baseline latency to "
+        "your own context. Read the diffs. Then form your own plan: adopt "
+        "verbatim where evidence is strong, adapt the technique where "
+        "partial, or pursue a different optimization when YOUR analysis "
+        "of the current kernel + profile suggests more headroom. The KB "
+        "informs your decision; it does not make it for you.*"
     )
 
 
@@ -337,6 +250,21 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
 
     parts.append(f"## {kn} ({sp:.2f}x speedup, {exp.bottleneck_type}-bound)")
 
+    # Generic evidence header: everything the agent needs to judge whether
+    # this entry applies to its current kernel. No special-case banner
+    # for byte-identical code — the agent can compare the fingerprint
+    # below against its own fingerprint (shown above the entries) and
+    # make its own call.
+    hw = getattr(exp, "hardware", "") or exp_dict.get("hardware", "")
+    baseline_ms = getattr(exp, "baseline_latency_ms", 0) or 0
+    best_ms = getattr(exp, "best_latency_ms", 0) or 0
+    code_fp = _code_fingerprint(exp_dict.get("original_kernel_code", "") or "")
+    parts.append(
+        f"**Evidence**: hardware={hw or 'unknown'} | "
+        f"baseline={baseline_ms:.4f}ms → best={best_ms:.4f}ms | "
+        f"code_fingerprint={code_fp}"
+    )
+
     key_insight = exp.key_insight if exp.key_insight else exp_dict.get("key_insight", "")
     if key_insight:
         parts.append(f"*{key_insight}*")
@@ -358,13 +286,9 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
         best_patch_text = exp_dict.get("patch_content", "") or exp.patch_content or ""
     key_params = _extract_key_params(best_patch_text) if best_patch_text else []
     if key_params:
-        parts.append("\n**Key params from winning patch (apply these values directly):**")
+        parts.append("\n**Key params from winning patch:**")
         for kp in key_params:
             parts.append(f"  - {kp}")
-
-    adaptation = _build_adaptation_note(exp, target_kernel_path)
-    if adaptation:
-        parts.append(f"\n{adaptation}")
 
     profiling = exp_dict.get("profiling_insight", "")
     if profiling:
