@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,17 +54,6 @@ class SkillRuntime:
         return {s.name: s for s in skills}
 
     def build_system_prompt(self) -> str:
-        target_lang = os.environ.get("GEAK_TARGET_LANGUAGE", "")
-
-        auto_loaded: list[str] = []
-        if target_lang:
-            for _name, s in self.skills.items():
-                if target_lang.lower() in s.description.lower() and not s.loaded:
-                    skill_md = s.path / "SKILL.md"
-                    content = skill_md.read_text(encoding="utf-8")
-                    auto_loaded.append(f"\n# Auto-loaded skill: {s.name}\n{content}")
-                    s.loaded = True
-
         blocks = ["\n<available_skills>"]
 
         for _name, s in self.skills.items():
@@ -78,15 +66,8 @@ class SkillRuntime:
 
         blocks.append("</available_skills>")
 
-        if auto_loaded:
-            blocks.append(
-                "\nThe following skills have been automatically loaded because they match "
-                f"the target language '{target_lang}'. Follow their guidance closely."
-            )
-            blocks.extend(auto_loaded)
-        else:
-            blocks.append(
-                """
+        blocks.append(
+            """
 You can use the above skills to optimize related kernels.
 If a skill is relevant, respond with:
 
@@ -98,7 +79,7 @@ If a skill is relevant, respond with:
 ```
 Otherwise, respond normally.
     """
-            )
+        )
 
         return "\n".join(blocks)
 

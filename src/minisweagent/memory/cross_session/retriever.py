@@ -308,12 +308,6 @@ def _infer_category(kernel_path: str) -> str:
 
 
 def _infer_language(kernel_path: str) -> str:
-    import os
-
-    target_lang = os.environ.get("GEAK_TARGET_LANGUAGE", "").strip().lower()
-    if target_lang:
-        return target_lang
-
     p = kernel_path.lower()
     if any(k in p for k in ("flydsl", "flyc", "fly_dsl")):
         return "flydsl"

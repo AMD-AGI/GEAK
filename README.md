@@ -139,7 +139,6 @@ REPO="/path/to/FlyDSL"
 
 geak --repo "$REPO" \
   --kernel-url "$REPO/kernels/preshuffle_gemm.py" \
-  --target-language flydsl \
   --task "Optimize the preshuffle GEMM kernel." \
   --yolo --exit-immediately
 ```
