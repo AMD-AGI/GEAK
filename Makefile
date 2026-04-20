@@ -1,15 +1,28 @@
-.PHONY: install install-dev
+.PHONY: install install-dev install-full
 
-# Production install (used by Dockerfile)
+# Production install (used by Dockerfile): core + MCP tools
 install:
-	pip install .
+	pip install '.[langchain]'
 	pip install mcp_tools/automated-test-discovery/ \
 	            mcp_tools/metrix-mcp/ \
-	            mcp_tools/profiler-mcp/
+	            mcp_tools/profiler-mcp/ \
+	            mcp_tools/cross-session-memory-mcp/ \
+	            mcp_tools/rag-mcp/
 
-# Editable install (used by developers / GEAK_EDITABLE=1)
+# Full install: core + MCP tools + dev + swe-rex
+install-full:
+	pip install '.[dev,langchain]' 'swe-rex>=1.4.0'
+	pip install mcp_tools/automated-test-discovery/ \
+	            mcp_tools/metrix-mcp/ \
+	            mcp_tools/profiler-mcp/ \
+	            mcp_tools/cross-session-memory-mcp/ \
+	            mcp_tools/rag-mcp/
+
+# Editable full install (for developers)
 install-dev:
-	pip install -e .
+	pip install -e '.[dev,langchain]' 'swe-rex>=1.4.0'
 	pip install -e mcp_tools/automated-test-discovery/ \
 	            -e mcp_tools/metrix-mcp/ \
-	            -e mcp_tools/profiler-mcp/
+	            -e mcp_tools/profiler-mcp/ \
+	            -e mcp_tools/cross-session-memory-mcp/ \
+	            -e mcp_tools/rag-mcp/

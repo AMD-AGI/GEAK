@@ -39,9 +39,9 @@ cd GEAK
 AMD_LLM_API_KEY=<YOUR_KEY> bash scripts/run-docker.sh
 
 # Local install
-pip install -e .          # core package (includes fastmcp and mcp[cli])
-pip install -e '.[mcp]'   # + MCP tool servers (profiler, test-discovery, metrix)
-pip install -e '.[full]'  # everything (MCP tools + dev + langchain)
+make install              # core + MCP tools (same as Docker)
+make install-full         # + dev tools + swe-rex
+make install-dev          # install-full, editable (for developers)
 
 # Set model name and key. In the case of docker-based setup, export the API key before
 # running scripts/run-docker.sh.
@@ -63,7 +63,7 @@ export AMD_LLM_API_KEY="YOUR_KEY"
 GPU/ROCm/HIP optimization knowledge base, powered by hybrid retrieval (FAISS + BM25 + reranker).
 
 ```bash
-pip install -e mcp_tools/rag-mcp
+# rag-mcp is included in `make install` — just build the index:
 python scripts/build_index.py --force
 ```
 
