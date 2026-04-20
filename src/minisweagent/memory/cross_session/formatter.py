@@ -127,9 +127,12 @@ def format_landscape_context(
     parts.append(f"### Cross-Session Memory (from {n} similar kernel{'s' if n != 1 else ''})")
     parts.append("")
 
-    # Provide the agent's own kernel fingerprint + hardware so it can
-    # cross-reference generically against each KB entry below.
-    cur_code = ""
+    # Provide the agent's own kernel fingerprint so it can cross-reference
+    # against each KB entry's ``Code fingerprint`` line shown below. When a
+    # KB entry's fingerprint matches this value byte-for-byte, the stored
+    # patch is guaranteed to apply and is expected to reproduce the
+    # measured speedup -- the agent reads that off the evidence directly,
+    # no prescriptive banner required.
     if target_kernel_path:
         try:
             cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace")
@@ -137,16 +140,6 @@ def format_landscape_context(
             parts.append("")
         except OSError:
             pass
-
-    # EXACT-CODE-MATCH banner: fires only when one of the retrieved KB
-    # entries stores an ``original_kernel_code`` that is byte-identical to
-    # the current kernel.py. In that case the stored patch_content will
-    # apply verbatim and reproduces the measured speedup on this hardware.
-    # Guard clause so this never fires for cross-kernel transfers.
-    exact_match = _find_exact_code_match(experiences, cur_code) if cur_code else None
-    if exact_match is not None:
-        parts.append(_build_exact_match_banner(exact_match))
-        parts.append("")
 
     parts.append(_build_reasoning_guidance(lang))
     parts.append("")
@@ -166,65 +159,6 @@ def format_landscape_context(
         parts.append(chunk)
 
     return "\n".join(parts)
-
-
-def _find_exact_code_match(experiences: list[ExperienceRecord], target_code: str) -> ExperienceRecord | None:
-    """Return the best byte-identical-source entry from the retrieved set.
-
-    "Best" = highest verified speedup among entries whose stored
-    ``original_kernel_code`` exactly matches (under whitespace
-    normalization) the target kernel's current source. Returns ``None``
-    if no entry matches.
-    """
-    import hashlib
-
-    if not target_code:
-        return None
-
-    def _norm(s: str) -> str:
-        return "\n".join(line.strip() for line in s.splitlines() if line.strip())
-
-    target_hash = hashlib.sha256(_norm(target_code).encode()).hexdigest()
-    candidates: list[ExperienceRecord] = []
-    for exp in experiences:
-        kb_code = getattr(exp, "original_kernel_code", "") or ""
-        if not kb_code:
-            continue
-        if hashlib.sha256(_norm(kb_code).encode()).hexdigest() == target_hash:
-            candidates.append(exp)
-
-    if not candidates:
-        return None
-    return max(candidates, key=lambda e: e.best_speedup)
-
-
-def _build_exact_match_banner(exp: ExperienceRecord) -> str:
-    """Compose the EXACT-CODE-MATCH banner for a byte-identical entry.
-
-    Emitted only when the retrieved KB entry's stored baseline source
-    matches the current kernel.py byte-for-byte. In that case the KB's
-    ``patch_content`` applies verbatim and the ``best_speedup`` is a
-    hard lower bound on what the agent can achieve -- applying the patch
-    directly should reproduce it exactly (modulo run-to-run benchmark
-    noise).
-    """
-    strat = exp.best_strategy or "(unnamed)"
-    sp = exp.best_speedup
-    baseline_ms = getattr(exp, "baseline_latency_ms", 0) or 0
-    best_ms = getattr(exp, "best_latency_ms", 0) or 0
-    patch_len = len(getattr(exp, "patch_content", "") or "")
-    return (
-        "> **EXACT-CODE-MATCH FOUND** — one retrieved KB entry stores this "
-        f"exact kernel.py byte-for-byte. That entry's winning patch "
-        f"(`{strat}`, {patch_len:,} bytes) achieved a **verified "
-        f"{sp:.4f}x** speedup on this hardware ({baseline_ms:.4f} ms → "
-        f"{best_ms:.4f} ms). Applying its `patch_content` verbatim via "
-        "`str_replace` / `write` / `git apply` is expected to reproduce "
-        "that speedup on Round 1 — no adaptation required. Subsequent "
-        "rounds can still explore other strategies if the agent believes "
-        "more headroom remains; this banner is a concrete first move, "
-        "not a ceiling."
-    )
 
 
 def _classify_kb_match(top, target_kernel_path: str) -> tuple[str, str]:
