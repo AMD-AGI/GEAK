@@ -100,6 +100,7 @@ def format_landscape_context(
     query_bottleneck: str = "",
     compact: bool = False,
     target_code: str = "",
+    per_entry_code_sim: list[float] | None = None,
 ) -> str:
     """Format cross-session experiences into an "added context" block.
 
@@ -111,12 +112,21 @@ def format_landscape_context(
     ``target_code`` is the raw source of the kernel being optimized right
     now. It is used to emit the agent's own fingerprint at the top of the
     context so the agent can compare it to each KB entry's stored code
-    fingerprint and decide verbatim vs translate. The retriever never
-    reads the filesystem; the caller is responsible for supplying the
-    source.
+    fingerprint and decide verbatim vs translate.
+
+    ``per_entry_code_sim`` is a parallel list to ``experiences`` giving
+    the Jaccard similarity between ``target_code`` and each entry's
+    stored ``original_kernel_code``. Surfaced per entry so the agent
+    weighs KB hints by their actual overlap -- 100% means verbatim, 25%
+    means partial same-family, 10% means distant cross-family reference
+    only. When every entry is <25%, a top-of-context hint is emitted so
+    the agent doesn't anchor on a weak match.
     """
     if not experiences and not skills:
         return ""
+
+    if per_entry_code_sim is None or len(per_entry_code_sim) != len(experiences):
+        per_entry_code_sim = [0.0] * len(experiences)
 
     lang = _guess_language(experiences)
     parts: list[str] = []
@@ -134,15 +144,46 @@ def format_landscape_context(
         parts.append(f"**Your kernel fingerprint**: {_code_fingerprint(target_code)}")
         parts.append("")
 
+    # KB relevance summary: tell the agent up-front whether the retrieved
+    # entries are close matches or distant cross-family references. The
+    # agent then knows when to weight KB highly vs when to primarily rely
+    # on its own analysis of the current kernel.
+    max_sim = max(per_entry_code_sim) if per_entry_code_sim else 0.0
+    if max_sim >= 0.99:
+        relevance_note = (
+            "**KB relevance: STRONG** — at least one retrieved entry is byte-identical "
+            "to your current kernel. Its patch applies verbatim and reproduces the "
+            "measured speedup. Lower-ranked entries may offer additional techniques."
+        )
+    elif max_sim >= 0.25:
+        relevance_note = (
+            f"**KB relevance: PARTIAL** (best code_sim = {max_sim * 100:.0f}%). Retrieved "
+            "entries share some structural patterns but differ in key ways. Adapt "
+            "techniques rather than copying diffs verbatim; validate against your "
+            "current kernel's actual hot paths."
+        )
+    else:
+        relevance_note = (
+            f"**KB relevance: LOW** (best code_sim = {max_sim * 100:.0f}%). No close "
+            "code match in the knowledge base — the retrieved entries are distant "
+            "cross-family references. Use them as **weak hints** for generic "
+            "patterns only. Prioritise analysing YOUR kernel's profiler output and "
+            "its kernel-specific code paths (e.g., quantization ops, custom "
+            "primitives) rather than anchoring on strategy names from these entries."
+        )
+    parts.append(relevance_note)
+    parts.append("")
+
     parts.append(_build_reasoning_guidance(lang))
     parts.append("")
 
     budget = _MAX_CONTEXT_COMPACT if compact else _MAX_CONTEXT_FULL
-    for exp in experiences:
+    for idx, exp in enumerate(experiences):
         exp_dict = exp.to_dict() if hasattr(exp, "to_dict") else {}
-        chunk = _format_compact(exp, exp_dict) if compact else _format_single_experience(exp, exp_dict)
+        cs = per_entry_code_sim[idx] if idx < len(per_entry_code_sim) else 0.0
+        chunk = _format_compact(exp, exp_dict) if compact else _format_single_experience(exp, exp_dict, code_sim=cs)
         if budget - len(chunk) < 0 and parts:
-            parts.append(f"\n*(budget reached — {n - experiences.index(exp)} more omitted)*")
+            parts.append(f"\n*(budget reached — {n - idx} more omitted)*")
             break
         budget -= len(chunk)
         parts.append(chunk)
@@ -173,21 +214,25 @@ def _build_reasoning_guidance(lang: str) -> str:
     based on that informed comparison.
     """
     return (
-        "*Below: evidence from past optimization runs. Each entry reports its "
-        "hardware, baseline→best latency, bottleneck, code_fingerprint "
-        "(`Nbytes, sha256=...`), key_insight, extracted key params, "
+        "*Below: evidence from past optimization runs. Each entry reports "
+        "its hardware, baseline→best latency, bottleneck, "
+        "**Code similarity to your kernel** (raw Jaccard % over source "
+        "lines), code_fingerprint, key_insight, extracted key params, "
         "profiler insight, round-by-round results, winning diffs, and "
         "regression diffs to avoid.*\n\n"
-        "*How to use this generically: compare each entry's "
-        "`code_fingerprint` to YOUR kernel's fingerprint (shown above) — "
-        "byte-match means the diff applies verbatim and the speedup is "
-        "reproducible; differ means treat the diff as a technique to "
-        "translate. Compare hardware + bottleneck + baseline latency to "
-        "your own context. Read the diffs. Then form your own plan: adopt "
-        "verbatim where evidence is strong, adapt the technique where "
-        "partial, or pursue a different optimization when YOUR analysis "
-        "of the current kernel + profile suggests more headroom. The KB "
-        "informs your decision; it does not make it for you.*"
+        "*How to use this generically: read **Code similarity** first. "
+        "At ~100% the stored patch applies verbatim and should reproduce "
+        "the speedup. At 25-80% the KB shares structural patterns -- "
+        "adapt the technique to your kernel's actual hot paths. Below "
+        "25% the entry is a distant cross-family reference: treat it as "
+        "a weak hint for generic patterns only, and lean on YOUR own "
+        "kernel.py and profiler output for strategy ideas (especially "
+        "kernel-specific code paths like quantization ops, custom "
+        "primitives, or fusion opportunities that the KB entry may not "
+        "cover). The KB informs your decision; it does not make it for "
+        "you. If no entry matches well and early rounds of KB-inspired "
+        "strategies don't improve, pivot to analysing the current "
+        "kernel's profile and propose kernel-specific optimizations.*"
     )
 
 
@@ -219,7 +264,7 @@ def _format_compact(exp: ExperienceRecord, exp_dict: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _format_single_experience(exp: ExperienceRecord, exp_dict: dict) -> str:
+def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, code_sim: float = 0.0) -> str:
     """Format a single experience with all rich fields.
 
     Strategies are the single source of truth -- every strategy has a
@@ -231,6 +276,12 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict) -> str:
     strategy's diff so the LLM can directly apply the specific numeric /
     dtype values that made the winning patch work, without having to parse
     the full 5k-char diff.
+
+    ``code_sim`` is the Jaccard line-overlap between this entry's stored
+    ``original_kernel_code`` and the target kernel's current source. It
+    gets printed alongside the evidence so the agent can judge how much
+    weight to give this entry: 100% = apply verbatim, 25-60% = adapt
+    techniques, <25% = distant cross-family reference only.
     """
     parts: list[str] = []
     kn = exp.kernel_name or "unknown"
@@ -253,10 +304,23 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict) -> str:
     kstruct = exp_dict.get("kernel_structure", "") or ""
     timestamp = exp_dict.get("timestamp", "") or ""
 
+    # Code-similarity qualitative tier tells the agent what this entry
+    # actually represents relative to the current kernel.
+    cs_pct = code_sim * 100.0
+    if code_sim >= 0.99:
+        cs_tier = "STRONG: byte-identical source, patch applies verbatim"
+    elif code_sim >= 0.25:
+        cs_tier = "PARTIAL: shares structural patterns, adapt techniques"
+    elif code_sim > 0.0:
+        cs_tier = "WEAK: distant cross-family, treat as generic hint only"
+    else:
+        cs_tier = "NONE: no stored source or no overlap"
+
     parts.append(
         f"**Context**: hardware=`{hw or 'unknown'}` | language=`{language}` | "
         f"category=`{category}` | recorded={timestamp[:10] if timestamp else '?'}"
     )
+    parts.append(f"**Code similarity to your kernel**: {cs_pct:.1f}% ({cs_tier})")
     parts.append(
         f"**Performance**: baseline={baseline_ms:.4f}ms → best={best_ms:.4f}ms ({sp:.4f}x, {exp.bottleneck_type}-bound)"
     )

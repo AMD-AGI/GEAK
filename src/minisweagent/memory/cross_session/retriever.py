@@ -103,6 +103,19 @@ def retrieve_context(
     if not top:
         return ""
 
+    # Compute per-entry code similarity once so the formatter can surface
+    # the raw number alongside each entry. The agent needs this signal
+    # explicitly: when ALL top entries have low code_sim the KB is a
+    # DISTANT reference set (cross-family at best), and the agent should
+    # lean on its own kernel + profile for strategy ideas. Without this
+    # number the agent tends to anchor on whatever entry ranks highest
+    # -- even if that entry is only 13% code-similar to the current
+    # kernel, which is fine as a weak hint but misleading as a blueprint.
+    per_entry_code_sim: list[float] = []
+    for exp in top:
+        kb_code = getattr(exp, "original_kernel_code", "") or ""
+        per_entry_code_sim.append(_code_similarity(target_code, kb_code) if kb_code else 0.0)
+
     # Optional: skills are still retrieved using whatever metadata the
     # backend has; they're a lightweight supplement, not the primary signal.
     skills = []
@@ -123,6 +136,7 @@ def retrieve_context(
         query_bottleneck=bottleneck_type,
         compact=compact,
         target_code=target_code,
+        per_entry_code_sim=per_entry_code_sim,
     )
 
 
