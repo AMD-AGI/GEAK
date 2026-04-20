@@ -66,9 +66,13 @@ def extract_experience(**kwargs: Any) -> ExperienceRecord:
     # (no nulls, no empty arrays where data is available).
     bottleneck = str(kwargs.get("bottleneck_type", "unknown") or "unknown")
     kernel_url = _derive_kernel_url(kernel_path)
-    profiling_insight = _build_profiling_insight(baseline_latency_ms, best_latency_ms, speedup, bottleneck, profiling_metrics)
+    profiling_insight = _build_profiling_insight(
+        baseline_latency_ms, best_latency_ms, speedup, bottleneck, profiling_metrics
+    )
     baseline_benchmark = _build_baseline_benchmark(baseline_latency_ms, best_latency_ms, speedup, report_dir)
-    kernel_structure = _build_kernel_structure(original_kernel_code, language, str(kwargs.get("kernel_category", "unknown") or "unknown"))
+    kernel_structure = _build_kernel_structure(
+        original_kernel_code, language, str(kwargs.get("kernel_category", "unknown") or "unknown")
+    )
     round_insights = _extract_round_insights(report_dir, what_worked, what_failed)
     strategies = _extract_strategies_with_diffs(report_dir, kernel_path)
     agent_reasoning_samples = _extract_reasoning_samples(report_dir)
@@ -173,6 +177,7 @@ def _extract_round_insights(report_dir: Path | None, what_worked: list[str], wha
     fr = report_dir / "final_report.json"
     if fr.exists():
         import json as _json
+
         try:
             data = _json.loads(fr.read_text(encoding="utf-8", errors="replace"))
         except Exception:
@@ -198,6 +203,7 @@ def _extract_strategies_with_diffs(report_dir: Path | None, kernel_path: str) ->
     if not report_dir:
         return out
     import json as _json
+
     for round_dir in sorted(report_dir.glob("results/round_*")):
         if not round_dir.is_dir():
             continue
@@ -225,16 +231,18 @@ def _extract_strategies_with_diffs(report_dir: Path | None, kernel_path: str) ->
                     after_code = Path(patch_file_str).read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     pass
-            out.append({
-                "round": round_name,
-                "task": task_dir.name,
-                "patch": patch_id,
-                "speedup": sp,
-                "latency_ms": data.get("candidate_latency_ms", 0),
-                "after_code": after_code,
-                "is_regression": sp < 1.0,
-                "is_marginal": 1.0 <= sp < 1.10,
-            })
+            out.append(
+                {
+                    "round": round_name,
+                    "task": task_dir.name,
+                    "patch": patch_id,
+                    "speedup": sp,
+                    "latency_ms": data.get("candidate_latency_ms", 0),
+                    "after_code": after_code,
+                    "is_regression": sp < 1.0,
+                    "is_marginal": 1.0 <= sp < 1.10,
+                }
+            )
     return out
 
 

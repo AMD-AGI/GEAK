@@ -26,6 +26,7 @@ _MAX_BASELINE_BENCHMARK_CHARS = 1_500  # was 3_500
 # (``min_store_speedup`` in config.py / ``GEAK_MEMORY_MIN_SPEEDUP`` env var
 # / ``min_speedup_threshold`` in knowledge_base.json). Default 1.10x.
 import os as _os
+
 _SPEEDUP_THRESHOLD = float(_os.environ.get("GEAK_MEMORY_MIN_SPEEDUP", "1.10"))
 
 # Regexes for extracting high-signal optimization parameters from a winning
@@ -40,7 +41,10 @@ _PARAM_PATTERNS = [
     ("dtype_cast", re.compile(r"\.to\(\s*tl\.(float32|float16|bfloat16|int32|int64|uint32|uint64)\s*\)")),
     ("bitcast", re.compile(r"bitcast\s*=\s*True|tl\.(int32|uint32)\s*,\s*bitcast")),
     ("tl_arange_dtype", re.compile(r"tl\.arange\([^)]*\)\.to\(\s*tl\.(int32|int64)\s*\)")),
-    ("prealloc_output", re.compile(r"torch\.empty\(|torch\.empty_like\(|output_tensor\s*\.copy_|prealloc", re.IGNORECASE)),
+    (
+        "prealloc_output",
+        re.compile(r"torch\.empty\(|torch\.empty_like\(|output_tensor\s*\.copy_|prealloc", re.IGNORECASE),
+    ),
     ("tl_constexpr_dtype", re.compile(r"tl\.constexpr\s*=\s*tl\.(int32|int64|float32|float16)")),
     ("cuda_graph", re.compile(r"torch\.cuda\.CUDAGraph|cudagraph|cuda_graph", re.IGNORECASE)),
     ("hip_extension", re.compile(r"torch\.utils\.cpp_extension\.load|load_inline\(|hipLaunchKernelGGL")),
@@ -85,6 +89,7 @@ def _code_fingerprint(code: str) -> str:
     a special-case banner.
     """
     import hashlib
+
     if not code:
         return "absent"
     return f"{len(code)}B, sha256={hashlib.sha256(code.encode()).hexdigest()[:12]}"
@@ -127,10 +132,7 @@ def format_landscape_context(
     if target_kernel_path:
         try:
             cur_code = Path(target_kernel_path).read_text(encoding="utf-8", errors="replace")
-            parts.append(
-                f"**Your kernel fingerprint**: `{target_kernel_path}` "
-                f"→ {_code_fingerprint(cur_code)}"
-            )
+            parts.append(f"**Your kernel fingerprint**: `{target_kernel_path}` → {_code_fingerprint(cur_code)}")
             parts.append("")
         except OSError:
             pass
@@ -141,8 +143,10 @@ def format_landscape_context(
     budget = _MAX_CONTEXT_COMPACT if compact else _MAX_CONTEXT_FULL
     for exp in experiences:
         exp_dict = exp.to_dict() if hasattr(exp, "to_dict") else {}
-        chunk = _format_compact(exp, exp_dict) if compact else _format_single_experience(
-            exp, exp_dict, target_kernel_path=target_kernel_path
+        chunk = (
+            _format_compact(exp, exp_dict)
+            if compact
+            else _format_single_experience(exp, exp_dict, target_kernel_path=target_kernel_path)
         )
         if budget - len(chunk) < 0 and parts:
             parts.append(f"\n*(budget reached — {n - experiences.index(exp)} more omitted)*")
@@ -270,19 +274,13 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
         f"category=`{category}` | recorded={timestamp[:10] if timestamp else '?'}"
     )
     parts.append(
-        f"**Performance**: baseline={baseline_ms:.4f}ms → best={best_ms:.4f}ms "
-        f"({sp:.4f}x, {exp.bottleneck_type}-bound)"
+        f"**Performance**: baseline={baseline_ms:.4f}ms → best={best_ms:.4f}ms ({sp:.4f}x, {exp.bottleneck_type}-bound)"
     )
-    parts.append(
-        f"**Code fingerprint**: `{code_fp}`  ← compare byte-for-byte to your own fingerprint above"
-    )
+    parts.append(f"**Code fingerprint**: `{code_fp}`  ← compare byte-for-byte to your own fingerprint above")
     if kstruct:
         parts.append(f"**Kernel structure**: {kstruct}")
     if best_strat:
-        parts.append(
-            f"**Best strategy**: `{best_strat}`"
-            + (f" (change_category={change_cat})" if change_cat else "")
-        )
+        parts.append(f"**Best strategy**: `{best_strat}`" + (f" (change_category={change_cat})" if change_cat else ""))
 
     key_insight = exp.key_insight if exp.key_insight else exp_dict.get("key_insight", "")
     if key_insight:
@@ -319,13 +317,23 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, target_kern
 
     prof_metrics = exp_dict.get("profiling_metrics", {}) or {}
     if prof_metrics and isinstance(prof_metrics, dict):
-        keep = {k: v for k, v in prof_metrics.items()
-                if k in ("bottleneck_type", "baseline_latency_ms", "best_latency_ms",
-                         "speedup", "benchmark_iterations", "shapes_count",
-                         "warmup_iterations", "note")}
+        keep = {
+            k: v
+            for k, v in prof_metrics.items()
+            if k
+            in (
+                "bottleneck_type",
+                "baseline_latency_ms",
+                "best_latency_ms",
+                "speedup",
+                "benchmark_iterations",
+                "shapes_count",
+                "warmup_iterations",
+                "note",
+            )
+        }
         if keep:
-            parts.append("**Profiling metrics (numeric):** " +
-                         ", ".join(f"{k}={v}" for k, v in keep.items()))
+            parts.append("**Profiling metrics (numeric):** " + ", ".join(f"{k}={v}" for k, v in keep.items()))
 
     baseline_bm = exp_dict.get("baseline_benchmark", "")
     if baseline_bm:
