@@ -5,6 +5,83 @@ from __future__ import annotations
 import os
 import textwrap
 
+# ── Kernel-Analysis Habit (primary-evidence rubric) ────────────────────
+#
+# Codified habit: every LLM call that plans / generates / implements an
+# optimization must first produce a compact [A]-[D] analysis of the
+# kernel's primary evidence (source, shape regimes, profile). This runs
+# *independent* of cross-session memory / KB state. When KB has close
+# matches they slot into [D] as candidate strategies; when KB is empty
+# or low-overlap the agent still has [A]-[C] to plan from -- so we never
+# fall back to generic "try num_warps=4" autotune when the kernel's
+# actual hot paths haven't been enumerated.
+#
+# Disable with GEAK_KERNEL_ANALYSIS_RUBRIC_DISABLE=1.
+
+_KERNEL_ANALYSIS_RUBRIC_BODY = textwrap.dedent("""\
+    ## Mandatory Kernel-Analysis Habit (always run, independent of external memory/KB)
+
+    Before proposing or implementing ANY strategy, produce a compact structured
+    analysis in this exact format. This is a habit, not a conditional -- do it
+    every run, whether cross-session memory returned close matches or not. It
+    is your grounding in the current kernel's actual hot paths, shape space,
+    and bottleneck profile. Skipping it produces generic autotune guesses that
+    ignore this kernel's real primitives.
+
+    ### [A] Kernel primitives (from kernel.py)
+    List 3-6 concrete primitives the kernel performs and HOW each is implemented
+    today. Be specific -- name Triton / HIP / CK constructs, tile shapes,
+    broadcast patterns, register/LDS usage. Do not paraphrase.
+    Good: "tl.dot_scaled('e2m1','e2m1') with K-tile loop; per-K mxfp4 dequant
+    via _mxfp4_quant_op called inside the loop; 128-wide tile with num_warps=8".
+    Bad: "matmul with some quant".
+
+    ### [B] Shape regimes (from test_kernel_harness.py / ALL_SHAPES / benchmark)
+    List every distinct shape tuple the harness / benchmark tests. Group into
+    regimes by dominant axis (small-M <=32, medium 32..256, large >256; or
+    small-N vs large-N for reductions). Call out special-case keys that may
+    have tuned configs (e.g. N=7168 K=2048, power-of-2 vs ragged).
+
+    ### [C] Profile hotspots (from profile.json)
+    Top 3 kernels by duration. For each: bottleneck type (latency / compute /
+    memory), HBM util %, MFMA util % (where present), and which primitive
+    from [A] it maps onto.
+
+    ### [D] Attack surfaces (derived from [A] x [B] x [C])
+    For each (hotspot x regime) that is not already optimal, propose at least
+    one candidate strategy and tie it back to an observed signal from [A]-[C].
+    Generate at least 3 distinct strategies spanning at least 2 different
+    attack surfaces. Do NOT list 5 variants of a single autotune knob.
+    Good: "[small-M x mxfp4 dequant in K-loop] -> hoist dequant above the
+      loop so N_K repeated decodes per row collapse to one; expected gain
+      tied to latency bottleneck in profile[0]."
+    Bad: "try num_warps=4, num_warps=8, num_warps=16".
+
+    If external memory / KB evidence is available elsewhere in this prompt,
+    cross-reference each KB entry's code_fingerprint, kernel_structure, and
+    bottleneck_type against [A]-[C] and record them as additional [D]
+    candidates to VET -- not to override direct evidence. KB absence does not
+    change any of [A]-[D]; primary evidence always comes first.
+
+    2-3 bullets per section is enough. The rubric enforces grounding, not
+    verbosity.
+""")
+
+
+def build_kernel_analysis_rubric() -> str:
+    """Return the kernel-analysis rubric block, or empty if disabled.
+
+    Single source of truth so the orchestrator system prompt, the
+    task-generator system prompt, and the sub-agent task_prompt all inject
+    the identical rubric text. Respects GEAK_KERNEL_ANALYSIS_RUBRIC_DISABLE
+    for runs where the caller wants to ablate the habit (e.g., A/B studies
+    measuring the rubric's contribution).
+    """
+    if os.environ.get("GEAK_KERNEL_ANALYSIS_RUBRIC_DISABLE", "").strip().lower() in ("1", "true", "yes"):
+        return ""
+    return _KERNEL_ANALYSIS_RUBRIC_BODY
+
+
 SYSTEM_PROMPT = """\
 You are the GEAK orchestrator – an expert at planning and coordinating
 GPU kernel optimisation.
@@ -73,6 +150,12 @@ Rules:
   may be noisy or invalidated by later verification.
 """
 
+# Append the kernel-analysis habit to the orchestrator system prompt so
+# the exploration phase always grounds itself in [A]-[D] before declaring
+# "Ready to begin optimization rounds". Uses format() so a disabled rubric
+# (env var) collapses cleanly to an empty trailing block.
+SYSTEM_PROMPT = SYSTEM_PROMPT + "\n" + build_kernel_analysis_rubric()
+
 INSTANCE_TEMPLATE = """\
 ## Preprocessor Context
 
@@ -98,13 +181,16 @@ Output directory: {output_dir}
 
 ---
 
-Begin by reading the kernel source and profiling data to understand the
-optimisation landscape.  If cross-session memory is provided above,
-critically evaluate each past strategy: compare its code diff against
-YOUR kernel's actual code structure, bottleneck type, and data flow.
-Only adopt strategies where the underlying patterns genuinely match.
-Adapt the general approach to fit your kernel — do not blindly copy
-parameters or techniques from a different kernel.
+Begin by executing the Kernel-Analysis Habit from your system prompt:
+produce a compact [A]-[D] analysis of the kernel's primary evidence
+(source, shape regimes, profile hotspots, attack surfaces). This runs
+regardless of whether cross-session memory returned close matches --
+primary evidence always comes first. If memory IS provided above,
+cross-reference each entry's code_fingerprint, kernel_structure, and
+bottleneck_type against your [A]-[C] observations, and record any
+applicable KB strategies as candidates inside [D]. Do not blindly copy
+parameters or techniques from a different kernel; KB evidence must be
+VETTED against the primary signals in [A]-[C].
 Then follow the round instructions.
 """
 
@@ -277,8 +363,31 @@ COMMANDMENT must be rejected by the sub-agent itself.
 4. Compare results against baseline metrics and report before/after numbers
 5. If correctness tests fail, revert changes and report failure
 
+**Rubric-grounding** (mandatory): Before producing the JSON list, execute
+the Kernel-Analysis Habit appended at the end of this system prompt and
+produce your own compact [A]-[D] analysis. Each task you emit in the JSON
+must be tied to a specific [D] attack surface -- i.e. the combination of
+one (hotspot from [C]) x (regime from [B]) x (primitive from [A]) that
+the task targets. Reference the triple briefly in the task_prompt body
+so the sub-agent can re-verify it before editing. This prevents generic
+"try num_warps=X" tasks that are not anchored to an observed signal.
+
+Each task_prompt you emit MUST begin with a short header of the form:
+  "Target: [A]:<primitive>  x  [B]:<regime>  x  [C]:<hotspot>. Before
+   editing, re-derive [A]-[D] for this kernel and confirm the task is
+   grounded in an observed signal."
+Then include the usual detailed instructions. Do NOT paste the rubric
+itself into each task_prompt -- the sub-agent's system prompt already
+contains it; reference the specific [A]/[B]/[C] instance.
+
 Submit ONLY the JSON array via the submit tool. No markdown fences, no explanation.
 """).format(gpu_rules=GPU_AND_PROFILER_RULES.strip())
+
+# Append the kernel-analysis habit to the task-generator system prompt for
+# the same reason as the orchestrator: primary-evidence grounding first,
+# KB evidence second. Kept as a trailing append so the main prompt body
+# stays stable for future edits.
+TASKGEN_SYSTEM_PROMPT = TASKGEN_SYSTEM_PROMPT + "\n\n" + build_kernel_analysis_rubric()
 
 TASKGEN_INSTANCE_TEMPLATE = textwrap.dedent("""\
 Generate optimization tasks for the kernel at {{ kernel_path }}.
@@ -303,11 +412,13 @@ Generate optimization tasks for the kernel at {{ kernel_path }}.
 {% endif %}
 {% if memory_context %}
 ## Optimization Memory (from past kernel optimization runs)
-**Use critically**: These strategies worked on SIMILAR kernels, not this exact one.
-Compare each strategy's code pattern against THIS kernel's actual architecture
-before generating tasks.  If the past kernel's bottleneck was in a different
-code path than yours, skip those strategies and generate tasks based on YOUR
-profiling data instead.
+**Use as candidate evidence inside [D] of the Kernel-Analysis Habit.**
+These strategies worked on SIMILAR kernels, not this exact one. Cross-reference
+each entry's code_fingerprint, kernel_structure, and bottleneck_type against
+your own [A]-[C] observations of the current kernel. A KB entry with high
+code-similarity to your kernel is a strong [D] candidate; a low-similarity
+entry is a distant cross-family reference only. Never override direct
+evidence in [A]-[C] with KB guesses.
 {{ memory_context }}
 {% endif %}
 {% if workload_guidance %}
@@ -339,12 +450,21 @@ Each task uses 1 GPU.
 {% endif %}
 ## Instructions
 
-Read the profiling file first to understand the sub-kernel landscape. Then
-read the codebase context file for the kernel dependency tree -- every
-dependency listed is in-repo code that could be an optimization target.
-Read the discovery file for additional kernel metadata, and consult the
-knowledge base for applicable strategies. Finally, submit your task list
-as JSON via the `submit` tool.
+1. Execute the Kernel-Analysis Habit from your system prompt first: read
+   the kernel source, the test/benchmark harness, and the profiling file,
+   then produce a compact [A]-[D] analysis with 2-3 bullets each.
+2. Use [A]-[C] to identify real optimization targets. If memory context is
+   present above, record applicable KB entries as candidates inside [D];
+   if not, derive [D] entirely from primary evidence -- the habit is
+   independent of KB.
+3. Read the codebase context file for the kernel dependency tree -- every
+   in-repo dependency is a potential optimization target. Read the
+   discovery file for any additional metadata.
+4. Submit your task list as JSON via the `submit` tool. Each task's
+   task_prompt MUST begin with the header
+   `Target: [A]:<primitive> x [B]:<regime> x [C]:<hotspot>. Before
+    editing, re-derive [A]-[D] for this kernel and confirm the task is
+    grounded in an observed signal.`
 """)
 
 

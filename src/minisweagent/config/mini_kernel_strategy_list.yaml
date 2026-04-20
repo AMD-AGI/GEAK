@@ -33,6 +33,49 @@ agent:
     
     This exploration approach helps you discover the most effective optimizations through systematic experimentation.
     </optimization_strategy_exploration>
+
+    <mandatory_kernel_analysis_habit>
+    Before proposing or implementing ANY strategy, produce a compact structured
+    analysis in this exact format. This is a habit, not a conditional -- do it
+    every task, whether cross-session memory returned close matches or not. It
+    grounds you in the current kernel's actual hot paths, shape space, and
+    bottleneck profile. Skipping it leads to generic autotune guesses that do
+    not target this kernel's real primitives.
+
+    ### [A] Kernel primitives (from kernel.py)
+    List 3-6 concrete primitives the kernel performs and HOW each is implemented
+    today. Name Triton / HIP / CK constructs, tile shapes, broadcast patterns,
+    register/LDS usage. Do not paraphrase.
+    Good: "tl.dot_scaled('e2m1','e2m1') with K-tile loop; per-K mxfp4 dequant
+    via _mxfp4_quant_op called inside the loop; 128-wide tile num_warps=8".
+    Bad: "matmul with some quant".
+
+    ### [B] Shape regimes (from test_kernel_harness.py / ALL_SHAPES / benchmark)
+    List distinct shape tuples the harness / benchmark tests. Group by the
+    dominant axis (small-M <=32, medium 32..256, large >256; or small-N vs
+    large-N for reductions). Call out special-case keys with tuned configs.
+
+    ### [C] Profile hotspots (from profile.json)
+    Top 3 kernels by duration. For each: bottleneck type (latency / compute /
+    memory), HBM util %, MFMA util % where present, and which primitive
+    from [A] it maps onto.
+
+    ### [D] Attack surfaces (derived from [A] x [B] x [C])
+    For each (hotspot x regime) that is not already optimal, propose at least
+    one candidate strategy and tie it back to an observed signal. Generate
+    at least 3 distinct strategies spanning at least 2 different attack
+    surfaces. Do NOT list 5 variants of a single autotune knob.
+
+    If external memory / KB evidence appears elsewhere in this prompt, treat
+    each KB entry as a candidate inside [D]: cross-reference its code_fingerprint
+    / kernel_structure / bottleneck_type against your [A]-[C]. Never override
+    direct evidence in [A]-[C] with KB guesses. Absence of KB does not change
+    any of [A]-[D]; primary evidence always comes first.
+
+    2-3 bullets per section is enough. Record the analysis in your strategy
+    file (`strategy_manager note` or as initial content) so later rounds can
+    build on it.
+    </mandatory_kernel_analysis_habit>
   instance_template: |
     Task: {{task}}
 
@@ -55,11 +98,26 @@ agent:
           * memory bandwidth
         - These properties MUST be referenced in later strategy exploration.
 
-    2. **Understand the Task**
+    2. **Understand the Task** — **Mandatory Kernel-Analysis Habit first**
+       - Before any edit, produce the compact [A]-[D] analysis described in the
+         **Mandatory Kernel-Analysis Habit** block (below this workflow). This
+         is a habit, not a conditional -- always do it, every task, regardless
+         of whether cross-session memory returned close matches.
+         * [A] Kernel primitives (3-6 concrete items from kernel.py, with tile
+           shapes / dtype casts / tl.* constructs named explicitly)
+         * [B] Shape regimes (from test_kernel_harness.py / benchmark shapes,
+           grouped by dominant axis)
+         * [C] Profile hotspots (top 3 by duration from profile.json, tied to [A])
+         * [D] Attack surfaces (at least 3 strategies across >=2 surfaces)
+       - Confirm the task's target triple `Target: [A]:<primitive> x
+         [B]:<regime> x [C]:<hotspot>` (from the task_prompt header) matches
+         an observed signal in your own [A]-[C]. If it does NOT, flag the
+         mismatch and either reframe the task or pick a different [D] surface
+         from your own analysis before editing.
        - Analyze the task requirements carefully (may include code paths, descriptions, or specific optimization goals)
        - Explore the directory structure and identify relevant kernel files
        - Understand the current implementation and its context
-       - For complex tasks: Use `strategy_manager` tool to create `.optimization_strategies.md` with 3-5 potential optimization strategies
+       - For complex tasks: Use `strategy_manager` tool to create `.optimization_strategies.md` with 3-5 potential optimization strategies drawn from [D]
     {% if 'query' in tool_names %}
 
     2b. **Knowledge Base Lookup** (Recommended)

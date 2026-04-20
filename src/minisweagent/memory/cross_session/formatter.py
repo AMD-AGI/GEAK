@@ -176,22 +176,24 @@ def _build_reasoning_guidance(lang: str) -> str:
     it your first priority") biased the agent into KB-anchored thinking even
     when fundamentally different optimizations were reachable.
 
-    The new framing makes explicit what the agent should examine in the KB
-    entries below (strategies tried, baseline code of the KB kernel, code
-    diffs, what worked vs what didn't, profiler insights, round trajectory)
-    and cross-reference against (a) the current kernel.py source it sees,
-    (b) the current profile.json, (c) the current bottleneck — then decide
-    based on that informed comparison.
+    The new framing keeps the KB strictly as candidate evidence for step
+    [D] of the Kernel-Analysis Habit. Primary evidence (the agent's own
+    [A] primitives + [B] shape regimes + [C] profile hotspots) always
+    comes first; KB entries are vetted against that primary evidence
+    rather than replacing it.
     """
     return (
         "*Below: evidence from past optimization runs. Each entry reports "
-        "its hardware, baseline→best latency, bottleneck, code similarity "
+        "its hardware, baseline->best latency, bottleneck, code similarity "
         "to your current kernel (Jaccard line-overlap %), code_fingerprint, "
         "key_insight, extracted key params, profiler insight, round-by-round "
-        "results, winning diffs, and regression diffs. You also have your "
-        "current kernel's full source and profiler metrics from the main "
-        "task. Use both inputs to form your own plan -- the KB informs "
-        "your decision, it does not make it for you.*"
+        "results, winning diffs, and regression diffs. Treat each entry as "
+        "a CANDIDATE INSIDE [D] of the Kernel-Analysis Habit: cross-reference "
+        "its code_fingerprint and kernel_structure against your own [A]-[C] "
+        "observations (primitives, shape regimes, profile hotspots) and "
+        "keep only the candidates whose underlying signal matches. Primary "
+        "evidence from your own kernel always takes precedence; KB entries "
+        "never override [A]-[C].*"
     )
 
 
