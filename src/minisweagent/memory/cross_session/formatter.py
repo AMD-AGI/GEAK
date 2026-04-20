@@ -144,36 +144,6 @@ def format_landscape_context(
         parts.append(f"**Your kernel fingerprint**: {_code_fingerprint(target_code)}")
         parts.append("")
 
-    # KB relevance summary: tell the agent up-front whether the retrieved
-    # entries are close matches or distant cross-family references. The
-    # agent then knows when to weight KB highly vs when to primarily rely
-    # on its own analysis of the current kernel.
-    max_sim = max(per_entry_code_sim) if per_entry_code_sim else 0.0
-    if max_sim >= 0.99:
-        relevance_note = (
-            "**KB relevance: STRONG** — at least one retrieved entry is byte-identical "
-            "to your current kernel. Its patch applies verbatim and reproduces the "
-            "measured speedup. Lower-ranked entries may offer additional techniques."
-        )
-    elif max_sim >= 0.25:
-        relevance_note = (
-            f"**KB relevance: PARTIAL** (best code_sim = {max_sim * 100:.0f}%). Retrieved "
-            "entries share some structural patterns but differ in key ways. Adapt "
-            "techniques rather than copying diffs verbatim; validate against your "
-            "current kernel's actual hot paths."
-        )
-    else:
-        relevance_note = (
-            f"**KB relevance: LOW** (best code_sim = {max_sim * 100:.0f}%). No close "
-            "code match in the knowledge base — the retrieved entries are distant "
-            "cross-family references. Use them as **weak hints** for generic "
-            "patterns only. Prioritise analysing YOUR kernel's profiler output and "
-            "its kernel-specific code paths (e.g., quantization ops, custom "
-            "primitives) rather than anchoring on strategy names from these entries."
-        )
-    parts.append(relevance_note)
-    parts.append("")
-
     parts.append(_build_reasoning_guidance(lang))
     parts.append("")
 
@@ -215,24 +185,13 @@ def _build_reasoning_guidance(lang: str) -> str:
     """
     return (
         "*Below: evidence from past optimization runs. Each entry reports "
-        "its hardware, baseline→best latency, bottleneck, "
-        "**Code similarity to your kernel** (raw Jaccard % over source "
-        "lines), code_fingerprint, key_insight, extracted key params, "
-        "profiler insight, round-by-round results, winning diffs, and "
-        "regression diffs to avoid.*\n\n"
-        "*How to use this generically: read **Code similarity** first. "
-        "At ~100% the stored patch applies verbatim and should reproduce "
-        "the speedup. At 25-80% the KB shares structural patterns -- "
-        "adapt the technique to your kernel's actual hot paths. Below "
-        "25% the entry is a distant cross-family reference: treat it as "
-        "a weak hint for generic patterns only, and lean on YOUR own "
-        "kernel.py and profiler output for strategy ideas (especially "
-        "kernel-specific code paths like quantization ops, custom "
-        "primitives, or fusion opportunities that the KB entry may not "
-        "cover). The KB informs your decision; it does not make it for "
-        "you. If no entry matches well and early rounds of KB-inspired "
-        "strategies don't improve, pivot to analysing the current "
-        "kernel's profile and propose kernel-specific optimizations.*"
+        "its hardware, baseline→best latency, bottleneck, code similarity "
+        "to your current kernel (Jaccard line-overlap %), code_fingerprint, "
+        "key_insight, extracted key params, profiler insight, round-by-round "
+        "results, winning diffs, and regression diffs. You also have your "
+        "current kernel's full source and profiler metrics from the main "
+        "task. Use both inputs to form your own plan -- the KB informs "
+        "your decision, it does not make it for you.*"
     )
 
 
@@ -304,23 +263,11 @@ def _format_single_experience(exp: ExperienceRecord, exp_dict: dict, code_sim: f
     kstruct = exp_dict.get("kernel_structure", "") or ""
     timestamp = exp_dict.get("timestamp", "") or ""
 
-    # Code-similarity qualitative tier tells the agent what this entry
-    # actually represents relative to the current kernel.
-    cs_pct = code_sim * 100.0
-    if code_sim >= 0.99:
-        cs_tier = "STRONG: byte-identical source, patch applies verbatim"
-    elif code_sim >= 0.25:
-        cs_tier = "PARTIAL: shares structural patterns, adapt techniques"
-    elif code_sim > 0.0:
-        cs_tier = "WEAK: distant cross-family, treat as generic hint only"
-    else:
-        cs_tier = "NONE: no stored source or no overlap"
-
     parts.append(
         f"**Context**: hardware=`{hw or 'unknown'}` | language=`{language}` | "
         f"category=`{category}` | recorded={timestamp[:10] if timestamp else '?'}"
     )
-    parts.append(f"**Code similarity to your kernel**: {cs_pct:.1f}% ({cs_tier})")
+    parts.append(f"**Code similarity to your kernel**: {code_sim * 100.0:.1f}% (Jaccard over source lines)")
     parts.append(
         f"**Performance**: baseline={baseline_ms:.4f}ms → best={best_ms:.4f}ms ({sp:.4f}x, {exp.bottleneck_type}-bound)"
     )
