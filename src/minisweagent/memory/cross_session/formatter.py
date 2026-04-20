@@ -113,31 +113,28 @@ def _build_adaptation_note(exp, target_kernel_path: str) -> str:
 
 def format_landscape_context(
     experiences: list[ExperienceRecord],
-    skills: list[StrategySkill],
+    skills: list[StrategySkill] | None = None,
     query_category: str = "",
     query_bottleneck: str = "",
     query_language: str = "",
     compact: bool = False,
     target_kernel_path: str = "",
-    rag_snippets: list[dict] | None = None,
 ) -> str:
-    """Format experiences into a context block with reasoning guidance.
+    """Format cross-session experiences into an "added context" block.
 
-    compact=True produces a lightweight summary (strategy names + speedups,
-    no code diffs) suitable for homogeneous agents that can't do multi-step
-    strategy reasoning.
+    Two forms:
+      * compact=True  — strategy names + speedups only (no code diffs).
+      * compact=False — full evidence per entry: baseline kernel_structure,
+        strategies per round with diffs, profiler insights, dead-ends.
 
-    target_kernel_path, when provided, is used to emit a short adaptation
-    note when the KB seed kernel differs from the target kernel, so the
-    LLM knows to translate techniques rather than copy the patch verbatim.
-
-    rag_snippets, when provided, injects a short "Domain KB" section of
-    external AMD/ROCm/Triton reference knowledge retrieved from the
-    rag-mcp markdown corpus (BM25-ranked against the target kernel's
-    source). Complements the experience-based memory above with domain
-    grounding.
+    ``target_kernel_path`` enables an exact-code-match check that only
+    emits an imperative reference note when the stored baseline code is
+    byte-identical to the current kernel.py (i.e. the diff will apply
+    verbatim). For all other cases the entries are shown below as
+    reference; the agent forms its own plan and uses them for informed
+    cross-reference, not as directives to follow.
     """
-    if not experiences and not skills and not rag_snippets:
+    if not experiences and not skills:
         return ""
 
     lang = query_language or _guess_language(experiences)
@@ -146,17 +143,9 @@ def format_landscape_context(
     parts.append(f"### Cross-Session Memory (from {n} similar kernel{'s' if n != 1 else ''})")
     parts.append("")
 
-    # Lead with a concrete, imperative directive based on the single best KB
-    # entry so the LLM sees an actionable first-move before any caveats.
     top_hint = _build_top_hint(experiences, target_kernel_path) if experiences else ""
     if top_hint:
         parts.append(top_hint)
-        parts.append("")
-
-    # Domain-KB block (complementary signal: AMD aiter reports, Triton-on-ROCm
-    # guides, kernel-family case studies). Kept compact: top 2 snippets.
-    if rag_snippets:
-        parts.append(_build_rag_block(rag_snippets, target_kernel_path))
         parts.append("")
 
     parts.append(_build_reasoning_guidance(lang))
@@ -165,10 +154,9 @@ def format_landscape_context(
     budget = _MAX_CONTEXT_COMPACT if compact else _MAX_CONTEXT_FULL
     for exp in experiences:
         exp_dict = exp.to_dict() if hasattr(exp, "to_dict") else {}
-        if compact:
-            chunk = _format_compact(exp, exp_dict)
-        else:
-            chunk = _format_single_experience(exp, exp_dict, target_kernel_path=target_kernel_path)
+        chunk = _format_compact(exp, exp_dict) if compact else _format_single_experience(
+            exp, exp_dict, target_kernel_path=target_kernel_path
+        )
         if budget - len(chunk) < 0 and parts:
             parts.append(f"\n*(budget reached — {n - experiences.index(exp)} more omitted)*")
             break
@@ -176,38 +164,6 @@ def format_landscape_context(
         parts.append(chunk)
 
     return "\n".join(parts)
-
-
-def _build_rag_block(snippets: list[dict], target_kernel_path: str) -> str:
-    """Format the Domain-KB block from rag_hook.query_rag() results.
-
-    Each snippet contributes ~1200-1500 chars. Top-2 default keeps the
-    block bounded (~3000 chars total).
-    """
-    if not snippets:
-        return ""
-    lines: list[str] = []
-    lines.append(
-        "### Domain KB (AMD aiter / Triton-on-ROCm — complementary reference):"
-    )
-    lines.append(
-        "*These snippets are retrieved from the AMD GPU knowledge base "
-        "(rag-mcp) based on operation overlap with your kernel. Use them "
-        "for hardware-specific tuning hints (warp size, HBM bandwidth, "
-        "MFMA intrinsics, etc.) NOT as patches to copy. They are NOT from "
-        "successful runs — they are reference material.*"
-    )
-    lines.append("")
-    for idx, snip in enumerate(snippets, 1):
-        title = snip.get("title", "")[:140]
-        layer = snip.get("layer", "unknown")
-        path = snip.get("path", "")
-        body = snip.get("body", "")
-        lines.append(f"**[KB-{idx}] {title}**  (from `{path}`, {layer})")
-        lines.append("")
-        lines.append(body.strip())
-        lines.append("")
-    return "\n".join(lines)
 
 
 def _classify_kb_match(top, target_kernel_path: str) -> tuple[str, str]:

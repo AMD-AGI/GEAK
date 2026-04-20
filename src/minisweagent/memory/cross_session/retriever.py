@@ -104,25 +104,12 @@ def retrieve_context(
     except Exception as exc:
         logger.debug("search_skills failed (non-fatal): %s", exc)
 
-    # NOTE: Lightweight RAG hook removed. The official RAG path is the
-    # rag-mcp MCP server (PR #90) exposing ``query`` and ``optimize`` tools.
-    # The agent calls those tools on demand rather than receiving a
-    # pre-injected snippet at run start. Enable via ``tools.rag: true`` in
-    # geak.yaml and run:
-    #   pip install -e mcp_tools/rag-mcp
-    #   python scripts/build_index.py --force
-    #
-    # The two paths now have clear, non-overlapping roles:
-    #   - Cross-session memory KB: per-kernel verified experiences (real
-    #     diffs, original_kernel_code, profiler insights, dead-ends,
-    #     round trajectories) — INJECTED at task start so the agent has
-    #     concrete past evidence to cross-reference.
-    #   - rag-mcp ``query`` / ``optimize``: GENERIC GPU/ROCm/HIP knowledge
-    #     base (AMD aiter customer-case reports, optimization guides) —
-    #     PULLED on demand by the agent when it needs background reading.
-    rag_snippets: list[dict] = []
-
-    # Stage 4: format as landscape
+    # NOTE: Domain-KB (generic AMD/ROCm/HIP documentation) lives in a
+    # separate path — the rag-mcp MCP server (enabled via ``tools.rag``).
+    # Agent calls its ``query`` / ``optimize`` tools on demand rather
+    # than receiving pre-injected snippets. This file is the EXPERIENCE
+    # side only (per-kernel verified runs with real diffs + full kernel
+    # code + profiler metrics + dead-ends).
     return format_landscape_context(
         experiences=top,
         skills=skills,
@@ -131,7 +118,6 @@ def retrieve_context(
         query_language=language,
         compact=compact,
         target_kernel_path=kernel_path,
-        rag_snippets=rag_snippets,
     )
 
 
