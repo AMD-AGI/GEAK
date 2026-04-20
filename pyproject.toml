@@ -47,18 +47,20 @@ dependencies = [
     "google-genai",
     "openai != 1.100.0,!=1.100.1",  # https://github.com/SWE-agent/mini-swe-agent/issues/446
     "metrix @ git+https://github.com/AMDResearch/intellikit.git@bcbfa0252df9d55f3aab68c95dd3ce45ccbe5b46#subdirectory=metrix",  # AMD GPU profiling — pinned for production stability
+    "fastmcp>=2.0.0",
+    "mcp[cli]>=1.2.0",
 ]
 
 [project.optional-dependencies]
-# MCP tool packages and their transitive deps.
+# MCP tool servers (local packages).
 # Local package names resolve via [tool.uv.sources] (uv only).
 # With pip, use `make install` or `make install-dev` instead.
 mcp = [
     "automated-test-discovery",
     "metrix-mcp",
     "profiler-mcp",
-    "mcp[cli]>=1.2.0",
-    "fastmcp>=0.2.0",
+    "cross-session-memory-mcp",
+    "rag-mcp",
 ]
 
 # LangChain hybrid retrieval for AMD GPU knowledge base (embedding + BM25 + reranker)
@@ -275,6 +277,8 @@ line-ending = "auto"
 automated-test-discovery = { path = "mcp_tools/automated-test-discovery", editable = true }
 metrix-mcp = { path = "mcp_tools/metrix-mcp", editable = true }
 profiler-mcp = { path = "mcp_tools/profiler-mcp", editable = true }
+cross-session-memory-mcp = { path = "mcp_tools/cross-session-memory-mcp", editable = true }
+rag-mcp = { path = "mcp_tools/rag-mcp", editable = true }
 
 [tool.typos.default.extend-identifiers]
 # *sigh* this just isn't worth the cost of fixing
