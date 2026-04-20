@@ -361,8 +361,7 @@ def normalize_patch_paths(patch_text: str, target_basename: str = "kernel.py") -
         side = "a" if prefix == "---" else "b"
         return f"{prefix} {side}/{basename}"
 
-    normalized = _DIFF_RUN_HEADER_RE.sub(_rewrite, patch_text)
-    return normalized
+    return _DIFF_RUN_HEADER_RE.sub(_rewrite, patch_text)
 
 
 def apply_patch_with_generated_helper_fallback(
