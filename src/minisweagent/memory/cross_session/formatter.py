@@ -291,22 +291,31 @@ def _guess_language(experiences: list[ExperienceRecord]) -> str:
 
 
 def _build_reasoning_guidance(lang: str) -> str:
-    """Lightweight passive reference framing — no directives, no biasing.
+    """Informed-decision framing — agent cross-references KB with current state.
 
-    The previous version of this guidance prescribed how the agent should
-    weight the KB content (compare patterns, skip non-matching strategies).
-    That bias caused the agent to anchor on KB strategies even when better
-    optimizations were available from scratch.
+    The previous prescriptive version ("Decide", "skip GEMM strategies", "make
+    it your first priority") biased the agent into KB-anchored thinking even
+    when fundamentally different optimizations were reachable.
 
-    The new framing simply notes that the entries below are reference
-    material; the agent reasons about applicability based on its own
-    analysis of the current kernel, with no nudging from the KB.
+    The new framing makes explicit what the agent should examine in the KB
+    entries below (strategies tried, baseline code of the KB kernel, code
+    diffs, what worked vs what didn't, profiler insights, round trajectory)
+    and cross-reference against (a) the current kernel.py source it sees,
+    (b) the current profile.json, (c) the current bottleneck — then decide
+    based on that informed comparison.
     """
     return (
-        "*Below: reference material from past optimization runs (similar but not "
-        "identical kernels). Treat these as DOCUMENTATION you can consult, not "
-        "instructions to follow. Form your own optimization plan from the actual "
-        "kernel code + profile, then optionally consult these for ideas.*"
+        "*Below is ADDED CONTEXT from past optimization runs (similar — not "
+        "identical — kernels). Each entry includes: the baseline kernel.py "
+        "of that past run, the strategies tried per round, the actual code "
+        "diffs (winning + regressions), measured speedups, dead-ends to "
+        "avoid, profiler insights, and the round-by-round trajectory.*\n\n"
+        "*Examine each entry: compare its baseline code to YOUR current "
+        "kernel.py, its bottleneck to YOUR profile output, its diffs to "
+        "what would actually apply here. Then make an informed decision: "
+        "adopt verbatim if applicable, adapt the technique if partially "
+        "applicable, or set aside and proceed with your own analysis. The "
+        "KB does not prescribe — it informs.*"
     )
 
 
