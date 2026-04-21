@@ -17,6 +17,7 @@ from typing import Any
 
 from minisweagent.memory.cross_session.backends.base import MemoryBackend
 from minisweagent.memory.cross_session.config import CrossSessionConfig
+from minisweagent.run.utils.selected_kernel_summary import derive_primary_bottleneck, normalize_bottleneck_label
 
 logger = logging.getLogger(__name__)
 
@@ -94,37 +95,23 @@ def record(**kwargs: Any) -> None:
 
 
 def retrieve(**kwargs: Any) -> str:
-    """Retrieve relevant past experiences and format as context.
-
-    Accepts either ``target_code`` (the raw kernel source string, preferred)
-    or ``kernel_path`` (a filesystem path we read once here). Supplying
-    both is fine -- ``target_code`` wins. Supplying neither yields no
-    retrieval. The retriever itself never touches the filesystem.
-    """
+    """Read path: retrieve relevant past experiences and format as context."""
     backend = get_backend()
     if backend is None:
         return ""
-
-    target_code = kwargs.get("target_code", "") or ""
-    if not target_code:
-        kernel_path = kwargs.get("kernel_path", "") or ""
-        if kernel_path:
-            from pathlib import Path
-
-            try:
-                target_code = Path(kernel_path).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                target_code = ""
 
     try:
         from minisweagent.memory.cross_session.retriever import retrieve_context
 
         cfg = _get_config()
+        profiling_metrics = kwargs.get("profiling_metrics") or {}
+        derived_bottleneck = derive_primary_bottleneck(profiling_metrics)
+        explicit_bottleneck = normalize_bottleneck_label(kwargs.get("bottleneck_type"))
         return retrieve_context(
             backend=backend,
-            target_code=target_code,
-            bottleneck_type=kwargs.get("bottleneck_type", ""),
-            profiling_metrics=kwargs.get("profiling_metrics") or {},
+            kernel_path=kwargs.get("kernel_path", ""),
+            bottleneck_type=derived_bottleneck if derived_bottleneck != "unknown" else explicit_bottleneck,
+            profiling_metrics=profiling_metrics,
             limit=cfg.retrieval_limit,
             top_k=cfg.retrieval_top_k,
             compact=bool(kwargs.get("compact", False)),

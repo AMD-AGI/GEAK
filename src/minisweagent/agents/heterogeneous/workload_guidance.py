@@ -10,6 +10,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from minisweagent.run.utils.selected_kernel_summary import (
+    derive_primary_bottleneck,
+    format_bottleneck_summary,
+    guidance_bottlenecks,
+)
+
 _HIP_SEARCH_HINT_PATTERNS = (
     "binary_search",
     "lower_bound",
@@ -37,18 +43,17 @@ def _format_optional_float(value: float | None, suffix: str = "") -> str:
 
 
 def _normalized_bottleneck(baseline_metrics: dict[str, Any]) -> str:
-    text = str(baseline_metrics.get("bottleneck", "unknown")).lower().strip()
-    if "latency" in text:
-        return "latency"
-    if "memory" in text:
-        return "memory"
-    if "compute" in text:
-        return "compute"
-    if "lds" in text:
-        return "lds"
-    if "balanced" in text:
-        return "balanced"
-    return "unknown"
+    return derive_primary_bottleneck(baseline_metrics)
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return deduped
 
 
 def _is_hip_like_kernel(kernel: dict[str, Any]) -> bool:
@@ -133,7 +138,8 @@ def _profiling_summary_lines(baseline_metrics: dict[str, Any]) -> list[str]:
 
 
 def _build_triton_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]) -> str:
-    bottleneck = _normalized_bottleneck(baseline_metrics)
+    bottlenecks = guidance_bottlenecks(baseline_metrics)
+    primary_bottleneck = _normalized_bottleneck(baseline_metrics)
 
     prefer_first = [
         "Algorithmic kernel-body rewrites that change the reduction tree, tiling scheme, decomposition, or math formulation.",
@@ -149,53 +155,59 @@ def _build_triton_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, A
         "Python dispatch, import-routing, or wrapper-only edits unless profiling clearly shows the wrapper dominates.",
     ]
 
-    if bottleneck == "memory":
-        prefer_first.extend(
-            [
-                "Memory-access rewrites inside the kernel body: better blocking, fewer redundant loads/stores, and higher SRAM/L2 reuse.",
-                "Masking, pointer-arithmetic, or load/store simplifications that reduce HBM traffic on the hottest path.",
-            ]
-        )
-        consider_next.append(
-            "Vectorized or blocked load/store patterns when they are part of a broader kernel-body memory-traffic reduction plan."
-        )
-    elif bottleneck == "compute":
-        prefer_first.extend(
-            [
-                "Instruction-count reduction and control-flow simplification inside hot loops.",
-                "MFMA / tl.dot-friendly reformulations, cheaper math primitives, or algorithmic approximations when correct.",
-            ]
-        )
-        consider_next.append(
-            "Register-pressure and live-range reductions that let the compiler schedule the kernel body more efficiently."
-        )
-    elif bottleneck == "latency":
-        prefer_first.extend(
-            [
-                "Fuse adjacent short kernels so each launch performs materially more work.",
-                "Increase work per program or use persistent / multi-tile kernel patterns that amortize launch overhead.",
-            ]
-        )
-        consider_next.append(
-            "Shape-specialized kernel variants for small vs large shapes so short kernels are not forced into one-size-fits-all code."
-        )
-    elif bottleneck == "lds":
-        prefer_first.extend(
-            [
-                "LDS-bank-conflict reduction and staged-access restructuring inside the kernel body.",
-                "Move transient data from LDS to registers when it reduces LDS pressure without hurting occupancy too much.",
-            ]
-        )
-    else:
+    if not bottlenecks or primary_bottleneck in {"balanced", "unknown"}:
         prefer_first.extend(
             [
                 "Profiling-driven kernel-body simplifications on the hottest sub-kernels instead of generic parameter sweeps.",
                 "Common kernel optimization strategies such as fusion, shape-specialized variants, and memory/computation reordering.",
             ]
         )
+    for bottleneck in bottlenecks:
+        if bottleneck == "memory":
+            prefer_first.extend(
+                [
+                    "Memory-access rewrites inside the kernel body: better blocking, fewer redundant loads/stores, and higher SRAM/L2 reuse.",
+                    "Masking, pointer-arithmetic, or load/store simplifications that reduce HBM traffic on the hottest path.",
+                ]
+            )
+            consider_next.append(
+                "Vectorized or blocked load/store patterns when they are part of a broader kernel-body memory-traffic reduction plan."
+            )
+        elif bottleneck == "compute":
+            prefer_first.extend(
+                [
+                    "Instruction-count reduction and control-flow simplification inside hot loops.",
+                    "MFMA / tl.dot-friendly reformulations, cheaper math primitives, or algorithmic approximations when correct.",
+                ]
+            )
+            consider_next.append(
+                "Register-pressure and live-range reductions that let the compiler schedule the kernel body more efficiently."
+            )
+        elif bottleneck == "latency":
+            prefer_first.extend(
+                [
+                    "Fuse adjacent short kernels so each launch performs materially more work.",
+                    "Increase work per program or use persistent / multi-tile kernel patterns that amortize launch overhead.",
+                ]
+            )
+            consider_next.append(
+                "Shape-specialized kernel variants for small vs large shapes so short kernels are not forced into one-size-fits-all code."
+            )
+        elif bottleneck == "lds":
+            prefer_first.extend(
+                [
+                    "LDS-bank-conflict reduction and staged-access restructuring inside the kernel body.",
+                    "Move transient data from LDS to registers when it reduces LDS pressure without hurting occupancy too much.",
+                ]
+            )
+
+    prefer_first = _dedupe(prefer_first)
+    consider_next = _dedupe(consider_next)
+    deprioritize = _dedupe(deprioritize)
 
     lines = [
         "Triton backend detected. Prefer profiling-driven kernel-body strategies over autotune or wrapper work.",
+        format_bottleneck_summary(baseline_metrics),
         *_profiling_summary_lines(baseline_metrics),
         "Planning policy:",
         "- Fill most task slots with 'Prefer First' families below.",
@@ -213,6 +225,7 @@ def _build_triton_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, A
 
 def _build_hip_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]) -> str:
     top_kernels = baseline_metrics.get("top_kernels", [])
+    bottlenecks = guidance_bottlenecks(baseline_metrics)
     bottleneck = _normalized_bottleneck(baseline_metrics)
     hbm_utils = [_safe_float((k.get("metrics", {}) or {}).get("memory.hbm_bandwidth_utilization")) for k in top_kernels]
     hbm_utils_valid = [h for h in hbm_utils if h is not None]
@@ -233,58 +246,64 @@ def _build_hip_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]
         "Wrapper / dispatch / copy-path edits unless profiling shows they dominate total time.",
     ]
 
-    if bottleneck == "memory":
-        prefer_first.extend(
-            [
-                "Coalescing, vectorized access, or LDS staging when they directly raise effective bandwidth on the hot path.",
-                "Global-memory traffic reduction by fusing steps or recomputing cheap values instead of reloading them.",
-            ]
-        )
-        consider_next.append(
-            "Wavefront-level memory-access reordering or bank-conflict reduction when it is supported by the profile."
-        )
-    elif bottleneck == "compute":
-        prefer_first.extend(
-            [
-                "Instruction-count reduction, branch simplification, and cheaper per-thread math in the hottest loops.",
-                "Wave intrinsics, MFMA-friendly decomposition, or unrolled inner loops when they reduce compute bottlenecks.",
-            ]
-        )
-    elif bottleneck == "latency":
-        prefer_first.extend(
-            [
-                "Branchless/control-flow simplification that reduces serialized decision cost in short kernels.",
-                "Operation-specific specialization so the hot path does not pay for generic functionality it does not need.",
-                "Wavefront-cooperative or persistent-work patterns that amortize per-launch or per-query overhead.",
-            ]
-        )
-        if is_search_like:
-            prefer_first.extend(
-                [
-                    "Size-specialized kernel variants for separate small / medium / huge haystack paths.",
-                    "Wavefront-cooperative upper-level search or coarse-index narrowing when preprocessing can be amortized.",
-                ]
-            )
-        if bandwidth_deprioritized:
-            deprioritize.insert(0, "Bandwidth-maximization or generic vectorization ideas as the main strategy.")
-            deprioritize.insert(1, "Items-per-thread or throughput-only tuning without a latency-reduction hypothesis.")
-    elif bottleneck == "lds":
-        prefer_first.extend(
-            [
-                "LDS-bank-conflict reduction and staged-access redesign inside the kernel body.",
-                "Register-vs-LDS tradeoff changes that lower LDS pressure on the hot path.",
-            ]
-        )
-    else:
+    if not bottlenecks or bottleneck in {"balanced", "unknown"}:
         prefer_first.extend(
             [
                 "Fusion, algorithmic simplification, and memory/computation reordering based on the hottest profiled sub-kernels.",
                 "Operation-specific or size-specific kernel variants when the profile suggests one implementation is serving mismatched regimes.",
             ]
         )
+    for family in bottlenecks:
+        if family == "memory":
+            prefer_first.extend(
+                [
+                    "Coalescing, vectorized access, or LDS staging when they directly raise effective bandwidth on the hot path.",
+                    "Global-memory traffic reduction by fusing steps or recomputing cheap values instead of reloading them.",
+                ]
+            )
+            consider_next.append(
+                "Wavefront-level memory-access reordering or bank-conflict reduction when it is supported by the profile."
+            )
+        elif family == "compute":
+            prefer_first.extend(
+                [
+                    "Instruction-count reduction, branch simplification, and cheaper per-thread math in the hottest loops.",
+                    "Wave intrinsics, MFMA-friendly decomposition, or unrolled inner loops when they reduce compute bottlenecks.",
+                ]
+            )
+        elif family == "latency":
+            prefer_first.extend(
+                [
+                    "Branchless/control-flow simplification that reduces serialized decision cost in short kernels.",
+                    "Operation-specific specialization so the hot path does not pay for generic functionality it does not need.",
+                    "Wavefront-cooperative or persistent-work patterns that amortize per-launch or per-query overhead.",
+                ]
+            )
+            if is_search_like:
+                prefer_first.extend(
+                    [
+                        "Size-specialized kernel variants for separate small / medium / huge haystack paths.",
+                        "Wavefront-cooperative upper-level search or coarse-index narrowing when preprocessing can be amortized.",
+                    ]
+                )
+            if bandwidth_deprioritized:
+                deprioritize.insert(0, "Bandwidth-maximization or generic vectorization ideas as the main strategy.")
+                deprioritize.insert(1, "Items-per-thread or throughput-only tuning without a latency-reduction hypothesis.")
+        elif family == "lds":
+            prefer_first.extend(
+                [
+                    "LDS-bank-conflict reduction and staged-access redesign inside the kernel body.",
+                    "Register-vs-LDS tradeoff changes that lower LDS pressure on the hot path.",
+                ]
+            )
+
+    prefer_first = _dedupe(prefer_first)
+    consider_next = _dedupe(consider_next)
+    deprioritize = _dedupe(deprioritize)
 
     lines = [
         "HIP backend detected. Prefer profiling-driven kernel-body strategies over launch tuning or wrapper work.",
+        format_bottleneck_summary(baseline_metrics),
         *_profiling_summary_lines(baseline_metrics),
         "Planning policy:",
         "- Fill most task slots with 'Prefer First' families below.",

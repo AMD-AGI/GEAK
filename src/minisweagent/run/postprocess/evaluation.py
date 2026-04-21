@@ -30,6 +30,7 @@ from minisweagent.run.utils.generated_artifacts import (
     apply_patch_with_generated_helper_fallback,
 )
 from minisweagent.run.utils.git_safe_env import get_git_safe_env
+from minisweagent.run.utils.selected_kernel_summary import derive_primary_bottleneck
 
 logger = logging.getLogger(__name__)
 
@@ -453,7 +454,7 @@ def run_profile(
         logger.warning("Failed to parse baseline metrics: %s", baseline_metrics_path, exc_info=True)
         return
 
-    from minisweagent.run.preprocess.baseline import build_baseline_metrics
+    from minisweagent.run.preprocess.baseline import build_baseline_metrics, list_kernels
     from minisweagent.run.preprocess.kernel_selector import select_relevant_kernels
 
     _kname = Path(ctx.get("kernel_path", "")).stem
@@ -471,18 +472,21 @@ def run_profile(
         optimized_metrics = build_baseline_metrics(profile_result, kernel_names=opt_selected, preserve_order=True)
     else:
         optimized_metrics = build_baseline_metrics(profile_result, include_all=True)
+    # PROFILE evaluation runs on the single selected eval GPU, so compare
+    # against that GPU's kernel list explicitly.
+    optimized_all_kernels = list_kernels(profile_result, gpu_index=0)
 
     comparison: dict[str, Any] = {
         "baseline": baseline_metrics,
         "optimized": optimized_metrics,
     }
 
-    base_bn = baseline_metrics.get("bottleneck", "unknown")
-    opt_bn = optimized_metrics.get("bottleneck", "unknown")
+    base_bn = derive_primary_bottleneck(baseline_metrics)
+    opt_bn = derive_primary_bottleneck(optimized_metrics)
     if base_bn != opt_bn:
         comparison["bottleneck_shift"] = f"{base_bn} -> {opt_bn}"
 
-    per_kernel_deltas = _build_per_kernel_deltas(baseline_metrics, optimized_metrics)
+    per_kernel_deltas = _build_per_kernel_deltas(baseline_metrics, optimized_metrics, optimized_all_kernels)
     if per_kernel_deltas:
         comparison["per_kernel_deltas"] = per_kernel_deltas
 
@@ -492,27 +496,43 @@ def run_profile(
     logger.info("Profile comparison saved to %s", comparison_path)
 
 
-def _build_per_kernel_deltas(baseline: dict[str, Any], optimized: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_per_kernel_deltas(
+    baseline: dict[str, Any],
+    optimized: dict[str, Any],
+    optimized_all_kernels: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Build per-kernel metric deltas between baseline and optimized profiles.
 
     Pairs kernels by exact name.  Because baseline and optimized kernel sets
-    are independently LLM-selected, a renamed/fused kernel will appear as
-    "eliminated" + "new" rather than as a matched pair.  Downstream consumers
-    should interpret "eliminated" as "not found by name" rather than "kernel
-    was removed entirely."
+    are independently LLM-selected, a baseline-selected kernel may still exist
+    in the optimized full profile even when it was not selected into the
+    optimized ``top_kernels`` set. We distinguish that case from kernels that
+    are actually missing by name from the optimized profile entirely.
     """
     base_by_name = {k["name"]: k for k in baseline.get("top_kernels", [])}
     opt_by_name = {k["name"]: k for k in optimized.get("top_kernels", [])}
+    opt_all_by_name = {k["name"]: k for k in optimized_all_kernels or [] if isinstance(k, dict) and k.get("name")}
 
     deltas: list[dict[str, Any]] = []
 
     for name, base_k in base_by_name.items():
         opt_k = opt_by_name.get(name)
         if not opt_k:
+            opt_full_k = opt_all_by_name.get(name)
+            if opt_full_k:
+                deltas.append(
+                    {
+                        "name": name,
+                        "status": "not_selected_on_optimized",
+                        "baseline_duration_us": base_k.get("duration_us", 0),
+                        "optimized_duration_us": opt_full_k.get("duration_us", 0),
+                    }
+                )
+                continue
             deltas.append(
                 {
                     "name": name,
-                    "status": "eliminated",
+                    "status": "missing_by_name",
                     "baseline_duration_us": base_k.get("duration_us", 0),
                 }
             )

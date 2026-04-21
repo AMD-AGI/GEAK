@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import os
 
+from minisweagent.run.utils.selected_kernel_summary import derive_primary_bottleneck, normalize_bottleneck_label
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,7 +67,7 @@ def assemble_memory_context(**kwargs) -> str:
     try:
         from minisweagent.memory.cross_session import retrieve
 
-        return retrieve(**kwargs)
+        return retrieve(**_normalize_memory_kwargs(kwargs))
     except Exception as exc:
         logger.warning("Cross-session memory retrieval failed: %s", exc)
         return ""
@@ -81,12 +83,29 @@ def record_optimization_outcome(**kwargs) -> None:
     try:
         from minisweagent.memory.cross_session import record
 
-        _validate_record_kwargs(kwargs)
-        record(**kwargs)
+        normalized_kwargs = _normalize_memory_kwargs(kwargs)
+        _validate_record_kwargs(normalized_kwargs)
+        record(**normalized_kwargs)
     except ValueError as exc:
         logger.warning("Skipping record: validation failed: %s", exc)
     except Exception as exc:
         logger.warning("Cross-session record failed: %s", exc)
+
+
+def _normalize_memory_kwargs(kwargs: dict) -> dict:
+    """Canonicalize cross-session memory kwargs around profiling_metrics."""
+    normalized = dict(kwargs)
+    profiling_metrics = normalized.get("profiling_metrics") or {}
+    derived = derive_primary_bottleneck(profiling_metrics)
+    explicit = normalize_bottleneck_label(normalized.get("bottleneck_type"))
+    if derived != "unknown" and explicit != "unknown" and explicit != derived:
+        logger.debug(
+            "Overriding caller-supplied bottleneck_type=%s with derived primary_bottleneck=%s from profiling_metrics.",
+            explicit,
+            derived,
+        )
+    normalized["bottleneck_type"] = derived if derived != "unknown" else explicit
+    return normalized
 
 
 def _validate_record_kwargs(kwargs: dict) -> None:

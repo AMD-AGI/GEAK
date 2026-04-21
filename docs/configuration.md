@@ -28,6 +28,13 @@ How GEAK loads **YAML** for **`geak`**, where builtin files live, and how **`--c
 | **`cost_limit`** | Cost cap (same class). **`0`** means **disabled** (limits apply only when **`0 < cost_limit`**). |
 | **`mode`** | **`confirm`** = interactive confirmation for tool actions; **`yolo`** = auto-run. Parallel workers force **`yolo`** regardless. |
 
+### **`patch:`**
+
+| Key | Purpose |
+|-----|---------|
+| **`profile_every_patch`** | When **`true`**, **`save_and_test`** captures a Metrix profile after each successful patch test run. Can be overridden with **`GEAK_PROFILE_EVERY_PATCH`**. |
+| **`profile_quick`** | Controls the Metrix mode used by per-patch profiling. **`false`** = full Metrix profile (default). **`true`** = quick Metrix profile. Can be overridden with **`GEAK_PATCH_PROFILE_QUICK`**. Baseline preprocessing profiling stays on the full profile path. |
+
 
 ### **`env:`**
 

@@ -217,6 +217,50 @@ def test_build_workload_guidance_for_triton_deprioritizes_dispatch():
     assert "Python dispatch, import-routing, or wrapper-only edits" in guidance
 
 
+def test_build_workload_guidance_for_mixed_triton_mentions_dual_focus() -> None:
+    kernel = {
+        "file_path": "/workspace/kernel.py",
+        "kernel_name": "fused_mix",
+        "kernel_type": "triton",
+    }
+    baseline_metrics = {
+        "kernel_name": "fused_mix",
+        "top_kernels": [
+            {
+                "name": "mem_hot",
+                "bottleneck": "memory",
+                "duration_us": 60.0,
+                "pct_of_selected": 60.0,
+                "observations": [],
+                "metrics": {"memory.hbm_bandwidth_utilization": 65.0},
+            },
+            {
+                "name": "compute_hot",
+                "bottleneck": "compute",
+                "duration_us": 40.0,
+                "pct_of_selected": 40.0,
+                "observations": [],
+                "metrics": {"memory.hbm_bandwidth_utilization": 5.0},
+            },
+        ],
+        "selected_kernel_summary": {
+            "mode": "mixed",
+            "primary_bottleneck": "memory",
+            "primary_bottleneck_pct_of_selected": 60.0,
+            "bottleneck_mix": [
+                {"bottleneck": "memory", "pct_of_selected": 60.0, "duration_us": 60.0, "kernels": []},
+                {"bottleneck": "compute", "pct_of_selected": 40.0, "duration_us": 40.0, "kernels": []},
+            ],
+        },
+    }
+
+    guidance = _build_workload_guidance(kernel, baseline_metrics)
+
+    assert "Mixed bottlenecks: memory 60.0%, compute 40.0% (primary: memory)" in guidance
+    assert "Memory-access rewrites inside the kernel body" in guidance
+    assert "Instruction-count reduction and control-flow simplification" in guidance
+
+
 def test_build_workload_guidance_empty_when_no_backend_and_no_metrics():
     kernel = {
         "file_path": "/workspace/kernel.txt",

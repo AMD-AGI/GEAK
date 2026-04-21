@@ -29,3 +29,6 @@ tools:
   profiling: false
   profiling_type: profiling
   rag: false
+patch:
+  profile_every_patch: false
+  profile_quick: false

@@ -140,6 +140,23 @@ For more options and examples, see **[Quick start](docs/quick_start.md)**.
 
 For more options and examples, see [Configuration](docs/configuration.md).
 
+#### Per-patch profiling
+
+To capture a Metrix profile after each successful `save_and_test`, add:
+
+```yaml
+patch:
+  profile_every_patch: true
+  profile_quick: false  # true = quick Metrix profile, false = full Metrix profile
+```
+
+Environment overrides:
+
+- `GEAK_PROFILE_EVERY_PATCH=1` enables per-patch profiling
+- `GEAK_PATCH_PROFILE_QUICK=1` switches per-patch profiling to quick Metrix mode
+
+Baseline preprocessing profiles continue to use the full Metrix profile path by default.
+
 
 ### Output & Artifacts
 

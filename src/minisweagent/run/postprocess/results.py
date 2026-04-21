@@ -195,7 +195,6 @@ def record_final_outcome(ctx: dict[str, Any], report: dict[str, Any]) -> None:
         record_optimization_outcome(
             kernel_path=_kpath,
             kernel_category=_kcat,
-            bottleneck_type=_bm.get("bottleneck", "unknown"),
             strategy_name=(report.get("summary") or "")[:100],
             speedup_achieved=speedup_val,
             success=success,
@@ -547,7 +546,6 @@ def auto_finalize(
         record_optimization_outcome(
             kernel_path=_kpath,
             kernel_category=_kcat,
-            bottleneck_type=_bm.get("bottleneck", "unknown"),
             strategy_name=summary_text[:100],
             speedup_achieved=best_speedup,
             success=best_speedup > 1.0,

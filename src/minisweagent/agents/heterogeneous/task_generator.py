@@ -577,7 +577,6 @@ def _run_task_agent(
             _wm_ctx = summarize_working_notebook(_notebook_dir)
             _mem = assemble_memory_context(
                 kernel_path=kernel_path,
-                bottleneck_type=_bm_dict.get("bottleneck"),
                 profiling_metrics=_bm_dict,
             )
             combined_memory = "\n\n".join(part.strip() for part in (_wm_ctx, _mem or "") if part and str(part).strip())

@@ -209,6 +209,21 @@ Options match the Typer **`Option`** definitions in **`main`** (same names in **
 | **`--gpu-ids`** | Comma-separated GPU device indices. |
 | **`--test-command`**, **`--test_command`** | test command used to test the correctness and performance of the kernel. |
 
+### Per-patch profiling
+
+To capture a Metrix profile after each successful `save_and_test`, add this to your YAML override:
+
+```yaml
+patch:
+  profile_every_patch: true
+  profile_quick: false
+```
+
+Environment overrides:
+
+- `GEAK_PROFILE_EVERY_PATCH=1`
+- `GEAK_PATCH_PROFILE_QUICK=1`
+
 ## 4. Outputs
 
 GEAK saves patches + test logs so the optimization progress and the results are transparent.

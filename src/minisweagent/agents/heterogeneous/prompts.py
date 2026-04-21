@@ -11,7 +11,7 @@ GPU kernel optimisation.
 
 You have been given the results of a preprocessing pipeline:
 * Profiling data with per-kernel bottleneck analysis
-* Baseline metrics (duration, throughput, bottleneck classification)
+* Baseline metrics (duration, throughput, and selected-kernel bottleneck summary)
 * A COMMANDMENT.md that specifies the rules every sub-agent must follow
 
 You also have access to **bash** (execute shell commands),
@@ -101,7 +101,7 @@ Output directory: {output_dir}
 Begin by reading the kernel source and profiling data to understand the
 optimisation landscape.  If cross-session memory is provided above,
 critically evaluate each past strategy: compare its code diff against
-YOUR kernel's actual code structure, bottleneck type, and data flow.
+YOUR kernel's actual code structure, dominant bottleneck(s), and data flow.
 Only adopt strategies where the underlying patterns genuinely match.
 Adapt the general approach to fit your kernel — do not blindly copy
 parameters or techniques from a different kernel.
@@ -145,7 +145,7 @@ optimization approach, then submit your task list as JSON via the
 1. **strategy_agent** (default and only agent type) -- An LLM-guided agent
    with bash, editor, save_and_test, submit, profile_kernel,
    baseline_metrics, and strategy_manager. It reads code, reasons about
-   bottlenecks, makes edits, then tests and profiles. Best for targeted
+   bottleneck summaries and hot kernels, makes edits, then tests and profiles. Best for targeted
    edits, autotune configs, algorithmic rewrites, and any optimization
    where the agent should read-think-edit-test-profile on its own.
 
@@ -292,7 +292,7 @@ Generate optimization tasks for the kernel at {{ kernel_path }}.
 ## Files to read (use `str_replace_editor` with command "view")
 {% if codebase_context_path %}- **Codebase context** (repo layout, kernel dependency tree with optimization targets): {{ codebase_context_path }}
 {% endif %}{% if discovery_path %}- **Discovery** (kernel info, tests, benchmarks): {{ discovery_path }}
-{% endif %}{% if baseline_metrics_path %}- **Baseline metrics** (per-kernel profiling metrics, bottlenecks, observations): {{ baseline_metrics_path }}
+{% endif %}{% if baseline_metrics_path %}- **Baseline metrics** (per-kernel profiling metrics, selected-kernel bottleneck summary, observations): {{ baseline_metrics_path }}
 {% endif %}{% if commandment_path %}- **COMMANDMENT.md** (evaluation contract): {{ commandment_path }}
 {% endif %}{% if knowledge_base_path %}- **Knowledge base** (optimization strategies): {{ knowledge_base_path }}
 {% endif %}{% if deep_search_path %}- **Deep search findings**: {{ deep_search_path }}
@@ -304,7 +304,7 @@ Generate optimization tasks for the kernel at {{ kernel_path }}.
 ## Optimization Memory (from past kernel optimization runs)
 **Use critically**: These strategies worked on SIMILAR kernels, not this exact one.
 Compare each strategy's code pattern against THIS kernel's actual architecture
-before generating tasks.  If the past kernel's bottleneck was in a different
+before generating tasks.  If the past kernel's dominant bottleneck or bottleneck mix was in a different
 code path than yours, skip those strategies and generate tasks based on YOUR
 profiling data instead.
 {{ memory_context }}
@@ -339,7 +339,7 @@ Each task uses 1 GPU.
 ## Instructions
 
 Read the baseline metrics file first to understand the per-kernel profiling
-landscape (bottlenecks, observations, HBM utilization). Then read the
+landscape (dominant bottlenecks, observations, HBM utilization). Then read the
 codebase context file for the kernel dependency tree -- every
 dependency listed is in-repo code that could be an optimization target.
 Read the discovery file for additional kernel metadata, and consult the

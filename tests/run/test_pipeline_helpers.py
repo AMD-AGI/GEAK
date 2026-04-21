@@ -30,7 +30,7 @@ def test_bottleneck_guidance_adds_search_specific_hip_hints() -> None:
         ],
     }
 
-    text = "\n".join(_bottleneck_guidance("latency", metrics))
+    text = "\n".join(_bottleneck_guidance(metrics))
 
     assert "Optimization Guidance (bottleneck: latency-bound)" in text
     assert "Workload Guidance (HIP search / pointer-chasing)" in text
@@ -38,12 +38,63 @@ def test_bottleneck_guidance_adds_search_specific_hip_hints() -> None:
     assert "Deprioritize generic vectorization" in text
 
 
+def test_bottleneck_guidance_renders_mixed_summary_and_dual_focus() -> None:
+    metrics = {
+        "top_kernels": [
+            {
+                "name": "mem_hot",
+                "bottleneck": "memory",
+                "duration_us": 55.0,
+                "pct_of_selected": 55.0,
+                "observations": [],
+                "metrics": {},
+            },
+            {
+                "name": "compute_hot",
+                "bottleneck": "compute",
+                "duration_us": 45.0,
+                "pct_of_selected": 45.0,
+                "observations": [],
+                "metrics": {},
+            },
+        ],
+        "selected_kernel_summary": {
+            "mode": "mixed",
+            "primary_bottleneck": "memory",
+            "primary_bottleneck_pct_of_selected": 55.0,
+            "bottleneck_mix": [
+                {"bottleneck": "memory", "pct_of_selected": 55.0, "duration_us": 55.0, "kernels": []},
+                {"bottleneck": "compute", "pct_of_selected": 45.0, "duration_us": 45.0, "kernels": []},
+            ],
+        },
+    }
+
+    text = "\n".join(_bottleneck_guidance(metrics))
+
+    assert "Optimization Guidance (mixed bottlenecks)" in text
+    assert "Focus Area: memory-bound" in text
+    assert "Focus Area: compute-bound" in text
+    assert "latency-bound" not in text
+
+
 def _demo_harness_results() -> list[dict[str, object]]:
     return [
         {"mode": "correctness", "success": True, "returncode": 0, "duration_s": 0.1, "stdout": "ALL PASS\n"},
         {"mode": "profile", "success": True, "returncode": 0, "duration_s": 0.1, "stdout": "PROFILE OK\n"},
-        {"mode": "benchmark", "success": True, "returncode": 0, "duration_s": 0.1, "stdout": "GEAK_RESULT_LATENCY_MS=1.0\n"},
-        {"mode": "full-benchmark", "success": True, "returncode": 0, "duration_s": 0.1, "stdout": "GEAK_RESULT_LATENCY_MS=1.0\n"},
+        {
+            "mode": "benchmark",
+            "success": True,
+            "returncode": 0,
+            "duration_s": 0.1,
+            "stdout": "GEAK_RESULT_LATENCY_MS=1.0\n",
+        },
+        {
+            "mode": "full-benchmark",
+            "success": True,
+            "returncode": 0,
+            "duration_s": 0.1,
+            "stdout": "GEAK_RESULT_LATENCY_MS=1.0\n",
+        },
     ]
 
 

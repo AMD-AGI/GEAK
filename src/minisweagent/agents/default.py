@@ -46,6 +46,8 @@ class AgentConfig:
     test_command: str | None = None
     patch_output_dir: str | None = None
     metric: str | None = None
+    profile_every_patch: bool | None = None  # YAML patch.profile_every_patch
+    patch_profile_quick: bool | None = None  # runtime form of YAML patch.profile_quick
     # Strategy manager configuration
     use_strategy_manager: bool = False
     strategy_file_path: str = ".optimization_strategies.md"
@@ -215,6 +217,8 @@ class DefaultAgent:
             log_fn=self._log_message,
             patch_counter=self.patch_counter,
             source_file_paths=source_file_paths,
+            profile_every_patch=getattr(self.config, "profile_every_patch", None),
+            patch_profile_quick=getattr(self.config, "patch_profile_quick", None),
         )
 
         save_and_test_tool = self.toolruntime._tool_table.get("save_and_test")

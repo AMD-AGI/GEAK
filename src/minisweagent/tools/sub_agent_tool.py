@@ -153,6 +153,8 @@ class SubAgentTool:
             base_repo_path=parent_ctx.base_repo_path,
             log_fn=parent_ctx.log_fn,
             patch_counter=parent_ctx.patch_counter,
+            profile_every_patch=parent_ctx.profile_every_patch,
+            patch_profile_quick=parent_ctx.patch_profile_quick,
         )
         save_and_test_tool = child.toolruntime._tool_table.get("save_and_test")
         if save_and_test_tool:

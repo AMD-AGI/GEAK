@@ -19,6 +19,8 @@ from minisweagent.run.postprocess.benchmark_parsing import (
     parse_shape_latencies_ms,
 )
 from minisweagent.run.utils.generated_artifacts import generated_helper_excludes
+from minisweagent.run.utils.metrix_profile import build_metrix_profile_kwargs
+from minisweagent.run.utils.selected_kernel_summary import format_bottleneck_summary
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,8 @@ class SaveAndTestContext:
     patch_counter: int = 0
     helper_harness_logged: bool = False
     source_file_paths: list[str] | None = None  # files the agent is allowed to modify
+    profile_every_patch: bool | None = None  # threaded from YAML patch.profile_every_patch
+    patch_profile_quick: bool | None = None  # threaded from YAML patch.profile_quick
 
 
 class SaveAndTestTool:
@@ -432,15 +436,31 @@ class SaveAndTestTool:
     def _is_truthy(value: Any) -> bool:
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
+    def _resolve_profile_flag(self, explicit: bool | None, env_name: str, *, default: bool = False) -> bool:
+        ctx = self.context
+        env_vars = (ctx.env_vars or {}) if ctx else {}
+        for raw in (env_vars.get(env_name), os.environ.get(env_name)):
+            if raw is not None:
+                return self._is_truthy(raw)
+        if explicit is not None:
+            return explicit
+        return default
+
     def _patch_profiling_enabled(self) -> bool:
         ctx = self.context
-        if not ctx:
-            return False
-        env_vars = ctx.env_vars or {}
-        flag = env_vars.get("GEAK_PROFILE_EVERY_PATCH")
-        if flag is None:
-            flag = os.environ.get("GEAK_PROFILE_EVERY_PATCH")
-        return self._is_truthy(flag)
+        return self._resolve_profile_flag(
+            ctx.profile_every_patch if ctx else None,
+            "GEAK_PROFILE_EVERY_PATCH",
+            default=False,
+        )
+
+    def _patch_profile_quick(self) -> bool:
+        ctx = self.context
+        return self._resolve_profile_flag(
+            ctx.patch_profile_quick if ctx else None,
+            "GEAK_PATCH_PROFILE_QUICK",
+            default=False,
+        )
 
     def _build_test_env(self) -> dict[str, str]:
         ctx = self.context
@@ -538,14 +558,15 @@ class SaveAndTestTool:
         from profiler_mcp.server import profile_kernel
 
         previous, newly_added = self._apply_process_env(profile_env)
+        quick_profile = self._patch_profile_quick()
         try:
             _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
             raw_result = _profile_fn(
-                command=f"python {harness_path} --profile",
-                backend="metrix",
-                num_replays=3,
-                quick=True,
-                gpu_devices=gpu_devices,
+                **build_metrix_profile_kwargs(
+                    f"python {harness_path} --profile",
+                    gpu_devices,
+                    quick=quick_profile,
+                )
             )
         finally:
             self._restore_process_env(previous, newly_added)
@@ -602,11 +623,13 @@ class SaveAndTestTool:
                 "command": command,
                 "gpu_devices": gpu_devices,
                 "harness_path": str(harness_path),
+                "quick": self._patch_profile_quick(),
             }
         )
 
         try:
-            self._log(f"[SaveAndTest] Per-patch Metrix profiling enabled for {patch_name}: {command}")
+            mode = "quick" if result["quick"] else "full"
+            self._log(f"[SaveAndTest] Per-patch Metrix profiling enabled for {patch_name} ({mode}): {command}")
             raw_result, metrics = self._run_patch_profile(
                 harness_path=harness_path,
                 profile_env=profile_env,
@@ -1044,14 +1067,12 @@ class SaveAndTestTool:
         if status == "ok":
             metrics = patch_profile.get("metrics", {})
             top = metrics.get("top_kernels", [])
-            bottleneck = metrics.get("bottleneck")
+            lines.append(format_bottleneck_summary(metrics))
             if top:
                 for k in top[:3]:
                     dur = k.get("duration_us")
                     if isinstance(dur, (int, float)):
                         lines.append(f"  {k.get('name', '?')}: {dur:.3f} us [{k.get('bottleneck', '?')}]")
-            elif bottleneck:
-                lines.append(f"Bottleneck: {bottleneck}")
         elif patch_profile.get("reason"):
             lines.append(f"Reason: {patch_profile['reason']}")
         elif patch_profile.get("error"):

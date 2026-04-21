@@ -273,6 +273,8 @@ def tool_dispatch_tasks(
             gpu_ids=gpu_ids,
             output_dir=results_base,
             model_factory=ctx.get("model_factory"),
+            profile_every_patch=ctx.get("profile_every_patch"),
+            patch_profile_quick=ctx.get("patch_profile_quick"),
         )
         all_results.append(
             {

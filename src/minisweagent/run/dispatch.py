@@ -258,7 +258,6 @@ def task_file_to_agent_task(task_file: Path):
         _bm = baseline_metrics or {}
         _mem_ctx = assemble_memory_context(
             kernel_path=meta.get("kernel_path", ""),
-            bottleneck_type=_bm.get("bottleneck", ""),
             profiling_metrics=_bm,
         )
         if _mem_ctx and len(_mem_ctx) > 50:
@@ -293,6 +292,8 @@ def run_task_batch(
     model_factory,
     *,
     console=None,
+    profile_every_patch: bool | None = None,
+    patch_profile_quick: bool | None = None,
 ) -> dict[str, Any]:
     """Run a batch of task files via ParallelAgent pool mode.
 
@@ -339,6 +340,8 @@ def run_task_batch(
 
     agent_config: dict[str, Any] = {
         "save_patch": True,
+        "profile_every_patch": profile_every_patch,
+        "patch_profile_quick": patch_profile_quick,
     }
 
     # Pre-seed GEAK_REPO_ROOT and GEAK_HARNESS so COMMANDMENT commands

@@ -19,6 +19,8 @@ import math
 import sys
 from pathlib import Path
 
+from minisweagent.run.utils.selected_kernel_summary import build_selected_kernel_summary
+
 # Metrics where summation is the correct aggregation (total cost).
 _SUM_METRICS = {"duration_us", "duration_us_min", "duration_us_max", "duration_us_median"}
 # All other numeric metrics use duration-weighted averaging.
@@ -210,6 +212,10 @@ def _format_baseline(
     Each ``top_kernels`` entry carries the full per-kernel ``metrics`` dict
     and ``observations`` list.  There is **no** top-level aggregated
     ``metrics`` dict -- consumers should iterate ``top_kernels`` instead.
+    The deterministic ``selected_kernel_summary`` block is the stable
+    bottleneck contract for downstream consumers. The legacy top-level
+    ``bottleneck`` field remains as a compatibility alias to
+    ``primary_bottleneck`` during migration.
 
     Args:
         selected: Kernel dicts to include.  When *preserve_order* is True
@@ -262,12 +268,18 @@ def _format_baseline(
             entry["pct_of_all_gpu_time"] = round(100.0 * k_dur / all_kernels_total_dur, 1)
         top_kernels.append(entry)
 
+    selected_kernel_summary = build_selected_kernel_summary(top_kernels)
+    primary_bottleneck = selected_kernel_summary.get("primary_bottleneck", "unknown")
     result = {
         "kernel_name": kernel_name,
         "kernel_names": [k["name"] for k in selected],
-        "bottleneck": dominant.get("bottleneck", "unknown"),
+        "primary_bottleneck": primary_bottleneck,
+        # TODO(geak-v4): remove this legacy alias after all consumers migrate
+        # to primary_bottleneck / selected_kernel_summary.
+        "bottleneck": primary_bottleneck,
         "observations": observations,
         "top_kernels": top_kernels,
+        "selected_kernel_summary": selected_kernel_summary,
     }
     return _sanitize_value(result)
 

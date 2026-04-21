@@ -40,6 +40,17 @@ console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich")
 prompt_session = PromptSession(history=FileHistory(global_config_dir / "mini_task_history.txt"))
 
+_KNOWN_PATCH_CONFIG_KEYS = {
+    "gpu_ids",
+    "harness",
+    "metric",
+    "patch_output_dir",
+    "profile_every_patch",
+    "profile_quick",
+    "repo",
+    "test_command",
+}
+
 
 def _deep_merge(base: dict, override: dict) -> dict:
     result = base.copy()
@@ -65,6 +76,19 @@ def _normalize_kernel_type(value: Any) -> str:
     if text in {"hip", "rocm", "rocblas"}:
         return "hip"
     return "other"
+
+
+def _warn_unknown_patch_keys(config: dict[str, Any]) -> None:
+    patch_cfg = config.get("patch") or {}
+    if not isinstance(patch_cfg, dict):
+        return
+    unknown = sorted(key for key in patch_cfg if key not in _KNOWN_PATCH_CONFIG_KEYS)
+    if unknown:
+        logger.warning(
+            "Unknown patch config key(s): %s. Known keys: %s",
+            ", ".join(unknown),
+            ", ".join(sorted(_KNOWN_PATCH_CONFIG_KEYS)),
+        )
 
 
 def _derive_output_dir(output: Path | None, kernel_name: str | None) -> Path:
@@ -380,6 +404,8 @@ def main(
         output = Path(parsed_config["output_dir"])
         logger.info("Using output_dir from task content: %s", output)
 
+    _warn_unknown_patch_keys(config)
+
     kernel_target = kernel_url or parsed_config.get("kernel_url") or parsed_config.get("kernel_name")
     if not kernel_target:
         logger.error(
@@ -518,6 +544,12 @@ def main(
             logger.error(error_message)
             raise RuntimeError(error_message)
 
+        patch_cfg = config.get("patch", {})
+        if "profile_every_patch" in patch_cfg:
+            preprocess_ctx["profile_every_patch"] = patch_cfg.get("profile_every_patch")
+        if "profile_quick" in patch_cfg:
+            preprocess_ctx["patch_profile_quick"] = patch_cfg.get("profile_quick")
+
         preprocess_ctx["user_instructions"] = task_content
 
         extracted = extract_user_constraints(task_content, model)
@@ -559,7 +591,8 @@ def main(
         logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
         return _final_report_to_bestpatchresult(report)
 
-    metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
+    patch_cfg = config.get("patch", {})
+    metric = parsed_config.get("metric") or patch_cfg.get("metric")
     logger.info("Using metric: %s", metric)
 
     # Cross-session memory injection for homogeneous mode
@@ -574,7 +607,6 @@ def main(
         from minisweagent.memory.integration import assemble_memory_context
         _mem_ctx = assemble_memory_context(
             kernel_path=_kernel_path,
-            bottleneck_type=_bm.get("bottleneck", ""),
             profiling_metrics=_bm,
         )
         if _mem_ctx:
@@ -591,12 +623,14 @@ def main(
 
     agent_config = dict(config.get("agent", {}))
     agent_config["save_patch"] = True
-    agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
+    agent_config["test_command"] = test_command or patch_cfg.get("test_command")
     agent_config["metric"] = metric
     agent_config["patch_output_dir"] = str(preprocess_output_dir)
+    agent_config["profile_every_patch"] = patch_cfg.get("profile_every_patch")
+    agent_config["patch_profile_quick"] = patch_cfg.get("profile_quick")
     logger.debug("Homogeneous agent_config: %s", agent_config)
 
-    repo_path = repo or config.get("patch", {}).get("repo")
+    repo_path = repo or patch_cfg.get("repo")
     if repo_path:
         p = Path(repo_path)
         if not p.exists():

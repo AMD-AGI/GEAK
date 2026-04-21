@@ -270,7 +270,6 @@ def run_heterogeneous_orchestrator(
 
         _memory_context = assemble_memory_context(
             kernel_path=kernel_path,
-            bottleneck_type=bm.get("bottleneck"),
             profiling_metrics=bm,
         )
         if _memory_context:

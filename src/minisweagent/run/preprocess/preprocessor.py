@@ -56,6 +56,7 @@ from minisweagent.run.preprocess.testcase_cache import (
     materialize_cached_harness,
     save_cached_harness,
 )
+from minisweagent.run.utils.metrix_profile import build_metrix_profile_kwargs
 
 # ── main entry point ─────────────────────────────────────────────────
 
@@ -1075,12 +1076,12 @@ def run_preprocessor(
 
                 _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
                 profiling = _profile_fn(
-                    command=perf_cmd,
-                    backend="metrix",
-                    num_replays=3,
-                    quick=False,
-                    gpu_devices=str(gpu_id),
-                    workdir=_cwd,
+                    **build_metrix_profile_kwargs(
+                        perf_cmd,
+                        gpu_id,
+                        quick=False,
+                        workdir=_cwd,
+                    )
                 )
             except Exception as exc:
                 logger.warning("[yellow]Profiling failed: %s[/yellow]", exc, exc_info=True)

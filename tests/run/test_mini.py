@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -53,6 +54,16 @@ class TestNormalizeKernelType:
     )
     def test_mapping(self, value: object, expected: str) -> None:
         assert mini_module._normalize_kernel_type(value) == expected
+
+
+class TestPatchConfigWarnings:
+    def test_warns_on_unknown_patch_keys(self, capsys: pytest.CaptureFixture[str]) -> None:
+        capsys.readouterr()
+
+        mini_module._warn_unknown_patch_keys({"patch": {"profile_quickk": True}})
+
+        captured = capsys.readouterr()
+        assert "Unknown patch config key(s): profile_quickk" in captured.out
 
 
 class TestDeriveOutputDir:
@@ -140,3 +151,86 @@ class TestTryPromoteToHarness:
 def test_typer_app_exposed() -> None:
     assert mini_module.app is not None
     assert hasattr(mini_module.app, "registered_commands") or hasattr(mini_module.app, "info_name")
+
+
+def test_heterogeneous_path_threads_patch_profile_flags_to_orchestrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import minisweagent.run.utils.task_parser as task_parser_module
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "mini_kernel_strategy_list.yaml").write_text("agent: {}\nenv: {}\nmodel: {}\npatch: {}\ntools: {}\n")
+    geak_yaml = config_dir / "geak.yaml"
+    geak_yaml.write_text("patch:\n  profile_every_patch: true\n  profile_quick: false\n")
+
+    kernel_path = tmp_path / "kernel.py"
+    kernel_path.write_text("print('kernel')\n")
+
+    monkeypatch.setattr(mini_module, "builtin_config_dir", config_dir)
+    monkeypatch.setattr(mini_module.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr(task_parser_module, "parse_pipeline_params", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(mini_module, "parse_task_info", lambda *_args, **_kwargs: {"kernel_type": "triton"})
+    monkeypatch.setattr(mini_module, "display_parsed_config", lambda *_args, **_kwargs: "resolved")
+    monkeypatch.setattr(mini_module, "parse_gpu_ids", lambda *_args, **_kwargs: [0])
+    monkeypatch.setattr(
+        mini_module, "extract_user_constraints", lambda *_args, **_kwargs: {"constraints": [], "directives": []}
+    )
+    monkeypatch.setattr(mini_module, "add_file_handler", lambda *_args, **_kwargs: None)
+
+    class _FakeModel:
+        def __init__(self):
+            self.config = SimpleNamespace(model_name="fake-model")
+
+    monkeypatch.setattr(mini_module, "get_model", lambda *_args, **_kwargs: _FakeModel())
+
+    class _FakeEnv:
+        def __init__(self, **kwargs):
+            self.config = SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(mini_module, "get_environment_class", lambda *_args, **_kwargs: _FakeEnv)
+
+    monkeypatch.setattr(
+        mini_module,
+        "run_preprocessor",
+        lambda **_kwargs: {
+            "commandment": "## SETUP\ntrue\n",
+            "discovery": {"kernel": {"type": "triton"}},
+            "kernel_path": str(kernel_path),
+            "repo_root": str(tmp_path),
+            "test_command": "python test_harness.py --correctness",
+        },
+    )
+
+    captured: dict = {}
+
+    def _fake_run_orchestrator(*, preprocess_ctx, **kwargs):
+        captured["preprocess_ctx"] = preprocess_ctx
+        captured["kwargs"] = kwargs
+        return {"best_patch": str(tmp_path / "best.patch"), "best_speedup": 1.1, "summary": "ok"}
+
+    monkeypatch.setattr(mini_module, "run_orchestrator", _fake_run_orchestrator)
+
+    result = mini_module.main(
+        visual=False,
+        model_name=None,
+        model_class=None,
+        task="optimize this triton kernel",
+        yolo=False,
+        cost_limit=None,
+        kernel_url=str(kernel_path),
+        config_spec=geak_yaml,
+        output=tmp_path / "out",
+        exit_immediately=False,
+        repo=None,
+        num_parallel=None,
+        gpu_ids=None,
+        test_command=None,
+    )
+
+    assert result is not None
+    assert captured["preprocess_ctx"]["profile_every_patch"] is True
+    assert captured["preprocess_ctx"]["patch_profile_quick"] is False
+    assert captured["preprocess_ctx"]["user_instructions"] == "optimize this triton kernel"
+    assert captured["kwargs"]["heterogeneous"] is True
