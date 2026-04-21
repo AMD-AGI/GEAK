@@ -14,9 +14,10 @@ RUN make install
 RUN python3 -c "from profiler_mcp.server import profile_kernel; from metrix import Metrix; print('Core imports verified')"
 
 # Runtime assets (not needed for install; changes only rebuild cheap COPY layers)
+# Note: knowledge-base was moved under mcp_tools/rag-mcp/knowledge-base/ (commit d6bbd9c7),
+# so it's already included via the mcp_tools/ COPY above. No top-level knowledge-base/ exists.
 COPY skills/ skills/
 COPY docs/ docs/
-COPY knowledge-base/ knowledge-base/
 COPY entrypoint.sh ./
 
 RUN chmod +x /workspace/entrypoint.sh

@@ -57,6 +57,13 @@ class ParallelAgentConfig(AgentConfig):
     strategy_file_path: str | None = None
     # Interactive/exit behaviour (passed through from --exit-immediately)
     confirm_exit: bool = True
+    # Working-memory artefact paths (set by run/mini.py for homogeneous mode so that
+    # ``run_single_agent`` can initialise a per-slot WorkingMemory). They must be
+    # declared here so ``ParallelAgentConfig(**agent_config)`` accepts them and so
+    # ``ParallelAgent.run()`` carries them through to ``run_parallel``.
+    _wm_baseline_metrics: str | None = None
+    _wm_benchmark_baseline: str | None = None
+    _wm_kernel_path: str | None = None
 
 
 class ParallelAgent(DefaultAgent):
