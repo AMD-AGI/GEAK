@@ -128,13 +128,13 @@ class SubAgentTool:
             self._inherit_save_and_test_context(child)
             exit_status, result = child.run(task)
             self._sync_patch_counter_from_child(child)
-            logger.info(f"[sub_agent] Child finished: {exit_status}")
+            logger.info("[sub_agent] Child finished: %s", exit_status)
             return {
                 "output": f"Sub-agent completed ({exit_status}): {result}",
                 "returncode": 0 if exit_status == "Submitted" else 1,
             }
         except Exception as e:
-            logger.error(f"[sub_agent] Child agent failed: {e}")
+            logger.error("[sub_agent] Child agent failed: %s", e)
             return {"output": f"Sub-agent error: {e}", "returncode": 1}
 
     def _inherit_save_and_test_context(self, child) -> None:

@@ -4,6 +4,7 @@ This module provides a structured way to manage optimization strategies,
 avoiding manual markdown editing and ensuring consistent formatting.
 """
 
+import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+
+logger = logging.getLogger(__name__)
 
 
 class StrategyStatus(Enum):
@@ -163,6 +166,7 @@ class StrategyManager:
                 import sys
 
                 print(f"Warning: on_change_callback failed: {e}", file=sys.stderr)
+                logger.warning("on_change_callback failed: %s", e, exc_info=True)
 
     def exists(self) -> bool:
         """Check if strategy file exists."""

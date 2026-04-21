@@ -51,6 +51,12 @@ See the built-in example: `examples/skills/silu-optimization/SKILL.md` — front
 
 Keep **`description`** accurate so the model knows when to load the skill; put the detailed procedure in the Markdown body.
 
+## Skill reference usage
+
+Put **extra material** (long references, helper scripts, data snippets) in **subfolders** of your skill directory, not loose files mixed at the skill root unless you prefer that layout. Common names are `docs/` and `scripts/`. When a skill is loaded, GEAK lists those immediate subdirectories in the injected context so the agent knows where to look.
+
+In **`SKILL.md`**, point to those files with **paths relative to `SKILL.md`** (for example `docs/overview.md`, `scripts/run_bench.sh`). That keeps skills portable and matches how the runtime reports material paths.
+
 ## Checklist for a new skill
 
 | Step | Action |

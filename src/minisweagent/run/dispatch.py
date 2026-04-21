@@ -252,6 +252,21 @@ def task_file_to_agent_task(task_file: Path):
         benchmark_baseline=benchmark_baseline_text,
     )
 
+    try:
+        from minisweagent.memory.integration import assemble_memory_context
+
+        _bm = baseline_metrics or {}
+        _mem_ctx = assemble_memory_context(
+            kernel_path=meta.get("kernel_path", ""),
+            bottleneck_type=_bm.get("bottleneck", ""),
+            profiling_metrics=_bm,
+        )
+        if _mem_ctx and len(_mem_ctx) > 50:
+            body += "\n\n## Optimization Patterns from Similar Kernels (cross-session memory)\n" + _mem_ctx
+            logger.info("Cross-session memory injected into sub-agent task (%d chars)", len(_mem_ctx))
+    except Exception as _mem_exc:
+        logger.warning("Cross-session memory injection failed in dispatch: %s", _mem_exc)
+
     if meta.get("starting_patch"):
         cfg["starting_patch"] = meta["starting_patch"]
 
@@ -359,6 +374,13 @@ def run_task_batch(
         hypothesis_id="H5",
     )
     # endregion
+
+    logger.info(
+        "[bold yellow]Running %d sub-agent(s) in parallel:[/bold yellow]%s",
+        len(tasks),
+        "".join(f"\n  - {t.label} (priority={t.priority})" for t in tasks),
+    )
+    logger.info("[dim]Sub-agents are working — expect no output for several minutes.[/dim]")
 
     try:
         raw_results = ParallelAgent.run_parallel(

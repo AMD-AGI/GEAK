@@ -2,10 +2,12 @@
 
 """Backup mini entry with kernel-type routing."""
 
-import os
+import json
+import logging
 import shlex
+import subprocess
 import sys
-from io import StringIO
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,32 +27,18 @@ from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.orchestrator import run_orchestrator
 from minisweagent.run.preprocess.preprocessor import run_preprocessor
-from minisweagent.run.utils.task_parser import _resolve_path_case, display_parsed_config, parse_task_info
+from minisweagent.run.utils.task_parser import (
+    _resolve_path_case,
+    display_parsed_config,
+    extract_user_constraints,
+    parse_task_info,
+)
+from minisweagent.utils.log import DEFAULT_LOG_FILENAME, add_file_handler
 
-DEFAULT_CONFIG = Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml"))
-DEFAULT_OUTPUT = global_config_dir / "last_mini_run.traj.json"
-
+logger = logging.getLogger(__name__)
 console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich")
 prompt_session = PromptSession(history=FileHistory(global_config_dir / "mini_task_history.txt"))
-
-
-class TeeOutput:
-    """Capture stdout/stderr to buffer while keeping terminal output."""
-
-    def __init__(self, original):
-        self.terminal = original
-        self.buffer = StringIO()
-
-    def write(self, message):
-        self.terminal.write(message)
-        self.buffer.write(message)
-
-    def flush(self):
-        self.terminal.flush()
-
-    def getvalue(self):
-        return self.buffer.getvalue()
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -61,14 +49,6 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             result[key] = value
     return result
-
-
-def _as_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
 
 
 def _as_int(value: Any) -> int | None:
@@ -87,25 +67,22 @@ def _normalize_kernel_type(value: Any) -> str:
     return "other"
 
 
-def _derive_output_dir_and_traj(output: Path | None, kernel_name: str | None) -> tuple[Path, Path]:
-    """Unify patch_output_dir and -o/--output location.
+def _derive_output_dir(output: Path | None, kernel_name: str | None) -> Path:
+    """Derive the output directory from ``-o``/``--output``.
 
-    - If output is a file path: output_dir = output.parent, traj = output
-    - If output is a directory: output_dir = output, traj = output/trajectory.json
-    - If output is not provided: use ./optimization_logs/<kernel_name>_<timestamp> as output_dir
+    - If output is a file path: output_dir = output.parent
+    - If output is a directory: output_dir = output
+    - If output is not provided: use ./optimization_logs/<kernel_name>_<timestamp>
     """
     if output is None:
         from minisweagent.run.utils.task_parser import generate_patch_output_dir
 
-        output_dir = (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
-        return output_dir, output_dir / "trajectory.json"
-
-    output = output.resolve()
+        return (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
 
     if output.suffix:
-        return output.parent, output
+        return output.parent
 
-    return output, output / "trajectory.json"
+    return output
 
 
 def _final_report_to_bestpatchresult(report: Any) -> BestPatchResult | None:
@@ -117,16 +94,13 @@ def _final_report_to_bestpatchresult(report: Any) -> BestPatchResult | None:
 
     best_patch = report_dict.get("best_patch")
     patch_path = Path(best_patch) if best_patch else None
+    raw_speedup = report_dict.get("best_speedup")
     return BestPatchResult(
         agent_id=0,
         patch_id=patch_path.stem if patch_path else "unknown",
         test_output="",
-        metric_result={
-            "best_speedup": report_dict.get("best_speedup"),
-            "best_round": report_dict.get("best_round"),
-            "best_task": report_dict.get("best_task"),
-            "status": report_dict.get("status"),
-        },
+        best_speedup=float(raw_speedup) if raw_speedup is not None else None,
+        best_patch_file=str(patch_path) if patch_path else None,
         patch_dir=patch_path.parent if patch_path else None,
         llm_conclusion=str(report_dict.get("summary") or ""),
     )
@@ -185,29 +159,47 @@ def main(
 ):
     # fmt: on
     del visual
-    tee_out, tee_err = TeeOutput(sys.stdout), TeeOutput(sys.stderr)
-    sys.stdout, sys.stderr = tee_out, tee_err
 
-    if sys.stdin.isatty():
-        configure_if_first_time()
+    configure_if_first_time()
 
-    # 1) Config merge
+    # 1) Config merge — explicit UTF-8 avoids locale-dependent decoding for YAML on some platforms
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
-    console.print(f"Loading base config: [bold green]'{base_config_path.name}'[/bold green]")
-    config = yaml.safe_load(base_config_path.read_text()) or {}
+    config = yaml.safe_load(base_config_path.read_text(encoding="utf-8")) or {}
+    if config:
+        logger.info("Loaded base config from [bold green]'%s'[/bold green]", base_config_path.name)
+    else:
+        logger.warning(
+            "Base config %s: null or empty YAML file.",
+            base_config_path.name,
+        )
+
     config_path = config_spec or (builtin_config_dir / "geak.yaml")
-    console.print(f"[dim]Applying user config from '{config_path}' (final override)[/dim]")
-    user_config = yaml.safe_load(config_path.read_text()) or {}
+    user_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if user_config:
+        logger.info(
+            "Loaded user config from [bold green]'%s'[/bold green] [dim](final override)[/dim]",
+            config_path.name,
+        )
+    else:
+        logger.warning(
+            "User config %s: null or empty YAML file.",
+            config_path.name,
+        )
+
     config = _deep_merge(config, user_config)
 
     if yolo:
         config.setdefault("agent", {})["mode"] = "yolo"
+        logger.info("Running in YOLO mode.")
     if cost_limit is not None:
         config.setdefault("agent", {})["cost_limit"] = cost_limit
+        logger.info("Setting cost limit to %s.", cost_limit)
     if exit_immediately:
         config.setdefault("agent", {})["confirm_exit"] = False
+        logger.info("Running in exit-immediately mode.")
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
+        logger.info("Using model class: %s.", model_class)
 
     tools_cfg = config.get("tools") or {}
     disabled_tools: list[str] = []
@@ -217,25 +209,78 @@ def main(
         disabled_tools.append("profiling")
         disabled_tools.append("profile_kernel")
 
+    # RAG MCP toggle: disable RAG tools when rag is not enabled
+    rag_enabled = tools_cfg.get("rag", False)
+    if rag_enabled:
+        # Auto-install rag-mcp package if missing
+        try:
+            import rag_mcp  # noqa: F401
+        except ImportError:
+            logger.info("rag-mcp package not found, installing automatically...")
+            _rag_mcp_path = Path(__file__).resolve().parents[3] / "mcp_tools" / "rag-mcp"
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-e", str(_rag_mcp_path)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Auto-install of rag-mcp failed.\n\n"
+                    f"stderr:\n{result.stderr}\n\n"
+                    "Please install manually:\n"
+                    f"  pip install -e {_rag_mcp_path}"
+                )
+            logger.info("rag-mcp installed successfully.")
+            # Refresh sys.path so the newly installed package is discoverable
+            import importlib
+            import site
+            importlib.invalidate_caches()
+            site.main()
+            import rag_mcp  # noqa: F401
+        # Auto-build semantic index if missing
+        _index_path = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
+        _has_faiss = (_index_path / "index.faiss").exists() or (_index_path / "faiss.index").exists()
+        _has_pkl = bool(list(_index_path.glob("*.pkl"))) if _index_path.exists() else False
+        if not (_has_faiss and _has_pkl):
+            logger.info("RAG index not found at %s, building automatically...", _index_path)
+            _build_script = Path(__file__).resolve().parents[3] / "scripts" / "build_index.py"
+            result = subprocess.run(
+                [sys.executable, str(_build_script), "--force"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Auto-build of RAG index failed.\n\n"
+                    f"stderr:\n{result.stderr}\n\n"
+                    "Please build manually:\n"
+                    f"  python {_build_script} --force"
+                )
+            logger.info("RAG index built successfully.")
+    else:
+        disabled_tools.append("query")
+        disabled_tools.append("optimize")
+
     if disabled_tools:
         config.setdefault("agent", {}).setdefault("disabled_tools", [])
         config["agent"]["disabled_tools"] = list(set(config["agent"]["disabled_tools"]) | set(disabled_tools))
+    logger.debug("config: %s", config)
 
     model = get_model(model_name, config.get("model", {}))
     _model_name = getattr(model.config, "model_name", "unknown")
-    console.print(f"\\Using model: [bold cyan]{_model_name}[/bold cyan]")
+    logger.info("Using model: [bold cyan]%s[/bold cyan]", _model_name)
 
     task_content = task
     if task:
         task_path = Path(task)
         if task_path.exists() and task_path.is_file():
             task_content = task_path.read_text(encoding="utf-8")
-            console.print(f"[bold green]Read task from file: {task_path}[/bold green]")
+            logger.info("[bold green]Read task from file: %s[/bold green]", task_path)
         elif not task.strip():
             task_content = None
+            logger.info("Task content is empty.")
 
     if not task_content:
         console.print("[bold yellow]What do you want to do?")
+        logger.info("Prompting user for task input (interactive).")
         task_content = prompt_session.prompt(
             "",
             multiline=True,
@@ -246,6 +291,7 @@ def main(
             ),
         )
         console.print("[bold green]Got that, thanks![/bold green]")
+        logger.info("User task input (%d chars): %s", len(task_content), task_content[:500])
 
     # 2a) LLM-driven pipeline param extraction
     heterogeneous = None
@@ -253,31 +299,38 @@ def main(
     if task_content:
         from minisweagent.run.utils.task_parser import parse_pipeline_params
 
-        console.print("[bold cyan]Checking task for pipeline parameters...[/bold cyan]")
+        logger.info("[bold cyan]Checking task for pipeline parameters...[/bold cyan]")
         pipeline_params = parse_pipeline_params(task_content, model)
+        logger.debug("pipeline_params: %s", pipeline_params)
 
         # Apply non-None extracted values (CLI flags still take priority)
         if pipeline_params.get("heterogeneous") is not None and heterogeneous is None:
             heterogeneous = pipeline_params["heterogeneous"]
+            logger.info("Using heterogeneous mode.")
         if pipeline_params.get("max_rounds") is not None:
             max_rounds = pipeline_params["max_rounds"]
+            logger.info("Using max rounds: %s.", max_rounds)
 
         # Prompt for missing required params (kernel_url) — only if not already set
         if kernel_url is None:
             from minisweagent.run.utils.config_editor import prompt_missing_pipeline_params
 
+            logger.info("Prompting for missing pipeline parameters.")
             pipeline_params, should_use_pipeline = prompt_missing_pipeline_params(
                 pipeline_params, console, yolo
             )
+            logger.info("pipeline_params: %s, should_use_pipeline: %s", pipeline_params, should_use_pipeline)
 
             if should_use_pipeline:
                 if pipeline_params.get("kernel_url"):
                     kernel_url = pipeline_params["kernel_url"]
+                    logger.info("Using kernel URL: %s.", kernel_url)
 
     # 2b) Detect configs from task
     parsed_config = parse_task_info(task_content, model)
-    task_kernel_type = _normalize_kernel_type(parsed_config.get("kernel_type"))
-    kernel_type = task_kernel_type
+    kernel_type = _normalize_kernel_type(parsed_config.get("kernel_type"))
+    logger.info("Normalized kernel_type from task content: %s", kernel_type)
+
     if kernel_url:
         kp = Path(kernel_url)
         if kp.exists() and kp.is_file():
@@ -286,15 +339,14 @@ def main(
             inferred = _normalize_kernel_type(_infer_kernel_type(kp))
             if inferred in {"hip", "triton"}:
                 kernel_type = inferred
-
-    # Keep kernel_type resolution internal; avoid exposing routing details in logs.
+                logger.info("Updated kernel_type using kernel path: %s", kernel_type)
 
     if repo is None and parsed_config.get("repo"):
         repo = Path(parsed_config["repo"])
+        logger.info("Using repo from task content: %s", repo)
     if test_command is None and parsed_config.get("test_command"):
         test_command = parsed_config["test_command"]
-    if num_parallel is None:
-        num_parallel = _as_int(parsed_config.get("num_parallel"))
+        logger.info("Using test command from task content: %s", test_command)
     if gpu_ids is None and parsed_config.get("gpu_ids") is not None:
         _parsed_gpu_ids = parsed_config["gpu_ids"]
         if isinstance(_parsed_gpu_ids, list):
@@ -303,45 +355,63 @@ def main(
             gpu_ids = str(_parsed_gpu_ids)
         if not gpu_ids.strip():
             gpu_ids = None
+        logger.info("Using gpu_ids: %s", gpu_ids)
 
     # Apply config/model/output_dir extracted from task (CLI flags take priority)
     if config_spec is None and parsed_config.get("config"):
         _task_config_path = get_config_path(Path(parsed_config["config"]))
         if _task_config_path and _task_config_path.exists():
-            console.print(f"[dim]Applying config from task: '{_task_config_path}'[/dim]")
-            _task_user_config = yaml.safe_load(_task_config_path.read_text()) or {}
+            logger.info("[dim]Applying config from task: '%s'[/dim]", _task_config_path)
+            _task_yaml = yaml.safe_load(_task_config_path.read_text(encoding="utf-8"))
+            _task_user_config = _task_yaml or {}
+            if not _task_yaml:
+                logger.warning(
+                    "Task config %s: null or empty YAML; merge layer uses {}.",
+                    _task_config_path,
+                )
             config = _deep_merge(config, _task_user_config)
 
     if model_name is None and parsed_config.get("model"):
         model_name = parsed_config["model"]
         model = get_model(model_name, config.get("model", {}))
-        console.print(f"\\Using model (from task): [bold cyan]{model_name}[/bold cyan]")
+        logger.info("Using model (from task): [bold cyan]%s[/bold cyan]", model_name)
 
     if output is None and parsed_config.get("output_dir"):
         output = Path(parsed_config["output_dir"])
+        logger.info("Using output_dir from task content: %s", output)
 
     kernel_target = kernel_url or parsed_config.get("kernel_url") or parsed_config.get("kernel_name")
     if not kernel_target:
-        console.print("[red]Error: missing kernel target. Provide --kernel-url or include kernel info in task.[/red]")
+        logger.error(
+            "[red]Error: missing kernel target. Provide --kernel-url or include kernel info in task.[/red]"
+        )
         raise typer.Exit(1)
 
     parsed_gpu_ids = parse_gpu_ids(gpu_ids)
-    if num_parallel is None and isinstance(gpu_ids, str) and gpu_ids.strip():
+
+    # Auto-detect num_parallel from gpu_ids when not explicitly provided.
+    if num_parallel is None:
+        num_parallel = _as_int(parsed_config.get("num_parallel"))
+    if num_parallel is None and parsed_gpu_ids:
         num_parallel = len(parsed_gpu_ids)
-    metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
+        logger.info("Auto-setting num_parallel=%s from gpu_ids.", num_parallel)
 
     kernel_name_for_output = parsed_config.get("kernel_name")
     if not kernel_name_for_output and kernel_url:
         kernel_name_for_output = Path(kernel_url).stem
     if not kernel_name_for_output and isinstance(kernel_target, str):
         kernel_name_for_output = Path(kernel_target).stem
+    logger.info("Using kernel_name_for_output: %s", kernel_name_for_output)
 
-    preprocess_output_dir, traj_output_path = _derive_output_dir_and_traj(output, kernel_name_for_output)
+    preprocess_output_dir = _derive_output_dir(output, kernel_name_for_output)
     preprocess_output_dir.mkdir(parents=True, exist_ok=True)
+    add_file_handler(preprocess_output_dir / DEFAULT_LOG_FILENAME)
+    _run_t0 = time.monotonic()
     config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
-    console.print(
-        f"[dim]Logs and artifacts for this run are under '{preprocess_output_dir}' "
-        f"(e.g. optimization_logs/<kernel>_<timestamp>/).[/dim]"
+    logger.info(
+        "[dim]Logs and artifacts for this run are under '%s' "
+        "(e.g. optimization_logs/<kernel>_<timestamp>/).[/dim]",
+        preprocess_output_dir,
     )
 
     # Display the *resolved* configuration (CLI overrides auto-detection).
@@ -361,7 +431,8 @@ def main(
         _display_cfg["model"] = model_name
     if config_spec is not None:
         _display_cfg["config"] = str(config_spec)
-    console.print(display_parsed_config(_display_cfg, str(preprocess_output_dir)))
+    _resolved_config_display = display_parsed_config(_display_cfg, str(preprocess_output_dir))
+    logger.info("Resolved configuration:\n%s", _resolved_config_display)
 
     _env_kwargs = dict(config.get("env", {}))
     env_type = str(_env_kwargs.pop("type", _env_kwargs.pop("environment_class", "local"))).strip().lower() or "local"
@@ -369,7 +440,7 @@ def main(
         env_class = get_environment_class(env_type)
         env = env_class(**_env_kwargs)
     except Exception as e:
-        console.print(f"[red]Error: failed to initialize env.type={env_type}: {e}[/red]")
+        logger.error("[red]Error: failed to initialize env.type=%s: %s[/red]", env_type, e)
         raise typer.Exit(1)
 
     harness_spec = config.get("patch", {}).get("harness")
@@ -377,7 +448,7 @@ def main(
         promoted = _try_promote_to_harness(test_command)
         if promoted:
             harness_spec = promoted
-            console.print(f"[bold cyan]Promoted test command to validated harness: {promoted}[/bold cyan]")
+            logger.info("[bold cyan]Promoted test command to validated harness: %s[/bold cyan]", promoted)
 
     _preprocess_kwargs = dict(
         kernel_url=kernel_target,
@@ -387,13 +458,16 @@ def main(
         model_factory=lambda: get_model(model_name, config.get("model", {})),
         console=console,
     )
+    logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
 
     if harness_spec:
         try:
             preprocess_ctx = run_preprocessor(**_preprocess_kwargs, harness=harness_spec)
         except RuntimeError as exc:
             if "harness" in str(exc).lower():
-                console.print(f"[yellow]Harness validation failed, falling back to eval_command: {exc}[/yellow]")
+                logger.warning(
+                    "[yellow]Harness validation failed, falling back to eval_command: %s[/yellow]", exc
+                )
                 preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
             else:
                 raise
@@ -402,6 +476,7 @@ def main(
             left, right = test_command.rsplit("&&", 1)
             correctness_command = left.strip() or None
             performance_command = right.strip() or None
+            logger.info("Correctness command: %s, Performance command: %s", correctness_command, performance_command)
             preprocess_ctx = run_preprocessor(
                 **_preprocess_kwargs,
                 correctness_command=correctness_command,
@@ -409,6 +484,7 @@ def main(
             )
         else:
             preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
+    logger.debug("Preprocessor context: %s", preprocess_ctx)
 
     if preprocess_ctx.get("test_command") and not test_command:
         test_command = preprocess_ctx["test_command"]
@@ -430,15 +506,47 @@ def main(
 
         if _auto_kernel_type == "triton":
             heterogeneous = True
+            logger.info("Using heterogeneous mode based on discovery.")
         else:
             heterogeneous = False
-    else:
-        pass
+            logger.info("Using homogeneous mode based on discovery.")
 
     if heterogeneous:
         commandment = preprocess_ctx.get("commandment")
-        if commandment:
-            task_content = f"{commandment}\n\n---\n\n{task_content}"
+        if not commandment:
+            error_message = "No commandment found in preprocessor context. Check preprocessor logs for failures."
+            logger.error(error_message)
+            raise RuntimeError(error_message)
+
+        preprocess_ctx["user_instructions"] = task_content
+
+        extracted = extract_user_constraints(task_content, model)
+        _addendum_parts: list[str] = []
+        if extracted["constraints"]:
+            _addendum_parts.append("## USER-SPECIFIED CONSTRAINTS\n\nThese are mandatory. Violation means rejection.\n")
+            _addendum_parts.extend(f"- {c}" for c in extracted["constraints"])
+        if extracted["directives"]:
+            _addendum_parts.append(
+                "\n## PRESCRIBED OPTIMIZATION DIRECTIVES\n\n"
+                "These are the user's prescribed optimization strategies. Prioritize them, but\n"
+                "also explore additional directions beyond these.\n"
+                "NOTE: Any performance numbers in the original user request come from full-model\n"
+                "profiling under different conditions. Use ONLY the GEAK-measured baseline metrics\n"
+                "for before/after speedup comparisons.\n"
+            )
+            _addendum_parts.extend(f"- {d}" for d in extracted["directives"])
+        if _addendum_parts:
+            preprocess_ctx["commandment"] = commandment + "\n\n" + "\n".join(_addendum_parts)
+            _commandment_path = preprocess_output_dir / "COMMANDMENT.md"
+            _commandment_path.write_text(preprocess_ctx["commandment"], encoding="utf-8")
+            logger.info(
+                "Enriched commandment with %d constraints and %d directives (written to %s).",
+                len(extracted["constraints"]),
+                len(extracted["directives"]),
+                _commandment_path,
+            )
+
+        preprocess_ctx["rag_enabled"] = rag_enabled
         report = run_orchestrator(
             preprocess_ctx=preprocess_ctx,
             gpu_ids=parsed_gpu_ids,
@@ -447,15 +555,46 @@ def main(
             output_dir=preprocess_output_dir,
             max_rounds=max_rounds or config.get("orchestrator", {}).get("max_rounds"),
             heterogeneous=True,
-            console=console,
         )
+        logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
         return _final_report_to_bestpatchresult(report)
+
+    metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
+    logger.info("Using metric: %s", metric)
+
+    # Cross-session memory injection for homogeneous mode
+    _kernel_path = preprocess_ctx.get("kernel_path", "")
+    _bm = preprocess_ctx.get("baseline_metrics") or {}
+    if isinstance(_bm, str):
+        try:
+            _bm = json.loads(_bm)
+        except Exception:
+            _bm = {}
+    try:
+        from minisweagent.memory.integration import assemble_memory_context
+        _mem_ctx = assemble_memory_context(
+            kernel_path=_kernel_path,
+            bottleneck_type=_bm.get("bottleneck", ""),
+            profiling_metrics=_bm,
+        )
+        if _mem_ctx:
+            task_content = (
+                task_content
+                + "\n\n### Optimization Memory (from past kernel optimization runs)\n"
+                + _mem_ctx
+            )
+            logger.info("Cross-session memory injected into homogeneous task (%d chars)", len(_mem_ctx))
+        else:
+            logger.info("Cross-session memory: no relevant experiences found")
+    except Exception as _mem_exc:
+        logger.warning("Cross-session memory unavailable: %s", _mem_exc)
 
     agent_config = dict(config.get("agent", {}))
     agent_config["save_patch"] = True
     agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
     agent_config["metric"] = metric
     agent_config["patch_output_dir"] = str(preprocess_output_dir)
+    logger.debug("Homogeneous agent_config: %s", agent_config)
 
     repo_path = repo or config.get("patch", {}).get("repo")
     if repo_path:
@@ -465,8 +604,9 @@ def main(
             if resolved is not None:
                 p = resolved
         repo_path = p.resolve()
+    logger.info("Resolved repo path: %s", repo_path)
 
-    return run_homogeneous_agent(
+    result = run_homogeneous_agent(
         config=config,
         task_content=task_content,
         model=model,
@@ -478,10 +618,11 @@ def main(
         num_parallel=num_parallel,
         gpu_ids=gpu_ids,
         output_dir=preprocess_output_dir,
-        traj_output=traj_output_path,
         model_name=model_name,
         console=console,
     )
+    logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
+    return result
 
 
 if __name__ == "__main__":

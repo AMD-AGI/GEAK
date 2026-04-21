@@ -1,0 +1,26 @@
+[project]
+name = "rag-mcp"
+version = "0.1.0"
+description = "RAG Knowledge Base MCP Server — GPU/ROCm/HIP hybrid retrieval"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "pyyaml",
+    "numpy",
+    "langchain-community",
+    "langchain-huggingface",
+    "langchain-core",
+    "faiss-cpu",
+    "sentence-transformers",
+    "rank-bm25",
+]
+
+[project.scripts]
+rag-mcp = "rag_mcp.server:main"
+
+[tool.setuptools.package-data]
+rag_mcp = ["config/*.yaml"]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"

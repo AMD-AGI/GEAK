@@ -4,17 +4,27 @@ This directory is where you add **Model Context Protocol** servers that the GEAK
 
 ## Installation
 
-`fastmcp` and `mcp[cli]` are core dependencies — installed automatically with `pip install -e .`.
+### Recommended (Makefile)
 
-From the GEAK repository root, install the main package with:
+From the GEAK repository root, the Makefile installs the main package and each MCP server explicitly:
+
+```bash
+make install       # non-editable (used by Dockerfile); core + MCP servers
+make install-dev   # editable install for development
+make install-full  # core + MCP servers + dev tools + swe-rex
+```
+
+### Alternative (pip only)
+
+`fastmcp` and `mcp[cli]` are core dependencies — installed automatically with `pip install -e .`.
 
 ```bash
 pip install -e .          # runtime install
 # or
-pip install -e '.[full]'  # runtime + dev/langchain extras
+pip install -e '.[full]'  # runtime + dev/langchain extras + swe-rex
 ```
 
-GEAK launches the shipped MCP servers in this directory directly from the repository by setting each server's `src/` directory on `PYTHONPATH`, so there is no separate `.[mcp]` extra to install.
+GEAK launches the shipped MCP servers in this directory directly from the repository as subprocesses by setting each server's `src/` directory on `PYTHONPATH`, so no separate MCP pip extra is required.
 
 If you want to work on one server package in isolation, install that package directly, for example:
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Test harness for MLA decode kernel
-# Shapes source: /home/upandey/AIG-Eval/external_repos/aiter/op_tests/test_mla.py
+# Shapes source: aiter/op_tests/test_mla.py
 
 import argparse
 import os

@@ -6,10 +6,13 @@ and kernel function name. Used by the agent when given a --kernel-url.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from minisweagent.run.preprocess.resolve_kernel_url import get_kernel_name_at_line, resolve_kernel_url
+
+logger = logging.getLogger(__name__)
 
 
 class ResolveKernelUrlTool:
@@ -42,7 +45,7 @@ class ResolveKernelUrlTool:
             try:
                 kernel_name = get_kernel_name_at_line(path, line_num)
             except Exception:
-                pass
+                logger.debug("get_kernel_name_at_line failed for path=%s line=%s", path, line_num, exc_info=True)
 
         parts = [f"local_file_path: {path}"]
         if line_num:

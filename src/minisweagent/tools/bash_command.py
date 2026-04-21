@@ -1,4 +1,5 @@
 import locale
+import logging
 import os
 import re
 import subprocess
@@ -11,6 +12,8 @@ _OUTPUT_UNREADABLE = (
     "none of the captured stdout is shown. Run text-producing steps separately "
     "or use a tool suited for binary data."
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _process_stream_encoding() -> str:
@@ -163,6 +166,6 @@ class BashCommand:
                     if msg:
                         output_text += f"\n\n{msg}"
                 except Exception:
-                    pass
+                    logger.debug("COMMANDMENT validation failed", exc_info=True)
 
         return output_text

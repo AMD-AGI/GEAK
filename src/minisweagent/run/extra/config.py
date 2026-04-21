@@ -5,6 +5,7 @@ You can also directly edit the `.env` file in the config directory.
 It is located at [bold green]{global_config_file}[/bold green].
 """
 
+import logging
 import os
 import subprocess
 
@@ -15,6 +16,8 @@ from rich.rule import Rule
 from typer import Argument, Typer
 
 from minisweagent import global_config_file
+
+logger = logging.getLogger(__name__)
 
 app = Typer(
     help=__doc__.format(global_config_file=global_config_file),  # type: ignore
@@ -46,11 +49,24 @@ To find the best model, check the leaderboard at https://swebench.com/
 """
 
 
+_API_KEY_NAMES = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "AMD_LLM_API_KEY",
+    "LLM_API_KEY",
+)
+
+
 def configure_if_first_time():
-    if not os.getenv("MSWEA_CONFIGURED"):
-        console.print(Rule())
-        setup()
-        console.print(Rule())
+    if os.getenv("MSWEA_CONFIGURED"):
+        return
+    if any(os.getenv(k) for k in _API_KEY_NAMES):
+        return
+    console.print(Rule())
+    logger.info("First-time configuration: running setup.")
+    setup()
+    console.print(Rule())
 
 
 @app.command()

@@ -6,6 +6,7 @@ There are three modes:
 - yolo: commands issued by the LM are executed immediately without confirmation
 """
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Literal
@@ -18,6 +19,7 @@ from rich.rule import Rule
 from minisweagent import global_config_dir
 from minisweagent.agents.default import AgentConfig, DefaultAgent, LimitsExceeded, NonTerminatingException, Submitted
 
+logger = logging.getLogger(__name__)
 console = Console(highlight=False)
 prompt_session = PromptSession(history=FileHistory(global_config_dir / "interactive_history.txt"))
 
@@ -32,7 +34,7 @@ class InteractiveAgentConfig(AgentConfig):
     """If the agent wants to finish, do we ask for confirmation from user?"""
     # Strategy agent compatibility (ignored by InteractiveAgent but allows config sharing)
     strategy_file_path: str | None = None
-    tool_profile: str = "swe"
+    tool_profile: str = "full"
     """ToolRuntime profile: 'swe' for reduced tool set, 'full' for all tools."""
 
     def __post_init__(self) -> None:
@@ -75,6 +77,8 @@ class InteractiveAgent(DefaultAgent):
                     self.add_message("assistant", msg["content"])
                     return msg
         try:
+            if self.extra_template_vars.get("_is_parallel_mode"):
+                return super().query()
             with console.status("Waiting for the LM to respond..."):
                 return super().query()
         except LimitsExceeded:
@@ -82,8 +86,16 @@ class InteractiveAgent(DefaultAgent):
                 f"Limits exceeded. Limits: {self.config.step_limit} steps, ${self.config.cost_limit}.\n"
                 f"Current spend: {self.model.n_calls} steps, ${self.model.cost:.2f}."
             )
+            logger.warning(
+                "Limits exceeded (step=%d/%d, cost=$%.2f/$%.2f). Prompting for new limits.",
+                self.model.n_calls,
+                self.config.step_limit,
+                self.model.cost,
+                self.config.cost_limit,
+            )
             self.config.step_limit = int(input("New step limit: "))
             self.config.cost_limit = float(input("New cost limit: "))
+            logger.info("New limits: step=%d, cost=$%.2f", self.config.step_limit, self.config.cost_limit)
             return super().query()
 
     def step(self) -> dict:
@@ -131,6 +143,7 @@ class InteractiveAgent(DefaultAgent):
         """Prompts the user, takes care of /h (followed by requery) and sets the mode. Returns the user input."""
         console.print(prompt, end="")
         user_input = prompt_session.prompt("")
+        logger.info("User input: %r", user_input)
         if user_input == "/h":
             console.print(
                 f"Current mode: [bold green]{self.config.mode}[/bold green]\n"
@@ -148,6 +161,7 @@ class InteractiveAgent(DefaultAgent):
             if self.config.mode == "yolo":
                 self.config.confirm_exit = False
             console.print(f"Switched to [bold green]{self.config.mode}[/bold green] mode.")
+            logger.info("Switched to %s mode.", self.config.mode)
             return user_input
         return user_input
 

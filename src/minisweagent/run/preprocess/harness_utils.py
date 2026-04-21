@@ -1118,10 +1118,10 @@ def execute_harness_validation(
     Parameters
     ----------
     benchmark_extra_args:
-        Extra CLI args appended to benchmark/full-benchmark invocations
-        (e.g. ``"--iterations 50"``).  Passed via the
-        ``GEAK_BENCHMARK_EXTRA_ARGS`` env var so both direct invocations
-        and COMMANDMENT-based scripts use the same settings.
+        Extra benchmark tuning args. ``--iterations N`` is normalized into
+        ``GEAK_BENCHMARK_ITERATIONS`` so harnesses do not need to expose it
+        as a CLI flag. Any remaining args are passed via
+        ``GEAK_BENCHMARK_EXTRA_ARGS``.
     use_uta_timeouts:
         When True, use ``UTA_MODE_TIMEOUTS`` instead of the default
         ``MODE_TIMEOUTS``.  The UTA timeout for ``--correctness`` is more
@@ -1146,15 +1146,21 @@ def execute_harness_validation(
     if not benchmark_extra_args:
         env_overrides["GEAK_BENCHMARK_ITERATIONS"] = "5"
     else:
-        env_overrides["GEAK_BENCHMARK_EXTRA_ARGS"] = benchmark_extra_args
-        # Extract --iterations N from extra_args and also set the env var
-        # so harnesses that read GEAK_BENCHMARK_ITERATIONS (instead of
-        # parsing --iterations from argv) get the right count.
         import re as _re
 
-        _iter_match = _re.search(r"--iterations\s+(\d+)", benchmark_extra_args)
+        remaining_extra_args = benchmark_extra_args.strip()
+        # Extract --iterations N into the env var so benchmark reruns work
+        # even when the harness argparse only accepts mode flags.
+        _iter_match = _re.search(r"(?:^|\s)--iterations\s+(\d+)(?=\s|$)", remaining_extra_args)
         if _iter_match:
             env_overrides["GEAK_BENCHMARK_ITERATIONS"] = _iter_match.group(1)
+            remaining_extra_args = _re.sub(
+                r"(?:^|\s)--iterations\s+\d+(?=\s|$)",
+                " ",
+                remaining_extra_args,
+            ).strip()
+        if remaining_extra_args:
+            env_overrides["GEAK_BENCHMARK_EXTRA_ARGS"] = remaining_extra_args
 
     mode_timeouts = UTA_MODE_TIMEOUTS if use_uta_timeouts else None
 
@@ -1465,6 +1471,7 @@ def _gpu_arch_context(profiling_path: str) -> list[str]:
     try:
         data = _json.loads(Path(profiling_path).read_text())
     except Exception:
+        logger.debug("Could not read or parse profiling JSON at %s", profiling_path, exc_info=True)
         return []
 
     results = data.get("results", [])
@@ -1621,7 +1628,7 @@ def inject_pipeline_context(
                 ctx.append(_mem_ctx.strip())
                 ctx.append("")
     except Exception:
-        pass
+        logger.debug("Could not assemble optimization memory context", exc_info=True)
 
     enriched = "\n".join(ctx) + "\n" + task_body
     return enriched, cfg

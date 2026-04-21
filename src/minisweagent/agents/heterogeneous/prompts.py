@@ -16,7 +16,7 @@ You have been given the results of a preprocessing pipeline:
 
 You also have access to **bash** (execute shell commands),
 **str_replace_editor** (view / edit files), **profile_kernel** (GPU
-profiling), and **strategy_manager**.  Use these only when you need to
+profiling), and **strategy_manager**.{rag_tools_description}  Use these only when you need to
 inspect artefacts, debug a failure, or gather information the
 orchestration tools above cannot provide.
 
@@ -99,7 +99,13 @@ Output directory: {output_dir}
 ---
 
 Begin by reading the kernel source and profiling data to understand the
-optimisation landscape.  Then follow the round instructions.
+optimisation landscape.  If cross-session memory is provided above,
+critically evaluate each past strategy: compare its code diff against
+YOUR kernel's actual code structure, bottleneck type, and data flow.
+Only adopt strategies where the underlying patterns genuinely match.
+Adapt the general approach to fit your kernel — do not blindly copy
+parameters or techniques from a different kernel.
+Then follow the round instructions.
 """
 
 
@@ -142,6 +148,8 @@ optimization approach, then submit your task list as JSON via the
    bottlenecks, makes edits, then tests and profiles. Best for targeted
    edits, autotune configs, algorithmic rewrites, and any optimization
    where the agent should read-think-edit-test-profile on its own.
+
+__RAG_TOOLS_SECTION__
 
 ## PRIORITY DIRECTIVE -- KERNEL ALGORITHMIC IMPROVEMENT IS THE PRIMARY GOAL
 
@@ -295,6 +303,11 @@ Generate optimization tasks for the kernel at {{ kernel_path }}.
 {% endif %}
 {% if memory_context %}
 ## Optimization Memory (from past kernel optimization runs)
+**Use critically**: These strategies worked on SIMILAR kernels, not this exact one.
+Compare each strategy's code pattern against THIS kernel's actual architecture
+before generating tasks.  If the past kernel's bottleneck was in a different
+code path than yours, skip those strategies and generate tasks based on YOUR
+profiling data instead.
 {{ memory_context }}
 {% endif %}
 {% if workload_guidance %}
@@ -308,6 +321,22 @@ It is acceptable to leave some GPUs idle rather than padding the batch with
 low-priority wrapper / dispatch work.
 Each task uses 1 GPU.
 {% endif %}
+{% if base_task_context %}
+## User-Provided Context
+
+**IMPORTANT**:
+1. Any performance numbers below (durations, invocation counts, efficiency
+   percentages) come from the user's full-model profiling under different
+   conditions (batch sizes, graph replay, concurrency). They provide
+   qualitative context (e.g., "this kernel is memory-bound") but MUST NOT
+   be used as baselines for speedup comparison. Always use the GEAK-measured
+   baseline metrics from the baseline_metrics file for before/after comparisons.
+2. If the user prescribes optimization strategies below, prioritize them in
+   early rounds. But if prior round tasks already attempted a strategy,
+   do NOT regenerate it -- follow the deduplication rules in the system prompt.
+
+{{ base_task_context }}
+{% endif %}
 ## Instructions
 
 Read the profiling file first to understand the sub-kernel landscape. Then
@@ -316,8 +345,6 @@ dependency listed is in-repo code that could be an optimization target.
 Read the discovery file for additional kernel metadata, and consult the
 knowledge base for applicable strategies. Finally, submit your task list
 as JSON via the `submit` tool.
-
-{{ base_task_context }}
 """)
 
 

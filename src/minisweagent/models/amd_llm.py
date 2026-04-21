@@ -12,7 +12,7 @@ import logging
 
 from minisweagent.models.amd_base import AmdLlmModelConfig
 
-logger = logging.getLogger("amd_llm")
+logger = logging.getLogger(__name__)
 
 
 class AmdLlmModel:
@@ -41,14 +41,17 @@ class AmdLlmModel:
             from minisweagent.models.amd_openai import AmdOpenAIModel
 
             self._impl = AmdOpenAIModel(config)
+            logger.debug("LLM backend: OpenAI (gpt), model_name=%s", config.model_name)
         elif "claude" in config.model_name:
             from minisweagent.models.amd_claude import AmdClaudeModel
 
             self._impl = AmdClaudeModel(config)
+            logger.debug("LLM backend: Anthropic (claude), model_name=%s", config.model_name)
         elif "gemini" in config.model_name:
             from minisweagent.models.amd_gemini import AmdGeminiModel
 
             self._impl = AmdGeminiModel(config)
+            logger.debug("LLM backend: Google (gemini), model_name=%s", config.model_name)
         else:
             raise ValueError(f"Unsupported model: {config.model_name}")
 
@@ -105,7 +108,7 @@ if __name__ == "__main__":
         {"role": "assistant", "content": "Paris"},
         {
             "role": "user",
-            "content": "Use tool named as str_replace_editor to view file '/home/chaox/kernel_agent/read_mini.py' and output your thinking",
+            "content": "Use tool named as str_replace_editor to view file 'read_mini.py' and output your thinking",
         },
     ]
     for model_name in model_list:
