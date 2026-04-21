@@ -28,6 +28,4 @@ model:
 tools:
   profiling: false
   profiling_type: profiling
-  rag: true                      # Enable official MCP RAG (PR #90): query + optimize tools
-                                 # Requires: pip install -e mcp_tools/rag-mcp
-                                 # Then: python scripts/build_index.py --force
+  rag: false
