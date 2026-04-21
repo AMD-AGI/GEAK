@@ -113,9 +113,7 @@ def parse_shape_latencies_ms(output: str) -> dict[str, float]:
 
         perf_match = _PERF_SHAPE_RE.match(line)
         if perf_match:
-            shape_latencies[perf_match.group(3).strip()] = _latency_to_ms(
-                perf_match.group(1), perf_match.group(2)
-            )
+            shape_latencies[perf_match.group(3).strip()] = _latency_to_ms(perf_match.group(1), perf_match.group(2))
             continue
 
         paren_match = _PAREN_SHAPE_RE.match(line)
