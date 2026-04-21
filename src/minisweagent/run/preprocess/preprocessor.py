@@ -1078,7 +1078,7 @@ def run_preprocessor(
                     command=perf_cmd,
                     backend="metrix",
                     num_replays=3,
-                    quick=True,
+                    quick=False,
                     gpu_devices=str(gpu_id),
                     workdir=_cwd,
                 )
