@@ -232,9 +232,8 @@ def main(
             logger.info("rag-mcp installed successfully.")
             # Refresh sys.path so the newly installed package is discoverable
             import importlib
-            import site
+            sys.path.insert(0, str(_rag_mcp_path / "src"))
             importlib.invalidate_caches()
-            site.main()
             import rag_mcp  # noqa: F401
         # Auto-build semantic index if missing
         _index_path = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
