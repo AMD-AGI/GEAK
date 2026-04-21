@@ -103,7 +103,6 @@ codebase-context = "minisweagent.run.preprocess.codebase_context:main"
 resolve-kernel-url = "minisweagent.run.preprocess.resolve_kernel_url:main"
 geak-orchestrate = "minisweagent.run.orchestrator:main"
 task-generator = "minisweagent.agents.heterogeneous.task_generator:main"
-geak-translate = "minisweagent.run.preprocess.translate:main"
 
 [tool.setuptools]
 include-package-data = true

@@ -89,6 +89,7 @@ agent:
 
   cost_limit: 0
   step_limit: 200
+  use_skills: true
 
 model:
   model_class: amd_llm

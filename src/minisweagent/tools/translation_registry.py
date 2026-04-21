@@ -198,14 +198,14 @@ def load_translation_kb(
     Two content types are concatenated:
 
     1. **FlyDSL reference** (API, patterns, kernels):
-       - Default: from ``knowledge-base/`` (our authored API reference)
+       - Default: from ``skills/pytorch2flydsl-translation/docs/``
        - With ``flydsl_repo``: from FlyDSL repo ``docs/`` directory
 
-    2. **Translation content** (always from ``knowledge-base/``):
+    2. **Translation content** (always from skill docs):
        - Translation guide (PyTorch op mapping, structural patterns, pitfalls)
        - Category-specific guides (reductions, GEMM, attention)
     """
-    kb_root = Path(__file__).resolve().parents[3] / "knowledge-base"
+    kb_root = Path(__file__).resolve().parents[3] / "skills" / "pytorch2flydsl-translation" / "docs"
     sections: list[str] = []
 
     if flydsl_repo:
@@ -249,12 +249,12 @@ _PYTORCH_TO_FLYDSL = TranslationPair(
     harness_config_name="mini_unit_test_agent_pytorch_translation",
     harness_candidate_flag="--flydsl-kernel",
     candidate_filename_fn=lambda stem: f"{stem}_flydsl.py",
-    kb_base_files=["flydsl/flydsl_translation_api_reference.md"],
-    kb_translation_files=["flydsl/flydsl_translation_guide.md"],
+    kb_base_files=["flydsl_translation_api_reference.md"],
+    kb_translation_files=["flydsl_translation_guide.md"],
     kb_category_files={
-        "gemm": "flydsl/flydsl_translation_gemm.md",
-        "reductions": "flydsl/flydsl_translation_reductions.md",
-        "attention": "flydsl/flydsl_translation_attention.md",
+        "gemm": "flydsl_translation_gemm.md",
+        "reductions": "flydsl_translation_reductions.md",
+        "attention": "flydsl_translation_attention.md",
     },
     env_setup=_flydsl_env_setup,
     max_attempts=3,

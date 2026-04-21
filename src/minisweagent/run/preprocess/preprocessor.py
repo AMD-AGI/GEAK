@@ -412,7 +412,6 @@ def run_preprocessor(
     performance_command: str | list[str] | None = None,
     benchmark_timeout: int = 3600,
     target_language: str | None = None,
-    translate_only: bool = False,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -531,39 +530,6 @@ def run_preprocessor(
             console.print(msg)
         else:
             print(msg, file=sys.stderr)
-
-    # ── --translate-only lightweight path: translate and exit early ──
-    if translate_only:
-        _print(
-            "[bold cyan]--- Translation (--translate-only) ---[/bold cyan]"
-            if console
-            else "--- Translation (--translate-only) ---"
-        )
-        from minisweagent.run.preprocess.translate import run_translation
-
-        translation_output_dir = output_dir / "translation"
-        translation_result = run_translation(
-            kernel_path=Path(kernel_path),
-            output_dir=translation_output_dir,
-            gpu_id=gpu_id,
-            target_language=target_language,
-            model=model,
-            model_factory=model_factory,
-            repo=Path(repo_root) if repo_root else None,
-            console=console,
-        )
-        ctx.update(translation_result)
-        if translation_result.get("translation_success"):
-            ctx["kernel_path"] = translation_result["translation_kernel_path"]
-            _print(f"  Translated kernel: {ctx['kernel_path']}")
-        else:
-            _errors = translation_result.get("translation_errors", [])
-            _print("  [red]Translation failed[/red]" if console else "  Translation failed")
-            for _e in (_errors or [])[-3:]:
-                _print(f"    {_e}")
-        ctx["translate_only"] = True
-        _print("  --translate-only: skipping remaining preprocessing steps")
-        return ctx
 
     # ── Fast path for eval_command: skip Steps 2-4 ───────────────────
     if eval_command:
@@ -1410,6 +1376,11 @@ def main() -> None:
         default=None,
         help='Benchmark command (e.g. "./benchmark"). Used for profiling and baseline capture.',
     )
+    parser.add_argument(
+        "--target-language",
+        default=None,
+        help="Target language for translation (e.g. flydsl). Triggers translation step.",
+    )
     args = parser.parse_args()
 
     try:
@@ -1436,6 +1407,7 @@ def main() -> None:
     print(f"  repo:                 {args.repo}")
     print(f"  correctness_command:  {args.correctness_command}")
     print(f"  performance_command:  {args.performance_command}")
+    print(f"  target_language:      {args.target_language}")
     print("-" * 60)
     print(f"  GEAK_MODEL:                 {os.environ.get('GEAK_MODEL', '<not set>')}")
     print(f"  GEAK_MODEL_ENSEMBLE:        {os.environ.get('GEAK_MODEL_ENSEMBLE', '<not set>')}")
@@ -1456,6 +1428,7 @@ def main() -> None:
         eval_command=args.eval_command,
         correctness_command=args.correctness_command,
         performance_command=args.performance_command,
+        target_language=args.target_language,
     )
 
     print(json.dumps(ctx, indent=2, default=str))
