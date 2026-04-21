@@ -22,14 +22,11 @@ AMD_LLM_API_KEY=<YOUR_KEY> bash scripts/run-docker.sh
 # (or)
 # Local
 pip install -e .
-
-# To also install the MCP tool servers (automated-test-discovery, metrix-mcp, profiler-mcp):
-pip install -e '.[mcp]'
 # Or install everything at once:
 pip install -e '.[full]'
 ```
 
-> **Note:** `fastmcp` and `mcp[cli]` are included in the core dependencies and installed automatically with `pip install -e .`. The `[mcp]` extra installs the three GEAK-specific MCP server packages that live under `mcp_tools/` — these are not on PyPI and are not installed by default. Without them you will see `ModuleNotFoundError` errors when the agent tries to start the profiler or test-discovery servers.
+> **Note:** `fastmcp` and `mcp[cli]` are included in the core dependencies and installed automatically with `pip install -e .`. GEAK launches the shipped MCP servers from `mcp_tools/` directly from the repository, so there is no separate `.[mcp]` extra to install.
 
 ## 2. Configure the model
 In the case of docker-based setup, export the API key before running scripts/run-docker.sh.

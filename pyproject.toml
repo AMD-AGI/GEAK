@@ -52,17 +52,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# MCP tool servers (local packages).
-# Local package names resolve via [tool.uv.sources] (uv only).
-# With pip, use `make install` or `make install-dev` instead.
-mcp = [
-    "automated-test-discovery",
-    "metrix-mcp",
-    "profiler-mcp",
-    "cross-session-memory-mcp",
-    "rag-mcp",
-]
-
 # LangChain hybrid retrieval for AMD GPU knowledge base (embedding + BM25 + reranker)
 langchain = [
     "langchain>=0.3.0",
@@ -78,7 +67,6 @@ langchain = [
 full = [
     "mini-swe-agent[dev]",
     "mini-swe-agent[langchain]",
-    "mini-swe-agent[mcp]",
     "swe-rex>=1.4.0",
 ]
 
@@ -272,13 +260,6 @@ skip-magic-trailing-comma = false
 
 # Like Black, automatically detect the appropriate line ending.
 line-ending = "auto"
-
-[tool.uv.sources]
-automated-test-discovery = { path = "mcp_tools/automated-test-discovery", editable = true }
-metrix-mcp = { path = "mcp_tools/metrix-mcp", editable = true }
-profiler-mcp = { path = "mcp_tools/profiler-mcp", editable = true }
-cross-session-memory-mcp = { path = "mcp_tools/cross-session-memory-mcp", editable = true }
-rag-mcp = { path = "mcp_tools/rag-mcp", editable = true }
 
 [tool.typos.default.extend-identifiers]
 # *sigh* this just isn't worth the cost of fixing
