@@ -210,6 +210,45 @@ script that imports the kernel, creates test inputs, and provides
    - If a harness mode fails, understand why it fails before editing. Prefer
      the smallest source-faithful fix over rewriting working harness logic.
 
+10. **Benchmark timing: use GPU-side events, NOT `triton.testing.do_bench`.**
+
+    The `--benchmark` and `--full-benchmark` modes must measure **GPU kernel
+    execution time only**, not wall-clock time that includes Python dispatch
+    overhead.
+
+    **Why this matters:** `triton.testing.do_bench` measures wall-clock time
+    from Python, which includes config lookups, `copy.deepcopy`, logging, and
+    assertions that wrap the kernel call.  When GEAK uses `do_bench` as its
+    objective function, it can achieve apparent speedups by optimizing Python
+    overhead (e.g. replacing `deepcopy` with `dict()`) rather than improving
+    actual GPU kernel performance.  This conflation is especially severe for
+    small, launch-latency-bound shapes where Python overhead dominates.
+
+    **Use `torch.cuda.Event` timing:**
+    ```python
+    # Warmup
+    for _ in range(WARMUP):
+        kernel_fn(...)
+    torch.cuda.synchronize()
+
+    # Timed iterations
+    latencies = []
+    for _ in range(ITERATIONS):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        kernel_fn(...)
+        end.record()
+        end.synchronize()
+        latencies.append(start.elapsed_time(end))
+    median_ms = sorted(latencies)[len(latencies) // 2]
+    ```
+
+    **When `triton.testing.do_bench` is acceptable:** Only when the
+    optimization target is end-to-end dispatch latency (wrapper + kernel
+    combined), not kernel-level performance.  This should be the exception,
+    not the default.
+
 **Language-specific test harness notes:**
 
 When the kernel is NOT a Python/Triton kernel, the test harness approach varies:
