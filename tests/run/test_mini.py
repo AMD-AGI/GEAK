@@ -170,6 +170,7 @@ def test_heterogeneous_path_threads_patch_profile_flags_to_orchestrator(
 
     monkeypatch.setattr(mini_module, "builtin_config_dir", config_dir)
     monkeypatch.setattr(mini_module.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr(mini_module, "configure_if_first_time", lambda: None)
     monkeypatch.setattr(task_parser_module, "parse_pipeline_params", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(mini_module, "parse_task_info", lambda *_args, **_kwargs: {"kernel_type": "triton"})
     monkeypatch.setattr(mini_module, "display_parsed_config", lambda *_args, **_kwargs: "resolved")

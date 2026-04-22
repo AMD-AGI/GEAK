@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 from typing import Any
 
 from minisweagent.memory.cross_session.backends.base import MemoryBackend
@@ -107,9 +108,17 @@ def retrieve(**kwargs: Any) -> str:
         profiling_metrics = kwargs.get("profiling_metrics") or {}
         derived_bottleneck = derive_primary_bottleneck(profiling_metrics)
         explicit_bottleneck = normalize_bottleneck_label(kwargs.get("bottleneck_type"))
+        target_code = str(kwargs.get("target_code") or "")
+        if not target_code:
+            kernel_path = str(kwargs.get("kernel_path") or "")
+            if kernel_path:
+                try:
+                    target_code = Path(kernel_path).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    target_code = ""
         return retrieve_context(
             backend=backend,
-            kernel_path=kwargs.get("kernel_path", ""),
+            target_code=target_code,
             bottleneck_type=derived_bottleneck if derived_bottleneck != "unknown" else explicit_bottleneck,
             profiling_metrics=profiling_metrics,
             limit=cfg.retrieval_limit,
