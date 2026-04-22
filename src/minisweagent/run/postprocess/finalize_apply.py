@@ -1,20 +1,26 @@
-"""Post-run hook: apply the best patch to the user's repo, commit it, and cleanup.
+"""Post-run hooks: apply best patch + commit, and clean up run artifacts.
 
-Triggered by the ``--cleanup`` flag on the ``geak`` CLI. Responsible for:
+Exposes two independent operations and a coordinator:
 
-1. Applying the winning ``.diff`` (from ``BestPatchResult.best_patch_file``) to
-   ``--repo`` on the current branch, using the same ``git apply`` fallback
-   helper as the per-round eval worktree logic.
-2. Committing the result with a message that references the run's
-   ``final_report.json``.
-3. Pruning per-run artifacts while preserving ``final_report.json`` and the
-   winning ``.diff`` inside the original ``output_dir``.
+- ``apply_and_commit_best_patch(result, repo)`` -- applies the winning
+  ``.diff`` (from ``BestPatchResult.best_patch_file``) to ``repo`` on the
+  current branch using the same ``git apply`` fallback helper as the
+  per-round eval worktree logic, then commits with a message that points
+  at the run's ``final_report.json``.
+- ``cleanup_run_artifacts(result, output_dir)`` -- prunes per-run artifacts
+  while preserving ``final_report.json`` and the winning ``.diff`` inside
+  the original ``output_dir``. Independent of apply.
+- ``finalize_run(result, repo, output_dir, *, apply_best_patch, cleanup)``
+  -- CLI-level entry point that runs either/both according to the boolean
+  flags.
 
 Failure semantics:
 
-- Apply fails  -> no commit, no cleanup, output_dir untouched.
-- Commit fails -> no cleanup. Apply stays in the working tree so the user
-  can recover manually.
+- Apply fails  -> no commit. Cleanup still runs if requested (the winning
+  patch file is preserved in the summary, so the user can re-apply it by
+  hand).
+- Commit fails -> apply stays in the working tree. Cleanup still runs if
+  requested.
 - Cleanup fails -> the two retained files have already been copied to a
   safe temp location before ``rmtree`` runs, so we surface the error but
   never lose both summary and artifacts.
@@ -45,52 +51,89 @@ _DEFAULT_GIT_AUTHOR_NAME = "GEAK Agent"
 _DEFAULT_GIT_AUTHOR_EMAIL = "geak@amd.com"
 
 
-def apply_commit_and_cleanup(
+def apply_and_commit_best_patch(
     result: BestPatchResult | None,
     repo: Path | None,
-    output_dir: Path | None,
-) -> None:
-    """Apply ``result.best_patch_file`` to ``repo``, commit, and prune ``output_dir``.
+) -> str | None:
+    """Apply ``result.best_patch_file`` to ``repo`` and commit on the current branch.
 
-    This is best-effort: every step logs a clear reason before returning
-    early rather than raising, so a broken cleanup never masks the successful
-    optimisation run.
+    Returns the commit SHA on success, or ``None`` when a precondition fails
+    or any git step fails. Never raises; every failure is logged with a
+    clear reason so the caller can decide whether to proceed.
     """
-    if not _validate_preconditions(result, repo, output_dir):
-        return
+    if not _validate_apply_preconditions(result, repo):
+        return None
 
-    assert result is not None and repo is not None and output_dir is not None  # for type narrowing
+    assert result is not None and repo is not None  # for type narrowing
     repo = Path(repo).resolve()
-    output_dir = Path(output_dir).resolve()
     patch_path = Path(result.best_patch_file).resolve()  # type: ignore[arg-type]
 
     if not _repo_is_clean(repo):
         logger.warning(
-            "[geak --cleanup] Skipping: repo %s has uncommitted tracked changes. "
+            "[geak apply] Skipping: repo %s has uncommitted tracked changes. "
             "Commit or stash them first, then re-run apply manually.",
             repo,
         )
-        return
+        return None
 
     if not _apply_patch_to_repo(patch_path, repo):
-        return
+        return None
 
-    commit_sha = _commit_applied_patch(result, repo, output_dir)
+    commit_sha = _commit_applied_patch(result, repo)
     if commit_sha is None:
         logger.warning(
-            "[geak --cleanup] Commit failed; leaving applied changes in the working "
-            "tree of %s and skipping artifact cleanup.",
+            "[geak apply] Commit failed; leaving applied changes in the working tree of %s.",
             repo,
         )
+        return None
+
+    logger.info("[geak apply] Committed %s on %s.", commit_sha, repo)
+    return commit_sha
+
+
+def cleanup_run_artifacts(
+    result: BestPatchResult | None,
+    output_dir: Path | None,
+) -> None:
+    """Prune ``output_dir`` to just ``final_report.json`` + winning ``.diff``.
+
+    Independent of apply: it is safe to call this whether or not the patch
+    was applied/committed. If the patch file lives under ``output_dir`` it is
+    preserved across the rmtree so the user can always re-apply it by hand.
+    """
+    if not _validate_cleanup_preconditions(result, output_dir):
         return
 
-    _cleanup_artifacts(repo, output_dir, patch_path)
+    assert result is not None and output_dir is not None  # for type narrowing
+    output_dir = Path(output_dir).resolve()
+    patch_path = Path(result.best_patch_file).resolve() if result.best_patch_file else None
 
-    logger.info(
-        "[geak --cleanup] Done. Commit: %s  Retained artifacts: %s",
-        commit_sha,
-        output_dir,
-    )
+    _cleanup_artifacts(output_dir, patch_path)
+
+
+def finalize_run(
+    result: BestPatchResult | None,
+    repo: Path | None,
+    output_dir: Path | None,
+    *,
+    apply_best_patch: bool = True,
+    cleanup: bool = True,
+) -> None:
+    """CLI-level coordinator invoked from ``mini.py``.
+
+    ``apply_best_patch`` and ``cleanup`` are fully independent; either can
+    be toggled without affecting the other. If both are False, this is a
+    no-op (the caller shouldn't have called in the first place, but it's
+    safe).
+    """
+    if not apply_best_patch and not cleanup:
+        return
+
+    if apply_best_patch:
+        apply_and_commit_best_patch(result, repo)
+
+    if cleanup:
+        cleanup_run_artifacts(result, output_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -98,52 +141,50 @@ def apply_commit_and_cleanup(
 # ---------------------------------------------------------------------------
 
 
-def _validate_preconditions(  # pylint: disable=too-many-return-statements
+def _validate_apply_preconditions(  # pylint: disable=too-many-return-statements
     result: BestPatchResult | None,
     repo: Path | None,
-    output_dir: Path | None,
 ) -> bool:
     if result is None:
-        logger.warning("[geak --cleanup] Skipping: no BestPatchResult produced by the run.")
+        logger.warning("[geak apply] Skipping: no BestPatchResult produced by the run.")
         return False
     if not result.best_patch_file:
-        logger.warning("[geak --cleanup] Skipping: BestPatchResult has no best_patch_file.")
+        logger.warning("[geak apply] Skipping: BestPatchResult has no best_patch_file.")
         return False
     patch_path = Path(result.best_patch_file)
     if not patch_path.is_file():
-        logger.warning(
-            "[geak --cleanup] Skipping: best patch file does not exist: %s",
-            patch_path,
-        )
+        logger.warning("[geak apply] Skipping: best patch file does not exist: %s", patch_path)
         return False
     if patch_path.stat().st_size == 0:
-        logger.warning(
-            "[geak --cleanup] Skipping: best patch file is empty: %s",
-            patch_path,
-        )
+        logger.warning("[geak apply] Skipping: best patch file is empty: %s", patch_path)
         return False
     if repo is None:
-        logger.warning("[geak --cleanup] Skipping: no --repo resolved; cannot apply/commit.")
+        logger.warning("[geak apply] Skipping: no --repo resolved; cannot apply/commit.")
         return False
     repo = Path(repo)
     if not repo.exists():
-        logger.warning("[geak --cleanup] Skipping: repo path does not exist: %s", repo)
+        logger.warning("[geak apply] Skipping: repo path does not exist: %s", repo)
         return False
     if not (repo / ".git").exists():
-        logger.warning(
-            "[geak --cleanup] Skipping: %s is not a git repo (no .git). Cannot commit.",
-            repo,
-        )
+        logger.warning("[geak apply] Skipping: %s is not a git repo (no .git). Cannot commit.", repo)
         return False
+    return True
+
+
+def _validate_cleanup_preconditions(
+    result: BestPatchResult | None,
+    output_dir: Path | None,
+) -> bool:
     if output_dir is None:
         logger.warning("[geak --cleanup] Skipping: no output_dir provided.")
         return False
     if not Path(output_dir).exists():
-        logger.warning(
-            "[geak --cleanup] Skipping: output_dir does not exist: %s",
-            output_dir,
-        )
+        logger.warning("[geak --cleanup] Skipping: output_dir does not exist: %s", output_dir)
         return False
+    # ``result`` is optional for cleanup -- if present we use it to locate
+    # the winning patch file to preserve. Missing/empty result just means
+    # we fall back to preserving only ``final_report.json``.
+    del result
     return True
 
 
@@ -260,7 +301,6 @@ def _apply_patch_to_repo(patch_path: Path, repo: Path) -> bool:
 def _commit_applied_patch(
     result: BestPatchResult,
     repo: Path,
-    output_dir: Path,
 ) -> str | None:
     """Stage + commit the applied changes. Return commit SHA or None on failure."""
     env = get_git_safe_env(repo)
@@ -275,7 +315,7 @@ def _commit_applied_patch(
     )
     if add.returncode != 0:
         logger.warning(
-            "[geak --cleanup] git add -A failed (rc=%s): %s",
+            "[geak apply] git add -A failed (rc=%s): %s",
             add.returncode,
             add.stderr.strip(),
         )
@@ -290,12 +330,10 @@ def _commit_applied_patch(
         env=env,
     )
     if staged.returncode == 0 and not staged.stdout.strip():
-        logger.warning(
-            "[geak --cleanup] Patch applied cleanly but resulted in no staged changes. Skipping empty commit."
-        )
+        logger.warning("[geak apply] Patch applied cleanly but resulted in no staged changes. Skipping empty commit.")
         return None
 
-    message = _build_commit_message(result, output_dir)
+    message = _build_commit_message(result)
     commit_env = _ensure_git_identity(repo, env)
     commit = subprocess.run(
         ["git", "commit", "-m", message],
@@ -307,7 +345,7 @@ def _commit_applied_patch(
     )
     if commit.returncode != 0:
         logger.warning(
-            "[geak --cleanup] git commit failed (rc=%s): %s",
+            "[geak apply] git commit failed (rc=%s): %s",
             commit.returncode,
             commit.stderr.strip(),
         )
@@ -324,16 +362,17 @@ def _commit_applied_patch(
     return sha.stdout.strip() if sha.returncode == 0 else "HEAD"
 
 
-def _build_commit_message(result: BestPatchResult, output_dir: Path) -> str:
+def _build_commit_message(result: BestPatchResult) -> str:
     speedup = result.best_speedup
     speedup_str = f"{speedup:.4f}x" if isinstance(speedup, (int, float)) else "unknown"
     patch_id = result.patch_id or "unknown"
     title = f"geak: apply best patch ({patch_id}, {speedup_str})"
 
     body_lines: list[str] = []
-    report_path = output_dir / _FINAL_REPORT_NAME
-    body_lines.append(f"Report: {report_path}")
     if result.best_patch_file:
+        patch_path = Path(result.best_patch_file)
+        report_path = patch_path.parent / _FINAL_REPORT_NAME
+        body_lines.append(f"Report: {report_path}")
         body_lines.append(f"Patch:  {result.best_patch_file}")
     summary = (result.llm_conclusion or "").strip()
     if summary:
@@ -344,17 +383,17 @@ def _build_commit_message(result: BestPatchResult, output_dir: Path) -> str:
 
 
 def _cleanup_artifacts(
-    repo: Path,
     output_dir: Path,
-    patch_path: Path,
+    patch_path: Path | None,
 ) -> None:
     """Prune per-run artifacts, keeping only ``final_report.json`` and the winning ``.diff``.
 
-    Worktree slots registered with ``git worktree add`` under ``output_dir`` are
-    pruned first via ``git worktree remove --force`` so that the subsequent
-    ``rmtree`` does not leave dangling worktree administrative files behind.
+    Lingering ``git worktree`` slots registered under ``output_dir`` are pruned
+    first via ``git worktree remove --force`` on each slot's owning repo (found
+    by reading the slot's ``.git`` gitfile) so the subsequent ``rmtree`` doesn't
+    leave dangling admin files behind.
     """
-    _prune_worktrees_under(repo, output_dir)
+    _prune_worktrees_under(output_dir)
 
     final_report = output_dir / _FINAL_REPORT_NAME
 
@@ -367,7 +406,7 @@ def _cleanup_artifacts(
             saved_report = tmp / _FINAL_REPORT_NAME
             shutil.copy2(final_report, saved_report)
 
-        if patch_path.is_file():
+        if patch_path is not None and patch_path.is_file():
             saved_patch = tmp / patch_path.name
             shutil.copy2(patch_path, saved_patch)
 
@@ -391,57 +430,68 @@ def _cleanup_artifacts(
     logger.info("[geak --cleanup] Pruned %s; kept final_report.json + best patch.", output_dir)
 
 
-def _prune_worktrees_under(repo: Path, output_dir: Path) -> None:
+def _iter_worktree_slots(output_dir: Path) -> list[Path]:
+    """Return directories under ``output_dir`` that look like git worktrees.
+
+    A worktree slot has a ``.git`` *file* (not directory) whose contents point
+    at the owning repo's ``worktrees/<slug>`` admin directory.
+    """
+    slots: list[Path] = []
+    if not output_dir.is_dir():
+        return slots
+    for candidate in output_dir.rglob(".git"):
+        try:
+            if candidate.is_file():
+                slots.append(candidate.parent)
+        except OSError:
+            continue
+    return slots
+
+
+def _owning_repo_for_worktree(slot: Path) -> Path | None:
+    """Read the slot's ``.git`` gitfile to locate the owning main repo.
+
+    Returns the main repo root (two levels up from ``<repo>/.git/worktrees/<slug>``)
+    or ``None`` when the gitfile is malformed / the admin path is gone.
+    """
+    gitfile = slot / ".git"
+    try:
+        text = gitfile.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    prefix = "gitdir:"
+    if not text.startswith(prefix):
+        return None
+    admin_dir = Path(text[len(prefix) :].strip())
+    if not admin_dir.is_absolute():
+        admin_dir = (slot / admin_dir).resolve()
+    # admin_dir is <repo>/.git/worktrees/<slug>; walk up to <repo>.
+    if admin_dir.parent.name != "worktrees" or admin_dir.parent.parent.name != ".git":
+        return None
+    return admin_dir.parent.parent.parent
+
+
+def _prune_worktrees_under(output_dir: Path) -> None:
     """Remove git worktrees whose working directory is inside ``output_dir``."""
-    env = get_git_safe_env(repo)
-    listing = subprocess.run(
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
-    if listing.returncode != 0:
-        logger.debug(
-            "[geak --cleanup] git worktree list failed (rc=%s); skipping worktree prune.",
-            listing.returncode,
-        )
-        return
-
     output_dir_resolved = output_dir.resolve()
-    for block in listing.stdout.split("\n\n"):
-        for line in block.splitlines():
-            if not line.startswith("worktree "):
-                continue
-            wt_path = Path(line[len("worktree ") :].strip())
-            try:
-                wt_resolved = wt_path.resolve()
-            except OSError:
-                continue
-            if output_dir_resolved != wt_resolved and output_dir_resolved not in wt_resolved.parents:
-                continue
-            remove = subprocess.run(
-                ["git", "worktree", "remove", "--force", str(wt_path)],
-                cwd=str(repo),
-                capture_output=True,
-                text=True,
-                check=False,
-                env=env,
-            )
-            if remove.returncode != 0:
-                logger.debug(
-                    "[geak --cleanup] git worktree remove %s failed (rc=%s): %s",
-                    wt_path,
-                    remove.returncode,
-                    remove.stderr.strip(),
-                )
-
-    subprocess.run(
-        ["git", "worktree", "prune"],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
+    for slot in _iter_worktree_slots(output_dir_resolved):
+        repo = _owning_repo_for_worktree(slot)
+        if repo is None:
+            continue
+        env = get_git_safe_env(repo)
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(slot)],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
