@@ -60,11 +60,22 @@ def write_task_file(
     for k, v in metadata.items():
         if v is None:
             continue
-        if relative_to and k in _PATH_KEYS and isinstance(v, (str, Path)):
+        if k in _PATH_KEYS and isinstance(v, (str, Path)) and v:
+            # Resolve path-valued fields against the writer's CWD before
+            # storing. Without this, a caller passing a CWD-relative string
+            # (e.g. "outputs/foo/kernel.py") would be written verbatim, and
+            # ``read_task_file`` would later resolve it against the task
+            # file's own directory — producing a nonsense path like
+            # ``<task_dir>/outputs/foo/kernel.py``. By normalising to
+            # absolute on write, the read-side resolution becomes a no-op
+            # for absolute paths, regardless of who later opens the file.
             abs_path = Path(v).resolve()
-            try:
-                fm[k] = os.path.relpath(abs_path, relative_to.resolve())
-            except ValueError:
+            if relative_to:
+                try:
+                    fm[k] = os.path.relpath(abs_path, relative_to.resolve())
+                except ValueError:
+                    fm[k] = str(abs_path)
+            else:
                 fm[k] = str(abs_path)
         else:
             fm[k] = v
