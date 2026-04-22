@@ -1377,9 +1377,9 @@ def main() -> None:
         help='Benchmark command (e.g. "./benchmark"). Used for profiling and baseline capture.',
     )
     parser.add_argument(
-        "--target-language",
+        "--kernel-type",
         default=None,
-        help="Target language for translation (e.g. flydsl). Triggers translation step.",
+        help="Kernel type (e.g. pytorch2flydsl). Triggers translation when applicable.",
     )
     args = parser.parse_args()
 
@@ -1407,7 +1407,7 @@ def main() -> None:
     print(f"  repo:                 {args.repo}")
     print(f"  correctness_command:  {args.correctness_command}")
     print(f"  performance_command:  {args.performance_command}")
-    print(f"  target_language:      {args.target_language}")
+    print(f"  kernel_type:          {args.kernel_type}")
     print("-" * 60)
     print(f"  GEAK_MODEL:                 {os.environ.get('GEAK_MODEL', '<not set>')}")
     print(f"  GEAK_MODEL_ENSEMBLE:        {os.environ.get('GEAK_MODEL_ENSEMBLE', '<not set>')}")
@@ -1428,7 +1428,7 @@ def main() -> None:
         eval_command=args.eval_command,
         correctness_command=args.correctness_command,
         performance_command=args.performance_command,
-        target_language=args.target_language,
+        target_language="flydsl" if args.kernel_type == "pytorch2flydsl" else None,
     )
 
     print(json.dumps(ctx, indent=2, default=str))

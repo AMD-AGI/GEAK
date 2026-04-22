@@ -64,6 +64,8 @@ def _normalize_kernel_type(value: Any) -> str:
         return "triton"
     if text in {"hip", "rocm", "rocblas"}:
         return "hip"
+    if text == "pytorch2flydsl":
+        return "pytorch2flydsl"
     return "other"
 
 
@@ -156,7 +158,7 @@ def main(
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs."),
     test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command"),
-    target_language: str | None = typer.Option(None, "--target-language", help="Target language for translation (e.g. flydsl). Auto-detects if omitted."),
+    kernel_type_flag: str | None = typer.Option(None, "--kernel-type", help="Kernel type (e.g. pytorch2flydsl, triton, hip). Auto-detects if omitted."),
 ):
     # fmt: on
     del visual
@@ -342,6 +344,10 @@ def main(
                 kernel_type = inferred
                 logger.info("Updated kernel_type using kernel path: %s", kernel_type)
 
+    if kernel_type_flag:
+        kernel_type = _normalize_kernel_type(kernel_type_flag)
+        logger.info("CLI --kernel-type override: %s", kernel_type)
+
     if repo is None and parsed_config.get("repo"):
         repo = Path(parsed_config["repo"])
         logger.info("Using repo from task content: %s", repo)
@@ -451,6 +457,7 @@ def main(
             harness_spec = promoted
             logger.info("[bold cyan]Promoted test command to validated harness: %s[/bold cyan]", promoted)
 
+    _target_language = "flydsl" if kernel_type == "pytorch2flydsl" else None
     _preprocess_kwargs = dict(
         kernel_url=kernel_target,
         repo=repo,
@@ -458,7 +465,7 @@ def main(
         gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
         model_factory=lambda: get_model(model_name, config.get("model", {})),
         console=console,
-        target_language=target_language,
+        target_language=_target_language,
     )
     logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
 

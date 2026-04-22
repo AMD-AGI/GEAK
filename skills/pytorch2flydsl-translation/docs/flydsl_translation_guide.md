@@ -33,25 +33,48 @@ Identify the computational pattern:
 
 ## Step 2: Choose Translation Strategy
 
-**Always prefer FlyDSL over PyTorch.** Only fall back to PyTorch for operations
-FlyDSL genuinely cannot do (Conv2d, MaxPool2d, BatchNorm2d).
+**Always prefer FlyDSL over PyTorch.** Replace ALL PyTorch compute modules
+(`nn.Linear`, `nn.Conv2d`) with FlyDSL-native patterns using `nn.Parameter`
+for weight storage and pre-built FlyDSL kernels for compute.
 
-**Pre-built FlyDSL kernel** (GEMM, Flash Attention, softmax, LayerNorm, RMSNorm):
-- Import from `kernels.*` module — these are highly optimized
-- **GEMM**: `compile_preshuffle_gemm_a8` — replaces `nn.Linear`, `torch.matmul`
+### Replacing nn.Linear with FlyDSL GEMM
+
+Do NOT keep `nn.Linear` — replace it entirely:
+1. Extract weight and bias from the original model
+2. Store as `nn.Parameter` (raw tensors)
+3. Preshuffle weight once with `shuffle_weight(w, layout=(16, 16))`
+4. Compile GEMM once with `compile_preshuffle_gemm_a8(...)` — use fused epilogue if followed by activation
+5. Call the compiled launcher in `forward()`
+
+### Replacing nn.Conv2d with im2col + FlyDSL GEMM
+
+Do NOT keep `nn.Conv2d` — replace it entirely:
+1. Extract conv weight, reshape to `(out_channels, in_channels * kH * kW)`
+2. Store as `nn.Parameter`, preshuffle once
+3. In forward: `F.unfold(x, ...)` produces `[N, C*kH*kW, L]` columns matrix
+4. Compile GEMM once, call in forward with unfolded input
+5. Reshape output back to `[N, out_channels, H_out, W_out]`
+
+See `flydsl_translation_conv_pool_bn.md` for the complete worked example.
+
+### Pre-built FlyDSL kernels
+
+- **GEMM**: `compile_preshuffle_gemm_a8` — replaces `nn.Linear`, `torch.matmul`, `F.linear`
 - **Flash Attention**: `build_flash_attn_func_module` — replaces `F.scaled_dot_product_attention`
 - **Softmax**: `build_softmax_module`
 - **LayerNorm/RMSNorm**: `build_layernorm_module` / `build_rmsnorm_module`
 
-**Custom FlyDSL kernel** (element-wise, simple reductions):
-- Write `@flyc.kernel` + `@flyc.jit` with layout algebra
-- Best for operations where FlyDSL gives explicit control
+### Custom FlyDSL kernels
 
-**Hybrid** (complex models mixing multiple op types):
-- Use FlyDSL kernels for ALL translatable ops
-- Conv2d: im2col (`F.unfold`) + preshuffle GEMM (fp16 cast); fallback: im2col + `torch.mm`
-- MaxPool2d: custom `@flyc.kernel` with `arith.maximumf`
-- BatchNorm2d: `F.batch_norm` (acceptable PyTorch fallback)
+Write `@flyc.kernel` + `@flyc.jit` with layout algebra for element-wise ops
+and simple reductions.
+
+### Acceptable PyTorch fallbacks (minimal set)
+
+- `F.unfold` (im2col for Conv2d — structural, not compute)
+- `F.batch_norm` (MIOpen backend, no FlyDSL equivalent)
+- `torch.mm` (fp32 GEMM only — when fp16 preshuffle fails correctness)
+- `F.max_pool2d` (if custom FlyDSL maxpool kernel fails)
 
 ## Step 3: Element-wise Translation (Complete Example)
 
@@ -213,33 +236,31 @@ from tests.utils import shuffle_weight
 class Model(nn.Module):
     def __init__(self, in_features, out_features):
         super().__init__()
+        # Store weights as raw nn.Parameter (NOT nn.Linear)
         self.weight = nn.Parameter(torch.randn(out_features, in_features, dtype=torch.float16))
-        self._gemm = None
-        self._weight_shuffled = None
+        self.bias = nn.Parameter(torch.randn(out_features, dtype=torch.float16))
+        # Preshuffle weight ONCE
+        self.w_shuffled = shuffle_weight(self.weight.data.contiguous(), layout=(16, 16))
+        # Compile GEMM ONCE — fuse bias+relu if needed
+        N, K = out_features, in_features
+        self.gemm_fn = compile_preshuffle_gemm_a8(
+            M=0, N=N, K=K,
+            tile_m=64, tile_n=128, tile_k=128,
+            in_dtype="fp16", out_dtype="fp16", lds_stage=2,
+        )
 
     def forward(self, x):
         x = x.half()
         M = x.shape[0]
-        N, K = self.weight.shape
-        if self._gemm is None:
-            self._gemm = compile_preshuffle_gemm_a8(
-                M=0, N=N, K=K,
-                tile_m=64, tile_n=128, tile_k=128,
-                in_dtype="fp16", out_dtype="fp16", lds_stage=2,
-            )
-            self._weight_shuffled = shuffle_weight(
-                self.weight.data.contiguous(), layout=(16, 16)
-            )
+        N = self.weight.shape[0]
         output = torch.empty(M, N, device=x.device, dtype=torch.float16)
         scale = torch.empty(0, device=x.device, dtype=torch.float32)
-        self._gemm(
-            output.contiguous().view(-1),
-            x.contiguous().view(-1),
-            self._weight_shuffled.contiguous().view(-1),
-            scale, scale, M, N,
+        self.gemm_fn(
+            output.view(-1), x.contiguous().view(-1),
+            self.w_shuffled.view(-1), scale, scale, M, N,
             torch.cuda.current_stream(),
         )
-        return output
+        return output + self.bias
 ```
 
 ### Flash Attention
@@ -270,40 +291,36 @@ class Model(nn.Module):
 
 ## Step 5: Hybrid Translation for Complex Models
 
-For L2/L3 kernels with multiple operation types, use a hybrid approach:
+For L2/L3 kernels with multiple operation types, compose FlyDSL kernels:
 
 ```python
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import flydsl.compiler as flyc
-import flydsl.expr as fx
-
-# Custom FlyDSL kernel for the compute-intensive element-wise part
-@flyc.kernel
-def fused_activation_kernel(...):
-    # ... FlyDSL element-wise ops ...
-
-@flyc.jit
-def fused_activation_launch(...):
-    fused_activation_kernel(...).launch(...)
+from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from tests.utils import shuffle_weight
 
 class Model(nn.Module):
-    def __init__(self):
+    def __init__(self, in_ch, out_ch, kernel_size):
         super().__init__()
-        self.conv = nn.Conv2d(3, 64, 3, padding=1)  # weight container only
-        self._gemm = None
-        self._weight_shuffled = None
+        K = in_ch * kernel_size * kernel_size
+        # Conv weights as raw nn.Parameter (NOT nn.Conv2d)
+        self.conv_weight = nn.Parameter(torch.randn(out_ch, K, dtype=torch.float16))
+        self.conv_bias = nn.Parameter(torch.randn(out_ch, dtype=torch.float16))
+        self.w_shuffled = shuffle_weight(self.conv_weight.data.contiguous(), layout=(16, 16))
+        self.conv_gemm = compile_preshuffle_gemm_a8(
+            M=0, N=out_ch, K=K, tile_m=64, tile_n=128, tile_k=128,
+            in_dtype="fp16", out_dtype="fp16", lds_stage=2,
+            epilogue="bias_relu")  # fuse bias + ReLU
+        self.kernel_size = kernel_size
 
     def forward(self, x):
-        # Conv2d via im2col + preshuffle GEMM (see conv_pool_bn KB)
-        # ... (F.unfold + compile_preshuffle_gemm_a8) ...
-        x = self._conv_forward(x)
-        x_flat = x.contiguous().view(-1)
-        out_flat = torch.empty_like(x_flat)
-        n = x_flat.numel()
-        fused_activation_launch(...)          # FlyDSL for activation
-        return out_flat.view_as(x)
+        # Conv2d via im2col + preshuffle GEMM
+        patches = F.unfold(x, kernel_size=self.kernel_size, padding=1)
+        B, K, L = patches.shape
+        patches_2d = patches.transpose(1, 2).reshape(B * L, K).half().contiguous()
+        # ... GEMM call, reshape to NCHW ...
+        return out
 ```
 
 ## Common Pitfalls
