@@ -22,6 +22,12 @@ if [ "${GEAK_EDITABLE}" = "1" ]; then
     echo ""
 fi
 
+# Git identity for `geak --cleanup` commits (used only when the target repo
+# has no user.name/user.email configured). Values can be overridden by the
+# host at `docker run` time with `-e GEAK_GIT_AUTHOR_NAME=... -e GEAK_GIT_AUTHOR_EMAIL=...`.
+export GEAK_GIT_AUTHOR_NAME="${GEAK_GIT_AUTHOR_NAME:-GEAK Agent}"
+export GEAK_GIT_AUTHOR_EMAIL="${GEAK_GIT_AUTHOR_EMAIL:-geak@amd.com}"
+
 # Setup mini-swe-agent config from environment variables
 mkdir -p /root/.config/mini-swe-agent
 

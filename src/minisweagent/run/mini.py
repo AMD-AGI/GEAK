@@ -165,6 +165,10 @@ There are two different user interfaces:
 
 [bold green]mini[/bold green] Simple REPL-style interface
 [bold green]mini -v[/bold green] Pager-style interface (Textual)
+
+Pass [bold green]--cleanup[/bold green] to apply the winning patch to [bold]--repo[/bold]
+on the current branch, commit it, and prune per-run artifacts (keeping only
+[bold]final_report.json[/bold] and the winning diff).
 [/not dim]
 """
 
@@ -206,6 +210,14 @@ def main(
             "kernel time via torch.profiler CUDA events (excludes dispatch). The dual-signal "
             "harness always reports BOTH (GEAK_RESULT_WALL_MS + GEAK_RESULT_KERNEL_MS) for "
             "agent visibility; --target only chooses which becomes the scoring signal."
+        ),
+    ),
+    cleanup: bool = typer.Option(
+        False,
+        "--cleanup",
+        help=(
+            "After the run, apply the best patch to --repo, commit it, and prune "
+            "per-run artifacts (keeping final_report.json and the winning diff)."
         ),
     ),
 ):
@@ -802,7 +814,15 @@ def main(
                 registry=state.registry,
             )
             logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
-            return _final_report_to_bestpatchresult(report)
+            het_result = _final_report_to_bestpatchresult(report)
+            if cleanup:
+                from minisweagent.run.postprocess.finalize_apply import apply_commit_and_cleanup
+
+                het_repo = repo or (
+                    Path(preprocess_ctx["repo_root"]) if preprocess_ctx.get("repo_root") else None
+                )
+                apply_commit_and_cleanup(het_result, het_repo, preprocess_output_dir)
+            return het_result
 
         metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
         logger.info("Using metric: %s", metric)
@@ -869,6 +889,10 @@ def main(
             registry=state.registry,
         )
         logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
+        if cleanup:
+            from minisweagent.run.postprocess.finalize_apply import apply_commit_and_cleanup
+
+            apply_commit_and_cleanup(result, repo_path or repo, preprocess_output_dir)
         return result
     finally:
         budget.cancel_all_timers()

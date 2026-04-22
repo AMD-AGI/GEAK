@@ -99,6 +99,14 @@ geak --repo /path/to/kernel/repo \
 - `--kernel-url`: required; path to the target kernel file (local path or URL)
 - `--num-parallel`: number of optimization agents
 - `--gpu-ids`: comma-separated GPU IDs for agents
+- `--cleanup`: after the run finishes, apply the winning patch to `--repo` on the current
+  branch, commit it with a message pointing at `final_report.json`, and prune per-run
+  artifacts (keeping only `final_report.json` and the winning `.diff`). Requires a clean
+  working tree on `--repo`; if apply or commit fails, the artifact dir is left intact for
+  debugging. When the repo has no configured git identity (typical inside the GEAK
+  container), the commit falls back to `GEAK Agent <geak@amd.com>`; override via the
+  `GEAK_GIT_AUTHOR_NAME` / `GEAK_GIT_AUTHOR_EMAIL` environment variables (passed through
+  by `entrypoint.sh`).
 
 ### Runnable examples
 
