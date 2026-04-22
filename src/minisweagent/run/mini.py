@@ -166,9 +166,15 @@ There are two different user interfaces:
 [bold green]mini[/bold green] Simple REPL-style interface
 [bold green]mini -v[/bold green] Pager-style interface (Textual)
 
-Pass [bold green]--cleanup[/bold green] to apply the winning patch to [bold]--repo[/bold]
-on the current branch, commit it, and prune per-run artifacts (keeping only
-[bold]final_report.json[/bold] and the winning diff).
+After a successful run, two independent post-processing steps run by default:
+
+- [bold green]--apply-best-patch[/bold green] applies the winning patch to
+  [bold]--repo[/bold] on the current branch and commits it.
+- [bold green]--cleanup[/bold green] prunes per-run artifacts under the output
+  directory, keeping only [bold]final_report.json[/bold] and the winning diff.
+
+Disable either independently with [bold]--no-apply-best-patch[/bold] /
+[bold]--no-cleanup[/bold].
 [/not dim]
 """
 
@@ -212,12 +218,21 @@ def main(
             "agent visibility; --target only chooses which becomes the scoring signal."
         ),
     ),
-    cleanup: bool = typer.Option(
-        False,
-        "--cleanup",
+    apply_best_patch: bool = typer.Option(
+        True,
+        "--apply-best-patch/--no-apply-best-patch",
         help=(
-            "After the run, apply the best patch to --repo, commit it, and prune "
-            "per-run artifacts (keeping final_report.json and the winning diff)."
+            "After the run, apply the winning patch to --repo on the current branch "
+            "and commit it. Default: on."
+        ),
+    ),
+    cleanup: bool = typer.Option(
+        True,
+        "--cleanup/--no-cleanup",
+        help=(
+            "After the run, prune per-run artifacts under the output dir (keeping "
+            "final_report.json and the winning diff). Independent of "
+            "--apply-best-patch. Default: on."
         ),
     ),
 ):
@@ -815,13 +830,19 @@ def main(
             )
             logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
             het_result = _final_report_to_bestpatchresult(report)
-            if cleanup:
-                from minisweagent.run.postprocess.finalize_apply import apply_commit_and_cleanup
+            if apply_best_patch or cleanup:
+                from minisweagent.run.postprocess.finalize_apply import finalize_run
 
                 het_repo = repo or (
                     Path(preprocess_ctx["repo_root"]) if preprocess_ctx.get("repo_root") else None
                 )
-                apply_commit_and_cleanup(het_result, het_repo, preprocess_output_dir)
+                finalize_run(
+                    het_result,
+                    het_repo,
+                    preprocess_output_dir,
+                    apply_best_patch=apply_best_patch,
+                    cleanup=cleanup,
+                )
             return het_result
 
         metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
@@ -889,10 +910,16 @@ def main(
             registry=state.registry,
         )
         logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
-        if cleanup:
-            from minisweagent.run.postprocess.finalize_apply import apply_commit_and_cleanup
+        if apply_best_patch or cleanup:
+            from minisweagent.run.postprocess.finalize_apply import finalize_run
 
-            apply_commit_and_cleanup(result, repo_path or repo, preprocess_output_dir)
+            finalize_run(
+                result,
+                repo_path or repo,
+                preprocess_output_dir,
+                apply_best_patch=apply_best_patch,
+                cleanup=cleanup,
+            )
         return result
     finally:
         budget.cancel_all_timers()
