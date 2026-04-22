@@ -93,6 +93,7 @@ Repository = "https://github.com/SWE-agent/mini-SWE-agent"
 
 [project.scripts]
 geak = "minisweagent.run.mini:app"
+geak-translate = "minisweagent.run.preprocess.translate:main"
 geak-preprocess = "minisweagent.run.preprocess.preprocessor:main"
 kernel-profile = "minisweagent.run.preprocess.kernel_profile:main"
 commandment = "minisweagent.run.preprocess.commandment:main"

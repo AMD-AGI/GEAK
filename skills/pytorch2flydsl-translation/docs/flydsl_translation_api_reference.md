@@ -238,11 +238,54 @@ def scalar_kernel(Input: fx.Tensor, Output: fx.Tensor, N: fx.Constexpr[int]):
         fx.copy_atom_call(copy_atom, r_out, fx.slice(out_div, (None, idx)))
 ```
 
+## Control Flow
+
+```python
+from flydsl.expr import range_constexpr, const_expr
+
+# Compile-time unrolled loop (N must be Constexpr or literal)
+for i in range_constexpr(N):
+    # loop body is fully unrolled in generated IR
+    ...
+
+# Runtime loop (lowered to scf.for)
+for i in range(runtime_value):
+    ...
+
+# Mark a derived value as compile-time constant
+tile_size = const_expr(N // 4)
+```
+
+## Hardware Math Intrinsics
+
+```python
+from flydsl.expr import rocdl
+from flydsl.expr.typing import T
+
+# Single-cycle hardware exp2 (v_exp_f32) — lower precision than math.exp2
+result = rocdl.exp2(T.f32, x)
+
+# Single-cycle hardware reciprocal (v_rcp_f32)
+result = rocdl.rcp(T.f32, x)
+
+# ArithValue method style also works (used in Swish pattern):
+exp_val = neg_x_log2e.exp2()
+```
+
 ## Synchronization
 
 ```python
 from flydsl.expr import gpu
 gpu.barrier()   # workgroup barrier
+```
+
+## Kernel Debugging
+
+```python
+import flydsl.expr as fx
+
+# In-kernel printf (works inside @flyc.kernel)
+fx.printf("tid=%d bid=%d val=%f", tid, bid, value)
 ```
 
 ## Launch Configuration
@@ -320,7 +363,40 @@ executor = build_rmsnorm_module(M=batch, N=dim, dtype_str="f32")
 # Usage: executor(input, gamma, output, M, stream=stream)
 ```
 
-**Only these ops have NO FlyDSL equivalent**: Conv2d, Conv3d, MaxPool2d, AvgPool2d, BatchNorm2d.
+### Pre-built Kernel Configuration
+
+GEMM additional parameters: `waves_per_eu` (int, optional) limits CU occupancy (1-4);
+`use_cshuffle_epilog` (bool) enables CK-style LDS CShuffle epilogue for output.
+
+All pre-built kernels use: `BLOCK_THREADS=256`, `VEC_WIDTH=8`, `WARP_SIZE=64` (AMD wavefront).
+
+### Reduction Helpers (`kernels/reduce.py`)
+
+Reusable warp/block reduction functions used by normalization and softmax kernels:
+
+```python
+from kernels.reduce import reduce_vec_max, reduce_vec_sum, make_block_reduce
+```
+
+| Function | Description |
+|----------|-------------|
+| `reduce_vec_max(vec, VEC_WIDTH)` | Vector reduction to max via `maxnumf` |
+| `reduce_vec_sum(vec, VEC_WIDTH)` | Vector reduction to sum via `add` |
+| `make_block_reduce(tid, BLOCK_SIZE)` | Block-wide reduction: intra-wave XOR shuffle + LDS cross-wave sync |
+
+## AMD Hardware Reference
+
+| Property | MI300X (gfx942) | MI350 (gfx950) |
+|----------|-----------------|----------------|
+| Wavefront size | 64 threads | 64 threads |
+| LDS per CU | 64 KB | 160 KB |
+| VGPR per CU | 512 KB | 512 KB |
+
+**Translation paths for ops without direct FlyDSL pre-built kernels:**
+- **Conv2d**: im2col (`F.unfold`) + `compile_preshuffle_gemm_a8` (fp16 cast); fallback: im2col + `torch.mm`
+- **MaxPool2d**: custom `@flyc.kernel` with `arith.maximumf` over window elements
+- **BatchNorm2d**: `F.batch_norm` (acceptable PyTorch fallback, MIOpen backend)
+- **Conv3d, AvgPool2d**: no FlyDSL equivalent, use PyTorch
 
 ## Common PyTorch -> FlyDSL Op Mapping
 
@@ -341,6 +417,6 @@ executor = build_rmsnorm_module(M=batch, N=dim, dtype_str="f32")
 | `F.scaled_dot_product_attention` | `build_flash_attn_func_module()` | **Pre-built** |
 | `nn.LayerNorm` | `build_layernorm_module()` | **Pre-built** |
 | `nn.RMSNorm` | `build_rmsnorm_module()` | **Pre-built** |
-| `nn.Conv2d` | `torch.nn.Conv2d` (NO FlyDSL equiv) | PyTorch only |
-| `F.max_pool2d` | `torch.nn.functional` (NO FlyDSL equiv) | PyTorch only |
-| `nn.BatchNorm2d` | `torch.nn.BatchNorm2d` (NO FlyDSL equiv) | PyTorch only |
+| `nn.Conv2d` | im2col + `compile_preshuffle_gemm_a8` (see conv_pool_bn guide) | Hybrid (im2col + **Pre-built** GEMM) |
+| `F.max_pool2d` | Custom `@flyc.kernel` (see conv_pool_bn guide) | Custom kernel |
+| `nn.BatchNorm2d` | `F.batch_norm` (acceptable PyTorch fallback) | PyTorch fallback |

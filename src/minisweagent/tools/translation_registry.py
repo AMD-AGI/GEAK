@@ -102,6 +102,18 @@ _CATEGORY_PATTERNS: dict[str, list[str]] = {
         r"nn\.LayerNorm",
         r"F\.normalize",
     ],
+    "conv_pool_bn": [
+        r"nn\.Conv2d",
+        r"nn\.Conv1d",
+        r"nn\.Conv3d",
+        r"F\.conv2d",
+        r"F\.max_pool2d",
+        r"nn\.MaxPool2d",
+        r"nn\.BatchNorm2d",
+        r"F\.batch_norm",
+        r"nn\.AvgPool2d",
+        r"F\.avg_pool2d",
+    ],
 }
 
 
@@ -255,6 +267,7 @@ _PYTORCH_TO_FLYDSL = TranslationPair(
         "gemm": "flydsl_translation_gemm.md",
         "reductions": "flydsl_translation_reductions.md",
         "attention": "flydsl_translation_attention.md",
+        "conv_pool_bn": "flydsl_translation_conv_pool_bn.md",
     },
     env_setup=_flydsl_env_setup,
     max_attempts=3,

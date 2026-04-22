@@ -29,7 +29,7 @@ Identify the computational pattern:
 2. **Reduction**: Output has fewer elements (sum, mean, softmax) → manual reduction or pre-built kernel
 3. **GEMM/Linear**: Matrix multiplication → `compile_preshuffle_gemm_a8` + `shuffle_weight`
 4. **Normalization**: LayerNorm, RMSNorm → `build_layernorm_module` / `build_rmsnorm_module`
-5. **Convolution**: Conv2d/Conv3d → use `torch.nn.functional.conv2d` (FlyDSL doesn't have conv kernels)
+5. **Convolution**: Conv2d → im2col (`F.unfold`) + `compile_preshuffle_gemm_a8` (fp16 cast)
 
 ## Step 2: Choose Translation Strategy
 
@@ -49,8 +49,9 @@ FlyDSL genuinely cannot do (Conv2d, MaxPool2d, BatchNorm2d).
 
 **Hybrid** (complex models mixing multiple op types):
 - Use FlyDSL kernels for ALL translatable ops
-- PyTorch ONLY for: Conv2d, Conv3d, MaxPool2d, AvgPool2d, BatchNorm2d
-- These have no FlyDSL equivalent (backed by MIOpen)
+- Conv2d: im2col (`F.unfold`) + preshuffle GEMM (fp16 cast); fallback: im2col + `torch.mm`
+- MaxPool2d: custom `@flyc.kernel` with `arith.maximumf`
+- BatchNorm2d: `F.batch_norm` (acceptable PyTorch fallback)
 
 ## Step 3: Element-wise Translation (Complete Example)
 
@@ -290,10 +291,14 @@ def fused_activation_launch(...):
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv = nn.Conv2d(3, 64, 3, padding=1)  # keep PyTorch conv
+        self.conv = nn.Conv2d(3, 64, 3, padding=1)  # weight container only
+        self._gemm = None
+        self._weight_shuffled = None
 
     def forward(self, x):
-        x = self.conv(x)                     # PyTorch conv (no FlyDSL equivalent)
+        # Conv2d via im2col + preshuffle GEMM (see conv_pool_bn KB)
+        # ... (F.unfold + compile_preshuffle_gemm_a8) ...
+        x = self._conv_forward(x)
         x_flat = x.contiguous().view(-1)
         out_flat = torch.empty_like(x_flat)
         n = x_flat.numel()
@@ -330,14 +335,21 @@ What operation type?
 ├── Attention (self-attention, SDPA, Flash)
 │   └── Use build_flash_attn_func_module() from kernels.flash_attn_func
 │       (fallback to decomposed GEMM+softmax if constraints not met)
-├── Conv2d / Conv3d / Pooling / BatchNorm2d
-│   └── Use torch.nn.functional (no FlyDSL equivalent — this is the ONLY
-│       acceptable reason to keep PyTorch compute)
+├── Conv2d
+│   ├── F.unfold (im2col) to get patches (B, K_patch, L)
+│   ├── Transpose+reshape to (B*L, K_patch) = A matrix
+│   ├── Weight (C_out, K_patch) → preshuffle once (fp16 cast)
+│   ├── compile_preshuffle_gemm_a8(fp16) → reshape output to NCHW
+│   └── If correctness fails → im2col + torch.mm fallback
+├── MaxPool2d
+│   └── Custom @flyc.kernel with arith.maximumf over window elements
+├── BatchNorm2d
+│   └── F.batch_norm (acceptable PyTorch fallback, MIOpen backend)
 └── Complex model (L2/L3)
-    └── FlyDSL for ALL ops except conv/pool/batchnorm
+    └── FlyDSL for ALL ops; Conv2d via im2col+GEMM, MaxPool via custom kernel
 ```
 
 **IMPORTANT**: Do NOT use `torch.matmul`, `F.linear`, `nn.Linear`, or
 `F.scaled_dot_product_attention` when FlyDSL pre-built kernels are available.
-PyTorch fallback is ONLY acceptable for Conv2d, MaxPool2d, BatchNorm2d,
-and fp32 GEMM when the dtype table has no fp32 output type (use `torch.mm`).
+Acceptable PyTorch fallbacks: `F.unfold` (im2col), `F.batch_norm`, `torch.mm`
+(fp32 GEMM only). Conv2d uses im2col + preshuffle GEMM, NOT `nn.Conv2d`.

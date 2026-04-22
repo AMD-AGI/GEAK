@@ -3,7 +3,11 @@
 Provides ``run_translation()`` — orchestration function called by the
 preprocessor (multi-round retry loop, self-review, performance measurement).
 
-Use ``geak-preprocess --target-language flydsl`` to invoke translation.
+Invocation:
+
+* ``geak-translate --kernel-url <path>`` — translation only (fast path).
+* ``geak-preprocess --target-language flydsl`` — full preprocess with
+  translation as Step 4.
 
 Each translation round delegates to
 :func:`~minisweagent.agents.translation_agent.run_translation_agent`
@@ -941,4 +945,103 @@ def main():
 if __name__ == "__main__":
     main()
 '''
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    """CLI: ``geak-translate --kernel-url <path> --target-language flydsl``."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Translate a GPU kernel from one language to another (e.g. PyTorch -> FlyDSL)",
+    )
+    parser.add_argument(
+        "--kernel-url",
+        required=True,
+        help="Kernel source (local path or GitHub URL)",
+    )
+    parser.add_argument(
+        "--target-language",
+        default="flydsl",
+        help="Target language (default: flydsl)",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output directory (default: <kernel_dir>/translation_output)",
+    )
+    parser.add_argument(
+        "--gpu",
+        type=int,
+        default=0,
+        help="GPU device ID (default: 0)",
+    )
+    parser.add_argument(
+        "--repo",
+        default=None,
+        help="Repository root path",
+    )
+    parser.add_argument(
+        "-m",
+        "--model",
+        default=None,
+        help="Model name for translation agent",
+    )
+    parser.add_argument(
+        "--flydsl-repo",
+        default=None,
+        help="Path to local FlyDSL repo (for loading reference docs)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    from minisweagent.run.preprocess.resolve_kernel_url import resolve_kernel_url
+
+    resolved = resolve_kernel_url(args.kernel_url, repo=args.repo)
+    if resolved.get("error"):
+        print(f"Error resolving kernel: {resolved['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    kernel_path = Path(resolved["local_file_path"])
+    repo_root = Path(resolved.get("local_repo_path") or kernel_path.parent)
+
+    output_dir = Path(args.output) if args.output else kernel_path.parent / "translation_output"
+
+    from minisweagent.run.preprocess.harness_utils import geak_model_factory
+
+    _model_factory = geak_model_factory(args.model)
+
+    try:
+        from rich.console import Console
+
+        console = Console()
+    except ImportError:
+        console = None
+
+    flydsl_repo = Path(args.flydsl_repo) if args.flydsl_repo else None
+
+    result = run_translation(
+        kernel_path=kernel_path,
+        output_dir=output_dir,
+        gpu_id=args.gpu,
+        target_language=args.target_language,
+        model_name=args.model,
+        model_factory=_model_factory,
+        repo=repo_root,
+        flydsl_repo=flydsl_repo,
+        console=console,
+    )
+
+    print(json.dumps(result, indent=2, default=str))
+    sys.exit(0 if result.get("translation_success") else 1)
+
+
+if __name__ == "__main__":
+    main()
 
