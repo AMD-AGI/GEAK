@@ -115,7 +115,12 @@ where = ["src"]
 include = ["minisweagent*"]
 
 [tool.setuptools.package-data]
-minisweagent = ["config/**/*", "run/preprocess/config/**/*", "tools/*.json"]
+minisweagent = [
+    "config/**/*",
+    "run/preprocess/config/**/*",
+    "tools/*.json",
+    "memory/cross_session/*.json",
+]
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.
