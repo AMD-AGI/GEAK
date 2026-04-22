@@ -94,10 +94,27 @@ def record(**kwargs: Any) -> None:
 
 
 def retrieve(**kwargs: Any) -> str:
-    """Read path: retrieve relevant past experiences and format as context."""
+    """Retrieve relevant past experiences and format as context.
+
+    Accepts either ``target_code`` (the raw kernel source string, preferred)
+    or ``kernel_path`` (a filesystem path we read once here). Supplying
+    both is fine -- ``target_code`` wins. Supplying neither yields no
+    retrieval. The retriever itself never touches the filesystem.
+    """
     backend = get_backend()
     if backend is None:
         return ""
+
+    target_code = kwargs.get("target_code", "") or ""
+    if not target_code:
+        kernel_path = kwargs.get("kernel_path", "") or ""
+        if kernel_path:
+            from pathlib import Path
+
+            try:
+                target_code = Path(kernel_path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                target_code = ""
 
     try:
         from minisweagent.memory.cross_session.retriever import retrieve_context
@@ -105,7 +122,7 @@ def retrieve(**kwargs: Any) -> str:
         cfg = _get_config()
         return retrieve_context(
             backend=backend,
-            kernel_path=kwargs.get("kernel_path", ""),
+            target_code=target_code,
             bottleneck_type=kwargs.get("bottleneck_type", ""),
             profiling_metrics=kwargs.get("profiling_metrics") or {},
             limit=cfg.retrieval_limit,

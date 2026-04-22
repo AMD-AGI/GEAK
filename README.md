@@ -38,10 +38,14 @@ cd GEAK
 # Docker-based
 AMD_LLM_API_KEY=<YOUR_KEY> bash scripts/run-docker.sh
 
-# Local install
+# Local install (recommended)
 make install              # core + MCP tools (same as Docker)
 make install-full         # + dev tools + swe-rex
 make install-dev          # install-full, editable (for developers)
+
+# (or) pip-only install without registering MCP tools as packages
+pip install -e .          # core package, including MCP runtime dependencies
+pip install -e '.[full]'  # core + dev + langchain + swe-rex
 
 # Set model name and key. In the case of docker-based setup, export the API key before
 # running scripts/run-docker.sh.

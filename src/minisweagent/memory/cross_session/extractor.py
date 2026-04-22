@@ -54,13 +54,36 @@ def extract_experience(**kwargs: Any) -> ExperienceRecord:
     if not best_change_category and strategy_name:
         best_change_category = _classify_strategy(strategy_name)
 
+    # Capture the kernel's source code at the time of optimization. This
+    # enables code-based identity matching at retrieval time so the agent
+    # knows whether a stored patch will apply verbatim, vs. needing
+    # adaptation to a different version of the same kernel.
+    original_kernel_code = _read_kernel_source(kernel_path)
+
+    # Build rich v6 fields: never leave them empty if we can derive them
+    # from the run artifacts. The retriever / formatter consumes these and
+    # users want every saved record to carry the full evidence base
+    # (no nulls, no empty arrays where data is available).
+    bottleneck = str(kwargs.get("bottleneck_type", "unknown") or "unknown")
+    kernel_url = _derive_kernel_url(kernel_path)
+    profiling_insight = _build_profiling_insight(
+        baseline_latency_ms, best_latency_ms, speedup, bottleneck, profiling_metrics
+    )
+    baseline_benchmark = _build_baseline_benchmark(baseline_latency_ms, best_latency_ms, speedup, report_dir)
+    kernel_structure = _build_kernel_structure(
+        original_kernel_code, language, str(kwargs.get("kernel_category", "unknown") or "unknown")
+    )
+    round_insights = _extract_round_insights(report_dir, what_worked, what_failed)
+    strategies = _extract_strategies_with_diffs(report_dir, kernel_path)
+    agent_reasoning_samples = _extract_reasoning_samples(report_dir)
+
     return ExperienceRecord(
         kernel_path=kernel_path,
         kernel_name=kernel_name,
         kernel_category=str(kwargs.get("kernel_category", "unknown") or "unknown"),
         kernel_language=language,
         repo_url="",
-        bottleneck_type=str(kwargs.get("bottleneck_type", "unknown") or "unknown"),
+        bottleneck_type=bottleneck,
         baseline_latency_ms=baseline_latency_ms,
         top_kernels=profiling_metrics.get("top_kernels", []) if isinstance(profiling_metrics, dict) else [],
         hardware=hardware,
@@ -80,7 +103,174 @@ def extract_experience(**kwargs: Any) -> ExperienceRecord:
         patch_file=patch_file,
         final_report_path=str(report_dir / "final_report.json") if report_dir else "",
         notebook_dir=str(report_dir / "_working_memory") if report_dir else "",
+        original_kernel_code=original_kernel_code,
+        kernel_url=kernel_url,
+        profiling_insight=profiling_insight,
+        baseline_benchmark=baseline_benchmark,
+        kernel_structure=kernel_structure,
+        round_insights=round_insights,
+        strategies=strategies,
+        agent_reasoning_samples=agent_reasoning_samples,
     )
+
+
+def _derive_kernel_url(kernel_path: str) -> str:
+    """Build a portable URL/relative path for the kernel."""
+    if not kernel_path:
+        return ""
+    parts = Path(kernel_path).parts
+    for marker in ("triton2triton", "geak_eval", "AgentKernelArena"):
+        if marker in parts:
+            i = parts.index(marker)
+            return "/".join(parts[i:-1])
+    return Path(kernel_path).parent.name
+
+
+def _build_profiling_insight(base_ms: float, best_ms: float, sp: float, bottleneck: str, raw: dict) -> str:
+    """Build a 1-2 line profiling summary."""
+    bits = [f"Baseline: {base_ms:.4f}ms ({bottleneck}-bound)"]
+    if best_ms > 0 and sp > 1.0:
+        bits.append(f"Best: {best_ms:.4f}ms ({sp:.4f}x speedup)")
+    if isinstance(raw, dict) and raw:
+        for k in ("benchmark_iterations", "shapes_count", "warmup_iterations"):
+            if k in raw:
+                bits.append(f"{k}={raw[k]}")
+    return " | ".join(bits)
+
+
+def _build_baseline_benchmark(base_ms: float, best_ms: float, sp: float, report_dir: Path | None) -> str:
+    """Embed baseline_metrics.json content if available, else summary string."""
+    if report_dir:
+        bm = report_dir / "baseline_metrics.json"
+        if bm.exists():
+            try:
+                return bm.read_text(encoding="utf-8", errors="replace")[:6000]
+            except OSError:
+                pass
+    return f"baseline_latency_ms={base_ms:.4f} | best_latency_ms={best_ms:.4f} | speedup={sp:.4f}x"
+
+
+def _build_kernel_structure(code: str, language: str, category: str) -> str:
+    """Inspect the kernel source to summarize structure."""
+    if not code:
+        return f"{language} kernel, {category} category"
+    bits = [f"{language} kernel, {category} category"]
+    n_jit = code.count("@triton.jit")
+    n_autotune = code.count("@triton.autotune")
+    n_cls = code.count("class ")
+    if n_jit:
+        bits.append(f"{n_jit} @triton.jit kernel(s)")
+    if n_autotune:
+        bits.append(f"{n_autotune} @triton.autotune block(s)")
+    if n_cls:
+        bits.append(f"{n_cls} Python class(es)")
+    if "torch.utils.cpp_extension" in code or "load_inline" in code:
+        bits.append("uses HIP/cpp_extension")
+    return ", ".join(bits)
+
+
+def _extract_round_insights(report_dir: Path | None, what_worked: list[str], what_failed: list[str]) -> list[str]:
+    """Build per-round insight strings from final_report + working notebook."""
+    insights: list[str] = []
+    if not report_dir:
+        return insights
+    fr = report_dir / "final_report.json"
+    if fr.exists():
+        import json as _json
+
+        try:
+            data = _json.loads(fr.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            data = {}
+        re = data.get("round_evaluation", {}) if isinstance(data, dict) else {}
+        if isinstance(re, dict) and re:
+            r = re.get("round", "?")
+            task = re.get("best_task", "?")
+            ts = re.get("benchmark_speedup") or re.get("verified_speedup", "?")
+            insights.append(f"Round {r} winner: {task} = {ts}x verified")
+    if what_worked:
+        insights.append(f"Worked: {', '.join(what_worked[:5])}")
+    if what_failed:
+        insights.append(f"Avoid (regression): {', '.join(what_failed[:5])}")
+    return insights
+
+
+def _extract_strategies_with_diffs(report_dir: Path | None, kernel_path: str) -> list[dict]:
+    """Walk results/round_*/<task>/best_results.json + patches and capture
+    every strategy attempt with its measured speedup and full diff.
+    """
+    out: list[dict] = []
+    if not report_dir:
+        return out
+    import json as _json
+
+    for round_dir in sorted(report_dir.glob("results/round_*")):
+        if not round_dir.is_dir():
+            continue
+        round_name = round_dir.name
+        for task_dir in sorted(round_dir.iterdir()):
+            if not task_dir.is_dir() or task_dir.name in ("worktrees",):
+                continue
+            br = task_dir / "best_results.json"
+            if not br.exists():
+                continue
+            try:
+                data = _json.loads(br.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                continue
+            sp = data.get("best_patch_speedup", 0)
+            try:
+                sp = float(sp)
+            except (TypeError, ValueError):
+                sp = 0.0
+            patch_id = data.get("best_patch_id", "")
+            patch_file_str = data.get("best_patch_file", "")
+            after_code = ""
+            if patch_file_str and Path(patch_file_str).exists():
+                try:
+                    after_code = Path(patch_file_str).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    pass
+            out.append(
+                {
+                    "round": round_name,
+                    "task": task_dir.name,
+                    "patch": patch_id,
+                    "speedup": sp,
+                    "latency_ms": data.get("candidate_latency_ms", 0),
+                    "after_code": after_code,
+                    "is_regression": sp < 1.0,
+                    "is_marginal": 1.0 <= sp < 1.10,
+                }
+            )
+    return out
+
+
+def _extract_reasoning_samples(report_dir: Path | None) -> list[str]:
+    """Pull short excerpts of agent reasoning from working notebook (top 3)."""
+    if not report_dir:
+        return []
+    samples: list[str] = []
+    nb_dir = report_dir / "_working_memory"
+    if not nb_dir.exists():
+        return samples
+    for f in sorted(nb_dir.glob("*.json"))[:3]:
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")[:1500]
+            samples.append(f"{f.name}: {content}")
+        except OSError:
+            pass
+    return samples
+
+
+def _read_kernel_source(kernel_path: str) -> str:
+    """Read the kernel source file at ``kernel_path``. Returns "" if missing."""
+    if not kernel_path:
+        return ""
+    try:
+        return Path(kernel_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def _resolve_report_dir(patch_file: str, kernel_path: str) -> Path | None:
