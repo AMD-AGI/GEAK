@@ -62,19 +62,6 @@ export ANTHROPIC_API_KEY="YOUR_KEY"
 export AMD_LLM_API_KEY="YOUR_KEY"
 ```
 
-GEAK launches the shipped MCP servers under `mcp_tools/` directly from the repository as subprocesses, so no separate MCP pip extra is required; `make install` additionally registers them as Python packages for convenience.
-
-### RAG Knowledge Base (Optional)
-
-GPU/ROCm/HIP optimization knowledge base, powered by hybrid retrieval (FAISS + BM25 + reranker).
-
-```bash
-# rag-mcp is included in `make install` — just build the index:
-python scripts/build_index.py --force
-```
-
-See **[RAG MCP Server](mcp_tools/rag-mcp/README.md)** for configuration and usage details.
-
 ### Usage
 
 #### Basic (single-agent) GPU kernel optimization
@@ -228,21 +215,18 @@ Automatically selects the best result across runs:
 
 - Kernel Profile — bottleneck analysis (bandwidth, occupancy, etc.)
 - RAG — GPU knowledge retrieval (AMD / NVIDIA)
+  - See **[RAG MCP Server](mcp_tools/rag-mcp/README.md)** for configuration and usage details.
 - In-session strategy tracking — full history, reproducibility, rollback
 - Cross-session memory — reuse past optimization insights
 
----
+  | Flag | Default | What it does |
+  |------|---------|--------------|
+  | `GEAK_MEMORY_DISABLE=1` | off | Turn off all memory (within-session + cross-session) |
+  | `GEAK_USE_KNOWLEDGE_BASE=0` | on | Turn off reading past insights from the knowledge base |
+  | `GEAK_SAVE_TO_KNOWLEDGE_BASE=1` | off | Turn on saving run insights to the knowledge base after each run |
+  | `GEAK_MEMORY_MIN_SPEEDUP=1.10` | 1.10 | Minimum speedup required to save an experience |
 
-## Cross-Session Memory Flags
-
-| Flag | Default | What it does |
-|------|---------|--------------|
-| `GEAK_MEMORY_DISABLE=1` | off | Turn off all memory (within-session + cross-session) |
-| `GEAK_USE_KNOWLEDGE_BASE=0` | on | Turn off reading past insights from the knowledge base |
-| `GEAK_SAVE_TO_KNOWLEDGE_BASE=1` | off | Turn on saving run insights to the knowledge base after each run |
-| `GEAK_MEMORY_MIN_SPEEDUP=1.10` | 1.10 | Minimum speedup required to save an experience |
-
-By default, the knowledge base is **read** (agents see past insights) but **not written** (run results are not saved back). Set `GEAK_SAVE_TO_KNOWLEDGE_BASE=1` to start building the knowledge base from your runs.
+  By default, the knowledge base is **read** (agents see past insights) but **not written** (run results are not saved back). Set `GEAK_SAVE_TO_KNOWLEDGE_BASE=1` to start building the knowledge base from your runs.
 
 ## Contributing
 
