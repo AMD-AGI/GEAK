@@ -288,7 +288,9 @@ def _build_hip_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]
                 )
             if bandwidth_deprioritized:
                 deprioritize.insert(0, "Bandwidth-maximization or generic vectorization ideas as the main strategy.")
-                deprioritize.insert(1, "Items-per-thread or throughput-only tuning without a latency-reduction hypothesis.")
+                deprioritize.insert(
+                    1, "Items-per-thread or throughput-only tuning without a latency-reduction hypothesis."
+                )
         elif family == "lds":
             prefer_first.extend(
                 [

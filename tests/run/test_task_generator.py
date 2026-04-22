@@ -195,17 +195,19 @@ def test_build_workload_guidance_for_triton_deprioritizes_dispatch():
     baseline_metrics = {
         "kernel_name": "fused_rms_fp8",
         "bottleneck": "memory-bound",
-        "top_kernels": [{
-            "name": "fused_rms_fp8",
-            "bottleneck": "memory-bound",
-            "duration_us": 12.4,
-            "pct_of_selected": 100.0,
-            "observations": [],
-            "metrics": {
-                "memory.hbm_bandwidth_utilization": 71.2,
-                "memory.l2_hit_rate": 44.0,
-            },
-        }],
+        "top_kernels": [
+            {
+                "name": "fused_rms_fp8",
+                "bottleneck": "memory-bound",
+                "duration_us": 12.4,
+                "pct_of_selected": 100.0,
+                "observations": [],
+                "metrics": {
+                    "memory.hbm_bandwidth_utilization": 71.2,
+                    "memory.l2_hit_rate": 44.0,
+                },
+            }
+        ],
     }
 
     guidance = _build_workload_guidance(kernel, baseline_metrics)
