@@ -504,12 +504,9 @@ def main(
             from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
             _auto_kernel_type = _infer_kernel_type(Path(preprocess_ctx["kernel_path"]))
 
-        if _auto_kernel_type == "triton":
-            heterogeneous = True
-            logger.info("Using heterogeneous mode based on discovery.")
-        else:
-            heterogeneous = False
-            logger.info("Using homogeneous mode based on discovery.")
+        # Always use heterogeneous orchestrator to enable subagent dispatch
+        heterogeneous = True
+        logger.info("Using heterogeneous mode (kernel_type=%s).", _auto_kernel_type)
 
     if heterogeneous:
         commandment = preprocess_ctx.get("commandment")

@@ -21,18 +21,40 @@ logger = logging.getLogger(__name__)
 def _agent_type_to_class() -> dict[str, type]:
     """Canonical mapping from task-file ``agent_type`` string to class.
 
+    Includes the hardcoded base types plus any subagents registered in
+    ``SubAgentRegistry``.  Registry-defined subagents that run inprocess
+    are mapped to ``StrategyInteractiveAgent`` (their custom config is
+    applied at dispatch time, not here).
+
     Lazy import to avoid circular dependencies at module level.
     """
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 
-    return {
+    mapping: dict[str, type] = {
         "strategy_agent": StrategyInteractiveAgent,
     }
+
+    try:
+        from minisweagent.subagents.subagent_registry import SubAgentRegistry
+
+        registry = SubAgentRegistry()
+        for name in registry.list_names():
+            if name not in mapping:
+                mapping[name] = StrategyInteractiveAgent
+    except Exception:
+        logger.debug("SubAgentRegistry unavailable; using base agent types only.")
+
+    return mapping
 
 
 def _agent_class_to_type() -> dict[type, str]:
     """Reverse mapping: agent class -> agent_type string."""
     return {cls: name for name, cls in _agent_type_to_class().items()}
+
+
+def _all_agent_types() -> frozenset[str]:
+    """Compute the full set of known agent type names (base + registry)."""
+    return frozenset(_agent_type_to_class().keys())
 
 
 ALL_AGENT_TYPES: frozenset[str] = frozenset({"strategy_agent"})
@@ -47,6 +69,7 @@ def get_allowed_agent_types() -> set[str] | None:
     (blocklist) from the environment.  When *both* are set the allowlist
     wins and the blocklist is ignored (a warning is logged).
     """
+    all_types = _all_agent_types()
     allowed_raw = os.environ.get("GEAK_ALLOWED_AGENTS", "").strip()
     excluded_raw = os.environ.get("GEAK_EXCLUDED_AGENTS", "").strip()
 
@@ -59,10 +82,10 @@ def get_allowed_agent_types() -> set[str] | None:
                 "Both GEAK_ALLOWED_AGENTS and GEAK_EXCLUDED_AGENTS are set; GEAK_ALLOWED_AGENTS takes precedence."
             )
         allowed = {t.strip() for t in allowed_raw.split(",") if t.strip()}
-        return allowed & ALL_AGENT_TYPES
+        return allowed & all_types
 
     excluded = {t.strip() for t in excluded_raw.split(",") if t.strip()}
-    return ALL_AGENT_TYPES - excluded
+    return all_types - excluded
 
 
 def filter_agent_type(agent_type: str) -> str:

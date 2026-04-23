@@ -220,6 +220,10 @@ def run_heterogeneous_orchestrator(
         except Exception as e:
             logger.warning("Failed to wrap RAG tools with RAG postprocessor: %s", e)
 
+    from minisweagent.subagents.subagent_registry import SubAgentRegistry
+
+    registry = SubAgentRegistry()
+
     ctx: dict[str, Any] = {
         **preprocess_ctx,
         "kernel_meta": kernel_meta,
@@ -230,6 +234,7 @@ def run_heterogeneous_orchestrator(
         "model_factory": model_factory,
         "agent_class": StrategyInteractiveAgent,
         "toolruntime": toolruntime,
+        "registry": registry,
     }
 
     tools_schema = build_tools_schema(toolruntime)

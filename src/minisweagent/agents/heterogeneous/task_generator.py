@@ -197,6 +197,7 @@ def generate_tasks(
     num_gpus: int = 1,
     output_dir: Path | None = None,
     rag_enabled: bool | None = None,
+    registry: Any | None = None,
 ) -> list[AgentTask]:
     """Generate optimization tasks using an LLM planning agent.
 
@@ -255,6 +256,7 @@ def generate_tasks(
         num_gpus=num_gpus,
         output_dir=output_dir,
         rag_enabled=rag_enabled,
+        registry=registry,
     )
 
     return _parse_llm_response(
@@ -290,6 +292,7 @@ def generate_tasks_from_content(
     num_gpus: int = 1,
     output_dir: Path | None = None,
     rag_enabled: bool | None = None,
+    registry: Any | None = None,
 ) -> list[AgentTask]:
     """Convenience wrapper that materializes in-memory content to temp files.
 
@@ -340,6 +343,7 @@ def generate_tasks_from_content(
             num_gpus=num_gpus,
             output_dir=output_dir,
             rag_enabled=rag_enabled,
+            registry=registry,
         )
     finally:
         for f in tmp_files:
@@ -384,6 +388,7 @@ def write_task_files(
             "label": t.label,
             "priority": t.priority,
             "agent_type": class_to_type.get(t.agent_class, "strategy_agent"),
+            "agent_name": t.config.get("agent_name", ""),
             "kernel_language": t.kernel_language,
             "kernel_path": kernel_path,
             "repo_root": repo_root,
@@ -450,6 +455,7 @@ def _run_task_agent(
     num_gpus: int = 1,
     output_dir: Path | None = None,
     rag_enabled: bool | None = None,
+    registry: Any | None = None,
 ) -> str:
     """Run a read-only planning agent and return the submitted JSON text."""
     from minisweagent.agents.default import DefaultAgent
@@ -600,7 +606,21 @@ def _run_task_agent(
             )
         else:
             _rag_section = ""
-        system_prompt = _SYSTEM_PROMPT.replace("__RAG_TOOLS_SECTION__", _rag_section)
+        # Inject agent catalog from registry (or use default description)
+        if registry is not None and hasattr(registry, "build_taskgen_catalog"):
+            _agent_catalog = registry.build_taskgen_catalog()
+        else:
+            _agent_catalog = (
+                "1. **strategy_agent** (default) -- An LLM-guided agent "
+                "with bash, editor, save_and_test, submit, profile_kernel, "
+                "baseline_metrics, and strategy_manager. It reads code, reasons about "
+                "bottlenecks, makes edits, then tests and profiles. Best for targeted "
+                "edits, autotune configs, algorithmic rewrites, and any optimization "
+                "where the agent should read-think-edit-test-profile on its own."
+            )
+
+        system_prompt = _SYSTEM_PROMPT.replace("__AGENT_CATALOG__", _agent_catalog)
+        system_prompt = system_prompt.replace("__RAG_TOOLS_SECTION__", _rag_section)
         system_prompt = system_prompt + _build_agent_restriction_addendum()
 
         agent = DefaultAgent(
@@ -723,6 +743,7 @@ def _parse_llm_response(
             priority = 10
         priority = max(0, min(15, priority))
         agent_type = filter_agent_type(str(item.get("agent_type", "strategy_agent")))
+        agent_name = str(item.get("agent_name", "")) or ""
         kernel_language = str(item.get("kernel_language", "python"))
         task_prompt = str(item.get("task_prompt", ""))
         try:
@@ -734,11 +755,17 @@ def _parse_llm_response(
             logger.debug("_parse_llm_response: skipping task '%s' with empty prompt.", label)
             continue
 
-        resolved_class = type_to_class.get(agent_type, agent_class)
-        if agent_type not in type_to_class:
+        # Prefer agent_name (registry subagent) over agent_type when resolving class
+        if agent_name and agent_name in type_to_class:
+            resolved_class = type_to_class[agent_name]
+        else:
+            resolved_class = type_to_class.get(agent_type, agent_class)
+        if agent_type not in type_to_class and not agent_name:
             logger.debug("_parse_llm_response: unknown agent_type %r for '%s'; using default class.", agent_type, label)
 
         cfg: dict[str, Any] = {}
+        if agent_name:
+            cfg["agent_name"] = agent_name
 
         tasks.append(
             AgentTask(

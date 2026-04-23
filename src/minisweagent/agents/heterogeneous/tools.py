@@ -115,6 +115,8 @@ def tool_generate_tasks(
 
     kwargs["output_dir"] = Path(ctx["output_dir"])
     kwargs["rag_enabled"] = ctx.get("rag_enabled", False)
+    if ctx.get("registry"):
+        kwargs["registry"] = ctx["registry"]
 
     emit_debug_log(
         "heterogeneous_orchestrator:tool_generate_tasks:before_gen",

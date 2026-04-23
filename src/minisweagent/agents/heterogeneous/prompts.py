@@ -142,12 +142,7 @@ optimization approach, then submit your task list as JSON via the
 
 ### Agents (task execution)
 
-1. **strategy_agent** (default and only agent type) -- An LLM-guided agent
-   with bash, editor, save_and_test, submit, profile_kernel,
-   baseline_metrics, and strategy_manager. It reads code, reasons about
-   bottlenecks, makes edits, then tests and profiles. Best for targeted
-   edits, autotune configs, algorithmic rewrites, and any optimization
-   where the agent should read-think-edit-test-profile on its own.
+__AGENT_CATALOG__
 
 __RAG_TOOLS_SECTION__
 
@@ -233,6 +228,7 @@ parameter containing a JSON array of task objects. Each task has:
 - "label": short kebab-case identifier (e.g. "ck-tile-tuning", "triton-tiling-rewrite")
 - "priority": integer 0-15
 - "agent_type": "strategy_agent"
+- "agent_name": name of a registered subagent (e.g. "general-kernel-optimization"). Optional — defaults to "strategy_agent" behavior if omitted.
 - "kernel_language": "python", "cpp", or "asm"
 - "num_gpus": integer (default 1). Each task uses 1 GPU.
 - "task_prompt": detailed instructions for the sub-agent (specific
@@ -350,7 +346,7 @@ as JSON via the `submit` tool.
 
 def build_agent_restriction_addendum() -> str:
     """Return a prompt paragraph describing agent restrictions, or empty string."""
-    from minisweagent.agents.agent_spec import ALL_AGENT_TYPES, get_allowed_agent_types
+    from minisweagent.agents.agent_spec import _all_agent_types, get_allowed_agent_types
 
     allowed = get_allowed_agent_types()
     if allowed is None:
@@ -368,7 +364,7 @@ def build_agent_restriction_addendum() -> str:
         )
 
     if excluded_raw:
-        excluded = ALL_AGENT_TYPES - allowed
+        excluded = _all_agent_types() - allowed
         excluded_list = ", ".join(sorted(excluded))
         return (
             f"\n\n**Agent restriction**: The following agents are NOT available "

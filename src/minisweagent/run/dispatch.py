@@ -177,8 +177,15 @@ def task_file_to_agent_task(task_file: Path):
     from minisweagent.agents.agent_spec import _agent_type_to_class, filter_agent_type
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
 
+    # Resolve agent class: prefer agent_name (registry subagent) over agent_type
+    agent_name = meta.get("agent_name", "")
     agent_type = filter_agent_type(meta.get("agent_type", "strategy_agent"))
-    agent_class = _agent_type_to_class().get(agent_type, StrategyInteractiveAgent)
+    type_to_class = _agent_type_to_class()
+
+    if agent_name and agent_name in type_to_class:
+        agent_class = type_to_class[agent_name]
+    else:
+        agent_class = type_to_class.get(agent_type, StrategyInteractiveAgent)
 
     try:
         inherited_step_limit = int(os.environ.get("GEAK_AGENT_STEP_LIMIT", "200"))
@@ -194,6 +201,27 @@ def task_file_to_agent_task(task_file: Path):
         "mode": "yolo",
         "use_strategy_manager": True,
     }
+
+    # If a registry subagent is specified, merge its system_template into config
+    if agent_name:
+        try:
+            from minisweagent.subagents.subagent_registry import SubAgentRegistry
+
+            _registry = SubAgentRegistry()
+            _desc = _registry.get(agent_name)
+            if _desc:
+                _sys_prompt = _registry.load_system_prompt(_desc)
+                if _sys_prompt:
+                    cfg["system_template"] = _sys_prompt
+                    logger.info("Merged system_template from subagent %r", agent_name)
+                # Merge other agent config fields (tool_profile, etc.)
+                for _key in ("tool_profile", "use_strategy_manager", "instance_template"):
+                    if _key in (_desc.agent_config or {}):
+                        cfg[_key] = _desc.agent_config[_key]
+            else:
+                logger.warning("Subagent %r not found in registry; using default config.", agent_name)
+        except Exception as _reg_exc:
+            logger.warning("Failed to look up subagent %r in registry: %s", agent_name, _reg_exc)
 
     # COMMANDMENT is the single source of truth for test commands.
     # Its SETUP + CORRECTNESS + BENCHMARK sections are executed verbatim.
