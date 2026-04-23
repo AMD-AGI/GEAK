@@ -38,6 +38,7 @@ def _ensure_mcp_importable() -> None:
 
 
 from minisweagent.run.preprocess.benchmark_parsing import extract_latency_ms
+from minisweagent.run.utils.timeouts import GEAK_TEST_TIMEOUT
 from minisweagent.run.preprocess.harness_utils import (
     DEFAULT_EVAL_BENCHMARK_ITERATIONS,
     DEFAULT_PIPELINE_OUTPUT_DIR,
@@ -410,7 +411,7 @@ def run_preprocessor(
     eval_command: str | None = None,
     correctness_command: str | list[str] | None = None,
     performance_command: str | list[str] | None = None,
-    benchmark_timeout: int = 3600,
+    benchmark_timeout: int | None = None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -447,7 +448,7 @@ def run_preprocessor(
         directly for profiling and baseline capture — no ``&&`` guessing.
     benchmark_timeout:
         Timeout in seconds for the benchmark baseline subprocess.
-        Defaults to 3600s. Increase for kernels with long runtimes.
+        Defaults to GEAK_TEST_TIMEOUT. Increase for kernels with long runtimes.
 
     Returns
     -------
@@ -459,6 +460,8 @@ def run_preprocessor(
     _preprocess_t0 = time.monotonic()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if benchmark_timeout is None:
+        benchmark_timeout = GEAK_TEST_TIMEOUT
 
     ctx: dict[str, Any] = {}
 
@@ -1047,7 +1050,7 @@ def run_preprocessor(
                 executable="/bin/bash",
                 capture_output=True,
                 text=True,
-                timeout=3600,
+                timeout=GEAK_TEST_TIMEOUT,
                 cwd=_cwd,
             )
             (output_dir / "correctness_stdout.txt").write_text(result.stdout or "")

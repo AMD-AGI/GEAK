@@ -28,4 +28,5 @@ model:
 tools:
   profiling: false
   profiling_type: profiling
+  profile_timeout: 3600
   rag: false

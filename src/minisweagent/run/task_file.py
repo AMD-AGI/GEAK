@@ -217,8 +217,20 @@ def _copy_nested_git_repos(repo_path: Path, worktree_path: Path) -> None:
             shutil.copytree(current, dst, symlinks=True)
 
 
+_UNTRACKED_SKIP_PATTERNS = (
+    "gpucore.*",
+    "core.*",
+    "*.core",
+    "*.coredump",
+)
+
+_UNTRACKED_MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+
+
 def _copy_untracked_files(repo_path: Path, worktree_path: Path, env: dict[str, str] | None = None) -> None:
     """Copy untracked files from repo to worktree."""
+    from fnmatch import fnmatch
+
     run_env = env if env is not None else None
     resolved_wt = worktree_path.resolve()
     try:
@@ -240,9 +252,24 @@ def _copy_untracked_files(repo_path: Path, worktree_path: Path, env: dict[str, s
                 continue
             except ValueError:
                 pass
-            if src.is_file():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
+            if not src.is_file():
+                continue
+            name = src.name
+            if any(fnmatch(name, pat) for pat in _UNTRACKED_SKIP_PATTERNS):
+                continue
+            try:
+                file_size = src.stat().st_size
+                if file_size > _UNTRACKED_MAX_FILE_SIZE:
+                    logging.getLogger(__name__).warning(
+                        "Skipping large untracked file %s (%.1f MB)",
+                        rel_path,
+                        file_size / (1024 * 1024),
+                    )
+                    continue
+            except OSError:
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
     except subprocess.CalledProcessError:
         pass
 

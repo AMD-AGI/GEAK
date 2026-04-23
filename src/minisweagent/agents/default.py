@@ -13,6 +13,7 @@ from jinja2 import StrictUndefined, Template
 
 from minisweagent import Environment, Model
 from minisweagent.skills.skill_runtime import SkillRuntime
+from minisweagent.run.utils.timeouts import GEAK_TEST_TIMEOUT
 from minisweagent.tools.tools_runtime import ToolRuntime
 
 logger = logging.getLogger(__name__)
@@ -208,7 +209,7 @@ class DefaultAgent:
         context = SaveAndTestContext(
             cwd=cwd,
             test_command=self.config.test_command,
-            timeout=getattr(self.env.config, "timeout", 3600),
+            timeout=getattr(self.env.config, "timeout", None) or GEAK_TEST_TIMEOUT,
             patch_output_dir=self.config.patch_output_dir,
             env_vars=getattr(self.env.config, "env", None),
             base_repo_path=self.base_repo_path,

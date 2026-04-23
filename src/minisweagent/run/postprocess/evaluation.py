@@ -18,6 +18,8 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+
+from minisweagent.run.utils.timeouts import GEAK_PROFILE_TIMEOUT, GEAK_TEST_TIMEOUT
 from typing import Any
 
 from minisweagent.run.postprocess.benchmark_parsing import (
@@ -247,7 +249,7 @@ def run_correctness_and_benchmark(
                 ["bash", correctness_script],
                 capture_output=True,
                 text=True,
-                timeout=600,
+                timeout=GEAK_TEST_TIMEOUT,
                 cwd=str(eval_worktree),
                 env=eval_env,
             )
@@ -295,7 +297,7 @@ def run_correctness_and_benchmark(
                 ["bash", benchmark_script],
                 capture_output=True,
                 text=True,
-                timeout=1800,
+                timeout=GEAK_TEST_TIMEOUT,
                 cwd=str(eval_worktree),
                 env=eval_env,
             )
@@ -415,7 +417,7 @@ def run_profile(
             ["bash", profile_script],
             capture_output=True,
             text=True,
-            timeout=1800,
+            timeout=GEAK_PROFILE_TIMEOUT,
             cwd=str(eval_worktree),
             env=eval_env,
         )

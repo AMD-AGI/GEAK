@@ -47,6 +47,10 @@ _ROOT_GENERATED_GLOBS = (
     "*.obj",
     "*.out",
     "*.bin",
+    "gpucore.*",
+    "core.*",
+    "*.core",
+    "*.coredump",
 )
 
 

@@ -319,7 +319,8 @@ def _auto_fix(content: str, errors: list[str]) -> str:
         m = re.search(r"Command starts with shell built-in ['\"](\w+)['\"].*?['\"](.+?)['\"]", error)
         if m:
             original_cmd = m.group(2)
-            fixed_cmd = f'bash -c "{original_cmd}"'
+            escaped = original_cmd.replace("'", "'\\''")
+            fixed_cmd = f"bash -c '{escaped}'"
             content = content.replace(original_cmd, fixed_cmd)
 
         # Fix: inline env var prefix -> wrap in bash -c
@@ -327,7 +328,8 @@ def _auto_fix(content: str, errors: list[str]) -> str:
         m = re.search(r"Command uses inline env var prefix ['\"](\w+=\S+)['\"].*?['\"](.+?)['\"]", error)
         if m:
             original_cmd = m.group(2)
-            fixed_cmd = f'bash -c "{original_cmd}"'
+            escaped = original_cmd.replace("'", "'\\''")
+            fixed_cmd = f"bash -c '{escaped}'"
             content = content.replace(original_cmd, fixed_cmd)
 
     return content

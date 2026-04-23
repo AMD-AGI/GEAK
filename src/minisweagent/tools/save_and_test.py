@@ -683,11 +683,15 @@ class SaveAndTestTool:
                 "*.so",
                 ".geak_resolved/",
                 ".git.bak/",
+                "gpucore.*",
+                "core.*",
+                "*.core",
+                "*.coredump",
                 *self._generated_helper_excludes(),
             ]
             exclude_args = " ".join(f"':(exclude){entry}'" for entry in excludes)
             result = subprocess.run(
-                f"git add -N . && git diff --binary -- . {exclude_args}",
+                f"git add -N . && git diff -- . {exclude_args}",
                 cwd=cwd,
                 capture_output=True,
                 text=True,
@@ -697,7 +701,7 @@ class SaveAndTestTool:
             return result.stdout
 
         if ctx.base_repo_path and ctx.base_repo_path.exists():
-            excludes = [".git", "__pycache__", *self._generated_helper_excludes()]
+            excludes = [".git", "__pycache__", "gpucore.*", "core.*", *self._generated_helper_excludes()]
             if ctx.patch_output_dir:
                 run_dir_name = Path(ctx.patch_output_dir).resolve().parent.name
                 if run_dir_name:
