@@ -47,6 +47,9 @@ make install-dev          # install-full, editable (for developers)
 pip install -e .          # core package, including MCP runtime dependencies
 pip install -e '.[full]'  # core + dev + langchain + swe-rex
 
+# (optional) RAG index build: if enable RAG, build index after make install
+make index
+
 # Set model name and key. In the case of docker-based setup, export the API key before
 # running scripts/run-docker.sh.
 
