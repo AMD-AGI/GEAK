@@ -38,7 +38,6 @@ def _ensure_mcp_importable() -> None:
 
 
 from minisweagent.run.preprocess.benchmark_parsing import extract_latency_ms
-from minisweagent.run.utils.timeouts import GEAK_TEST_TIMEOUT
 from minisweagent.run.preprocess.harness_utils import (
     DEFAULT_EVAL_BENCHMARK_ITERATIONS,
     DEFAULT_PIPELINE_OUTPUT_DIR,
@@ -57,6 +56,7 @@ from minisweagent.run.preprocess.testcase_cache import (
     materialize_cached_harness,
     save_cached_harness,
 )
+from minisweagent.run.utils.timeouts import GEAK_TEST_TIMEOUT
 
 # ── main entry point ─────────────────────────────────────────────────
 

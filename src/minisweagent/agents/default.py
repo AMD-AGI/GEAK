@@ -12,8 +12,8 @@ from pathlib import Path
 from jinja2 import StrictUndefined, Template
 
 from minisweagent import Environment, Model
-from minisweagent.skills.skill_runtime import SkillRuntime
 from minisweagent.run.utils.timeouts import GEAK_TEST_TIMEOUT
+from minisweagent.skills.skill_runtime import SkillRuntime
 from minisweagent.tools.tools_runtime import ToolRuntime
 
 logger = logging.getLogger(__name__)

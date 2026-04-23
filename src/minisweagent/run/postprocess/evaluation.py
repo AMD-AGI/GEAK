@@ -18,8 +18,6 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-
-from minisweagent.run.utils.timeouts import GEAK_PROFILE_TIMEOUT, GEAK_TEST_TIMEOUT
 from typing import Any
 
 from minisweagent.run.postprocess.benchmark_parsing import (
@@ -32,6 +30,7 @@ from minisweagent.run.utils.generated_artifacts import (
     apply_patch_with_generated_helper_fallback,
 )
 from minisweagent.run.utils.git_safe_env import get_git_safe_env
+from minisweagent.run.utils.timeouts import GEAK_PROFILE_TIMEOUT, GEAK_TEST_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
