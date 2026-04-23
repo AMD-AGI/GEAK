@@ -12,7 +12,9 @@ PARSE_TASK_INFO_USER_TEMPLATE = """Analyze the following optimization task and e
 Extract the following information (return null if not found):
 1. kernel_name: The name of the kernel/function being optimized (e.g., "gemm", "matmul", "conv2d")
 2. kernel_url: The kernel URL or local path if provided
-3. kernel_type: Kernel type, strictly one of "hip", "triton", or "other"
+3. kernel_type: Kernel type, strictly one of "hip", "triton", "pytorch2flydsl", "flydsl", or "other".
+   Use "pytorch2flydsl" when the task mentions translating PyTorch code to FlyDSL, converting PyTorch to FlyDSL, or pytorch2flydsl translation.
+   Use "flydsl" when the task is about optimizing existing FlyDSL code (not translating from PyTorch).
 4. repo: The repository path mentioned in the task (absolute path or relative path)
 5. test_command: The command to run tests or benchmarks
 6. metric: The performance metric to measure (e.g., "bandwidth in GB/s", "latency in ms", "throughput")
@@ -26,7 +28,7 @@ Return ONLY a valid JSON object with these keys. Example:
 {{
   "kernel_name": "matmul",
   "kernel_url": "https://github.com/org/repo/blob/main/kernel.py",
-  "kernel_type": "triton",
+  "kernel_type": "triton",  // one of: "hip", "triton", "pytorch2flydsl", "flydsl", "other"
   "repo": "/path/to/repo",
   "test_command": "python test.py",
   "metric": "Extract throughput in GFLOPS",
