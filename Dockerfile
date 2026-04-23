@@ -16,6 +16,7 @@ RUN python3 -c "from profiler_mcp.server import profile_kernel; from metrix impo
 # Runtime assets (not needed for install; changes only rebuild cheap COPY layers)
 COPY skills/ skills/
 COPY docs/ docs/
+COPY scripts/ scripts/
 COPY entrypoint.sh ./
 
 RUN chmod +x /workspace/entrypoint.sh
