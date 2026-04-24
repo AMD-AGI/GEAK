@@ -139,7 +139,7 @@ class DefaultAgent:
             self.toolruntime.disable_tools(self.config.disabled_tools)
         # Always wrap RAG MCP tools with postprocessor filter
         try:
-            self.toolruntime.wrap_rag_tools_with_postprocessor()
+            self.toolruntime.wrap_rag_tools_with_postprocessor(api_key=self.model.config.api_key)
         except Exception as e:
             logger.warning("Failed to wrap RAG tools with RAG postprocessor: %s", e)
         # Propagate agent's env vars (HIP_VISIBLE_DEVICES etc.) to tools

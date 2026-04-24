@@ -104,7 +104,7 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
     kernel_type = str(raw_kernel_type or "").strip().lower()
     logger.info("parse_task_info: kernel_type: %s", kernel_type)
 
-    if kernel_type not in {"hip", "triton", "flydsl", "other"}:
+    if kernel_type not in {"hip", "triton", "pytorch2flydsl", "flydsl", "other"}:
         if raw_kernel_type not in (None, ""):
             logger.warning(
                 "parse_task_info: invalid kernel_type %r; normalizing to 'other'.",

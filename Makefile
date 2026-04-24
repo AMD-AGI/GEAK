@@ -1,4 +1,4 @@
-.PHONY: install install-dev install-full
+.PHONY: install install-dev install-full index
 
 # Production install (used by Dockerfile): core + MCP tools
 install:
@@ -26,3 +26,9 @@ install-dev:
 	            -e mcp_tools/profiler-mcp/ \
 	            -e mcp_tools/cross-session-memory-mcp/ \
 	            -e mcp_tools/rag-mcp/
+
+# Build the RAG semantic-search index (opt-in; mini.py auto-builds on first
+# use when tools.rag is enabled, so explicit invocation is only needed for
+# offline pre-baking).
+index:
+	python scripts/build_index.py --force
