@@ -64,6 +64,10 @@ def _normalize_kernel_type(value: Any) -> str:
         return "triton"
     if text in {"hip", "rocm", "rocblas"}:
         return "hip"
+    if text == "pytorch2flydsl":
+        return "pytorch2flydsl"
+    if text == "flydsl":
+        return "flydsl"
     return "other"
 
 
@@ -449,6 +453,7 @@ def main(
             harness_spec = promoted
             logger.info("[bold cyan]Promoted test command to validated harness: %s[/bold cyan]", promoted)
 
+    _target_language = "flydsl" if kernel_type in {"pytorch2flydsl", "flydsl"} else None
     _preprocess_kwargs = dict(
         kernel_url=kernel_target,
         repo=repo,
@@ -456,6 +461,7 @@ def main(
         gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
         model_factory=lambda: get_model(model_name, config.get("model", {})),
         console=console,
+        target_language=_target_language,
     )
     logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
 
