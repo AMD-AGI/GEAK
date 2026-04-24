@@ -124,6 +124,18 @@ geak --repo "$REPO" \
   --task "Optimize the MLA decode Triton kernel." 
 ```
 
+**Example: FlyDSL kernel `preshuffle_gemm`**
+
+```bash
+# FlyDSL repo root (requires `pip install flydsl` in the environment)
+REPO="/path/to/FlyDSL"
+
+geak --repo "$REPO" \
+  --kernel-url "$REPO/kernels/preshuffle_gemm.py" \
+  --task "Optimize the preshuffle GEMM kernel." \
+  --yolo --exit-immediately
+```
+
 For more options and examples, see **[Quick start](docs/quick_start.md)**.
 
 

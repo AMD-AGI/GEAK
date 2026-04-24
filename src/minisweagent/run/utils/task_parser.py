@@ -191,7 +191,7 @@ def parse_task_info(task_content: str, model) -> dict:
     Extracts:
     - kernel_name: Name of the kernel being optimized
     - kernel_url: URL/path of the kernel being optimized
-    - kernel_type: One of hip/triton/other
+    - kernel_type: One of hip/triton/flydsl/other
     - repo: Repository path
     - test_command: Command to test the optimization
     - metric: Performance metric to extract

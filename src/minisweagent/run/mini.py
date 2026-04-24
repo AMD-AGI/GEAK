@@ -340,7 +340,7 @@ def main(
             from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
 
             inferred = _normalize_kernel_type(_infer_kernel_type(kp))
-            if inferred in {"hip", "triton"}:
+            if inferred in {"hip", "triton", "flydsl"}:
                 kernel_type = inferred
                 logger.info("Updated kernel_type using kernel path: %s", kernel_type)
 
@@ -497,7 +497,7 @@ def main(
         repo = Path(preprocess_ctx["repo_root"])
 
     # kernel_type routing:
-    # - hip/other -> homogeneous agent
+    # - hip/flydsl/other -> homogeneous agent
     # - triton -> heterogeneous orchestrator
     # Auto-detect kernel type if heterogeneous flag was not set by LLM extraction or task parser
     if heterogeneous is None:
