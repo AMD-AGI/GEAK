@@ -23,6 +23,8 @@ import yaml
 from minisweagent.run.utils.generated_artifacts import apply_patch_with_generated_helper_fallback
 from minisweagent.run.utils.git_safe_env import get_git_safe_env
 
+logger = logging.getLogger(__name__)
+
 # ============================================================================
 # Task file I/O
 # ============================================================================
@@ -283,6 +285,104 @@ def _apply_dirty_tracked_changes(repo_path: Path, worktree_path: Path, env: dict
         raise RuntimeError(f"Failed to sync dirty tracked files into worktree: {error_text[:500]}")
 
 
+def _resolve_output_root(repo_path: Path, worktree_path: Path) -> Path | None:
+    """Return the top-level GEAK output directory inside repo_path, if any.
+
+    When the worktree is created inside the repo (e.g.
+    ``<repo>/optimization_logs/<run>/results/.../slot_N``), returns the first
+    directory component relative to repo_path (e.g. ``<repo>/optimization_logs``).
+    Returns None if the worktree is not inside the repo.
+    """
+    try:
+        relative = worktree_path.relative_to(repo_path)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+    return repo_path / relative.parts[0]
+
+
+def _symlink_gitignored_files(
+    repo_path: Path,
+    worktree_path: Path,
+    env: dict[str, str] | None = None,
+) -> None:
+    """Symlink gitignored files from the original repo into the worktree.
+
+    Gitignored build artifacts (compiled extensions, generated version files,
+    etc.) are absent from worktrees created by ``git worktree add``.
+    Symlinking them lets the worktree use these artifacts without rebuilding.
+
+    Files inside the GEAK output root are skipped to avoid pulling in
+    artifacts from previous optimization runs.
+    """
+    resolved_repo = repo_path.resolve()
+    resolved_worktree = worktree_path.resolve()
+    output_root = _resolve_output_root(resolved_repo, resolved_worktree)
+
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--ignored", "--exclude-standard"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except subprocess.CalledProcessError:
+        return
+
+    symlinked_count = 0
+    skipped_by_directory: dict[str, int] = {}
+
+    for relative_path in (line.strip() for line in result.stdout.splitlines() if line.strip()):
+        source = resolved_repo / relative_path
+
+        if not source.exists():
+            continue
+
+        if output_root is not None:
+            try:
+                source.resolve().relative_to(output_root)
+                continue
+            except ValueError:
+                pass
+
+        try:
+            source.resolve().relative_to(resolved_worktree)
+            continue
+        except ValueError:
+            pass
+
+        destination = resolved_worktree / relative_path
+        if destination.exists() or destination.is_symlink():
+            top_directory = relative_path.split("/")[0] if "/" in relative_path else relative_path
+            skipped_by_directory[top_directory] = skipped_by_directory.get(top_directory, 0) + 1
+            continue
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.symlink_to(source)
+        symlinked_count += 1
+
+    if symlinked_count:
+        logger.info(
+            "Symlinked %d gitignored file(s) from original repo into worktree.",
+            symlinked_count,
+        )
+
+    skipped_total = sum(skipped_by_directory.values())
+    if skipped_total:
+        summary_parts = [
+            f"{directory}/ ({count})" for directory, count in
+            sorted(skipped_by_directory.items(), key=lambda item: item[1], reverse=True)
+        ]
+        logger.info(
+            "Skipped %d gitignored file(s) already present in worktree: %s",
+            skipped_total,
+            ", ".join(summary_parts),
+        )
+
+
 def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
     """Create a git worktree, cleaning up any existing one first.
 
@@ -415,6 +515,7 @@ def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
     # Neutralize .git dirs in copied nested repos so the worktree's git
     # treats their content as regular files (clean diffs, no gitlink noise).
     _neutralize_nested_git_repos(worktree_path)
+    _symlink_gitignored_files(repo_path, worktree_path, git_env)
     return worktree_path
 
 
@@ -469,6 +570,8 @@ def create_worktree_with_patch(
         )
     else:
         log.info("Starting patch applied successfully on clean HEAD worktree")
+
+    _symlink_gitignored_files(repo_path, wt, git_env)
     return wt
 
 
