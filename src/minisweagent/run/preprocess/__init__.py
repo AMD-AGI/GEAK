@@ -20,5 +20,6 @@ The main entry points are ``run_preprocessor()`` and ``preprocessor.main()``.
 """
 
 from minisweagent.run.preprocess.preprocessor import run_preprocessor
+from minisweagent.run.preprocess.preprocess_orchestrator import run_preprocess_orchestrator
 
-__all__ = ["run_preprocessor"]
+__all__ = ["run_preprocessor", "run_preprocess_orchestrator"]

@@ -47,6 +47,10 @@ class PreprocessContext:
     # Original resolution info
     resolved: dict | None = None
 
+    # Agentic preprocessing fields
+    speedup_script_path: str | None = None
+    explore_result: dict | None = None
+
     def validate(self) -> list[str]:
         """Check that required fields are set and paths exist.
 
@@ -110,4 +114,6 @@ class PreprocessContext:
             commandment=ctx.get("commandment"),
             testcase_selection=ctx.get("testcase_selection"),
             resolved=ctx.get("resolved"),
+            speedup_script_path=ctx.get("speedup_script_path"),
+            explore_result=ctx.get("explore_result"),
         )
