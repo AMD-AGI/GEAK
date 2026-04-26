@@ -20,10 +20,25 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-
-from minisweagent.run.utils.gpu_arch import guard_rocprof_compute
-
 logger = logging.getLogger(__name__)
+
+
+def _import_guard_rocprof_compute():
+    """Import ``guard_rocprof_compute`` lazily, with the same sys.path fallback
+    as the other minisweagent imports in this module (see ``_profile_with_rocprof``).
+    profiler-mcp does not declare minisweagent as a dependency in its
+    pyproject.toml, so a hard top-level import would break standalone installs.
+    """
+    try:
+        from minisweagent.run.utils.gpu_arch import guard_rocprof_compute
+    except ImportError:
+        _agent_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+        _src = _agent_root / "src"
+        if str(_src) not in sys.path:
+            sys.path.insert(0, str(_src))
+        from minisweagent.run.utils.gpu_arch import guard_rocprof_compute
+    return guard_rocprof_compute
+
 
 mcp = FastMCP(
     name="profiler",
@@ -248,7 +263,7 @@ def profile_kernel(
     """
     logger.info("Profiler MCP: backend=%s, command=%s", backend, command)
 
-    backend, rdna_arch = guard_rocprof_compute(backend)
+    backend, rdna_arch = _import_guard_rocprof_compute()(backend)
     if rdna_arch:
         logger.warning(
             "rocprof-compute does not support RDNA (%s). Falling back to metrix backend.",

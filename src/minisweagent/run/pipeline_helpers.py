@@ -23,7 +23,7 @@ from typing import Any
 from minisweagent import get_repo_root
 from minisweagent.run.utils.gpu_arch import (
     detect_gpu_arch,
-    is_rdna,
+    is_wmma_capable,
     rdna_arch_context,
     rdna_compute_bound_guidance,
 )
@@ -711,7 +711,7 @@ def _bottleneck_guidance(bottleneck: str, metrics: dict, arch: str = "") -> list
     bn_lower = bn_aliases.get(bn_lower, bn_lower)
     for key, text in _BOTTLENECK_GUIDANCE.items():
         if key in bn_lower:
-            if key == "compute-bound" and is_rdna(arch):
+            if key == "compute-bound" and is_wmma_capable(arch):
                 text = rdna_compute_bound_guidance()
             lines = text.strip().splitlines()
             lines.extend(_search_workload_guidance(metrics))

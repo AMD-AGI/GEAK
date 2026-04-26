@@ -1042,8 +1042,7 @@ def run_preprocessor(
         # (mirrors run_harness.py behavior). Fixes sporadic
         # "No HIP GPUs are available" during Step 5 correctness on multi-GPU
         # hosts when the parent leaves no HIP_VISIBLE_DEVICES set.
-        import os as _os_env
-        _step5_env = _os_env.environ.copy()
+        _step5_env = os.environ.copy()
         _step5_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
         _step5_env.setdefault("PYTHONUNBUFFERED", "1")
 

@@ -3,11 +3,18 @@
 
 """Shared GPU architecture detection via rocminfo."""
 
+import functools
 import subprocess
 
 
+@functools.lru_cache(maxsize=1)
 def detect_gpu_arch() -> str:
-    """Return the GFX architecture string (e.g. 'gfx942', 'gfx1201') or '' on failure."""
+    """Return the GFX architecture string (e.g. 'gfx942', 'gfx1201') or '' on failure.
+
+    Cached: ``rocminfo`` is invoked at most once per process. The arch of the
+    host GPU does not change at runtime, so caching is safe and avoids
+    spawning rocminfo for every prompt-injection / harness-compile call.
+    """
     try:
         out = subprocess.run(["rocminfo"], capture_output=True, text=True, timeout=10)
         for line in out.stdout.splitlines():
@@ -25,6 +32,17 @@ def is_rdna(arch: str) -> bool:
     return arch.startswith(("gfx10", "gfx11", "gfx12"))
 
 
+def is_wmma_capable(arch: str) -> bool:
+    """True if *arch* supports WMMA (Wave Matrix Multiply-Accumulate).
+
+    WMMA was introduced on RDNA3 (gfx11) and is also present on RDNA4
+    (gfx12). RDNA1/RDNA2 (gfx10xx) do not have WMMA, so prompts that
+    suggest WMMA reformulations should be gated on this check rather
+    than on ``is_rdna``.
+    """
+    return arch.startswith(("gfx11", "gfx12"))
+
+
 def rdna_arch_context(gpu_info: dict, arch: str) -> list[str] | None:
     """Return RDNA-specific GPU context lines, or None if arch is not RDNA."""
     if not is_rdna(arch):
@@ -35,7 +53,7 @@ def rdna_arch_context(gpu_info: dict, arch: str) -> list[str] | None:
     lds_per_cu = gpu_info.get("lds_per_cu_kb", 64)
     vgprs = gpu_info.get("vgprs_per_cu", 512)
     wave_size = gpu_info.get("wavefront_size", 32)
-    return [
+    lines = [
         f"## GPU Architecture: {name} ({arch})",
         f"- Architecture: {arch} (RDNA)",
         f"- Compute Units: {cus}",
@@ -43,10 +61,16 @@ def rdna_arch_context(gpu_info: dict, arch: str) -> list[str] | None:
         f"- LDS per CU: {lds_per_cu} KB",
         f"- VGPRs per CU: {vgprs}",
         f"- Wavefront size: {wave_size} (RDNA default 32, supports 64)",
-        "- WMMA (Wave Matrix Multiply-Accumulate) instructions for matrix math (RDNA3+)",
-        "- Use these specs to guide your kernel optimizations (tile sizes, occupancy, LDS usage).",
-        "",
     ]
+    if is_wmma_capable(arch):
+        lines.append("- WMMA (Wave Matrix Multiply-Accumulate) instructions for matrix math (RDNA3+)")
+    lines.extend(
+        [
+            "- Use these specs to guide your kernel optimizations (tile sizes, occupancy, LDS usage).",
+            "",
+        ]
+    )
+    return lines
 
 
 _RDNA_COMPUTE_BOUND_GUIDANCE = (
