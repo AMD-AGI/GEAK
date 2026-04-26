@@ -52,7 +52,7 @@ class AmdClaudeModel(AmdLlmModelBase):
     def _init_client(self):
         api_key = self._get_api_key()
         user = self._get_user()
-        base_url = self.config.base_url or "https://llm-api.amd.com/Anthropic"
+        base_url = self.config.base_url or self.config.model_kwargs.get("api_base") or "https://llm-api.amd.com/Anthropic"
         self.client = anthropic.Anthropic(
             api_key="dummy",
             base_url=base_url,
