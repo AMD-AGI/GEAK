@@ -38,10 +38,17 @@ cd GEAK
 # Docker-based
 AMD_LLM_API_KEY=<YOUR_KEY> bash scripts/run-docker.sh
 
-# Local install
+# Local install (recommended)
 make install              # core + MCP tools (same as Docker)
 make install-full         # + dev tools + swe-rex
 make install-dev          # install-full, editable (for developers)
+
+# (or) pip-only install without registering MCP tools as packages
+pip install -e .          # core package, including MCP runtime dependencies
+pip install -e '.[full]'  # core + dev + langchain + swe-rex
+
+# (optional) RAG index build: if enable RAG, build index after make install
+make index
 
 # Set model name and key. In the case of docker-based setup, export the API key before
 # running scripts/run-docker.sh.
@@ -57,17 +64,6 @@ export ANTHROPIC_API_KEY="YOUR_KEY"
 # Option 2: If you use AMD LLM Gateway (model_class: amd_llm)
 export AMD_LLM_API_KEY="YOUR_KEY"
 ```
-
-### RAG Knowledge Base (Optional)
-
-GPU/ROCm/HIP optimization knowledge base, powered by hybrid retrieval (FAISS + BM25 + reranker).
-
-```bash
-# rag-mcp is included in `make install` — just build the index:
-python scripts/build_index.py --force
-```
-
-See **[RAG MCP Server](mcp_tools/rag-mcp/README.md)** for configuration and usage details.
 
 ### Usage
 
@@ -129,6 +125,18 @@ geak --repo "$REPO" \
   --kernel-url "$REPO/kernel.py" \
   --test-command "python3 -c \"import ast; ast.parse(open('kernel.py').read())\" && python3 'test_kernel_harness.py' --correctness && python3 'test_kernel_harness.py' --full-benchmark" \
   --task "Optimize the MLA decode Triton kernel." 
+```
+
+**Example: FlyDSL kernel `preshuffle_gemm`**
+
+```bash
+# FlyDSL repo root (requires `pip install flydsl` in the environment)
+REPO="/path/to/FlyDSL"
+
+geak --repo "$REPO" \
+  --kernel-url "$REPO/kernels/preshuffle_gemm.py" \
+  --task "Optimize the preshuffle GEMM kernel." \
+  --yolo --exit-immediately
 ```
 
 For more options and examples, see **[Quick start](docs/quick_start.md)**.
@@ -222,21 +230,18 @@ Automatically selects the best result across runs:
 
 - Kernel Profile — bottleneck analysis (bandwidth, occupancy, etc.)
 - RAG — GPU knowledge retrieval (AMD / NVIDIA)
+  - See **[RAG MCP Server](mcp_tools/rag-mcp/README.md)** for configuration and usage details.
 - In-session strategy tracking — full history, reproducibility, rollback
 - Cross-session memory — reuse past optimization insights
 
----
+  | Flag | Default | What it does |
+  |------|---------|--------------|
+  | `GEAK_MEMORY_DISABLE=1` | off | Turn off all memory (within-session + cross-session) |
+  | `GEAK_USE_KNOWLEDGE_BASE=0` | on | Turn off reading past insights from the knowledge base |
+  | `GEAK_SAVE_TO_KNOWLEDGE_BASE=1` | off | Turn on saving run insights to the knowledge base after each run |
+  | `GEAK_MEMORY_MIN_SPEEDUP=1.10` | 1.10 | Minimum speedup required to save an experience |
 
-## Cross-Session Memory Flags
-
-| Flag | Default | What it does |
-|------|---------|--------------|
-| `GEAK_MEMORY_DISABLE=1` | off | Turn off all memory (within-session + cross-session) |
-| `GEAK_USE_KNOWLEDGE_BASE=0` | on | Turn off reading past insights from the knowledge base |
-| `GEAK_SAVE_TO_KNOWLEDGE_BASE=1` | off | Turn on saving run insights to the knowledge base after each run |
-| `GEAK_MEMORY_MIN_SPEEDUP=1.10` | 1.10 | Minimum speedup required to save an experience |
-
-By default, the knowledge base is **read** (agents see past insights) but **not written** (run results are not saved back). Set `GEAK_SAVE_TO_KNOWLEDGE_BASE=1` to start building the knowledge base from your runs.
+  By default, the knowledge base is **read** (agents see past insights) but **not written** (run results are not saved back). Set `GEAK_SAVE_TO_KNOWLEDGE_BASE=1` to start building the knowledge base from your runs.
 
 ## Contributing
 

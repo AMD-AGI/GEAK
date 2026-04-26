@@ -23,6 +23,85 @@ from minisweagent.run.utils.generated_artifacts import generated_helper_excludes
 logger = logging.getLogger(__name__)
 
 
+def _normalize_diff_ruN_to_git(patch_text: str, base_repo: Path, cwd: Path) -> str:
+    """Rewrite ``diff -ruN`` headers (absolute paths) to git-style relative.
+
+    ``diff -ruN /abs/base /abs/cwd`` produces headers like::
+
+        diff -ruN /abs/base/kernel.py /abs/cwd/kernel.py
+        --- /abs/base/kernel.py    2026-04-17 19:10:02 +0000
+        +++ /abs/cwd/kernel.py     2026-04-19 01:21:00 +0000
+
+    ``git apply`` rejects these because it can't find ``/abs/base/kernel.py``.
+    Rewrite to::
+
+        diff --git a/kernel.py b/kernel.py
+        --- a/kernel.py
+        +++ b/kernel.py
+
+    The relative path is derived by stripping the ``base_repo`` / ``cwd``
+    prefix from each header line. Returns the input unchanged if no
+    rewrite is needed.
+    """
+    if not patch_text:
+        return patch_text
+    base_str = str(Path(base_repo).resolve()).rstrip("/")
+    cwd_str = str(Path(cwd).resolve()).rstrip("/")
+
+    out_lines: list[str] = []
+    rewrote = False
+    for line in patch_text.splitlines():
+        if line.startswith("diff -ruN "):
+            # Try to derive the relative path of the changed file from the
+            # second argument (the cwd-side path).
+            parts = line.split()
+            if len(parts) >= 4:
+                rel = parts[-1]
+                if rel.startswith(cwd_str + "/"):
+                    rel = rel[len(cwd_str) + 1 :]
+                elif rel.startswith(base_str + "/"):
+                    rel = rel[len(base_str) + 1 :]
+                out_lines.append(f"diff --git a/{rel} b/{rel}")
+                rewrote = True
+                continue
+        if line.startswith("--- "):
+            payload = line[4:].split("\t", 1)[0].strip()
+            if payload == "/dev/null":
+                out_lines.append("--- /dev/null")
+                continue
+            rel = payload
+            for prefix in (base_str + "/", cwd_str + "/"):
+                if rel.startswith(prefix):
+                    rel = rel[len(prefix) :]
+                    break
+            else:
+                # Fall back to basename if neither prefix matches.
+                rel = Path(payload).name
+            out_lines.append(f"--- a/{rel}")
+            rewrote = True
+            continue
+        if line.startswith("+++ "):
+            payload = line[4:].split("\t", 1)[0].strip()
+            if payload == "/dev/null":
+                out_lines.append("+++ /dev/null")
+                continue
+            rel = payload
+            for prefix in (base_str + "/", cwd_str + "/"):
+                if rel.startswith(prefix):
+                    rel = rel[len(prefix) :]
+                    break
+            else:
+                rel = Path(payload).name
+            out_lines.append(f"+++ b/{rel}")
+            rewrote = True
+            continue
+        out_lines.append(line)
+
+    if not rewrote:
+        return patch_text
+    return "\n".join(out_lines) + ("\n" if patch_text.endswith("\n") else "")
+
+
 @dataclass
 class SaveAndTestContext:
     """Context required for save_and_test tool execution."""
@@ -90,6 +169,32 @@ class SaveAndTestTool:
                 test_returncode,
                 patch_profile=patch_profile,
             )
+            # Strong feedback when no code changes were captured: this is
+            # almost always a sub-agent bug where the strategy was
+            # described in the tool-call but kernel.py was never edited.
+            # Surfacing this prominently in the tool output (instead of
+            # only as a [SaveAndTest] log line) helps the agent recognise
+            # and correct the mistake within the same round.
+            if not patch_content.strip():
+                no_change_warning = (
+                    "\n\n"
+                    "============================================================\n"
+                    "WARNING: NO CODE CHANGES DETECTED in your worktree.\n"
+                    "------------------------------------------------------------\n"
+                    "This save_and_test call captured an EMPTY patch (0 bytes).\n"
+                    "The benchmark above ran on the BASELINE (unmodified) kernel.py.\n"
+                    "\n"
+                    "To test an optimization, you must EDIT kernel.py BEFORE\n"
+                    "calling save_and_test:\n"
+                    "  1. Use the `edit` / `str_replace` / `write` tool to modify\n"
+                    "     kernel.py with your optimization, OR\n"
+                    "  2. `git apply` a patch file you have prepared.\n"
+                    "\n"
+                    "save_and_test runs `git diff` to capture your changes — if\n"
+                    "no files were modified, there is nothing to test or verify.\n"
+                    "============================================================\n"
+                )
+                output = output + no_change_warning
             return {"output": output, "returncode": 0 if test_passed else 1}
 
         except subprocess.TimeoutExpired:
@@ -612,7 +717,12 @@ class SaveAndTestTool:
                 text=True,
                 timeout=30,
             )
-            return result.stdout
+            # Normalize ``diff -ruN`` headers into git-style relative paths
+            # so that ``git apply`` in the eval worktree can apply the patch
+            # without choking on absolute paths like
+            # ``--- /home/user/repo/.../kernel.py``. Otherwise eval fails
+            # with "kernel.py: No such file or directory".
+            return _normalize_diff_ruN_to_git(result.stdout, ctx.base_repo_path, cwd)
 
         return ""
 
@@ -961,7 +1071,10 @@ class SaveAndTestTool:
     def _save_patch_file(self, patch_name: str, patch_content: str):
         output_dir = Path(self.context.patch_output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / f"{patch_name}.patch").write_text(patch_content)
+        patch_path = output_dir / f"{patch_name}.patch"
+        if not patch_content.strip() and patch_path.exists() and patch_path.stat().st_size > 0:
+            return
+        patch_path.write_text(patch_content)
 
     def _save_test_output(self, patch_name: str, test_output: str):
         output_dir = Path(self.context.patch_output_dir)

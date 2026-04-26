@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -486,6 +487,11 @@ class ParallelAgent(DefaultAgent):
                 new_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
                 new_env["GEAK_GPU_DEVICE"] = str(gpu_id)
                 logger.debug("Parallel agent %d assigned GPU %d", agent_id, gpu_id)
+                if console:
+                    with _stdout_lock:
+                        console.print(f"[bold green]Parallel agent {agent_id} using GPU {gpu_id}[/bold green]")
+                        if hasattr(sys.stdout, "flush"):
+                            sys.stdout.flush()
             env_config_dict["env"] = new_env
             parallel_env = type(base_env)(**env_config_dict)
 
