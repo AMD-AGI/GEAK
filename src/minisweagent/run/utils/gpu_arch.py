@@ -95,9 +95,15 @@ def rdna_compute_bound_guidance() -> str:
 
 
 def hipcc_offload_arch_flags() -> list[str]:
-    """Return ['--offload-arch=<gfx>'] if arch can be detected, else []."""
+    """Return ['--offload-arch=<gfx>'] on RDNA, else [].
+
+    Only emitted on RDNA where hipcc's default arch detection can pick the
+    wrong target on multi-GPU hosts (gfx1151 vs gfx1201 etc.). On CDNA we
+    intentionally leave the compile command unchanged from pre-PR behavior
+    and rely on hipcc's default agent enumeration.
+    """
     arch = detect_gpu_arch()
-    if arch:
+    if arch and is_rdna(arch):
         return [f"--offload-arch={arch}"]
     return []
 

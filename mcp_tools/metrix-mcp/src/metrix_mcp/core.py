@@ -337,17 +337,38 @@ class MetrixTool:
         return metrics
 
     def _validate_metrics(self, metrics: dict[str, float], kernel_name: str, quick: bool = False) -> None:
-        """Validate that expected metrics are present."""
+        """Validate that expected metrics are present.
+
+        On RDNA some metrics (notably certain L2/HBM counters) are genuinely
+        unavailable -- the metric set was authored against CDNA. Log a warning
+        and continue on RDNA so the pipeline can still surface partial results.
+        On CDNA we keep the pre-PR strict behavior (RuntimeError) so missing
+        metrics surface as a hard failure as before.
+        """
         expected = self.EXPECTED_METRICS_QUICK if quick else self.EXPECTED_METRICS_FULL
         missing = [m for m in expected if m not in metrics]
         if missing:
-            logger.warning(
-                "Metric validation for '%s...': %d metric(s) unavailable on this GPU: %s",
-                kernel_name[:60],
-                len(missing),
-                missing,
+            arch = ""
+            if hasattr(self.profiler, "backend") and hasattr(self.profiler.backend, "device_specs"):
+                arch = getattr(self.profiler.backend.device_specs, "arch", "") or ""
+            is_rdna_arch = arch.startswith(("gfx10", "gfx11", "gfx12"))
+            if is_rdna_arch:
+                logger.warning(
+                    "Metric validation for '%s...': %d metric(s) unavailable on this GPU: %s",
+                    kernel_name[:60],
+                    len(missing),
+                    missing,
+                )
+                logger.debug(
+                    f"Validated {len(expected) - len(missing)}/{len(expected)} metrics for '{kernel_name[:60]}...'"
+                )
+                return
+            logger.error(f"Metric validation failed for '{kernel_name[:60]}...': missing {len(missing)} metric(s)")
+            raise RuntimeError(
+                f"Missing expected metrics for kernel '{kernel_name}': {missing}\n"
+                f"Available metrics: {list(metrics.keys())}"
             )
-        logger.debug(f"Validated {len(expected) - len(missing)}/{len(expected)} metrics for '{kernel_name[:60]}...'")
+        logger.debug(f"Validated {len(expected)} metrics for '{kernel_name[:60]}...'")
 
     def _classify_bottleneck(self, metrics: dict[str, float], quick: bool = False) -> str:
         """Classify bottleneck based on metrics."""
