@@ -339,11 +339,11 @@ class MetrixTool:
     def _validate_metrics(self, metrics: dict[str, float], kernel_name: str, quick: bool = False) -> None:
         """Validate that expected metrics are present.
 
-        On RDNA some metrics (notably certain L2/HBM counters) are genuinely
-        unavailable -- the metric set was authored against CDNA. Log a warning
-        and continue on RDNA so the pipeline can still surface partial results.
-        On CDNA we keep the pre-PR strict behavior (RuntimeError) so missing
-        metrics surface as a hard failure as before.
+        On RDNA some metrics are genuinely unavailable -- the metric set was
+        authored against CDNA. Log a warning and continue on RDNA so the
+        pipeline can still surface partial results. On CDNA we keep the pre-PR
+        strict behavior (RuntimeError) so missing metrics surface as a hard
+        failure as before.
         """
         expected = self.EXPECTED_METRICS_QUICK if quick else self.EXPECTED_METRICS_FULL
         missing = [m for m in expected if m not in metrics]
