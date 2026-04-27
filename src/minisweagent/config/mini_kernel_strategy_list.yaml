@@ -80,7 +80,9 @@ agent:
        
     4. Before listing strategies, identify the bottleneck of the current kernel:
        - If `profile.json` exists in the workspace, use it as the primary profiling reference for optimization planning.
+    {% if 'profile_kernel' in tool_names %}
        - If `profile.json` is not available, call the `profile_kernel` tool with the appropriate working directory and command used during performance testing.
+    {% endif %}
 
     5. **Analyze and Prioritize Strategies**
        - Analyze computational complexity, memory access patterns, and parallelization opportunities
@@ -108,7 +110,9 @@ agent:
        - **Calculate relative change** compared to baseline (e.g., +21.1% improvement or -4.7% regression)
        - Record ONLY the relative change (percentage) in strategy file, not absolute values
        - Include reference to detailed log file for full metrics
+    {% if 'profile_kernel' in tool_names %}
        - **RECOMMENDED**: Use `profile_kernel` tool to profile the kernel after implementation to identify the bottleneck of the current kernel.
+    {% endif %}
        - **Decision**: If successful (performance improved), keep it. If failed (regression), revert the changes.
 
     8. **Explore Additional Strategies**
@@ -156,8 +160,8 @@ agent:
     ## Important Rules
 
     1. Every response must contain exactly one tool call
-    2. NOTE: This rule applies to `bash` tool only, NOT to `profile_kernel`.
-       For `bash` tool, directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+    2. {% if 'profile_kernel' in tool_names %}NOTE: This rule applies to `bash` tool only, NOT to `profile_kernel`.
+       {% endif %}For `bash` tool, directory or environment variable changes are not persistent. Every action is executed in a new subshell.
        However, you can prefix any bash command with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
     3. Ignore policy: When analyzing logs / drawing conclusions / optimizing, IGNORE all information related to parallel execution or hardware assignment (e.g., "parallel X runs", "gpu idx N", "device id", multi-GPU, threads, streams, scheduling, affinity). This information is already handled by the backend; it MUST NOT enter your reasoning, MUST NOT influence decisions, and MUST NOT be mentioned in the final answer.
     4. All code edits MUST stay inside the current worktree. Never write files using absolute paths outside the current worktree.
@@ -203,6 +207,7 @@ agent:
     - **note**: Add documentation note
     - **summary**: Show statistics
 
+    {% if 'profile_kernel' in tool_names %}
     ### profile_kernel
     Profile GPU kernel with rocprof to identify bottlenecks. Parameters: command, workdir
     - **command**: Must be a single executable invocation (no shell operators). If you use relative paths (e.g. `scripts/...`), they are resolved relative to **workdir**.
@@ -211,6 +216,7 @@ agent:
     - Good example: `command="python3 scripts/task_runner.py performance", workdir="/path/to/project"`
     - Also ok: `command="python3 /absolute/path/to/scripts/task_runner.py performance"`
     - Bad example: `command="cd /path && python3 scripts/task_runner.py performance"`
+    {% endif %}
   
   action_observation_template: |
     <returncode>{{output.returncode}}</returncode>
@@ -225,7 +231,8 @@ agent:
     - **save_and_test**: Save patch and run performance test
     - **submit**: Submit final result and complete task
     - **strategy_manager**: Track optimization strategies
-    - **profile_kernel**: Profile GPU kernel with rocprof
+    {% if 'profile_kernel' in tool_names %}- **profile_kernel**: Profile GPU kernel with rocprof
+    {% endif %}
     {% if 'query' in tool_names %}- **query**: Search knowledge base for optimization techniques
     - **optimize**: Get optimization suggestions for specific kernel types
     {% endif %}</available_tools>
