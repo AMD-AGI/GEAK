@@ -210,44 +210,30 @@ script that imports the kernel, creates test inputs, and provides
    - If a harness mode fails, understand why it fails before editing. Prefer
      the smallest source-faithful fix over rewriting working harness logic.
 
-10. **Benchmark timing: use GPU-side events, NOT `triton.testing.do_bench`.**
+10. **Benchmark timing: understand dispatch-inclusive vs kernel-only timing.**
 
-    The `--benchmark` and `--full-benchmark` modes must measure **GPU kernel
-    execution time only**, not wall-clock time that includes Python dispatch
-    overhead.
+    Both `triton.testing.do_bench` and `torch.cuda.Event` measure
+    **dispatch-inclusive** time: the GPU-side interval includes any idle gap
+    while Python prepares and submits the kernel (config lookups,
+    `copy.deepcopy`, logging, assertions).  `do_bench` additionally handles
+    L2 cache flushing between iterations, which raw `torch.cuda.Event` loops
+    do not.  Either timer is fine for **general benchmarking**.
 
-    **Why this matters:** `triton.testing.do_bench` measures wall-clock time
-    from Python, which includes config lookups, `copy.deepcopy`, logging, and
-    assertions that wrap the kernel call.  When GEAK uses `do_bench` as its
-    objective function, it can achieve apparent speedups by optimizing Python
-    overhead (e.g. replacing `deepcopy` with `dict()`) rather than improving
-    actual GPU kernel performance.  This conflation is especially severe for
-    small, launch-latency-bound shapes where Python overhead dominates.
+    **When dispatch-inclusive timing becomes a problem:**
+    For optimization strategies that only change kernel configs (tile sizes,
+    `num_warps`, `num_stages`, etc.), Python dispatch overhead is constant
+    across configs.  If that overhead dominates kernel execution time — common
+    with small, launch-latency-bound shapes — then `do_bench` / CUDA-event
+    timers cannot distinguish between configs, and GEAK may credit unrelated
+    wrapper changes (e.g. `deepcopy` → `dict()`) as kernel speedups.
 
-    **Use `torch.cuda.Event` timing:**
-    ```python
-    # Warmup
-    for _ in range(WARMUP):
-        kernel_fn(...)
-    torch.cuda.synchronize()
-
-    # Timed iterations
-    latencies = []
-    for _ in range(ITERATIONS):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        kernel_fn(...)
-        end.record()
-        end.synchronize()
-        latencies.append(start.elapsed_time(end))
-    median_ms = sorted(latencies)[len(latencies) // 2]
-    ```
-
-    **When `triton.testing.do_bench` is acceptable:** Only when the
-    optimization target is end-to-end dispatch latency (wrapper + kernel
-    combined), not kernel-level performance.  This should be the exception,
-    not the default.
+    **Use `rocprofv3 --kernel-trace` for kernel-only timing:**
+    The harness `--profile` mode already runs the kernel for `rocprofv3`
+    capture.  When the optimization target is pure GPU kernel performance
+    (config tuning, algorithmic changes), prefer `kernel-profile` /
+    `rocprofv3` durations as the ground-truth metric.  These report
+    hardware-level kernel start/end timestamps, completely free of Python
+    dispatch noise.
 
 **Language-specific test harness notes:**
 
