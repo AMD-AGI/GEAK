@@ -4,26 +4,33 @@ This directory is where you add **Model Context Protocol** servers that the GEAK
 
 ## Installation
 
-### With uv (recommended for development)
+### Recommended (Makefile)
+
+From the GEAK repository root, the Makefile installs the main package and each MCP server explicitly:
 
 ```bash
-uv pip install -e '.[mcp]'   # main package + MCP servers
-# or
-uv pip install -e '.[full]'  # everything
-```
-
-### With pip (or inside Docker)
-
-Use the Makefile, which installs the main package first, then each MCP server explicitly:
-
-```bash
+make install       # non-editable (used by Dockerfile); core + MCP servers
 make install-dev   # editable install for development
-make install       # non-editable (used by Dockerfile)
+make install-full  # core + MCP servers + dev tools + swe-rex
 ```
 
-`fastmcp` and `mcp[cli]` are in the `[mcp]` optional group. With pip, `fastmcp` is installed transitively — each MCP server package declares `fastmcp>=0.2.0` as its own dependency.
+### Alternative (pip only)
 
-Without installing the MCP servers, the agent will fail with `ModuleNotFoundError` when it tries to start them.
+`fastmcp` and `mcp[cli]` are core dependencies — installed automatically with `pip install -e .`.
+
+```bash
+pip install -e .          # runtime install
+# or
+pip install -e '.[full]'  # runtime + dev/langchain extras + swe-rex
+```
+
+GEAK launches the shipped MCP servers in this directory directly from the repository as subprocesses by setting each server's `src/` directory on `PYTHONPATH`, so no separate MCP pip extra is required.
+
+If you want to work on one server package in isolation, install that package directly, for example:
+
+```bash
+pip install -e mcp_tools/profiler-mcp
+```
 
 ## Directory and module naming
 
