@@ -3,14 +3,10 @@ name: hip-and-triton-kernel-optimization
 description: >-
   Profiler-driven optimization playbook for AMD CDNA-3 / CDNA-4 GPU kernels
   (MI300X, MI325X, MI355X — gfx942 / gfx950) covering attention, GEMM, and
-  MoE workloads. Use when optimizing a HIP or Triton kernel on AMD ROCm;
-  when the user mentions rocprofv3, PMC counters, MFMA utilization, LDS
-  bank conflicts, s_waitcnt stalls, or the "Triton ceiling"; when
-  computing a roofline target for a kernel; when validating accuracy with
-  run_perftest / aiter or against an fp32 torch reference; or when
+  MoE workloads. Use when optimizing a HIP or Triton kernel on AMD ROCm; or when
   scoping a HipKittens port. Encodes the three-tier rocprofv3
-  methodology, a roofline-anchored signal-to-decision table, nine HIP
-  optimization recipes, and the build / accuracy / benchmarking patterns.
+  methodology, a roofline-anchored signal-to-decision table, and the build / 
+  accuracy / benchmarking patterns.
 ---
 
 # AMD Kernel Optimization
@@ -381,28 +377,6 @@ with `sched_barrier_pairs<>` templates per cluster. HK abstracts the
 **primitives** (tile types, mma, sched-group barriers); you still
 hand-author cluster-level scheduling. The productivity win is real but
 it is 6× LOC, not "10-line MLA".
-
-## Communicating results
-
-For exec-facing material:
-
-- **Story-arc plot.** Kernel evolution v1 → vN with milestone
-  annotations. One line per version, distinct color, milestone text in
-  a legend or table. Plot the **roofline target** as a horizontal
-  reference line so the audience sees how close each variant gets.
-- **Zoom plot.** When a noisy or much-slower baseline compresses the
-  kernel-vs-kernel band into the bottom 10 % of the y-axis, drop the
-  baseline in a separate "zoom" plot so the deltas between optimized
-  variants are readable. Cap the y-axis at ~1.12× the highest sample
-  in the zoomed view.
-- **Accuracy slide.** Always include a slide proving the speedup is
-  not a precision compromise — fp32-reference cosine numbers for the
-  new kernel (and the reference, if one is available), side by side.
-- **Annotation placement.** Park summary callouts in plot whitespace
-  using axes-fraction coordinates (e.g.
-  `xytext=(0.97, 0.06), textcoords="axes fraction"`), not over the
-  data band. Use a curved arrow to point from the callout to the
-  data point.
 
 ## Workflow checklist
 
