@@ -18,6 +18,7 @@ RUN python3 -c "from profiler_mcp.server import profile_kernel; from metrix impo
 # so it's already included via the mcp_tools/ COPY above. No top-level knowledge-base/ exists.
 COPY skills/ skills/
 COPY docs/ docs/
+COPY scripts/ scripts/
 COPY entrypoint.sh ./
 
 RUN chmod +x /workspace/entrypoint.sh

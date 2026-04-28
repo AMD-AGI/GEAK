@@ -1,0 +1,19 @@
+task_type: flydsl_geak
+source_file_path:
+- kernels/preshuffle_gemm.py
+harness_path: test_preshuffle_gemm_harness.py
+flydsl_commit: e7b2a742081c5492731b5b8b846cab5ead131e71
+compile_command:
+- python3 -c "import ast; ast.parse(open('kernels/preshuffle_gemm.py').read())"
+correctness_command:
+- python3 test_preshuffle_gemm_harness.py --correctness
+performance_command:
+- python3 test_preshuffle_gemm_harness.py --full-benchmark
+target_kernel_functions:
+- compile_preshuffle_gemm_a8
+- preshuffle_gemm_kernel
+prompt:
+  instructions: Optimize the preshuffle GEMM FlyDSL kernel for AMD MI300X GPU.
+    The kernel implements FP8/INT8/BF16 matrix multiplication with B-matrix
+    pre-shuffling for MFMA instructions, double-buffered LDS staging, and
+    configurable tiling.
