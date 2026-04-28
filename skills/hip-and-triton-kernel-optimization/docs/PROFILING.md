@@ -16,7 +16,6 @@ os.environ["PYTORCH_ROCM_ARCH"] = "gfx950"
 import torch, sys, argparse
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--target", choices=["asm", "hip"], required=True)
 ap.add_argument("--ctx", type=int, default=4000)
 ap.add_argument("--batch", type=int, default=4)
 ap.add_argument("--iters", type=int, default=10)
@@ -26,7 +25,7 @@ args = ap.parse_args()
 # rocprofv3 will see N dispatches; we drop the cold one in post-processing.
 inputs = build_inputs(args.batch, args.ctx)
 for _ in range(args.iters):
-    run_kernel(args.target, inputs)
+    run_kernel(inputs)
 torch.cuda.synchronize()
 ```
 
@@ -39,7 +38,7 @@ dispatch, few enough that PC-sampling output stays manageable.
 
 ```bash
 rocprofv3 --sys-trace -d timeline_out -o timeline_<tag> \
-  -- python3 driver.py --target asm --ctx 4000 --batch 4 --iters 10
+  -- python3 driver.py --ctx 4000 --batch 4 --iters 10
 ```
 
 ### Outputs
@@ -103,8 +102,9 @@ Per-group rationale:
   stalls are LDS-side or VMEM-side. `FetchSize` / `WriteSize` are
   HBM bytes per launch.
 - **c (instruction mix per wave)** — divide each `SQ_INSTS_*` by
-  `SQ_WAVES` to get per-wave instruction counts. Compare to a
-  reference kernel (ASM, vendor) to see which class is bloated.
+  `SQ_WAVES` to get per-wave instruction counts. Compare to the
+  algorithmic-minimum count for each class (count what the algorithm
+  actually requires) to see which class is bloated.
 - **d (VMEM + L2)** — `TCC_HIT_sum / (TCC_HIT_sum + TCC_MISS_sum)`
   is the L2 hit rate. A high hit rate combined with high `FetchSize`
   signals redundant fetches.
@@ -112,18 +112,16 @@ Per-group rationale:
 ### Sweep invocation
 
 ```bash
-for tgt in asm hip; do
-  for ctx in 1000 2500 4000 7000 9000; do
-    for grp in "${GROUPS[@]}"; do
-      gname=${grp%%:*}
-      counters=${grp#*:}
-      counters_sp=$(echo "$counters" | tr ',' ' ')
-      tag="${tgt}_b4_ctx${ctx}_g${gname}"
-      rocprofv3 --pmc $counters_sp -f csv \
-        -d pmc_runs -o "$tag" \
-        --kernel-include-regex "${tgt}_kernel_pattern.*" \
-        -- python3 driver.py --target $tgt --ctx $ctx --batch 4 --iters 10
-    done
+for ctx in 1000 2500 4000 7000 9000; do
+  for grp in "${GROUPS[@]}"; do
+    gname=${grp%%:*}
+    counters=${grp#*:}
+    counters_sp=$(echo "$counters" | tr ',' ' ')
+    tag="kernel_b4_ctx${ctx}_g${gname}"
+    rocprofv3 --pmc $counters_sp -f csv \
+      -d pmc_runs -o "$tag" \
+      --kernel-include-regex "your_kernel_regex.*" \
+      -- python3 driver.py --ctx $ctx --batch 4 --iters 10
   done
 done
 ```
@@ -132,27 +130,29 @@ done
 rocprofv3 collects PMC for every kernel in the process (including
 PyTorch internals), bloating the CSVs.
 
-### Worked example (Kimi-K2 MLA decode at b=4)
+### Worked example (attention decode at b=4, well-tuned reference vs. baseline HIP)
 
-| ctx | LDSBankConflict (ASM) | LDSBankConflict (HIP-baseline) | LBC/MemUnitStalled (ASM) | LBC/MemUnitStalled (HIP) |
+| ctx | LDSBankConflict (reference) | LDSBankConflict (baseline) | LBC/MemUnitStalled (reference) | LBC/MemUnitStalled (baseline) |
 |---:|---:|---:|---:|---:|
 | 1000 | 0.98 | 1.45 | 0.0035 | **0.118** |
 | 4000 | 1.93 | 3.13 | 0.0029 | 0.049 |
 | 9000 | 2.66 | 4.13 | 0.0029 | 0.034 |
 
-The `0.118` at ctx=1000 was the smoking gun: HIP-baseline LDS pressure
-was 35× the ASM kernel's. This drove the v9k transposed-LDS rewrite.
+The `0.118` at ctx=1000 was the smoking gun: baseline LDS pressure was
+35× the roofline target (< 0.005). This kind of signal drives a
+transposed-LDS rewrite (recipe 1).
 
-| Counter | ASM (per wave) | HIP (per wave) | Ratio |
+| Counter | Algorithmic min (per wave) | Baseline (per wave) | Ratio |
 |---|---:|---:|---:|
-| `SQ_INSTS_VALU` | 236 | 1130 | 4.8× |
-| `SQ_INSTS_SALU` | 107 | 297 | 2.8× |
-| `SQ_INSTS_LDS` | 65 | 408 | 6.3× |
-| `SQ_INSTS_MFMA` (scaled to NHEAD-equivalent) | 15.5 | 7.3 | 0.47× |
+| `SQ_INSTS_VALU` | ≈ 240 | 1130 | 4.7× |
+| `SQ_INSTS_SALU` | ≈ 110 | 297 | 2.7× |
+| `SQ_INSTS_LDS` | ≈ 65 | 408 | 6.3× |
+| MFMA utilization | 100 % of opcode peak | 47 % | 0.47× |
 
-The 4.8× VALU and 6.3× LDS gap meant we were doing too much data
-shuffling. The MFMA pipe at 0.47× ASM meant it was *under-fed*, not
-saturated — confirmed by Tier 3 below.
+The 4.7× VALU and 6.3× LDS multipliers meant the kernel was doing too
+much data shuffling around the MFMA. MFMA utilization at 47 % of opcode
+peak meant the pipe was *under-fed*, not saturated — confirmed by
+Tier 3 below.
 
 ### Aggregation
 
@@ -188,7 +188,7 @@ rocprofv3 --pc-sampling-method host_trap \
           --pc-sampling-interval 50us \
           -d pc_out -o pc_<tag> \
           --kernel-include-regex "your_kernel_regex.*" \
-          -- python3 driver.py --target asm --ctx 4000 --batch 4 --iters 200
+          -- python3 driver.py --ctx 4000 --batch 4 --iters 200
 ```
 
 `50us` is a good default for kernels in the 5–30 µs range. Drop to
@@ -240,7 +240,7 @@ hist = (df["class"].value_counts(normalize=True) * 100).round(1)
 print(hist)
 ```
 
-### Worked example (Kimi-K2 MLA decode, ASM kernel)
+### Worked example (attention decode, well-tuned reference)
 
 ```
 class       %
@@ -255,7 +255,7 @@ SMEM         3.9
 ```
 
 Reading: 7.8 % MFMA means the MFMA pipe is **idle 92 % of the time**
-even on hand-tuned ASM. 27.7 % `s_waitcnt` means the kernel is
+even on a well-tuned reference. 27.7 % `s_waitcnt` means the kernel is
 sitting on synchronization waits, not arithmetic. **Conclusion: this
 kernel is wait-counter-bound, not arithmetic-bound. Adding MFMA
 throughput will not help; cutting staging traffic will.**
@@ -338,8 +338,8 @@ sometimes scaled differently between ROCm releases).
   pipe into pandas. Add `-f csv` to all PMC and timeline runs.
 - **Wrong `--kernel-include-regex`.** The regex matches the demangled
   kernel name; check `_kernel_stats.csv` after a Tier 1 run to confirm
-  the exact name. ASM kernels have C-style names; HIP kernels have
-  C++-mangled names.
+  the exact name. Toolchains differ: HIP / C++ kernels have mangled
+  names, hand-written assembly is typically C-style.
 - **PMC overhead inflating timing.** PMC adds ~5–15 % overhead per
   collected counter. Don't read kernel duration from a PMC run; use
   Tier 1's `--sys-trace` for timing and Tier 2 for counters only.

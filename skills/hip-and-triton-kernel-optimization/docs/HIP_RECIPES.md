@@ -15,8 +15,9 @@ Each recipe is structured:
 ## 1. Transposed LDS reads
 
 **Trigger.** `LDSBankConflict / MemUnitStalled > 0.05` from PMC group
-`b`. (Reference: ASM is typically < 0.005; a baseline HIP kernel
-loading scattered KV through LDS is often 0.05–0.15.)
+`b`. The roofline target is < 0.005 (any LDS conflict is sub-roofline);
+a baseline HIP kernel loading scattered KV through LDS is often
+0.05–0.15.
 
 **Change.** Replace scattered `ds_read` patterns with the gfx950
 transposed reads, and XOR-swizzle the LDS layout so each read hits all
@@ -43,9 +44,9 @@ const uint32_t swizzled_offset =
     base_offset ^ ((lane >> 3) << 4) ^ ((slot << 5) & 0x3FF);
 ```
 
-**Expected impact.** Closes 30–60 % of the gap to ASM when LDS is the
-dominant stall. In the MLA project this single change moved
-`LDSBankConflict / MemUnitStalled` from 0.118 → 0.025 at ctx=1000.
+**Expected impact.** Closes 30–60 % of the gap to roofline when LDS is
+the dominant stall. Empirically this single change can move
+`LDSBankConflict / MemUnitStalled` from ~0.12 → ~0.025 at low context.
 
 **Gotchas.**
 
@@ -114,8 +115,10 @@ auto acc = __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(
 
 **Expected impact.** Doubles MFMA work-per-issue when MFMA was the
 issue-rate bottleneck. Combined with hand-scheduling (recipe 6) this
-is what unblocks the path from "MFMA pipe under-fed" to
-"wait-counter-bound" — the same regime as hand-tuned ASM.
+is what unblocks the path from "MFMA pipe under-fed" to the
+"wait-counter-bound" regime that any roofline-tracking attention
+kernel ends up in (see [PROFILING.md](PROFILING.md) Tier 3 worked
+example).
 
 **Gotchas.**
 
@@ -129,9 +132,9 @@ is what unblocks the path from "MFMA pipe under-fed" to
 
 ## 4. Persistent grid (CU-sized + atomic dispenser)
 
-**Trigger.** PC sampling on the reference (e.g. ASM) shows > 30 % of
-samples in the persistent prologue (Q-tile load, accumulator init,
-m_i/l_i seed). Your kernel relaunches that work per dispatch.
+**Trigger.** PC sampling shows > 30 % of samples in the persistent
+prologue region (Q-tile load, accumulator init, m_i/l_i seed) — i.e.
+per-launch setup is not amortized across tiles.
 
 **Change.** Promote the grid to CU-sized (~304 WGs on MI355X). Each
 WG pulls work-tile tuples `(split, batch, head_group)` from a global
@@ -160,8 +163,8 @@ __global__ void persistent_kernel(...) {
 ```
 
 **Expected impact.** Closes the gap that comes from per-launch
-prologue work. This is the dominant source of remaining gap to ASM at
-long context lengths after recipes 1–3 land.
+prologue work. This is the dominant source of remaining gap to the
+roofline at long context lengths after recipes 1–3 land.
 
 **Gotchas.**
 
@@ -176,10 +179,11 @@ long context lengths after recipes 1–3 land.
 
 ## 5. Register-resident Q + softmax state
 
-**Trigger.** VALU per wave > 3× ASM-equivalent in PMC group `c`.
-Indicates redundant data movement around the MFMA pipe — most often
-because Q tiles and softmax accumulators (`m_i`, `l_i`) are being
-re-loaded from LDS every K-iteration.
+**Trigger.** VALU per wave > 3× algorithmic minimum in PMC group `c`
+(count the VALU ops your algorithm actually requires; everything above
+is redundant data movement). Most often this means Q tiles and softmax
+accumulators (`m_i`, `l_i`) are being re-loaded from LDS every
+K-iteration.
 
 **Change.** Accept 1 WG/CU occupancy. Budget VGPRs aggressively:
 
@@ -194,10 +198,11 @@ __launch_bounds__(NUM_THREADS, 1)   // 1 WG/CU
 __global__ void kernel(...) { ... }
 ```
 
-**Expected impact.** ASM's 512 VGPR / 160 KB LDS / 1 WG/CU layout
-typically lands at 2× the throughput of a 124 VGPR / 64 KB LDS /
-2 WG/CU layout for decode-shaped attention, because the LDS round-
-trips dominate at low context.
+**Expected impact.** A 1 WG/CU register-budgeted layout (full Q tile +
+softmax state in registers, ~512 VGPRs / ~160 KB LDS) typically lands
+at 2× the throughput of a 2 WG/CU shared-LDS layout (~124 VGPRs /
+~64 KB LDS) for decode-shaped attention, because the LDS round-trips
+dominate at low context.
 
 **Gotchas.**
 
@@ -250,9 +255,10 @@ __builtin_amdgcn_s_waitcnt(0);                      // single drain
 pv_mfma_phase(...);
 ```
 
-**Expected impact.** This is the recipe that closes the gap from
-"HIP-with-recipes-1-5" to "matches ASM". In the MLA project it took
-v9o from 1.4× ASM (long ctx) to 1.16× ASM (short ctx, beating ASM).
+**Expected impact.** This is the recipe that takes a kernel from
+"recipes 1–5 applied, MFMA pipe fed but waitcnt-stalled" to
+"roofline-tracking". For attention decode, expect the kernel to land
+within ~10 % of the binding ceiling once this recipe is in.
 
 **Gotchas.**
 
@@ -336,9 +342,10 @@ atomicAdd(&g_done_count, 1);
 while (atomicAdd(&g_done_count, 0) < EXPECTED) { /* spin */ }
 ```
 
-**Expected impact.** The MLA project's v9o reduce was 4.4 µs vs.
-ASM's Triton reduce at 7.8 µs — recipes 1–4 in this section took it
-from 7+ µs to 4.4 µs.
+**Expected impact.** Recipes 1–4 in this section together typically
+trim a non-vectorized reduce by 30–50 %. For attention decode, that
+moves the reduce stage from "Tier 1 dominant" back to a fraction of
+the partial-kernel time.
 
 **Gotchas.**
 
@@ -353,8 +360,9 @@ from 7+ µs to 4.4 µs.
 ## 9. `buffer_load_dwordx4` with hand-built v-descriptor
 
 **Trigger.** PMC group `d` shows L2 hit % is high (e.g. > 70 %) but
-`FetchSize` is also higher than the reference ASM. The L2 is catching
-redundant fetches that ASM never issues.
+`FetchSize` is more than 1.2× the algorithmic minimum bytes
+(working-set × tile-passes). The L2 is catching redundant fetches that
+the algorithm does not require.
 
 **Change.** Replace `global_load` with `buffer_load_dwordx4` against
 a v-descriptor (BD resource record) built once in SGPRs.
@@ -380,9 +388,10 @@ auto x = __builtin_amdgcn_raw_buffer_load_b128(
 ```
 
 **Expected impact.** Eliminates per-lane-predicated redundant fetches
-that `global_load` issues for OOB-protection. In the MLA project this
-trimmed `FetchSize` from 6722 KB / launch (HIP) to 5241 KB / launch
-(ASM-equivalent) at ctx=4000.
+that `global_load` issues for OOB-protection. Empirically this trims
+`FetchSize` by 20–30 % toward the algorithmic minimum, with the bigger
+gains at long context where the OOB-tail is a smaller fraction of the
+total.
 
 **Gotchas.**
 

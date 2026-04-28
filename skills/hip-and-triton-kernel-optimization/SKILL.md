@@ -3,43 +3,60 @@ name: hip-and-triton-kernel-optimization
 description: >-
   Profiler-driven optimization playbook for AMD CDNA-3 / CDNA-4 GPU kernels
   (MI300X, MI325X, MI355X — gfx942 / gfx950) covering attention, GEMM, and
-  MoE workloads. Use when optimizing a HIP, Triton, or assembly kernel on
-  AMD ROCm; when the user mentions rocprofv3, PMC counters, MFMA
-  utilization, LDS bank conflicts, s_waitcnt stalls, or the "Triton
-  ceiling"; when picking which kernel in a workload to optimize first;
-  when validating accuracy with run_perftest / aiter or against an fp32
-  torch reference; or when scoping a HipKittens port. Encodes the
-  three-tier rocprofv3 methodology, signal-to-decision mappings, nine
-  HIP optimization recipes, and the build / accuracy / benchmarking
-  patterns validated during the Kimi-K2 MLA decode work.
+  MoE workloads. Use when optimizing a HIP or Triton kernel on AMD ROCm;
+  when the user mentions rocprofv3, PMC counters, MFMA utilization, LDS
+  bank conflicts, s_waitcnt stalls, or the "Triton ceiling"; when
+  computing a roofline target for a kernel; when validating accuracy with
+  run_perftest / aiter or against an fp32 torch reference; or when
+  scoping a HipKittens port. Encodes the three-tier rocprofv3
+  methodology, a roofline-anchored signal-to-decision table, nine HIP
+  optimization recipes, and the build / accuracy / benchmarking patterns.
 ---
 
 # AMD Kernel Optimization
 
 Profiler-driven optimization for AMD CDNA-3 / CDNA-4 kernels. Methodology
-generalizes to attention, GEMM, and MoE; concrete numbers below come
-from a Kimi-K2 MLA decode optimization that took a HIP kernel from 5×
-slower than hand-written ASM to 1.16× faster.
+generalizes to attention, GEMM, and MoE. The skill assumes the kernel
+under optimization has already been selected (by an upstream workload
+analysis or the user); the goal here is to take that one kernel and
+drive it toward its roofline.
 
-## Quick start: pick what to optimize
+## Roofline reference
 
-**Do not start by profiling a kernel. Start by profiling the workload.**
+The performance bar is the **hardware roofline**, not an external
+reference kernel. A roofline is always available (you have the spec
+sheet) whereas vendor or hand-tuned kernels often are not. Compute the
+binding ceiling once per kernel:
 
-Get a kernel-by-kernel breakdown of total step time vs. silicon-projection
-(or vs. theoretical peak), then pick only kernels with > 20 % projection
-gap. The MLA project worked because MLA decode showed 72.8 % headroom in
-the MAIDAS-vs-silicon table while attention GEMMs were already at
-projection — every microsecond shaved off MLA cashed out almost
-one-for-one in TPOT, while time spent on attention GEMMs would have
-returned nothing.
+```
+peak_compute_TFLOPS = arch_peak_for_MFMA_opcode    # opcode-specific
+peak_HBM_TBs        = arch_HBM_bandwidth           # device-specific
+arith_intensity     = total_ops / total_bytes_HBM_traffic
+binding_ceiling     = min(peak_compute_TFLOPS,
+                          peak_HBM_TBs * arith_intensity)
+target_runtime_us   = total_ops / binding_ceiling
+```
 
-Decision rule:
+Use the MFMA peak that matches your opcode (K=32 fp8/bf16, K=128 scaled
+fp8, etc.); the ISA reference lists per-opcode throughput. Reference
+HBM bandwidth: MI300X / MI325X ≈ 5.3 TB/s, MI355X ≈ 8.0 TB/s.
 
-| Projection gap | Action |
+From the binding ceiling derive the per-counter reference points used
+throughout this skill:
+
+| Counter | Roofline-derived reference |
 |---|---|
-| < 5 % | Do not optimize. The kernel is already at the limit. |
-| 5–20 % | Re-tune existing kernel; do not rewrite. |
-| > 20 % | Profile per the methodology below and consider rewrite. |
+| Kernel runtime | `total_ops / binding_ceiling` |
+| MFMA utilization | `(SQ_INSTS_MFMA × mfma_cycles) / GRBM_GUI_ACTIVE` ≥ 50 % |
+| FetchSize | Algorithmic minimum bytes (working-set × tile-passes) |
+| `LDSBankConflict / MemUnitStalled` | < 0.005 (any LDS conflict is sub-roofline) |
+| PC-sample `s_waitcnt` share | < 15 % |
+| VALU per wave | Algorithmic minimum (count the VALU ops the algorithm requires; everything above is shuffling) |
+| Persistent prologue PC share | < 30 % of total samples |
+
+If you happen to have a tuned reference kernel (vendor ASM, vendor HIP,
+a previous best variant), use it as a *sanity check* on the roofline
+computation, never as the bar. The bar is the roofline.
 
 ## Three-tier profiling methodology
 
@@ -55,9 +72,12 @@ Decision lever: identify the dominant stage (partial vs. reduce, gemm
 vs. epilogue, all-reduce vs. compute) so you do not waste effort
 optimizing a stage that is already fast.
 
-Concrete pattern from MLA: timeline showed ASM stage-1 = 8.93 µs vs. our
-HIP partial = 26.9 µs, but our reduce = 4.4 µs vs. ASM's Triton reduce =
-7.8 µs. The entire gap was in stage-1; we never had to touch the reduce.
+Compare each stage's measured runtime to its **roofline-derived target
+runtime** (compute the binding ceiling for each stage independently —
+they often have different arithmetic intensities). Optimize stages that
+are sub-roofline; leave stages that already track their roofline alone.
+A common mistake is rewriting a stage that is already at its ceiling
+because it is the largest absolute contributor.
 
 ### Tier 2 — PMC counter sweep (`rocprofv3 --pmc`)
 
@@ -84,11 +104,12 @@ Question: **which instruction is the kernel sitting on?**
 Use 50 µs interval (`--pc-sampling-interval 50us`). Annotate the
 disassembly and bucket samples by instruction class.
 
-Key insight from the MLA project: even on hand-tuned ASM only **7.8 % of
-samples were in MFMA** — 27.7 % were in `s_waitcnt`. The kernel was
-**wait-counter-bound, not arithmetic-bound**. This single observation
-flipped our optimization strategy: we stopped trying to add MFMA
-throughput and started cutting KV staging traffic.
+Key insight that recurs across decode-shaped attention and short-K
+GEMMs: even at roofline, **MFMA share is often well under 10 %** while
+`s_waitcnt` is over 25 %. The kernel is **wait-counter-bound, not
+arithmetic-bound**, so adding MFMA throughput cannot help — only
+cutting staging traffic and tightening the load/MFMA interleave can.
+Read the histogram before changing the kernel.
 
 ### Tier 4 — ATT thread trace (often unavailable)
 
@@ -105,13 +126,13 @@ kernel change it justifies; do not change code without a signal.
 
 | Signal | Threshold | Action | Recipe |
 |---|---|---|---|
-| `LDSBankConflict / MemUnitStalled` | > 0.05 | Swap LDS layout for transposed reads | [HIP_RECIPES.md#1](docs/HIP_RECIPES.md) — `ds_read_b64_tr_b16/_b8` |
-| VALU per wave | > 3× ASM-equivalent | Redundant data shuffling — promote state to register-resident | [HIP_RECIPES.md#5](docs/HIP_RECIPES.md) |
-| `SQ_INSTS_MFMA` per wave | < 50 % of theoretical | MFMA pipe starved — switch to larger MFMA opcode | [HIP_RECIPES.md#3](docs/HIP_RECIPES.md) — K=128 scaled FP8 |
+| `LDSBankConflict / MemUnitStalled` | > 0.05 (roofline target < 0.005) | Swap LDS layout for transposed reads | [HIP_RECIPES.md#1](docs/HIP_RECIPES.md) — `ds_read_b64_tr_b16/_b8` |
+| VALU per wave | > 3× algorithmic minimum | Redundant data shuffling — promote state to register-resident | [HIP_RECIPES.md#5](docs/HIP_RECIPES.md) |
+| MFMA utilization | < 50 % of opcode peak | MFMA pipe starved — switch to larger MFMA opcode | [HIP_RECIPES.md#3](docs/HIP_RECIPES.md) — K=128 scaled FP8 |
 | PC-sample `s_waitcnt` | > 25 % | Wait-counter-bound — do **not** add MFMA, cut staging traffic | [HIP_RECIPES.md#6](docs/HIP_RECIPES.md) — hand-scheduled inner loop |
-| L2 hit % AND FetchSize | both high | Redundant fetches under per-lane predication | [HIP_RECIPES.md#9](docs/HIP_RECIPES.md) — `buffer_load_dwordx4` |
+| FetchSize ÷ algorithmic-minimum | > 1.2 with high L2 hit rate | Redundant fetches under per-lane predication | [HIP_RECIPES.md#9](docs/HIP_RECIPES.md) — `buffer_load_dwordx4` |
 | Reduce kernel share of total | > 20 % | Rewrite reduce stage | [HIP_RECIPES.md#8](docs/HIP_RECIPES.md) — vector loads, persistent done-counter |
-| Persistent prologue PC samples | > 30 % of ASM | ASM amortizes prologue across tiles; we do not | [HIP_RECIPES.md#4](docs/HIP_RECIPES.md) — persistent grid |
+| Persistent prologue PC samples | > 30 % of total | Per-launch prologue work not amortized across tiles | [HIP_RECIPES.md#4](docs/HIP_RECIPES.md) — persistent grid |
 
 Order matters: address LDS pressure before tuning MFMA, address VMEM
 redundancy before tuning the reduce.
@@ -119,9 +140,9 @@ redundancy before tuning the reduce.
 ## The Triton ceiling pattern
 
 When PC sampling on a Triton kernel shows **25–30 % `s_waitcnt`** and
-**MFMA utilization at 15–20 %** (vs. ASM at 50–60 % on the same
-workload), you have hit the AMD Triton scheduling ceiling. Do not keep
-tuning Triton.
+**MFMA utilization at 15–20 % of opcode peak** (well below the 50 %
+target derived from the roofline), you have hit the AMD Triton
+scheduling ceiling. Do not keep tuning Triton.
 
 Root cause: AMD Triton's MLIR → LLVM → gfx950 path uses a generic
 instruction scheduler that does not co-issue MFMA with VALU/memory ops,
@@ -131,9 +152,10 @@ the MFMA pipe sits idle waiting for loads.
 
 Action: pivot to HIP with `__builtin_amdgcn_mfma_*` intrinsics and
 hand-schedule the load/MFMA interleave (see
-[HIP_RECIPES.md#6](docs/HIP_RECIPES.md)). Expected recovery: 70–90 % of the
-ASM gap in 1–2 engineering-weeks. Do not wait on a multi-quarter
-upstream LLVM scheduler fix unless you have nothing else to ship.
+[HIP_RECIPES.md#6](docs/HIP_RECIPES.md)). Expected recovery: 70–90 % of
+the gap to the roofline in 1–2 engineering-weeks. Do not wait on a
+multi-quarter upstream LLVM scheduler fix unless you have nothing else
+to ship.
 
 ## HIP optimization recipes (summary)
 
@@ -149,7 +171,7 @@ Each recipe maps to a specific signal and is detailed in
 4. **Persistent grid** — CU-sized grid with atomic work-tile dispenser.
    Triggered by PC samples in the persistent-prologue region.
 5. **Register-resident Q + softmax state** — accept 1 WG/CU, budget VGPRs.
-   Triggered by VALU/wave > 3× ASM and high LDS round-trips.
+   Triggered by VALU/wave > 3× algorithmic minimum and high LDS round-trips.
 6. **Hand-scheduled inner loop** — `__builtin_amdgcn_s_waitcnt` +
    `sched_group_barrier`. Triggered by `s_waitcnt > 25 %`.
 7. **K-split + dedicated reduce kernel** — split-K factor capped at the
@@ -158,7 +180,7 @@ Each recipe maps to a specific signal and is detailed in
    accumulation, persistent done-counter.
 9. **`buffer_load_dwordx4` with hand-built v-descriptor** —
    `__builtin_amdgcn_raw_buffer_load_b128`. Triggered by FetchSize >
-   ASM despite higher L2 hit rate.
+   1.2× algorithmic minimum despite high L2 hit rate.
 
 ## Accuracy validation
 
@@ -219,12 +241,11 @@ Cosine > 0.99 against the fp32 reference. This matches aiter's
 
 ### Bonus pattern
 
-Also report `kernel-vs-fp32-ref` for **both** your kernel **and** the
-reference ASM. You may discover your kernel is more accurate than ASM
-(this happened in the MLA project: HIP v9o landed at cosine 0.999860
-vs. ASM's 0.999699 at b=4 ctx=1000). When that happens, the speedup is
-a free win, not a precision compromise — and that should be a slide in
-the deck.
+If a tuned reference kernel (vendor or in-house) is available, also
+report `kernel-vs-fp32-ref` for **both** your kernel **and** the
+reference, side by side. You may discover your kernel is more accurate
+than the reference; when that happens the speedup is a free win, not a
+precision compromise — and that should be a slide in the deck.
 
 ## Benchmark harness
 
@@ -241,11 +262,12 @@ from aiter.test_common import run_perftest
 us, _ = run_perftest(my_kernel, *args, num_iters=101, num_warmup=20)
 ```
 
-**Do not** measure with one-shot subprocess per ctx. That methodology
-(used by `mla_asm_vs_triton.py`) produces noisy curves dominated by
-JIT and dispatch overhead, not kernel time. The MLA project saw
-50 → 320 µs noisy Triton curves under that methodology vs. clean
-35 → 160 µs curves under `run_perftest` for the same kernel.
+**Do not** measure with one-shot subprocess per ctx (a process restart
+per data point). That methodology produces noisy curves dominated by
+JIT and dispatch overhead, not kernel time. Same kernel under
+`run_perftest` typically lands at 30–50 % of the runtime that one-shot
+subprocess methodology reports — the difference is overhead, not the
+kernel.
 
 Apples-to-apples requirements:
 
@@ -305,10 +327,10 @@ K2/TP4 has NHEAD=16). This changes:
 - Grid shape
 
 Common bug: NHEAD-dependent constants hardcoded in kernel body cause
-silent OOB at smaller NHEAD. The MLA project saw this with v9j —
-`constexpr int NHEAD = 128` plus indexing assumptions in the body
-caused GPU memory faults at NHEAD=16. Fix: parameterize all NHEAD-
-dependent constants and re-validate accuracy after porting.
+silent OOB at smaller NHEAD (e.g. `constexpr int NHEAD = 128` plus
+indexing assumptions that scale with NHEAD will memory-fault when the
+kernel is re-instantiated at NHEAD = 16). Fix: parameterize all
+NHEAD-dependent constants and re-validate accuracy after porting.
 
 `pick_k_splits` pattern that is safe across NHEAD:
 
@@ -334,9 +356,9 @@ HazyResearch's tile DSL for AMD CDNA-3/4. It is registered as an AITER
 backend and worth considering as a **parallel** track to a hand-coded
 HIP kernel.
 
-Validation point: HipKittens reaches **96.1 %** of AITER's hand-tuned
-flash_attn on MI355X for standard GQA (B=16, H=64, H_KV=8, N=2048,
-D=128, BF16) with roughly 6× LOC reduction vs. hand-coded HIP.
+Validation point: on MI355X for standard GQA forward (B=16, H=64,
+H_KV=8, N=2048, D=128, BF16) HipKittens lands within ~4 % of an
+AITER-tuned HIP flash_attn while using roughly 6× fewer source lines.
 
 When to consider:
 
@@ -366,15 +388,16 @@ For exec-facing material:
 
 - **Story-arc plot.** Kernel evolution v1 → vN with milestone
   annotations. One line per version, distinct color, milestone text in
-  a legend or table.
-- **Zoom plot.** When a noisy or much-slower baseline (e.g. Triton
-  at 50–320 µs) compresses the kernel-vs-kernel band into the bottom
-  10 % of the y-axis, drop the baseline in a separate "zoom" plot so
-  the deltas between optimized variants are readable. Cap the y-axis at
-  ~1.12× the highest sample.
+  a legend or table. Plot the **roofline target** as a horizontal
+  reference line so the audience sees how close each variant gets.
+- **Zoom plot.** When a noisy or much-slower baseline compresses the
+  kernel-vs-kernel band into the bottom 10 % of the y-axis, drop the
+  baseline in a separate "zoom" plot so the deltas between optimized
+  variants are readable. Cap the y-axis at ~1.12× the highest sample
+  in the zoomed view.
 - **Accuracy slide.** Always include a slide proving the speedup is
-  not a precision compromise — fp32-reference cosine numbers for both
-  the new kernel and the reference, side by side.
+  not a precision compromise — fp32-reference cosine numbers for the
+  new kernel (and the reference, if one is available), side by side.
 - **Annotation placement.** Park summary callouts in plot whitespace
   using axes-fraction coordinates (e.g.
   `xytext=(0.97, 0.06), textcoords="axes fraction"`), not over the
@@ -386,20 +409,21 @@ For exec-facing material:
 For a new optimization task, copy this and track progress:
 
 ```
-- [ ] Step 1: Profile the workload, identify > 20 % gap kernels
+- [ ] Step 1: Compute roofline (binding ceiling + per-counter targets)
 - [ ] Step 2: Tier 1 timeline — identify dominant stage
 - [ ] Step 3: Tier 2 PMC sweep — identify stalled subsystem
 - [ ] Step 4: Tier 3 PC sampling — identify instruction class
 - [ ] Step 5: Map signals to recipes (signal-to-decision table)
 - [ ] Step 6: Implement smallest signal-driven change first
 - [ ] Step 7: Validate accuracy against fp32 reference (cell sweep)
-- [ ] Step 8: Bench through run_perftest, same harness as baseline
+- [ ] Step 8: Bench through run_perftest with consistent harness
 - [ ] Step 9: Re-profile — confirm the targeted signal moved
 - [ ] Step 10: Iterate from Step 5 with the next-highest signal
 ```
 
-Stop when (a) projection gap is below 20 %, (b) PC sampling shows
-`s_waitcnt < 15 %`, or (c) you have hit hand-tuned ASM parity.
+Stop when (a) measured runtime is within 10 % of the roofline target,
+(b) PC sampling shows `s_waitcnt < 15 %`, or (c) every remaining signal
+is at or below its roofline-derived reference.
 
 ## Additional resources
 
