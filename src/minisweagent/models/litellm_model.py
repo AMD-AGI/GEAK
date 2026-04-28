@@ -15,7 +15,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 import litellm
+import openai
+from litellm.llms.custom_httpx.http_handler import HTTPHandler
 from tenacity import (
     before_sleep_log,
     retry,
@@ -52,6 +55,7 @@ LITELLM_COMPLETION_PARAM_KEYS: frozenset[str] = frozenset(
         "tools",
         "api_key",
         "api_base",
+        "ssl_verify",
         "extra_headers",
         "drop_params",
         # OpenAI / gateway “reasoning effort” style configs used in GEAK YAML.
@@ -59,9 +63,94 @@ LITELLM_COMPLETION_PARAM_KEYS: frozenset[str] = frozenset(
         "reasoning",
         # Anthropic extended thinking (e.g. {"type": "enabled", "budget_tokens": 10000}).
         "thinking",
-        "text",
+        # OpenAI chat-completions (AMD OpenAI-compatible gateway path).
+        "tool_choice",
+        "n",
+        "stop",
+        "seed",
+        "frequency_penalty",
+        "presence_penalty",
+        "response_format",
+        "max_completion_tokens",
     }
 )
+
+
+def convert_tools_to_openai_chat(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize tool definitions to OpenAI chat-completions ``tools`` format."""
+    converted: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function", tool)
+        name = function.get("name")
+        if not name:
+            continue
+        converted.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": function.get("description", ""),
+                    "parameters": function.get(
+                        "parameters",
+                        {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                        },
+                    ),
+                },
+            }
+        )
+    return converted
+
+
+def format_messages_openai_chat(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert standard agent messages to OpenAI chat-completions message shape."""
+    formatted: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        if role == "tool":
+            tool_msg: dict[str, Any] = {
+                "role": "tool",
+                "content": content,
+                "tool_call_id": msg.get("tool_call_id", ""),
+            }
+            if msg.get("name"):
+                tool_msg["name"] = msg["name"]
+            formatted.append(tool_msg)
+        elif role == "assistant" and msg.get("tool_calls"):
+            raw_tool_calls = msg["tool_calls"]
+            tool_calls = raw_tool_calls if isinstance(raw_tool_calls, list) else [raw_tool_calls]
+            formatted_tool_calls: list[dict[str, Any]] = []
+            for tool_info in tool_calls:
+                function = dict(tool_info.get("function", {}))
+                args = function.get("arguments")
+                if isinstance(args, dict):
+                    function["arguments"] = json.dumps(args)
+                elif args is None:
+                    function["arguments"] = "{}"
+                elif not isinstance(args, str):
+                    function["arguments"] = str(args)
+                formatted_tool_calls.append(
+                    {
+                        "id": tool_info.get("id", ""),
+                        "type": "function",
+                        "function": function,
+                    }
+                )
+            formatted.append(
+                {
+                    "role": "assistant",
+                    "content": content or None,
+                    "tool_calls": formatted_tool_calls,
+                }
+            )
+        else:
+            formatted.append({"role": role, "content": content})
+
+    return formatted
 
 
 def convert_openai_tools_to_litellm(
@@ -217,6 +306,44 @@ def _filter_default_tools(
     return filter_tools_for_amd_config(tools, profiling=profiling, bash_tool=bash_tool)
 
 
+def _gateway_url_text_for_amd_detection(config: LitellmModelConfig) -> str:
+    """Join configured base URLs for substring checks (AMD Primus / OpenAI gateway)."""
+    mk = config.model_kwargs or {}
+    parts = [config.base_url, mk.get("api_base"), mk.get("base_url")]
+    return " ".join(str(p) for p in parts if p).lower()
+
+
+def use_amd_openai_compatible_litellm_route(config: LitellmModelConfig) -> bool:
+    """True when LiteLLM should use the same OpenAI chat-completions path as :class:`amd_openai.AmdOpenAIModel`.
+
+    Bare model IDs against ``llm-proxy`` / ``.../openai/...`` gateways are rewritten to
+    ``openai/<model>`` so LiteLLM does not route ``claude-*`` to Anthropic ``/v1/messages``.
+    """
+    url = _gateway_url_text_for_amd_detection(config)
+    if not url:
+        return False
+    if "llm-proxy" not in url and "/openai/" not in url:
+        return False
+    mn = config.model_name
+    if mn.startswith("anthropic/"):
+        return False
+    if mn.startswith("openai/"):
+        return True
+    if "/" not in mn:
+        return True
+    return False
+
+
+def litellm_model_name_for_completion(config: LitellmModelConfig) -> str:
+    """``litellm.completion`` model id, including ``openai/`` prefix for AMD OpenAI-compatible URLs."""
+    mn = config.model_name
+    if use_amd_openai_compatible_litellm_route(config):
+        if mn.startswith("openai/"):
+            return mn
+        return f"openai/{mn}"
+    return mn
+
+
 @dataclass
 class LitellmModelConfig(AmdLlmModelConfig):
     """Configuration for :class:`NewLitellmModel`."""
@@ -231,6 +358,7 @@ class LitellmModelConfig(AmdLlmModelConfig):
     """If set, used only for ``litellm.cost_calculator.completion_cost`` (Portkey-style parity)."""
     tool_cache_control: bool = False
     """Attach ``cache_control`` to the last tool definition (Anthropic prompt caching)."""
+    ssl_verify: bool = False
 
 
 def _merge_completion_kwargs(
@@ -284,7 +412,7 @@ class LitellmModel:
 
     @retry(
         stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "10"))),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
+        wait=wait_exponential(multiplier=4, min=4, max=60),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         retry=retry_if_not_exception_type(
             (
@@ -300,15 +428,38 @@ class LitellmModel:
     )
     def _query(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
         filtered = _merge_completion_kwargs(self.config, kwargs)
-        filtered["tools"] = convert_openai_tools_to_litellm(
-            self.tools,
-            tool_cache_control=self.config.tool_cache_control,
-        )
+        if use_amd_openai_compatible_litellm_route(self.config):
+            filtered["tools"] = convert_tools_to_openai_chat(self.tools)
+            filtered.setdefault("tool_choice", "auto")
+        else:
+            filtered["tools"] = convert_openai_tools_to_litellm(
+                self.tools,
+                tool_cache_control=self.config.tool_cache_control,
+            )
+        # TLS: Anthropic sync path ignores ``ssl_verify`` → use LiteLLM ``HTTPHandler``.
+        # AMD OpenAI-compatible route must use ``openai.OpenAI(http_client=httpx.Client(verify=...))``
+        # (same as :class:`amd_openai.AmdOpenAIModel`); a bare ``HTTPHandler`` breaks OpenAI handler.
+        completion_extras: dict[str, Any] = {}
+        if kwargs.get("client") is None and filtered.get("ssl_verify") is False:
+            if use_amd_openai_compatible_litellm_route(self.config):
+                api_key = filtered.get("api_key") or self.config.api_key or ""
+                api_base = filtered.get("api_base") or self.config.base_url
+                completion_extras["client"] = openai.OpenAI(
+                    api_key=api_key,
+                    base_url=api_base,
+                    http_client=httpx.Client(verify=False),
+                )
+            else:
+                completion_extras["client"] = HTTPHandler(
+                    timeout=httpx.Timeout(timeout=600.0, connect=5.0),
+                    ssl_verify=False,
+                )
         try:
             return litellm.completion(
-                model=self.config.model_name,
+                model=litellm_model_name_for_completion(self.config),
                 messages=messages,
                 **filtered,
+                **completion_extras,
             )
         except litellm.exceptions.AuthenticationError as e:
             hint = " You can permanently set your API key with `config set KEY VALUE`."
@@ -321,6 +472,8 @@ class LitellmModel:
 
     def query(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
         messages = normalize_messages_for_litellm_api(messages)
+        if use_amd_openai_compatible_litellm_route(self.config):
+            messages = format_messages_openai_chat(messages)
         if self.config.set_cache_control:
             messages = set_cache_control(messages, mode=self.config.set_cache_control)
 
@@ -368,42 +521,25 @@ class LitellmModel:
 
 
 if __name__ == "__main__":
-    # Quick smoke test
+    # Quick smoke test — same shape as ``amd_openai`` __main__ (OpenAI-compatible gateway).
     model_configs = [
         {
-            "model_name": "openai/gpt-5",
+            "model_name": "claude-opus-4-6",
             "model_kwargs": {
-                "extra_headers": {"Ocp-Apim-Subscription-Key": ""},
-                "temperature": 1.0,
+                "temperature": 0.0,
                 "max_tokens": 16000,
-                "api_key": "",
-                "api_base": "https://llm-api.amd.com/azure/engines/gpt-5",
+                "api_key": "ak-",
+                "api_base": "https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1",
             },
         },
         {
             "model_name": "anthropic/claude-opus-4.6",
             "model_kwargs": {
-                "extra_headers": {"Ocp-Apim-Subscription-Key": ""},
-                "temperature": 1.0,
+                "extra_headers": {"Ocp-Apim-Subscription-Key": "amd_gateway_key"},
+                "temperature": 0.0,
                 "max_tokens": 16000,
-                "api_key": "",
+                "api_key": "amd_gateway_key",
                 "api_base": "https://llm-api.amd.com/Anthropic",
-            },
-        },
-         {
-            "model_name": "gpt-5.4-mini",
-            "model_kwargs": {
-                "max_tokens": 16000,
-                "api_key": "",
-                "api_base": "https://oci-slc.primus-safe.amd.com/llm-gateway/v1",
-            },
-        },
-        {
-            "model_name": "claude-opus-4-6",
-            "model_kwargs": {
-                "max_tokens": 16000,
-                "api_key": "",
-                "api_base": "https://oci-slc.primus-safe.amd.com/llm-gateway",
             },
         },
     ]
