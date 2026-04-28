@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 from minisweagent.run.preprocess.debug_runtime import emit_debug_log
 from minisweagent.run.preprocess.repo_paths import ensure_preprocess_mcp_importable
-from minisweagent.run.utils.gpu_arch import detect_gpu_arch, is_rdna
 
 
 def _ensure_mcp_importable() -> None:
@@ -1083,22 +1082,8 @@ def run_preprocessor(
     if eval_command:
         _cwd = str(repo_root) if repo_root else None
 
-        # On RDNA hosts the parent process often does not export
-        # HIP_VISIBLE_DEVICES (the parallel agent injects it per-thread,
-        # which is too late for Step 5). Pin it here to match
-        # run_harness.py behavior. On CDNA we leave the subprocess env
-        # untouched (env=None) so behavior is byte-identical to pre-PR.
-        _step5_env: dict[str, str] | None = None
-        if is_rdna(detect_gpu_arch()):
-            _step5_env = os.environ.copy()
-            _step5_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
-            _step5_env.setdefault("PYTHONUNBUFFERED", "1")
-
         if correctness_cmd:
-            if _step5_env is not None:
-                logger.info("  Running correctness_command: %s (HIP_VISIBLE_DEVICES=%s)", correctness_cmd, gpu_id)
-            else:
-                logger.info("  Running correctness_command: %s", correctness_cmd)
+            logger.info("  Running correctness_command: %s", correctness_cmd)
             import subprocess
 
             result = subprocess.run(
@@ -1109,7 +1094,6 @@ def run_preprocessor(
                 text=True,
                 timeout=3600,
                 cwd=_cwd,
-                env=_step5_env,
             )
             (output_dir / "correctness_stdout.txt").write_text(result.stdout or "")
             (output_dir / "correctness_stderr.txt").write_text(result.stderr or "")
@@ -1158,7 +1142,6 @@ def run_preprocessor(
                     text=True,
                     timeout=benchmark_timeout,
                     cwd=_cwd,
-                    env=_step5_env,
                 )
                 if result.returncode == 0:
                     benchmark_baseline = result.stdout
