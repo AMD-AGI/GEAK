@@ -44,6 +44,94 @@ DEFAULT_AGENT_BENCHMARK_ITERATIONS = DEFAULT_EVAL_BENCHMARK_ITERATIONS
 DEFAULT_PIPELINE_OUTPUT_DIR = "geak_output"
 DEFAULT_HETEROGENEOUS = False
 
+# Modes accepted by ``--mode``. See ``run/budget.py`` and ``run.budgets`` /
+# ``run.presets`` in ``geak.yaml``.
+RUN_MODES: tuple[str, ...] = ("quick", "full")
+DEFAULT_RUN_MODE: str = "full"
+
+
+def apply_mode_presets(config: dict, mode: str) -> dict:
+    """Deep-merge ``config["run"]["presets"][mode]`` into *config*.
+
+    Mode controls only ``orchestrator.max_rounds`` (and any other future
+    non-env knobs); step / cost / iteration limits intentionally remain
+    user-controlled to avoid silent overrides of ``GEAK_*_STEP_LIMIT`` etc.
+    that users may have set in their shell.
+
+    Precedence:
+      - For ``max_rounds``: CLI ``--max-rounds`` > mode preset > ``GEAK_MAX_ROUNDS``
+        env > built-in default. Mode wins over env because that is its job.
+      - For step/cost limits: CLI > YAML ``agent.*`` > ``GEAK_*`` env > default.
+        Mode is *not* in this chain.
+      - For ``total_s`` / ``finalize_grace_s`` / preprocess caps: CLI override
+        flag > mode preset > built-in default. No env vars participate.
+
+    Returns the same dict (mutated) for caller convenience.
+    """
+    if mode not in RUN_MODES:
+        raise ValueError(f"Unknown run mode {mode!r}; expected one of {RUN_MODES}")
+
+    presets = (((config.get("run") or {}).get("presets")) or {}).get(mode) or {}
+    if not presets:
+        logger.debug("apply_mode_presets: no presets defined for mode=%s", mode)
+        return config
+
+    def _deep_merge(base: dict, override: dict) -> dict:
+        for k, v in override.items():
+            if isinstance(v, dict) and isinstance(base.get(k), dict):
+                _deep_merge(base[k], v)
+            else:
+                base[k] = copy.deepcopy(v)
+        return base
+
+    _deep_merge(config, presets)
+
+    # Surface a dotted-key summary so users see exactly what mode injected.
+    _injected: list[str] = []
+
+    def _walk(d: dict, prefix: str = "") -> None:
+        for k, v in d.items():
+            key = f"{prefix}.{k}" if prefix else k
+            if isinstance(v, dict):
+                _walk(v, key)
+            else:
+                _injected.append(f"{key}={v}")
+
+    _walk(presets)
+    logger.info("apply_mode_presets: mode=%s injected %s", mode, ", ".join(_injected))
+    return config
+
+
+def resolve_max_rounds(
+    *,
+    cli_max_rounds: int | None,
+    config: dict | None = None,
+    default: int = 5,
+) -> tuple[int, str]:
+    """Resolve ``max_rounds`` per the documented precedence chain.
+
+    Returns ``(value, source)`` where ``source`` is one of
+    ``"cli"``, ``"mode"``, ``"env"``, ``"default"`` and is suitable for
+    surfacing in the budget banner so users can tell that ``--mode`` overrode
+    ``GEAK_MAX_ROUNDS`` (or did not).
+    """
+    if cli_max_rounds is not None:
+        return int(cli_max_rounds), "cli"
+
+    if config is not None:
+        mode_val = (config.get("orchestrator") or {}).get("max_rounds")
+        if mode_val is not None:
+            return int(mode_val), "mode"
+
+    env_val = os.environ.get("GEAK_MAX_ROUNDS")
+    if env_val:
+        try:
+            return int(env_val), "env"
+        except ValueError:
+            logger.warning("GEAK_MAX_ROUNDS=%r is not an integer; falling back to default", env_val)
+
+    return int(default), "default"
+
 
 # ── agent filtering ──────────────────────────────────────────────────
 

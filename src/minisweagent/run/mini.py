@@ -5,6 +5,7 @@
 import json
 import logging
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -24,9 +25,21 @@ from minisweagent.agents.parallel_agent import BestPatchResult
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments import get_environment_class
 from minisweagent.models import get_model
+from minisweagent.run.budget import BudgetSpec, RunBudget
 from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.orchestrator import run_orchestrator
+from minisweagent.run.pipeline_helpers import (
+    DEFAULT_RUN_MODE,
+    RUN_MODES,
+    apply_mode_presets,
+    resolve_max_rounds,
+)
 from minisweagent.run.preprocess.preprocessor import run_preprocessor
+from minisweagent.run.state import (
+    PreprocessState,
+    preprocess_hard_stop_handler,
+    preprocess_soft_stop_handler,
+)
 from minisweagent.run.utils.task_parser import (
     _resolve_path_case,
     display_parsed_config,
@@ -160,6 +173,16 @@ def main(
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs."),
     test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command"),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help="Wall-clock budget profile: 'quick' (~1h) or 'full' (~2h). Default: from geak.yaml run.mode.",
+    ),
+    total_budget_s: float | None = typer.Option(
+        None,
+        "--total-budget-s",
+        help="Override the mode's total wall-clock budget (seconds). Escape hatch for testing.",
+    ),
 ):
     # fmt: on
     del visual
@@ -191,6 +214,19 @@ def main(
         )
 
     config = _deep_merge(config, user_config)
+
+    # Validate --mode early but defer the full precedence resolution + preset
+    # injection until AFTER parse_pipeline_params runs. The natural-language
+    # extractor can return ``mode`` from phrases like "quick mode" or "1 hour
+    # run", and we want CLI > task > YAML > default precedence to be applied
+    # in one place. apply_mode_presets only injects orchestrator.max_rounds,
+    # which is only consumed below when run_orchestrator is called, so
+    # deferring is safe.
+    if mode is not None:
+        _normalized_cli_mode = mode.strip().lower()
+        if _normalized_cli_mode not in RUN_MODES:
+            raise typer.BadParameter(f"--mode must be one of {RUN_MODES}; got {mode!r}")
+        mode = _normalized_cli_mode
 
     if yolo:
         config.setdefault("agent", {})["mode"] = "yolo"
@@ -297,6 +333,7 @@ def main(
     # 2a) LLM-driven pipeline param extraction
     heterogeneous = None
     max_rounds = None
+    task_extracted_mode: str | None = None
     if task_content:
         from minisweagent.run.utils.task_parser import parse_pipeline_params
 
@@ -311,21 +348,35 @@ def main(
         if pipeline_params.get("max_rounds") is not None:
             max_rounds = pipeline_params["max_rounds"]
             logger.info("Using max rounds: %s.", max_rounds)
+        if pipeline_params.get("mode") is not None:
+            task_extracted_mode = pipeline_params["mode"]
+            logger.info("Task-extracted run mode: %s.", task_extracted_mode)
 
         # Prompt for missing required params (kernel_url) — only if not already set
         if kernel_url is None:
             from minisweagent.run.utils.config_editor import prompt_missing_pipeline_params
 
             logger.info("Prompting for missing pipeline parameters.")
-            pipeline_params, should_use_pipeline = prompt_missing_pipeline_params(
-                pipeline_params, console, yolo
-            )
+            pipeline_params, should_use_pipeline = prompt_missing_pipeline_params(pipeline_params, console, yolo)
             logger.info("pipeline_params: %s, should_use_pipeline: %s", pipeline_params, should_use_pipeline)
 
             if should_use_pipeline:
                 if pipeline_params.get("kernel_url"):
                     kernel_url = pipeline_params["kernel_url"]
                     logger.info("Using kernel URL: %s.", kernel_url)
+
+    # Finalize mode precedence: CLI --mode > task-extracted mode > YAML
+    # run.mode > built-in default. Apply presets exactly once. We do this
+    # AFTER parse_pipeline_params so a "quick mode"/"1 hour" phrase in the
+    # natural-language task can drive the budget.
+    _run_cfg = config.get("run") or {}
+    resolved_mode = (mode or task_extracted_mode or _run_cfg.get("mode") or DEFAULT_RUN_MODE).strip().lower()
+    if resolved_mode not in RUN_MODES:
+        raise typer.BadParameter(f"--mode must be one of {RUN_MODES}; got {resolved_mode!r}")
+    _mode_source = "cli" if mode else "task" if task_extracted_mode else "yaml" if _run_cfg.get("mode") else "default"
+    logger.info("[bold cyan]Run mode: %s (source=%s)[/bold cyan]", resolved_mode, _mode_source)
+    config.setdefault("run", {})["mode"] = resolved_mode
+    apply_mode_presets(config, resolved_mode)
 
     # 2b) Detect configs from task
     parsed_config = parse_task_info(task_content, model)
@@ -452,6 +503,49 @@ def main(
             logger.info("[bold cyan]Promoted test command to validated harness: %s[/bold cyan]", promoted)
 
     _target_language = "flydsl" if kernel_type in {"pytorch2flydsl", "flydsl"} else None
+
+    # ── Build RunBudget from mode + CLI overrides ────────────────────
+    _budget_cfg = (config.get("run") or {}).get("budgets", {}).get(resolved_mode) or {}
+    if not _budget_cfg:
+        raise typer.BadParameter(
+            f"No run.budgets.{resolved_mode} block in config; check geak.yaml"
+        )
+    _spec = BudgetSpec(
+        mode=resolved_mode,  # type: ignore[arg-type]
+        total_s=float(total_budget_s if total_budget_s is not None else _budget_cfg["total_s"]),
+        preprocess_soft_cap_s=float(_budget_cfg["preprocess_soft_cap_s"]),
+        preprocess_hard_cap_fraction=float(_budget_cfg["preprocess_hard_cap_fraction"]),
+        finalize_grace_s=float(_budget_cfg["finalize_grace_s"]),
+    )
+    budget = RunBudget(spec=_spec)
+    for _line in budget.banner_lines():
+        console.print(f"[bold cyan]{_line}[/bold cyan]")
+        logger.info(_line)
+
+    # ── SIGINT handler: first Ctrl-C -> SoftStop; second Ctrl-C -> ──
+    # ── force-terminate registry and re-raise.                     ──
+    state = PreprocessState(output_dir=preprocess_output_dir)
+    _sigint_count = {"n": 0}
+    _orig_sigint = signal.getsignal(signal.SIGINT)
+
+    def _sigint_handler(_signum, _frame):  # noqa: ANN001
+        _sigint_count["n"] += 1
+        if _sigint_count["n"] == 1:
+            logger.warning("SIGINT received -- flipping SoftStop (graceful finalize). Press Ctrl-C again to force.")
+            budget.soft_stop.set()
+        else:
+            logger.error("Second SIGINT received -- terminating tracked subprocesses and exiting.")
+            try:
+                state.registry.terminate_all()
+            except Exception:
+                logger.exception("registry.terminate_all() failed during SIGINT")
+            # Restore original handler and re-raise so the user gets the
+            # standard KeyboardInterrupt traceback.
+            signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
+            raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+
     _preprocess_kwargs = dict(
         kernel_url=kernel_target,
         repo=repo,
@@ -460,34 +554,78 @@ def main(
         model_factory=lambda: get_model(model_name, config.get("model", {})),
         console=console,
         target_language=_target_language,
+        budget=budget,
+        state=state,
     )
     logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
 
-    if harness_spec:
-        try:
-            preprocess_ctx = run_preprocessor(**_preprocess_kwargs, harness=harness_spec)
-        except RuntimeError as exc:
-            if "harness" in str(exc).lower():
-                logger.warning(
-                    "[yellow]Harness validation failed, falling back to eval_command: %s[/yellow]", exc
-                )
-                preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
-            else:
-                raise
-    else:
-        if isinstance(test_command, str) and "&&" in test_command:
-            left, right = test_command.rsplit("&&", 1)
-            correctness_command = left.strip() or None
-            performance_command = right.strip() or None
-            logger.info("Correctness command: %s, Performance command: %s", correctness_command, performance_command)
-            preprocess_ctx = run_preprocessor(
-                **_preprocess_kwargs,
-                correctness_command=correctness_command,
-                performance_command=performance_command,
-            )
+    # Schedule preprocess watchdogs that reach into ``state`` to apply the
+    # stage-aware soft/hard policy. Cancelled in the finally block.
+    budget.schedule_preprocess_watchdogs(
+        on_soft=lambda: preprocess_soft_stop_handler(
+            state,
+            soft_cap_s=budget.spec.preprocess_soft_cap_s,
+            hard_cap_s=budget.spec.preprocess_hard_cap_s,
+            console=console,
+        ),
+        on_hard=lambda: preprocess_hard_stop_handler(
+            state,
+            hard_cap_s=budget.spec.preprocess_hard_cap_s,
+            console=console,
+        ),
+    )
+
+    try:
+        if harness_spec:
+            try:
+                preprocess_ctx = run_preprocessor(**_preprocess_kwargs, harness=harness_spec)
+            except RuntimeError as exc:
+                if "harness" in str(exc).lower():
+                    logger.warning(
+                        "[yellow]Harness validation failed, falling back to eval_command: %s[/yellow]", exc
+                    )
+                    preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
+                else:
+                    raise
         else:
-            preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
-    logger.debug("Preprocessor context: %s", preprocess_ctx)
+            if isinstance(test_command, str) and "&&" in test_command:
+                left, right = test_command.rsplit("&&", 1)
+                correctness_command = left.strip() or None
+                performance_command = right.strip() or None
+                logger.info(
+                    "Correctness command: %s, Performance command: %s",
+                    correctness_command,
+                    performance_command,
+                )
+                preprocess_ctx = run_preprocessor(
+                    **_preprocess_kwargs,
+                    correctness_command=correctness_command,
+                    performance_command=performance_command,
+                )
+            else:
+                preprocess_ctx = run_preprocessor(**_preprocess_kwargs, eval_command=test_command)
+        logger.debug("Preprocessor context: %s", preprocess_ctx)
+
+        # Cancel preprocess watchdogs and transition phase before optimization.
+        budget.cancel_preprocess_watchdogs()
+        _T_pp_end_elapsed = budget.elapsed()
+        opt_deadline = budget.commit_preprocess(_T_pp_end_elapsed)
+        budget.schedule_optimization_watchdog()
+        logger.info(
+            "[budget] preprocess finished at +%.0fs; optimization deadline @+%.0fs (softstop_at @+%.0fs)",
+            _T_pp_end_elapsed,
+            _T_pp_end_elapsed + opt_deadline.remaining(),
+            _T_pp_end_elapsed + max(0.0, opt_deadline.remaining() - budget.spec.finalize_grace_s),
+        )
+    except Exception:
+        # On exception, ensure cleanup runs before the exception propagates.
+        budget.cancel_all_timers()
+        try:
+            state.registry.terminate_all()
+        except Exception:
+            logger.exception("registry.terminate_all() failed during preprocess error")
+        signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
+        raise
 
     if preprocess_ctx.get("test_command") and not test_command:
         test_command = preprocess_ctx["test_command"]
@@ -514,118 +652,152 @@ def main(
             heterogeneous = False
             logger.info("Using homogeneous mode based on discovery.")
 
-    if heterogeneous:
-        commandment = preprocess_ctx.get("commandment")
-        if not commandment:
-            error_message = "No commandment found in preprocessor context. Check preprocessor logs for failures."
-            logger.error(error_message)
-            raise RuntimeError(error_message)
+    # Resolve max_rounds via the documented precedence chain:
+    # CLI --max-rounds (if any future flag added) > config (mode preset) >
+    # GEAK_MAX_ROUNDS env > default. ``max_rounds`` from task parsing acts as
+    # an additional override (parsed via parse_pipeline_params at the top of
+    # main()), so we honor it when set.
+    _resolved_max_rounds, _max_rounds_source = resolve_max_rounds(
+        cli_max_rounds=max_rounds,
+        config=config,
+    )
+    logger.info(
+        "[budget] max_rounds=%d (source=%s; mode=%s)",
+        _resolved_max_rounds,
+        _max_rounds_source,
+        resolved_mode,
+    )
 
-        preprocess_ctx["user_instructions"] = task_content
+    try:
+        if heterogeneous:
+            commandment = preprocess_ctx.get("commandment")
+            if not commandment:
+                error_message = "No commandment found in preprocessor context. Check preprocessor logs for failures."
+                logger.error(error_message)
+                raise RuntimeError(error_message)
 
-        extracted = extract_user_constraints(task_content, model)
-        _addendum_parts: list[str] = []
-        if extracted["constraints"]:
-            _addendum_parts.append("## USER-SPECIFIED CONSTRAINTS\n\nThese are mandatory. Violation means rejection.\n")
-            _addendum_parts.extend(f"- {c}" for c in extracted["constraints"])
-        if extracted["directives"]:
-            _addendum_parts.append(
-                "\n## PRESCRIBED OPTIMIZATION DIRECTIVES\n\n"
-                "These are the user's prescribed optimization strategies. Prioritize them, but\n"
-                "also explore additional directions beyond these.\n"
-                "NOTE: Any performance numbers in the original user request come from full-model\n"
-                "profiling under different conditions. Use ONLY the GEAK-measured baseline metrics\n"
-                "for before/after speedup comparisons.\n"
+            preprocess_ctx["user_instructions"] = task_content
+
+            extracted = extract_user_constraints(task_content, model)
+            _addendum_parts: list[str] = []
+            if extracted["constraints"]:
+                _addendum_parts.append(
+                    "## USER-SPECIFIED CONSTRAINTS\n\nThese are mandatory. Violation means rejection.\n"
+                )
+                _addendum_parts.extend(f"- {c}" for c in extracted["constraints"])
+            if extracted["directives"]:
+                _addendum_parts.append(
+                    "\n## PRESCRIBED OPTIMIZATION DIRECTIVES\n\n"
+                    "These are the user's prescribed optimization strategies. Prioritize them, but\n"
+                    "also explore additional directions beyond these.\n"
+                    "NOTE: Any performance numbers in the original user request come from full-model\n"
+                    "profiling under different conditions. Use ONLY the GEAK-measured baseline metrics\n"
+                    "for before/after speedup comparisons.\n"
+                )
+                _addendum_parts.extend(f"- {d}" for d in extracted["directives"])
+            if _addendum_parts:
+                preprocess_ctx["commandment"] = commandment + "\n\n" + "\n".join(_addendum_parts)
+                _commandment_path = preprocess_output_dir / "COMMANDMENT.md"
+                _commandment_path.write_text(preprocess_ctx["commandment"], encoding="utf-8")
+                logger.info(
+                    "Enriched commandment with %d constraints and %d directives (written to %s).",
+                    len(extracted["constraints"]),
+                    len(extracted["directives"]),
+                    _commandment_path,
+                )
+
+            preprocess_ctx["rag_enabled"] = rag_enabled
+            report = run_orchestrator(
+                preprocess_ctx=preprocess_ctx,
+                gpu_ids=parsed_gpu_ids,
+                model=model,
+                model_factory=lambda: get_model(model_name, config.get("model", {})),
+                output_dir=preprocess_output_dir,
+                max_rounds=_resolved_max_rounds,
+                heterogeneous=True,
+                deadline=opt_deadline,
+                soft_stop=budget.soft_stop,
+                registry=state.registry,
             )
-            _addendum_parts.extend(f"- {d}" for d in extracted["directives"])
-        if _addendum_parts:
-            preprocess_ctx["commandment"] = commandment + "\n\n" + "\n".join(_addendum_parts)
-            _commandment_path = preprocess_output_dir / "COMMANDMENT.md"
-            _commandment_path.write_text(preprocess_ctx["commandment"], encoding="utf-8")
-            logger.info(
-                "Enriched commandment with %d constraints and %d directives (written to %s).",
-                len(extracted["constraints"]),
-                len(extracted["directives"]),
-                _commandment_path,
-            )
+            logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
+            return _final_report_to_bestpatchresult(report)
 
-        preprocess_ctx["rag_enabled"] = rag_enabled
-        report = run_orchestrator(
-            preprocess_ctx=preprocess_ctx,
-            gpu_ids=parsed_gpu_ids,
+        metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
+        logger.info("Using metric: %s", metric)
+
+        # Cross-session memory injection for homogeneous mode
+        _kernel_path = preprocess_ctx.get("kernel_path", "")
+        _bm = preprocess_ctx.get("baseline_metrics") or {}
+        if isinstance(_bm, str):
+            try:
+                _bm = json.loads(_bm)
+            except Exception:
+                _bm = {}
+        try:
+            from minisweagent.memory.integration import assemble_memory_context
+
+            _mem_ctx = assemble_memory_context(
+                kernel_path=_kernel_path,
+                bottleneck_type=_bm.get("bottleneck", ""),
+                profiling_metrics=_bm,
+            )
+            if _mem_ctx:
+                task_content = (
+                    task_content + "\n\n### Optimization Memory (from past kernel optimization runs)\n" + _mem_ctx
+                )
+                logger.info("Cross-session memory injected into homogeneous task (%d chars)", len(_mem_ctx))
+            else:
+                logger.info("Cross-session memory: no relevant experiences found")
+        except Exception as _mem_exc:
+            logger.warning("Cross-session memory unavailable: %s", _mem_exc)
+
+        agent_config = dict(config.get("agent", {}))
+        agent_config["save_patch"] = True
+        agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
+        agent_config["metric"] = metric
+        agent_config["patch_output_dir"] = str(preprocess_output_dir)
+        logger.debug("Homogeneous agent_config: %s", agent_config)
+
+        repo_path = repo or config.get("patch", {}).get("repo")
+        if repo_path:
+            p = Path(repo_path)
+            if not p.exists():
+                resolved = _resolve_path_case(p)
+                if resolved is not None:
+                    p = resolved
+            repo_path = p.resolve()
+        logger.info("Resolved repo path: %s", repo_path)
+
+        result = run_homogeneous_agent(
+            config=config,
+            task_content=task_content,
             model=model,
-            model_factory=lambda: get_model(model_name, config.get("model", {})),
+            env=env,
+            env_class=env.__class__,
+            env_kwargs=_env_kwargs,
+            agent_config=agent_config,
+            repo=repo_path,
+            num_parallel=num_parallel,
+            gpu_ids=gpu_ids,
             output_dir=preprocess_output_dir,
-            max_rounds=max_rounds or config.get("orchestrator", {}).get("max_rounds"),
-            heterogeneous=True,
+            model_name=model_name,
+            console=console,
+            deadline=opt_deadline,
+            soft_stop=budget.soft_stop,
+            registry=state.registry,
         )
         logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
-        return _final_report_to_bestpatchresult(report)
-
-    metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
-    logger.info("Using metric: %s", metric)
-
-    # Cross-session memory injection for homogeneous mode
-    _kernel_path = preprocess_ctx.get("kernel_path", "")
-    _bm = preprocess_ctx.get("baseline_metrics") or {}
-    if isinstance(_bm, str):
+        return result
+    finally:
+        budget.cancel_all_timers()
         try:
-            _bm = json.loads(_bm)
+            state.registry.terminate_all()
         except Exception:
-            _bm = {}
-    try:
-        from minisweagent.memory.integration import assemble_memory_context
-        _mem_ctx = assemble_memory_context(
-            kernel_path=_kernel_path,
-            bottleneck_type=_bm.get("bottleneck", ""),
-            profiling_metrics=_bm,
-        )
-        if _mem_ctx:
-            task_content = (
-                task_content
-                + "\n\n### Optimization Memory (from past kernel optimization runs)\n"
-                + _mem_ctx
-            )
-            logger.info("Cross-session memory injected into homogeneous task (%d chars)", len(_mem_ctx))
-        else:
-            logger.info("Cross-session memory: no relevant experiences found")
-    except Exception as _mem_exc:
-        logger.warning("Cross-session memory unavailable: %s", _mem_exc)
-
-    agent_config = dict(config.get("agent", {}))
-    agent_config["save_patch"] = True
-    agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
-    agent_config["metric"] = metric
-    agent_config["patch_output_dir"] = str(preprocess_output_dir)
-    logger.debug("Homogeneous agent_config: %s", agent_config)
-
-    repo_path = repo or config.get("patch", {}).get("repo")
-    if repo_path:
-        p = Path(repo_path)
-        if not p.exists():
-            resolved = _resolve_path_case(p)
-            if resolved is not None:
-                p = resolved
-        repo_path = p.resolve()
-    logger.info("Resolved repo path: %s", repo_path)
-
-    result = run_homogeneous_agent(
-        config=config,
-        task_content=task_content,
-        model=model,
-        env=env,
-        env_class=env.__class__,
-        env_kwargs=_env_kwargs,
-        agent_config=agent_config,
-        repo=repo_path,
-        num_parallel=num_parallel,
-        gpu_ids=gpu_ids,
-        output_dir=preprocess_output_dir,
-        model_name=model_name,
-        console=console,
-    )
-    logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
-    return result
+            logger.exception("registry.terminate_all() failed during run cleanup")
+        try:
+            signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
+        except Exception:
+            logger.exception("restoring SIGINT handler failed")
 
 
 if __name__ == "__main__":

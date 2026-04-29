@@ -36,7 +36,12 @@ _EMPTY_PIPELINE_PARAMS: dict = {
     "max_rounds": None,
     "start_round": None,
     "pipeline_intent": False,
+    "mode": None,
 }
+
+# Run modes accepted from natural-language extraction. Keep in sync with
+# ``minisweagent.run.pipeline_helpers.RUN_MODES``.
+_VALID_RUN_MODES: frozenset[str] = frozenset({"quick", "full"})
 
 
 def _resolve_path_case(path: Path) -> Path | None:
@@ -159,6 +164,7 @@ def _normalize_pipeline_params_from_parsed(parsed: dict) -> dict:
         "max_rounds": parsed.get("max_rounds"),
         "start_round": parsed.get("start_round"),
         "pipeline_intent": bool(parsed.get("pipeline_intent", False)),
+        "mode": parsed.get("mode"),
     }
 
     if result["kernel_url"]:
@@ -178,6 +184,19 @@ def _normalize_pipeline_params_from_parsed(parsed: dict) -> dict:
                     raw,
                 )
                 result[field] = None
+
+    if result["mode"] is not None:
+        raw = result["mode"]
+        normalized = str(raw).strip().lower() if isinstance(raw, str) else ""
+        if normalized in _VALID_RUN_MODES:
+            result["mode"] = normalized
+        else:
+            logger.warning(
+                "parse_pipeline_params: invalid mode %r (expected one of %s); clearing.",
+                raw,
+                sorted(_VALID_RUN_MODES),
+            )
+            result["mode"] = None
 
     populated = sorted(k for k, v in result.items() if v is not None)
     logger.debug("parse_pipeline_params: extracted non-null fields: %s", populated)
@@ -249,6 +268,8 @@ def parse_pipeline_params(task_content: str, model) -> dict:
     - max_rounds: Maximum optimization rounds
     - start_round: Round to resume from
     - pipeline_intent: Whether the task describes kernel optimization work
+    - mode: Wall-clock budget profile -- "quick" (~1h) or "full" (~2h),
+      extracted only when the user explicitly requests one.
 
     Returns dict with extracted values (None if not found).
     """

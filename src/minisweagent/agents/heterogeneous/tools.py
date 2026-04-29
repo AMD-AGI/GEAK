@@ -242,6 +242,21 @@ def tool_dispatch_tasks(
     output_dir = Path(ctx["output_dir"])
     gpu_ids = ctx.get("gpu_ids", [0])
 
+    # Honor wall-clock soft-stop: short-circuit dispatch if the budget has
+    # already run out (e.g. because preprocess overran into the optimization
+    # window). Without this we'd start a 30-minute parallel batch that the
+    # finalize-grace window can't accommodate.
+    _soft_stop = ctx.get("soft_stop")
+    _deadline = ctx.get("deadline")
+    if (_soft_stop is not None and _soft_stop.is_set()) or (_deadline is not None and _deadline.expired()):
+        logger.warning("tool_dispatch_tasks: SoftStop / deadline reached -- skipping dispatch.")
+        return json.dumps(
+            {
+                "status": "skipped",
+                "reason": "wall-clock soft-stop reached; finalize with best-so-far",
+            }
+        )
+
     if not task_files:
         tasks_base = output_dir / "tasks"
         if tasks_base.is_dir():
@@ -269,12 +284,23 @@ def tool_dispatch_tasks(
 
     all_results: list[dict] = []
     for stage_name, stage_tasks in stages:
+        # Re-check between dispatch stages: a low-priority stage shouldn't
+        # start if SoftStop fired during a high-priority stage.
+        if (_soft_stop is not None and _soft_stop.is_set()) or (_deadline is not None and _deadline.expired()):
+            logger.warning(
+                "tool_dispatch_tasks: SoftStop / deadline reached between stages; skipping '%s'.",
+                stage_name,
+            )
+            break
         logger.info("tool_dispatch_tasks: running stage '%s' (%d tasks).", stage_name, len(stage_tasks))
         stage_result = run_task_batch(
             task_files=stage_tasks,
             gpu_ids=gpu_ids,
             output_dir=results_base,
             model_factory=ctx.get("model_factory"),
+            deadline=_deadline,
+            soft_stop=_soft_stop,
+            registry=ctx.get("registry"),
         )
         all_results.append(
             {
@@ -317,7 +343,13 @@ def tool_collect_results(
     results_dir: str | None = None,
     **_extra,
 ) -> str:
-    """Read and summarize results from completed tasks."""
+    """Read and summarize results from completed tasks.
+
+    Honors ``ctx["soft_stop"]`` as a polite "stop spending time" signal: if
+    SoftStop has fired, return whatever's already on disk in ``results/``
+    rather than re-scanning everything. The result-scanner is fast in
+    practice but in pathological cases (thousands of patches) this matters.
+    """
     output_dir = Path(ctx["output_dir"])
     if results_dir:
         base = Path(results_dir)

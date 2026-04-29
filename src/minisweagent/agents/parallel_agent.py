@@ -69,6 +69,9 @@ class ParallelAgent(DefaultAgent):
     def run(self, task: str, **kwargs) -> BestPatchResult | None:
         num_parallel = self.config.num_parallel or 1
         console = kwargs.get("console")
+        deadline = kwargs.get("deadline")
+        soft_stop = kwargs.get("soft_stop")
+        registry = kwargs.get("registry")
 
         # Validate repo path (required for worktree management)
         if not self.config.repo:
@@ -109,6 +112,9 @@ class ParallelAgent(DefaultAgent):
             console=console,
             agent_specs=self.config.agent_specs,
             tasks=self.config.tasks,
+            deadline=deadline,
+            soft_stop=soft_stop,
+            registry=registry,
         )
 
         metric = (
@@ -374,6 +380,9 @@ class ParallelAgent(DefaultAgent):
         console=None,
         agent_specs: list | None = None,
         tasks: list | None = None,
+        deadline=None,
+        soft_stop=None,
+        registry=None,
     ) -> list[tuple[int, Any, Any, Any]]:
         """Run multiple parallel agents and return their results.
 
@@ -381,6 +390,10 @@ class ParallelAgent(DefaultAgent):
         - Pool (preferred): pass tasks (list[AgentTask]) for M tasks on N GPUs.
         - Heterogeneous (legacy): pass agent_specs (list[AgentSpec]).
         - Homogeneous (default): num_parallel identical agents, each with 1 GPU.
+
+        ``deadline`` / ``soft_stop`` / ``registry`` are forwarded to the
+        chosen helper so spawned subprocesses are tracked and the dispatch
+        loop can short-circuit on SoftStop.
         """
         # Pool mode: M tasks on N GPU slots (preferred)
         if tasks:
@@ -398,6 +411,9 @@ class ParallelAgent(DefaultAgent):
                 redirect_output_fn=redirect_output_fn,
                 save_traj_fn=save_traj_fn,
                 console=console,
+                deadline=deadline,
+                soft_stop=soft_stop,
+                registry=registry,
             )
 
         # Heterogeneous mode: use agent_specs if provided (legacy)
@@ -415,6 +431,9 @@ class ParallelAgent(DefaultAgent):
                 redirect_output_fn=redirect_output_fn,
                 save_traj_fn=save_traj_fn,
                 console=console,
+                deadline=deadline,
+                soft_stop=soft_stop,
+                registry=registry,
             )
 
         # Homogeneous mode (original behavior)
@@ -451,6 +470,11 @@ class ParallelAgent(DefaultAgent):
 
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
+            # Defense in depth: SoftStop may have fired between submit and start.
+            if soft_stop is not None and soft_stop.is_set():
+                logger.info("run_single_agent[%d]: SoftStop set before start; skipping", agent_id)
+                return agent_id, None, "SoftStop", "skipped before start"
+
             # All repos use git worktree (non-git repos are initialized as git above)
             worktree_path = create_worktree(repo_path, worktree_base / f"slot_{agent_id}")
             worktree_path_str = str(worktree_path.resolve())
@@ -515,6 +539,9 @@ class ParallelAgent(DefaultAgent):
                     agent._setup_save_and_test_context()
             if hasattr(agent, "log_file"):
                 agent.log_file = log_file
+            # Wall-clock soft-stop -> sub-agent step loop.
+            if soft_stop is not None:
+                agent._soft_stop = soft_stop
 
             with open(log_file, "w", encoding="utf-8") as f:
                 f.write(f"Agent {agent_id} Conversation Log\n")
@@ -605,15 +632,44 @@ class ParallelAgent(DefaultAgent):
         _progress_thread = threading.Thread(target=_report_progress, daemon=True)
         _progress_thread.start()
 
+        # Use poll loop so SoftStop is observed mid-dispatch.
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel) as executor:
-            futures = {executor.submit(run_single_agent, i): i for i in range(num_parallel)}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    result = future.result()
-                    results.append(result)
-                except Exception as e:
-                    agent_id = futures[future]
-                    logger.error("Error in parallel agent %d: %s", agent_id, e, exc_info=True)
+            futures: dict[concurrent.futures.Future, int] = {}
+            for i in range(num_parallel):
+                if registry is not None:
+                    with registry.lock:
+                        if soft_stop is not None and soft_stop.is_set():
+                            break
+                        fut = executor.submit(run_single_agent, i)
+                        registry.futures.append(fut)
+                else:
+                    if soft_stop is not None and soft_stop.is_set():
+                        break
+                    fut = executor.submit(run_single_agent, i)
+                futures[fut] = i
+
+            pending = set(futures.keys())
+            while pending:
+                if soft_stop is not None and soft_stop.is_set():
+                    logger.warning(
+                        "ParallelAgent.run_parallel (homogeneous): SoftStop set; cancelling %d in-flight",
+                        len(pending),
+                    )
+                    if registry is not None:
+                        registry.terminate_all()
+                    for f in pending:
+                        f.cancel()
+                    break
+                done, pending = concurrent.futures.wait(pending, timeout=2.0)
+                for f in done:
+                    agent_id = futures[f]
+                    try:
+                        result = f.result()
+                        results.append(result)
+                    except concurrent.futures.CancelledError:
+                        logger.info("Homogeneous parallel agent %d cancelled", agent_id)
+                    except Exception as e:
+                        logger.error("Error in parallel agent %d: %s", agent_id, e, exc_info=True)
 
         _progress_stop.set()
         _progress_thread.join(timeout=2)

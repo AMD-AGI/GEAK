@@ -16,9 +16,9 @@ from minisweagent.agents.homogeneous.homogeneous_agent import (
     run_homogeneous_agent,
 )
 from minisweagent.agents.parallel_agent import BestPatchResult, ParallelAgent
-from minisweagent.run.task_file import create_worktree
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models.test_models import DeterministicModel
+from minisweagent.run.task_file import create_worktree
 
 # --- Test parse_gpu_ids ---
 

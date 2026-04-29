@@ -1,8 +1,6 @@
 import os
 from unittest.mock import patch
 
-import pytest
-
 from minisweagent.models import GlobalModelStats, get_model, get_model_class, get_model_name
 from minisweagent.models.test_models import DeterministicModel, make_output
 

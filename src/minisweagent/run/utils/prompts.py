@@ -54,6 +54,15 @@ Extract the following (return null if not found or not applicable):
 4. max_rounds: Maximum number of optimization rounds (integer). Only set if explicitly mentioned.
 5. start_round: Round number to resume from (integer, 1-based). Only set if explicitly mentioned.
 6. pipeline_intent: true if the task describes kernel optimization, performance improvement, GPU kernel work, or profiling. false if it describes general coding tasks like bug fixes, refactoring, or feature additions.
+7. mode: Wall-clock budget profile -- "quick" or "full". Only set if the user explicitly chooses one.
+   - "quick" -> ~1-hour total budget. Triggered by phrases like: "quick mode", "quick run",
+     "fast run", "quick optimization", "1 hour", "one hour", "1h", "shorter run", "tight budget",
+     "smoke test the optimization", "limit to 60 minutes", "--mode quick", "mode=quick".
+   - "full" -> ~2-hour total budget. Triggered by phrases like: "full mode", "full run",
+     "thorough run", "long run", "2 hours", "two hours", "2h", "extended run", "deep optimization",
+     "--mode full", "mode=full".
+   - null if neither is mentioned. Do NOT infer a mode from the kernel size or complexity --
+     only set when the user explicitly chooses one.
 
 Return ONLY a valid JSON object. Example:
 {{{{
@@ -62,7 +71,8 @@ Return ONLY a valid JSON object. Example:
   "heterogeneous": null,
   "max_rounds": 5,
   "start_round": null,
-  "pipeline_intent": true
+  "pipeline_intent": true,
+  "mode": "quick"
 }}}}
 
 Here is the task content:

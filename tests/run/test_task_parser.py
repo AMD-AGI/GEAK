@@ -6,8 +6,6 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from minisweagent.run.utils import task_parser as tp
 
 
@@ -196,6 +194,75 @@ class TestParsePipelineParams:
         out = tp.parse_pipeline_params("t", Bad())
         assert out["kernel_url"] is None
         assert out["pipeline_intent"] is False
+        assert out["mode"] is None  # fallback always includes mode key
+
+    def test_extracts_quick_mode(self) -> None:
+        payload = {
+            "kernel_url": None,
+            "preprocess_dir": None,
+            "heterogeneous": None,
+            "max_rounds": None,
+            "start_round": None,
+            "pipeline_intent": True,
+            "mode": "quick",
+        }
+        out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
+        assert out["mode"] == "quick"
+
+    def test_extracts_full_mode(self) -> None:
+        payload = {
+            "kernel_url": None,
+            "preprocess_dir": None,
+            "heterogeneous": None,
+            "max_rounds": None,
+            "start_round": None,
+            "pipeline_intent": True,
+            "mode": "full",
+        }
+        out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
+        assert out["mode"] == "full"
+
+    def test_normalizes_mode_case_and_whitespace(self) -> None:
+        payload = {
+            "kernel_url": None,
+            "preprocess_dir": None,
+            "heterogeneous": None,
+            "max_rounds": None,
+            "start_round": None,
+            "pipeline_intent": True,
+            "mode": "  Quick  ",
+        }
+        out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
+        assert out["mode"] == "quick"
+
+    def test_invalid_mode_value_clears_to_none(self) -> None:
+        # The LLM might hallucinate a value not in the supported set;
+        # we must clear it to None rather than propagate garbage.
+        for bad in ("blazing", "fast", "1h", "", 7):
+            payload = {
+                "kernel_url": None,
+                "preprocess_dir": None,
+                "heterogeneous": None,
+                "max_rounds": None,
+                "start_round": None,
+                "pipeline_intent": True,
+                "mode": bad,
+            }
+            out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
+            assert out["mode"] is None, f"bad value {bad!r} should normalize to None"
+
+    def test_missing_mode_key_returns_none(self) -> None:
+        # Backward-compat with old responses that don't include the field.
+        payload = {
+            "kernel_url": None,
+            "preprocess_dir": None,
+            "heterogeneous": None,
+            "max_rounds": None,
+            "start_round": None,
+            "pipeline_intent": True,
+        }
+        out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
+        assert out["mode"] is None
 
 
 class TestGeneratePatchOutputDir:

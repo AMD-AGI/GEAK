@@ -1,7 +1,4 @@
-import os
-import sys
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -31,9 +28,9 @@ _global_stats_lock = threading.Lock()
 def reset_global_stats():
     """Reset global model stats and ensure exclusive access for tests that need it."""
     with _global_stats_lock:
-        # Reset at start
-        GLOBAL_MODEL_STATS._cost = 0.0  # noqa: protected-access
-        GLOBAL_MODEL_STATS._n_calls = 0  # noqa: protected-access
+        # Reset at start (pylint: disable=protected-access)
+        GLOBAL_MODEL_STATS._cost = 0.0
+        GLOBAL_MODEL_STATS._n_calls = 0
         yield
         GLOBAL_MODEL_STATS._cost = 0.0
         GLOBAL_MODEL_STATS._n_calls = 0

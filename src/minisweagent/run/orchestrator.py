@@ -17,11 +17,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
 
-from minisweagent.run.pipeline_helpers import DEFAULT_HETEROGENEOUS, DEFAULT_PIPELINE_OUTPUT_DIR
+from minisweagent.run.pipeline_helpers import (
+    DEFAULT_HETEROGENEOUS,
+    DEFAULT_PIPELINE_OUTPUT_DIR,
+    DEFAULT_RUN_MODE,
+    RUN_MODES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,9 @@ def run_orchestrator(
     max_rounds: int | None = None,
     start_round: int = 1,
     heterogeneous: bool = DEFAULT_HETEROGENEOUS,
+    deadline=None,
+    soft_stop=None,
+    registry=None,
 ) -> dict[str, Any]:
     """Run the orchestrator agent loop.
 
@@ -66,6 +75,17 @@ def run_orchestrator(
     heterogeneous:
         If True, use LLM-generated diverse tasks per round.
         If False (default), use homogeneous mode where all agents get the same task.
+    deadline:
+        Optional ``run.budget.Deadline`` snapshot. Threaded into the round loop
+        and ``run_llm_steps`` so per-step polls can short-circuit cleanly.
+    soft_stop:
+        Optional ``threading.Event``. Set ~``finalize_grace_s`` before the
+        deadline by the optimization watchdog; orchestrator polls it to stop
+        dispatching new work and finalize with best-so-far.
+    registry:
+        Optional ``run.state.ProcessRegistry``. Sub-agent dispatchers register
+        their ``Popen`` / ``Future`` here so the watchdog and SIGINT handler
+        can ``terminate_all()``.
     """
     _out = output_dir or Path(preprocess_ctx.get("output_dir", DEFAULT_PIPELINE_OUTPUT_DIR))
     _out = Path(_out)
@@ -95,6 +115,9 @@ def run_orchestrator(
         _out,
         max_rounds,
         start_round,
+        deadline=deadline,
+        soft_stop=soft_stop,
+        registry=registry,
     )
 
 
@@ -209,6 +232,18 @@ def main() -> None:
         default=None,
         help="Model name (default: from GEAK_MODEL env or geak.yaml)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=list(RUN_MODES),
+        default=None,
+        help="Wall-clock budget profile: 'quick' (~1h) or 'full' (~2h). Default: from geak.yaml run.mode.",
+    )
+    parser.add_argument(
+        "--total-budget-s",
+        type=float,
+        default=None,
+        help="Override the mode's total wall-clock budget (seconds). Escape hatch.",
+    )
     from minisweagent.run.pipeline_helpers import add_agent_filter_args, apply_agent_filter_env
 
     add_agent_filter_args(parser)
@@ -268,16 +303,97 @@ def main() -> None:
     model = load_geak_model(model_name)
     factory = geak_model_factory(model_name)
 
-    report = run_orchestrator(
-        preprocess_ctx=ctx,
-        gpu_ids=gpu_ids,
-        model=model,
-        model_factory=factory,
-        output_dir=pp_dir,
-        max_rounds=args.max_rounds,
-        start_round=args.start_round,
-        heterogeneous=args.heterogeneous,
+    # ── Build RunBudget from --mode + geak.yaml ──────────────────────
+    # Resume detection: budget clock is fresh; warn the user that this
+    # invocation's wall-clock budget is independent of any prior run that
+    # produced the artifacts in ``pp_dir``.
+    if args.start_round and args.start_round > 1:
+        logger.warning(
+            "[geak-orchestrate] Resume detected (--start-round=%d). "
+            "Budget timer reset to T0=now; this run gets a fresh budget regardless "
+            "of how long the prior run took.",
+            args.start_round,
+        )
+
+    import yaml
+
+    from minisweagent.config import get_config_path
+    from minisweagent.run.budget import BudgetSpec, RunBudget
+    from minisweagent.run.state import ProcessRegistry
+
+    _yaml_path = get_config_path("geak")
+    _yaml = yaml.safe_load(_yaml_path.read_text(encoding="utf-8")) or {} if _yaml_path.exists() else {}
+    _run_cfg = _yaml.get("run") or {}
+    resolved_mode = (args.mode or _run_cfg.get("mode") or DEFAULT_RUN_MODE).strip().lower()
+    if resolved_mode not in RUN_MODES:
+        logger.error("--mode must be one of %s; got %r", RUN_MODES, resolved_mode)
+        sys.exit(2)
+    _budget_cfg = (_run_cfg.get("budgets") or {}).get(resolved_mode) or {}
+    if not _budget_cfg:
+        logger.error("No run.budgets.%s block in %s", resolved_mode, _yaml_path)
+        sys.exit(2)
+    spec = BudgetSpec(
+        mode=resolved_mode,  # type: ignore[arg-type]
+        total_s=float(args.total_budget_s if args.total_budget_s is not None else _budget_cfg["total_s"]),
+        preprocess_soft_cap_s=float(_budget_cfg["preprocess_soft_cap_s"]),
+        preprocess_hard_cap_fraction=float(_budget_cfg["preprocess_hard_cap_fraction"]),
+        finalize_grace_s=float(_budget_cfg["finalize_grace_s"]),
     )
+    budget = RunBudget(spec=spec)
+    for _line in budget.banner_lines():
+        logger.info(_line)
+
+    # geak-orchestrate skips preprocess; transition straight to optimization
+    # and schedule the soft-stop watchdog with a 0-elapsed preprocess.
+    opt_deadline = budget.commit_preprocess(0.0)
+    budget.schedule_optimization_watchdog()
+
+    registry = ProcessRegistry()
+
+    # SIGINT handler (same semantics as `geak`).
+    _sigint_count = {"n": 0}
+    _orig_sigint = signal.getsignal(signal.SIGINT)
+
+    def _sigint_handler(_signum, _frame):  # noqa: ANN001
+        _sigint_count["n"] += 1
+        if _sigint_count["n"] == 1:
+            logger.warning("SIGINT received -- flipping SoftStop. Press Ctrl-C again to force.")
+            budget.soft_stop.set()
+        else:
+            logger.error("Second SIGINT received -- terminating tracked subprocesses and exiting.")
+            try:
+                registry.terminate_all()
+            except Exception:
+                logger.exception("registry.terminate_all() failed during SIGINT")
+            signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
+            raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    try:
+        report = run_orchestrator(
+            preprocess_ctx=ctx,
+            gpu_ids=gpu_ids,
+            model=model,
+            model_factory=factory,
+            output_dir=pp_dir,
+            max_rounds=args.max_rounds,
+            start_round=args.start_round,
+            heterogeneous=args.heterogeneous,
+            deadline=opt_deadline,
+            soft_stop=budget.soft_stop,
+            registry=registry,
+        )
+    finally:
+        budget.cancel_all_timers()
+        try:
+            registry.terminate_all()
+        except Exception:
+            logger.exception("registry.terminate_all() failed during cleanup")
+        try:
+            signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
+        except Exception:
+            logger.exception("restoring SIGINT handler failed")
 
     if report:
         report_dict = report.to_dict() if hasattr(report, "to_dict") else report

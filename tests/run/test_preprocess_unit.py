@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 # ===================================================================
 # Test 1: _pick() determinism and correctness
 # ===================================================================
@@ -448,9 +447,6 @@ class TestImports:
     def test_pipeline_helpers_import(self):
         from minisweagent.run.pipeline_helpers import (
             extract_harness_path,
-            validate_harness,
-            execute_harness_validation,
-            create_validated_harness,
         )
         assert callable(extract_harness_path)
 
@@ -775,8 +771,8 @@ class TestPreprocessContractEnforcement:
                 assert Path(pc.profiling_result_path).is_file()
 
     def test_harness_passes_static_validation(self):
-        from minisweagent.run.preprocess.context import PreprocessContext
         from minisweagent.run.pipeline_helpers import validate_harness
+        from minisweagent.run.preprocess.context import PreprocessContext
         with tempfile.TemporaryDirectory() as tmp:
             ctx, out = self._make_mock_output(tmp)
             pc = PreprocessContext.from_preprocessor_output(ctx, out)
@@ -1083,8 +1079,7 @@ if __name__ == "__main__":
 
     def test_splits_hip_main_and_run_functions(self):
         """Merged HIP source should split host-side test entrypoints into a harness."""
-        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
-        from minisweagent.run.preprocess.harness_utils import validate_harness
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness, validate_harness
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             src_dir = tmp_path / "repo"

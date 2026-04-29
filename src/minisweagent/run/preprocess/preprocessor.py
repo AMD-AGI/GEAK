@@ -45,7 +45,6 @@ from minisweagent.run.preprocess.harness_utils import (
     detect_and_split_kernel_from_harness,
     execute_harness_validation,
     extract_harness_path,
-    run_baseline_profile,
     validate_harness,
 )
 from minisweagent.run.preprocess.testcase_cache import (
@@ -411,6 +410,8 @@ def run_preprocessor(
     performance_command: str | list[str] | None = None,
     benchmark_timeout: int = 3600,
     target_language: str | None = None,
+    budget=None,
+    state=None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -448,6 +449,17 @@ def run_preprocessor(
     benchmark_timeout:
         Timeout in seconds for the benchmark baseline subprocess.
         Defaults to 3600s. Increase for kernels with long runtimes.
+    budget:
+        Optional ``RunBudget`` (from ``run/budget.py``). When supplied, the
+        ``benchmark_timeout`` and other per-subprocess timeouts are clamped to
+        ``deadline.cap(...)`` so a near-hard-cap preprocess cannot run past
+        the ceiling.
+    state:
+        Optional ``PreprocessState`` (from ``run/state.py``). When supplied,
+        each stage updates ``state.current_stage`` so the watchdog soft-stop
+        handler can apply its stage-aware policy. Spawned subprocesses /
+        ``mp.Process`` instances are tracked in ``state.registry`` so the
+        watchdog can terminate them.
 
     Returns
     -------
@@ -459,6 +471,22 @@ def run_preprocessor(
     _preprocess_t0 = time.monotonic()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Lazy import to avoid a circular dependency at module load time:
+    # state.py -> benchmark_parsing -> preprocess package -> ... back here.
+    from minisweagent.run.state import (
+        PreprocessAborted,
+        PreprocessStage,
+        PreprocessState,
+        build_thin_baseline_metrics,
+    )
+
+    if state is None:
+        state = PreprocessState(output_dir=output_dir)
+    else:
+        # Propagate output_dir if caller didn't preset it.
+        if state.output_dir is None:
+            state.output_dir = output_dir
 
     ctx: dict[str, Any] = {}
 
@@ -1035,6 +1063,9 @@ def run_preprocessor(
         )
         if harness_path_for_baseline and harness_results:
             logger.info("[bold cyan]--- Step 4/7: Baseline collection ---[/bold cyan]")
+            state.current_stage = PreprocessStage.HARNESS_BENCHMARK
+            if state.hard_fail:
+                raise PreprocessAborted(state.fail_reason or "preprocess aborted by watchdog")
             extra = f"--iterations {eval_iters}"
             logger.info("  Re-running all modes with %s for baselines...", extra)
             bl_ok, bl_errors, baseline_results = execute_harness_validation(
@@ -1075,10 +1106,15 @@ def run_preprocessor(
 
     # ── 5. kernel-profile (via profiler-mcp) ─────────────────────────
     logger.info("[bold cyan]--- Step 5/7: Kernel profiling (Metrix instrumented) ---[/bold cyan]")
+    state.current_stage = PreprocessStage.KERNEL_PROFILE
+    if state.hard_fail:
+        raise PreprocessAborted(state.fail_reason or "preprocess aborted by watchdog")
 
     _profile_t0 = time.monotonic()
     profiling: dict[str, Any] | None = None
-    if eval_command:
+    if state.skip_profiling:
+        logger.warning("  Skipping kernel-profile stage (state.skip_profiling=True)")
+    elif eval_command:
         _cwd = str(repo_root) if repo_root else None
 
         if correctness_cmd:
@@ -1110,21 +1146,23 @@ def run_preprocessor(
 
         if not perf_cmd:
             logger.info("  Skipping profiling (no performance_command in eval_command)")
+        elif state.skip_profiling:
+            logger.warning("  Skipping profiling (state.skip_profiling=True)")
         else:
             logger.info("  Profiling with performance_command: %s", perf_cmd)
             try:
-                _ensure_mcp_importable()
-                profiler_server = importlib.import_module("profiler_mcp.server")
-                profile_kernel = profiler_server.profile_kernel
+                from minisweagent.run.preprocess.profiler_runner import run_profiler_with_handle
 
-                _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
-                profiling = _profile_fn(
-                    command=perf_cmd,
+                _profile_timeout = budget.deadline_for_preprocess().remaining() if budget else None
+                profiling = run_profiler_with_handle(
+                    state,
+                    perf_cmd=perf_cmd,
                     backend="metrix",
+                    gpu_id=gpu_id,
+                    workdir=_cwd,
                     num_replays=3,
                     quick=False,
-                    gpu_devices=str(gpu_id),
-                    workdir=_cwd,
+                    timeout_s=_profile_timeout,
                 )
             except Exception as exc:
                 logger.warning("[yellow]Profiling failed: %s[/yellow]", exc, exc_info=True)
@@ -1161,10 +1199,25 @@ def run_preprocessor(
         ctx["harness_path"] = extract_harness_path(test_command)
         (output_dir / "harness_path.txt").write_text(ctx["harness_path"])
 
-        try:
-            profiling = run_baseline_profile(test_command, gpu_id=gpu_id)
-        except Exception as exc:
-            logger.warning("[yellow]Profiling failed: %s[/yellow]", exc, exc_info=True)
+        if state.skip_profiling:
+            logger.warning("  Skipping profiling (state.skip_profiling=True)")
+        else:
+            try:
+                from minisweagent.run.preprocess.profiler_runner import run_profiler_with_handle
+
+                _profile_timeout = budget.deadline_for_preprocess().remaining() if budget else None
+                profile_cmd = f"python {ctx['harness_path']} --profile"
+                profiling = run_profiler_with_handle(
+                    state,
+                    perf_cmd=profile_cmd,
+                    backend="metrix",
+                    gpu_id=gpu_id,
+                    num_replays=3,
+                    quick=False,
+                    timeout_s=_profile_timeout,
+                )
+            except Exception as exc:
+                logger.warning("[yellow]Profiling failed: %s[/yellow]", exc, exc_info=True)
     else:
         logger.info("  Skipping profiling (no test command found)")
 
@@ -1182,6 +1235,9 @@ def run_preprocessor(
 
     # ── 6. baseline-metrics ──────────────────────────────────────────
     logger.info("[bold cyan]--- Step 6/7: Baseline metrics ---[/bold cyan]")
+    state.current_stage = PreprocessStage.BASELINE_METRICS
+    if state.hard_fail:
+        raise PreprocessAborted(state.fail_reason or "preprocess aborted by watchdog")
 
     baseline_metrics: dict[str, Any] | None = None
     if profiling and profiling.get("success", True):
@@ -1194,6 +1250,17 @@ def run_preprocessor(
             logger.info("  Baseline: %s µs, bottleneck=%s", dur, bn)
         except Exception as exc:
             logger.warning("[yellow]Baseline metrics failed: %s[/yellow]", exc, exc_info=True)
+    elif state.skip_profiling:
+        # Profiling was skipped by the soft-stop handler; build a thin metrics
+        # dict from benchmark_baseline.txt alone so the orchestrator can still
+        # run (with degraded -- but valid -- guidance).
+        bb_path = output_dir / "benchmark_baseline.txt"
+        bb_text = bb_path.read_text() if bb_path.exists() else ""
+        baseline_metrics = build_thin_baseline_metrics(bb_text)
+        logger.warning(
+            "  Built THIN baseline_metrics (profiling_skipped=True): duration_us=%s",
+            baseline_metrics.get("duration_us", "?"),
+        )
     else:
         logger.info("  Skipping baseline metrics (no profiling data)")
 
@@ -1232,6 +1299,9 @@ def run_preprocessor(
 
     # ── 7. commandment ───────────────────────────────────────────────
     logger.info("[bold cyan]--- Step 7/7: Commandment ---[/bold cyan]")
+    state.current_stage = PreprocessStage.COMMANDMENT
+    if state.hard_fail:
+        raise PreprocessAborted(state.fail_reason or "preprocess aborted by watchdog")
 
     commandment: str | None = None
     if eval_command:
@@ -1316,7 +1386,15 @@ def run_preprocessor(
     # endregion
 
     _preprocess_elapsed = time.monotonic() - _preprocess_t0
-    logger.info("Preprocessing complete in %.0fs. Artefacts written to: %s", _preprocess_elapsed, output_dir)
+    state.mark_done()
+    if state.in_borrow_mode:
+        logger.warning(
+            "Preprocessing complete in %.0fs (borrowed time used). Artefacts written to: %s",
+            _preprocess_elapsed,
+            output_dir,
+        )
+    else:
+        logger.info("Preprocessing complete in %.0fs. Artefacts written to: %s", _preprocess_elapsed, output_dir)
     return ctx
 
 

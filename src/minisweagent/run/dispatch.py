@@ -293,6 +293,9 @@ def run_task_batch(
     model_factory,
     *,
     console=None,
+    deadline=None,
+    soft_stop=None,
+    registry=None,
 ) -> dict[str, Any]:
     """Run a batch of task files via ParallelAgent pool mode.
 
@@ -308,6 +311,11 @@ def run_task_batch(
         Callable returning a new model instance.
     console:
         Optional Rich console.
+    deadline / soft_stop / registry:
+        Optional wall-clock budget primitives forwarded to
+        ``ParallelAgent.run_parallel`` so it can register spawned subprocesses
+        in the registry, poll ``soft_stop`` between submissions, and clamp
+        per-agent timeouts via ``deadline.cap()``.
 
     Returns
     -------
@@ -397,6 +405,9 @@ def run_task_batch(
             gpu_ids=gpu_ids,
             console=console,
             tasks=tasks,
+            deadline=deadline,
+            soft_stop=soft_stop,
+            registry=registry,
         )
     except Exception as exc:
         logger.error("Task batch execution failed: %s", exc, exc_info=True)

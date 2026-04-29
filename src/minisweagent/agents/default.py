@@ -366,6 +366,15 @@ class DefaultAgent:
             0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost
         ):
             raise LimitsExceeded()
+
+        # Wall-clock soft-stop poll: if the run-level watchdog has fired,
+        # treat it the same as cost/step limits so the sub-agent stops
+        # spending tokens on new work and returns its last good state via
+        # the existing TerminatingException machinery.
+        _soft_stop = getattr(self, "_soft_stop", None)
+        if _soft_stop is not None and _soft_stop.is_set() and not self._allow_one_summary_step:
+            logger.info("DefaultAgent.query: SoftStop is set; raising LimitsExceeded to terminate this sub-agent")
+            raise LimitsExceeded("wall-clock soft-stop reached")
         if self._allow_one_summary_step:
             self._allow_one_summary_step = False
 
