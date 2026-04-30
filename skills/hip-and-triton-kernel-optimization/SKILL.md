@@ -35,7 +35,8 @@ target_runtime_us   = total_ops / binding_ceiling
 
 Use the MFMA peak that matches your opcode (K=32 fp8/bf16, K=128 scaled
 fp8, etc.); the ISA reference lists per-opcode throughput. Reference
-HBM bandwidth: MI300X / MI325X ≈ 5.3 TB/s, MI355X ≈ 8.0 TB/s.
+HBM bandwidth: MI300X ≈ 5.3 TB/s (HBM3), MI325X ≈ 6.0 TB/s (HBM3E),
+MI355X ≈ 8.0 TB/s (HBM3E).
 
 From the binding ceiling derive the per-counter reference points used
 throughout this skill:
@@ -122,13 +123,13 @@ kernel change it justifies; do not change code without a signal.
 
 | Signal | Threshold | Action | Recipe |
 |---|---|---|---|
-| `LDSBankConflict / MemUnitStalled` | > 0.05 (roofline target < 0.005) | Swap LDS layout for transposed reads | [HIP_RECIPES.md#1](docs/HIP_RECIPES.md) — `ds_read_b64_tr_b16/_b8` |
-| VALU per wave | > 3× algorithmic minimum | Redundant data shuffling — promote state to register-resident | [HIP_RECIPES.md#5](docs/HIP_RECIPES.md) |
-| MFMA utilization | < 50 % of opcode peak | MFMA pipe starved — switch to larger MFMA opcode | [HIP_RECIPES.md#3](docs/HIP_RECIPES.md) — K=128 scaled FP8 |
-| PC-sample `s_waitcnt` | > 25 % | Wait-counter-bound — do **not** add MFMA, cut staging traffic | [HIP_RECIPES.md#6](docs/HIP_RECIPES.md) — hand-scheduled inner loop |
-| FetchSize ÷ algorithmic-minimum | > 1.2 with high L2 hit rate | Redundant fetches under per-lane predication | [HIP_RECIPES.md#9](docs/HIP_RECIPES.md) — `buffer_load_dwordx4` |
-| Reduce kernel share of total | > 20 % | Rewrite reduce stage | [HIP_RECIPES.md#8](docs/HIP_RECIPES.md) — vector loads, persistent done-counter |
-| Persistent prologue PC samples | > 30 % of total | Per-launch prologue work not amortized across tiles | [HIP_RECIPES.md#4](docs/HIP_RECIPES.md) — persistent grid |
+| `LDSBankConflict / MemUnitStalled` | > 0.05 (roofline target < 0.005) | Swap LDS layout for transposed reads | [HIP_RECIPES.md#1](docs/HIP_RECIPES.md#1-transposed-lds-reads) — `ds_read_b64_tr_b16/_b8` |
+| VALU per wave | > 3× algorithmic minimum | Redundant data shuffling — promote state to register-resident | [HIP_RECIPES.md#5](docs/HIP_RECIPES.md#5-register-resident-q--softmax-state) |
+| MFMA utilization | < 50 % of opcode peak | MFMA pipe starved — switch to larger MFMA opcode | [HIP_RECIPES.md#3](docs/HIP_RECIPES.md#3-k128-scaled-fp8-mfma) — K=128 scaled FP8 |
+| PC-sample `s_waitcnt` | > 25 % | Wait-counter-bound — do **not** add MFMA, cut staging traffic | [HIP_RECIPES.md#6](docs/HIP_RECIPES.md#6-hand-scheduled-inner-loop) — hand-scheduled inner loop |
+| FetchSize ÷ algorithmic-minimum | > 1.2 with high L2 hit rate | Redundant fetches under per-lane predication | [HIP_RECIPES.md#9](docs/HIP_RECIPES.md#9-buffer_load_dwordx4-with-hand-built-v-descriptor) — `buffer_load_dwordx4` |
+| Reduce kernel share of total | > 20 % | Rewrite reduce stage | [HIP_RECIPES.md#8](docs/HIP_RECIPES.md#8-reduce-kernel-tuning) — vector loads, persistent done-counter |
+| Persistent prologue PC samples | > 30 % of total | Per-launch prologue work not amortized across tiles | [HIP_RECIPES.md#4](docs/HIP_RECIPES.md#4-persistent-grid-cu-sized--atomic-dispenser) — persistent grid |
 
 Order matters: address LDS pressure before tuning MFMA, address VMEM
 redundancy before tuning the reduce.
@@ -148,7 +149,7 @@ the MFMA pipe sits idle waiting for loads.
 
 Action: pivot to HIP with `__builtin_amdgcn_mfma_*` intrinsics and
 hand-schedule the load/MFMA interleave (see
-[HIP_RECIPES.md#6](docs/HIP_RECIPES.md)). Expected recovery: 70–90 % of
+[HIP_RECIPES.md#6](docs/HIP_RECIPES.md#6-hand-scheduled-inner-loop)). Expected recovery: 70–90 % of
 the gap to the roofline in 1–2 engineering-weeks. Do not wait on a
 multi-quarter upstream LLVM scheduler fix unless you have nothing else
 to ship.
@@ -334,7 +335,7 @@ NHEAD-dependent constants and re-validate accuracy after porting.
 static int pick_k_splits(int ctx, int batch) {
     const int HG = NHEAD / BLOCK_H;
     const int BLOCK_N = 32;
-    const int TOTAL_SLOTS = 512;          // CU count target
+    const int TOTAL_SLOTS = 512;          // target dispatch slots (~2x CU count, fill heuristic)
     const int K_MAX_SUPPORTED = 32;       // reduce dispatcher max
     int k_fill = std::max(1, TOTAL_SLOTS / std::max(1, batch * HG));
     int k_ctx  = std::max(1, ctx / BLOCK_N);

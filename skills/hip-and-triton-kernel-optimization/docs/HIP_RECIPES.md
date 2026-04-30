@@ -25,13 +25,15 @@ transposed reads, and XOR-swizzle the LDS layout so each read hits all
 
 ```cpp
 // BF16 PV path: 16 lanes × 4B per read, transposed so adjacent
-// lanes hit adjacent banks.
-auto v = __builtin_amdgcn_ds_read_b64_tr_b16(
-    (const __local uint64_t*)(lds_base + swizzled_offset));
+// lanes hit adjacent banks. ISA mnemonic: ds_read_b64_tr_b16.
+// Builtin variants: _v4i16 / _v4f16 / _v4bf16 — pick the one that
+// matches your accumulator type.
+auto v = __builtin_amdgcn_ds_read_tr16_b64_v4bf16(
+    (const __attribute__((address_space(3))) __bf16*)(lds_base + swizzled_offset));
 
-// FP8 QK path
-auto k = __builtin_amdgcn_ds_read_b64_tr_b8(
-    (const __local uint64_t*)(lds_base + swizzled_offset));
+// FP8 QK path. ISA mnemonic: ds_read_b64_tr_b8.
+auto k = __builtin_amdgcn_ds_read_tr8_b64_v2i32(
+    (const __attribute__((address_space(3))) int*)(lds_base + swizzled_offset));
 ```
 
 XOR-swizzle pattern that gives all-32-bank coverage for a 16-lane
@@ -50,9 +52,12 @@ the dominant stall. Empirically this single change can move
 
 **Gotchas.**
 
-- The transposed-read intrinsics return packed 64-bit values. Cast to
-  the right type before feeding to MFMA — use `__builtin_bit_cast` or
-  reinterpret through a union, not C-style casts.
+- The transposed-read builtins are typed: `_v4i16` / `_v4f16` /
+  `_v4bf16` for the b16 form (each returns a 4-lane 16-bit vector,
+  i.e. 64 bits) and `_v2i32` for the b8 form. The pointer type must
+  match the return type and live in `__local` (address space 3).
+  Cast through `__builtin_bit_cast` (or a union) when you need to
+  reinterpret as MFMA operand types — never C-style casts.
 - Add a 4-byte stride pad on the PV LDS slot to avoid conflict with
   concurrent QK writes in a double-buffered layout.
 - Swizzle the **write** side too. A read swizzle without a matching
@@ -105,12 +110,20 @@ sampling showing MFMA share < 20 %.
 issue compared to the K=32 variant.
 
 ```cpp
+// Argument order matches the upstream LLVM intrinsic and Composable
+// Kernel's wrapper: (a, b, c, cbsz, blgp, opsel_a, scale_a,
+// opsel_b, scale_b). Note that opsel and scale are interleaved
+// per-operand — do NOT group scale_a and scale_b together.
 auto acc = __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(
-    a_fp8_packed,    // 128 K elements per row
+    a_fp8_packed,   // 128 K elements per row
     b_fp8_packed,
     acc,
-    scale_a, scale_b,    // dynamic scale factors
-    /*opsel*/ 0, /*cbsz*/ 0, /*blgp*/ 0);
+    /*cbsz=*/   0,  // A-operand encoding (0 = fp8/bf8, see below)
+    /*blgp=*/   0,  // B-operand encoding
+    /*opsel_a=*/0,  // { OPSEL_HI[0], OPSEL[0] } for scale_a
+    scale_a,        // per-block exponent scale for A
+    /*opsel_b=*/0,  // { OPSEL_HI[1], OPSEL[1] } for scale_b
+    scale_b);       // per-block exponent scale for B
 ```
 
 **Expected impact.** Doubles MFMA work-per-issue when MFMA was the
@@ -122,10 +135,14 @@ example).
 
 **Gotchas.**
 
-- The scaled variant takes a per-block scale factor (`f8f6f4` = 8-bit
-  A operand, 6-bit shared exponent, 4-bit B operand encoding). For
-  uniform-scale workloads, set `scale_a = scale_b = 1.0`; for true
-  block-scaling use the dispatcher's per-block scales.
+- `f8f6f4` in the opcode name means each of A and B can be selected
+  (via `cbsz` / `blgp`) as 8-bit (fp8/bf8), 6-bit (fp6/bf6), or 4-bit
+  (fp4) packed formats — it is NOT an A=8 / shared=6 / B=4 layout.
+  `cbsz = blgp = 0` selects fp8/bf8 for both operands.
+- `scale_a` / `scale_b` are per-block exponent scales (one byte each
+  packed in the scale register). For uniform-scale workloads set
+  `scale_a = scale_b = 0` (which encodes a 2^0 = 1.0 multiplier);
+  for true block-scaling use the dispatcher's per-block scales.
 - K=128 means 128-element K-loop tiles. Adjust `BLOCK_K`, LDS layout,
   and stride math accordingly. A common bug is using K=32 LDS strides
   with K=128 MFMA.
@@ -136,7 +153,8 @@ example).
 prologue region (Q-tile load, accumulator init, m_i/l_i seed) — i.e.
 per-launch setup is not amortized across tiles.
 
-**Change.** Promote the grid to CU-sized (~304 WGs on MI355X). Each
+**Change.** Promote the grid to CU-sized (~256 WGs on MI355X,
+~304 on MI300X / MI325X). Each
 WG pulls work-tile tuples `(split, batch, head_group)` from a global
 atomic counter and processes them sequentially. Peel the prologue work
 to run only on the first tile per WG.
@@ -287,7 +305,7 @@ a dedicated reduce kernel that combines partial accumulators.
 static int pick_k_splits(int ctx, int batch) {
     const int HG = NHEAD / BLOCK_H;
     const int BLOCK_N = 32;
-    const int TOTAL_SLOTS = 512;       // CU count target
+    const int TOTAL_SLOTS = 512;       // target dispatch slots (~2x CU count, fill heuristic)
     const int K_MAX_SUPPORTED = 32;    // reduce dispatcher max
     int k_fill = std::max(1, TOTAL_SLOTS / std::max(1, batch * HG));
     int k_ctx  = std::max(1, ctx / BLOCK_N);
