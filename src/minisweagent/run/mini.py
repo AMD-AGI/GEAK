@@ -199,7 +199,12 @@ def main(
     # fmt: on
     del visual
 
-    configure_if_first_time()
+    # Only run interactive first-time setup when stdin is a tty. Without the
+    # guard, a CI / scripted run without ``MSWEA_CONFIGURED`` or any API key
+    # env var would block on ``prompt(...)`` inside ``setup()``. The guard
+    # was originally present and was removed by ``c07285cc``; restoring it.
+    if sys.stdin.isatty():
+        configure_if_first_time()
 
     # 1) Config merge — explicit UTF-8 avoids locale-dependent decoding for YAML on some platforms
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
