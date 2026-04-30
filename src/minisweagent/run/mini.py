@@ -90,6 +90,18 @@ def _derive_output_dir(output: Path | None, kernel_name: str | None) -> Path:
     - If output is a file path: output_dir = output.parent
     - If output is a directory: output_dir = output
     - If output is not provided: use ./optimization_logs/<kernel_name>_<timestamp>
+
+    The returned path is always absolute. Several preprocess helpers
+    (notably ``_resolve_deterministic_harness`` and the merged-file split
+    helpers in ``preprocess/harness_utils.py``) interpret a relative path
+    in their inputs as relative to ``repo_root``; if we let a relative
+    ``output_dir`` flow through, harness paths the split helper writes
+    would later be resolved against the wrong root and the run would fail
+    with "Deterministic harness file not found". This invariant was
+    originally added in ``3b0ff0ac`` ("fix(preprocess): resolve output_dir
+    to absolute and exclude preprocessor artifacts from patches"), then
+    silently reverted by ``c07285cc`` (a RAG refactor whose "remove dead
+    code" line item caught this). Keep the ``.resolve()`` calls below.
     """
     if output is None:
         from minisweagent.run.utils.task_parser import generate_patch_output_dir
@@ -97,9 +109,9 @@ def _derive_output_dir(output: Path | None, kernel_name: str | None) -> Path:
         return (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
 
     if output.suffix:
-        return output.parent
+        return output.parent.resolve()
 
-    return output
+    return output.resolve()
 
 
 def _final_report_to_bestpatchresult(report: Any) -> BestPatchResult | None:
