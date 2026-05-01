@@ -58,6 +58,67 @@ from minisweagent.run.preprocess.testcase_cache import (
 # ── main entry point ─────────────────────────────────────────────────
 
 
+def _filter_discovery_to_repo_root(disc_dict: dict[str, Any], repo_root: str | Path) -> dict[str, Any]:
+    """Drop ``tests`` / ``benchmarks`` whose ``file`` is outside ``repo_root``.
+
+    The ``automated_test_discovery`` MCP can return harnesses from sibling
+    kernel directories (e.g. when the kernel sits in a benchmark suite of
+    related kernels). Letting those flow into ``execute_harness_validation``
+    triggers "Harness ... is outside repo_root -- cannot rewrite relative
+    imports" warnings and picks the wrong workload.
+
+    Returns a *new* dict with the filtered lists; counts in
+    ``total_tests_found`` / ``total_benchmarks_found`` are also updated so
+    the saved ``discovery.json`` is internally consistent.
+
+    A ``WARNING`` is logged when filtering removed any results so users can
+    see what was dropped without needing to diff against the raw MCP output.
+    """
+    if not isinstance(disc_dict, dict):
+        return disc_dict
+    try:
+        repo_resolved = Path(repo_root).resolve()
+    except (OSError, RuntimeError) as exc:
+        logger.debug("_filter_discovery_to_repo_root: repo_root resolve failed (%s); skipping filter", exc)
+        return disc_dict
+
+    def _is_inside(file_path: Any) -> bool:
+        if not isinstance(file_path, (str, Path)):
+            return True  # don't drop entries we can't classify
+        try:
+            return Path(file_path).resolve().is_relative_to(repo_resolved)
+        except (OSError, RuntimeError):
+            return False
+
+    new_disc = dict(disc_dict)
+    dropped_total = 0
+    for key in ("tests", "benchmarks"):
+        items = disc_dict.get(key, [])
+        if not isinstance(items, list):
+            continue
+        kept = [t for t in items if isinstance(t, dict) and _is_inside(t.get("file"))]
+        if len(kept) != len(items):
+            dropped = [t.get("file") for t in items if t not in kept]
+            dropped_total += len(items) - len(kept)
+            logger.warning(
+                "[yellow]Test discovery: dropped %d %s outside repo_root %s: %s[/yellow]",
+                len(items) - len(kept),
+                key,
+                repo_resolved,
+                dropped[:5],
+            )
+            new_disc[key] = kept
+
+    if "total_tests_found" in new_disc:
+        new_disc["total_tests_found"] = len(new_disc.get("tests", []))
+    if "total_benchmarks_found" in new_disc:
+        new_disc["total_benchmarks_found"] = len(new_disc.get("benchmarks", []))
+
+    if dropped_total == 0:
+        return disc_dict  # unchanged; let caller short-circuit
+    return new_disc
+
+
 def _infer_repo_root(kernel_path: str) -> str:
     """Walk up from kernel_path to find the repo root.
 
@@ -615,6 +676,17 @@ def run_preprocessor(
             disc_dict = _discover_fn(**_discovery_kwargs)
         except Exception as exc:
             logger.warning("[yellow]Test discovery failed: %s[/yellow]", exc)
+
+        # Filter out tests/benchmarks living OUTSIDE the kernel's repo_root.
+        # The automated_test_discovery MCP searches broadly enough to find
+        # harnesses for unrelated kernels in sibling directories
+        # (e.g. .../L3/fused_rms_fp8/test_kernel_harness.py when the user
+        # is optimizing .../L3/gemm_a16wfp4/kernel.py). Those harnesses
+        # then fail with "outside repo_root -- cannot rewrite relative
+        # imports" warnings or pick the wrong workload entirely.
+        _filtered = _filter_discovery_to_repo_root(disc_dict, repo_root)
+        if _filtered != disc_dict:
+            disc_dict = _filtered
 
         ctx["discovery"] = disc_dict
         (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))

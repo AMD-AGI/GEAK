@@ -11,7 +11,11 @@ PARSE_TASK_INFO_USER_TEMPLATE = """Analyze the following optimization task and e
 
 Extract the following information (return null if not found):
 1. kernel_name: The name of the kernel/function being optimized (e.g., "gemm", "matmul", "conv2d")
-2. kernel_url: The kernel URL or local path if provided
+2. kernel_url: The path or URL to the SPECIFIC KERNEL FILE to optimize. This MUST be a path
+   ending in a file extension (e.g. ``.py``, ``.hip``, ``.cu``, ``.flydsl``), NOT a directory.
+   If the task only mentions a directory and says something like "the kernel is in <DIR>",
+   set this to ``<DIR>/kernel.py`` (or the appropriate extension for the kernel_type) -- do
+   NOT return the bare directory.
 3. kernel_type: Kernel type, strictly one of "hip", "triton", "pytorch2flydsl", "flydsl", or "other".
    Use "pytorch2flydsl" when the task mentions translating PyTorch code to FlyDSL, converting PyTorch to FlyDSL, or pytorch2flydsl translation.
    Use "flydsl" when the task is about optimizing existing FlyDSL code (not translating from PyTorch).

@@ -94,13 +94,127 @@ _JSON_OBJECT_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
 def _load_json_object_from_model_response(response: dict, *, log_prefix: str) -> dict:
-    """Strip optional ```json fence and parse the model's JSON object."""
+    """Strip optional ```json fence and parse the model's JSON object.
+
+    On ``JSONDecodeError``, log a truncated view of the raw response BEFORE
+    re-raising. Without this the only diagnostic users get from the warning
+    handler is "Expecting value: line 1 column 1 (char 0)", which is
+    indistinguishable across any non-JSON failure mode (model returned a
+    plain-text apology, returned nothing, returned markdown without a
+    fenced JSON block, etc.).
+    """
     content = response.get("content", "").strip()
     m = _JSON_OBJECT_FENCE.search(content)
     if m:
         logger.debug("%s: extracted JSON from markdown fence in model response", log_prefix)
         content = m.group(1)
-    return json.loads(content)
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        # Show what the model actually produced so the user can tell whether
+        # this was a prompt issue, a model regression, or a transport problem.
+        # Truncate to keep logs manageable; full content lives in trajectory.
+        preview = (response.get("content") or "").strip()
+        if len(preview) > 500:
+            preview = preview[:500] + "... [truncated]"
+        logger.warning(
+            "%s: model response was not valid JSON. Raw response (truncated): %r",
+            log_prefix,
+            preview or "<empty>",
+        )
+        raise
+
+
+# Kernel-source filename heuristics, ranked. When the LLM returned a
+# directory as ``kernel_url`` we look inside it for the first match. Keep
+# this conservative -- most users will have ``kernel.py`` or
+# ``<kernel_name>.<ext>``; if that's not the layout we leave the path
+# alone and let downstream resolution surface the original error with the
+# (now slightly more actionable) message we log here.
+_KERNEL_FILENAME_GUESSES: tuple[str, ...] = (
+    "kernel.py",
+    "kernel.hip",
+    "kernel.cu",
+    "kernel.flydsl",
+)
+_KERNEL_TYPE_TO_EXT: dict[str, tuple[str, ...]] = {
+    "triton": (".py",),
+    "hip": (".hip", ".cu", ".cpp"),
+    "flydsl": (".flydsl", ".py"),
+    "pytorch2flydsl": (".py",),
+}
+
+
+def _promote_kernel_url_dir_to_file(
+    kernel_url: str,
+    *,
+    kernel_name_hint: str | None,
+    kernel_type: str,
+) -> str:
+    """Return ``kernel_url`` unchanged unless it points at an existing
+    *directory*, in which case search inside for a kernel file and promote.
+
+    Search order, first match wins:
+      1. ``<kernel_name_hint>.<kernel-type extension>`` if both hints set.
+      2. Hard-coded ``kernel.{py,hip,cu,flydsl}`` (most common GEAK layout).
+      3. The single file in the directory matching the kernel-type
+         extensions, if exactly one exists.
+
+    If nothing matches, return the original ``kernel_url`` (the existing
+    error will fire downstream); we only log a warning so users know we
+    tried and saw a directory.
+    """
+    p = Path(kernel_url)
+    if not p.is_dir():
+        return kernel_url
+
+    # Resolve to absolute for clearer logs.
+    p = p.resolve()
+
+    candidates: list[Path] = []
+
+    if kernel_name_hint:
+        for ext in _KERNEL_TYPE_TO_EXT.get(kernel_type, (".py",)):
+            cand = p / f"{kernel_name_hint}{ext}"
+            candidates.append(cand)
+
+    candidates.extend(p / name for name in _KERNEL_FILENAME_GUESSES)
+
+    for cand in candidates:
+        if cand.is_file():
+            promoted = str(cand)
+            logger.info(
+                "parse_task_info: kernel_url was a directory; promoted to %s "
+                "(was %s)",
+                promoted,
+                kernel_url,
+            )
+            return promoted
+
+    # Last resort: if exactly one file in the directory matches the type's
+    # extensions, take it.
+    exts = _KERNEL_TYPE_TO_EXT.get(kernel_type, (".py",))
+    matches = [f for f in p.iterdir() if f.is_file() and f.suffix in exts]
+    if len(matches) == 1:
+        promoted = str(matches[0])
+        logger.info(
+            "parse_task_info: kernel_url was a directory with a single %s "
+            "file; promoted to %s (was %s)",
+            "/".join(exts),
+            promoted,
+            kernel_url,
+        )
+        return promoted
+
+    logger.warning(
+        "parse_task_info: kernel_url %s is a directory and no obvious kernel "
+        "file (%s, kernel.{py,hip,cu,flydsl}, single %s match) was found "
+        "inside it. Pass the kernel file path explicitly.",
+        kernel_url,
+        f"{kernel_name_hint}.<ext>" if kernel_name_hint else "<kernel_name>.<ext>",
+        "/".join(exts),
+    )
+    return kernel_url
 
 
 def _normalize_parsed_task_info(parsed: dict) -> dict:
@@ -143,6 +257,18 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
             if resolved is not None:
                 result["repo"] = str(resolved.resolve())
                 logger.debug("parse_task_info: repo path case-corrected: %s -> %s", original_repo, result["repo"])
+
+    # Promote a directory kernel_url to a kernel file inside it. Users
+    # frequently say "the kernel is in <DIR>" rather than handing us the file
+    # path directly; the LLM extractor tends to echo the directory verbatim.
+    # Without this rescue, ``resolve_kernel_url`` later fails with the
+    # opaque "Kernel file not found: <DIR>" error.
+    if result["kernel_url"]:
+        result["kernel_url"] = _promote_kernel_url_dir_to_file(
+            result["kernel_url"],
+            kernel_name_hint=result.get("kernel_name"),
+            kernel_type=kernel_type,
+        )
 
     if result["output_dir"]:
         result["output_dir"] = _normalize_path(result["output_dir"])
