@@ -542,6 +542,12 @@ class ParallelAgent(DefaultAgent):
             # Wall-clock soft-stop -> sub-agent step loop.
             if soft_stop is not None:
                 agent._soft_stop = soft_stop
+            # Run-level ProcessRegistry -> save_and_test inner subprocess.run
+            # so the budget watchdog can SIGTERM/SIGKILL stuck benchmarks.
+            if registry is not None:
+                agent._registry = registry
+                if hasattr(agent, "_setup_save_and_test_context"):
+                    agent._setup_save_and_test_context()  # rebuild ctx with registry attached
 
             with open(log_file, "w", encoding="utf-8") as f:
                 f.write(f"Agent {agent_id} Conversation Log\n")

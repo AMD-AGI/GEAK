@@ -47,6 +47,12 @@ class BudgetSpec:
     preprocess_soft_cap_s: float
     preprocess_hard_cap_fraction: float
     finalize_grace_s: float
+    # Grace period after ``opt_deadline`` before the hard-kill watchdog
+    # forcibly terminates registered subprocesses and ``os._exit``s the
+    # whole process. Defaults to 60s so a stuck inner tool call (e.g. a
+    # 30-min benchmark with no soft_stop poll inside it) cannot run the
+    # process indefinitely past the user-visible budget.
+    kill_buffer_s: float = 60.0
 
     @property
     def preprocess_hard_cap_s(self) -> float:
@@ -230,6 +236,50 @@ class RunBudget:
             self._opt_deadline_at - time.monotonic(),
         )
         return Deadline(self._opt_deadline_at, self.soft_stop)
+
+    def schedule_optimization_hard_kill_watchdog(self, on_kill: Callable[[], None]) -> None:
+        """Schedule the unconditional hard-kill watchdog for the optimization phase.
+
+        Fires at ``opt_deadline + kill_buffer_s``. Calls ``on_kill`` (typically
+        ``state.registry.terminate_all`` followed by ``os._exit(124)``) so a
+        stuck inner tool call -- one that never observes ``soft_stop`` because
+        it is mid-``subprocess.run`` -- still terminates the process within
+        ~``kill_buffer_s`` of the user-visible budget.
+
+        The phase guard intentionally keeps this callable in 'optimization'
+        and 'finalize' phases (we transition to 'finalize' inside the
+        cooperative shutdown path; the killer must still fire if cooperative
+        shutdown stalls). We accept this by not phase-guarding the kill
+        callback.
+        """
+        if self._opt_deadline_at is None:
+            raise RuntimeError("commit_preprocess must run before schedule_optimization_hard_kill_watchdog")
+
+        kill_delay_s = max(0.0, self._opt_deadline_at - time.monotonic() + self.spec.kill_buffer_s)
+
+        def _wrapper() -> None:
+            # No phase guard: the kill is a backstop, not a cooperative
+            # signal. If we've already cleanly exited, this Timer was
+            # cancelled in cancel_all_timers().
+            try:
+                on_kill()
+            except SystemExit:
+                raise  # os._exit raises this; let it through
+            except Exception:
+                logger.exception("hard-kill watchdog callback failed")
+
+        timer = threading.Timer(kill_delay_s, _wrapper)
+        timer.daemon = True
+        timer.name = "geak-optimization-hard-kill"
+        with self._lock:
+            self._timers.append(timer)
+        timer.start()
+        logger.debug(
+            "optimization hard-kill watchdog scheduled: kill @+%.0fs (opt_deadline @+%.0fs, buffer=%.0fs)",
+            kill_delay_s,
+            self._opt_deadline_at - time.monotonic(),
+            self.spec.kill_buffer_s,
+        )
 
     def cancel_all_timers(self) -> None:
         with self._lock:

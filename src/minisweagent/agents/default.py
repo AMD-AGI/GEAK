@@ -225,6 +225,11 @@ class DefaultAgent:
             log_fn=self._log_message,
             patch_counter=self.patch_counter,
             source_file_paths=source_file_paths,
+            # Optional run-level ProcessRegistry. Set as a side-attribute on
+            # the agent by parallel_helpers / parallel_agent / homogeneous_agent
+            # when those wire ``registry`` through. Lets the budget watchdog
+            # SIGTERM/SIGKILL long-running test/benchmark subprocesses.
+            registry=getattr(self, "_registry", None),
         )
 
         save_and_test_tool = self.toolruntime._tool_table.get("save_and_test")

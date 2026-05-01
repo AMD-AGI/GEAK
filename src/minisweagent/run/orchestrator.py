@@ -338,6 +338,7 @@ def main() -> None:
         preprocess_soft_cap_s=float(_budget_cfg["preprocess_soft_cap_s"]),
         preprocess_hard_cap_fraction=float(_budget_cfg["preprocess_hard_cap_fraction"]),
         finalize_grace_s=float(_budget_cfg["finalize_grace_s"]),
+        kill_buffer_s=float(_budget_cfg.get("kill_buffer_s", 60.0)),
     )
     budget = RunBudget(spec=spec)
     for _line in budget.banner_lines():
@@ -349,6 +350,19 @@ def main() -> None:
     budget.schedule_optimization_watchdog()
 
     registry = ProcessRegistry()
+
+    # Hard-kill backstop. See mini.py for rationale.
+    def _hard_kill_handler() -> None:
+        logger.error(
+            "[budget] HARD KILL: opt_deadline + kill_buffer_s reached; terminating registry and exiting",
+        )
+        try:
+            registry.terminate_all(escalate_after_s=5.0)
+        except Exception:
+            logger.exception("hard-kill: registry.terminate_all() failed")
+        os._exit(124)
+
+    budget.schedule_optimization_hard_kill_watchdog(_hard_kill_handler)
 
     # SIGINT handler (same semantics as `geak`).
     _sigint_count = {"n": 0}

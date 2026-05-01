@@ -407,6 +407,11 @@ def run_parallel_heterogeneous(
         # terminates between LLM calls when the watchdog fires.
         if soft_stop is not None:
             agent._soft_stop = soft_stop
+        # Run-level ProcessRegistry -> save_and_test inner subprocess.run.
+        if registry is not None:
+            agent._registry = registry
+            if hasattr(agent, "_setup_save_and_test_context"):
+                agent._setup_save_and_test_context()
 
         with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"Agent {agent_id} ({label}) Conversation Log\n")
@@ -672,6 +677,11 @@ def run_pool(
             # Wall-clock soft-stop -> sub-agent step loop.
             if soft_stop is not None:
                 agent._soft_stop = soft_stop
+            # Run-level ProcessRegistry -> save_and_test inner subprocess.run.
+            if registry is not None:
+                agent._registry = registry
+                if hasattr(agent, "_setup_save_and_test_context"):
+                    agent._setup_save_and_test_context()
 
             try:
                 from minisweagent.memory.integration import (  # pylint: disable=import-error,no-name-in-module

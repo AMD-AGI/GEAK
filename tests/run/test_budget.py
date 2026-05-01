@@ -15,13 +15,20 @@ import pytest
 from minisweagent.run.budget import BudgetSpec, Deadline, RunBudget
 
 
-def _spec(total_s: float = 10.0, soft_cap_s: float = 2.0, frac: float = 0.5, grace_s: float = 1.0) -> BudgetSpec:
+def _spec(
+    total_s: float = 10.0,
+    soft_cap_s: float = 2.0,
+    frac: float = 0.5,
+    grace_s: float = 1.0,
+    kill_buffer_s: float = 1.0,
+) -> BudgetSpec:
     return BudgetSpec(
         mode="quick",
         total_s=total_s,
         preprocess_soft_cap_s=soft_cap_s,
         preprocess_hard_cap_fraction=frac,
         finalize_grace_s=grace_s,
+        kill_buffer_s=kill_buffer_s,
     )
 
 
@@ -183,3 +190,113 @@ def test_cancel_all_timers_idempotent():
     budget.schedule_preprocess_watchdogs(on_soft=lambda: None, on_hard=lambda: None)
     budget.cancel_all_timers()
     budget.cancel_all_timers()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Hard-kill watchdog (the absolute backstop)
+# ---------------------------------------------------------------------------
+
+
+def test_hard_kill_watchdog_fires_at_opt_deadline_plus_kill_buffer():
+    """The hard-kill watchdog must fire at ``opt_deadline + kill_buffer_s``.
+
+    This is the backstop that protects against a sub-agent stuck inside a
+    long-running ``subprocess.run`` (e.g. a 30-min benchmark) that never
+    polls ``soft_stop``. Use sub-second delays to keep the test fast.
+    """
+    spec = BudgetSpec(
+        mode="quick",
+        total_s=0.5,
+        preprocess_soft_cap_s=0.05,
+        preprocess_hard_cap_fraction=0.5,
+        finalize_grace_s=0.05,
+        kill_buffer_s=0.1,
+    )
+    budget = RunBudget(spec=spec)
+    # Pretend preprocess used effectively no time so opt_deadline = now + 0.5s.
+    budget.commit_preprocess(actual_preprocess_s=0.0)
+    budget.schedule_optimization_watchdog()
+
+    fired = threading.Event()
+
+    def _on_kill():
+        fired.set()
+
+    budget.schedule_optimization_hard_kill_watchdog(_on_kill)
+    # Should fire at opt_deadline (0.5s) + kill_buffer (0.1s) = 0.6s.
+    # Generous timeout for thread scheduling jitter on shared CI.
+    assert fired.wait(timeout=2.0), "hard-kill watchdog should have fired by now"
+    budget.cancel_all_timers()
+
+
+def test_hard_kill_watchdog_can_be_cancelled_before_firing():
+    spec = BudgetSpec(
+        mode="quick",
+        total_s=10.0,
+        preprocess_soft_cap_s=2.0,
+        preprocess_hard_cap_fraction=0.5,
+        finalize_grace_s=1.0,
+        kill_buffer_s=0.5,
+    )
+    budget = RunBudget(spec=spec)
+    budget.commit_preprocess(actual_preprocess_s=0.0)
+    budget.schedule_optimization_watchdog()
+
+    fired = threading.Event()
+    budget.schedule_optimization_hard_kill_watchdog(lambda: fired.set())
+    # Cancel immediately, before any timer could fire.
+    budget.cancel_all_timers()
+    # Wait long enough that the timer would have fired if not cancelled.
+    time.sleep(0.3)
+    assert not fired.is_set(), "cancelled hard-kill must not fire"
+
+
+def test_hard_kill_watchdog_logs_callback_exception():
+    """If the hard-kill callback raises (other than SystemExit), it's logged."""
+    import logging
+
+    spec = BudgetSpec(
+        mode="quick",
+        total_s=0.2,
+        preprocess_soft_cap_s=0.05,
+        preprocess_hard_cap_fraction=0.5,
+        finalize_grace_s=0.05,
+        kill_buffer_s=0.05,
+    )
+    budget = RunBudget(spec=spec)
+    budget.commit_preprocess(actual_preprocess_s=0.0)
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture(level=logging.DEBUG)
+    logger_obj = logging.getLogger("minisweagent.run.budget")
+    logger_obj.addHandler(handler)
+    try:
+
+        def _bad():
+            raise RuntimeError("synthetic hard-kill failure")
+
+        budget.schedule_optimization_hard_kill_watchdog(_bad)
+        time.sleep(0.5)
+        assert any("hard-kill watchdog callback failed" in r.getMessage() for r in records), (
+            "exception in hard-kill callback should be logged, not swallowed"
+        )
+    finally:
+        logger_obj.removeHandler(handler)
+        budget.cancel_all_timers()
+
+
+def test_kill_buffer_default_is_60_seconds():
+    """Belt-and-braces: confirm the documented default doesn't drift silently."""
+    spec = BudgetSpec(
+        mode="quick",
+        total_s=3600.0,
+        preprocess_soft_cap_s=900.0,
+        preprocess_hard_cap_fraction=0.5,
+        finalize_grace_s=300.0,
+    )
+    assert spec.kill_buffer_s == 60.0

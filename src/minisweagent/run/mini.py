@@ -4,6 +4,7 @@
 
 import json
 import logging
+import os
 import shlex
 import signal
 import subprocess
@@ -533,6 +534,7 @@ def main(
         preprocess_soft_cap_s=float(_budget_cfg["preprocess_soft_cap_s"]),
         preprocess_hard_cap_fraction=float(_budget_cfg["preprocess_hard_cap_fraction"]),
         finalize_grace_s=float(_budget_cfg["finalize_grace_s"]),
+        kill_buffer_s=float(_budget_cfg.get("kill_buffer_s", 60.0)),
     )
     budget = RunBudget(spec=_spec)
     for _line in budget.banner_lines():
@@ -628,11 +630,33 @@ def main(
         _T_pp_end_elapsed = budget.elapsed()
         opt_deadline = budget.commit_preprocess(_T_pp_end_elapsed)
         budget.schedule_optimization_watchdog()
+
+        # Hard-kill backstop: if cooperative shutdown stalls (e.g. a sub-agent
+        # is mid-subprocess.run with no internal soft_stop poll), forcibly
+        # terminate the registry and ``os._exit`` after kill_buffer_s past
+        # the deadline. This is the only thing that guarantees the run exits
+        # within budget regardless of where the stall is.
+        def _hard_kill_handler() -> None:
+            logger.error(
+                "[budget] HARD KILL: opt_deadline + kill_buffer_s reached; terminating registry and exiting",
+            )
+            try:
+                state.registry.terminate_all(escalate_after_s=5.0)
+            except Exception:
+                logger.exception("hard-kill: registry.terminate_all() failed")
+            # 124 is the conventional exit code for a wall-clock timeout
+            # (matches GNU ``timeout``). Use ``os._exit`` (not sys.exit) to
+            # bypass any atexit/cleanup that might block.
+            os._exit(124)
+
+        budget.schedule_optimization_hard_kill_watchdog(_hard_kill_handler)
+
         logger.info(
-            "[budget] preprocess finished at +%.0fs; optimization deadline @+%.0fs (softstop_at @+%.0fs)",
+            "[budget] preprocess finished at +%.0fs; opt_deadline @+%.0fs (softstop_at @+%.0fs, hard_kill @+%.0fs)",
             _T_pp_end_elapsed,
             _T_pp_end_elapsed + opt_deadline.remaining(),
             _T_pp_end_elapsed + max(0.0, opt_deadline.remaining() - budget.spec.finalize_grace_s),
+            _T_pp_end_elapsed + opt_deadline.remaining() + budget.spec.kill_buffer_s,
         )
     except Exception:
         # On exception, ensure cleanup runs before the exception propagates.
