@@ -40,6 +40,61 @@ class PatchApplyError(Exception):
     pass
 
 
+class CommandmentExecutionError(RuntimeError):
+    """Raised when a COMMANDMENT subprocess fails for a non-kernel-logic reason.
+
+    This signals that the evaluation contract itself is broken (e.g. the
+    harness rejects `--iterations`, a wrapper script is missing, the script
+    crashes before kernel logic runs, or the subprocess raises before
+    completion). The orchestrator treats this as a hard failure and aborts
+    the run rather than silently continuing with no validated speedup.
+
+    Distinguished from kernel-level correctness failures, which remain
+    recoverable per-round events (status="correctness_failed").
+    """
+
+    def __init__(self, section: str, returncode: int | None, detail: str) -> None:
+        self.section = section
+        self.returncode = returncode
+        self.detail = detail
+        super().__init__(f"COMMANDMENT {section} failed (rc={returncode}): {detail}")
+
+
+# Stderr signatures that indicate the harness/commandment itself is broken,
+# not the kernel under optimization. When any of these match a non-zero
+# subprocess exit, we raise CommandmentExecutionError instead of treating
+# the failure as a recoverable kernel-correctness miss.
+_CONTRACT_BROKEN_PATTERNS: tuple[str, ...] = (
+    "unrecognized arguments",
+    "the following arguments are required",
+    "argument --",
+    "Harness file not found",
+    "No such file or directory",
+    "ModuleNotFoundError",
+    "ImportError",
+    "command not found",
+    "Permission denied",
+    "Errno 2",
+)
+
+
+def _stderr_indicates_broken_contract(stderr: str) -> str | None:
+    """Return the first contract-broken signature found in *stderr*, or None."""
+    if not stderr:
+        return None
+    for pattern in _CONTRACT_BROKEN_PATTERNS:
+        if pattern in stderr:
+            return pattern
+    return None
+
+
+def _format_stderr_tail(stderr: str, *, max_lines: int = 20) -> str:
+    """Return the last *max_lines* of *stderr*, joined for log inclusion."""
+    if not stderr:
+        return ""
+    return "\n".join(stderr.strip().splitlines()[-max_lines:])
+
+
 def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Path:
     """Create a temporary worktree and apply the best patch.
 
@@ -235,6 +290,87 @@ def resolve_eval_worktree(
     return eval_worktree, eval_env
 
 
+def preflight_commandment_contract(
+    commandment_path: Path,
+    repo_root: str,
+    harness_path: str,
+    gpu_id: int,
+    *,
+    timeout_s: int = 600,
+) -> None:
+    """Smoke-test SETUP + CORRECTNESS once before fanning out sub-agents.
+
+    Runs the COMMANDMENT against the *unpatched* repo with
+    ``--iterations 1`` so a broken contract (e.g. a harness that rejects
+    ``--iterations``) is surfaced as a single ``CommandmentExecutionError``
+    instead of being burned into every sub-agent's iteration loop.
+
+    Skipped silently when ``GEAK_SKIP_COMMANDMENT_PREFLIGHT=1`` is set.
+
+    Raises
+    ------
+    CommandmentExecutionError
+        If the SETUP+CORRECTNESS script can't run, returns non-zero, or
+        prints a stderr matching the contract-broken signature set.
+    """
+    if os.environ.get("GEAK_SKIP_COMMANDMENT_PREFLIGHT", "").strip() == "1":
+        logger.info("preflight_commandment_contract: skipped (GEAK_SKIP_COMMANDMENT_PREFLIGHT=1)")
+        return
+
+    if not commandment_path.exists():
+        raise CommandmentExecutionError(
+            "PREFLIGHT", None, f"COMMANDMENT.md not found at {commandment_path}"
+        )
+
+    script = build_eval_script(str(commandment_path), ["SETUP", "CORRECTNESS"])
+    if not script:
+        logger.warning(
+            "preflight_commandment_contract: no SETUP/CORRECTNESS commands in %s; skipping",
+            commandment_path,
+        )
+        return
+
+    repo_root_path = Path(repo_root).resolve()
+    env = build_eval_env(repo_root_path, str(repo_root_path), harness_path, gpu_id)
+    env["GEAK_BENCHMARK_EXTRA_ARGS"] = "--iterations 1"
+    env["GEAK_BENCHMARK_ITERATIONS"] = "1"
+
+    logger.info(
+        "preflight_commandment_contract: smoke-testing COMMANDMENT against %s with --iterations 1",
+        repo_root_path,
+    )
+    try:
+        result = subprocess.run(
+            ["bash", script],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            cwd=str(repo_root_path),
+            env=env,
+        )
+    except Exception as exc:
+        raise CommandmentExecutionError(
+            "PREFLIGHT", None, f"SETUP+CORRECTNESS subprocess failed to complete: {exc}"
+        ) from exc
+
+    if result.returncode != 0:
+        stderr_tail = _format_stderr_tail(result.stderr)
+        broken = _stderr_indicates_broken_contract(result.stderr)
+        detail = (
+            f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
+            if broken is not None
+            else f"non-zero exit; stderr tail:\n{stderr_tail}"
+        )
+        logger.error(
+            "preflight_commandment_contract: FAILED (rc=%d) -- aborting before sub-agent fan-out:\n%s",
+            result.returncode,
+            stderr_tail,
+        )
+        raise CommandmentExecutionError("PREFLIGHT", result.returncode, detail)
+
+    logger.info("preflight_commandment_contract: PASS")
+
+
 def run_correctness_and_benchmark(
     eval_worktree: Path,
     eval_env: dict[str, str],
@@ -262,16 +398,35 @@ def run_correctness_and_benchmark(
                 env=eval_env,
             )
         except Exception as exc:
-            logger.warning("CORRECTNESS execution failed: %s", exc)
+            # The subprocess could not complete (timeout, OS error, etc.).
+            # This is a contract-level failure; record it on round_eval for
+            # any callers that catch the exception, then escalate.
             round_eval["correctness"] = {"error": str(exc)}
-            round_eval["status"] = "correctness_failed"
-            return
+            round_eval["status"] = "commandment_execution_failed"
+            raise CommandmentExecutionError(
+                "CORRECTNESS", None, f"subprocess failed to complete: {exc}"
+            ) from exc
 
         round_eval["correctness"] = {
             "returncode": correctness_result.returncode,
             "success": correctness_result.returncode == 0,
         }
         if correctness_result.returncode != 0:
+            stderr_tail = _format_stderr_tail(correctness_result.stderr)
+            broken = _stderr_indicates_broken_contract(correctness_result.stderr)
+            if broken is not None:
+                round_eval["status"] = "commandment_execution_failed"
+                logger.error(
+                    "CORRECTNESS failed because the COMMANDMENT contract is broken "
+                    "(matched %r):\n%s",
+                    broken,
+                    stderr_tail,
+                )
+                raise CommandmentExecutionError(
+                    "CORRECTNESS",
+                    correctness_result.returncode,
+                    f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}",
+                )
             logger.warning(
                 "CORRECTNESS failed (rc=%d): %s",
                 correctness_result.returncode,
@@ -310,14 +465,34 @@ def run_correctness_and_benchmark(
                 env=eval_env,
             )
         except Exception as exc:
-            logger.warning("%s execution failed: %s", section_key, exc)
             round_eval[section_key] = {"error": str(exc)}
-            continue
+            round_eval["status"] = "commandment_execution_failed"
+            raise CommandmentExecutionError(
+                baseline_section_name, None, f"subprocess failed to complete: {exc}"
+            ) from exc
 
         if candidate_result.returncode != 0:
-            logger.warning("%s execution failed: %s", baseline_section_name, candidate_result.stderr)
-            round_eval[section_key] = {"error": candidate_result.stderr}
-            continue
+            stderr_tail = _format_stderr_tail(candidate_result.stderr)
+            round_eval[section_key] = {
+                "error": candidate_result.stderr,
+                "returncode": candidate_result.returncode,
+            }
+            round_eval["status"] = "commandment_execution_failed"
+            broken = _stderr_indicates_broken_contract(candidate_result.stderr)
+            detail = (
+                f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
+                if broken is not None
+                else f"non-zero exit; stderr tail:\n{stderr_tail}"
+            )
+            logger.error(
+                "%s execution failed (rc=%d) -- treating as COMMANDMENT failure:\n%s",
+                baseline_section_name,
+                candidate_result.returncode,
+                stderr_tail,
+            )
+            raise CommandmentExecutionError(
+                baseline_section_name, candidate_result.returncode, detail
+            )
 
         candidate_stdout = candidate_result.stdout
         round_eval[section_key] = {
@@ -421,7 +596,7 @@ def run_profile(
 
     logger.info("Running PROFILE on best kernel from round %d...", round_num)
     try:
-        subprocess.run(
+        profile_result = subprocess.run(
             ["bash", profile_script],
             capture_output=True,
             text=True,
@@ -430,9 +605,31 @@ def run_profile(
             env=eval_env,
         )
     except Exception as exc:
-        logger.warning("PROFILE execution failed: %s", exc)
         round_eval["profile_comparison"] = {"error": str(exc)}
-        return
+        round_eval["status"] = "commandment_execution_failed"
+        raise CommandmentExecutionError(
+            "PROFILE", None, f"subprocess failed to complete: {exc}"
+        ) from exc
+
+    if profile_result.returncode != 0:
+        stderr_tail = _format_stderr_tail(profile_result.stderr)
+        round_eval["profile_comparison"] = {
+            "error": profile_result.stderr,
+            "returncode": profile_result.returncode,
+        }
+        round_eval["status"] = "commandment_execution_failed"
+        broken = _stderr_indicates_broken_contract(profile_result.stderr)
+        detail = (
+            f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
+            if broken is not None
+            else f"non-zero exit; stderr tail:\n{stderr_tail}"
+        )
+        logger.error(
+            "PROFILE execution failed (rc=%d) -- treating as COMMANDMENT failure:\n%s",
+            profile_result.returncode,
+            stderr_tail,
+        )
+        raise CommandmentExecutionError("PROFILE", profile_result.returncode, detail)
 
     profile_output = eval_worktree / "profile.json"
     if not profile_output.exists():

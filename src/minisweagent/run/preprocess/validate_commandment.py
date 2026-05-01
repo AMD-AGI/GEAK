@@ -49,7 +49,7 @@ def _extract_section_text(content: str, section: str) -> str | None:
     return "\n".join(lines)
 
 
-_REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
+_REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark", "--iterations")
 
 
 def _validate_harness_flags(harness_path: str) -> list[str]:

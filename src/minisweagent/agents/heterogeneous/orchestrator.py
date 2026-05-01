@@ -416,6 +416,39 @@ def run_heterogeneous_orchestrator(
         {"role": "user", "content": instance_msg},
     ]
 
+    # Smoke-test the COMMANDMENT contract once before fanning out sub-agents.
+    # If the harness rejects --iterations or the SETUP/CORRECTNESS section
+    # cannot execute, abort here instead of letting every worker burn its
+    # iteration budget on a contract that can never succeed.
+    try:
+        from minisweagent.run.postprocess.evaluation import (
+            CommandmentExecutionError,
+            preflight_commandment_contract,
+        )
+
+        _preflight_repo_root = str(preprocess_ctx.get("repo_root") or "")
+        _preflight_harness = str(preprocess_ctx.get("harness_path") or "")
+        _preflight_commandment = preprocess_dir / "COMMANDMENT.md"
+        _preflight_gpu = gpu_ids[0] if gpu_ids else 0
+        if _preflight_repo_root and _preflight_harness and _preflight_commandment.exists():
+            preflight_commandment_contract(
+                _preflight_commandment,
+                _preflight_repo_root,
+                _preflight_harness,
+                _preflight_gpu,
+            )
+        else:
+            logger.warning(
+                "Skipping COMMANDMENT preflight: repo_root=%r, harness_path=%r, commandment_exists=%s",
+                _preflight_repo_root,
+                _preflight_harness,
+                _preflight_commandment.exists(),
+            )
+    except CommandmentExecutionError:
+        # Re-raise so the orchestrator/mini.py wrapper exits non-zero
+        # before any sub-agent is launched.
+        raise
+
     if start_round > 1:
         logger.info("Resuming from round %d; loading prior evaluations 1..%d.", start_round, start_round - 1)
         for prev_round in range(1, start_round):

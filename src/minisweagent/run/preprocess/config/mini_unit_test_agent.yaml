@@ -138,9 +138,24 @@ agent:
          Must exit non-zero on failure.
        - `--profile`: runs 5 configs for profiling. No correctness.
 
+    Required `--iterations` flag (MANDATORY):
+       - Your argparse MUST define an `--iterations N` integer flag in
+         addition to the four mode flags above. The pipeline appends
+         `--iterations N` to every `--benchmark` / `--full-benchmark`
+         invocation; if your harness rejects it the optimization cannot
+         be validated and the run aborts.
+       - When `--iterations` is not passed, fall back to
+         `int(os.environ.get("GEAK_BENCHMARK_ITERATIONS", "200"))`.
+       - Concretely:
+           parser.add_argument("--iterations", type=int, default=None)
+           args = parser.parse_args()
+           ITERATIONS = args.iterations if args.iterations is not None \
+               else int(os.environ.get("GEAK_BENCHMARK_ITERATIONS", "200"))
+
     Fixed constants:
        - WARMUP = 50
-       - ITERATIONS = int(os.environ.get("GEAK_BENCHMARK_ITERATIONS", "200"))
+       - ITERATIONS resolved from `--iterations` then `GEAK_BENCHMARK_ITERATIONS`
+         (default 200), per the rule above.
 
     Timing:
        - GPU event-based ONLY: `torch.cuda.Event(enable_timing=True)`

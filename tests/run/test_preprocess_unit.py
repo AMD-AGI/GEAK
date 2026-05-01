@@ -215,6 +215,7 @@ class TestValidateHarness:
                 "parser.add_argument('--correctness')\n"
                 "parser.add_argument('--benchmark')\n"
                 "parser.add_argument('--full-benchmark')\n"
+                "parser.add_argument('--iterations', type=int, default=None)\n"
             )
             f.flush()
             valid, errors = validate_harness(f.name)
@@ -229,12 +230,30 @@ class TestValidateHarness:
                 "parser.add_argument('--correctness')\n"
                 "parser.add_argument('--benchmark')\n"
                 "parser.add_argument('--full-benchmark')\n"
+                "parser.add_argument('--iterations')\n"
             )
             f.flush()
             valid, errors = validate_harness(f.name)
         os.unlink(f.name)
         assert not valid
         assert any("--profile" in e for e in errors)
+
+    def test_rejects_missing_iterations(self):
+        from minisweagent.run.pipeline_helpers import validate_harness
+        with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+            f.write(
+                "import argparse\n"
+                "parser = argparse.ArgumentParser()\n"
+                "parser.add_argument('--profile')\n"
+                "parser.add_argument('--correctness')\n"
+                "parser.add_argument('--benchmark')\n"
+                "parser.add_argument('--full-benchmark')\n"
+            )
+            f.flush()
+            valid, errors = validate_harness(f.name)
+        os.unlink(f.name)
+        assert not valid, "Harness without --iterations must be rejected"
+        assert any("--iterations" in e for e in errors), errors
 
     def test_rejects_no_argparse(self):
         from minisweagent.run.pipeline_helpers import validate_harness
@@ -703,6 +722,7 @@ class TestPreprocessContractEnforcement:
             "p.add_argument('--correctness')\n"
             "p.add_argument('--benchmark')\n"
             "p.add_argument('--full-benchmark')\n"
+            "p.add_argument('--iterations', type=int, default=None)\n"
         )
         (out / "resolved.json").write_text(json.dumps({
             "local_file_path": str(kernel),
@@ -1035,6 +1055,34 @@ int main(int argc, char** argv) {
             assert "from my_kernel import *" in harness_text
             assert "@triton.jit" not in harness_text
 
+    def test_split_injects_iterations_shim_when_source_lacks_it(self):
+        """Triton split must inject the --iterations shim when source argparse omits it."""
+        from minisweagent.run.preprocess.harness_utils import (
+            detect_and_split_kernel_from_harness,
+            validate_harness,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_dir = tmp_path / "repo"
+            src_dir.mkdir()
+            merged = src_dir / "my_kernel.py"
+            # _MERGED_SOURCE has no --iterations in its __main__ argparse.
+            merged.write_text(self._MERGED_SOURCE)
+            out_dir = tmp_path / "output"
+            out_dir.mkdir()
+
+            result = detect_and_split_kernel_from_harness(merged, out_dir)
+            assert result is not None
+            new_harness_path, _ = result
+            harness_text = Path(new_harness_path).read_text()
+
+            assert "--iterations" in harness_text, (
+                "Triton-split harness must surface --iterations (via shim) when source argparse lacks it"
+            )
+            assert "GEAK_BENCHMARK_ITERATIONS" in harness_text
+            valid, errors = validate_harness(str(new_harness_path))
+            assert valid, f"Triton-split harness should pass validate_harness: {errors}"
+
     def test_kernel_not_included_in_test_bfs(self):
         """@triton.jit functions called from test roots must not be moved to harness."""
         from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
@@ -1115,6 +1163,8 @@ if __name__ == "__main__":
             assert "--profile" in harness_text
             assert "--benchmark" in harness_text
             assert "--full-benchmark" in harness_text
+            assert "--iterations" in harness_text, "C-like wrapper must expose --iterations"
+            assert "GEAK_BENCHMARK_ITERATIONS" in harness_text
             assert "hipcc" in harness_text
             valid, errors = validate_harness(str(new_harness_path))
             assert valid, f"Generated HIP wrapper harness should satisfy GEAK harness contract: {errors}"
@@ -1298,6 +1348,7 @@ class TestCommandmentHardcodesHarness:
         "g.add_argument('--profile', action='store_true')\n"
         "g.add_argument('--benchmark', action='store_true')\n"
         "g.add_argument('--full-benchmark', action='store_true')\n"
+        "p.add_argument('--iterations', type=int, default=None)\n"
     )
 
     def test_simple_commandment_has_no_geak_harness_var(self):

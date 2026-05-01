@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = get_repo_root()
 
-REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
+REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark", "--iterations")
 
 MAX_HARNESS_RETRIES = 2
 

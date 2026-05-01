@@ -1156,6 +1156,39 @@ def run_preprocessor(
                     benchmark_baseline = r["stdout"]
                 if r["mode"] == "full-benchmark" and r["success"]:
                     full_benchmark_baseline = r["stdout"]
+
+            # Hard-fail when no benchmark mode produced output. Without a
+            # baseline the orchestrator cannot validate any optimization, so
+            # progressing to commandment generation + the optimizer wastes
+            # GPU time and silently masks contract bugs (e.g. a harness that
+            # rejects --iterations). Gated by an explicit escape hatch for
+            # debugging only.
+            _allow_broken = os.environ.get("GEAK_ALLOW_BROKEN_HARNESS", "").strip() == "1"
+            if benchmark_baseline is None and full_benchmark_baseline is None:
+                _summary_lines = [
+                    "Baseline harness execution produced no benchmark output;",
+                    "neither --benchmark nor --full-benchmark succeeded.",
+                    f"harness={harness_path_for_baseline}",
+                ]
+                if bl_errors:
+                    _summary_lines.append("errors:")
+                    _summary_lines.extend(f"  - {e}" for e in bl_errors[:4])
+                _abort_msg = "\n".join(_summary_lines)
+                if _allow_broken:
+                    logger.warning(
+                        "[GEAK_ALLOW_BROKEN_HARNESS=1] continuing despite broken baseline:\n%s",
+                        _abort_msg,
+                    )
+                else:
+                    logger.error(
+                        "Refusing to progress to optimization "
+                        "(set GEAK_ALLOW_BROKEN_HARNESS=1 to override):\n%s",
+                        _abort_msg,
+                    )
+                    raise PreprocessAborted(
+                        "harness baseline failed in every mode -- "
+                        "cannot generate a validatable commandment.\n" + _abort_msg
+                    )
         elif harness_results:
             for r in harness_results:
                 if r["mode"] == "benchmark" and r["success"]:

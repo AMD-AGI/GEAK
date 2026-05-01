@@ -32,9 +32,50 @@ from minisweagent.run.utils.gpu_arch import (
     rdna_compute_bound_guidance,
 )
 
-REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
+REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark", "--iterations")
 
 MAX_HARNESS_RETRIES = 2
+
+# Iteration shim injected at the top of pipeline-generated harnesses (Triton
+# split, etc.) when the source's __main__ block doesn't natively accept
+# ``--iterations N``. It strips ``--iterations`` from sys.argv so the existing
+# argparse doesn't crash with "unrecognized arguments", and forwards the value
+# to GEAK_BENCHMARK_ITERATIONS so harness code that reads the env var picks it
+# up. The literal string ``--iterations`` keeps validate_harness() satisfied.
+_GEAK_ITERATIONS_SHIM = '''\
+# --- GEAK iteration shim (auto-injected) ---------------------------------
+# Accepts "--iterations N" and "--iterations=N" without modifying the
+# downstream argparse. Forwards the value via GEAK_BENCHMARK_ITERATIONS.
+import os as _geak_os_iter
+import sys as _geak_sys_iter
+
+
+def _geak_consume_iterations() -> None:
+    argv = _geak_sys_iter.argv
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        if token == "--iterations" and i + 1 < len(argv):
+            try:
+                _geak_os_iter.environ["GEAK_BENCHMARK_ITERATIONS"] = str(int(argv[i + 1]))
+            except (TypeError, ValueError):
+                pass
+            del argv[i:i + 2]
+            continue
+        if token.startswith("--iterations="):
+            try:
+                _geak_os_iter.environ["GEAK_BENCHMARK_ITERATIONS"] = str(int(token.split("=", 1)[1]))
+            except (TypeError, ValueError):
+                pass
+            del argv[i]
+            continue
+        i += 1
+
+
+_geak_consume_iterations()
+# --- end GEAK iteration shim ---------------------------------------------
+
+'''
 
 # Use one canonical benchmark definition everywhere. The legacy
 # GEAK_AGENT_BENCHMARK_ITERATIONS split is intentionally ignored so
@@ -656,22 +697,25 @@ def _generate_c_like_python_harness(
             return fallback_ms
 
 
-        def _run_once() -> tuple[subprocess.CompletedProcess[str], float]:
+        def _run_once(iterations: int | None) -> tuple[subprocess.CompletedProcess[str], float]:
             binary = _compile_binary()
+            run_env = os.environ.copy()
+            if iterations is not None:
+                run_env["GEAK_BENCHMARK_ITERATIONS"] = str(iterations)
             t0 = time.perf_counter()
             proc = subprocess.run(
                 [str(binary)],
                 capture_output=True,
                 text=True,
                 cwd=str(SOURCE_DIR),
-                env=os.environ.copy(),
+                env=run_env,
             )
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             return proc, elapsed_ms
 
 
-        def _run_mode(measure: bool) -> int:
-            proc, elapsed_ms = _run_once()
+        def _run_mode(measure: bool, iterations: int | None) -> int:
+            proc, elapsed_ms = _run_once(iterations)
             if proc.stdout:
                 sys.stdout.write(proc.stdout)
             if proc.stderr:
@@ -682,20 +726,20 @@ def _generate_c_like_python_harness(
             return proc.returncode
 
 
-        def run_correctness() -> int:
-            return _run_mode(measure=False)
+        def run_correctness(iterations: int | None) -> int:
+            return _run_mode(measure=False, iterations=iterations)
 
 
-        def run_profile() -> int:
-            return _run_mode(measure=False)
+        def run_profile(iterations: int | None) -> int:
+            return _run_mode(measure=False, iterations=iterations)
 
 
-        def run_benchmark() -> int:
-            return _run_mode(measure=True)
+        def run_benchmark(iterations: int | None) -> int:
+            return _run_mode(measure=True, iterations=iterations)
 
 
-        def run_full_benchmark() -> int:
-            return _run_mode(measure=True)
+        def run_full_benchmark(iterations: int | None) -> int:
+            return _run_mode(measure=True, iterations=iterations)
 
 
         def main() -> int:
@@ -705,15 +749,32 @@ def _generate_c_like_python_harness(
             group.add_argument("--profile", action="store_true")
             group.add_argument("--benchmark", action="store_true")
             group.add_argument("--full-benchmark", action="store_true")
-            parser.parse_known_args()
+            # --iterations N is part of the GEAK harness contract. The native
+            # binary reads GEAK_BENCHMARK_ITERATIONS from its environment.
+            parser.add_argument(
+                "--iterations",
+                type=int,
+                default=None,
+                help="Override GEAK_BENCHMARK_ITERATIONS for benchmark loops.",
+            )
+            args, _ = parser.parse_known_args()
 
-            if parser.parse_known_args()[0].correctness:
-                return run_correctness()
-            if parser.parse_known_args()[0].profile:
-                return run_profile()
-            if parser.parse_known_args()[0].benchmark:
-                return run_benchmark()
-            return run_full_benchmark()
+            iters = args.iterations
+            if iters is None:
+                env_iters = os.environ.get("GEAK_BENCHMARK_ITERATIONS")
+                if env_iters:
+                    try:
+                        iters = int(env_iters)
+                    except ValueError:
+                        iters = None
+
+            if args.correctness:
+                return run_correctness(iters)
+            if args.profile:
+                return run_profile(iters)
+            if args.benchmark:
+                return run_benchmark(iters)
+            return run_full_benchmark(iters)
 
 
         if __name__ == "__main__":
@@ -1008,6 +1069,13 @@ def detect_and_split_kernel_from_harness(
         "    _geak_sys.path.insert(0, _KERNEL_DIR)\n"
         "\n"
     )
+    # 2a. --iterations shim: the GEAK harness contract requires that every
+    # harness accepts --iterations N. The split source may not implement it
+    # natively, so we strip it from sys.argv and forward the value via
+    # GEAK_BENCHMARK_ITERATIONS so any os.environ reads pick it up.
+    raw_main_source = main_chunk or ""
+    if "--iterations" not in raw_main_source and "--iterations" not in raw_imports:
+        harness_parts.append(_GEAK_ITERATIONS_SHIM)
     # 3. Star-import kernel module
     harness_parts.append(f"from {stem} import *\n\n")
     # 4. Test functions (sorted by original line order for determinism)

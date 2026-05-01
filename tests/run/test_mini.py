@@ -150,6 +150,7 @@ class TestTryPromoteToHarness:
                     "    p.add_argument('--profile', action='store_true')",
                     "    p.add_argument('--benchmark', action='store_true')",
                     "    p.add_argument('--full-benchmark', action='store_true')",
+                    "    p.add_argument('--iterations', type=int, default=None)",
                     "    p.parse_args()",
                     "",
                     "if __name__ == '__main__':",
