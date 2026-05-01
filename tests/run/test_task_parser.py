@@ -265,6 +265,97 @@ class TestParsePipelineParams:
         assert out["mode"] is None
 
 
+class TestInferModeFromText:
+    """Regex backstop for mode extraction. Fires when LLM returns no mode."""
+
+    def test_quick_mode_phrase(self) -> None:
+        assert tp._infer_mode_from_text("Use quick mode for this run.") == "quick"
+
+    def test_in_quick_mode_phrase(self) -> None:
+        assert tp._infer_mode_from_text("Use GPUs 0-3 in quick mode.") == "quick"
+
+    def test_one_hour_phrase(self) -> None:
+        assert tp._infer_mode_from_text("Limit the run to 1 hour please.") == "quick"
+        assert tp._infer_mode_from_text("Run for one hour total.") == "quick"
+        assert tp._infer_mode_from_text("Cap it at 1h.") == "quick"
+
+    def test_full_mode_phrase(self) -> None:
+        assert tp._infer_mode_from_text("Use full mode and explore deeply.") == "full"
+
+    def test_two_hours_phrase(self) -> None:
+        assert tp._infer_mode_from_text("Run for 2 hours.") == "full"
+        assert tp._infer_mode_from_text("Run for two hours.") == "full"
+
+    def test_cli_style_flags(self) -> None:
+        assert tp._infer_mode_from_text("Run with --mode quick please.") == "quick"
+        assert tp._infer_mode_from_text("Use mode=full.") == "full"
+
+    def test_no_mode_returns_none(self) -> None:
+        # Reasonable task text without any mode reference.
+        assert tp._infer_mode_from_text("Optimize the silu kernel for me.") is None
+
+    def test_ambiguous_returns_none(self) -> None:
+        # If both quick and full are mentioned, abstain rather than guess.
+        text = "Try quick mode first, but if needed switch to full mode."
+        assert tp._infer_mode_from_text(text) is None
+
+    def test_empty_text(self) -> None:
+        assert tp._infer_mode_from_text("") is None
+        assert tp._infer_mode_from_text(None) is None  # type: ignore[arg-type]
+
+
+class TestParsePipelineParamsRegexFallback:
+    """When the LLM fails to produce JSON, the regex backstop should still
+    populate ``mode`` from obvious natural-language cues, so the budget
+    feature isn't silently downgraded to YAML's ``full`` default.
+    """
+
+    def _model_returning(self, content: str):
+        class _M:
+            def query(_self, _messages):
+                return {"content": content}
+
+        return _M()
+
+    def test_regex_fills_mode_when_llm_returns_prose(self) -> None:
+        # This is the exact failure mode we hit: LLM acknowledges and
+        # bails instead of producing JSON.
+        prose = "Looking at the task, I need to identify the kernel file. Let me first check the directory."
+        out = tp.parse_pipeline_params(
+            "Optimize the kernel from /some/dir. Use GPUs 0-3 in quick mode.",
+            self._model_returning(prose),
+        )
+        assert out["mode"] == "quick", "regex fallback must fire after JSON decode failure"
+
+    def test_regex_fills_mode_when_llm_returns_empty(self) -> None:
+        out = tp.parse_pipeline_params("Run with full mode for 2 hours.", self._model_returning(""))
+        assert out["mode"] == "full"
+
+    def test_regex_does_not_override_explicit_llm_mode(self) -> None:
+        # LLM returned "quick" -- the regex must not flip it even if the
+        # task text also contains a "full" phrase (it doesn't here, but
+        # this asserts the precedence rule).
+        payload = {
+            "kernel_url": None,
+            "preprocess_dir": None,
+            "heterogeneous": None,
+            "max_rounds": None,
+            "start_round": None,
+            "pipeline_intent": True,
+            "mode": "quick",
+        }
+        out = tp.parse_pipeline_params(
+            "Use full mode for thorough optimization.",
+            self._model_returning(json.dumps(payload)),
+        )
+        # LLM said "quick"; regex would have inferred "full"; LLM wins.
+        assert out["mode"] == "quick"
+
+    def test_no_regex_match_keeps_none(self) -> None:
+        out = tp.parse_pipeline_params("Optimize the kernel.", self._model_returning(""))
+        assert out["mode"] is None  # neither LLM nor regex found a mode
+
+
 class TestJsonDecodeFailureLogsRawResponse:
     """When the LLM returns non-JSON content, the warning must include a
     truncated view of the raw response so users can debug. Without this,

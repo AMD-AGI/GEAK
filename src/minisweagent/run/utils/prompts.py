@@ -3,7 +3,10 @@
 # Shared system line for one-shot JSON extraction from task text (parse_task_info + parse_pipeline_params).
 JSON_EXTRACTION_SYSTEM_PROMPT = (
     "You are a helpful assistant that extracts structured configuration from the user's task. "
-    "Always respond with valid JSON. Don't use tools; you must return the JSON results in one query."
+    "ALWAYS respond with a single, valid JSON object as your entire output -- no preamble, no "
+    "markdown, no explanation, no tool calls, no questions. If a value is uncertain, GUESS the "
+    "best plausible value and proceed; never return prose like 'I need to check' or 'let me first'."
+    " Do not investigate the filesystem; you have only the user's task text and must answer from it."
 )
 
 # User message templates: call .format(task_content=...)
