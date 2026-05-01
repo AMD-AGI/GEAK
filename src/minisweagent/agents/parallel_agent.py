@@ -638,18 +638,24 @@ class ParallelAgent(DefaultAgent):
         _progress_thread = threading.Thread(target=_report_progress, daemon=True)
         _progress_thread.start()
 
-        # Use poll loop so SoftStop is observed mid-dispatch.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel) as executor:
+        # Use poll loop so SoftStop is observed mid-dispatch. Manual executor
+        # lifecycle (no ``with`` block) so we can detach via shutdown(wait=False,
+        # cancel_futures=True) on SoftStop instead of blocking on stuck workers.
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel)
+        soft_stop_observed = False
+        try:
             futures: dict[concurrent.futures.Future, int] = {}
             for i in range(num_parallel):
                 if registry is not None:
                     with registry.lock:
                         if soft_stop is not None and soft_stop.is_set():
+                            soft_stop_observed = True
                             break
                         fut = executor.submit(run_single_agent, i)
                         registry.register_future(fut)
                 else:
                     if soft_stop is not None and soft_stop.is_set():
+                        soft_stop_observed = True
                         break
                     fut = executor.submit(run_single_agent, i)
                 futures[fut] = i
@@ -665,6 +671,7 @@ class ParallelAgent(DefaultAgent):
                         registry.terminate_all()
                     for f in pending:
                         f.cancel()
+                    soft_stop_observed = True
                     break
                 done, pending = concurrent.futures.wait(pending, timeout=2.0)
                 for f in done:
@@ -676,6 +683,11 @@ class ParallelAgent(DefaultAgent):
                         logger.info("Homogeneous parallel agent %d cancelled", agent_id)
                     except Exception as e:
                         logger.error("Error in parallel agent %d: %s", agent_id, e, exc_info=True)
+        finally:
+            if soft_stop_observed:
+                executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                executor.shutdown(wait=True)
 
         _progress_stop.set()
         _progress_thread.join(timeout=2)

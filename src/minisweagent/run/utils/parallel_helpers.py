@@ -437,8 +437,18 @@ def run_parallel_heterogeneous(
     # Run all agents concurrently. Use a poll loop instead of as_completed so
     # SoftStop is observed mid-dispatch (as_completed blocks until at least
     # one future completes, which can be tens of minutes for sub-agents).
+    #
+    # NOTE: we intentionally do NOT use ``with ThreadPoolExecutor(...) as ex:``
+    # here, because that calls ``shutdown(wait=True)`` on exit and would block
+    # the orchestrator's deadline-finalize path waiting for stuck workers
+    # (e.g. agents mid-LLM-call). On SoftStop we want to detach the executor
+    # via ``shutdown(wait=False, cancel_futures=True)`` and return immediately
+    # so the orchestrator can call finalize_run within the finalize_grace
+    # window. The hard-kill watchdog remains as the absolute backstop.
     results: list = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_agents) as executor:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=num_agents)
+    soft_stop_observed = False
+    try:
         futures: dict[concurrent.futures.Future, int] = {}
         for i, spec in enumerate(agent_specs):
             # Race-proof submit-and-track: hold registry.lock across (soft_stop
@@ -455,11 +465,13 @@ def run_parallel_heterogeneous(
                             i,
                             num_agents,
                         )
+                        soft_stop_observed = True
                         break
                     fut = executor.submit(run_spec_agent, i, spec)
                     registry.register_future(fut)
             else:
                 if soft_stop is not None and soft_stop.is_set():
+                    soft_stop_observed = True
                     break
                 fut = executor.submit(run_spec_agent, i, spec)
             futures[fut] = i
@@ -468,13 +480,15 @@ def run_parallel_heterogeneous(
         while pending:
             if soft_stop is not None and soft_stop.is_set():
                 logger.warning(
-                    "run_parallel_heterogeneous: SoftStop set during dispatch; cancelling %d in-flight",
+                    "run_parallel_heterogeneous: SoftStop set during dispatch; "
+                    "cancelling %d in-flight, terminating subprocesses",
                     len(pending),
                 )
                 if registry is not None:
                     registry.terminate_all()
                 for f in pending:
                     f.cancel()
+                soft_stop_observed = True
                 break
             done, pending = concurrent.futures.wait(pending, timeout=2.0)
             for f in done:
@@ -486,6 +500,13 @@ def run_parallel_heterogeneous(
                     logger.info("Heterogeneous agent %d was cancelled", agent_id)
                 except Exception as e:
                     logger.error("Error in heterogeneous agent %d: %s", agent_id, e, exc_info=True)
+    finally:
+        # Detach instead of waiting on stuck workers when SoftStop fired;
+        # otherwise drain normally so caller sees a fully-completed batch.
+        if soft_stop_observed:
+            executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            executor.shutdown(wait=True)
     return results
 
 
@@ -864,8 +885,17 @@ def run_pool(
 
     # Submit ALL M tasks; ThreadPoolExecutor(max_workers=N) queues overflow.
     # Use a poll loop so SoftStop is observed mid-dispatch.
+    #
+    # NOTE: we intentionally do NOT use ``with ThreadPoolExecutor(...) as ex:``
+    # here. ``with`` calls ``shutdown(wait=True)`` on exit, which would block
+    # the orchestrator's deadline-finalize path waiting for stuck workers
+    # (e.g. agents mid-LLM-call). On SoftStop we detach the executor via
+    # ``shutdown(wait=False, cancel_futures=True)`` and return immediately so
+    # the orchestrator can call finalize_run within finalize_grace_s.
     results: list = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=n_slots) as executor:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=n_slots)
+    soft_stop_observed = False
+    try:
         futures: dict[concurrent.futures.Future, int] = {}
         for tid, task in sorted_tasks:
             if registry is not None:
@@ -875,11 +905,13 @@ def run_pool(
                             "run_pool: SoftStop set before submitting task %d; not submitting further",
                             tid,
                         )
+                        soft_stop_observed = True
                         break
                     fut = executor.submit(execute_task, tid, task)
                     registry.register_future(fut)
             else:
                 if soft_stop is not None and soft_stop.is_set():
+                    soft_stop_observed = True
                     break
                 fut = executor.submit(execute_task, tid, task)
             futures[fut] = tid
@@ -908,6 +940,7 @@ def run_pool(
                     registry.terminate_all()
                 for f in pending:
                     f.cancel()
+                soft_stop_observed = True
                 break
             done, pending = concurrent.futures.wait(pending, timeout=2.0)
             for future in done:
@@ -944,6 +977,11 @@ def run_pool(
                         hypothesis_id="H8",
                     )
                     # endregion
+    finally:
+        if soft_stop_observed:
+            executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            executor.shutdown(wait=True)
 
     _progress_stop.set()
     _progress_thread.join(timeout=2)
