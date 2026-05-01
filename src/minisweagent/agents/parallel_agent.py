@@ -647,7 +647,7 @@ class ParallelAgent(DefaultAgent):
                         if soft_stop is not None and soft_stop.is_set():
                             break
                         fut = executor.submit(run_single_agent, i)
-                        registry.futures.append(fut)
+                        registry.register_future(fut)
                 else:
                     if soft_stop is not None and soft_stop.is_set():
                         break

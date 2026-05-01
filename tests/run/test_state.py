@@ -83,6 +83,103 @@ def test_terminate_all_handles_already_dead_subprocess():
 
 
 # ---------------------------------------------------------------------------
+# register_future: auto-cleanup on completion (no stale "futures=N" in logs)
+# ---------------------------------------------------------------------------
+
+
+def test_register_future_auto_removes_on_completion():
+    """After the future completes, it should no longer be in registry.futures.
+
+    This is the cleanliness fix that stops ``terminate_all``'s SIGTERM-wave
+    log line from misleadingly reporting "futures=N" for already-completed
+    workers when the run finalizes naturally.
+    """
+    import concurrent.futures
+
+    registry = ProcessRegistry()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        with registry.lock:
+            fut = executor.submit(lambda: 42)
+            registry.register_future(fut)
+        # Future is in the registry while alive (or already removed if it
+        # finished synchronously between submit and register; either is
+        # acceptable as long as it's gone post-completion).
+        result = fut.result(timeout=5)
+        assert result == 42
+        # add_done_callback may have fired in the executor thread; give it a
+        # moment then assert the future is no longer tracked.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with registry.lock:
+                if fut not in registry.futures:
+                    break
+            time.sleep(0.02)
+        with registry.lock:
+            assert fut not in registry.futures, (
+                "register_future must auto-remove a completed future via add_done_callback"
+            )
+
+
+def test_register_future_handles_already_done_future():
+    """If the future is already done at registration time (rare but possible
+    for very fast tasks), the callback fires synchronously in the calling
+    thread. Because ``ProcessRegistry.lock`` is now an ``RLock``, this must
+    not deadlock when the caller is already inside ``with registry.lock:``.
+    """
+    import concurrent.futures
+
+    registry = ProcessRegistry()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        fut = executor.submit(lambda: "done")
+        # Deliberately wait for completion BEFORE registering, so the
+        # done-callback is invoked synchronously inside register_future.
+        fut.result(timeout=5)
+
+        with registry.lock:
+            registry.register_future(fut)  # must not deadlock
+        # The synchronous callback ran while we held the lock; the future
+        # should already be gone (or we re-acquire the lock and verify).
+        with registry.lock:
+            assert fut not in registry.futures
+
+
+def test_terminate_all_after_all_futures_done_reports_zero():
+    """Integration: register a future, let it complete, then call
+    ``terminate_all``. The SIGTERM wave should see ``futures=0`` (the whole
+    point of the cleanliness fix).
+    """
+    import concurrent.futures
+    import logging
+
+    registry = ProcessRegistry()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        with registry.lock:
+            fut = executor.submit(lambda: None)
+            registry.register_future(fut)
+        fut.result(timeout=5)
+        # Allow the done-callback to run.
+        time.sleep(0.1)
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture(level=logging.DEBUG)
+    state_logger = logging.getLogger("minisweagent.run.state")
+    state_logger.addHandler(handler)
+    try:
+        registry.terminate_all(escalate_after_s=0.1)
+        # No SIGTERM-wave log emitted because we have nothing to terminate.
+        assert not any("SIGTERM wave" in r.getMessage() for r in records), (
+            "terminate_all should be a no-op when registry is fully cleaned up"
+        )
+    finally:
+        state_logger.removeHandler(handler)
+
+
+# ---------------------------------------------------------------------------
 # Stage classifier: preprocess_soft_stop_handler
 # ---------------------------------------------------------------------------
 

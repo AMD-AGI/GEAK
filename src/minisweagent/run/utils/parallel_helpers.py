@@ -442,9 +442,11 @@ def run_parallel_heterogeneous(
         futures: dict[concurrent.futures.Future, int] = {}
         for i, spec in enumerate(agent_specs):
             # Race-proof submit-and-track: hold registry.lock across (soft_stop
-            # check + executor.submit + registry.futures.append) so
-            # terminate_all() cannot miss a worker that has already spawned a
-            # Popen.
+            # check + executor.submit + register_future) so terminate_all()
+            # cannot miss a worker that has already spawned a Popen.
+            # register_future also wires a done-callback that removes the
+            # future on completion, so terminate_all's "futures=N" log line
+            # reflects only in-flight workers.
             if registry is not None:
                 with registry.lock:
                     if soft_stop is not None and soft_stop.is_set():
@@ -455,7 +457,7 @@ def run_parallel_heterogeneous(
                         )
                         break
                     fut = executor.submit(run_spec_agent, i, spec)
-                    registry.futures.append(fut)
+                    registry.register_future(fut)
             else:
                 if soft_stop is not None and soft_stop.is_set():
                     break
@@ -875,7 +877,7 @@ def run_pool(
                         )
                         break
                     fut = executor.submit(execute_task, tid, task)
-                    registry.futures.append(fut)
+                    registry.register_future(fut)
             else:
                 if soft_stop is not None and soft_stop.is_set():
                     break

@@ -88,7 +88,11 @@ class ProcessRegistry:
     popens: list[subprocess.Popen] = field(default_factory=list)
     mp_procs: list = field(default_factory=list)  # multiprocessing.Process; target MUST call os.setsid()
     futures: list[Future] = field(default_factory=list)
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    # ``RLock`` (not plain ``Lock``) so the ``register_future`` done-callback
+    # can re-acquire the lock from the submitting thread when a future is
+    # already done at registration time (the synchronous-callback case in
+    # ``Future.add_done_callback``). Plain Lock would deadlock there.
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
     # ----- tracking context managers -----
 
@@ -124,6 +128,33 @@ class ProcessRegistry:
             with self.lock:
                 if fut in self.futures:
                     self.futures.remove(fut)
+
+    def register_future(self, fut: Future) -> None:
+        """Add ``fut`` to the registry and arrange for it to be auto-removed
+        on completion via ``Future.add_done_callback``.
+
+        This is the right primitive for fire-and-forget submission from a
+        dispatcher loop: the caller holds ``self.lock`` across the
+        (soft_stop check + executor.submit + register_future) critical
+        section to close the submit-and-track race, and the cleanup happens
+        automatically when the worker thread completes (no need to remember
+        to call ``futures.remove`` from the caller).
+
+        Without auto-cleanup, completed futures linger in ``self.futures``
+        and ``terminate_all`` reports misleading "futures=N" counts in its
+        SIGTERM-wave log line.
+        """
+        self.futures.append(fut)
+        fut.add_done_callback(self._on_future_done)
+
+    def _on_future_done(self, fut: Future) -> None:
+        """Remove a completed future from the registry. Safe to call from any
+        thread (including the submitting thread, when the callback fires
+        synchronously due to the future being already done at registration).
+        """
+        with self.lock:
+            if fut in self.futures:
+                self.futures.remove(fut)
 
     # ----- termination -----
 
