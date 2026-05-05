@@ -236,8 +236,7 @@ def _promote_kernel_url_dir_to_file(
         if cand.is_file():
             promoted = str(cand)
             logger.info(
-                "parse_task_info: kernel_url was a directory; promoted to %s "
-                "(was %s)",
+                "parse_task_info: kernel_url was a directory; promoted to %s (was %s)",
                 promoted,
                 kernel_url,
             )
@@ -250,8 +249,7 @@ def _promote_kernel_url_dir_to_file(
     if len(matches) == 1:
         promoted = str(matches[0])
         logger.info(
-            "parse_task_info: kernel_url was a directory with a single %s "
-            "file; promoted to %s (was %s)",
+            "parse_task_info: kernel_url was a directory with a single %s file; promoted to %s (was %s)",
             "/".join(exts),
             promoted,
             kernel_url,

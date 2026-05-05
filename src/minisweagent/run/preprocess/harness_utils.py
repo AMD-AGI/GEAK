@@ -42,7 +42,7 @@ MAX_HARNESS_RETRIES = 2
 # argparse doesn't crash with "unrecognized arguments", and forwards the value
 # to GEAK_BENCHMARK_ITERATIONS so harness code that reads the env var picks it
 # up. The literal string ``--iterations`` keeps validate_harness() satisfied.
-_GEAK_ITERATIONS_SHIM = '''\
+_GEAK_ITERATIONS_SHIM = """\
 # --- GEAK iteration shim (auto-injected) ---------------------------------
 # Accepts "--iterations N" and "--iterations=N" without modifying the
 # downstream argparse. Forwards the value via GEAK_BENCHMARK_ITERATIONS.
@@ -75,7 +75,7 @@ def _geak_consume_iterations() -> None:
 _geak_consume_iterations()
 # --- end GEAK iteration shim ---------------------------------------------
 
-'''
+"""
 
 # Use one canonical benchmark definition everywhere. The legacy
 # GEAK_AGENT_BENCHMARK_ITERATIONS split is intentionally ignored so

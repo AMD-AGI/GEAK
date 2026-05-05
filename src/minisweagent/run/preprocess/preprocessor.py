@@ -1181,8 +1181,7 @@ def run_preprocessor(
                     )
                 else:
                     logger.error(
-                        "Refusing to progress to optimization "
-                        "(set GEAK_ALLOW_BROKEN_HARNESS=1 to override):\n%s",
+                        "Refusing to progress to optimization (set GEAK_ALLOW_BROKEN_HARNESS=1 to override):\n%s",
                         _abort_msg,
                     )
                     raise PreprocessAborted(

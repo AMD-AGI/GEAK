@@ -318,9 +318,7 @@ def preflight_commandment_contract(
         return
 
     if not commandment_path.exists():
-        raise CommandmentExecutionError(
-            "PREFLIGHT", None, f"COMMANDMENT.md not found at {commandment_path}"
-        )
+        raise CommandmentExecutionError("PREFLIGHT", None, f"COMMANDMENT.md not found at {commandment_path}")
 
     script = build_eval_script(str(commandment_path), ["SETUP", "CORRECTNESS"])
     if not script:
@@ -403,9 +401,7 @@ def run_correctness_and_benchmark(
             # any callers that catch the exception, then escalate.
             round_eval["correctness"] = {"error": str(exc)}
             round_eval["status"] = "commandment_execution_failed"
-            raise CommandmentExecutionError(
-                "CORRECTNESS", None, f"subprocess failed to complete: {exc}"
-            ) from exc
+            raise CommandmentExecutionError("CORRECTNESS", None, f"subprocess failed to complete: {exc}") from exc
 
         round_eval["correctness"] = {
             "returncode": correctness_result.returncode,
@@ -417,8 +413,7 @@ def run_correctness_and_benchmark(
             if broken is not None:
                 round_eval["status"] = "commandment_execution_failed"
                 logger.error(
-                    "CORRECTNESS failed because the COMMANDMENT contract is broken "
-                    "(matched %r):\n%s",
+                    "CORRECTNESS failed because the COMMANDMENT contract is broken (matched %r):\n%s",
                     broken,
                     stderr_tail,
                 )
@@ -490,9 +485,7 @@ def run_correctness_and_benchmark(
                 candidate_result.returncode,
                 stderr_tail,
             )
-            raise CommandmentExecutionError(
-                baseline_section_name, candidate_result.returncode, detail
-            )
+            raise CommandmentExecutionError(baseline_section_name, candidate_result.returncode, detail)
 
         candidate_stdout = candidate_result.stdout
         round_eval[section_key] = {
@@ -607,9 +600,7 @@ def run_profile(
     except Exception as exc:
         round_eval["profile_comparison"] = {"error": str(exc)}
         round_eval["status"] = "commandment_execution_failed"
-        raise CommandmentExecutionError(
-            "PROFILE", None, f"subprocess failed to complete: {exc}"
-        ) from exc
+        raise CommandmentExecutionError("PROFILE", None, f"subprocess failed to complete: {exc}") from exc
 
     if profile_result.returncode != 0:
         stderr_tail = _format_stderr_tail(profile_result.stderr)
