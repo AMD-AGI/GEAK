@@ -203,7 +203,18 @@ class DefaultAgent:
         return
 
     def _setup_save_and_test_context(self):
-        """Setup context for save_and_test tool."""
+        """Setup context for save_and_test tool.
+
+        Idempotent and cheap to re-call. The parallel/heterogeneous helpers
+        rely on this: they construct the agent (which calls this for the
+        first time, *before* ``self._registry`` is set), then attach
+        ``agent._registry = registry`` and re-call this to rebuild the
+        ``SaveAndTestContext`` with the registry attached. If you ever add
+        per-agent state to the context that should *not* be reset by the
+        second call (e.g. a counter), gate it on ``self._save_and_test_context
+        is None``; otherwise the implicit "second init wipes the context"
+        coupling will silently regress.
+        """
         from minisweagent.tools.save_and_test import SaveAndTestContext
 
         cwd = getattr(self.env.config, "cwd", None) or os.getcwd()

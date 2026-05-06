@@ -78,7 +78,10 @@ def _filter_discovery_to_repo_root(disc_dict: dict[str, Any], repo_root: str | P
         return disc_dict
     try:
         repo_resolved = Path(repo_root).resolve()
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, RecursionError) as exc:
+        # ``Path.resolve()`` can raise ``RecursionError`` on filesystems with
+        # symlink loops (NFS / macOS). Treat the same as "couldn't resolve"
+        # rather than crashing the preprocess pipeline.
         logger.debug("_filter_discovery_to_repo_root: repo_root resolve failed (%s); skipping filter", exc)
         return disc_dict
 
@@ -87,7 +90,7 @@ def _filter_discovery_to_repo_root(disc_dict: dict[str, Any], repo_root: str | P
             return True  # don't drop entries we can't classify
         try:
             return Path(file_path).resolve().is_relative_to(repo_resolved)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, RecursionError):
             return False
 
     new_disc = dict(disc_dict)
@@ -1135,9 +1138,7 @@ def run_preprocessor(
         )
         if harness_path_for_baseline and harness_results:
             logger.info("[bold cyan]--- Step 4/7: Baseline collection ---[/bold cyan]")
-            state.current_stage = PreprocessStage.HARNESS_BENCHMARK
-            if state.hard_fail:
-                raise PreprocessAborted(state.fail_reason or "preprocess aborted by watchdog")
+            state.set_stage(PreprocessStage.HARNESS_BENCHMARK)
             extra = f"--iterations {eval_iters}"
             logger.info("  Re-running all modes with %s for baselines...", extra)
             bl_ok, bl_errors, baseline_results = execute_harness_validation(
@@ -1210,9 +1211,7 @@ def run_preprocessor(
 
     # ── 5. kernel-profile (via profiler-mcp) ─────────────────────────
     logger.info("[bold cyan]--- Step 5/7: Kernel profiling (Metrix instrumented) ---[/bold cyan]")
-    state.current_stage = PreprocessStage.KERNEL_PROFILE
-    if state.hard_fail:
-        raise PreprocessAborted(state.fail_reason or "preprocess aborted by watchdog")
+    state.set_stage(PreprocessStage.KERNEL_PROFILE)
 
     _profile_t0 = time.monotonic()
     profiling: dict[str, Any] | None = None
@@ -1339,9 +1338,7 @@ def run_preprocessor(
 
     # ── 6. baseline-metrics ──────────────────────────────────────────
     logger.info("[bold cyan]--- Step 6/7: Baseline metrics ---[/bold cyan]")
-    state.current_stage = PreprocessStage.BASELINE_METRICS
-    if state.hard_fail:
-        raise PreprocessAborted(state.fail_reason or "preprocess aborted by watchdog")
+    state.set_stage(PreprocessStage.BASELINE_METRICS)
 
     baseline_metrics: dict[str, Any] | None = None
     if profiling and profiling.get("success", True):
@@ -1403,9 +1400,7 @@ def run_preprocessor(
 
     # ── 7. commandment ───────────────────────────────────────────────
     logger.info("[bold cyan]--- Step 7/7: Commandment ---[/bold cyan]")
-    state.current_stage = PreprocessStage.COMMANDMENT
-    if state.hard_fail:
-        raise PreprocessAborted(state.fail_reason or "preprocess aborted by watchdog")
+    state.set_stage(PreprocessStage.COMMANDMENT)
 
     commandment: str | None = None
     if eval_command:

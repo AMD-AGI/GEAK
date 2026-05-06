@@ -1,7 +1,7 @@
 """Shared helpers for the GEAK preprocessing and orchestration pipelines.
 
-All CLI entry points (``geak``, ``geak-preprocess``, ``geak-orchestrate``,
-``run-tasks``, ``task-generator``) import from this module so that harness
+All CLI entry points (``geak``, ``geak-preprocess``, ``run-tasks``,
+``task-generator``) import from this module so that harness
 extraction, validation, profiling, model loading, agent filtering, and
 pipeline-context injection are always identical regardless of entry point.
 """
@@ -76,6 +76,24 @@ def apply_mode_presets(config: dict, mode: str) -> dict:
         logger.debug("apply_mode_presets: no presets defined for mode=%s", mode)
         return config
 
+    # Snapshot the leaf values that *will* change under deep-merge so the
+    # log line reflects the actual config delta instead of the preset tree.
+    # Walking the preset tree alone would, e.g., claim we "injected" a dict
+    # at a key where ``_deep_merge`` actually replaced a non-dict scalar
+    # with a fresh dict subtree.
+    def _collect_preset_changes(base: dict, override: dict, prefix: str = "") -> list[tuple[str, Any, Any]]:
+        changes: list[tuple[str, Any, Any]] = []
+        for k, v in override.items():
+            key = f"{prefix}.{k}" if prefix else k
+            base_v = base.get(k) if isinstance(base, dict) else None
+            if isinstance(v, dict) and isinstance(base_v, dict):
+                changes.extend(_collect_preset_changes(base_v, v, key))
+            else:
+                changes.append((key, base_v, v))
+        return changes
+
+    deltas = _collect_preset_changes(config, presets)
+
     def _deep_merge(base: dict, override: dict) -> dict:
         for k, v in override.items():
             if isinstance(v, dict) and isinstance(base.get(k), dict):
@@ -86,19 +104,15 @@ def apply_mode_presets(config: dict, mode: str) -> dict:
 
     _deep_merge(config, presets)
 
-    # Surface a dotted-key summary so users see exactly what mode injected.
-    _injected: list[str] = []
-
-    def _walk(d: dict, prefix: str = "") -> None:
-        for k, v in d.items():
-            key = f"{prefix}.{k}" if prefix else k
-            if isinstance(v, dict):
-                _walk(v, key)
-            else:
-                _injected.append(f"{key}={v}")
-
-    _walk(presets)
-    logger.info("apply_mode_presets: mode=%s injected %s", mode, ", ".join(_injected))
+    parts: list[str] = []
+    for key, before, after in deltas:
+        if before is None:
+            parts.append(f"+{key}={after}")
+        elif before == after:
+            parts.append(f"={key}={after}")
+        else:
+            parts.append(f"{key}: {before}->{after}")
+    logger.info("apply_mode_presets: mode=%s applied %s", mode, ", ".join(parts) if parts else "(no changes)")
     return config
 
 
@@ -421,6 +435,8 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
 
     Returns ``(valid, errors)`` where *errors* is empty when *valid* is True.
     """
+    from minisweagent.run.preprocess.harness_utils import _strip_python_comments
+
     harness = Path(harness_path)
     errors: list[str] = []
 
@@ -436,8 +452,13 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
             "CLI flags like --profile and --correctness will be silently ignored"
         )
 
+    # Strip comments before substring-checking required flags so that a
+    # ``# --iterations N not yet supported`` comment does not falsely
+    # satisfy the validator. Must mirror the equivalent helper in
+    # ``preprocess/harness_utils.py``.
+    code_only_source = _strip_python_comments(source)
     for flag in REQUIRED_HARNESS_FLAGS:
-        if flag not in source:
+        if flag not in code_only_source:
             errors.append(f"Harness source does not define '{flag}' flag")
 
     # Check for GPU-side tensor allocation inside the profile function.

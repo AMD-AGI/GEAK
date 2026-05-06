@@ -59,6 +59,20 @@ def test_deadline_soft_stopped_reflects_event():
     assert deadline.soft_stopped()
 
 
+def test_deadline_cap_returns_zero_when_softstop_is_set():
+    """Once SoftStop has fired, ``cap()`` returns 0.0 regardless of remaining
+    wallclock so callers using ``cap()`` to size new subprocess timeouts will
+    refuse to start new long-running work without needing a separate
+    ``soft_stop.is_set()`` poll at every site.
+    """
+    soft_stop = threading.Event()
+    deadline = Deadline(time.monotonic() + 60.0, soft_stop)
+    assert deadline.cap(10.0) == pytest.approx(10.0, abs=1e-3)
+    soft_stop.set()
+    assert deadline.cap(10.0) == 0.0
+    assert deadline.cap(0.5) == 0.0
+
+
 # ---------------------------------------------------------------------------
 # RunBudget.commit_preprocess: rollover + clamp
 # ---------------------------------------------------------------------------

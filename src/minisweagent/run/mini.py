@@ -554,13 +554,17 @@ def main(
             budget.soft_stop.set()
         else:
             logger.error("Second SIGINT received -- terminating tracked subprocesses and exiting.")
+            # Restore the original SIGINT handler *before* calling
+            # ``terminate_all`` so a third Ctrl-C lands on the default handler
+            # (KeyboardInterrupt) instead of recursing back into this handler
+            # mid-escalation. ``terminate_all`` waits up to ``escalate_after_s``
+            # seconds for SIGTERM->SIGKILL escalation; without this swap the
+            # third SIGINT would re-enter and recurse.
+            signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
             try:
                 state.registry.terminate_all()
             except Exception:
                 logger.exception("registry.terminate_all() failed during SIGINT")
-            # Restore original handler and re-raise so the user gets the
-            # standard KeyboardInterrupt traceback.
-            signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
             raise KeyboardInterrupt()
 
     signal.signal(signal.SIGINT, _sigint_handler)
@@ -640,6 +644,27 @@ def main(
             logger.error(
                 "[budget] HARD KILL: opt_deadline + kill_buffer_s reached; terminating registry and exiting",
             )
+            # Best-effort stub final report so the operator has *something*
+            # to point at when the run hits hard kill (the regular finalize
+            # path won't get a chance to write one). Pure stdlib write, no
+            # LLM, takes microseconds; intentionally tolerates any failure
+            # because the next thing we do is ``os._exit``.
+            try:
+                _stub_path = preprocess_output_dir / "final_report.json"
+                if not _stub_path.exists():
+                    _stub_path.write_text(
+                        json.dumps(
+                            {
+                                "status": "hard_kill",
+                                "exit_code": 124,
+                                "elapsed_s": round(budget.elapsed(), 3),
+                                "reason": "opt_deadline + kill_buffer_s reached",
+                            },
+                            indent=2,
+                        )
+                    )
+            except Exception:
+                logger.exception("hard-kill: writing stub final_report.json failed (non-fatal)")
             try:
                 state.registry.terminate_all(escalate_after_s=5.0)
             except Exception:

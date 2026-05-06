@@ -1121,6 +1121,53 @@ _GPU_ALLOC_IN_PROFILE_RE = re.compile(
 )
 
 
+def _strip_python_comments(source: str) -> str:
+    """Strip ``#`` line comments from ``source`` while preserving ``#`` that
+    appear inside string literals.
+
+    Used to make the harness flag-presence check robust against flags that
+    only appear inside comments such as ``# --iterations N not yet supported``
+    -- those are not actually wired up and shouldn't satisfy
+    ``validate_harness``. We can't naively strip ``#``-to-EOL because string
+    literals containing ``#`` are common (e.g. URLs, regex patterns).
+
+    We use ``tokenize`` to enumerate comment spans and blank them out by
+    character offset; the surrounding tokens are preserved verbatim. Falls
+    back to the unchanged source if tokenization fails (e.g. invalid Python).
+    """
+    import io as _io
+    import tokenize as _tokenize
+
+    try:
+        tokens = list(_tokenize.generate_tokens(_io.StringIO(source).readline))
+    except (_tokenize.TokenizeError, IndentationError, SyntaxError):
+        return source
+
+    # Collect (lineno-1, col_start, col_end) spans for every COMMENT token,
+    # then blank those spans on the corresponding source lines. Comments
+    # always end at EOL so we don't need to worry about multi-line spans.
+    spans_by_line: dict[int, list[tuple[int, int]]] = {}
+    for tok in tokens:
+        if tok.type != _tokenize.COMMENT:
+            continue
+        line_idx = tok.start[0] - 1
+        spans_by_line.setdefault(line_idx, []).append((tok.start[1], tok.end[1]))
+
+    if not spans_by_line:
+        return source
+
+    lines = source.splitlines(keepends=True)
+    for line_idx, spans in spans_by_line.items():
+        if line_idx >= len(lines):
+            continue
+        line = lines[line_idx]
+        # Blank each span (left-to-right; spans on the same line don't overlap).
+        for start_col, end_col in sorted(spans):
+            line = line[:start_col] + (" " * (end_col - start_col)) + line[end_col:]
+        lines[line_idx] = line
+    return "".join(lines)
+
+
 def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
     """Static-analyse a harness script to verify it supports required CLI flags.
 
@@ -1148,8 +1195,14 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
             "CLI flags like --profile and --correctness will be silently ignored"
         )
 
+    # Strip comments before substring-checking required flags so that a
+    # ``# --iterations N not yet supported`` comment does not falsely
+    # satisfy the validator. The shim path that injects ``--iterations``
+    # handling at runtime as a string literal in code (not just a comment)
+    # still passes.
+    code_only_source = _strip_python_comments(source)
     for flag in REQUIRED_HARNESS_FLAGS:
-        if flag not in source:
+        if flag not in code_only_source:
             errors.append(f"Harness source does not define '{flag}' flag")
 
     # Check for GPU-side tensor allocation inside the profile function.

@@ -197,6 +197,13 @@ _KERNEL_TYPE_TO_EXT: dict[str, tuple[str, ...]] = {
 }
 
 
+# Safety bound on the cheap "exactly one matching file" fallback inside the
+# directory: we don't want to walk a HIP repo with thousands of files just
+# because the LLM echoed a wrong directory back to us, especially on shared
+# filesystems where ``iterdir`` can be slow and racy.
+_PROMOTE_DIR_MAX_ENTRIES = 32
+
+
 def _promote_kernel_url_dir_to_file(
     kernel_url: str,
     *,
@@ -210,7 +217,16 @@ def _promote_kernel_url_dir_to_file(
       1. ``<kernel_name_hint>.<kernel-type extension>`` if both hints set.
       2. Hard-coded ``kernel.{py,hip,cu,flydsl}`` (most common GEAK layout).
       3. The single file in the directory matching the kernel-type
-         extensions, if exactly one exists.
+         extensions, if exactly one exists *and* the directory is small
+         (<= ``_PROMOTE_DIR_MAX_ENTRIES`` entries).
+
+    Promotion only runs when ``kernel_type`` is set to a known, kernel-bearing
+    value. The LLM extractor is explicitly prompted not to investigate the
+    filesystem; this helper does, but we keep its scope tight: we never walk
+    large directories, and we never guess on an "unknown"/"other" kernel
+    type. Without those guardrails a stale ``kernel_url`` like
+    ``/home/.../some/cached/dir`` could silently get promoted to whatever
+    ``.py`` file happens to live there.
 
     If nothing matches, return the original ``kernel_url`` (the existing
     error will fire downstream); we only log a warning so users know we
@@ -218,6 +234,21 @@ def _promote_kernel_url_dir_to_file(
     """
     p = Path(kernel_url)
     if not p.is_dir():
+        return kernel_url
+
+    if kernel_type not in _KERNEL_TYPE_TO_EXT and not kernel_name_hint:
+        # Unknown / "other" kernel types don't have a reliable extension
+        # signal, and without a name hint we cannot tell which file to
+        # promote. Refuse with a warning so the user passes the file path
+        # explicitly rather than risk silently promoting a stale directory's
+        # arbitrary ``.py`` file.
+        logger.warning(
+            "parse_task_info: kernel_url %s is a directory and kernel_type=%r "
+            "with no kernel_name hint is not promotable; pass the kernel file "
+            "path explicitly.",
+            kernel_url,
+            kernel_type,
+        )
         return kernel_url
 
     # Resolve to absolute for clearer logs.
@@ -243,9 +274,26 @@ def _promote_kernel_url_dir_to_file(
             return promoted
 
     # Last resort: if exactly one file in the directory matches the type's
-    # extensions, take it.
+    # extensions, take it -- but only if the directory is small enough that
+    # iterating it is cheap and predictable.
     exts = _KERNEL_TYPE_TO_EXT.get(kernel_type, (".py",))
-    matches = [f for f in p.iterdir() if f.is_file() and f.suffix in exts]
+    try:
+        entries: list[Path] = []
+        for i, entry in enumerate(p.iterdir()):
+            if i >= _PROMOTE_DIR_MAX_ENTRIES:
+                logger.warning(
+                    "parse_task_info: kernel_url %s contains > %d entries; refusing to "
+                    "scan for a kernel file. Pass the kernel file path explicitly.",
+                    kernel_url,
+                    _PROMOTE_DIR_MAX_ENTRIES,
+                )
+                return kernel_url
+            entries.append(entry)
+    except OSError as exc:
+        logger.debug("parse_task_info: iterdir failed on %s: %s", p, exc)
+        return kernel_url
+
+    matches = [f for f in entries if f.is_file() and f.suffix in exts]
     if len(matches) == 1:
         promoted = str(matches[0])
         logger.info(

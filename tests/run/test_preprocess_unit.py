@@ -272,6 +272,28 @@ class TestValidateHarness:
         valid, errors = validate_harness("/nonexistent/harness.py")
         assert not valid
 
+    def test_rejects_iterations_only_in_comment(self):
+        """A harness that mentions ``--iterations`` only inside a comment
+        (e.g. a TODO note about not yet supporting it) must NOT pass the
+        validator -- it isn't actually wired up.
+        """
+        from minisweagent.run.pipeline_helpers import validate_harness
+        with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+            f.write(
+                "import argparse\n"
+                "# TODO: --iterations N is not yet supported\n"
+                "parser = argparse.ArgumentParser()\n"
+                "parser.add_argument('--profile')\n"
+                "parser.add_argument('--correctness')\n"
+                "parser.add_argument('--benchmark')\n"
+                "parser.add_argument('--full-benchmark')\n"
+            )
+            f.flush()
+            valid, errors = validate_harness(f.name)
+        os.unlink(f.name)
+        assert not valid, "Comment-only --iterations mention must not satisfy the validator"
+        assert any("--iterations" in e for e in errors), errors
+
 
 # ===================================================================
 # Test 4: execute_harness_validation env vars

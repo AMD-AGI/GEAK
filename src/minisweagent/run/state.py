@@ -143,6 +143,15 @@ class ProcessRegistry:
         Without auto-cleanup, completed futures linger in ``self.futures``
         and ``terminate_all`` reports misleading "futures=N" counts in its
         SIGTERM-wave log line.
+
+        Ordering note: the append must precede ``add_done_callback`` so that
+        the synchronous-callback case (future already done at registration)
+        observes the future *in* ``self.futures`` and removes it. Reversing
+        the order would leak entries in that path. Concurrent ``terminate_all``
+        callers cannot observe the intermediate state because callers of
+        ``register_future`` hold ``self.lock`` across submit-and-register
+        per the docstring; the ``RLock`` makes the synchronous-callback
+        re-entry safe.
         """
         self.futures.append(fut)
         fut.add_done_callback(self._on_future_done)
@@ -304,10 +313,7 @@ class PreprocessState:
         """Mark a stage as current. Raises ``PreprocessAborted`` if a hard
         stop has fired before we even entered the stage.
         """
-        if self.hard_fail:
-            raise PreprocessAborted(self.fail_reason or "preprocess aborted by watchdog")
-        self.current_stage = stage
-        logger.debug("PreprocessState entered stage: %s", stage.value)
+        self.set_stage(stage)
         try:
             yield
         finally:
@@ -315,6 +321,20 @@ class PreprocessState:
             # will overwrite it. Leaving it as the last stage entered is
             # correct for the soft-stop handler if a stage raises.
             pass
+
+    def set_stage(self, stage: PreprocessStage) -> None:
+        """Bundle the "advance current_stage + raise on hard_fail" guard.
+
+        Use this when a ``with state.enter(...)`` context isn't ergonomic
+        (e.g. the stage spans a top-level ``if/elif`` chain that wouldn't
+        nest cleanly in a context manager). It preserves the same hard-cap
+        invariant: once ``state.hard_fail`` is set by the watchdog, any
+        further stage transition aborts the preprocess pipeline.
+        """
+        if self.hard_fail:
+            raise PreprocessAborted(self.fail_reason or "preprocess aborted by watchdog")
+        self.current_stage = stage
+        logger.debug("PreprocessState entered stage: %s", stage.value)
 
     def mark_done(self) -> None:
         self.current_stage = PreprocessStage.DONE

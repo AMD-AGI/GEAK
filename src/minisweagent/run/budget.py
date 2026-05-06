@@ -92,10 +92,19 @@ class Deadline:
         return self._soft_stop.is_set()
 
     def cap(self, requested_s: float) -> float:
-        """Clamp a requested timeout to ``[0, remaining]``."""
+        """Clamp a requested timeout to ``[0, remaining]``.
+
+        Returns ``0.0`` once SoftStop has fired so that callers using
+        ``cap()`` to size new subprocess timeouts will reject any new
+        long-running work; the cooperative ``soft_stop.is_set()`` poll
+        is still the primary signal but a 0-cap makes the Deadline API
+        safe-by-default at this boundary.
+        """
         try:
             requested = float(requested_s)
         except (TypeError, ValueError):
+            return 0.0
+        if self._soft_stop.is_set():
             return 0.0
         return max(0.0, min(requested, self.remaining()))
 

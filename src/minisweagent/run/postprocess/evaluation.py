@@ -513,12 +513,34 @@ def _compute_verified_speedup(
     round_eval: dict[str, Any],
     section_key: str,
 ) -> None:
-    """Compute verified speedup from latency measurements."""
+    """Compute verified speedup from latency measurements.
+
+    Falsy-check pitfall: ``not candidate_ms`` collapses ``0.0`` and ``None``,
+    so a real ``0.0`` candidate latency (e.g. divide-by-zero shortcut, broken
+    benchmark loop) used to silently look identical to "couldn't parse". Use
+    explicit ``is None`` / ``<= 0`` so an unparseable result and a degenerate
+    measurement get distinct ``failure_reason`` strings, which then flow
+    through to ``RoundEvaluation.full_benchmark.failure_reason``.
+    """
     candidate_ms = extract_latency_ms(candidate_stdout)
     baseline_ms = extract_latency_ms(baseline_text)
 
-    if not candidate_ms or not baseline_ms or baseline_ms <= 0:
-        logger.warning("Could not extract latency: candidate_ms=%s, baseline_ms=%s", candidate_ms, baseline_ms)
+    if candidate_ms is None or baseline_ms is None:
+        msg = f"latency parse failed (candidate_ms={candidate_ms}, baseline_ms={baseline_ms})"
+        logger.warning("Could not extract latency: %s", msg)
+        round_eval[section_key]["failure_reason"] = msg
+        return
+    if baseline_ms <= 0:
+        msg = f"baseline latency non-positive (baseline_ms={baseline_ms})"
+        logger.warning("%s", msg)
+        round_eval[section_key]["failure_reason"] = msg
+        return
+    if candidate_ms <= 0:
+        msg = f"candidate latency non-positive (candidate_ms={candidate_ms}); rejecting as broken measurement"
+        logger.warning("%s", msg)
+        round_eval[section_key]["failure_reason"] = msg
+        round_eval[section_key]["candidate_ms"] = candidate_ms
+        round_eval[section_key]["baseline_ms"] = baseline_ms
         return
 
     verified_speedup = baseline_ms / candidate_ms
@@ -703,6 +725,12 @@ def write_eval_results(
             failure = f"config mismatch: {fb_raw.get('config_mismatch_detail', '')}"
         elif not fb_raw.get("success", True) and fb_raw.get("returncode", 0) != 0:
             failure = f"benchmark failed (exit code {fb_raw.get('returncode')})"
+        elif fb_raw.get("failure_reason"):
+            # Set by ``_compute_verified_speedup`` when latency parsing failed
+            # despite a clean exit; without this propagation a return-code-0
+            # benchmark with unparseable output looked like "everything passed
+            # but no verified speedup" with no diagnostic.
+            failure = str(fb_raw["failure_reason"])
         fb_typed = FullBenchmarkResult(
             verified_speedup=fb_raw.get("verified_speedup"),
             baseline_ms=fb_raw.get("baseline_ms"),

@@ -1,15 +1,18 @@
-"""Orchestrator: dispatch to homogeneous or heterogeneous optimization mode.
+"""Orchestrator dispatcher: heterogeneous-only thin shim.
 
-This module is the thin entry point for ``geak-orchestrate``.  It reads
-preprocessor artefacts, resolves configuration, and delegates to:
-
-- ``agents.heterogeneous.orchestrator`` -- LLM-generated diverse tasks
-
-Note: homogeneous mode is handled directly by ``mini`` CLI via
-``agents.homogeneous.homogeneous_agent`` and is not supported here.
-
-All heavy lifting lives in those modules and in the shared postprocess
+This module exposes :func:`run_orchestrator` for callers that have already
+run preprocess (notably ``minisweagent.run.mini``).  All heavy lifting
+lives in ``agents.heterogeneous.orchestrator`` and the shared postprocess
 package (``run.postprocess.evaluation``, ``run.postprocess.results``).
+
+Note: the historical ``geak-orchestrate`` console script that wrapped
+this module has been removed.  Its semantics for ``--mode`` diverged
+from ``geak`` (preprocess elapsed was always assumed to be 0, so
+``--mode quick`` from the standalone CLI gave a *fresh* 1h optimization
+budget instead of the 1h preprocess+optimization budget the same flag
+gives via ``geak``).  Rather than carry a second flavour of the budget
+contract, the entry point was deleted; use ``geak`` end-to-end and rely
+on its in-flight resume support if you need to re-enter mid-run.
 """
 
 from __future__ import annotations
@@ -17,16 +20,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import signal
-import sys
 from pathlib import Path
 from typing import Any
 
 from minisweagent.run.pipeline_helpers import (
     DEFAULT_HETEROGENEOUS,
     DEFAULT_PIPELINE_OUTPUT_DIR,
-    DEFAULT_RUN_MODE,
-    RUN_MODES,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,7 +73,8 @@ def run_orchestrator(
         Round number to start from (1-based, default 1).
     heterogeneous:
         If True, use LLM-generated diverse tasks per round.
-        If False (default), use homogeneous mode where all agents get the same task.
+        If False (default), homogeneous mode is handled directly by
+        ``mini`` and is not supported here.
     deadline:
         Optional ``run.budget.Deadline`` snapshot. Threaded into the round loop
         and ``run_llm_steps`` so per-step polls can short-circuit cleanly.
@@ -103,7 +103,10 @@ def run_orchestrator(
     )
 
     if not heterogeneous:
-        raise NotImplementedError("Homogeneous mode is not supported via geak-orchestrate. Use the 'mini' CLI instead.")
+        raise NotImplementedError(
+            "Homogeneous mode is not supported via run_orchestrator(); "
+            "the homogeneous code path is invoked directly from the geak CLI."
+        )
 
     from minisweagent.agents.heterogeneous.orchestrator import run_heterogeneous_orchestrator
 
@@ -121,11 +124,13 @@ def run_orchestrator(
     )
 
 
-# ── CLI entry point ──────────────────────────────────────────────────
-
-
 def _probe_preprocess_dir(pp_dir: Path):
-    """Backward-compatible fallback: reconstruct PreprocessContext by probing files."""
+    """Backward-compatible fallback: reconstruct PreprocessContext by probing files.
+
+    Retained for tests and for any tool that consumes a preprocess artefact
+    directory without a ``preprocess_context.json`` manifest.  Not part of
+    a CLI flow anymore.
+    """
     from minisweagent.run.pipeline_types import PreprocessContext
 
     logger.debug("_probe_preprocess_dir: probing %s for preprocessor artefacts.", pp_dir)
@@ -187,232 +192,3 @@ def _probe_preprocess_dir(pp_dir: Path):
         profiling_result_path=str(pp_dir / "profile.json") if (pp_dir / "profile.json").exists() else "",
         discovery=discovery,
     )
-
-
-def main() -> None:
-    """CLI: ``geak-orchestrate --preprocess-dir <dir> [--gpu-ids 0,1] [--max-rounds 3]``."""
-    import argparse
-
-    from minisweagent.run.pipeline_helpers import DEFAULT_HETEROGENEOUS
-
-    parser = argparse.ArgumentParser(
-        description="GEAK orchestrator: LLM-driven task generation, dispatch, and iteration loop",
-    )
-    parser.add_argument(
-        "--preprocess-dir",
-        required=True,
-        help="Directory containing preprocessor artefacts (resolved.json, discovery.json, profile.json, ...)",
-    )
-    parser.add_argument(
-        "--gpu-ids",
-        default=None,
-        help="Comma-separated GPU device IDs (default: all detected GPUs, or 0 as fallback)",
-    )
-    parser.add_argument(
-        "--max-rounds",
-        type=int,
-        default=None,
-        help="Maximum optimisation rounds (default: GEAK_MAX_ROUNDS env or 5)",
-    )
-    parser.add_argument(
-        "--start-round",
-        type=int,
-        default=1,
-        help="Round to resume from (1-based, default: 1). "
-        "Skips exploration and loads prior round evaluations from disk.",
-    )
-    parser.add_argument(
-        "--heterogeneous",
-        action="store_true",
-        default=DEFAULT_HETEROGENEOUS,
-        help="Use LLM-generated diverse tasks per round. Default: homogeneous (all agents get the same task).",
-    )
-    parser.add_argument(
-        "--model",
-        default=None,
-        help="Model name (default: from GEAK_MODEL env or geak.yaml)",
-    )
-    parser.add_argument(
-        "--mode",
-        choices=list(RUN_MODES),
-        default=None,
-        help="Wall-clock budget profile: 'quick' (~1h) or 'full' (~2h). Default: from geak.yaml run.mode.",
-    )
-    parser.add_argument(
-        "--total-budget-s",
-        type=float,
-        default=None,
-        help="Override the mode's total wall-clock budget (seconds). Escape hatch.",
-    )
-    from minisweagent.run.pipeline_helpers import add_agent_filter_args, apply_agent_filter_env
-
-    add_agent_filter_args(parser)
-    args = parser.parse_args()
-    apply_agent_filter_env(args)
-
-    pp_dir = Path(args.preprocess_dir).resolve()
-    if not pp_dir.is_dir():
-        logger.error("Preprocess directory not found: %s", args.preprocess_dir)
-        sys.exit(1)
-
-    from minisweagent.run.pipeline_types import PreprocessContext
-
-    manifest_path = pp_dir / "preprocess_context.json"
-    if manifest_path.exists():
-        preprocess_ctx = PreprocessContext.from_dict(json.loads(manifest_path.read_text()))
-    else:
-        logger.warning("preprocess_context.json not found in %s, falling back to file probing", pp_dir)
-        preprocess_ctx = _probe_preprocess_dir(pp_dir)
-
-    ctx: dict[str, Any] = {
-        "kernel_path": preprocess_ctx.kernel_path,
-        "repo_root": preprocess_ctx.repo_root,
-        "harness_path": preprocess_ctx.harness_path,
-        "output_dir": preprocess_ctx.preprocess_dir,
-        "preprocess_dir": preprocess_ctx.preprocess_dir,
-        "commandment_path": preprocess_ctx.commandment_path,
-        "codebase_context_path": preprocess_ctx.codebase_context_path,
-        "baseline_metrics_path": preprocess_ctx.baseline_metrics_path,
-        "profiling_path": preprocess_ctx.profiling_result_path,
-        "discovery": preprocess_ctx.discovery,
-    }
-    if preprocess_ctx.commandment_path and Path(preprocess_ctx.commandment_path).exists():
-        ctx["commandment"] = Path(preprocess_ctx.commandment_path).read_text()
-    if preprocess_ctx.baseline_metrics_path and Path(preprocess_ctx.baseline_metrics_path).exists():
-        ctx["baseline_metrics"] = json.loads(Path(preprocess_ctx.baseline_metrics_path).read_text())
-    if preprocess_ctx.profiling_result_path and Path(preprocess_ctx.profiling_result_path).exists():
-        ctx["profiling"] = json.loads(Path(preprocess_ctx.profiling_result_path).read_text())
-
-    # Parse GPU IDs
-    if args.gpu_ids:
-        gpu_ids = [int(g.strip()) for g in args.gpu_ids.split(",") if g.strip()]
-        logger.info("GPU IDs from CLI: %s", gpu_ids)
-    else:
-        try:
-            from minisweagent.agents.agent_spec import detect_available_gpus
-
-            gpu_ids = detect_available_gpus()
-            logger.info("Auto-detected GPU IDs: %s", gpu_ids)
-        except Exception as exc:
-            logger.warning("GPU auto-detection failed (%s); falling back to [0].", exc)
-            gpu_ids = [0]
-
-    from minisweagent.run.pipeline_helpers import geak_model_factory, load_geak_model
-
-    model_name = args.model or os.getenv("GEAK_MODEL")
-    model = load_geak_model(model_name)
-    factory = geak_model_factory(model_name)
-
-    # ── Build RunBudget from --mode + geak.yaml ──────────────────────
-    # Resume detection: budget clock is fresh; warn the user that this
-    # invocation's wall-clock budget is independent of any prior run that
-    # produced the artifacts in ``pp_dir``.
-    if args.start_round and args.start_round > 1:
-        logger.warning(
-            "[geak-orchestrate] Resume detected (--start-round=%d). "
-            "Budget timer reset to T0=now; this run gets a fresh budget regardless "
-            "of how long the prior run took.",
-            args.start_round,
-        )
-
-    import yaml
-
-    from minisweagent.config import get_config_path
-    from minisweagent.run.budget import BudgetSpec, RunBudget
-    from minisweagent.run.state import ProcessRegistry
-
-    _yaml_path = get_config_path("geak")
-    _yaml = yaml.safe_load(_yaml_path.read_text(encoding="utf-8")) or {} if _yaml_path.exists() else {}
-    _run_cfg = _yaml.get("run") or {}
-    resolved_mode = (args.mode or _run_cfg.get("mode") or DEFAULT_RUN_MODE).strip().lower()
-    if resolved_mode not in RUN_MODES:
-        logger.error("--mode must be one of %s; got %r", RUN_MODES, resolved_mode)
-        sys.exit(2)
-    _budget_cfg = (_run_cfg.get("budgets") or {}).get(resolved_mode) or {}
-    if not _budget_cfg:
-        logger.error("No run.budgets.%s block in %s", resolved_mode, _yaml_path)
-        sys.exit(2)
-    spec = BudgetSpec(
-        mode=resolved_mode,  # type: ignore[arg-type]
-        total_s=float(args.total_budget_s if args.total_budget_s is not None else _budget_cfg["total_s"]),
-        preprocess_soft_cap_s=float(_budget_cfg["preprocess_soft_cap_s"]),
-        preprocess_hard_cap_fraction=float(_budget_cfg["preprocess_hard_cap_fraction"]),
-        finalize_grace_s=float(_budget_cfg["finalize_grace_s"]),
-        kill_buffer_s=float(_budget_cfg.get("kill_buffer_s", 60.0)),
-    )
-    budget = RunBudget(spec=spec)
-    for _line in budget.banner_lines():
-        logger.info(_line)
-
-    # geak-orchestrate skips preprocess; transition straight to optimization
-    # and schedule the soft-stop watchdog with a 0-elapsed preprocess.
-    opt_deadline = budget.commit_preprocess(0.0)
-    budget.schedule_optimization_watchdog()
-
-    registry = ProcessRegistry()
-
-    # Hard-kill backstop. See mini.py for rationale.
-    def _hard_kill_handler() -> None:
-        logger.error(
-            "[budget] HARD KILL: opt_deadline + kill_buffer_s reached; terminating registry and exiting",
-        )
-        try:
-            registry.terminate_all(escalate_after_s=5.0)
-        except Exception:
-            logger.exception("hard-kill: registry.terminate_all() failed")
-        os._exit(124)
-
-    budget.schedule_optimization_hard_kill_watchdog(_hard_kill_handler)
-
-    # SIGINT handler (same semantics as `geak`).
-    _sigint_count = {"n": 0}
-    _orig_sigint = signal.getsignal(signal.SIGINT)
-
-    def _sigint_handler(_signum, _frame):  # noqa: ANN001
-        _sigint_count["n"] += 1
-        if _sigint_count["n"] == 1:
-            logger.warning("SIGINT received -- flipping SoftStop. Press Ctrl-C again to force.")
-            budget.soft_stop.set()
-        else:
-            logger.error("Second SIGINT received -- terminating tracked subprocesses and exiting.")
-            try:
-                registry.terminate_all()
-            except Exception:
-                logger.exception("registry.terminate_all() failed during SIGINT")
-            signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
-            raise KeyboardInterrupt()
-
-    signal.signal(signal.SIGINT, _sigint_handler)
-
-    try:
-        report = run_orchestrator(
-            preprocess_ctx=ctx,
-            gpu_ids=gpu_ids,
-            model=model,
-            model_factory=factory,
-            output_dir=pp_dir,
-            max_rounds=args.max_rounds,
-            start_round=args.start_round,
-            heterogeneous=args.heterogeneous,
-            deadline=opt_deadline,
-            soft_stop=budget.soft_stop,
-            registry=registry,
-        )
-    finally:
-        budget.cancel_all_timers()
-        try:
-            registry.terminate_all()
-        except Exception:
-            logger.exception("registry.terminate_all() failed during cleanup")
-        try:
-            signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
-        except Exception:
-            logger.exception("restoring SIGINT handler failed")
-
-    if report:
-        report_dict = report.to_dict() if hasattr(report, "to_dict") else report
-        logger.info("Orchestrator report (truncated): %s", json.dumps(report_dict, indent=2, default=str)[:2000])
-
-
-if __name__ == "__main__":
-    main()
