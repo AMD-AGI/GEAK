@@ -1140,7 +1140,7 @@ def _strip_python_comments(source: str) -> str:
 
     try:
         tokens = list(_tokenize.generate_tokens(_io.StringIO(source).readline))
-    except (_tokenize.TokenizeError, IndentationError, SyntaxError):
+    except (_tokenize.TokenError, IndentationError, SyntaxError):
         return source
 
     # Collect (lineno-1, col_start, col_end) spans for every COMMENT token,
