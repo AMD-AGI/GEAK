@@ -240,6 +240,15 @@ def run_planned_orchestrator(
         "task_generation": _tg,
     }
 
+    _repo_path = Path(ctx.get("repo_root", ".")).resolve()
+    _kp_str = ctx.get("kernel_path")
+    if _kp_str:
+        _kp = Path(_kp_str)
+        _kernel_dir = (_kp.parent if _kp.is_file() else _kp).resolve()
+        if _kernel_dir != _repo_path and (_repo_path / ".git").exists():
+            logger.info("Narrowing repo_root from %s to kernel dir %s", _repo_path, _kernel_dir)
+            ctx["repo_root"] = str(_kernel_dir)
+
     tools_schema = build_tools_schema(toolruntime)
     model_impl = getattr(model, "_impl", model)
     _orig = getattr(model_impl, "tools", None)
