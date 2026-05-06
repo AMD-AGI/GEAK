@@ -21,6 +21,7 @@ _EMPTY_TASK_INFO: dict = {
     "kernel_type": "other",
     "repo": None,
     "test_command": None,
+    "test_harness": None,
     "metric": None,
     "num_parallel": None,
     "gpu_ids": None,
@@ -32,10 +33,11 @@ _EMPTY_TASK_INFO: dict = {
 _EMPTY_PIPELINE_PARAMS: dict = {
     "kernel_url": None,
     "preprocess_dir": None,
-    "heterogeneous": None,
+    "mode": None,
     "max_rounds": None,
     "start_round": None,
     "pipeline_intent": False,
+    "target_language": None,
 }
 
 
@@ -117,6 +119,7 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
         "kernel_type": kernel_type,
         "repo": parsed.get("repo"),
         "test_command": parsed.get("test_command"),
+        "test_harness": parsed.get("test_harness"),
         "metric": parsed.get("metric"),
         "num_parallel": parsed.get("num_parallel"),
         "gpu_ids": parsed.get("gpu_ids"),
@@ -124,6 +127,12 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
         "model": parsed.get("model"),
         "config": parsed.get("config"),
     }
+
+    # User-provided harness paths get the same treatment as repo/output_dir:
+    # if it points at an existing file we resolve it; if it's a relative path
+    # we leave it alone (CLI will resolve against repo_root downstream).
+    if result["test_harness"]:
+        result["test_harness"] = _normalize_path(result["test_harness"]) or result["test_harness"]
 
     # Normalize repo path and preserve filesystem case (LLM often returns lowercase)
     if result["repo"]:
@@ -150,15 +159,75 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
     return result
 
 
+_VALID_MODES: frozenset[str] = frozenset({"fixed", "planned", "auto"})
+
+
+def _normalize_mode_field(raw: object) -> str | None:
+    """Map raw LLM output (bool legacy ``heterogeneous`` or new ``mode`` str) to canonical mode string.
+
+    ``translate`` is deliberately rejected here: translation is a separate
+    preprocess phase driven by the ``target_language`` field, not a
+    pipeline mode.  If an older prompt still emits ``mode="translate"``
+    we log and drop it (the translate signal comes from target_language).
+    """
+    if raw is None:
+        return None
+    # Legacy boolean: True -> planned, False -> fixed.
+    if isinstance(raw, bool):
+        return "planned" if raw else "fixed"
+    if isinstance(raw, str):
+        canon = raw.strip().lower()
+        if canon in _VALID_MODES:
+            return canon
+        # Tolerate legacy vocabulary
+        if canon == "heterogeneous":
+            return "planned"
+        if canon == "homogeneous":
+            return "fixed"
+        if canon == "translate":
+            logger.info(
+                "parse_pipeline_params: dropping legacy mode='translate'; "
+                "translation is a preprocess phase (see target_language field)."
+            )
+            return None
+        logger.debug("parse_pipeline_params: ignoring unknown mode value %r", raw)
+    return None
+
+
+def _normalize_target_language(raw: object) -> str | None:
+    """Canonicalize ``target_language`` extraction output."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return None
+    canon = raw.strip().lower()
+    if not canon:
+        return None
+    # Accept a small whitelist for now; the kernel_language registry
+    # will take over validation once the translation phase lands.
+    _KNOWN = {"triton", "hip", "cuda", "rocm"}
+    if canon in _KNOWN:
+        return canon
+    logger.debug("parse_pipeline_params: ignoring unknown target_language %r", raw)
+    return None
+
+
 def _normalize_pipeline_params_from_parsed(parsed: dict) -> dict:
     """Normalize paths and integer fields after JSON parse."""
+    # Prefer explicit ``mode`` from the LLM; fall back to legacy
+    # ``heterogeneous`` boolean so older prompts keep working.
+    mode_value = _normalize_mode_field(parsed.get("mode"))
+    if mode_value is None:
+        mode_value = _normalize_mode_field(parsed.get("heterogeneous"))
+
     result = {
         "kernel_url": parsed.get("kernel_url"),
         "preprocess_dir": parsed.get("preprocess_dir"),
-        "heterogeneous": parsed.get("heterogeneous"),
+        "mode": mode_value,
         "max_rounds": parsed.get("max_rounds"),
         "start_round": parsed.get("start_round"),
         "pipeline_intent": bool(parsed.get("pipeline_intent", False)),
+        "target_language": _normalize_target_language(parsed.get("target_language")),
     }
 
     if result["kernel_url"]:
@@ -245,10 +314,16 @@ def parse_pipeline_params(task_content: str, model) -> dict:
     Extracts:
     - kernel_url: Path or URL to the specific kernel file to optimize
     - preprocess_dir: Path to existing preprocessing artifacts
-    - heterogeneous: Whether to use heterogeneous (diverse strategy) mode
+    - mode: Execution mode (fixed | planned | auto).  Legacy boolean
+      ``heterogeneous`` is accepted and translated to planned/fixed.
+      ``translate`` is deliberately NOT a valid mode here — translation
+      is a preprocess phase signalled by ``target_language``.
     - max_rounds: Maximum optimization rounds
     - start_round: Round to resume from
     - pipeline_intent: Whether the task describes kernel optimization work
+    - target_language: Target kernel language if the user asks to
+      translate/port the kernel (triggers a preprocess translation phase
+      before optimization).  ``None`` when no translation is requested.
 
     Returns dict with extracted values (None if not found).
     """
@@ -385,6 +460,11 @@ def display_parsed_config(parsed_info: dict, patch_output_dir: str) -> str:
             "test_command",
             parsed_info["test_command"]
             or "Not detected. Automatically search or create the test command via UnitTestAgent",
+        ),
+        (
+            "test_harness",
+            parsed_info.get("test_harness")
+            or "Not detected. HarnessBuilder/UnitTestAgent will materialise one.",
         ),
         (
             "metric",

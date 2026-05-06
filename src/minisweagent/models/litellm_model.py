@@ -274,7 +274,7 @@ class LitellmModel:
         _register_litellm_registry(self.config.litellm_model_registry)
 
     def set_tools(self, tools: list[dict[str, Any]]) -> None:
-        """Replace the active tool schema (used by strategy / heterogeneous agents)."""
+        """Replace the active tool schema (used by strategy / planned-mode agents)."""
         self.tools = _filter_default_tools(
             tools,
             profiling=self.config.profiling,

@@ -43,7 +43,9 @@ def run_orchestrator(
     output_dir: Path | None = None,
     max_rounds: int | None = None,
     start_round: int = 1,
-    heterogeneous: bool = DEFAULT_HETEROGENEOUS,
+    mode: str = "planned",
+    # Back-compat shim — deprecated, use ``mode`` instead.
+    heterogeneous: bool | None = None,
 ) -> dict[str, Any]:
     """Run the orchestrator agent loop.
 
@@ -63,10 +65,28 @@ def run_orchestrator(
         Maximum optimisation rounds (default: from GEAK_MAX_ROUNDS env or 5).
     start_round:
         Round number to start from (1-based, default 1).
+    mode:
+        Dispatch strategy.  ``"planned"`` (default) uses the LLM planner
+        to emit diverse per-worker strategies.  ``"fixed"`` is not
+        supported via this entry point — use ``run_pipeline`` with
+        ``ctx.mode = "fixed"`` instead.  All modes run the same
+        ``OptimizationAgent`` class; only the task BODY differs.
     heterogeneous:
-        If True, use LLM-generated diverse tasks per round.
-        If False (default), use homogeneous mode where all agents get the same task.
+        Deprecated.  Legacy callers pass ``heterogeneous=True`` which
+        is equivalent to ``mode="planned"``.  Emits a deprecation
+        warning and overrides ``mode`` if set.
     """
+    # Legacy shim: translate ``heterogeneous=True/False`` to the new mode kwarg.
+    if heterogeneous is not None:
+        import warnings
+
+        warnings.warn(
+            "run_orchestrator(heterogeneous=...) is deprecated; use mode='planned' or mode='fixed'.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        mode = "planned" if heterogeneous else "fixed"
+
     _out = output_dir or Path(preprocess_ctx.get("output_dir", DEFAULT_PIPELINE_OUTPUT_DIR))
     _out = Path(_out)
     _out.mkdir(parents=True, exist_ok=True)
@@ -74,20 +94,25 @@ def run_orchestrator(
     _env_rounds = os.getenv("GEAK_MAX_ROUNDS")
     max_rounds = max_rounds or int(_env_rounds or "5")
     logger.info(
-        "run_orchestrator: output_dir=%s, max_rounds=%d (source=%s), start_round=%d, heterogeneous=%s",
+        "run_orchestrator: output_dir=%s, max_rounds=%d (source=%s), start_round=%d, mode=%s",
         _out,
         max_rounds,
         _max_rounds_source(max_rounds, _env_rounds),
         start_round,
-        heterogeneous,
+        mode,
     )
 
-    if not heterogeneous:
-        raise NotImplementedError("Homogeneous mode is not supported via geak-orchestrate. Use the 'mini' CLI instead.")
+    if mode == "fixed":
+        raise NotImplementedError(
+            "Fixed mode is not supported via geak-orchestrate; "
+            "use ``run_pipeline`` (``geak -t ...``) with ``ctx.mode = 'fixed'`` instead."
+        )
+    if mode != "planned":
+        raise ValueError(f"Unsupported mode for orchestrator: {mode!r} (expected 'planned' or 'fixed')")
 
-    from minisweagent.agents.heterogeneous.orchestrator import run_heterogeneous_orchestrator
+    from minisweagent.agents.heterogeneous.orchestrator import run_planned_orchestrator
 
-    return run_heterogeneous_orchestrator(
+    return run_planned_orchestrator(
         preprocess_ctx,
         gpu_ids,
         model,
@@ -199,10 +224,20 @@ def main() -> None:
         "Skips exploration and loads prior round evaluations from disk.",
     )
     parser.add_argument(
+        "--mode",
+        default="planned",
+        choices=("planned", "fixed"),
+        help=(
+            "Dispatch strategy. 'planned' (default): LLM planner emits "
+            "diverse per-worker strategies. 'fixed': N identical copies "
+            "(only available via 'geak -t', not this CLI)."
+        ),
+    )
+    parser.add_argument(
         "--heterogeneous",
         action="store_true",
-        default=DEFAULT_HETEROGENEOUS,
-        help="Use LLM-generated diverse tasks per round. Default: homogeneous (all agents get the same task).",
+        default=None,
+        help="[DEPRECATED] Alias for --mode=planned. Use --mode instead.",
     )
     parser.add_argument(
         "--model",
@@ -268,6 +303,13 @@ def main() -> None:
     model = load_geak_model(model_name)
     factory = geak_model_factory(model_name)
 
+    effective_mode = "planned" if args.heterogeneous else args.mode
+    if args.heterogeneous:
+        logger.warning(
+            "--heterogeneous is deprecated; use --mode=planned instead. "
+            "Treating this run as mode=planned."
+        )
+
     report = run_orchestrator(
         preprocess_ctx=ctx,
         gpu_ids=gpu_ids,
@@ -276,7 +318,7 @@ def main() -> None:
         output_dir=pp_dir,
         max_rounds=args.max_rounds,
         start_round=args.start_round,
-        heterogeneous=args.heterogeneous,
+        mode=effective_mode,
     )
 
     if report:

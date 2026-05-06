@@ -312,7 +312,7 @@ def _resolve_report_dir(patch_file: str, kernel_path: str) -> Path | None:
 def _extract_patch_content(patch_file: str, report_dir: Path | None) -> tuple[str, str]:
     """Read the actual patch/diff content and generate a code changes summary.
 
-    Searches multiple locations because GEAK's heterogeneous orchestrator
+    Searches multiple locations because GEAK's planned-mode orchestrator
     writes patches in various structures:
       - patch_file (from final_report.json best_patch)
       - results/round_N/best_patch.diff (orchestrator-created)

@@ -1,9 +1,10 @@
-"""Heterogeneous execution: LLM-generated diverse tasks dispatched across GPUs.
+"""Planned-mode dispatch: LLM-generated diverse tasks across GPUs.
 
-In heterogeneous mode the orchestrator asks an LLM to generate multiple
-distinct optimization tasks (different strategies, different kernel regions)
-and dispatches them across available GPU slots via the pool scheduler in
-``parallel_agent.py``.
+This package implements "planned" mode from the execution plan: a
+planner LLM emits N distinct optimization strategies and dispatches
+one per GPU slot through the pool scheduler in ``parallel_agent.py``.
+Every worker runs the same ``OptimizationAgent`` class — only the task
+body differs.
 
 Key modules:
 - ``orchestrator``        -- LLM-driven multi-round optimization loop.
@@ -13,4 +14,11 @@ Key modules:
 - ``task_generator``      -- LLM-driven task generation from discovery artifacts.
 - ``workload_guidance``   -- Backend-specific strategy recommendation builders.
 - ``result_scanning``     -- Prior-round result and task scanning utilities.
+
+Historical note: this package was named ``heterogeneous`` when the
+codebase had distinct agent classes per dispatch style.  With the
+unified ``OptimizationAgent``, the directory name is retained as a
+compatibility shim; new code should reference these modules through
+``run_orchestrator`` (in ``run/orchestrator.py``) rather than importing
+from here directly.
 """

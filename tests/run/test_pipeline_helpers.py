@@ -110,7 +110,7 @@ def test_create_validated_harness_materializes_harness_into_log_dir(tmp_path: Pa
             gpu_id=0,
         )
 
-    materialized_harness = output_dir / "test_kernel_harness.py"
+    materialized_harness = output_dir / "_geak_materialized_harness_kernel.py"
     assert harness_results == _demo_harness_results()
     assert materialized_harness.is_file()
     assert str(materialized_harness) in test_command

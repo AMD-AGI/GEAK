@@ -1,0 +1,103 @@
+{#
+  HIP harness skeleton — consumed by HarnessBuilder.
+
+  Jinja vars:
+    - kernel_path      : absolute path to the HIP kernel (.cu / .hip / .cpp)
+    - build_cmd        : command that compiles the kernel
+                         (torch.utils.cpp_extension.load_inline, `make`, or hipcc line)
+    - entry_point      : Python-level invocation (for shape 1) OR
+                         shell command (for shapes 2 / 3)
+    - ref_body         : reference impl Python code (usually torch-based)
+    - shape_block      : setup that builds input tensors / args
+    - allclose_atol    : numerical tolerance
+
+  The template renders a Python harness even when the underlying
+  kernel is raw HIP — the Python layer wraps the build + launch +
+  stdout parsing so the UNIVERSAL contract is preserved.
+#}
+"""Auto-generated HIP harness — universal GEAK evaluation contract."""
+import argparse
+import subprocess
+import time
+
+import torch
+
+{{ build_cmd | indent(0) }}
+
+
+def _ref():
+    {{ ref_body | indent(4) }}
+
+
+def _run_correctness() -> bool:
+    {{ shape_block | indent(4) }}
+    ref_out = _ref()(*_inputs)
+    candidate_out = {{ entry_point }}(*_inputs)
+    ok = torch.allclose(candidate_out, ref_out, atol={{ allclose_atol }}, rtol={{ allclose_atol }})
+    print("OK" if ok else "FAIL")
+    return ok
+
+
+def _time_n(fn, args, n: int = 100, warmup: int = 5) -> float:
+    for _ in range(warmup):
+        fn(*args)
+    torch.cuda.synchronize()
+    samples = []
+    for _ in range(n):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        fn(*args)
+        torch.cuda.synchronize()
+        samples.append((time.perf_counter() - t0) * 1e3)
+    samples.sort()
+    return samples[n // 2]
+
+
+def _run_benchmark() -> None:
+    {{ shape_block | indent(4) }}
+    ms = _time_n({{ entry_point }}, _inputs)
+    print(f"GEAK_RESULT_LATENCY_MS={ms:.6f}")
+
+
+def _run_full_benchmark() -> None:
+    {{ shape_block | indent(4) }}
+    ref_fn = _ref()
+    ref_ms = _time_n(ref_fn, _inputs)
+    cand_ms = _time_n({{ entry_point }}, _inputs)
+    speedup = ref_ms / cand_ms if cand_ms > 0 else 0.0
+    print(f"GEAK_RESULT_LATENCY_MS={cand_ms:.6f}")
+    print(f"GEAK_RESULT_SPEEDUP={speedup:.4f}")
+    ok = torch.allclose(ref_fn(*_inputs), {{ entry_point }}(*_inputs),
+                        atol={{ allclose_atol }}, rtol={{ allclose_atol }})
+    print("OK" if ok else "FAIL")
+
+
+def _run_profile() -> None:
+    {{ shape_block | indent(4) }}
+    torch.cuda.synchronize()
+    for _ in range(3):
+        {{ entry_point }}(*_inputs)
+    torch.cuda.synchronize()
+
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    mutex = p.add_mutually_exclusive_group(required=True)
+    mutex.add_argument("--correctness", action="store_true")
+    mutex.add_argument("--benchmark", action="store_true")
+    mutex.add_argument("--full-benchmark", action="store_true")
+    mutex.add_argument("--profile", action="store_true")
+    args = p.parse_args()
+
+    if args.correctness:
+        raise SystemExit(0 if _run_correctness() else 1)
+    if args.benchmark:
+        _run_benchmark()
+    elif args.full_benchmark:
+        _run_full_benchmark()
+    elif args.profile:
+        _run_profile()
+
+
+if __name__ == "__main__":
+    main()

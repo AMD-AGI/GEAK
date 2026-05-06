@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""
-Homogeneous Agent Runner - Run multiple identical agents in parallel.
+"""Direct ParallelAgent runner for N identical task bodies (tests / rare entry).
 
-This module provides a simplified interface to run ParallelAgent with
-homogeneous configuration (all agents run the same task with identical settings).
+Production fixed mode uses ``run_pipeline`` → ``run_orchestrator``; see
+``run/unified.py``.  Shared GPU parsing: ``run/utils/gpu_ids.py``.
 """
 
 import copy
@@ -15,20 +14,15 @@ from pathlib import Path
 from rich.console import Console
 
 from minisweagent.agents.parallel_agent import BestPatchResult, ParallelAgent
-from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+from minisweagent.agents.optimization_agent import OptimizationAgent
 from minisweagent.models import get_model
+from minisweagent.run.pool_runner import build_fixed_tasks
+from minisweagent.run.utils.gpu_ids import parse_gpu_ids
 
 logger = logging.getLogger(__name__)
 
 
-def parse_gpu_ids(gpu_ids_str: str | None) -> list[int]:
-    """Parse comma-separated GPU IDs string to list of integers."""
-    if not gpu_ids_str:
-        return [0]
-    return [int(x.strip()) for x in gpu_ids_str.split(",") if x.strip()]
-
-
-def run_homogeneous_agent(
+def run_fixed_mode(
     config: dict,
     task_content: str,
     model,
@@ -37,61 +31,26 @@ def run_homogeneous_agent(
     env_kwargs: dict,
     agent_config: dict,
     repo: Path | None = None,
-    num_parallel: int | None = None,
     gpu_ids: str | None = None,
     output_dir: Path | None = None,
     model_name: str | None = None,
     console: Console | None = None,
 ) -> BestPatchResult | None:
-    """
-    Run homogeneous parallel agents.
+    """Run ``fixed`` mode: one identical task body per GPU (``len(gpu_ids)`` workers).
 
-    This function is called from mini.py when agent_mode is 'homogeneous'.
-    Configuration is already loaded and merged by mini.py.
+    Dispatch width always matches the GPU list.  Variance across workers
+    comes from LLM sampling alone (temperature > 0 or trajectory seeds).
 
-    Args:
-        config: Merged configuration dict
-        task_content: Task description
-        model: Model instance
-        env: Environment instance
-        env_class: Environment class for factory
-        env_kwargs: Environment kwargs for factory
-        tools_settings: Tools settings from config
-        agent_config: Base agent configuration
-        repo: Repository path for git worktree management
-        num_parallel: Number of parallel agents
-        gpu_ids: Comma-separated GPU IDs
-        output_dir: Output directory
-        model_name: Model name for factory
-        console: Rich console for output
-
-    Returns:
-        The ParallelAgent instance after execution
+    Prefer ``run_pipeline(..., mode=\"fixed\")``; direct calls are rare.
     """
     if console is None:
         console = Console(highlight=False)
 
-    # Parse configuration values
     parallel_config = config.get("parallel", {})
 
-    # Number of parallel agents
-    final_num_parallel = (
-        num_parallel or parallel_config.get("num_parallel") or config.get("agent", {}).get("num_parallel") or 1
-    )
-    _np_source = (
-        "arg"
-        if num_parallel
-        else "parallel config"
-        if parallel_config.get("num_parallel")
-        else "agent config"
-        if config.get("agent", {}).get("num_parallel")
-        else "default"
-    )
-    logger.debug("num_parallel=%d (source=%s)", final_num_parallel, _np_source)
-
-    # GPU IDs
     final_gpu_ids = parse_gpu_ids(gpu_ids or parallel_config.get("gpu_ids") or config.get("agent", {}).get("gpu_ids"))
-    logger.debug("gpu_ids=%s", final_gpu_ids)
+    parallel_workers = max(1, len(final_gpu_ids))
+    logger.debug("gpu_ids=%s parallel_workers=%d", final_gpu_ids, parallel_workers)
 
     # Repository path
     final_repo = repo
@@ -103,13 +62,12 @@ def run_homogeneous_agent(
         raise ValueError(f"Repository path does not exist: {final_repo}")
 
     # GEAK homogeneous flow always uses strategy interactive agent.
-    base_agent_class = StrategyInteractiveAgent
+    base_agent_class = OptimizationAgent
 
     # Configure agent for homogeneous mode
     agent_config["mode"] = "yolo"
     agent_config["confirm_exit"] = False
     agent_config.setdefault("use_strategy_manager", True)
-    agent_config["num_parallel"] = final_num_parallel
     agent_config["gpu_ids"] = final_gpu_ids
     agent_config["repo"] = str(final_repo)
     agent_config["agent_class"] = base_agent_class
@@ -125,23 +83,36 @@ def run_homogeneous_agent(
     model_config = config.get("model", {})
 
     logger.info(
-        "\n[bold cyan]%s[/bold cyan]\n  [bold]Homogeneous Agent[/bold] (%d agents, GPUs %s)\n[bold cyan]%s[/bold cyan]",
+        "\n[bold cyan]%s[/bold cyan]\n  [bold]Fixed-mode parallel run[/bold] (%d workers, GPUs %s)\n[bold cyan]%s[/bold cyan]",
         "=" * 60,
-        final_num_parallel,
+        parallel_workers,
         final_gpu_ids,
         "=" * 60,
     )
     logger.info("  repo=%s, output_dir=%s", final_repo, final_output_dir)
     logger.info("[dim]Sub-agents are working — expect no output for several minutes.[/dim]")
 
-    # Create and run ParallelAgent
+    # Build an identical-copies AgentTask list so fixed mode flows through
+    # the shared ``run_pool`` scheduler.  Same pool, same worktrees, same
+    # logs as the planned-mode path — only the task body differs.
+    task_body_with_wt = task_content + "\n\n" + "The current worktree is: " + str(final_repo)
+    fixed_tasks = build_fixed_tasks(
+        parallel_workers,
+        base_agent_class,
+        task_body_with_wt,
+        base_label="parallel",
+    )
+    # ParallelAgentConfig carries ``tasks`` alongside ``agent_class`` — when
+    # ``tasks`` is set, ParallelAgent.run_parallel skips its inline fixed
+    # branch and calls run_pool directly.
+    agent_config["tasks"] = fixed_tasks
+
     agent = ParallelAgent(model, env, **agent_config)
 
     try:
-        task_content = task_content + "\n\n" + "The current worktree is: " + str(final_repo)
         _t0 = time.monotonic()
         best_result = agent.run(
-            task_content,
+            task_body_with_wt,
             console=console,
             model_factory=lambda: get_model(model_name, model_config.copy()),
             env_factory=lambda: env_class(**copy.deepcopy(env_kwargs)),
@@ -194,3 +165,6 @@ def run_homogeneous_agent(
         raise
 
     return best_result
+
+
+run_homogeneous_agent = run_fixed_mode

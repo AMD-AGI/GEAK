@@ -65,6 +65,20 @@ def _build_ensemble_factory(base_factory):
     return _ensemble_factory
 
 
+def _normalize_section_name(name: str) -> str:
+    """Canonicalize a section name for case- / whitespace-insensitive matching.
+
+    The COMMANDMENT contract (``kernel_languages/contract.py``) uses
+    title-case multi-word section names like ``## Full Benchmark``.
+    Legacy callers and older templates use all-caps with underscores
+    like ``## FULL_BENCHMARK``.  We normalize both to the same upper-
+    snake_case token (``FULL_BENCHMARK``) so callers can pass either
+    form and templates can render in either style without breaking
+    downstream consumers.
+    """
+    return "_".join(name.strip().upper().split())
+
+
 def _read_commandment_section(commandment_path: str, section: str) -> str | None:
     """Read a section from a COMMANDMENT.md file verbatim.
 
@@ -72,6 +86,17 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
     ``"CORRECTNESS"``, ``"PROFILE"``, ``"BENCHMARK"``,
     ``"FULL_BENCHMARK"``), exactly as written.  No parsing, no extraction,
     no transformation.
+
+    Section-name matching is case-insensitive and whitespace-flexible:
+    ``## Full Benchmark`` matches ``section="FULL_BENCHMARK"`` just as
+    ``## FULL_BENCHMARK`` does.  This is required because the Jinja
+    harness contract (kernel_languages/contract.py::REQUIRED_COMMANDMENT_
+    SECTIONS) uses title-case ("Full Benchmark"), while callers of
+    ``build_eval_script`` use the legacy uppercase-underscore form
+    ("FULL_BENCHMARK").  Without this normalization the parser would
+    silently miss the section and downstream code would report
+    ``"No FULL_BENCHMARK commands"`` even though the commandment has
+    the section under its canonical title-case name.
 
     Fenced code blocks (```bash, ```, etc.) are stripped automatically.
     """
@@ -85,11 +110,17 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
     in_section = False
     # Pattern to match fenced code block markers (```bash, ```sh, ```, etc.)
     fence_pattern = re.compile(r"^```\w*$")
+    # ``##`` header followed by one or more words (may contain spaces,
+    # underscores, hyphens).  Trailing whitespace/colons are tolerated.
+    header_re = re.compile(r"^##\s+([A-Za-z][\w\s\-]*?)\s*:?\s*$")
+
+    target = _normalize_section_name(section)
 
     for raw_line in text.splitlines():
-        header = re.match(r"^##\s+(\w+)", raw_line.strip())
+        header = header_re.match(raw_line.strip())
         if header:
-            if header.group(1) == section:
+            candidate = _normalize_section_name(header.group(1))
+            if candidate == target:
                 in_section = True
                 continue
             elif in_section:
@@ -175,10 +206,10 @@ def task_file_to_agent_task(task_file: Path):
     meta, body = read_task_file(task_file)
 
     from minisweagent.agents.agent_spec import _agent_type_to_class, filter_agent_type
-    from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+    from minisweagent.agents.optimization_agent import OptimizationAgent
 
     agent_type = filter_agent_type(meta.get("agent_type", "strategy_agent"))
-    agent_class = _agent_type_to_class().get(agent_type, StrategyInteractiveAgent)
+    agent_class = _agent_type_to_class().get(agent_type, OptimizationAgent)
 
     try:
         inherited_step_limit = int(os.environ.get("GEAK_AGENT_STEP_LIMIT", "200"))

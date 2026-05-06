@@ -12,40 +12,52 @@ from minisweagent.run.orchestrator import _probe_preprocess_dir, run_orchestrato
 
 
 class TestRunOrchestrator:
-    def test_homogeneous_raises_not_implemented(self, tmp_path: Path) -> None:
+    def test_fixed_mode_raises_not_implemented(self, tmp_path: Path) -> None:
         ctx = {"output_dir": str(tmp_path)}
-        with pytest.raises(NotImplementedError, match="Homogeneous mode is not supported"):
+        with pytest.raises(NotImplementedError, match="Fixed mode is not supported"):
             run_orchestrator(
                 preprocess_ctx=ctx,
                 gpu_ids=[0],
                 model=MagicMock(),
                 model_factory=MagicMock(),
-                heterogeneous=False,
+                mode="fixed",
             )
 
-    def test_heterogeneous_delegates_to_run_heterogeneous_orchestrator(self, tmp_path: Path) -> None:
+    def test_legacy_heterogeneous_false_still_raises_and_warns(self, tmp_path: Path) -> None:
+        ctx = {"output_dir": str(tmp_path)}
+        with pytest.raises(NotImplementedError, match="Fixed mode is not supported"):
+            with pytest.warns(DeprecationWarning, match="heterogeneous"):
+                run_orchestrator(
+                    preprocess_ctx=ctx,
+                    gpu_ids=[0],
+                    model=MagicMock(),
+                    model_factory=MagicMock(),
+                    heterogeneous=False,
+                )
+
+    def test_planned_delegates_to_run_planned_orchestrator(self, tmp_path: Path) -> None:
         ctx = {"output_dir": str(tmp_path / "pp")}
         model = MagicMock()
         factory = MagicMock()
         sentinel = {"status": "ok"}
 
         with patch(
-            "minisweagent.agents.heterogeneous.orchestrator.run_heterogeneous_orchestrator",
+            "minisweagent.agents.heterogeneous.orchestrator.run_planned_orchestrator",
             return_value=sentinel,
-        ) as mock_hetero:
+        ) as mock_planned:
             out = run_orchestrator(
                 preprocess_ctx=ctx,
                 gpu_ids=[0, 1],
                 model=model,
                 model_factory=factory,
-                heterogeneous=True,
+                mode="planned",
                 max_rounds=3,
                 start_round=2,
             )
 
         assert out is sentinel
-        assert mock_hetero.call_count == 1
-        args, kwargs = mock_hetero.call_args
+        assert mock_planned.call_count == 1
+        args, kwargs = mock_planned.call_args
         assert args[0] is ctx
         assert args[1] == [0, 1]
         assert args[2] is model
@@ -55,41 +67,69 @@ class TestRunOrchestrator:
         assert args[6] == 2
         assert len(args) == 7
 
+    def test_legacy_heterogeneous_true_translates_to_planned(self, tmp_path: Path) -> None:
+        """``heterogeneous=True`` must still route to planned mode (with a deprecation warning)."""
+        ctx = {"output_dir": str(tmp_path / "pp")}
+        with patch(
+            "minisweagent.agents.heterogeneous.orchestrator.run_planned_orchestrator",
+            return_value={"status": "ok"},
+        ) as mock_planned:
+            with pytest.warns(DeprecationWarning, match="heterogeneous"):
+                run_orchestrator(
+                    preprocess_ctx=ctx,
+                    gpu_ids=[0],
+                    model=MagicMock(),
+                    model_factory=MagicMock(),
+                    heterogeneous=True,
+                )
+        assert mock_planned.call_count == 1
+
     def test_max_rounds_defaults_from_env_when_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         ctx = {"output_dir": str(tmp_path)}
         monkeypatch.setenv("GEAK_MAX_ROUNDS", "7")
         with patch(
-            "minisweagent.agents.heterogeneous.orchestrator.run_heterogeneous_orchestrator",
+            "minisweagent.agents.heterogeneous.orchestrator.run_planned_orchestrator",
             return_value={},
-        ) as mock_hetero:
+        ) as mock_planned:
             run_orchestrator(
                 preprocess_ctx=ctx,
                 gpu_ids=[0],
                 model=MagicMock(),
                 model_factory=MagicMock(),
-                heterogeneous=True,
+                mode="planned",
                 max_rounds=None,
             )
-        assert mock_hetero.call_args[0][5] == 7
+        assert mock_planned.call_args[0][5] == 7
 
     def test_output_dir_override(self, tmp_path: Path) -> None:
         ctx = {"output_dir": str(tmp_path / "ignored")}
         override = tmp_path / "override_out"
         with patch(
-            "minisweagent.agents.heterogeneous.orchestrator.run_heterogeneous_orchestrator",
+            "minisweagent.agents.heterogeneous.orchestrator.run_planned_orchestrator",
             return_value={},
-        ) as mock_hetero:
+        ) as mock_planned:
             run_orchestrator(
                 preprocess_ctx=ctx,
                 gpu_ids=[0],
                 model=MagicMock(),
                 model_factory=MagicMock(),
-                heterogeneous=True,
+                mode="planned",
                 output_dir=override,
             )
-        assert mock_hetero.call_args[0][4] == override
+        assert mock_planned.call_args[0][4] == override
+
+    def test_unknown_mode_raises_value_error(self, tmp_path: Path) -> None:
+        ctx = {"output_dir": str(tmp_path)}
+        with pytest.raises(ValueError, match="Unsupported mode"):
+            run_orchestrator(
+                preprocess_ctx=ctx,
+                gpu_ids=[0],
+                model=MagicMock(),
+                model_factory=MagicMock(),
+                mode="auto",
+            )
 
 
 class TestProbePreprocessDir:

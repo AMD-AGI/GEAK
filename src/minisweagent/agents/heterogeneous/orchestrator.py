@@ -1,6 +1,6 @@
-"""Heterogeneous orchestrator: LLM-driven multi-round optimization.
+"""Planned-mode orchestrator (package path still ``heterogeneous``): LLM-driven multi-round optimization.
 
-In heterogeneous mode, an LLM agent drives the optimization loop by
+In planned mode, an LLM agent drives the optimization loop by
 calling tools in sequence each round:
 
 1. ``generate_tasks`` -- create diverse optimization task files
@@ -73,7 +73,7 @@ def run_llm_steps(
                 name in content_text for name in ("dispatch_tasks", "collect_results", "finalize")
             ):
                 emit_debug_log(
-                    "heterogeneous_orchestrator:run_llm_steps:no_tool_call",
+                    "planned_orchestrator:run_llm_steps:no_tool_call",
                     "Orchestrator produced text mentioning missing orchestration tools",
                     {
                         "phase": phase,
@@ -157,7 +157,7 @@ def run_llm_steps(
 
 
 def _log_final_summary(report) -> None:
-    """Log a human-readable conclusion at the end of a heterogeneous run."""
+    """Log a human-readable conclusion at the end of a planned-mode run."""
     if report is None:
         return
     best_speedup = getattr(report, "best_speedup", None) or 0
@@ -165,7 +165,7 @@ def _log_final_summary(report) -> None:
     best_round = getattr(report, "best_round", None) or "unknown"
     summary = getattr(report, "summary", "") or ""
     logger.info(
-        "Heterogeneous run completed. Best patch: %s (round %s, %.4fx speedup)",
+        "Planned-mode run completed. Best patch: %s (round %s, %.4fx speedup)",
         best_patch,
         best_round,
         best_speedup,
@@ -177,7 +177,7 @@ def _log_final_summary(report) -> None:
 # ── Main entry point ─────────────────────────────────────────────────
 
 
-def run_heterogeneous_orchestrator(
+def run_planned_orchestrator(
     preprocess_ctx: dict[str, Any],
     gpu_ids: list[int],
     model,
@@ -185,14 +185,18 @@ def run_heterogeneous_orchestrator(
     output_dir: Path,
     max_rounds: int,
     start_round: int,
+    task_generation: str = "planned",
 ) -> dict[str, Any]:
-    """Run the heterogeneous orchestrator with LLM-driven tool calling.
+    """Run COMMANDMENT + orchestrator loop (shared for planned and fixed).
 
-    This is the main heterogeneous entry point, called by
-    ``run/orchestrator.py:run_orchestrator`` when ``heterogeneous=True``.
+    * ``task_generation="planned"`` — strategy LLM emits diverse per-worker tasks.
+    * ``task_generation="fixed"`` — N identical copies of the user objective
+      (legacy homogeneous HIP / fixed-mode shape).
+
+    Called from ``run/orchestrator.py:run_orchestrator``.
     """
     from minisweagent.agents.heterogeneous.task_generator import _extract_kernel_meta
-    from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+    from minisweagent.agents.optimization_agent import OptimizationAgent
     from minisweagent.run.postprocess.results import (
         finalize_run,
         post_round_evaluate,
@@ -220,6 +224,10 @@ def run_heterogeneous_orchestrator(
         except Exception as e:
             logger.warning("Failed to wrap RAG tools with RAG postprocessor: %s", e)
 
+    _tg = str(task_generation or "planned").strip().lower()
+    if _tg not in {"planned", "fixed", "mixed"}:
+        raise ValueError(f"task_generation must be 'planned', 'fixed', or 'mixed', got {_tg!r}")
+
     ctx: dict[str, Any] = {
         **preprocess_ctx,
         "kernel_meta": kernel_meta,
@@ -228,8 +236,9 @@ def run_heterogeneous_orchestrator(
         "gpu_ids": gpu_ids,
         "model": model,
         "model_factory": model_factory,
-        "agent_class": StrategyInteractiveAgent,
+        "agent_class": OptimizationAgent,
         "toolruntime": toolruntime,
+        "task_generation": _tg,
     }
 
     tools_schema = build_tools_schema(toolruntime)
@@ -288,7 +297,7 @@ def run_heterogeneous_orchestrator(
         )
 
         if is_working_memory_enabled():
-            from minisweagent.memory.cross_session_memory import (  # pylint: disable=import-error,no-name-in-module
+            from minisweagent.memory.cross_session import (  # pylint: disable=import-error,no-name-in-module
                 classify_kernel_category,
             )
             from minisweagent.memory.working_memory import (  # pylint: disable=import-error,no-name-in-module
@@ -325,9 +334,16 @@ def run_heterogeneous_orchestrator(
     )
 
     start_label = f"rounds {start_round}-{max_rounds}" if start_round > 1 else f"{max_rounds} rounds"
+    if _tg == "fixed":
+        _mode_banner = "Fixed-mode orchestrator (identical worker tasks)"
+    elif _tg == "mixed":
+        _mode_banner = "Mixed-mode orchestrator (half legacy + half planned)"
+    else:
+        _mode_banner = "Planned-mode orchestrator"
     logger.info(
-        "\n[bold cyan]%s[/bold cyan]\n  [bold]Heterogeneous Orchestrator[/bold] (%s, %d GPUs)\n[bold cyan]%s[/bold cyan]",
+        "\n[bold cyan]%s[/bold cyan]\n  [bold]%s[/bold] (%s, %d GPUs)\n[bold cyan]%s[/bold cyan]",
         "=" * 60,
+        _mode_banner,
         start_label,
         len(gpu_ids),
         "=" * 60,
@@ -491,3 +507,7 @@ def run_heterogeneous_orchestrator(
     report = finalize_run(ctx, output_dir)
     _log_final_summary(report)
     return report
+
+
+# Deprecated alias — no in-tree callers; kept for external scripts only.
+run_heterogeneous_orchestrator = run_planned_orchestrator

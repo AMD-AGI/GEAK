@@ -1113,7 +1113,10 @@ if __name__ == "__main__":
             assert "int main" not in kernel_text
 
             # Generated GEAK harness is a Python wrapper that drives the split HIP harness.
-            assert new_harness_path == str(out_dir / "test_relu_kernel_harness.py")
+            # ``_geak_split_harness_<stem>.*`` is the ownership-prefixed
+            # name; the legacy ``test_<stem>_harness.*`` name collided
+            # with user-chosen filenames.
+            assert new_harness_path == str(out_dir / "_geak_split_harness_relu_kernel.py")
             harness_text = Path(new_harness_path).read_text()
             assert "argparse" in harness_text
             assert "--correctness" in harness_text
@@ -1125,7 +1128,7 @@ if __name__ == "__main__":
             assert valid, f"Generated HIP wrapper harness should satisfy GEAK harness contract: {errors}"
 
             # The split C-like harness source still contains the moved host-side test logic.
-            split_harness = out_dir / "test_relu_kernel_harness.hip"
+            split_harness = out_dir / "_geak_split_harness_relu_kernel.hip"
             assert split_harness.is_file()
             split_harness_text = split_harness.read_text()
             assert '#include "relu_kernel.hip"' in split_harness_text

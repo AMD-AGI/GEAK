@@ -172,7 +172,7 @@ def rewrite_summary_with_verified_selection(
 def record_final_outcome(ctx: dict[str, Any], report: dict[str, Any]) -> None:
     """Record the final outcome using verified speedup when available."""
     try:
-        from minisweagent.memory.cross_session_memory import (  # pylint: disable=import-error,no-name-in-module
+        from minisweagent.memory.cross_session import (  # pylint: disable=import-error,no-name-in-module
             classify_kernel_category,
         )
         from minisweagent.memory.integration import (  # pylint: disable=import-error,no-name-in-module
@@ -298,7 +298,7 @@ def post_round_evaluate(
 ) -> Any:
     """Run post-round evaluation and update ctx with best-patch tracking.
 
-    Shared by both homogeneous and heterogeneous orchestrators.  After
+    Shared by both fixed-mode and planned-mode orchestrators.  After
     each round completes:
 
     1. Calls ``evaluate_round_best`` to run FULL_BENCHMARK + PROFILE on
@@ -534,7 +534,7 @@ def auto_finalize(
         return report
 
     try:
-        from minisweagent.memory.cross_session_memory import (  # pylint: disable=import-error,no-name-in-module
+        from minisweagent.memory.cross_session import (  # pylint: disable=import-error,no-name-in-module
             classify_kernel_category,
         )
         from minisweagent.memory.integration import (  # pylint: disable=import-error,no-name-in-module

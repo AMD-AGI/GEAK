@@ -909,9 +909,9 @@ def main():
         sys.exit(1)
 
     # Placeholder agent class for CLI output
-    from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+    from minisweagent.agents.optimization_agent import OptimizationAgent
 
-    agent_class = StrategyInteractiveAgent
+    agent_class = OptimizationAgent
 
     base_task_context = f"Optimize the kernel at {kernel_path} for maximum performance."
 

@@ -1,36 +1,37 @@
-"""Utility to manage the global config file.
+"""First-time global config setup helper for the GEAK CLI.
 
-You can also directly edit the `.env` file in the config directory.
+Exposes a single helper, ``configure_if_first_time``, that ``cli.py``
+invokes on every ``geak`` launch.  If the user has not already
+configured a model / API key in ``global_config_file`` (and no relevant
+API-key environment variables are set), it walks them through an
+interactive setup and writes the result.
 
-It is located at [bold green]{global_config_file}[/bold green].
+Previously this module also exposed a standalone Typer app
+(``mini-extra config setup|set|unset|edit``), but that CLI was never
+registered in ``pyproject.toml`` and had zero production callers.  It
+was removed during CLI consolidation.  If an operator needs to edit
+the global config file by hand, they can open
+``global_config_file`` directly (``$EDITOR`` or any text editor).
 """
 
 import logging
 import os
-import subprocess
 
-from dotenv import set_key, unset_key
+from dotenv import set_key
 from prompt_toolkit import prompt
 from rich.console import Console
 from rich.rule import Rule
-from typer import Argument, Typer
 
 from minisweagent import global_config_file
 
 logger = logging.getLogger(__name__)
-
-app = Typer(
-    help=__doc__.format(global_config_file=global_config_file),  # type: ignore
-    no_args_is_help=True,
-    rich_markup_mode="rich",
-    add_completion=False,
-)
 console = Console(highlight=False)
 
 
 _SETUP_HELP = """To get started, we need to set up your global config file.
 
-You can edit it manually or use the [bold green]mini-extra config set[/bold green] or [bold green]mini-extra config edit[/bold green] commands.
+You can edit it manually at the path shown above or re-run this setup by
+deleting the ``MSWEA_CONFIGURED`` key from that file.
 
 This setup will ask you for your model and an API key.
 
@@ -45,7 +46,6 @@ Here's a few popular models and the required API keys:
 [bold yellow]You can leave any setting blank to skip it.[/bold yellow]
 
 More information at https://mini-swe-agent.com/latest/quickstart/
-To find the best model, check the leaderboard at https://swebench.com/
 """
 
 
@@ -58,21 +58,22 @@ _API_KEY_NAMES = (
 )
 
 
-def configure_if_first_time():
+def configure_if_first_time() -> None:
+    """Run the interactive setup once per user, on the first geak invocation."""
     if os.getenv("MSWEA_CONFIGURED"):
         return
     if any(os.getenv(k) for k in _API_KEY_NAMES):
         return
     console.print(Rule())
     logger.info("First-time configuration: running setup.")
-    setup()
+    _setup()
     console.print(Rule())
 
 
-@app.command()
-def setup():
-    """Setup the global config file."""
-    console.print(_SETUP_HELP.format(global_config_file=global_config_file))
+def _setup() -> None:
+    """Interactive setup for the global config file."""
+    console.print(_SETUP_HELP)
+    console.print(f"[dim]Writing to: {global_config_file}[/dim]")
     default_model = prompt(
         "Enter your default model (e.g., anthropic/claude-sonnet-4-5-20250929): ",
         default=os.getenv("MSWEA_MODEL_NAME", ""),
@@ -80,51 +81,24 @@ def setup():
     if default_model:
         set_key(global_config_file, "MSWEA_MODEL_NAME", default_model)
     console.print(
-        "[bold yellow]If you already have your API keys set as environment variables, you can ignore the next question.[/bold yellow]"
+        "[bold yellow]If you already have your API keys set as environment variables, you can skip the next question.[/bold yellow]"
     )
     key_name = prompt("Enter your API key name (e.g., ANTHROPIC_API_KEY): ").strip()
     key_value = None
     if key_name:
-        key_value = prompt("Enter your API key value (e.g., sk-1234567890): ", default=os.getenv(key_name, "")).strip()
+        key_value = prompt(
+            "Enter your API key value (e.g., sk-1234567890): ",
+            default=os.getenv(key_name, ""),
+        ).strip()
         if key_value:
             set_key(global_config_file, key_name, key_value)
     if not key_value:
         console.print(
-            "[bold red]API key setup not completed.[/bold red] Totally fine if you have your keys as environment variables."
+            "[bold red]API key setup not completed.[/bold red] "
+            "Totally fine if you have your keys as environment variables."
         )
     set_key(global_config_file, "MSWEA_CONFIGURED", "true")
-    console.print(
-        "\n[bold yellow]Config finished.[/bold yellow] If you want to revisit it, run [bold green]mini-extra config setup[/bold green]."
-    )
+    console.print("\n[bold yellow]Config finished.[/bold yellow]")
 
 
-@app.command()
-def set(
-    key: str | None = Argument(None, help="The key to set"),
-    value: str | None = Argument(None, help="The value to set"),
-):
-    """Set a key in the global config file."""
-    if key is None:
-        key = prompt("Enter the key to set: ")
-    if value is None:
-        value = prompt(f"Enter the value for {key}: ")
-    set_key(global_config_file, key, value)
-
-
-@app.command()
-def unset(key: str | None = Argument(None, help="The key to unset")):
-    """Unset a key in the global config file."""
-    if key is None:
-        key = prompt("Enter the key to unset: ")
-    unset_key(global_config_file, key)
-
-
-@app.command()
-def edit():
-    """Edit the global config file."""
-    editor = os.getenv("EDITOR", "nano")
-    subprocess.run([editor, global_config_file])
-
-
-if __name__ == "__main__":
-    app()
+__all__ = ["configure_if_first_time"]

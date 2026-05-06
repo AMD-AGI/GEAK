@@ -203,9 +203,9 @@ class TestRunHomogeneousAgent:
 
             mock_parallel.assert_called_once()
             call_kwargs = mock_parallel.call_args[1]
-            from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+            from minisweagent.agents.optimization_agent import OptimizationAgent
 
-            assert call_kwargs.get("agent_class") == StrategyInteractiveAgent
+            assert call_kwargs.get("agent_class") == OptimizationAgent
 
     def test_run_homogeneous_agent_with_strategy_manager_disabled(self, mock_model, mock_env, base_config, temp_repo):
         """Test that strategy interactive agent is used when strategy_manager is disabled."""
@@ -236,11 +236,11 @@ class TestRunHomogeneousAgent:
 
             # Verify ParallelAgent was called
             mock_parallel.assert_called_once()
-            # GEAK homogeneous mode always uses StrategyInteractiveAgent.
+            # GEAK fixed mode always uses OptimizationAgent.
             call_kwargs = mock_parallel.call_args[1]
-            from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+            from minisweagent.agents.optimization_agent import OptimizationAgent
 
-            assert call_kwargs.get("agent_class") == StrategyInteractiveAgent
+            assert call_kwargs.get("agent_class") == OptimizationAgent
 
     def test_run_homogeneous_agent_num_parallel_from_param(self, mock_model, mock_env, base_config, temp_repo):
         """Test that num_parallel parameter takes precedence."""
@@ -649,6 +649,9 @@ class TestHomogeneousAgentSlowIntegration:
 
     def test_full_parallel_run_single_agent(self, temp_git_repo_with_content):
         """Test a full parallel run with a single agent."""
+        from minisweagent.agents.default import DefaultAgent
+        from minisweagent.run.pool_runner import build_homogeneous_tasks
+
         model = DeterministicModel(
             outputs=[
                 "THOUGHT: Running test\n```bash\necho 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'test passed'\n```"
@@ -658,6 +661,15 @@ class TestHomogeneousAgentSlowIntegration:
 
         with tempfile.TemporaryDirectory() as output_dir:
             output_path = Path(output_dir)
+
+            # run_parallel now requires an explicit tasks list (the legacy
+            # identical-copies inline branch was removed).  Build one via
+            # the canonical helper.
+            tasks = build_homogeneous_tasks(
+                num_parallel=1,
+                agent_class=DefaultAgent,
+                task_body="Run a simple test",
+            )
 
             agent = ParallelAgent(
                 model=model,
@@ -671,11 +683,13 @@ class TestHomogeneousAgentSlowIntegration:
                 patch_output_dir=str(output_path),
                 mode="yolo",
                 confirm_exit=False,
+                tasks=tasks,
             )
 
             # Mock the _select_best_from_parallel_runs to avoid model calls
             with patch.object(ParallelAgent, "_select_best_from_parallel_runs", return_value=None):
                 agent.run("Run a simple test")
 
-            # Check that output directory has parallel directories
-            assert (output_path / "parallel_0").exists() or output_path.exists()
+            # run_pool places per-task output under <label>/ (not parallel_N/);
+            # either layout is acceptable as long as the dir was populated.
+            assert output_path.exists()

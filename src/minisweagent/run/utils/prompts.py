@@ -17,9 +17,29 @@ Extract the following information (return null if not found):
    Use "flydsl" when the task is about optimizing existing FlyDSL code (not translating from PyTorch).
 4. repo: The repository path mentioned in the task (absolute path or relative path)
 5. test_command: The command to run tests or benchmarks
+5b. test_harness: Path or URL to a USER-PROVIDED test/benchmark HARNESS FILE.
+   Look for phrases like "Use the test harness at <path>", "test harness:
+   <path>", "use harness <path>", "harness file <path>", "with the harness
+   at <path>".  This is a SINGLE FILE the user wants the pipeline to use
+   verbatim — DIFFERENT from test_command (which is a shell command).
+   Set null if the user only described a command but no harness file.
+   When BOTH a test_command and a test_harness are mentioned, populate
+   both — they're complementary (the harness is the file; the command
+   is one way to invoke it).
 6. metric: The performance metric to measure (e.g., "bandwidth in GB/s", "latency in ms", "throughput")
-7. num_parallel: Number of parallel optimization agents to run (integer)
-8. gpu_ids: Comma-separated GPU IDs for parallel execution (e.g., "0,1,2,3")
+7. num_parallel: Number of parallel optimization agents to run (integer).
+   If the user did not explicitly state a number but specified a GPU list,
+   you MAY leave this null — the pipeline will auto-derive it as
+   ``len(gpu_ids)``.  Only set this when the user explicitly says
+   "N parallel" / "N workers" etc.
+8. gpu_ids: GPU IDs for parallel execution.  Accept any of these forms
+   verbatim from the user's prompt:
+     - "0,1,2,3"   (comma-separated list)
+     - "4-7"       (range, inclusive — e.g., "Use GPUs 4-7" → "4-7")
+     - "0,1,4-7"   (mixed)
+     - "4"         (single GPU)
+   Prefer the FORM the user used (don't expand "4-7" into "4,5,6,7"
+   unnecessarily — downstream parsing handles both).
 9. output_dir: Directory path where output logs and artifacts should be saved (e.g., "outputs/topk_run", "/workspace/results")
 10. model: Model name or identifier to use (e.g., "claude-sonnet-4-20250514", "gpt-4o")
 11. config: Path to a YAML configuration file (e.g., "configs/my_setup.yaml", "/path/to/config.yaml")
@@ -31,6 +51,7 @@ Return ONLY a valid JSON object with these keys. Example:
   "kernel_type": "triton",  // one of: "hip", "triton", "pytorch2flydsl", "flydsl", "other"
   "repo": "/path/to/repo",
   "test_command": "python test.py",
+  "test_harness": "/path/to/test_kernel_harness.py",
   "metric": "Extract throughput in GFLOPS",
   "num_parallel": 4,
   "gpu_ids": "0,1,2,3",
@@ -50,19 +71,27 @@ PARSE_PIPELINE_PARAMS_USER_TEMPLATE = """Analyze the following task and extract 
 Extract the following (return null if not found or not applicable):
 1. kernel_url: The path or URL to the SPECIFIC KERNEL FILE to optimize (e.g., "/path/to/silu.hip", "/workspace/kernels/matmul.py", "https://github.com/org/repo/blob/main/kernel.py"). This is the kernel source file itself, NOT the repository root directory.
 2. preprocess_dir: Path to a directory containing existing preprocessing artifacts (e.g., "/path/to/geak_output"). Only set if the user explicitly mentions reusing existing artifacts.
-3. heterogeneous: Whether to use heterogeneous mode (diverse optimization strategies across GPUs). Set true if the user mentions "heterogeneous", false if they mention "homogeneous", null if not mentioned.
+3. mode: Execution mode for the optimization run.  One of:
+     - "fixed"   — run the same task body across N parallel agents (identical copies).  Set if the user asks for replicated / parallel / best-of-N runs of a single strategy.
+     - "planned" — let the planner LLM generate N diverse strategies and run each in its own agent.  Set if the user asks for "diverse strategies", "planner", or wording that suggests multiple distinct approaches.
+     - "auto"    — let the pipeline pick fixed vs planned.  This is the default; only set another value if the user is explicit.
+   Return null if the user is not explicit about the mode.
+   Legacy terms: "heterogeneous" should map to "planned"; "homogeneous" to "fixed".
+   NOTE: Do NOT emit "translate" here.  Translation is a separate preprocess phase triggered by ``target_language`` (field 7 below), not a pipeline mode.
 4. max_rounds: Maximum number of optimization rounds (integer). Only set if explicitly mentioned.
 5. start_round: Round number to resume from (integer, 1-based). Only set if explicitly mentioned.
 6. pipeline_intent: true if the task describes kernel optimization, performance improvement, GPU kernel work, or profiling. false if it describes general coding tasks like bug fixes, refactoring, or feature additions.
+7. target_language: Target kernel language if the user asks to translate / port / convert the kernel (e.g. "triton", "hip", "cuda").  Only set if the user is explicit about wanting translation.  Null otherwise.  When set, the pipeline runs a translation preprocess phase before optimization.
 
 Return ONLY a valid JSON object. Example:
 {{{{
   "kernel_url": "/workspace/repo/kernels/silu.hip",
   "preprocess_dir": null,
-  "heterogeneous": null,
+  "mode": null,
   "max_rounds": 5,
   "start_round": null,
-  "pipeline_intent": true
+  "pipeline_intent": true,
+  "target_language": null
 }}}}
 
 Here is the task content:

@@ -1,0 +1,96 @@
+# Kernel speedup regression thresholds for the refactor.
+#
+# Source: docs/refactor/EXECUTION_PLAN.md §0.2, pulled directly from the live
+# knowledge_base.json (version 7, 60+ recorded experiences) as of 2026-04-22.
+#
+# Any PR must maintain or improve these speedups on the listed kernels.
+# Nightly test `tests/refactor_regression/test_kb_speedups.py` (stub today,
+# full runner lands in PR-3) runs each kernel for 5 rounds × 1 seed and asserts
+# best-of-5 >= threshold.
+#
+# Format: kernel_name: {best_observed, threshold, source_line_in_kb}
+
+kernels:
+  # --- Top tier (3x-5x+) ---
+  gemm_a16w16_atomic:
+    best_observed: 3.9183
+    threshold: 3.5
+    source_line: 962
+    notes: "KB top entry; Triton gemm with atomic accumulation"
+
+  llama_ff_triton:
+    best_observed: 5.2364
+    threshold: 4.7
+    source_line: 5075
+
+  three_nn:
+    best_observed: 5.3813
+    threshold: 4.8
+    source_line: 1909
+    notes: "HIP three_nn via memory transfer; highest observed speedup"
+
+  knn:
+    best_observed: 3.0095
+    threshold: 2.7
+    source_line: 1811
+
+  fused_mxfp4_quant_moe_sort:
+    best_observed: 2.463  # peak 3.51x historical; current best 2.463x
+    threshold: 2.2
+    source_line: 57
+    notes: "Historical peak 3.51x; KB v7 stores 2.463x"
+
+  fused_rms_fp8:
+    best_observed: 2.2312
+    threshold: 2.0
+    source_line: 4928
+
+  # --- Mid tier (1.2x-1.6x) ---
+  gemm:
+    best_observed: 1.5889
+    threshold: 1.4
+    source_line: 639
+    notes: "Generic aiter-wrapped gemm"
+
+  topk:
+    best_observed: 1.3394
+    threshold: 1.2
+    source_line: 1518
+
+  gather_points:
+    best_observed: 1.3646
+    threshold: 1.2
+    source_line: 2007
+
+  moe_routing_sigmoid_top1:
+    best_observed: 1.2138
+    threshold: 1.1
+    source_line: 1249
+
+  # --- Low tier (marginal speedups) ---
+  ball_query:
+    best_observed: 1.18
+    threshold: 1.1
+    source_line: 1713
+
+  fused_qkv_rope:
+    best_observed: 1.131
+    threshold: 1.08
+    source_line: 5000
+
+  fused_qk_rope_cache_mla:
+    best_observed: 1.1008
+    threshold: 1.05
+    source_line: 285
+
+# Kernels that have been run but NOT yet in KB v7 — tracked here so they're on
+# the nightly regression roster once KB is bumped:
+tracked_not_in_kb:
+  - ff_backward
+  - gemm_a16wfp4
+  - lean_atten_paged
+  - mla_decode
+  - refk_fp8_blockwise_mm
+
+# Test runtime assumption: 4 GPUs × ~15 min avg per kernel-round.
+# Nightly full sweep: 13 kernels × 5 rounds × 1 seed × 15 min / 4 GPUs ≈ 4 GPU-hours.

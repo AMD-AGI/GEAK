@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from minisweagent.run.utils.git_safe_env import get_git_safe_env
 
 # Canonical name of the directory used to cache cloned repos.
-# Other modules (discovery, mini.py) import this constant to detect
+# Other modules (discovery, cli.py) import this constant to detect
 # whether a kernel path lives inside a resolved clone.
 RESOLVED_DIR_NAME = ".geak_resolved"
 

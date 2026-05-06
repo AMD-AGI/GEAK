@@ -128,7 +128,6 @@ def format_landscape_context(
     if per_entry_code_sim is None or len(per_entry_code_sim) != len(experiences):
         per_entry_code_sim = [0.0] * len(experiences)
 
-    lang = _guess_language(experiences)
     parts: list[str] = []
     n = len(experiences)
     parts.append(f"### Cross-Session Memory (from {n} similar kernel{'s' if n != 1 else ''})")
@@ -144,7 +143,7 @@ def format_landscape_context(
         parts.append(f"**Your kernel fingerprint**: {_code_fingerprint(target_code)}")
         parts.append("")
 
-    parts.append(_build_reasoning_guidance(lang))
+    parts.append(_build_reasoning_guidance())
     parts.append("")
 
     budget = _MAX_CONTEXT_COMPACT if compact else _MAX_CONTEXT_FULL
@@ -161,15 +160,7 @@ def format_landscape_context(
     return "\n".join(parts)
 
 
-def _guess_language(experiences: list[ExperienceRecord]) -> str:
-    for exp in experiences:
-        lang = getattr(exp, "kernel_language", "")
-        if lang:
-            return lang
-    return ""
-
-
-def _build_reasoning_guidance(lang: str) -> str:
+def _build_reasoning_guidance() -> str:
     """Informed-decision framing — agent cross-references KB with current state.
 
     The previous prescriptive version ("Decide", "skip GEMM strategies", "make
@@ -182,6 +173,9 @@ def _build_reasoning_guidance(lang: str) -> str:
     and cross-reference against (a) the current kernel.py source it sees,
     (b) the current profile.json, (c) the current bottleneck — then decide
     based on that informed comparison.
+
+    Note: previously accepted a ``lang`` argument that was never used.
+    Dropped per plan §13.2-D row 24.
     """
     return (
         "*Below: evidence from past optimization runs. Each entry reports "

@@ -3,6 +3,14 @@
 Pure functions that build "Prefer First / Consider Next / Deprioritize"
 strategy blocks based on kernel backend type and profiling bottleneck.
 Injected into the task generator's LLM prompt to guide strategy selection.
+
+Language detection goes through the ``kernel_languages.registry`` —
+literal equality comparisons against language names are forbidden in
+this module (enforced by ``scripts/refactor_ci/check_language_leaks.py``).
+When the registry cannot identify a language, we fall back to the path
+heuristics (``.hip``/``.cu`` + ROCm tokens → HIP-like; Python file
+whose path mentions Triton → Triton-like) so the guidance still fires
+in partial-discovery scenarios.
 """
 
 from __future__ import annotations
@@ -11,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from minisweagent.run.utils.gpu_arch import detect_gpu_arch, is_wmma_capable
+
+from minisweagent.kernel_languages import registry
 
 _HIP_SEARCH_HINT_PATTERNS = (
     "binary_search",
@@ -21,6 +31,12 @@ _HIP_SEARCH_HINT_PATTERNS = (
     "haystack",
     "needle",
 )
+
+# Names carried around by heterogeneous/task_generator and the discovery
+# dict that should NOT be treated as HIP-like even though they may land
+# in C++-extension territory.  Kept as a data tuple instead of inline
+# checks so the set is obvious and extensible.
+_NON_HIP_KERNEL_NAMES: tuple[str, ...] = ("ck", "asm")
 
 
 def _safe_float(value: Any) -> float | None:
@@ -53,22 +69,64 @@ def _normalized_bottleneck(baseline_metrics: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _resolved_language_name(kernel: dict[str, Any]) -> str:
+    """Return the canonical KernelLanguage name for ``kernel`` or ``""``.
+
+    Order of resolution (all via ``kernel_languages.registry`` — no
+    literal equality checks):
+      1. ``kernel["kernel_type"]`` passed through
+         ``registry.detect_best_by_name`` — handles aliases (``rocm``
+         → ``hip`` etc).
+      2. Fall back to ``registry.detect_best`` on the kernel file path
+         if the file exists.
+      3. ``""`` when both routes return None.
+    """
+    raw_type = str(kernel.get("kernel_type", "")).strip().lower()
+    if raw_type in _NON_HIP_KERNEL_NAMES:
+        # Legacy guard: these are NOT canonical KernelLanguage names and
+        # we shouldn't route them through either branch of the guidance.
+        return raw_type
+
+    if raw_type:
+        lang = registry.detect_best_by_name(raw_type)
+        if lang is not None:
+            return lang.name
+
+    file_path = str(kernel.get("file_path", "")).strip()
+    if file_path:
+        lang = registry.detect_best(Path(file_path))
+        if lang is not None:
+            return lang.name
+
+    return ""
+
+
 def _is_hip_like_kernel(kernel: dict[str, Any]) -> bool:
+    name = _resolved_language_name(kernel)
+    if name == "hip":
+        return True
+    if name in _NON_HIP_KERNEL_NAMES or name == "triton":
+        return False
+
+    # Last-resort path heuristic for partial-discovery cases: HIP-ish
+    # file extensions containing a ROCm / HIP token.
     path = str(kernel.get("file_path", "")).lower()
     ext = Path(path).suffix.lower()
-    kernel_type = str(kernel.get("kernel_type", "")).lower()
-    if kernel_type in {"triton", "ck", "asm"}:
-        return False
-    return kernel_type == "hip" or (
-        ext in {".hpp", ".h", ".cpp", ".cu", ".hip"} and any(token in path for token in ("rocprim", "hip", "rocm"))
+    return ext in {".hpp", ".h", ".cpp", ".cu", ".hip"} and any(
+        token in path for token in ("rocprim", "hip", "rocm")
     )
 
 
 def _is_triton_like_kernel(kernel: dict[str, Any]) -> bool:
-    path = str(kernel.get("file_path", "")).lower()
-    kernel_type = str(kernel.get("kernel_type", "")).lower()
-    if kernel_type == "triton":
+    name = _resolved_language_name(kernel)
+    if name == "triton":
         return True
+    if name and name != "":
+        return False
+
+    # Partial-discovery fallback: Python file whose path mentions
+    # "triton".  Only hit when the registry couldn't decide.
+    path = str(kernel.get("file_path", "")).lower()
     return "triton" in path and path.endswith(".py")
 
 

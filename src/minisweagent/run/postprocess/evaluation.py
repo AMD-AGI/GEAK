@@ -33,6 +33,42 @@ from minisweagent.run.utils.git_safe_env import get_git_safe_env
 
 logger = logging.getLogger(__name__)
 
+_SPEEDUP_DIVERGENCE_CAP = 5.0
+_BENCHMARK_OVERHEAD_THRESHOLD = 10.0
+
+
+def _load_baseline_metrics(pp_dir: Path | None) -> dict[str, Any] | None:
+    if pp_dir is None:
+        return None
+    path = pp_dir / "baseline_metrics.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _get_speedup_cap(pp_dir: Path | None) -> float | None:
+    baseline_metrics = _load_baseline_metrics(pp_dir)
+    if baseline_metrics is None:
+        return None
+
+    profiler_us = baseline_metrics.get("profiler_duration_us")
+    benchmark_us = baseline_metrics.get("benchmark_duration_us")
+    if not profiler_us or profiler_us <= 0 or not benchmark_us or benchmark_us <= 0:
+        return None
+
+    overhead_ratio = benchmark_us / profiler_us
+    if overhead_ratio <= _BENCHMARK_OVERHEAD_THRESHOLD:
+        return None
+
+    logger.debug(
+        "Baseline benchmark/profiler ratio: %.1fx (benchmark=%.1f us, profiler=%.1f us)",
+        overhead_ratio, benchmark_us, profiler_us,
+    )
+    return overhead_ratio
+
 
 class PatchApplyError(Exception):
     """Raised when a patch fails to apply to the evaluation worktree."""
@@ -66,6 +102,13 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
 
     repo = Path(repo_root).resolve()
     is_git = (repo / ".git").exists()
+    if is_git:
+        head_check = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo), capture_output=True, text=True,
+        )
+        if head_check.returncode != 0:
+            is_git = False
 
     git_env = get_git_safe_env(output_dir)
     if is_git:
@@ -329,7 +372,7 @@ def run_correctness_and_benchmark(
 
         _check_config_mismatch(candidate_stdout, baseline_text, round_eval, section_key)
         if not round_eval[section_key].get("config_mismatch"):
-            _compute_verified_speedup(candidate_stdout, baseline_text, round_eval, section_key)
+            _compute_verified_speedup(candidate_stdout, baseline_text, round_eval, section_key, pp_dir)
 
         logger.info("%s: PASS", baseline_section_name)
         break
@@ -344,19 +387,35 @@ def _compute_verified_speedup(
     baseline_text: str,
     round_eval: dict[str, Any],
     section_key: str,
+    pp_dir: Path | None = None,
 ) -> None:
-    """Compute verified speedup from latency measurements."""
     candidate_ms = extract_latency_ms(candidate_stdout)
     baseline_ms = extract_latency_ms(baseline_text)
 
     if not candidate_ms or not baseline_ms or baseline_ms <= 0:
-        logger.warning("Could not extract latency: candidate_ms=%s, baseline_ms=%s", candidate_ms, baseline_ms)
+        logger.warning(
+            "Could not extract latency: candidate_ms=%s, baseline_ms=%s",
+            candidate_ms, baseline_ms,
+        )
         return
 
     verified_speedup = baseline_ms / candidate_ms
-    round_eval[section_key]["verified_speedup"] = round(verified_speedup, 4)
     round_eval[section_key]["candidate_ms"] = candidate_ms
     round_eval[section_key]["baseline_ms"] = baseline_ms
+
+    speedup_cap = _get_speedup_cap(pp_dir)
+    if speedup_cap is not None and verified_speedup > speedup_cap:
+        logger.warning(
+            "Benchmark speedup (%.2fx) exceeds baseline overhead ratio (%.1fx). "
+            "Capping verified speedup to %.1fx.",
+            verified_speedup, speedup_cap, speedup_cap,
+        )
+        round_eval[section_key]["benchmark_speedup_raw"] = round(verified_speedup, 4)
+        round_eval[section_key]["speedup_capped"] = True
+        round_eval[section_key]["overhead_ratio"] = round(speedup_cap, 2)
+        verified_speedup = speedup_cap
+
+    round_eval[section_key]["verified_speedup"] = round(verified_speedup, 4)
     logger.info(f"  Verified speedup: {verified_speedup:.4f}x ({baseline_ms:.4f} ms -> {candidate_ms:.4f} ms)")
 
 
@@ -395,6 +454,33 @@ def _check_config_mismatch(
             round_eval[section_key]["shape_count_warning"] = f"baseline={baseline_shapes}, candidate={candidate_shapes}"
     else:
         logger.debug("_check_config_mismatch: neither side has config lines; skipping comparison.")
+
+
+def _cross_validate_with_profiler(
+    baseline_metrics: dict[str, Any],
+    optimized_metrics: dict[str, Any],
+    round_eval: dict[str, Any],
+) -> None:
+    base_us = baseline_metrics.get("profiler_duration_us") or baseline_metrics.get("duration_us")
+    opt_us = optimized_metrics.get("duration_us")
+    if not base_us or base_us <= 0 or not opt_us or opt_us <= 0:
+        return
+
+    profiler_speedup = base_us / opt_us
+    for key in ("full_benchmark", "benchmark"):
+        section = round_eval.get(key)
+        if not isinstance(section, dict):
+            continue
+        if not section.get("speedup_capped"):
+            continue
+        old_speedup = section.get("verified_speedup", 0)
+        section["profiler_speedup"] = round(profiler_speedup, 4)
+        section["verified_speedup"] = round(profiler_speedup, 4)
+        logger.info(
+            "Cross-validated %s speedup with profiler: %.4fx -> %.4fx "
+            "(profiler baseline=%.1f us, optimized=%.1f us)",
+            key, old_speedup, profiler_speedup, base_us, opt_us,
+        )
 
 
 def run_profile(
@@ -478,6 +564,8 @@ def run_profile(
     comparison_path.write_text(json.dumps(comparison, indent=2, default=str))
     round_eval["profile_comparison"] = comparison
     logger.info("Profile comparison saved to %s", comparison_path)
+
+    _cross_validate_with_profiler(baseline_metrics, optimized_metrics, round_eval)
 
 
 def write_eval_results(
@@ -601,7 +689,7 @@ def evaluate_round_best(
 
     if not candidates:
         # Fallback: check for best_patch.diff directly in the round directory.
-        # The heterogeneous orchestrator LLM sometimes creates patches directly
+        # The planned-mode orchestrator LLM sometimes creates patches directly
         # (e.g. when dispatch_tasks fails and it edits kernel.py manually).
         for diff_name in ("best_patch.diff", "best_patch.patch"):
             fallback_patch = results_dir / diff_name

@@ -139,6 +139,51 @@ class TestParseTaskInfo:
         out = tp.parse_task_info("t", self._Model(json.dumps(payload)))
         assert out["repo"] == str(tmp_path.resolve())
 
+    def test_test_harness_field_is_extracted(self, tmp_path: Path) -> None:
+        """User-provided test harness paths from the prompt must flow
+        through to ``parse_task_info`` output so the CLI can wire them
+        into ``ctx.harness`` (HarnessPhase Layer 2)."""
+        harness_file = tmp_path / "test_kernel_harness.py"
+        harness_file.write_text("# stub\n")
+
+        payload = {
+            "kernel_name": None,
+            "kernel_url": None,
+            "kernel_type": "triton",
+            "repo": None,
+            "test_command": None,
+            "test_harness": str(harness_file),
+            "metric": None,
+            "num_parallel": None,
+            "gpu_ids": None,
+            "output_dir": None,
+            "model": None,
+            "config": None,
+        }
+        out = tp.parse_task_info("t", self._Model(json.dumps(payload)))
+        assert "test_harness" in out
+        assert out["test_harness"] == str(harness_file.resolve())
+
+    def test_missing_test_harness_remains_null(self) -> None:
+        """When the LLM doesn't extract a harness, ``test_harness`` must
+        still be present in the output (as ``None``) so callers can
+        safely ``parsed_config.get("test_harness")`` without KeyError."""
+        payload = {
+            "kernel_name": "x",
+            "kernel_url": None,
+            "kernel_type": "other",
+            "repo": None,
+            "test_command": None,
+            "metric": None,
+            "num_parallel": None,
+            "gpu_ids": None,
+            "output_dir": None,
+            "model": None,
+            "config": None,
+        }
+        out = tp.parse_task_info("t", self._Model(json.dumps(payload)))
+        assert out["test_harness"] is None
+
 
 class TestParsePipelineParams:
     class _Model:
@@ -152,22 +197,81 @@ class TestParsePipelineParams:
         payload = {
             "kernel_url": "/tmp/a.hip",
             "preprocess_dir": None,
-            "heterogeneous": True,
+            "mode": "planned",
             "max_rounds": 3,
             "start_round": 1,
             "pipeline_intent": True,
         }
         out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
-        assert out["heterogeneous"] is True
+        assert out["mode"] == "planned"
         assert out["max_rounds"] == 3
         assert out["start_round"] == 1
         assert out["pipeline_intent"] is True
+
+    def test_legacy_heterogeneous_bool_translates_to_mode(self) -> None:
+        # Backward-compat: older LLM extractors still emit the bool.
+        payload_true = {
+            "kernel_url": None,
+            "preprocess_dir": None,
+            "heterogeneous": True,
+            "max_rounds": None,
+            "start_round": None,
+            "pipeline_intent": True,
+        }
+        out_true = tp.parse_pipeline_params("t", self._Model(json.dumps(payload_true)))
+        assert out_true["mode"] == "planned"
+
+        payload_false = dict(payload_true)
+        payload_false["heterogeneous"] = False
+        out_false = tp.parse_pipeline_params("t", self._Model(json.dumps(payload_false)))
+        assert out_false["mode"] == "fixed"
+
+    def test_legacy_translate_mode_string_is_dropped(self) -> None:
+        # Older prompts may still emit mode="translate" even though
+        # translation is now a preprocess phase signalled by
+        # target_language.  Drop it rather than crash.
+        payload = {
+            "kernel_url": None,
+            "preprocess_dir": None,
+            "mode": "translate",
+            "max_rounds": None,
+            "start_round": None,
+            "pipeline_intent": True,
+        }
+        out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
+        assert out["mode"] is None
+
+    def test_target_language_is_parsed_when_present(self) -> None:
+        payload = {
+            "kernel_url": None,
+            "preprocess_dir": None,
+            "mode": None,
+            "max_rounds": None,
+            "start_round": None,
+            "pipeline_intent": True,
+            "target_language": "TRITON",
+        }
+        out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
+        assert out["target_language"] == "triton"
+
+    def test_target_language_unknown_value_drops_to_none(self) -> None:
+        payload = {
+            "kernel_url": None,
+            "preprocess_dir": None,
+            "mode": None,
+            "max_rounds": None,
+            "start_round": None,
+            "pipeline_intent": True,
+            "target_language": "WebGL",  # not in the whitelist
+        }
+        out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
+        assert out["target_language"] is None
 
     def test_coerces_numeric_strings(self) -> None:
         payload = {
             "kernel_url": None,
             "preprocess_dir": None,
-            "heterogeneous": None,
+            "mode": None,
             "max_rounds": "10",
             "start_round": "2",
             "pipeline_intent": False,
@@ -180,7 +284,7 @@ class TestParsePipelineParams:
         payload = {
             "kernel_url": None,
             "preprocess_dir": None,
-            "heterogeneous": None,
+            "mode": None,
             "max_rounds": "nope",
             "start_round": None,
             "pipeline_intent": False,

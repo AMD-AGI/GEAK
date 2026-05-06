@@ -92,17 +92,12 @@ Repository = "https://github.com/SWE-agent/mini-SWE-agent"
 "Bug Tracker" = "https://github.com/SWE-agent/mini-SWE-agent/issues"
 
 [project.scripts]
-geak = "minisweagent.run.mini:app"
-geak-preprocess = "minisweagent.run.preprocess.preprocessor:main"
+# Single user-facing entry point.  All pipeline stages
+# (discover -> harness -> baseline -> profile -> optimize) are reachable via
+# `geak -t "<prompt>"`; the underlying modules remain callable programmatically.
+geak = "minisweagent.cli:cli_entry"
+# Invoked by generated harness / commandment shell scripts as a real subprocess.
 kernel-profile = "minisweagent.run.preprocess.kernel_profile:main"
-commandment = "minisweagent.run.preprocess.commandment:main"
-validate-commandment = "minisweagent.tools.validate_commandment:main"
-run-harness = "minisweagent.run.preprocess.run_harness:main"
-baseline-metrics = "minisweagent.run.preprocess.baseline:main"
-codebase-context = "minisweagent.run.preprocess.codebase_context:main"
-resolve-kernel-url = "minisweagent.run.preprocess.resolve_kernel_url:main"
-geak-orchestrate = "minisweagent.run.orchestrator:main"
-task-generator = "minisweagent.agents.heterogeneous.task_generator:main"
 
 [tool.setuptools]
 include-package-data = true

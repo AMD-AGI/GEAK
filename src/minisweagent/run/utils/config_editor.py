@@ -11,6 +11,49 @@ from minisweagent.run.utils.task_parser import generate_patch_output_dir
 logger = logging.getLogger(__name__)
 
 
+def _parse_gpu_ids_string(gpu_ids: str | list[int] | list[str] | None) -> list[int]:
+    """Parse a gpu_ids spec into a list of ints.
+
+    Accepts multiple human-friendly forms, all seen in the wild:
+
+      - ``"4,5,6,7"``       — comma-separated
+      - ``"4-7"``           — range (inclusive)
+      - ``"0,1,4-7"``       — mixed
+      - ``[4, 5, 6, 7]``    — already a list of ints
+      - ``"4"``             — single GPU
+      - ``None`` / ``""``   — empty list
+
+    This helper is what makes ``Use GPUs 4-7`` in the user's ``-t`` prompt
+    actually imply ``num_parallel=4`` without requiring the user to spell
+    it out.  Unknown syntax raises ``ValueError``; caller should catch
+    and fall back to the explicit num_parallel value.
+    """
+    if gpu_ids is None or gpu_ids == "":
+        return []
+    if isinstance(gpu_ids, list):
+        return [int(x) for x in gpu_ids]
+    s = str(gpu_ids).strip()
+    if not s:
+        return []
+
+    result: list[int] = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            lo_i, hi_i = int(lo.strip()), int(hi.strip())
+            if lo_i > hi_i:
+                raise ValueError(
+                    f"GPU range {part!r} has lo > hi ({lo_i} > {hi_i})"
+                )
+            result.extend(range(lo_i, hi_i + 1))
+        else:
+            result.append(int(part))
+    return result
+
+
 def input_with_timeout(prompt: str, timeout_s: float, default: str) -> tuple[str, bool]:
     sys.stdout.write(prompt)
     sys.stdout.flush()
@@ -301,6 +344,23 @@ def apply_config_changes(
     if not gpu_ids and parsed_config.get("gpu_ids"):
         gpu_ids = parsed_config["gpu_ids"]
         filled_from_parsed.append("gpu_ids")
+
+    # Auto-derive num_parallel from gpu_ids count when the LLM extracted a
+    # GPU list but did not extract num_parallel.  User-friendly: a prompt
+    # like "Use GPUs 4-7" or "Use GPUs 4,5,6,7" should IMPLICITLY mean
+    # num_parallel=4 without the user having to spell it out.  Only kicks
+    # in when num_parallel is still None — explicit values from CLI or
+    # from parsed_config always win.
+    if num_parallel is None and gpu_ids:
+        try:
+            _gpu_list = _parse_gpu_ids_string(gpu_ids)
+            if len(_gpu_list) > 0:
+                num_parallel = len(_gpu_list)
+                filled_from_parsed.append(f"num_parallel=len(gpu_ids)={num_parallel}")
+        except Exception as exc:
+            logger.debug(
+                "Failed to derive num_parallel from gpu_ids=%r: %s", gpu_ids, exc
+            )
 
     if not patch_output and parsed_config.get("_patch_output_dir"):
         patch_output = Path(parsed_config["_patch_output_dir"])
@@ -657,13 +717,14 @@ def prompt_missing_pipeline_params(
 
 def _display_pipeline_params(params: dict, console) -> None:
     """Display extracted pipeline parameters."""
+    # Accept legacy ``heterogeneous`` bool as a fallback for older extracts.
+    mode_value = params.get("mode")
+    if mode_value is None and params.get("heterogeneous") is not None:
+        mode_value = "planned" if params["heterogeneous"] else "fixed"
     fields = [
         ("kernel_url", params.get("kernel_url") or "[dim]not detected[/dim]"),
         ("preprocess_dir", params.get("preprocess_dir") or "[dim]not set[/dim]"),
-        (
-            "heterogeneous",
-            str(params.get("heterogeneous")) if params.get("heterogeneous") is not None else "[dim]auto-detect[/dim]",
-        ),
+        ("mode", str(mode_value) if mode_value is not None else "[dim]auto[/dim]"),
         ("max_rounds", str(params.get("max_rounds")) if params.get("max_rounds") is not None else "[dim]default[/dim]"),
         ("start_round", str(params.get("start_round")) if params.get("start_round") is not None else "[dim]1[/dim]"),
     ]

@@ -1,9 +1,9 @@
 """Shared helpers for the GEAK preprocessing and orchestration pipelines.
 
-All CLI entry points (``geak``, ``geak-preprocess``, ``geak-orchestrate``,
-``run-tasks``, ``task-generator``) import from this module so that harness
-extraction, validation, profiling, model loading, agent filtering, and
-pipeline-context injection are always identical regardless of entry point.
+Pipeline stages (discover -> harness -> baseline -> profile -> optimize) all
+import from this module so that harness extraction, validation, profiling,
+model loading, agent filtering, and pipeline-context injection are always
+identical regardless of where they are invoked from.
 """
 
 from __future__ import annotations
@@ -21,12 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from minisweagent import get_repo_root
-from minisweagent.run.utils.gpu_arch import (
-    detect_gpu_arch,
-    is_wmma_capable,
-    rdna_arch_context,
-    rdna_compute_bound_guidance,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -189,10 +183,17 @@ def extract_harness_path(test_command: str) -> str:
 
 
 def _preferred_harness_path(log_dir: Path, kernel_path: Path | None) -> Path:
+    """Resolve the on-disk path for a MATERIALIZED harness.
+
+    Uses the ``_geak_`` ownership-prefixed naming convention so the
+    output cannot collide with user files (a user may legitimately
+    have a hand-written ``test_<stem>_harness.py`` in the same
+    directory).
+    """
     if kernel_path is not None:
         stem = kernel_path.stem or "kernel"
-        return log_dir / f"test_{stem}_harness.py"
-    return log_dir / "geak_test_harness.py"
+        return log_dir / f"_geak_materialized_harness_{stem}.py"
+    return log_dir / "_geak_materialized_harness.py"
 
 
 def _materialized_harness_bootstrap(
@@ -699,7 +700,7 @@ def _search_workload_guidance(metrics: dict) -> list[str]:
     ]
 
 
-def _bottleneck_guidance(bottleneck: str, metrics: dict, arch: str = "") -> list[str]:
+def _bottleneck_guidance(bottleneck: str, metrics: dict) -> list[str]:
     """Return actionable optimization guidance lines based on bottleneck type."""
     bn_lower = bottleneck.lower().strip()
     bn_aliases = {
@@ -711,8 +712,6 @@ def _bottleneck_guidance(bottleneck: str, metrics: dict, arch: str = "") -> list
     bn_lower = bn_aliases.get(bn_lower, bn_lower)
     for key, text in _BOTTLENECK_GUIDANCE.items():
         if key in bn_lower:
-            if key == "compute-bound" and is_wmma_capable(arch):
-                text = rdna_compute_bound_guidance()
             lines = text.strip().splitlines()
             lines.extend(_search_workload_guidance(metrics))
             lines.append("")
@@ -757,9 +756,6 @@ def _gpu_arch_context(profiling_path: str) -> list[str]:
     hbm_bw = gpu_info.get("peak_hbm_bandwidth_gbps", gpu_info.get("hbm_bandwidth", "?"))
     lds_per_cu = gpu_info.get("lds_per_cu_kb", 64)
     vgprs = gpu_info.get("vgprs_per_cu", 512)
-    rdna_ctx = rdna_arch_context(gpu_info, arch)
-    if rdna_ctx is not None:
-        return rdna_ctx
 
     return [
         f"## GPU Architecture: {name} ({arch})",
@@ -843,7 +839,7 @@ def inject_pipeline_context(
                 )
         ctx.append("")
 
-        ctx.extend(_bottleneck_guidance(str(bn), baseline_metrics, arch=detect_gpu_arch()))
+        ctx.extend(_bottleneck_guidance(str(bn), baseline_metrics))
 
     if profiling_path and Path(profiling_path).exists():
         ctx.append(f"PROFILING DATA: {profiling_path}")

@@ -1,34 +1,24 @@
 """Agent with git patch saving and test execution capability."""
 
-import concurrent.futures
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
-import sys
-import threading
-import time
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from minisweagent import Environment, Model
-
-logger = logging.getLogger(__name__)
 from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.agents.select_patch_agent import run_select_patch
-from minisweagent.run.task_file import _neutralize_nested_git_repos, create_worktree
-from minisweagent.run.utils.parallel_helpers import (
-    _stdout_lock as _stdout_lock,
-)
+from minisweagent.run.task_file import _neutralize_nested_git_repos
 from minisweagent.run.utils.parallel_helpers import (
     redirect_output_to_file,
-    run_parallel_heterogeneous,
     run_pool,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -52,7 +42,6 @@ class ParallelAgentConfig(AgentConfig):
     repo: Path | None = None
     gpu_ids: list[int] | None = None
     agent_class: type | None = None
-    agent_specs: list | None = None  # list[AgentSpec] for heterogeneous parallel
     tasks: list | None = None  # list[AgentTask] for GPU pool mode
     # Strategy agent compatibility
     strategy_file_path: str | None = None
@@ -88,7 +77,9 @@ class ParallelAgent(DefaultAgent):
         output = kwargs.get("output")
         save_traj_fn = kwargs.get("save_traj_fn")
 
-        # Unified logic: always use run_parallel with git worktree management
+        # Unified logic: always route through run_pool via the task-based
+        # run_parallel entry point.  Config cleanup drops the pool-wiring keys
+        # so only agent-relevant settings flow into the per-task ``agent_config``.
         self.run_parallel(
             num_parallel=num_parallel,
             repo_path=repo_path,
@@ -98,7 +89,7 @@ class ParallelAgent(DefaultAgent):
             agent_config={
                 k: v
                 for k, v in self.config.__dict__.items()
-                if k not in ("num_parallel", "repo", "gpu_ids", "agent_class", "agent_specs", "tasks")
+                if k not in ("num_parallel", "repo", "gpu_ids", "agent_class", "tasks")
             },
             model_factory=model_factory,
             env_factory=env_factory,
@@ -107,7 +98,6 @@ class ParallelAgent(DefaultAgent):
             gpu_ids=self.config.gpu_ids,
             save_traj_fn=save_traj_fn,
             console=console,
-            agent_specs=self.config.agent_specs,
             tasks=self.config.tasks,
         )
 
@@ -117,7 +107,17 @@ class ParallelAgent(DefaultAgent):
         if console:
             console.print(f"\n[bold green]Selecting best patch from {num_parallel} parallel runs...[/bold green]")
         logger.info("Selecting best patch from %d parallel runs...", num_parallel)
-        results_dir = base_patch_dir / "results" / "round_1"
+
+        # Cross-N rollup: the per-worker artefacts (parallel_0/, parallel_1/, ...
+        # each containing patch_*.patch + best_results.json) sit DIRECTLY under
+        # ``base_patch_dir``.  The legacy hardcoded ``results/round_1`` subdir
+        # was a planned-mode artifact that doesn't exist in the fixed-mode
+        # layout, which caused ``SelectPatchAgent`` to come up empty even when
+        # individual workers had produced verified speedups.  Prefer
+        # ``base_patch_dir`` directly; fall back to legacy ``results/round_1``
+        # only when that layout actually exists (rare, planned-mode inheritance).
+        legacy_round_dir = base_patch_dir / "results" / "round_1"
+        results_dir = legacy_round_dir if legacy_round_dir.is_dir() else base_patch_dir
         best_result = self._select_best_from_parallel_runs(results_dir, num_parallel, metric, model_factory)
         if best_result and best_result.llm_conclusion:
             if console:
@@ -372,249 +372,34 @@ class ParallelAgent(DefaultAgent):
         redirect_output_fn=redirect_output_to_file,
         save_traj_fn=None,
         console=None,
-        agent_specs: list | None = None,
         tasks: list | None = None,
     ) -> list[tuple[int, Any, Any, Any]]:
         """Run multiple parallel agents and return their results.
 
-        Supports three modes (checked in priority order):
-        - Pool (preferred): pass tasks (list[AgentTask]) for M tasks on N GPUs.
-        - Heterogeneous (legacy): pass agent_specs (list[AgentSpec]).
-        - Homogeneous (default): num_parallel identical agents, each with 1 GPU.
+        Callers must supply ``tasks`` (a ``list[AgentTask]``).  All
+        execution modes — fixed (identical copies), planned
+        (planner-generated per-task bodies), translate — flow through
+        this task-based entry point.  Identical-copies workloads use
+        ``pool_runner.build_fixed_tasks`` to materialise their task list.
         """
-        # Pool mode: M tasks on N GPU slots (preferred)
-        if tasks:
-            return run_pool(
-                tasks=tasks,
-                gpu_ids=gpu_ids or [0],
-                repo_path=repo_path,
-                is_git_repo=is_git_repo,
-                base_task_content=task_content,
-                agent_config=agent_config,
-                model_factory=model_factory,
-                env_factory=env_factory,
-                base_patch_dir=base_patch_dir,
-                output=output,
-                redirect_output_fn=redirect_output_fn,
-                save_traj_fn=save_traj_fn,
-                console=console,
+        if not tasks:
+            raise ValueError(
+                "ParallelAgent.run_parallel requires a non-empty `tasks` list; "
+                "use pool_runner.build_fixed_tasks to materialise one for "
+                "identical-copies (fixed-mode) workloads."
             )
-
-        # Heterogeneous mode: use agent_specs if provided (legacy)
-        if agent_specs:
-            return run_parallel_heterogeneous(
-                agent_specs=agent_specs,
-                repo_path=repo_path,
-                is_git_repo=is_git_repo,
-                task_content=task_content,
-                agent_config=agent_config,
-                model_factory=model_factory,
-                env_factory=env_factory,
-                base_patch_dir=base_patch_dir,
-                output=output,
-                redirect_output_fn=redirect_output_fn,
-                save_traj_fn=save_traj_fn,
-                console=console,
-            )
-
-        # Homogeneous mode (original behavior)
-        logger.debug("Running %d parallel patch agents...", num_parallel)
-
-        base_patch_dir = base_patch_dir.resolve()
-        results_dir = base_patch_dir / "results" / "round_1"
-        results_dir.mkdir(parents=True, exist_ok=True)
-        worktree_base = results_dir / "worktrees"
-        worktree_base.mkdir(parents=True, exist_ok=True)
-        repo_path_resolved = repo_path.resolve()
-        repo_path_str = str(repo_path_resolved)
-
-        # Write task files (aligned with heterogeneous tasks/ structure)
-        tasks_dir = base_patch_dir / "tasks" / "round_1"
-        tasks_dir.mkdir(parents=True, exist_ok=True)
-        for i in range(num_parallel):
-            task_path = tasks_dir / f"parallel_{i}.md"
-            task_path.write_text(f"---\nlabel: parallel_{i}\n---\n\n{task_content}\n")
-        logger.debug("Wrote %d task files to %s", num_parallel, tasks_dir)
-
-        # Initialize non-git repos as git repos for unified worktree management
-        if not is_git_repo:
-            logger.info("Initializing non-git repo as git for worktree management...")
-            cls._init_as_git_repo(repo_path_resolved)
-            is_git_repo = True  # Now it's a git repo
-
-        if gpu_ids and len(gpu_ids) < num_parallel:
-            logger.warning(
-                "Only %d GPU IDs for %d parallel agents; some agents will not have GPU isolation.",
-                len(gpu_ids),
-                num_parallel,
-            )
-
-        def run_single_agent(agent_id: int):
-            """Run a single parallel agent instance."""
-            # All repos use git worktree (non-git repos are initialized as git above)
-            worktree_path = create_worktree(repo_path, worktree_base / f"slot_{agent_id}")
-            worktree_path_str = str(worktree_path.resolve())
-
-            logger.debug("Created worktree for agent %d: %s", agent_id, worktree_path)
-
-            parallel_patch_dir = (results_dir / f"parallel_{agent_id}").resolve()
-            parallel_patch_dir.mkdir(parents=True, exist_ok=True)
-            parallel_agent_config = agent_config.copy()
-            parallel_agent_config["patch_output_dir"] = str(parallel_patch_dir)
-            # Force yolo mode for parallel agents (no interactive confirmation prompts)
-            parallel_agent_config["mode"] = "yolo"
-            parallel_agent_config["confirm_exit"] = False
-
-            log_file = parallel_patch_dir / f"task_{agent_id}.log"
-
-            # test_command should use relative paths, executed from worktree cwd
-            # Path replacement kept for backward compatibility with absolute paths
-            if parallel_agent_config.get("test_command"):
-                parallel_agent_config["test_command"] = cls._replace_paths(
-                    parallel_agent_config["test_command"], repo_path, worktree_path
-                )
-
-            task_with_repo = cls._replace_paths(task_content, repo_path, worktree_path)
-
-            # Create model and environment
-            parallel_model = model_factory()
-            base_env = env_factory()
-            env_config_dict = base_env.config.__dict__.copy() if hasattr(base_env, "config") else {}
-            env_config_dict["cwd"] = worktree_path_str
-            # Create a NEW dict to avoid shared-reference race across threads
-            new_env = dict(env_config_dict.get("env") or {})
-            new_env[repo_path_str] = worktree_path_str
-            new_env["GEAK_WORK_DIR"] = worktree_path_str
-            new_env["GEAK_REPO_ROOT"] = repo_path_str
-            if gpu_ids and agent_id < len(gpu_ids):
-                gpu_id = gpu_ids[agent_id]
-                new_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
-                new_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-                new_env["GEAK_GPU_DEVICE"] = str(gpu_id)
-                logger.debug("Parallel agent %d assigned GPU %d", agent_id, gpu_id)
-                if console:
-                    with _stdout_lock:
-                        console.print(f"[bold green]Parallel agent {agent_id} using GPU {gpu_id}[/bold green]")
-                        if hasattr(sys.stdout, "flush"):
-                            sys.stdout.flush()
-            env_config_dict["env"] = new_env
-            parallel_env = type(base_env)(**env_config_dict)
-
-            parallel_output = None
-            if output:
-                parallel_output = output.parent / f"{output.stem}_parallel_{agent_id}{output.suffix}"
-
-            agent = agent_class(parallel_model, parallel_env, **parallel_agent_config)
-            # Set agent attributes if they exist (for ParallelAgent compatibility)
-            if hasattr(agent, "extra_template_vars"):
-                agent.extra_template_vars[repo_path_str] = worktree_path_str
-            if hasattr(agent, "base_repo_path"):
-                agent.base_repo_path = repo_path_resolved
-                # Re-initialize test_perf context with updated base_repo_path
-                if hasattr(agent, "_setup_save_and_test_context"):
-                    agent._setup_save_and_test_context()
-            if hasattr(agent, "log_file"):
-                agent.log_file = log_file
-
-            with open(log_file, "w", encoding="utf-8") as f:
-                f.write(f"Agent {agent_id} Conversation Log\n")
-                f.write("=" * 60 + "\n\n")
-
-            init_msg = (
-                f"\n{'=' * 60}\n"
-                "[ParallelAgent] Starting with patch saving enabled\n"
-                f"[ParallelAgent] Test command: {parallel_agent_config.get('test_command')}\n"
-                f"[ParallelAgent] Patch output directory: {parallel_agent_config.get('patch_output_dir')}\n"
-                f"[ParallelAgent] Metric extraction: {parallel_agent_config.get('metric') or 'Automatic (LLM will extract performance metrics and calculate speedup)'}\n"
-                f"{'=' * 60}\n\n"
-            )
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write(init_msg)
-                f.flush()
-
-            _task_label = tasks[agent_id].label if tasks and agent_id < len(tasks) else f"task_{agent_id}"
-            logger.info(
-                "[dim]Sub-agent %d (%s) started on GPU %s[/dim]",
-                agent_id,
-                _task_label,
-                new_env.get("GEAK_GPU_DEVICE", "?"),
-            )
-            _agent_t0 = time.monotonic()
-            exit_status, result, extra_info = None, None, None
-            with redirect_output_fn(log_file):
-                try:
-                    exit_status, result = agent.run(task_with_repo, _is_parallel_mode=True)
-                except Exception as e:
-                    exit_status, result = type(e).__name__, str(e)
-                    extra_info = {"traceback": traceback.format_exc()}
-                    # Write error to log file
-                    with open(log_file, "a", encoding="utf-8") as f:
-                        f.write(f"\n\nERROR: {exit_status}: {result}\n")
-                        f.write(f"Traceback:\n{extra_info['traceback']}\n")
-                finally:
-                    if parallel_output and save_traj_fn:
-                        save_traj_fn(
-                            agent, parallel_output, exit_status=exit_status, result=result, extra_info=extra_info
-                        )
-            _agent_elapsed = time.monotonic() - _agent_t0
-            logger.info(
-                "Sub-agent %d (%s) finished in %.0fs (exit=%s)",
-                agent_id,
-                _task_label,
-                _agent_elapsed,
-                exit_status,
-            )
-
-            return agent_id, agent, exit_status, result
-
-        # Run parallel agents with periodic progress reporting
-        results = []
-        _progress_stop = threading.Event()
-        _dispatch_t0 = time.monotonic()
-
-        def _report_progress():
-            """Periodically scan patch dirs and report sub-agent progress."""
-            _interval = float(os.environ.get("GEAK_PROGRESS_INTERVAL", "30"))
-            _prev_patches: dict[str, set[str]] = {}  # label -> set of patch filenames
-            while not _progress_stop.wait(_interval):
-                elapsed = time.monotonic() - _dispatch_t0
-                patches_by_agent = []
-                new_patch_paths: list[str] = []
-                for i in range(num_parallel):
-                    _label = tasks[i].label if tasks and i < len(tasks) else f"task_{i}"
-                    pdir = results_dir / (f"parallel_{i}" if not tasks else _label)
-                    cur_patches = {p.name for p in pdir.glob("*.patch")} if pdir.is_dir() else set()
-                    count = len(cur_patches)
-                    patches_by_agent.append((_label, count))
-                    prev = _prev_patches.get(_label, set())
-                    for pname in sorted(cur_patches - prev):
-                        new_patch_paths.append(str(pdir / pname))
-                    _prev_patches[_label] = cur_patches
-                total_patches = sum(c for _, c in patches_by_agent)
-                summary = ", ".join(f"{l}: {c}" for l, c in patches_by_agent if c > 0)
-                logger.info(
-                    "[dim]\\[running %.1fmin] Sub-agents working: %d total patches%s[/dim]",
-                    elapsed / 60,
-                    total_patches,
-                    f" ({summary})" if summary else "",
-                    extra={"progress_tick": True},
-                )
-                for pp in new_patch_paths:
-                    logger.debug("[dim]  New patch: %s[/dim]", pp)
-
-        _progress_thread = threading.Thread(target=_report_progress, daemon=True)
-        _progress_thread.start()
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel) as executor:
-            futures = {executor.submit(run_single_agent, i): i for i in range(num_parallel)}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    result = future.result()
-                    results.append(result)
-                except Exception as e:
-                    agent_id = futures[future]
-                    logger.error("Error in parallel agent %d: %s", agent_id, e, exc_info=True)
-
-        _progress_stop.set()
-        _progress_thread.join(timeout=2)
-        return results
+        return run_pool(
+            tasks=tasks,
+            gpu_ids=gpu_ids or [0],
+            repo_path=repo_path,
+            is_git_repo=is_git_repo,
+            base_task_content=task_content,
+            agent_config=agent_config,
+            model_factory=model_factory,
+            env_factory=env_factory,
+            base_patch_dir=base_patch_dir,
+            output=output,
+            redirect_output_fn=redirect_output_fn,
+            save_traj_fn=save_traj_fn,
+            console=console,
+        )

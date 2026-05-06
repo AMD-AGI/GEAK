@@ -1,0 +1,31 @@
+# KernelAnalysisAgent config — consumed by SubagentBase._load_config.
+#
+# Per execution plan §0.5(b): one-shot LLM subagent that produces the
+# [A]-[D] kernel-analysis rubric from kernel source + profile data +
+# optional codebase context.  Output is advisory (best-effort on
+# contract retry exhaustion, not a hard failure).
+
+name: kernel_analysis
+
+model_name: anthropic/claude-sonnet-4-5-20250929
+
+# Fallback templates — live subagent reads self.language.system_prompt
+# and ignores these unless the language bundle is incomplete.
+system_template: |
+  You are an expert GPU kernel analyst.  Given the full source of a
+  GPU kernel, its baseline profile data, and codebase context, produce
+  a structured [A]-[D] analysis rubric in markdown.  Return ONLY the
+  four required sections — no prose, no fences, no extra headers.
+
+instance_template: |
+  Produce the [A]-[D] analysis rubric for the {language_name} kernel.
+  The full instance prompt is assembled by
+  KernelAnalysisAgent._compose_analysis_prompt; this template is only
+  used when callers bypass that helper.
+
+step_limit: 1
+cost_limit: 3.0
+temperature: 0.2
+
+extra:
+  max_retries: 1

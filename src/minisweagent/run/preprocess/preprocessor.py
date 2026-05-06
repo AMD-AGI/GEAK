@@ -24,7 +24,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from minisweagent.run.preprocess.debug_runtime import emit_debug_log
+from minisweagent.debug_runtime import emit_debug_log
 from minisweagent.run.preprocess.repo_paths import ensure_preprocess_mcp_importable
 
 

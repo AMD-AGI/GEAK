@@ -1,10 +1,11 @@
-"""AgentSpec and AgentTask -- describe sub-agents for parallel execution.
+"""AgentTask -- describe a single sub-agent task for parallel execution.
 
-AgentSpec: Legacy fixed-GPU-assignment model (one spec per GPU).
-AgentTask: Decoupled model -- tasks are independent of GPU assignment.
-           The GPU pool scheduler assigns GPUs dynamically at runtime.
+``AgentTask`` is the only task shape the pipeline uses.  The GPU pool
+scheduler in ``run/utils/parallel_helpers.py::run_pool`` assigns GPUs
+dynamically at runtime; tasks are independent of GPU assignment.
 
-Used by ParallelAgent.run_parallel() to spawn agents.
+Used by ``run/pool_runner.py`` and ``ParallelAgent.run_parallel()`` to
+spawn agents.
 """
 
 from __future__ import annotations
@@ -23,10 +24,10 @@ def _agent_type_to_class() -> dict[str, type]:
 
     Lazy import to avoid circular dependencies at module level.
     """
-    from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+    from minisweagent.agents.optimization_agent import OptimizationAgent
 
     return {
-        "strategy_agent": StrategyInteractiveAgent,
+        "strategy_agent": OptimizationAgent,
     }
 
 
@@ -120,39 +121,6 @@ class AgentTask:
     step_limit: int = 0
     cost_limit: float = 0.0
     num_gpus: int = 1
-
-
-@dataclass
-class AgentSpec:
-    """Specification for a single sub-agent in a heterogeneous parallel run.
-
-    Legacy model: each spec is hard-wired to specific GPU IDs.
-    Prefer AgentTask + _run_pool() for new code.
-
-    Attributes:
-        agent_class: The agent class to instantiate (e.g. StrategyAgent).
-        gpu_ids: List of GPU device IDs assigned to this agent.
-        config: Config overrides merged into the base agent_config.
-        step_limit: Per-agent step limit (0 = inherit from parent).
-        cost_limit: Per-agent cost limit (0.0 = inherit from parent).
-        label: Human-readable label for logging (e.g. "algorithmic", "memory").
-    """
-
-    agent_class: type
-    gpu_ids: list[int] = field(default_factory=lambda: [0])
-    config: dict[str, Any] = field(default_factory=dict)
-    step_limit: int = 0
-    cost_limit: float = 0.0
-    label: str = ""
-
-    @property
-    def hip_visible_devices(self) -> str:
-        """HIP_VISIBLE_DEVICES value for this agent."""
-        return ",".join(str(g) for g in self.gpu_ids)
-
-    @property
-    def num_gpus(self) -> int:
-        return len(self.gpu_ids)
 
 
 def detect_available_gpus() -> list[int]:
