@@ -361,6 +361,18 @@ def run_task_batch(
     repo_path = Path(repo_root).resolve() if repo_root else Path.cwd()
     harness_path = meta_0.get("harness_path", "")
 
+    # When repo_root points to a large git repo (e.g. AgentKernelArena),
+    # using it as-is creates 20GB worktrees and git diff timeouts.
+    # Fall back to the kernel's parent directory — a small, self-contained
+    # directory that gets copied and bootstrapped as a fresh git repo.
+    _kernel_path = meta_0.get("kernel_path")
+    if _kernel_path:
+        _kp = Path(_kernel_path)
+        _kernel_dir = (_kp.parent if _kp.is_file() else _kp).resolve()
+        if _kernel_dir != repo_path and (repo_path / ".git").exists():
+            logger.info("Using kernel dir %s instead of git repo root %s for worktrees", _kernel_dir, repo_path)
+            repo_path = _kernel_dir
+
     is_git = False
     if repo_path.is_dir():
         is_git = (repo_path / ".git").exists() or (repo_path / ".git").is_file()

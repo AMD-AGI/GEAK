@@ -159,7 +159,7 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
     return result
 
 
-_VALID_MODES: frozenset[str] = frozenset({"fixed", "planned", "auto"})
+_VALID_MODES: frozenset[str] = frozenset({"fixed", "planned", "mixed"})
 
 
 def _normalize_mode_field(raw: object) -> str | None:
@@ -180,6 +180,8 @@ def _normalize_mode_field(raw: object) -> str | None:
         if canon in _VALID_MODES:
             return canon
         # Tolerate legacy vocabulary
+        if canon == "auto":
+            return "mixed"
         if canon == "heterogeneous":
             return "planned"
         if canon == "homogeneous":
@@ -314,7 +316,7 @@ def parse_pipeline_params(task_content: str, model) -> dict:
     Extracts:
     - kernel_url: Path or URL to the specific kernel file to optimize
     - preprocess_dir: Path to existing preprocessing artifacts
-    - mode: Execution mode (fixed | planned | auto).  Legacy boolean
+    - mode: Execution mode (fixed | planned | mixed).  Legacy boolean
       ``heterogeneous`` is accepted and translated to planned/fixed.
       ``translate`` is deliberately NOT a valid mode here — translation
       is a preprocess phase signalled by ``target_language``.

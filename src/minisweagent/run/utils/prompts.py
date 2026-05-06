@@ -74,7 +74,7 @@ Extract the following (return null if not found or not applicable):
 3. mode: Execution mode for the optimization run.  One of:
      - "fixed"   — run the same task body across N parallel agents (identical copies).  Set if the user asks for replicated / parallel / best-of-N runs of a single strategy.
      - "planned" — let the planner LLM generate N diverse strategies and run each in its own agent.  Set if the user asks for "diverse strategies", "planner", or wording that suggests multiple distinct approaches.
-     - "auto"    — let the pipeline pick fixed vs planned.  This is the default; only set another value if the user is explicit.
+     - "mixed"   — split workers 50/50 between fixed (identical) and planned (diverse).  This is the default; only set another value if the user is explicit.
    Return null if the user is not explicit about the mode.
    Legacy terms: "heterogeneous" should map to "planned"; "homogeneous" to "fixed".
    NOTE: Do NOT emit "translate" here.  Translation is a separate preprocess phase triggered by ``target_language`` (field 7 below), not a pipeline mode.

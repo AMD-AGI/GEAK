@@ -44,6 +44,7 @@ def run_orchestrator(
     max_rounds: int | None = None,
     start_round: int = 1,
     mode: str = "planned",
+    task_generation: str | None = None,
     # Back-compat shim — deprecated, use ``mode`` instead.
     heterogeneous: bool | None = None,
 ) -> dict[str, Any]:
@@ -110,6 +111,8 @@ def run_orchestrator(
     if mode != "planned":
         raise ValueError(f"Unsupported mode for orchestrator: {mode!r} (expected 'planned' or 'fixed')")
 
+    tg = task_generation or mode
+
     from minisweagent.agents.heterogeneous.orchestrator import run_planned_orchestrator
 
     return run_planned_orchestrator(
@@ -120,6 +123,7 @@ def run_orchestrator(
         _out,
         max_rounds,
         start_round,
+        task_generation=tg,
     )
 
 

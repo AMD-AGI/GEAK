@@ -1,6 +1,6 @@
 """Single GPU-pool execution path for every pipeline mode.
 
-Every mode (fixed, planned, auto) funnels through:
+Every mode (fixed, planned, mixed) funnels through:
 
     PipelineContext -> (materialise AgentTask list) -> execute(ctx, tasks) -> run_pool(...)
 

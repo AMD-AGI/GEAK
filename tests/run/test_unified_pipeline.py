@@ -161,7 +161,7 @@ def test_pipeline_planned_merges_addenda_into_commandment():
     assert "## DIRECTIVES" in pctx["commandment"]
 
 
-def test_pipeline_auto_routes_triton_to_planned():
+def test_pipeline_mixed_routes_to_orchestrator():
     ctx = _make_ctx(
         preprocess_ctx={
             "kernel_path": "/tmp/k.py",
@@ -174,41 +174,14 @@ def test_pipeline_auto_routes_triton_to_planned():
 
     def _fake_run_orchestrator(**kwargs):
         captured.update(kwargs)
-        return "PLANNED_RESULT"
+        return "MIXED_RESULT"
 
     with patch(
         "minisweagent.run.orchestrator.run_orchestrator",
         _fake_run_orchestrator,
     ), patch("minisweagent.tools.tools_runtime.ToolRuntime"):
-        result = run_pipeline(ctx, mode="auto")
+        result = run_pipeline(ctx, mode="mixed")
 
-    assert result == "PLANNED_RESULT"
+    assert result == "MIXED_RESULT"
     assert captured["mode"] == "planned"
-    assert "heterogeneous" not in captured, "legacy kwarg must not be forwarded"
-
-
-def test_pipeline_auto_routes_hip_to_fixed():
-    ctx = _make_ctx(
-        preprocess_ctx={
-            "kernel_path": "/tmp/k.py",
-            "discovery": {"kernel": {"type": "hip"}},
-        },
-    )
-
-    captured: dict = {}
-
-    def _fake_run_fixed_mode(**kwargs):
-        captured.update(kwargs)
-        return "FIXED_RESULT"
-
-    with patch(
-        "minisweagent.agents.homogeneous.homogeneous_agent.run_fixed_mode",
-        _fake_run_fixed_mode,
-    ), patch(
-        "minisweagent.memory.integration.assemble_memory_context",
-        return_value="",
-    ), patch("minisweagent.tools.tools_runtime.ToolRuntime"):
-        result = run_pipeline(ctx, mode="auto")
-
-    assert result == "FIXED_RESULT"
-    assert captured["task_content"] == "Optimize kernel X"
+    assert captured["task_generation"] == "mixed"

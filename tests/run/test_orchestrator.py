@@ -128,7 +128,7 @@ class TestRunOrchestrator:
                 gpu_ids=[0],
                 model=MagicMock(),
                 model_factory=MagicMock(),
-                mode="auto",
+                mode="invalid_mode",
             )
 
 

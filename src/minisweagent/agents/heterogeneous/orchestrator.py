@@ -29,7 +29,6 @@ from minisweagent.debug_runtime import emit_debug_log, model_tools_snapshot
 
 logger = logging.getLogger(__name__)
 
-
 # ── LLM step loop ────────────────────────────────────────────────────
 
 

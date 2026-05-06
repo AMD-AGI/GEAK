@@ -544,7 +544,11 @@ def main(
 
     if preprocess_ctx.get("test_command") and not test_command:
         test_command = preprocess_ctx["test_command"]
-    if preprocess_ctx.get("repo_root") and repo is None:
+    if repo is None and preprocess_ctx.get("kernel_path"):
+        _kp = Path(preprocess_ctx["kernel_path"])
+        repo = (_kp.parent if _kp.is_file() else _kp).resolve()
+        logger.info("Derived repo from kernel_path: %s", repo)
+    elif preprocess_ctx.get("repo_root") and repo is None:
         repo = Path(preprocess_ctx["repo_root"])
 
     # Translation-phase notification:

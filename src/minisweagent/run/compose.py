@@ -15,7 +15,7 @@ Both modes eventually fed identical downstream stages (``ParallelAgent`` ->
 ``OptimizationAgent``), so the divergence was purely presentational.  This
 module centralizes the composition in one function so that:
 
-  - new modes (``auto`` routes per round; ``translate`` runs verify-retry)
+  - new modes (``mixed`` splits fixed+planned; ``translate`` runs verify-retry)
     get a consistent entrypoint,
   - cross-session memory injection is applied identically,
   - the KernelLanguage-system-prompt binding (Triton / HIP / ...) is resolved
@@ -50,7 +50,7 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-Mode = Literal["fixed", "planned", "auto"]
+Mode = Literal["fixed", "planned", "mixed"]
 
 
 @dataclass

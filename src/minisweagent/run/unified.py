@@ -1,6 +1,6 @@
-"""Unified pipeline entry for fixed + planned + auto modes.
+"""Unified pipeline entry for fixed, planned, and mixed modes.
 
-All three modes run the SAME ``OptimizationAgent`` class on each worker.
+All modes run the SAME ``OptimizationAgent`` class on each worker.
 The only thing that differs is the **task body** each worker receives:
 
   - ``fixed``   — one task body, replicated across ``num_parallel`` copies.
@@ -11,18 +11,18 @@ The only thing that differs is the **task body** each worker receives:
                   per worker.  Good when the search space is large and
                   distinct strategies are likely to find different optima
                   (e.g. Triton kernels with many viable tiling choices).
-  - ``auto``    — Default.  Currently a static language-based router
-                  (Triton→planned, HIP→fixed); the next iteration will
-                  replace this with an adaptive mixed-mode controller
-                  (seed with 2 planned + 2 fixed in round 1, then pick
-                  the per-round ratio based on which variant produced
-                  the best speedup so far).
+  - ``mixed``   — Default.  Splits N workers 50/50: half get identical
+                  fixed prompts (variance from LLM sampling), half get
+                  LLM-planner-generated diverse strategies.  Combines
+                  the reliability of best-of-N with the exploration
+                  breadth of planned mode.
 
 The legacy "homogeneous" / "heterogeneous" terminology is an artifact of
 pre-refactor code that had separate agent CLASSES for each dispatch
 style.  With the unified ``OptimizationAgent`` those names no longer
 describe anything real — the worker class is the same; only the task
-body differs.  All public APIs and logs now use ``fixed`` / ``planned``.
+body differs.  All public APIs and logs now use ``fixed`` / ``planned``
+/ ``mixed``.
 
 NOTE on translation: source→target language translation is NOT a
 ``run_pipeline`` mode.  It is a **conditional preprocess phase**
@@ -121,36 +121,15 @@ def _resolve_tools(ctx: PipelineContext, mode: Mode):
 # ── Pipeline dispatch ─────────────────────────────────────────────────
 
 
-def _resolve_auto_mode(ctx: PipelineContext) -> Mode:
-    """Map ``auto`` to a concrete ``fixed``/``planned`` decision.
-
-    Current heuristic: Triton kernels (which benefit from diverse strategy
-    planning because they have a rich optimization surface) go through the
-    planner; everything else (HIP, CUDA, unknown) defaults to identical
-    parallel copies.  Future revisions will let a controller pick per
-    round based on KB state and available GPUs.
-    """
-    discovery = ctx.preprocess_ctx.get("discovery") or {}
-    kernel_info = discovery.get("kernel") or {}
-    inferred = kernel_info.get("type") or ctx.kernel_language or "unknown"
-    if str(inferred).strip().lower() == "triton":
-        resolved: Mode = "planned"
-    else:
-        resolved = "fixed"
-    logger.info("auto-mode resolved to %s (kernel_type=%s)", resolved, inferred)
-    return resolved
-
-
 def run_pipeline(ctx: PipelineContext, mode: Mode):
     """Drive one full optimization pipeline and return the final report.
 
-    This is the canonical entry point.  It resolves ``auto`` to a concrete
-    mode, resolves tools once, composes the task body once (for ``fixed``),
-    and dispatches.  Fixed mode is driven by ``_run_fixed`` (round loop
-    inline here); planned mode delegates to ``run_orchestrator``, which
-    in turn calls ``run_planned_orchestrator`` whose internals own the
-    planner loop.  Both paths ultimately instantiate the same
-    ``OptimizationAgent`` on each worker.
+    This is the canonical entry point.  It resolves tools once, composes
+    the task body once (for ``fixed``), and dispatches.  Fixed mode is
+    driven by ``_run_fixed`` (round loop inline here); planned mode
+    delegates to ``run_orchestrator``; mixed mode splits workers 50/50
+    between fixed and planned strategies.  All paths ultimately
+    instantiate the same ``OptimizationAgent`` on each worker.
     """
     logger.info(
         "run_pipeline: mode=%s kernel_language=%s output_dir=%s max_rounds=%s rag_enabled=%s",
@@ -161,17 +140,12 @@ def run_pipeline(ctx: PipelineContext, mode: Mode):
         ctx.rag_enabled,
     )
 
-    if mode == "auto":
-        mode = _resolve_auto_mode(ctx)
-
-    # Tool resolution happens once regardless of mode.  Planned mode still
-    # builds its own ToolRuntime inside ``run_planned_orchestrator`` — we
-    # do not override it here yet to avoid behavior drift; the single-
-    # site guarantee becomes enforced once ``run/pool_runner.py`` lands.
     _ = _resolve_tools(ctx, mode)
 
     if mode == "planned":
         return _run_planned(ctx)
+    if mode == "mixed":
+        return _run_planned(ctx, task_generation="mixed")
     if mode == "fixed":
         return _run_fixed(ctx)
     if mode == "translate":
@@ -187,13 +161,17 @@ def run_pipeline(ctx: PipelineContext, mode: Mode):
     raise ValueError(f"Unknown pipeline mode: {mode!r}")
 
 
-def _run_planned(ctx: PipelineContext):
+def _run_planned(ctx: PipelineContext, task_generation: str = "planned"):
     """Dispatch into the planner-driven parallel path.
 
     The planner (``task_generator``) composes its own per-task bodies, so
     here we only massage the top-level preprocess context (commandment
     presence check, constraint / directive addenda, rag flag) before
     delegating.
+
+    When ``task_generation="mixed"``, the orchestrator splits workers
+    50/50 between identical fixed prompts and LLM-generated diverse
+    strategies.
     """
     from minisweagent.run.orchestrator import run_orchestrator
 
@@ -234,6 +212,7 @@ def _run_planned(ctx: PipelineContext):
         output_dir=ctx.output_dir,
         max_rounds=ctx.max_rounds,
         mode="planned",
+        task_generation=task_generation,
     )
 
 

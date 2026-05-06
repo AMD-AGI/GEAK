@@ -995,5 +995,37 @@ def main():
         print(json.dumps(output, indent=2))
 
 
+def generate_identical_parallel_tasks(
+    *,
+    base_task_context: str,
+    agent_class: type,
+    num_tasks: int,
+    kernel_language: str = "python",
+    priority: int = 10,
+    label_prefix: str = "parallel-worker",
+) -> list[AgentTask]:
+    """Return ``num_tasks`` copies of the same optimization objective.
+
+    Used by mixed-mode orchestration: one COMMANDMENT, N parallel workers
+    with identical natural-language task bodies so variance comes only
+    from LLM sampling / GPU placement.
+    """
+    if num_tasks < 1:
+        num_tasks = 1
+    tasks: list[AgentTask] = []
+    for i in range(1, num_tasks + 1):
+        tasks.append(
+            AgentTask(
+                agent_class=agent_class,
+                task=base_task_context,
+                label=f"{label_prefix}-{i}",
+                priority=priority,
+                kernel_language=kernel_language,
+                num_gpus=1,
+            )
+        )
+    return tasks
+
+
 if __name__ == "__main__":
     main()
