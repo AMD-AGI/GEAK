@@ -68,7 +68,12 @@ class AmdLlmModelBase:
     # ------------------------------------------------------------------
 
     def _get_api_key(self) -> str:
-        api_key = self.config.api_key or self.config.model_kwargs.get("api_key") or os.getenv("AMD_LLM_API_KEY") or os.getenv("LLM_GATEWAY_KEY")
+        api_key = (
+            self.config.api_key
+            or self.config.model_kwargs.get("api_key")
+            or os.getenv("AMD_LLM_API_KEY")
+            or os.getenv("LLM_GATEWAY_KEY")
+        )
         if not api_key:
             raise ValueError(
                 "API key not provided. Please set it via:\n"

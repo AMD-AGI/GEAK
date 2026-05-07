@@ -823,11 +823,14 @@ class ProfilingAnalyzer:
 
         _, rdna_arch = guard_rocprof_compute("rocprof-compute")
         if rdna_arch:
-            return False, (
+            return (
+                False,
+                (
                     f"rocprof-compute does not support RDNA ({rdna_arch}). "
                     "Use the metrix profiling backend instead "
                     "(e.g. backend='metrix' in profiler-mcp)."
                 ),
+            )
 
         rocprof_version = self._check_rocprof_compute()
         if rocprof_version is None:
