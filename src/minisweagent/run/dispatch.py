@@ -352,13 +352,30 @@ def run_task_batch(
     # Pre-seed GEAK_REPO_ROOT and GEAK_HARNESS so COMMANDMENT commands
     # can reference them as variables (no hardcoded paths).
     from minisweagent.run.pipeline_helpers import DEFAULT_AGENT_BENCHMARK_ITERATIONS
+    from minisweagent.run.preprocess.harness_utils import harness_supports_iterations
 
     base_env_vars: dict[str, str] = {
         "GEAK_REPO_ROOT": str(repo_path.resolve()),
-        "GEAK_BENCHMARK_EXTRA_ARGS": f"--iterations {DEFAULT_AGENT_BENCHMARK_ITERATIONS}",
+        "GEAK_BENCHMARK_ITERATIONS": str(DEFAULT_AGENT_BENCHMARK_ITERATIONS),
     }
     if harness_path:
         base_env_vars["GEAK_HARNESS"] = harness_path
+        if harness_supports_iterations(harness_path):
+            base_env_vars["GEAK_BENCHMARK_EXTRA_ARGS"] = f"--iterations {DEFAULT_AGENT_BENCHMARK_ITERATIONS}"
+        else:
+            logger.debug(
+                "run_task_batch: harness %s does not declare --iterations; "
+                "relying on GEAK_BENCHMARK_ITERATIONS=%s only",
+                harness_path,
+                DEFAULT_AGENT_BENCHMARK_ITERATIONS,
+            )
+    else:
+        # No harness path available (e.g. eval_command flow). Preserve the
+        # legacy behaviour of pre-seeding the EXTRA_ARGS so downstream
+        # COMMANDMENT scripts that rely on the env var still see it; the
+        # COMMANDMENT itself is responsible for matching its harness's
+        # contract.
+        base_env_vars["GEAK_BENCHMARK_EXTRA_ARGS"] = f"--iterations {DEFAULT_AGENT_BENCHMARK_ITERATIONS}"
 
     def env_factory():
         return LocalEnvironment(**{"cwd": str(repo_path.resolve()), "timeout": 3600, "env": base_env_vars})

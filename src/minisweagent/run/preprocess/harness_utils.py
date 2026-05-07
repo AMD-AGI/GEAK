@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import ast
 import copy
+import functools
 import importlib
 import logging
 import os
@@ -32,7 +33,14 @@ from minisweagent.run.utils.gpu_arch import (
     rdna_compute_bound_guidance,
 )
 
-REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark", "--iterations")
+REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
+# ``--iterations`` is RECOMMENDED, not required: harnesses that decline to
+# accept it can still participate in a run as long as they either honour
+# ``GEAK_BENCHMARK_ITERATIONS`` from the environment or are content with
+# their hardcoded default. GEAK gates every callsite that would otherwise
+# pass ``--iterations N`` so the harness CLI never sees an unrecognized
+# flag. See ``harness_supports_iterations``.
+RECOMMENDED_HARNESS_FLAGS = ("--iterations",)
 
 MAX_HARNESS_RETRIES = 2
 
@@ -1168,20 +1176,86 @@ def _strip_python_comments(source: str) -> str:
     return "".join(lines)
 
 
+# Regex matching a ``--iterations N`` or ``--iterations=N`` token pair in a
+# whitespace-separated argv string. Anchored at start-of-string or
+# whitespace so we don't match inside other long flags.
+_ITERATIONS_TOKEN_RE = re.compile(r"(?:^|\s)--iterations(?:\s+\d+|=\d+)(?=\s|$)")
+
+
+def _strip_iterations_tokens(extra_args: str) -> str:
+    """Remove any ``--iterations N`` / ``--iterations=N`` tokens from an
+    argv-style string and collapse the resulting whitespace.
+
+    Used at GEAK's harness-invocation choke points to scrub ``--iterations``
+    out of ``GEAK_BENCHMARK_EXTRA_ARGS`` before it reaches a harness that
+    didn't declare the flag.
+    """
+    cleaned = _ITERATIONS_TOKEN_RE.sub(" ", extra_args)
+    return " ".join(cleaned.split())
+
+
+@functools.lru_cache(maxsize=512)
+def harness_supports_iterations(harness_path: str | os.PathLike) -> bool:
+    """Cheap static check: does this harness register ``--iterations`` as
+    a CLI argument?
+
+    The check strips Python comments (via :func:`_strip_python_comments`)
+    before looking for the literal flag, so a stray ``# TODO --iterations N``
+    comment does not falsely satisfy the predicate (mirroring the behaviour
+    of :func:`validate_harness`).
+
+    Returns ``False`` on read errors so callers treat unreadable harnesses
+    the same as harnesses that decline the flag (i.e. don't pass
+    ``--iterations`` to them).
+
+    Memoized per-path; clear with :func:`reset_harness_support_cache` after
+    rewriting a harness on disk so subsequent calls re-read the file.
+    """
+    try:
+        text = Path(harness_path).read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.debug("harness_supports_iterations: read failed for %s: %s", harness_path, exc)
+        return False
+    return "--iterations" in _strip_python_comments(text)
+
+
+def reset_harness_support_cache() -> None:
+    """Clear the ``harness_supports_iterations`` cache.
+
+    Call after any code path that rewrites a harness file in place so the
+    next ``harness_supports_iterations`` call re-reads from disk. Cheap;
+    the cache is rebuilt lazily.
+    """
+    harness_supports_iterations.cache_clear()
+
+
 def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
     """Static-analyse a harness script to verify it supports required CLI flags.
 
     Checks that the harness uses an argument-parsing library (argparse, click,
-    or typer) and defines all four required flags: ``--correctness``,
-    ``--profile``, ``--benchmark``, and ``--full-benchmark``.  Also checks
-    that the ``run_profile`` function (if present) does not allocate tensors
-    directly on CUDA, which would pollute the profiler trace with GPU RNG /
-    memset kernels.
+    or typer) and defines all four *required* flags: ``--correctness``,
+    ``--profile``, ``--benchmark``, and ``--full-benchmark``.  Missing required
+    flags hard-fail validation.
 
-    Returns ``(valid, errors)`` where *errors* is empty when *valid* is True.
+    ``--iterations`` is *recommended* but not required: missing it produces a
+    ``WARNING`` log line and is reported in the second tuple element, but
+    ``valid`` is still ``True``. GEAK callsites that pass iteration counts
+    consult :func:`harness_supports_iterations` and silently omit
+    ``--iterations`` from harness invocations when the flag is not declared.
+    Iteration counts still flow via the ``GEAK_BENCHMARK_ITERATIONS`` env var
+    for harnesses that read it.
+
+    Also checks that the ``run_profile`` function (if present) does not
+    allocate tensors directly on CUDA, which would pollute the profiler trace
+    with GPU RNG / memset kernels.
+
+    Returns ``(valid, messages)`` where *messages* contains both fatal errors
+    (when *valid* is False) and non-fatal warnings (when *valid* is True with
+    a missing recommended flag).
     """
     harness = Path(harness_path)
     errors: list[str] = []
+    warnings: list[str] = []
 
     if not harness.is_file():
         return False, [f"Harness file not found: {harness}"]
@@ -1205,6 +1279,17 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
         if flag not in code_only_source:
             errors.append(f"Harness source does not define '{flag}' flag")
 
+    for flag in RECOMMENDED_HARNESS_FLAGS:
+        if flag not in code_only_source:
+            msg = (
+                f"Harness {harness} does not define recommended flag '{flag}'; "
+                f"GEAK will skip passing it on the harness CLI and rely on "
+                f"GEAK_BENCHMARK_ITERATIONS only. Have your harness honour "
+                f"that env var if you want to control iteration counts."
+            )
+            logger.warning(msg)
+            warnings.append(msg)
+
     # Check for GPU-side tensor allocation inside the profile function.
     # rocprofv3 captures ALL GPU kernels, so torch.randn(..., device='cuda')
     # inside run_profile pollutes the trace with RNG kernels.
@@ -1225,7 +1310,12 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
             )
             break  # one warning is enough
 
-    return len(errors) == 0, errors
+    valid = len(errors) == 0
+    # When validation passes, surface non-fatal warnings to the caller so a
+    # ``logger.info("errors=%s", errors)`` line at the call site still
+    # mentions the missing recommended flag. When validation fails, hide
+    # warnings to keep the error list focused on what's actually broken.
+    return valid, (warnings if valid else errors)
 
 
 # ── harness runtime execution ─────────────────────────────────────────

@@ -215,6 +215,7 @@ def build_eval_env(
     the shared ``DEFAULT_EVAL_BENCHMARK_ITERATIONS`` is used.
     """
     from minisweagent.run.pipeline_helpers import DEFAULT_EVAL_BENCHMARK_ITERATIONS
+    from minisweagent.run.preprocess.harness_utils import harness_supports_iterations
 
     iters = benchmark_iterations or DEFAULT_EVAL_BENCHMARK_ITERATIONS
     env = os.environ.copy()
@@ -223,7 +224,19 @@ def build_eval_env(
     env["GEAK_HARNESS"] = harness_path
     env["GEAK_GPU_DEVICE"] = str(gpu_id)
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
-    env["GEAK_BENCHMARK_EXTRA_ARGS"] = f"--iterations {iters}"
+    env["GEAK_BENCHMARK_ITERATIONS"] = str(iters)
+    if harness_supports_iterations(harness_path):
+        env["GEAK_BENCHMARK_EXTRA_ARGS"] = f"--iterations {iters}"
+    else:
+        # Harness doesn't declare ``--iterations``; passing it on the CLI
+        # would crash argparse with "unrecognized arguments". The harness
+        # can still honour the iteration count by reading the
+        # ``GEAK_BENCHMARK_ITERATIONS`` env var we set above.
+        logger.debug(
+            "build_eval_env: harness %s does not declare --iterations; relying on GEAK_BENCHMARK_ITERATIONS=%s only",
+            harness_path,
+            iters,
+        )
     pp_parts = [str(work_dir), repo_root]
     if "/tests/" in harness_path:
         try:
@@ -328,13 +341,21 @@ def preflight_commandment_contract(
         )
         return
 
+    from minisweagent.run.preprocess.harness_utils import harness_supports_iterations
+
     repo_root_path = Path(repo_root).resolve()
     env = build_eval_env(repo_root_path, str(repo_root_path), harness_path, gpu_id)
-    env["GEAK_BENCHMARK_EXTRA_ARGS"] = "--iterations 1"
     env["GEAK_BENCHMARK_ITERATIONS"] = "1"
+    if harness_supports_iterations(harness_path):
+        env["GEAK_BENCHMARK_EXTRA_ARGS"] = "--iterations 1"
+    else:
+        # See ``build_eval_env`` for the reasoning. Drop any ``--iterations``
+        # tokens the upstream env-builder may have emitted so we don't pass
+        # them on the harness CLI.
+        env.pop("GEAK_BENCHMARK_EXTRA_ARGS", None)
 
     logger.info(
-        "preflight_commandment_contract: smoke-testing COMMANDMENT against %s with --iterations 1",
+        "preflight_commandment_contract: smoke-testing COMMANDMENT against %s with iterations=1",
         repo_root_path,
     )
     try:

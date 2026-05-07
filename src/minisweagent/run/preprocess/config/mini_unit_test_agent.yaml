@@ -138,15 +138,19 @@ agent:
          Must exit non-zero on failure.
        - `--profile`: runs 5 configs for profiling. No correctness.
 
-    Required `--iterations` flag (MANDATORY):
-       - Your argparse MUST define an `--iterations N` integer flag in
-         addition to the four mode flags above. The pipeline appends
+    Recommended `--iterations` flag (STRONGLY RECOMMENDED):
+       - Your argparse SHOULD define an `--iterations N` integer flag in
+         addition to the four mode flags above. The pipeline will pass
          `--iterations N` to every `--benchmark` / `--full-benchmark`
-         invocation; if your harness rejects it the optimization cannot
-         be validated and the run aborts.
-       - When `--iterations` is not passed, fall back to
-         `int(os.environ.get("GEAK_BENCHMARK_ITERATIONS", "200"))`.
-       - Concretely:
+         invocation when the harness declares the flag, giving the
+         orchestrator direct control over the iteration count.
+       - If your harness omits `--iterations`, GEAK detects this at
+         validation time, emits a WARNING, and silently skips passing
+         the flag on the harness CLI so argparse does not crash.
+         The orchestrator instead controls iteration counts via the
+         `GEAK_BENCHMARK_ITERATIONS` env var, so your harness MUST read
+         that env var as a fallback (or live with its hardcoded default).
+       - Concretely (preferred form, both channels):
            parser.add_argument("--iterations", type=int, default=None)
            args = parser.parse_args()
            ITERATIONS = args.iterations if args.iterations is not None \

@@ -32,7 +32,10 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = get_repo_root()
 
-REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark", "--iterations")
+REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
+# ``--iterations`` is RECOMMENDED, not required. See
+# ``minisweagent.run.preprocess.harness_utils`` for the canonical contract.
+RECOMMENDED_HARNESS_FLAGS = ("--iterations",)
 
 MAX_HARNESS_RETRIES = 2
 
@@ -426,19 +429,17 @@ _GPU_ALLOC_IN_PROFILE_RE = re.compile(
 def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
     """Static-analyse a harness script to verify it supports required CLI flags.
 
-    Checks that the harness uses an argument-parsing library (argparse, click,
-    or typer) and defines all four required flags: ``--correctness``,
-    ``--profile``, ``--benchmark``, and ``--full-benchmark``.  Also checks
-    that the ``run_profile`` function (if present) does not allocate tensors
-    directly on CUDA, which would pollute the profiler trace with GPU RNG /
-    memset kernels.
-
-    Returns ``(valid, errors)`` where *errors* is empty when *valid* is True.
+    Mirror of :func:`minisweagent.run.preprocess.harness_utils.validate_harness`
+    -- see that docstring for the contract. The two copies exist because of
+    the deliberate decoupling between ``run/`` and ``run/preprocess/``;
+    helpers like ``_strip_python_comments`` are imported from
+    ``harness_utils`` so the comment-stripping behaviour stays in lockstep.
     """
     from minisweagent.run.preprocess.harness_utils import _strip_python_comments
 
     harness = Path(harness_path)
     errors: list[str] = []
+    warnings: list[str] = []
 
     if not harness.is_file():
         return False, [f"Harness file not found: {harness}"]
@@ -461,6 +462,17 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
         if flag not in code_only_source:
             errors.append(f"Harness source does not define '{flag}' flag")
 
+    for flag in RECOMMENDED_HARNESS_FLAGS:
+        if flag not in code_only_source:
+            msg = (
+                f"Harness {harness} does not define recommended flag '{flag}'; "
+                f"GEAK will skip passing it on the harness CLI and rely on "
+                f"GEAK_BENCHMARK_ITERATIONS only. Have your harness honour "
+                f"that env var if you want to control iteration counts."
+            )
+            logger.warning(msg)
+            warnings.append(msg)
+
     # Check for GPU-side tensor allocation inside the profile function.
     # rocprofv3 captures ALL GPU kernels, so torch.randn(..., device='cuda')
     # inside run_profile pollutes the trace with RNG kernels.
@@ -481,7 +493,8 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
             )
             break  # one warning is enough
 
-    return len(errors) == 0, errors
+    valid = len(errors) == 0
+    return valid, (warnings if valid else errors)
 
 
 # ── harness runtime execution ─────────────────────────────────────────
