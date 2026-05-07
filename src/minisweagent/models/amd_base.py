@@ -68,13 +68,14 @@ class AmdLlmModelBase:
     # ------------------------------------------------------------------
 
     def _get_api_key(self) -> str:
-        api_key = self.config.api_key or os.getenv("AMD_LLM_API_KEY") or os.getenv("LLM_GATEWAY_KEY")
+        api_key = self.config.api_key or self.config.model_kwargs.get("api_key") or os.getenv("AMD_LLM_API_KEY") or os.getenv("LLM_GATEWAY_KEY")
         if not api_key:
             raise ValueError(
                 "API key not provided. Please set it via:\n"
                 "  1. VSCode settings (mini-swe-agent.apiKey), or\n"
-                "  2. Environment variable AMD_LLM_API_KEY, or\n"
-                "  3. Environment variable LLM_GATEWAY_KEY"
+                "  2. model_kwargs.api_key in the task config, or\n"
+                "  3. Environment variable AMD_LLM_API_KEY, or\n"
+                "  4. Environment variable LLM_GATEWAY_KEY"
             )
         return api_key
 

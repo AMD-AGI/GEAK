@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from minisweagent.run.utils.gpu_arch import detect_gpu_arch, is_wmma_capable
+
 _HIP_SEARCH_HINT_PATTERNS = (
     "binary_search",
     "lower_bound",
@@ -135,10 +137,11 @@ def _build_triton_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, A
             "Vectorized or blocked load/store patterns when they are part of a broader kernel-body memory-traffic reduction plan."
         )
     elif bottleneck == "compute":
+        _matrix_label = "WMMA" if is_wmma_capable(detect_gpu_arch()) else "MFMA"
         prefer_first.extend(
             [
                 "Instruction-count reduction and control-flow simplification inside hot loops.",
-                "MFMA / tl.dot-friendly reformulations, cheaper math primitives, or algorithmic approximations when correct.",
+                f"{_matrix_label} / tl.dot-friendly reformulations, cheaper math primitives, or algorithmic approximations when correct.",
             ]
         )
         consider_next.append(
@@ -217,10 +220,11 @@ def _build_hip_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]
             "Wavefront-level memory-access reordering or bank-conflict reduction when it is supported by the profile."
         )
     elif bottleneck == "compute":
+        _matrix_label = "WMMA" if is_wmma_capable(detect_gpu_arch()) else "MFMA"
         prefer_first.extend(
             [
                 "Instruction-count reduction, branch simplification, and cheaper per-thread math in the hottest loops.",
-                "Wave intrinsics, MFMA-friendly decomposition, or unrolled inner loops when they reduce compute bottlenecks.",
+                f"Wave intrinsics, {_matrix_label}-friendly decomposition, or unrolled inner loops when they reduce compute bottlenecks.",
             ]
         )
     elif bottleneck == "latency":

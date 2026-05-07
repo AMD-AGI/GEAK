@@ -24,6 +24,13 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from minisweagent.run.preprocess.repo_paths import ensure_preprocess_mcp_importable
+from minisweagent.run.utils.gpu_arch import (
+    detect_gpu_arch,
+    hipcc_offload_arch_flags,
+    is_wmma_capable,
+    rdna_arch_context,
+    rdna_compute_bound_guidance,
+)
 
 REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
 
@@ -587,6 +594,7 @@ def _generate_c_like_python_harness(
             deduped_include_dirs.append(resolved)
 
     repo_root_str = str(repo_root.resolve()) if repo_root is not None else str(original_source_dir.resolve())
+    offload_arch_flags = hipcc_offload_arch_flags()
     wrapper_source = textwrap.dedent(
         f"""\
         import argparse
@@ -604,6 +612,7 @@ def _generate_c_like_python_harness(
         REPO_ROOT = Path({repo_root_str!r})
         BINARY = C_HARNESS.with_suffix("")
         INCLUDE_DIRS = {deduped_include_dirs!r}
+        OFFLOAD_ARCH_FLAGS = {offload_arch_flags!r}
 
 
         def _compile_binary() -> Path:
@@ -614,7 +623,7 @@ def _generate_c_like_python_harness(
             if not needs_rebuild:
                 return BINARY
 
-            cmd = ["hipcc", "-O3", "-std=c++17", str(C_HARNESS), "-o", str(BINARY)]
+            cmd = ["hipcc", "-O3", "-std=c++17"] + OFFLOAD_ARCH_FLAGS + [str(C_HARNESS), "-o", str(BINARY)]
             for inc in INCLUDE_DIRS:
                 cmd.extend(["-I", inc])
             proc = subprocess.run(
@@ -1437,7 +1446,7 @@ def _search_workload_guidance(metrics: dict) -> list[str]:
     ]
 
 
-def _bottleneck_guidance(bottleneck: str, metrics: dict) -> list[str]:
+def _bottleneck_guidance(bottleneck: str, metrics: dict, arch: str = "") -> list[str]:
     """Return actionable optimization guidance lines based on bottleneck type."""
     bn_lower = bottleneck.lower().strip()
     bn_aliases = {
@@ -1449,6 +1458,8 @@ def _bottleneck_guidance(bottleneck: str, metrics: dict) -> list[str]:
     bn_lower = bn_aliases.get(bn_lower, bn_lower)
     for key, text in _BOTTLENECK_GUIDANCE.items():
         if key in bn_lower:
+            if key == "compute-bound" and is_wmma_capable(arch):
+                text = rdna_compute_bound_guidance()
             lines = text.strip().splitlines()
             lines.extend(_search_workload_guidance(metrics))
             lines.append("")
@@ -1493,6 +1504,9 @@ def _gpu_arch_context(profiling_path: str) -> list[str]:
     hbm_bw = gpu_info.get("peak_hbm_bandwidth_gbps", gpu_info.get("hbm_bandwidth", "?"))
     lds_per_cu = gpu_info.get("lds_per_cu_kb", 64)
     vgprs = gpu_info.get("vgprs_per_cu", 512)
+    rdna_ctx = rdna_arch_context(gpu_info, arch)
+    if rdna_ctx is not None:
+        return rdna_ctx
 
     return [
         f"## GPU Architecture: {name} ({arch})",
@@ -1576,7 +1590,7 @@ def inject_pipeline_context(
                 )
         ctx.append("")
 
-        ctx.extend(_bottleneck_guidance(str(bn), baseline_metrics))
+        ctx.extend(_bottleneck_guidance(str(bn), baseline_metrics, arch=detect_gpu_arch()))
 
     if profiling_path and Path(profiling_path).exists():
         ctx.append(f"PROFILING DATA: {profiling_path}")

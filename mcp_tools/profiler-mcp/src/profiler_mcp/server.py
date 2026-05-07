@@ -22,6 +22,36 @@ from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# GPU arch detection (kept inline; profiler-mcp must not depend on minisweagent)
+# ---------------------------------------------------------------------------
+
+
+def _detect_gpu_arch() -> str:
+    """Return the GFX architecture string (e.g. 'gfx942', 'gfx1201') or '' on failure."""
+    try:
+        out = subprocess.run(["rocminfo"], capture_output=True, text=True, timeout=10)
+        for line in out.stdout.splitlines():
+            if "gfx" in line.lower() and "name:" in line.lower():
+                for p in line.split():
+                    if p.startswith("gfx"):
+                        return p
+    except Exception:
+        pass
+    return ""
+
+
+def _guard_rocprof_compute(backend: str) -> tuple[str, str]:
+    """If *backend* is 'rocprof-compute' on RDNA, return ('metrix', arch). Otherwise (backend, '')."""
+    if backend != "rocprof-compute":
+        return backend, ""
+    arch = _detect_gpu_arch()
+    if arch.startswith(("gfx10", "gfx11", "gfx12")):
+        return "metrix", arch
+    return backend, ""
+
+
 mcp = FastMCP(
     name="profiler",
     instructions=(
@@ -235,6 +265,13 @@ def profile_kernel(
         }
     """
     logger.info("Profiler MCP: backend=%s, command=%s", backend, command)
+
+    backend, rdna_arch = _guard_rocprof_compute(backend)
+    if rdna_arch:
+        logger.warning(
+            "rocprof-compute does not support RDNA (%s). Falling back to metrix backend.",
+            rdna_arch,
+        )
 
     command = _normalize_command(command)
 

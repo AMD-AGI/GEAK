@@ -88,6 +88,19 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- Inspect the source file to determine if it is Triton, HIP, CUDA, or CK.\n"
         "- Apply the appropriate testing strategy based on your analysis."
     ),
+    "pytorch_translation": (
+        "This is a PyTorch -> FlyDSL translation comparison harness.\n"
+        "- The harness must support two modes:\n"
+        "  1. Baseline mode (no flag): runs the PyTorch reference kernel and reports latency.\n"
+        "  2. Comparison mode (--flydsl-kernel <path>): loads both PyTorch reference and FlyDSL\n"
+        "     candidate, runs both on identical inputs, and compares outputs.\n"
+        "- Use `torch.testing.assert_close` for correctness validation.\n"
+        "- Use `torch.cuda.Event` for latency measurement.\n"
+        "- The PyTorch kernel follows `Model(nn.Module)` + `get_inputs()` + `get_init_inputs()` pattern.\n"
+        "- Use `importlib.util.spec_from_file_location` for dynamic loading of both kernels.\n"
+        "- Set `torch.manual_seed(42)` for reproducibility.\n"
+        "- Print latency comparison and CORRECTNESS: PASS/FAIL status."
+    ),
 }
 
 
@@ -248,5 +261,68 @@ def run_unit_test_agent(
     exit_status, result = agent.run(task)
     if exit_status != "Submitted":
         raise RuntimeError(f"UnitTestAgent did not finish successfully: {exit_status}\n{result}")
+
+    return _extract_test_command(result)
+
+
+# ---------------------------------------------------------------------------
+# PyTorch translation harness support
+# ---------------------------------------------------------------------------
+
+
+def format_pytorch_translation_context(kernel_path: Path, kernel_name: str) -> str:
+    """Build context describing the PyTorch reference interface for translation harness."""
+    lines = [
+        "## Translation Harness Context",
+        f"- **Kernel name**: {kernel_name}",
+        f"- **Source file**: `{kernel_path}`",
+        "- **Interface**: `Model(nn.Module)` with `get_inputs()` and `get_init_inputs()`",
+        "",
+        "## Requirements",
+        "Create a comparison harness that:",
+        "1. Loads the PyTorch reference kernel via importlib",
+        "2. Accepts `--flydsl-kernel <path>` to load a FlyDSL candidate",
+        "3. Runs both on the same inputs (using `get_inputs()`) and compares outputs",
+        "4. Reports CORRECTNESS: PASS/FAIL and latency for both kernels",
+        "5. Supports `--correctness`, `--profile`, `--benchmark`, `--full-benchmark` modes",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def run_pytorch_translation_agent(
+    *,
+    model: "Model",
+    repo: Path,
+    kernel_name: str,
+    kernel_path: Path,
+    log_dir: Path | None = None,
+    harness_config_name: str = "mini_unit_test_agent_pytorch_translation",
+) -> str:
+    """Run UTA to create a translation comparison harness.
+
+    Returns the extracted TEST_COMMAND string.
+    """
+    agent_config, _ = load_preprocess_agent_config(harness_config_name)
+
+    env = LocalEnvironment(**LocalEnvironmentConfig(cwd=str(repo)).__dict__)
+    agent = UnitTestAgent(model, env, **agent_config)
+    if log_dir:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        agent.log_file = log_dir / "unit_test_agent_translation.log"
+
+    context = format_pytorch_translation_context(kernel_path, kernel_name)
+
+    task = (
+        f"Create a translation comparison harness for kernel: {kernel_name}\n"
+        f"Repository: {repo}\n\n"
+        f"{context}\n"
+        f"IMPORTANT: The harness must validate that a FlyDSL translation produces "
+        f"identical outputs to the PyTorch reference."
+    )
+
+    exit_status, result = agent.run(task)
+    if exit_status != "Submitted":
+        raise RuntimeError(f"Translation UTA did not finish: {exit_status}\n{result}")
 
     return _extract_test_command(result)

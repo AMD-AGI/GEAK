@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -137,17 +138,22 @@ class ParallelAgent(DefaultAgent):
         model = model_factory()
         _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
 
-        # Override with deterministic benchmark parsing when possible
-        from minisweagent.run.postprocess.benchmark_parsing import rewrite_best_results
+        # Only call rewrite_best_results when patch_*_test.txt files exist
+        # directly in base_patch_dir (heterogeneous flat layout).  In
+        # homogeneous/parallel mode the files live in subdirectories
+        # (parallel_0/, parallel_1/) so compute_best_patch cannot find them
+        # and the fallback would incorrectly clamp the LLM's speedup to 1.0.
+        if list(base_patch_dir.glob("patch_*_test.txt")):
+            from minisweagent.run.postprocess.benchmark_parsing import rewrite_best_results
 
-        det_result = rewrite_best_results(base_patch_dir)
-        if det_result:
-            best_patch_id = det_result.get("best_patch_id", best_patch_id)
-            logger.info(
-                "Deterministic override: %s (%sx)",
-                best_patch_id,
-                det_result.get("best_patch_speedup", "?"),
-            )
+            det_result = rewrite_best_results(base_patch_dir)
+            if det_result:
+                best_patch_id = det_result.get("best_patch_id", best_patch_id)
+                logger.info(
+                    "Deterministic override: %s (%sx)",
+                    best_patch_id,
+                    det_result.get("best_patch_speedup", "?"),
+                )
 
         if not best_patch_id:
             logger.warning("SelectPatchAgent did not produce best_results.json.")
@@ -486,6 +492,11 @@ class ParallelAgent(DefaultAgent):
                 new_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
                 new_env["GEAK_GPU_DEVICE"] = str(gpu_id)
                 logger.debug("Parallel agent %d assigned GPU %d", agent_id, gpu_id)
+                if console:
+                    with _stdout_lock:
+                        console.print(f"[bold green]Parallel agent {agent_id} using GPU {gpu_id}[/bold green]")
+                        if hasattr(sys.stdout, "flush"):
+                            sys.stdout.flush()
             env_config_dict["env"] = new_env
             parallel_env = type(base_env)(**env_config_dict)
 

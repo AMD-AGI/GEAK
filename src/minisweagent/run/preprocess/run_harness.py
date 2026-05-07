@@ -89,6 +89,8 @@ def _run_single(
     cwd: str | None = None,
 ) -> dict[str, Any]:
     """Run a single harness mode and return a structured result dict."""
+    import shlex
+
     flag = MODE_TO_FLAG[mode]
     cmd = [sys.executable, harness_path, flag]
 
@@ -97,10 +99,16 @@ def _run_single(
         if extra:
             cmd.extend(extra.split())
 
+    # Wrap in a login shell so /etc/profile.d/* is sourced. This ensures
+    # FlyDSL env setup (PYTHONPATH, LD_LIBRARY_PATH) is available even
+    # when the parent process didn't inherit a login shell.
+    shell_cmd = " ".join(shlex.quote(c) for c in cmd)
+    shell_wrapped = ["bash", "-lc", shell_cmd]
+
     t0 = time.monotonic()
     try:
         proc = subprocess.run(
-            cmd,
+            shell_wrapped,
             capture_output=True,
             text=True,
             timeout=timeout,

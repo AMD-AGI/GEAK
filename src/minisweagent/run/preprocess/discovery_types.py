@@ -33,7 +33,7 @@ class KernelMeta:
 
     kernel_path: str = ""
     kernel_name: str = ""
-    kernel_type: str = "unknown"  # triton, hip, ck, asm, unknown
+    kernel_type: str = "unknown"  # triton, hip, asm, flydsl, unknown
     kernel_language: str = "python"  # python, cpp, asm
     function_names: list[str] = field(default_factory=list)
     workspace_path: str = ""

@@ -29,6 +29,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from minisweagent.memory.working_notebook import WorkingNotebook, summarize_working_notebook
+from minisweagent.run.utils.gpu_arch import detect_gpu_arch, is_wmma_capable
 
 MAX_WORKING_MEMORY_TOKENS = 800
 MAX_INSIGHTS = 15
@@ -545,10 +546,11 @@ class WorkingMemory:
 
         # Bottleneck guidance (only when relevant)
         if self.bottleneck_type and self.tuning_steps >= 2:
+            _matrix_instr = "WMMA" if is_wmma_capable(detect_gpu_arch()) else "MFMA"
             _bn_hint = {
                 "balanced": "Bottleneck: balanced -- parameter tuning won't help. Focus on algorithmic changes or fusion; treat dispatch-path edits as a last resort.",
                 "memory": "Bottleneck: memory -- try vectorized loads, LDS staging, or fuse ops.",
-                "compute": "Bottleneck: compute -- try MFMA, reduce instructions, or fuse ops.",
+                "compute": f"Bottleneck: compute -- try {_matrix_instr}, reduce instructions, or fuse ops.",
                 "latency": "Bottleneck: latency -- increase work per kernel, fuse with adjacent kernels, or try @triton.autotune.",
             }
             hint = _bn_hint.get(self.bottleneck_type)

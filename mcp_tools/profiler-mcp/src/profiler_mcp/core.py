@@ -13,47 +13,6 @@ from metrix import Metrix
 logger = logging.getLogger(__name__)
 
 
-def _pick_spec_field(specs: Any, *attr_names: str) -> Any:
-    """Return the first present attribute from ``specs`` (Metrix DeviceSpecs API varies by version)."""
-    for name in attr_names:
-        if hasattr(specs, name):
-            return getattr(specs, name)
-    return None
-
-
-def _device_specs_to_gpu_info_dict(specs: Any, device: str) -> dict[str, Any] | None:
-    """Map Metrix ``device_specs`` to GEAK ``gpu_info`` without assuming every field exists."""
-    arch = _pick_spec_field(specs, "arch", "architecture")
-    name = _pick_spec_field(specs, "name", "model")
-    if arch is None and name is None:
-        return None
-
-    peak_l2 = _pick_spec_field(
-        specs,
-        "l2_bandwidth_gbs",
-        "peak_l2_bandwidth_gbs",
-        "l2_peak_bandwidth_gbs",
-    )
-
-    return {
-        "detected": True,
-        "device_id": device,
-        "vendor": "AMD",  # Metrix currently supports AMD GPUs
-        "architecture": arch,
-        "model": name,
-        "compute_units": _pick_spec_field(specs, "num_cu", "compute_units"),
-        "peak_hbm_bandwidth_gbs": _pick_spec_field(
-            specs, "hbm_bandwidth_gbs", "peak_hbm_bandwidth_gbs"
-        ),
-        "peak_l2_bandwidth_gbs": peak_l2,
-        "l2_size_mb": _pick_spec_field(specs, "l2_size_mb", "l2_cache_mb"),
-        "lds_size_per_cu_kb": _pick_spec_field(specs, "lds_size_per_cu_kb", "lds_kb_per_cu"),
-        "wavefront_size": _pick_spec_field(specs, "wavefront_size", "wave_size"),
-        "fp32_tflops": _pick_spec_field(specs, "fp32_tflops"),
-        "fp64_tflops": _pick_spec_field(specs, "fp64_tflops"),
-    }
-
-
 class MetrixTool:
     """MCP tool for GPU kernel profiling using metrix Python API."""
 
@@ -161,9 +120,21 @@ class MetrixTool:
             # Metrix backend contains device_specs with comprehensive GPU info
             if hasattr(self.profiler, "backend") and hasattr(self.profiler.backend, "device_specs"):
                 specs = self.profiler.backend.device_specs
-                mapped = _device_specs_to_gpu_info_dict(specs, device)
-                if mapped is not None:
-                    return mapped
+                return {
+                    "detected": True,
+                    "device_id": device,
+                    "vendor": "AMD",  # Metrix currently supports AMD GPUs
+                    "architecture": specs.arch,
+                    "model": specs.name,
+                    "compute_units": specs.num_cu,
+                    "peak_hbm_bandwidth_gbs": specs.hbm_bandwidth_gbs,
+                    "peak_l2_bandwidth_gbs": getattr(specs, "l2_bandwidth_gbs", 0),
+                    "l2_size_mb": specs.l2_size_mb,
+                    "lds_size_per_cu_kb": specs.lds_size_per_cu_kb,
+                    "wavefront_size": specs.wavefront_size,
+                    "fp32_tflops": getattr(specs, "fp32_tflops", 0),
+                    "fp64_tflops": getattr(specs, "fp64_tflops", 0),
+                }
         except Exception as e:
             logger.warning(f"Failed to detect GPU info for device {device}: {e}")
 
@@ -366,10 +337,32 @@ class MetrixTool:
         return metrics
 
     def _validate_metrics(self, metrics: dict[str, float], kernel_name: str, quick: bool = False) -> None:
-        """Validate that expected metrics are present."""
+        """Validate that expected metrics are present.
+
+        On RDNA some metrics are genuinely unavailable -- the metric set was
+        authored against CDNA. Log a warning and continue on RDNA so the
+        pipeline can still surface partial results. On CDNA we keep the pre-PR
+        strict behavior (RuntimeError) so missing metrics surface as a hard
+        failure as before.
+        """
         expected = self.EXPECTED_METRICS_QUICK if quick else self.EXPECTED_METRICS_FULL
         missing = [m for m in expected if m not in metrics]
         if missing:
+            arch = ""
+            if hasattr(self.profiler, "backend") and hasattr(self.profiler.backend, "device_specs"):
+                arch = getattr(self.profiler.backend.device_specs, "arch", "") or ""
+            is_rdna_arch = arch.startswith(("gfx10", "gfx11", "gfx12"))
+            if is_rdna_arch:
+                logger.warning(
+                    "Metric validation for '%s...': %d metric(s) unavailable on this GPU: %s",
+                    kernel_name[:60],
+                    len(missing),
+                    missing,
+                )
+                logger.debug(
+                    f"Validated {len(expected) - len(missing)}/{len(expected)} metrics for '{kernel_name[:60]}...'"
+                )
+                return
             logger.error(f"Metric validation failed for '{kernel_name[:60]}...': missing {len(missing)} metric(s)")
             raise RuntimeError(
                 f"Missing expected metrics for kernel '{kernel_name}': {missing}\n"

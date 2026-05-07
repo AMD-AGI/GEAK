@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 from packaging.version import Version
 
+from minisweagent.run.utils.gpu_arch import guard_rocprof_compute
 from minisweagent.tools.prompt_for_profiling_analyzer import profiler_prompt
 
 
@@ -817,9 +818,18 @@ class ProfilingAnalyzer:
         Returns (success: bool, error_msg: str | None).
         """
         kernel_name = Path(profiling_workdir).name
-        rocprof_version = self._check_rocprof_compute()
         if not profiling_workdir or not profiling_cmd:
             return False, "No profiling_workdir and profiling_cmd arguments are provided."
+
+        _, rdna_arch = guard_rocprof_compute("rocprof-compute")
+        if rdna_arch:
+            return False, (
+                    f"rocprof-compute does not support RDNA ({rdna_arch}). "
+                    "Use the metrix profiling backend instead "
+                    "(e.g. backend='metrix' in profiler-mcp)."
+                ),
+
+        rocprof_version = self._check_rocprof_compute()
         if rocprof_version is None:
             return False, "rocprof-compute is not installed."
 

@@ -64,6 +64,10 @@ def _normalize_kernel_type(value: Any) -> str:
         return "triton"
     if text in {"hip", "rocm", "rocblas"}:
         return "hip"
+    if text == "pytorch2flydsl":
+        return "pytorch2flydsl"
+    if text == "flydsl":
+        return "flydsl"
     return "other"
 
 
@@ -334,7 +338,7 @@ def main(
             from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
 
             inferred = _normalize_kernel_type(_infer_kernel_type(kp))
-            if inferred in {"hip", "triton"}:
+            if inferred in {"hip", "triton", "flydsl"}:
                 kernel_type = inferred
                 logger.info("Updated kernel_type using kernel path: %s", kernel_type)
 
@@ -447,6 +451,7 @@ def main(
             harness_spec = promoted
             logger.info("[bold cyan]Promoted test command to validated harness: %s[/bold cyan]", promoted)
 
+    _target_language = "flydsl" if kernel_type in {"pytorch2flydsl", "flydsl"} else None
     _preprocess_kwargs = dict(
         kernel_url=kernel_target,
         repo=repo,
@@ -454,6 +459,7 @@ def main(
         gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
         model_factory=lambda: get_model(model_name, config.get("model", {})),
         console=console,
+        target_language=_target_language,
     )
     logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
 
@@ -489,7 +495,7 @@ def main(
         repo = Path(preprocess_ctx["repo_root"])
 
     # kernel_type routing:
-    # - hip/other -> homogeneous agent
+    # - hip/flydsl/other -> homogeneous agent
     # - triton -> heterogeneous orchestrator
     # Auto-detect kernel type if heterogeneous flag was not set by LLM extraction or task parser
     if heterogeneous is None:
