@@ -411,6 +411,7 @@ def run_preprocessor(
     correctness_command: str | list[str] | None = None,
     performance_command: str | list[str] | None = None,
     benchmark_timeout: int = 3600,
+    target_language: str | None = None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -523,6 +524,12 @@ def run_preprocessor(
                 harness = _new_harness
 
     logger.info("  Kernel: %s", kernel_path)
+
+    def _print(msg: str) -> None:
+        if console:
+            console.print(msg)
+        else:
+            print(msg, file=sys.stderr)
 
     # ── Fast path for eval_command: skip Steps 2-4 ───────────────────
     if eval_command:
@@ -971,6 +978,44 @@ def run_preprocessor(
             testcase_selection["harness_path"] = ctx.get("harness_path")
             (output_dir / "testcase_selection.json").write_text(json.dumps(testcase_selection, indent=2, default=str))
 
+        # ── Step 4: Translation (conditional, after UTA) ─────────────
+        if target_language:
+            _print("[bold cyan]--- Step 4: Translation ---[/bold cyan]" if console else "--- Step 4: Translation ---")
+            from minisweagent.run.preprocess.translate import run_translation
+
+            translation_output_dir = output_dir / "translation"
+            translation_result = run_translation(
+                kernel_path=Path(kernel_path),
+                output_dir=translation_output_dir,
+                gpu_id=gpu_id,
+                target_language=target_language,
+                model=model,
+                model_factory=model_factory,
+                repo=Path(repo_root) if repo_root else None,
+                console=console,
+            )
+            ctx.update(translation_result)
+            if translation_result.get("translation_success"):
+                kernel_path = translation_result["translation_kernel_path"]
+                ctx["kernel_path"] = kernel_path
+                _print(f"  Translated kernel: {kernel_path}")
+                _harness = next(translation_output_dir.glob("test_*_translation_harness.py"), None)
+                if _harness and _harness.exists():
+                    test_command = f"{sys.executable} {_harness} --flydsl-kernel {kernel_path}"
+                    ctx["test_command"] = test_command
+                    ctx["harness_path"] = str(_harness)
+                    _print(f"  Translation harness as test_command: {test_command}")
+            else:
+                _errors = translation_result.get("translation_errors", [])
+                _src = translation_result.get("translation_source_language") or "source"
+                _print(
+                    f"  [yellow]Translation failed — continuing with original {_src} kernel[/yellow]"
+                    if console
+                    else f"  Translation failed — continuing with original {_src} kernel"
+                )
+                for _e in (_errors or [])[-3:]:
+                    _print(f"    {_e}")
+
         # GEAK_HARNESS_ONLY=1 skips profiling, baseline, and commandment steps.
         # Used by test_harness_variance.py to validate harness shapes quickly.
         _harness_only = os.environ.get("GEAK_HARNESS_ONLY", "").strip() == "1"
@@ -1331,6 +1376,11 @@ def main() -> None:
         default=None,
         help='Benchmark command (e.g. "./benchmark"). Used for profiling and baseline capture.',
     )
+    parser.add_argument(
+        "--kernel-type",
+        default=None,
+        help="Kernel type (e.g. pytorch2flydsl). Triggers translation when applicable.",
+    )
     args = parser.parse_args()
 
     try:
@@ -1357,6 +1407,7 @@ def main() -> None:
     print(f"  repo:                 {args.repo}")
     print(f"  correctness_command:  {args.correctness_command}")
     print(f"  performance_command:  {args.performance_command}")
+    print(f"  kernel_type:          {args.kernel_type}")
     print("-" * 60)
     print(f"  GEAK_MODEL:                 {os.environ.get('GEAK_MODEL', '<not set>')}")
     print(f"  GEAK_MODEL_ENSEMBLE:        {os.environ.get('GEAK_MODEL_ENSEMBLE', '<not set>')}")
@@ -1377,6 +1428,7 @@ def main() -> None:
         eval_command=args.eval_command,
         correctness_command=args.correctness_command,
         performance_command=args.performance_command,
+        target_language="flydsl" if args.kernel_type == "pytorch2flydsl" else None,
     )
 
     print(json.dumps(ctx, indent=2, default=str))

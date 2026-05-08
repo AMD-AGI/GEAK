@@ -169,7 +169,17 @@ def build_eval_env(
     env["GEAK_GPU_DEVICE"] = str(gpu_id)
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
     env["GEAK_BENCHMARK_EXTRA_ARGS"] = f"--iterations {iters}"
-    env["PYTHONPATH"] = f"{work_dir}:{repo_root}:{env.get('PYTHONPATH', '')}"
+    pp_parts = [str(work_dir), repo_root]
+    if "/tests/" in harness_path:
+        try:
+            hp = Path(harness_path).resolve()
+            for _ in range(3):
+                hp = hp.parent
+            pp_parts.append(str(hp))
+        except (OSError, ValueError):
+            pass
+    pp_parts.append(env.get("PYTHONPATH", ""))
+    env["PYTHONPATH"] = ":".join(p for p in pp_parts if p)
     alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF", "")
     if "expandable_segments" in alloc_conf:
         logger.debug("build_eval_env: removing PYTORCH_CUDA_ALLOC_CONF with expandable_segments.")

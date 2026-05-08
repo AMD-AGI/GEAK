@@ -180,6 +180,23 @@ def _neutralize_nested_git_repos(root: Path) -> list[Path]:
     return renamed
 
 
+def _resolve_output_root(repo_path: Path, worktree_path: Path) -> Path | None:
+    """Return the top-level GEAK output directory inside repo_path, if any.
+
+    When the worktree is created inside the repo (e.g.
+    ``<repo>/optimization_logs/<run>/results/.../slot_N``), returns the first
+    directory component relative to repo_path (e.g. ``<repo>/optimization_logs``).
+    Returns None if the worktree is not inside the repo.
+    """
+    try:
+        relative = worktree_path.relative_to(repo_path)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+    return repo_path / relative.parts[0]
+
+
 def _copy_nested_git_repos(repo_path: Path, worktree_path: Path) -> None:
     """Copy nested git repositories that are invisible to the top-level repo.
 
@@ -190,6 +207,7 @@ def _copy_nested_git_repos(repo_path: Path, worktree_path: Path) -> None:
     repo_path = repo_path.resolve()
     worktree_path = worktree_path.resolve()
     top_git = repo_path / ".git"
+    output_root = _resolve_output_root(repo_path, worktree_path)
 
     for dirpath, dirnames, _filenames in os.walk(repo_path):
         current = Path(dirpath)
@@ -204,7 +222,17 @@ def _copy_nested_git_repos(repo_path: Path, worktree_path: Path) -> None:
             dirnames.clear()
             continue
 
-        if ".git" in dirnames or (current / ".git").is_file():
+        # Skip the entire GEAK output directory to prevent recursive copying
+        # of artifacts from previous runs (fixes #189, #181).
+        if output_root is not None:
+            try:
+                current.relative_to(output_root)
+                dirnames.clear()
+                continue
+            except ValueError:
+                pass
+
+        if current != repo_path and (".git" in dirnames or (current / ".git").is_file()):
             # current is a nested git repo root — skip descending further
             # via os.walk (copytree will handle the full subtree).
             dirnames.clear()
@@ -220,7 +248,9 @@ def _copy_nested_git_repos(repo_path: Path, worktree_path: Path) -> None:
 def _copy_untracked_files(repo_path: Path, worktree_path: Path, env: dict[str, str] | None = None) -> None:
     """Copy untracked files from repo to worktree."""
     run_env = env if env is not None else None
+    resolved_repo = repo_path.resolve()
     resolved_wt = worktree_path.resolve()
+    output_root = _resolve_output_root(resolved_repo, resolved_wt)
     try:
         result = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard"],
@@ -240,6 +270,14 @@ def _copy_untracked_files(repo_path: Path, worktree_path: Path, env: dict[str, s
                 continue
             except ValueError:
                 pass
+            # Skip files inside the GEAK output directory to prevent recursive
+            # copying of artifacts from previous runs (fixes #189, #181).
+            if output_root is not None:
+                try:
+                    src.resolve().relative_to(output_root)
+                    continue
+                except ValueError:
+                    pass
             if src.is_file():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)

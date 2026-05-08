@@ -91,6 +91,8 @@ def _infer_kernel_type(kernel_path: Path) -> str:
                     return "triton"
                 logger.debug("_infer_kernel_type: bare 'import triton' in %s; classifying as triton.", kernel_path.name)
                 return "triton"
+            if "@flyc.kernel" in text or "flydsl.compiler" in text or "flydsl.expr" in text:
+                return "flydsl"
         except OSError as exc:
             logger.debug("_infer_kernel_type: could not read %s: %s", kernel_path, exc)
         logger.debug("_infer_kernel_type: no triton markers in %s; returning 'unknown'.", kernel_path.name)

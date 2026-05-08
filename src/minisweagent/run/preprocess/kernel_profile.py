@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 from minisweagent.run.preprocess.repo_paths import ensure_preprocess_mcp_importable
+from minisweagent.run.utils.gpu_arch import guard_rocprof_compute
 
 ensure_preprocess_mcp_importable("mcp_tools/profiler-mcp/src", "mcp_tools/metrix-mcp/src")
 
@@ -384,6 +385,14 @@ def main():
         parser.error("command is required (positional or via --from-discovery)")
 
     use_json = args.output_json or args.output is not None
+
+    args.backend, rdna_arch = guard_rocprof_compute(args.backend)
+    if rdna_arch:
+        print(
+            f"[kernel-profile] WARNING: rocprof-compute does not support RDNA ({rdna_arch}). "
+            "Switching to metrix backend.",
+            file=sys.stderr,
+        )
 
     # Dispatch via profiler-mcp (single code path for both backends)
     profiler_server = importlib.import_module("profiler_mcp.server")

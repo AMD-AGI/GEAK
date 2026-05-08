@@ -47,6 +47,9 @@ make install-dev          # install-full, editable (for developers)
 pip install -e .          # core package, including MCP runtime dependencies
 pip install -e '.[full]'  # core + dev + langchain + swe-rex
 
+# (optional) RAG index build: if enable RAG, build index after make install
+make index
+
 # Set model name and key. In the case of docker-based setup, export the API key before
 # running scripts/run-docker.sh.
 
@@ -122,6 +125,18 @@ geak --repo "$REPO" \
   --kernel-url "$REPO/kernel.py" \
   --test-command "python3 -c \"import ast; ast.parse(open('kernel.py').read())\" && python3 'test_kernel_harness.py' --correctness && python3 'test_kernel_harness.py' --full-benchmark" \
   --task "Optimize the MLA decode Triton kernel." 
+```
+
+**Example: FlyDSL kernel `preshuffle_gemm`**
+
+```bash
+# FlyDSL repo root (requires `pip install flydsl` in the environment)
+REPO="/path/to/FlyDSL"
+
+geak --repo "$REPO" \
+  --kernel-url "$REPO/kernels/preshuffle_gemm.py" \
+  --task "Optimize the preshuffle GEMM kernel." \
+  --yolo --exit-immediately
 ```
 
 For more options and examples, see **[Quick start](docs/quick_start.md)**.

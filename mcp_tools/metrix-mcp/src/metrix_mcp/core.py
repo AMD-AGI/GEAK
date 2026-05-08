@@ -128,12 +128,12 @@ class MetrixTool:
                     "model": specs.name,
                     "compute_units": specs.num_cu,
                     "peak_hbm_bandwidth_gbs": specs.hbm_bandwidth_gbs,
-                    "peak_l2_bandwidth_gbs": specs.l2_bandwidth_gbs,
+                    "peak_l2_bandwidth_gbs": getattr(specs, "l2_bandwidth_gbs", 0),
                     "l2_size_mb": specs.l2_size_mb,
                     "lds_size_per_cu_kb": specs.lds_size_per_cu_kb,
                     "wavefront_size": specs.wavefront_size,
-                    "fp32_tflops": specs.fp32_tflops,
-                    "fp64_tflops": specs.fp64_tflops,
+                    "fp32_tflops": getattr(specs, "fp32_tflops", 0),
+                    "fp64_tflops": getattr(specs, "fp64_tflops", 0),
                 }
         except Exception as e:
             logger.warning(f"Failed to detect GPU info for device {device}: {e}")
@@ -337,10 +337,32 @@ class MetrixTool:
         return metrics
 
     def _validate_metrics(self, metrics: dict[str, float], kernel_name: str, quick: bool = False) -> None:
-        """Validate that expected metrics are present."""
+        """Validate that expected metrics are present.
+
+        On RDNA some metrics are genuinely unavailable -- the metric set was
+        authored against CDNA. Log a warning and continue on RDNA so the
+        pipeline can still surface partial results. On CDNA we keep the pre-PR
+        strict behavior (RuntimeError) so missing metrics surface as a hard
+        failure as before.
+        """
         expected = self.EXPECTED_METRICS_QUICK if quick else self.EXPECTED_METRICS_FULL
         missing = [m for m in expected if m not in metrics]
         if missing:
+            arch = ""
+            if hasattr(self.profiler, "backend") and hasattr(self.profiler.backend, "device_specs"):
+                arch = getattr(self.profiler.backend.device_specs, "arch", "") or ""
+            is_rdna_arch = arch.startswith(("gfx10", "gfx11", "gfx12"))
+            if is_rdna_arch:
+                logger.warning(
+                    "Metric validation for '%s...': %d metric(s) unavailable on this GPU: %s",
+                    kernel_name[:60],
+                    len(missing),
+                    missing,
+                )
+                logger.debug(
+                    f"Validated {len(expected) - len(missing)}/{len(expected)} metrics for '{kernel_name[:60]}...'"
+                )
+                return
             logger.error(f"Metric validation failed for '{kernel_name[:60]}...': missing {len(missing)} metric(s)")
             raise RuntimeError(
                 f"Missing expected metrics for kernel '{kernel_name}': {missing}\n"
