@@ -35,7 +35,7 @@ GEAK expects servers implemented with **FastMCP**:
 - Use clear **docstrings** and typed parameters; they drive what the model sees and the tool JSON schema.
 - Provide an entry in **`server.py`** so **`python3 -m <package_name>.server`** runs the server (typically `mcp.run()` in `main()`).
 
-**In-repo examples:** `mcp_tools/profiler-mcp/`, `mcp_tools/metrix-mcp/`, and **`mcp_tools/README.md`** (detailed checklist and patterns — read that file when adding a new server).
+**In-repo examples:** `mcp_tools/profiler-mcp/` (Metrix + rocprof-compute) and **`mcp_tools/README.md`** (detailed checklist and patterns — read that file when adding a new server).
 
 **Dependencies:** Put them in your server’s **`pyproject.toml`** (or equivalent) so the subprocess environment can import your code. If the server fails to start or list tools, GEAK will **skip** it for that run rather than break the whole agent.
 

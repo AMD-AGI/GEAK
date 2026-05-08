@@ -1,7 +1,10 @@
+import copy
 import json
 import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from minisweagent.tools.bash_command import BashCommand
 from minisweagent.tools.save_and_test import SaveAndTestTool
@@ -9,43 +12,7 @@ from minisweagent.tools.str_replace_editor import str_replace_editor
 from minisweagent.tools.strategy_manager import StrategyManagerTool
 from minisweagent.tools.submit import SubmitTool
 
-json_path = Path(__file__).parent / "tools.json"
-with open(json_path, encoding="utf-8") as f:
-    _all_tools = json.load(f)
-
-# MCP tool schemas are shared at module level.
-# MCP bridge *instances* are created per ToolRuntime so each agent gets its
-# own subprocess and stdio pipes (safe for parallel profiling).
-logger = logging.getLogger(__name__)
-
-_mcp_tools: list = []
-_mcp_collected = False
-
-
-def _ensure_mcp_collected() -> None:
-    """Lazily collect MCP tool schemas.
-
-    Called on first ToolRuntime instantiation rather than at module import
-    time, so that ``geak --help`` and other import-only paths do not spawn
-    MCP server subprocesses and hang.
-    """
-    global _mcp_tools, _mcp_collected
-    if _mcp_collected:
-        return
-    _mcp_collected = True
-    try:
-        from minisweagent.tools.mcp_bridge import collect_mcp_tools
-
-        _boot_bridges, _mcp_tools = collect_mcp_tools()
-        _all_tools.extend(_mcp_tools)
-        # Bootstrap bridges are only needed for schema discovery; discard refs.
-        # Their atexit handlers will clean up at interpreter exit.
-        del _boot_bridges
-        logger.debug("_ensure_mcp_collected: discovered %d MCP tool(s).", len(_mcp_tools))
-    except Exception as exc:
-        logger.warning("MCP tool collection failed; MCP tools will be unavailable: %s", exc)
-        _mcp_tools = []
-
+_TOOLS_JSON_PATH = Path(__file__).parent / "tools.json"
 
 _TOOL_PROFILES: dict[str, set[str] | None] = {
     "full": None,
@@ -63,26 +30,60 @@ _TOOL_PROFILES: dict[str, set[str] | None] = {
 }
 
 
-def get_tools_list(use_strategy_manager: bool = False) -> list:
-    """Get filtered tools list based on settings.
-
-    Args:
-        use_strategy_manager: If True, include strategy_manager tool. If False, exclude it.
-    Returns:
-        List of tool definitions for the API.
-    """
-    _ensure_mcp_collected()
-    excluded = set()
-    if not use_strategy_manager:
-        excluded.add("strategy_manager")
-    return [t for t in _all_tools if t["name"] not in excluded]
-
-
-# Backward compatibility
-tools_list = _all_tools
-
-
 class ToolRuntime:
+    @classmethod
+    def load_tools_json(cls) -> list[dict[str, Any]]:
+        """Load native tool definitions from ``tools.json`` (fresh list each call)."""
+        with open(_TOOLS_JSON_PATH, encoding="utf-8") as f:
+            return json.load(f)
+
+    @classmethod
+    def _prepare_mcp(cls) -> tuple[list[dict[str, Any]], list]:
+        """Return ``(mcp_tool_schemas, dispatch_bridges)`` for one runtime.
+
+        This still performs **two** bridge lifecycles on purpose:
+
+        1. ``collect_mcp_tools`` — spawn bridges, run ``tools/list``, build OpenAI-style
+           schemas, then drop those bridge objects (they are not safe to share across
+           parallel agents / long-lived dispatch).
+        2. ``_populate_mcp_bridges`` — fresh bridges used only for ``call_tool`` on this
+           :class:`ToolRuntime` instance (stdio + asyncio isolation).
+        """
+        schemas: list[dict[str, Any]] = []
+        try:
+            from minisweagent.tools.mcp_bridge import collect_mcp_tools
+
+            boot_bridges, mcp_tools = collect_mcp_tools()
+            del boot_bridges
+            schemas = list(mcp_tools)
+        except Exception as exc:
+            logger.warning("MCP tool schema discovery failed; MCP tools will be unavailable: %s", exc)
+
+        try:
+            from minisweagent.tools.mcp_bridge import _populate_mcp_bridges
+
+            bridges = _populate_mcp_bridges()
+        except Exception as exc:
+            logger.warning("MCP bridge creation failed; MCP dispatch will be unavailable: %s", exc)
+            bridges = []
+
+        return schemas, bridges
+
+    @classmethod
+    def fetch_tools_list(
+        cls,
+        use_strategy_manager: bool = True,
+        tool_profile: str = "full",
+    ) -> list:
+        """Return tool API definitions without keeping a runtime (pays full MCP discovery).
+
+        Prefer :meth:`get_tools_list` when you already have an instance.
+        """
+        return cls(
+            use_strategy_manager=use_strategy_manager,
+            tool_profile=tool_profile,
+        ).get_tools_list()
+
     def __init__(
         self,
         use_strategy_manager: bool = True,
@@ -91,13 +92,9 @@ class ToolRuntime:
         patch_output_dir: str | None = None,
         tool_profile: str = "full",
     ):
-        self._tool_profile = tool_profile
-
-        # Each ToolRuntime gets its OWN set of MCP bridge instances so that
-        # parallel agents do not share asyncio event loops or stdio pipes.
-        # This prevents the "readuntil() called while another coroutine is
-        # already waiting for incoming data" race condition.
-        self._mcp_bridges: list = self._create_own_bridges()
+        json_tools = copy.deepcopy(self.load_tools_json())
+        mcp_schema_tools, self._mcp_bridges = self._prepare_mcp()
+        self.tools_list: list[dict[str, Any]] = json_tools + mcp_schema_tools
 
         allowed = _TOOL_PROFILES.get(tool_profile)
 
@@ -184,17 +181,6 @@ class ToolRuntime:
             if name in ("query", "optimize"):
                 self._tool_table[name] = _wrap(self._tool_table[name])
 
-    @staticmethod
-    def _create_own_bridges() -> list:
-        """Create a fresh set of MCPToolBridge instances for this ToolRuntime."""
-        try:
-            from minisweagent.tools.mcp_bridge import _populate_mcp_bridges
-
-            return _populate_mcp_bridges()
-        except Exception as exc:
-            logger.warning("_create_own_bridges: MCP bridge creation failed: %s", exc)
-            return []
-
     def _register_profiler_mcp(self):
         """Register only the profiler-mcp tool."""
         for bridge in self._mcp_bridges:
@@ -212,17 +198,18 @@ class ToolRuntime:
                 return
 
     def _register_mcp_tools(self):
-        """Register all MCP server tools discovered at module level."""
+        """Register all MCP server tools whose schemas are on ``self.tools_list``."""
         for bridge in self._mcp_bridges:
-            _mcp_server_name = bridge.server_name
-            for _mcp_tool in _mcp_tools:
-                if f"[MCP: {_mcp_server_name}]" in _mcp_tool.get("description", ""):
-                    base_name = (
-                        _mcp_tool["name"].split("__")[0]
-                        if f"__{_mcp_server_name}" in _mcp_tool["name"]
-                        else _mcp_tool["name"]
-                    )
-                    self._tool_table[_mcp_tool["name"]] = bridge.tool(base_name)
+            server_name = bridge.server_name
+            tag = f"[MCP: {server_name}]"
+            for mcp_tool in self.tools_list:
+                if tag not in (mcp_tool.get("description") or ""):
+                    continue
+                raw_name = mcp_tool.get("name")
+                if not isinstance(raw_name, str):
+                    continue
+                base_name = raw_name.split("__")[0] if f"__{server_name}" in raw_name else raw_name
+                self._tool_table[raw_name] = bridge.tool(base_name)
 
     def set_env(self, env: dict[str, str]) -> None:
         """Propagate environment overrides (e.g. HIP_VISIBLE_DEVICES) to tools."""
@@ -245,20 +232,27 @@ class ToolRuntime:
         if self._sub_agent_tool and context:
             self._sub_agent_tool._codebase_context = context
 
-    def get_tools_schema(self) -> list[dict]:
-        """Return JSON tool schemas for only the tools registered in _tool_table."""
-        return [t for t in _all_tools if t["name"] in self._tool_table]
+    def get_tools_list(self) -> list[dict]:
+        """OpenAI-style tool definitions for this runtime.
 
-    def get_tools_list(self) -> list:
-        """Get the tools list for API based on current settings."""
-        return get_tools_list(self.use_strategy_manager)
+        Includes only tools present in ``_tool_table`` (so names match
+        :meth:`dispatch`), and omits ``strategy_manager`` when
+        ``use_strategy_manager`` is false.
+        """
+        excluded: set[str] = set()
+        if not self.use_strategy_manager:
+            excluded.add("strategy_manager")
+        table = self._tool_table
+        return [t for t in self.tools_list if t["name"] in table and t["name"] not in excluded]
 
     def disable_tools(self, names) -> None:
-        """Disable tools by name (removes from schema + dispatch)."""
+        """Disable tools by name (removes from schema + dispatch + tools_list)."""
         if not names:
             return
         for n in list(names):
             self._tool_table.pop(n, None)
+        ban = set(names)
+        self.tools_list = [t for t in self.tools_list if t.get("name") not in ban]
 
     def dispatch(self, tool_call: dict[str, Any]) -> dict[str, Any]:
         """

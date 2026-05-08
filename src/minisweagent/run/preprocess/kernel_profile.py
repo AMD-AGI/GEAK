@@ -24,7 +24,7 @@ from pathlib import Path
 from minisweagent.run.preprocess.repo_paths import ensure_preprocess_mcp_importable
 from minisweagent.run.utils.gpu_arch import guard_rocprof_compute
 
-ensure_preprocess_mcp_importable("mcp_tools/profiler-mcp/src", "mcp_tools/metrix-mcp/src")
+ensure_preprocess_mcp_importable("mcp_tools/profiler-mcp/src")
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +138,50 @@ def _generate_rocprof_observations(metrics: dict, bottleneck: str) -> list[str]:
     return obs
 
 
+def _roofline_dict_per_kernel(block: list | dict | None, n_kernels: int) -> list[dict]:
+    """One roofline dict per ``top_kernels`` index (``analyze_structured`` lists, or legacy single dict)."""
+    if n_kernels <= 0:
+        return []
+    if block is None:
+        return [{} for _ in range(n_kernels)]
+    if isinstance(block, dict):
+        return [block if i == 0 else {} for i in range(n_kernels)]
+    if isinstance(block, list):
+        out: list[dict] = []
+        for i in range(n_kernels):
+            d = block[i] if i < len(block) and isinstance(block[i], dict) else {}
+            out.append(d)
+        return out
+    return [{} for _ in range(n_kernels)]
+
+
+def _flatten_roofline_rates(rates: dict) -> dict:
+    """``{metric_name: (value, peak, unit)}`` -> ``roofline.*`` flat keys."""
+    out: dict = {}
+    for name, tup in rates.items():
+        if not isinstance(tup, (tuple, list)) or len(tup) < 2:
+            continue
+        value, peak = tup[0], tup[1]
+        _unit = tup[2] if len(tup) > 2 else None
+        safe_name = str(name).lower().replace(" ", "_").replace("/", "_")
+        out[f"roofline.{safe_name}"] = value
+        out[f"roofline.{safe_name}_peak"] = peak
+    return out
+
+
+def _flatten_roofline_ai(ai: dict) -> dict:
+    """``{metric_name: (value, unit)}`` -> ``roofline.*`` flat keys (may overlap names with rates; AI wins last)."""
+    out: dict = {}
+    for name, tup in ai.items():
+        if not isinstance(tup, (tuple, list)) or len(tup) < 1:
+            continue
+        value = tup[0]
+        _unit = tup[1] if len(tup) > 1 else None
+        safe_name = str(name).lower().replace(" ", "_").replace("/", "_")
+        out[f"roofline.{safe_name}"] = value
+    return out
+
+
 def _build_rocprof_result(structured: dict, gpu_device: str = "0") -> dict:
     """Convert ProfilingAnalyzer.profile_structured() output to backend-neutral JSON."""
     sys_info = structured.get("sys_info", {})
@@ -146,8 +190,6 @@ def _build_rocprof_result(structured: dict, gpu_device: str = "0") -> dict:
     l1_data = structured.get("l1_data", {})
     l2_data = structured.get("l2_data", {})
     wavefront = structured.get("wavefront", {})
-    roofline_rates = structured.get("roofline_rates", {})
-    roofline_ai = structured.get("roofline_ai", {})
     top_kernels = structured.get("top_kernels", [])
 
     gpu_info = {
@@ -161,34 +203,29 @@ def _build_rocprof_result(structured: dict, gpu_device: str = "0") -> dict:
         "l2_cache": sys_info.get("gpu L2", "Unknown"),
     }
 
-    # Flatten all sections into a single metrics dict with native keys
-    metrics: dict = {}
+    # Shared sections (rocprof text is one report; roofline blocks are per CSV kernel row)
+    base_metrics: dict = {}
 
-    # sys_speed metrics
     for k, v in sys_speed.items():
         if v is not None:
-            metrics[k] = v
+            base_metrics[k] = v
 
-    # compute_units metrics
     for k, v in compute_units.items():
         if v is not None:
-            metrics[k] = v
+            base_metrics[k] = v
 
-    # l1_data (nested dicts -> flattened with prefix)
     for section_val in l1_data.values():
         if isinstance(section_val, dict):
             for k, v in section_val.items():
                 if v is not None:
-                    metrics[f"l1_{k}"] = v
+                    base_metrics[f"l1_{k}"] = v
 
-    # l2_data (nested dicts -> flattened with prefix)
     for section_val in l2_data.values():
         if isinstance(section_val, dict):
             for k, v in section_val.items():
                 if v is not None:
-                    metrics[f"l2_{k}"] = v
+                    base_metrics[f"l2_{k}"] = v
 
-    # wavefront metrics (each value is [float, status_string])
     total_cycles = 0
     for cycle_key in ("Dependency Wait Cycles", "Issue Wait Cycles", "Active Cycles"):
         vals = wavefront.get(cycle_key, [])
@@ -207,7 +244,7 @@ def _build_rocprof_result(structured: dict, gpu_device: str = "0") -> dict:
     for wf_key, metric_key in wf_mapping.items():
         vals = wavefront.get(wf_key, [])
         if vals and vals[0] is not None:
-            metrics[metric_key] = vals[0]
+            base_metrics[metric_key] = vals[0]
 
     if total_cycles > 0:
         for cycle_key, metric_key in (
@@ -217,42 +254,35 @@ def _build_rocprof_result(structured: dict, gpu_device: str = "0") -> dict:
         ):
             vals = wavefront.get(cycle_key, [])
             if vals and vals[0] is not None:
-                metrics[metric_key] = round(vals[0] / total_cycles * 100, 2)
+                base_metrics[metric_key] = round(vals[0] / total_cycles * 100, 2)
 
     kernel_time_vals = wavefront.get("Kernel Time", [])
     kernel_time_ns = kernel_time_vals[0] if kernel_time_vals and kernel_time_vals[0] is not None else None
-
-    # roofline rates: (value, peak, unit) tuples
-    for name, (value, peak, _unit) in roofline_rates.items():
-        safe_name = name.lower().replace(" ", "_").replace("/", "_")
-        metrics[f"roofline.{safe_name}"] = value
-        metrics[f"roofline.{safe_name}_peak"] = peak
-
-    # roofline AI: (value, unit) tuples
-    for name, (value, _unit) in roofline_ai.items():
-        safe_name = name.lower().replace(" ", "_").replace("/", "_")
-        metrics[f"roofline.{safe_name}"] = value
-
-    # duration_us from wavefront Kernel Time (nanoseconds -> microseconds)
     duration_us = kernel_time_ns / 1000.0 if kernel_time_ns is not None else 0.0
-    metrics["duration_us"] = duration_us
+    base_metrics["duration_us"] = duration_us
 
-    bottleneck = _classify_rocprof_bottleneck(metrics)
-    observations = _generate_rocprof_observations(metrics, bottleneck)
-
-    # Build one kernel entry per top kernel; detailed metrics go on the first (dominant)
     if not top_kernels:
         top_kernels = ["unknown"]
 
+    rates_per_k = _roofline_dict_per_kernel(structured.get("roofline_rates"), len(top_kernels))
+    ai_per_k = _roofline_dict_per_kernel(structured.get("roofline_ai"), len(top_kernels))
+
     kernels = []
     for i, kname in enumerate(top_kernels):
+        merged = {
+            **base_metrics,
+            **_flatten_roofline_rates(rates_per_k[i]),
+            **_flatten_roofline_ai(ai_per_k[i]),
+        }
+        bn = _classify_rocprof_bottleneck(merged)
+        obs = _generate_rocprof_observations(merged, bn)
         kernels.append(
             {
                 "name": kname,
                 "duration_us": duration_us if i == 0 else 0.0,
-                "bottleneck": bottleneck if i == 0 else "unknown",
-                "observations": observations if i == 0 else [],
-                "metrics": metrics if i == 0 else {},
+                "bottleneck": bn,
+                "observations": obs,
+                "metrics": merged,
             }
         )
 
@@ -266,28 +296,6 @@ def _build_rocprof_result(structured: dict, gpu_device: str = "0") -> dict:
             }
         ],
     }
-
-
-# ---------------------------------------------------------------------------
-# Metrix backend
-# ---------------------------------------------------------------------------
-
-
-def _profile_with_metrix(command: str, gpu_devices, replays: int, quick: bool) -> dict:
-    """Profile using MetrixTool and return backend-neutral JSON."""
-    metrix_core = importlib.import_module("metrix_mcp.core")
-    MetrixTool = metrix_core.MetrixTool
-
-    tool = MetrixTool(gpu_devices=gpu_devices)
-    result = tool.profile(
-        command=command,
-        num_replays=replays,
-        kernel_filter=None,
-        auto_select=False,
-        quick=quick,
-    )
-    result["backend"] = "metrix"
-    return result
 
 
 # ---------------------------------------------------------------------------

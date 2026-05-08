@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp>=0.2.0",
+    "metrix>=0.1.0",
 ]
 
 [project.scripts]

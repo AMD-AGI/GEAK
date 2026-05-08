@@ -6,7 +6,7 @@ which ones are in progress, and what results each produced.  The file is
 managed through the ``strategy_manager`` tool so the format stays
 consistent.
 
-On top of the base InteractiveAgent this class adds:
+On top of the base :class:`InteractiveAgent` / :class:`DefaultAgent` this class adds:
 
 1. **UI callbacks** -- every time the strategy list changes, the agent
    formats the update and calls ``notify_strategy_changed()``.
@@ -24,7 +24,6 @@ import logging
 import sys
 
 from minisweagent.agents.interactive import InteractiveAgent
-from minisweagent.tools.tools_runtime import ToolRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -45,38 +44,6 @@ class StrategyAgent(InteractiveAgent):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
-        # Recreate ToolRuntime with the configured tool_profile (default "swe").
-        # DefaultAgent.__init__ already created one with profile="full";
-        # we replace it here so the LLM only sees the intended tool set.
-        self.toolruntime = ToolRuntime(
-            use_strategy_manager=self.config.use_strategy_manager,
-            strategy_file=self._get_strategy_file()
-            if self.config.use_strategy_manager
-            else ".optimization_strategies.md",
-            on_strategy_change=self._get_strategy_callback(),
-            patch_output_dir=self.config.patch_output_dir,
-            tool_profile=self.config.tool_profile,
-        )
-        if self.config.disabled_tools:
-            self.toolruntime.disable_tools(self.config.disabled_tools)
-        self._setup_save_and_test_context()
-
-        if self.config.disabled_tools:
-            self.toolruntime.disable_tools(self.config.disabled_tools)
-
-        # Re-apply RAG postprocessor wrapping after ToolRuntime rebuild
-        try:
-            self.toolruntime.wrap_rag_tools_with_postprocessor(api_key=self.model.config.api_key)
-        except Exception as e:
-            logger.warning("Failed to wrap RAG tools with RAG postprocessor: %s", e)
-
-        # Override model tools so the LLM only sees dispatchable tools
-        if hasattr(self.model, "set_tools"):
-            self.model.set_tools(self.toolruntime.get_tools_schema())
-        else:
-            model_impl = getattr(self.model, "_impl", self.model)
-            model_impl.tools = self.toolruntime.get_tools_schema()
 
         logger.debug(
             "StrategyAgent initialized (profile=%s, strategy_file=%s)",

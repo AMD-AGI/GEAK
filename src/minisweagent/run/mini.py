@@ -207,11 +207,9 @@ def main(
 
     tools_cfg = config.get("tools") or {}
     disabled_tools: list[str] = []
-    if tools_cfg.get("bash") is False:
-        disabled_tools.append("bash")
-    if tools_cfg.get("profiling") is False:
-        disabled_tools.append("profiling")
-        disabled_tools.append("profile_kernel")
+    for tool_name, enabled in tools_cfg.items():
+        if enabled is False:
+            disabled_tools.append(tool_name)
 
     # RAG MCP toggle: disable RAG tools when rag is not enabled
     rag_enabled = tools_cfg.get("rag", False)

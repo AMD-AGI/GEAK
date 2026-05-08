@@ -5,7 +5,7 @@ error handling, and schema correctness.
 """
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -67,6 +67,7 @@ class TestMetrixDispatch:
             auto_select=True,
             quick=True,
             gpu_devices="0",
+            cwd=ANY,
         )
         assert result["success"] is True
 
@@ -148,19 +149,21 @@ class TestSchemaParams:
         }
         assert expected.issubset(props), f"Missing params: {expected - props}"
 
-    def test_backend_not_required(self):
+    def test_backend_is_required(self):
         tool = _get_tool_schema()
         required = tool.parameters.get("required", [])
-        assert "backend" not in required
+        assert "backend" in required
+
+    def test_backend_schema_enum(self):
+        tool = _get_tool_schema()
+        backend_prop = tool.parameters.get("properties", {}).get("backend", {})
+        assert backend_prop.get("enum") == ["metrix", "rocprof-compute"]
 
 
-class TestDefaultBackend:
-    @patch("profiler_mcp.server._profile_with_metrix")
-    def test_default_is_metrix(self, mock_metrix):
-        mock_metrix.return_value = {"success": True, "backend": "metrix", "results": []}
-        result = _call(command="python3 kernel.py")
-        mock_metrix.assert_called_once()
-        assert result["backend"] == "metrix"
+class TestMissingBackend:
+    def test_raises_without_backend(self):
+        with pytest.raises(TypeError):
+            _call(command="python3 kernel.py")
 
 
 class TestNormalizeCommand:

@@ -32,7 +32,6 @@ def _ensure_mcp_importable() -> None:
     """Add MCP tool source directories to sys.path if not already present."""
     ensure_preprocess_mcp_importable(
         "mcp_tools/profiler-mcp/src",
-        "mcp_tools/metrix-mcp/src",
         "mcp_tools/automated-test-discovery/src",
     )
 

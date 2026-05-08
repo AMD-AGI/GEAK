@@ -92,5 +92,5 @@ _ORCHESTRATOR_ONLY_TOOLS: list[dict] = [
 
 def build_tools_schema(toolruntime) -> list[dict]:
     """Merge ToolRuntime schemas (allowlisted) with orchestrator-specific tools."""
-    swe_tools = [t for t in toolruntime.get_tools_schema() if t["name"] in _ORCHESTRATOR_SWE_TOOLS]
+    swe_tools = [t for t in toolruntime.get_tools_list() if t["name"] in _ORCHESTRATOR_SWE_TOOLS]
     return swe_tools + _ORCHESTRATOR_ONLY_TOOLS

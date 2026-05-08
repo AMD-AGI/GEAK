@@ -1,4 +1,6 @@
+import os
 import re
+import shutil
 import subprocess
 import tempfile
 from collections import defaultdict
@@ -15,8 +17,22 @@ class ProfilingAnalyzer:
     def __init__(self, profiling_type: str, llm_model=None):
         self.profiling_type = profiling_type
         self.model = llm_model
-        with tempfile.TemporaryDirectory(prefix="rocprof_") as tmpdir:
-            self.output_path = Path(tmpdir).resolve()
+        self._env_override: dict[str, str] = {}
+        self.output_path = Path(tempfile.mkdtemp(prefix="rocprof_")).resolve()
+        self.skip_patterns = [
+            "vectorized_elementwise",
+            "distribution_",
+            "reduce_kernel",
+            "fillBuffer",
+            "copyBuffer",
+            "Cijk_",
+            "at::native",
+        ]
+
+    def cleanup(self):
+        """Remove the temporary profiling output directory."""
+        if self.output_path.exists():
+            shutil.rmtree(self.output_path, ignore_errors=True)
 
     def _check_rocprof_compute(self):
         result_rocprof = subprocess.run(["rocprof-compute --version"], capture_output=True, text=True, shell=True)
@@ -27,7 +43,7 @@ class ProfilingAnalyzer:
             )
             result = subprocess.run(
                 [
-                    "sudo update-alternatives --install /usr/bin/rocprofiler-compute rocprof-compute /opt/rocm/bin/rocprofiler-compute 0"
+                    "sudo update-alternatives --install /usr/bin/rocprof-compute rocprof-compute /opt/rocm/bin/rocprof-compute 0"
                 ],
                 capture_output=True,
                 text=True,
@@ -57,25 +73,33 @@ class ProfilingAnalyzer:
         match = re.search(r"Kernel\s+\d+:\s*(.+?)\s*\.\.\.", self.content)
         return match.group(1) if match else "Unknown"
 
-    def parse_roofline_rates(self) -> dict[str, tuple[float, float, str]]:
-        rates = {}
+    def parse_roofline_rates(self) -> list[dict[str, tuple[float, float, str]]]:
+        """Parse every ``4.1 Roofline Rate Metrics`` block (one dict per kernel section)."""
+        kernel_rates: list[dict[str, tuple[float, float, str]]] = []
+        rates: dict[str, tuple[float, float, str]] = {}
 
         lines = self.content.split("\n")
         in_section = False
 
-        for _i, line in enumerate(lines):
+        for line in lines:
             if "4.1 Roofline Rate Metrics" in line:
                 in_section = True
+                rates = {}
                 continue
 
             if in_section and "╘═" in line:
+                in_section = False
+                if rates:
+                    kernel_rates.append(rates)
+                continue
+
+            if "4.3 Roofline Plot" in line:
                 break
 
             if in_section and "│" in line and "4.1." in line:
                 parts = [p.strip() for p in line.split("│")]
                 if len(parts) >= 6:
                     try:
-                        parts[1]
                         metric_name = parts[2]
                         value = float(parts[3])
                         unit = parts[4]
@@ -85,10 +109,13 @@ class ProfilingAnalyzer:
                     except (ValueError, IndexError):
                         continue
 
-        if not rates:
+        if in_section and rates:
+            kernel_rates.append(rates)
+
+        if not kernel_rates:
             print("Warning: Could not find 4.1 section")
 
-        return rates
+        return kernel_rates
 
     def parse_profiling_top_kernel(self) -> dict[str, tuple[float, float, str]]:
         kernel_names = []
@@ -97,7 +124,7 @@ class ProfilingAnalyzer:
             df = pd.read_csv(csv_path)
             kernels = df["Kernel_Name"].tolist()
             pct = df["Pct"].tolist()
-            kernel_names = [k for k, p in zip(kernels, pct) if p > 1.0 and "amd_rocclr" not in k]
+            kernel_names = [k for k, p in zip(kernels, pct)]
         except (ValueError, IndexError):
             print("Warning: Could not find top kernels")
         return kernel_names
@@ -540,30 +567,38 @@ class ProfilingAnalyzer:
             print("Warning: Could not find wavefront")
         return feat
 
-    def parse_roofline_ai(self) -> dict[str, tuple[float, str]]:
-        ai_metrics = {}
+    def parse_roofline_ai(self) -> list[dict[str, tuple[float, str]]]:
+        """Parse every ``4.2 Roofline AI Plot Points`` block (one dict per kernel section)."""
+        kernel_metrics: list[dict[str, tuple[float, str]]] = []
+        ai_metrics: dict[str, tuple[float, str]] = {}
 
         lines = self.content.split("\n")
         in_section = False
 
-        for _i, line in enumerate(lines):
+        for line in lines:
             if "4.2 Roofline AI Plot Points" in line:
                 in_section = True
+                ai_metrics = {}
                 continue
 
             if in_section and "╘═" in line:
+                in_section = False
+                if ai_metrics:
+                    kernel_metrics.append(ai_metrics)
+                continue
+
+            if "4.3 Roofline Plot" in line:
                 break
 
             if in_section and "│" in line and "4.2." in line:
                 parts = [p.strip() for p in line.split("│")]
                 if len(parts) >= 5:
                     try:
-                        parts[1]
                         metric_name = parts[2]
                         value = float(parts[3])
                         unit = parts[4]
 
-                        if "HBM" in metric_name or "Performance" in metric_name:
+                        if "AI" in metric_name or "Performance" in metric_name:
                             if "Performance" in metric_name and "Gflop" in unit:
                                 value = value / 1000.0
                                 unit = "TFLOPS"
@@ -573,32 +608,36 @@ class ProfilingAnalyzer:
                     except (ValueError, IndexError):
                         continue
 
-        if not ai_metrics:
+        if in_section and ai_metrics:
+            kernel_metrics.append(ai_metrics)
+
+        if not kernel_metrics:
             print("Warning: Could not find 4.2 section")
 
-        return ai_metrics
+        return kernel_metrics
 
-    def categorize_metrics(self, rates: dict) -> dict:
-        categorized = {"bandwidth": {}, "compute": {}}
-
-        for metric_name, (value, peak, unit) in rates.items():
-            if "HBM" in metric_name and "Bandwidth" in metric_name:
-                categorized["bandwidth"][metric_name] = {
-                    "actual": value,
-                    "peak": peak,
-                    "unit": unit,
-                    "utilization_pct": (value / peak * 100) if peak > 0 else 0,
-                }
-            elif "FLOPs" in metric_name or "IOPs" in metric_name:
-                if value > 0:
-                    categorized["compute"][metric_name] = {
+    def categorize_metrics(self, rates_list: list[dict[str, tuple[float, float, str]]]) -> list[dict]:
+        kernel_categorized = []
+        for rates in rates_list:
+            categorized = {"bandwidth": {}, "compute": {}}
+            for metric_name, (value, peak, unit) in rates.items():
+                if "HBM" in metric_name and "Bandwidth" in metric_name:
+                    categorized["bandwidth"][metric_name] = {
                         "actual": value,
                         "peak": peak,
                         "unit": unit,
                         "utilization_pct": (value / peak * 100) if peak > 0 else 0,
                     }
-
-        return categorized
+                elif "FLOPs" in metric_name or "IOPs" in metric_name:
+                    if value > 0:
+                        categorized["compute"][metric_name] = {
+                            "actual": value,
+                            "peak": peak,
+                            "unit": unit,
+                            "utilization_pct": (value / peak * 100) if peak > 0 else 0,
+                        }
+            kernel_categorized.append(categorized)
+        return kernel_categorized
 
     def more_profiling(self):
         sys_info = self.parse_profiling_sys_info()
@@ -609,7 +648,9 @@ class ProfilingAnalyzer:
 
         top_kernels = self.parse_profiling_top_kernel()
         more_profiler += "\nSection 2.0: The following are the top-performing kernels that need optimization:\n"
-        for k in top_kernels[:3]:
+        for k in top_kernels:
+            if any(pattern in k for pattern in self.skip_patterns):
+                continue
             more_profiler += f"- {k}\n"
 
         sys_speedup = self.parse_profiling_sys_speed()
@@ -690,123 +731,175 @@ class ProfilingAnalyzer:
         more_profiler += f"\n- Instructions per wavefront: {wavefront['Instructions per wavefront'][0]} {wavefront['Instructions per wavefront'][1]}"
         return more_profiler
 
-    def roofline_summary(self, categorized: dict, ai_metrics: dict):
+    def roofline_summary(
+        self,
+        kernel_categorized: list[dict],
+        kernel_metrics: list[dict[str, tuple[float, str]]],
+    ) -> str:
+        """Align CSV top kernels with parsed roofline blocks via ``zip`` (shortest length wins)."""
         top_kernels = self.parse_profiling_top_kernel()
         roofline = "\nBelow is the roofline information of the kernel:"
-        roofline += "\nkernel function name:\n"
-        for k in top_kernels[:3]:
-            roofline += f"- {k}\n"
-        if categorized["bandwidth"]:
-            roofline += "\nHBM BANDWIDTH UTILIZATION:"
-            for metric_name, data in categorized["bandwidth"].items():
-                roofline += f"\n- {metric_name}: actual: {data['actual']} peak: {data['peak']} utilization_pct: {data['utilization_pct']}"
-        if categorized["compute"]:
-            roofline += "\nCOMPUTE UTILIZATION:"
-            for metric_name, data in categorized["compute"].items():
-                roofline += f"\n- {metric_name}: actual: {data['actual']} peak: {data['peak']} utilization_pct: {data['utilization_pct']}"
-        if ai_metrics:
-            roofline += "\nARITHMETIC INTENSITY:"
-            for metric_name, (value, unit) in ai_metrics.items():
-                if unit:
-                    roofline += f"\n- {metric_name}: value: {value} {unit}"
-                else:
-                    roofline += f"\n- {metric_name}: value: {value}"
+        for kernel, categorized, ai_metrics in zip(top_kernels, kernel_categorized, kernel_metrics):
+            if any(pattern in kernel for pattern in self.skip_patterns):
+                continue
+            roofline += "\nkernel function name:\n"
+            roofline += f"- {kernel}"
+            if categorized["bandwidth"]:
+                roofline += "\nHBM BANDWIDTH UTILIZATION:"
+                for metric_name, data in categorized["bandwidth"].items():
+                    roofline += f"\n- {metric_name}: actual: {data['actual']} peak: {data['peak']} utilization_pct: {data['utilization_pct']}"
+            if categorized["compute"]:
+                roofline += "\nCOMPUTE UTILIZATION:"
+                for metric_name, data in categorized["compute"].items():
+                    roofline += f"\n- {metric_name}: actual: {data['actual']} peak: {data['peak']} utilization_pct: {data['utilization_pct']}"
+            if ai_metrics:
+                roofline += "\nARITHMETIC INTENSITY:"
+                for metric_name, (value, unit) in ai_metrics.items():
+                    if unit:
+                        roofline += f"\n- {metric_name}: value: {value} {unit}"
+                    else:
+                        roofline += f"\n- {metric_name}: value: {value}"
         return roofline
 
     def analyze(self):
         rates = self.parse_roofline_rates()
-        ai_metrics = self.parse_roofline_ai()
+        ai_metrics_list = self.parse_roofline_ai()
         categorized = self.categorize_metrics(rates)
-        roofline = self.roofline_summary(categorized, ai_metrics)
-        more_profiler = self.more_profiling()
+        roofline = self.roofline_summary(categorized, ai_metrics_list)
+        # ``-b 4`` roofline-only analyze output lacks many sections ``more_profiling`` expects.
+        if self.profiling_type == "roofline":
+            more_profiler = None
+        else:
+            more_profiler = self.more_profiling()
 
         return {"roofline": roofline, "profiling": more_profiler}
 
-    def __call__(self, profiling_workdir: str, profiling_cmd: str, *args, **kwds):
-        kernel_name = Path(profiling_workdir).name
-        results = {}
+    def _roofline_rows_skip_filtered(
+        self,
+    ) -> tuple[list[str], list[dict[str, tuple[float, float, str]]], list[dict[str, tuple[float, str]]]]:
+        """``zip(top_kernels, roofline_rates, roofline_ai)`` rows not matching ``self.skip_patterns``."""
+        top_kernels = self.parse_profiling_top_kernel()
+        roofline_rates = self.parse_roofline_rates()
+        roofline_ai = self.parse_roofline_ai()
+        names: list[str] = []
+        rates_out: list[dict[str, tuple[float, float, str]]] = []
+        ai_out: list[dict[str, tuple[float, str]]] = []
+        for k, r, a in zip(top_kernels, roofline_rates, roofline_ai):
+            if any(pattern in k for pattern in self.skip_patterns):
+                continue
+            names.append(k)
+            rates_out.append(r)
+            ai_out.append(a)
+        return names, rates_out, ai_out
 
+    def analyze_structured(self) -> dict:
+        """Return all parsed profiling sections as structured dicts.
+
+        ``top_kernels``, ``roofline_rates``, and ``roofline_ai`` are aligned on the same
+        index order as ``roofline_summary`` (shortest-of-three ``zip``), then rows whose
+        CSV kernel name matches ``self.skip_patterns`` are dropped from all three lists.
+        """
+        top_kernels, roofline_rates, roofline_ai = self._roofline_rows_skip_filtered()
+        return {
+            "sys_info": self.parse_profiling_sys_info(),
+            "sys_speed": self.parse_profiling_sys_speed(),
+            "compute_units": self.parse_profiling_compute_units(),
+            "l1_data": self.parse_profiling_l1_data(),
+            "l2_data": self.parse_profiling_l2_data(),
+            "wavefront": self.parse_profiling_wavefront(),
+            "roofline_rates": roofline_rates,
+            "roofline_ai": roofline_ai,
+            "top_kernels": top_kernels,
+        }
+
+    def _run_rocprof(self, profiling_workdir: str, profiling_cmd: str):
+        """Run rocprof-compute profile + analyze, set self.content.
+
+        Returns (success: bool, error_msg: str | None).
+        """
+        kernel_name = Path(profiling_workdir).name
         if not profiling_workdir or not profiling_cmd:
-            return {
-                "output": "No profiling_workdir and profiling_cmd arguments are provided.",
-                "returncode": 1,
-            }
+            return False, "No profiling_workdir and profiling_cmd arguments are provided."
 
         _, rdna_arch = guard_rocprof_compute("rocprof-compute")
         if rdna_arch:
-            return {
-                "output": (
+            return (
+                False,
+                (
                     f"rocprof-compute does not support RDNA ({rdna_arch}). "
                     "Use the metrix profiling backend instead "
                     "(e.g. backend='metrix' in profiler-mcp)."
                 ),
-                "returncode": 1,
-            }
+            )
 
         rocprof_version = self._check_rocprof_compute()
         if rocprof_version is None:
-            return {
-                "output": "No ROCProf is installed. CAN NOT get profiling information.",
-                "returncode": 1,
-            }
+            return False, "rocprof-compute is not installed."
+
         use_profiling = Version(rocprof_version) < Version("3.3.1") and (
-            self.profiling_type == "roofline" or self.profiling_type == "profiling"
+            self.profiling_type in ("roofline", "profiling")
         )
-        if self.profiling_type == "profiling" or use_profiling or self.profiling_type == "profiler_analyzer":
+
+        if self.profiling_type in ("profiling", "profiler_analyzer") or use_profiling:
             make_cmd = [f"rocprof-compute profile -n {kernel_name} --path {self.output_path} -- {profiling_cmd}"]
         elif self.profiling_type == "roofline":
             make_cmd = [
                 f"rocprof-compute profile -n {kernel_name} --path {self.output_path} --roof-only -- {profiling_cmd}"
             ]
         else:
-            return {
-                "output": "No profiling information",
-                "returncode": 1,
-            }
+            return False, f"Unknown profiling_type: {self.profiling_type}"
+
+        env = os.environ | self._env_override if self._env_override else None
         result = subprocess.run(
-            make_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600 * 6
+            make_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600 * 6, env=env
         )
-        if result.returncode == 0:
-            if self.profiling_type == "profiling" or use_profiling:
-                analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
-            elif self.profiling_type == "roofline":
-                analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 4"]
-            elif self.profiling_type == "profiler_analyzer":
-                analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 11 16 17"]
-            else:
-                analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
-            result = subprocess.run(
-                analysis_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600 * 6
-            )
-            if result.returncode == 0:
-                if self.profiling_type == "profiler_analyzer" and self.model is not None:
-                    msg = profiler_prompt.format(profiler_output=result.stdout)
-                    prompt = [{"role": "user", "content": msg}]
-                    response = self.model.query(prompt)
-                    results = {
-                        "output": response["content"] if response["content"] else result.stdout,
-                        "returncode": 0,
-                    }
-                else:
-                    self.content = result.stdout
-                    analyzer = self.analyze()
-                    if use_profiling:
-                        results = {
-                            "output": analyzer["profiling"],
-                            "returncode": result.returncode,
-                        }
-                    elif self.profiling_type == "profiling":
-                        results = {
-                            "output": analyzer["roofline"] + analyzer["profiling"],
-                            "returncode": result.returncode,
-                        }
-                    elif self.profiling_type == "roofline":
-                        results = {
-                            "output": analyzer["roofline"],
-                            "returncode": result.returncode,
-                        }
-                    return results
-        return {
-            "output": result.stdout.strip() or result.stderr.strip(),
-            "returncode": 1,
-        }
+        if result.returncode != 0:
+            return False, result.stdout.strip() or result.stderr.strip()
+
+        if self.profiling_type == "profiling" or use_profiling:
+            analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
+        elif self.profiling_type == "roofline":
+            analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 4"]
+        elif self.profiling_type == "profiler_analyzer":
+            analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 11 16 17"]
+        else:
+            analysis_cmd = [f"rocprof-compute analyze -p {self.output_path} -b 0 1 2 4 7 10 16 17"]
+
+        result = subprocess.run(
+            analysis_cmd, shell=True, cwd=profiling_workdir, capture_output=True, text=True, timeout=3600 * 6, env=env
+        )
+        if result.returncode != 0:
+            return False, result.stdout.strip() or result.stderr.strip()
+
+        self.content = result.stdout
+        return True, None
+
+    def profile_structured(self, profiling_workdir: str, profiling_cmd: str) -> dict:
+        """Run rocprof-compute and return structured data instead of text.
+
+        Returns dict with keys: success, error (on failure),
+        or success + structured analysis data (on success).
+        """
+        success, error = self._run_rocprof(profiling_workdir, profiling_cmd)
+        if not success:
+            return {"success": False, "error": error}
+        return {"success": True, **self.analyze_structured()}
+
+    def __call__(self, profiling_workdir: str, profiling_cmd: str, *args, **kwds):
+        success, error = self._run_rocprof(profiling_workdir, profiling_cmd)
+        if not success:
+            return {"output": error, "returncode": 1}
+
+        if self.profiling_type == "profiler_analyzer" and self.model is not None:
+            msg = profiler_prompt.format(profiler_output=self.content)
+            prompt = [{"role": "user", "content": msg}]
+            response = self.model.query(prompt)
+            return {
+                "output": response["content"] if response["content"] else self.content,
+                "returncode": 0,
+            }
+
+        analyzer = self.analyze()
+        if self.profiling_type == "roofline":
+            return {"output": analyzer["roofline"], "returncode": 0}
+        return {"output": analyzer["roofline"] + analyzer["profiling"], "returncode": 0}
