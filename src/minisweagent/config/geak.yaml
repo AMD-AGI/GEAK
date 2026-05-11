@@ -29,3 +29,30 @@ tools:
   profile_kernel: false
   profiling_type: profiling
   rag: false
+run:
+  # Wall-clock budget knobs for `geak --mode quick|full`.
+  # Mode controls only time + max_rounds; step/cost limits remain user-controlled
+  # via CLI flags (--cost-limit) and existing GEAK_* env vars. See run/budget.py.
+  mode: full
+  budgets:
+    quick:
+      total_s: 3600              # 1 hour total wall-clock
+      preprocess_soft_cap_s: 900 # 15 min target; can borrow up to hard cap
+      preprocess_hard_cap_fraction: 0.5  # -> 1800 s ceiling
+      finalize_grace_s: 300      # 5 min reserved at end of opt for clean finalize
+      kill_buffer_s: 60          # forced os._exit() this long after opt_deadline
+    full:
+      total_s: 7200              # 2 hours total wall-clock
+      preprocess_soft_cap_s: 900
+      preprocess_hard_cap_fraction: 0.5  # -> 3600 s ceiling
+      finalize_grace_s: 300
+      kill_buffer_s: 60
+  presets:
+    # Mode-driven overrides (deep-merged into top-level config). Deliberately
+    # contains NO env: block -- mode does not touch step/cost/iteration limits.
+    quick:
+      orchestrator:
+        max_rounds: 2
+    full:
+      orchestrator:
+        max_rounds: 5

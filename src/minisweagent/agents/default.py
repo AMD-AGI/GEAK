@@ -203,7 +203,18 @@ class DefaultAgent:
         return
 
     def _setup_save_and_test_context(self):
-        """Setup context for save_and_test tool."""
+        """Setup context for save_and_test tool.
+
+        Idempotent and cheap to re-call. The parallel/heterogeneous helpers
+        rely on this: they construct the agent (which calls this for the
+        first time, *before* ``self._registry`` is set), then attach
+        ``agent._registry = registry`` and re-call this to rebuild the
+        ``SaveAndTestContext`` with the registry attached. If you ever add
+        per-agent state to the context that should *not* be reset by the
+        second call (e.g. a counter), gate it on ``self._save_and_test_context
+        is None``; otherwise the implicit "second init wipes the context"
+        coupling will silently regress.
+        """
         from minisweagent.tools.save_and_test import SaveAndTestContext
 
         cwd = getattr(self.env.config, "cwd", None) or os.getcwd()
@@ -225,6 +236,11 @@ class DefaultAgent:
             log_fn=self._log_message,
             patch_counter=self.patch_counter,
             source_file_paths=source_file_paths,
+            # Optional run-level ProcessRegistry. Set as a side-attribute on
+            # the agent by parallel_helpers / parallel_agent / homogeneous_agent
+            # when those wire ``registry`` through. Lets the budget watchdog
+            # SIGTERM/SIGKILL long-running test/benchmark subprocesses.
+            registry=getattr(self, "_registry", None),
         )
 
         save_and_test_tool = self.toolruntime._tool_table.get("save_and_test")
@@ -366,6 +382,15 @@ class DefaultAgent:
             0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost
         ):
             raise LimitsExceeded()
+
+        # Wall-clock soft-stop poll: if the run-level watchdog has fired,
+        # treat it the same as cost/step limits so the sub-agent stops
+        # spending tokens on new work and returns its last good state via
+        # the existing TerminatingException machinery.
+        _soft_stop = getattr(self, "_soft_stop", None)
+        if _soft_stop is not None and _soft_stop.is_set() and not self._allow_one_summary_step:
+            logger.info("DefaultAgent.query: SoftStop is set; raising LimitsExceeded to terminate this sub-agent")
+            raise LimitsExceeded("wall-clock soft-stop reached")
         if self._allow_one_summary_step:
             self._allow_one_summary_step = False
 

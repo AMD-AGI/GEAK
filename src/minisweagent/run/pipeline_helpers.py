@@ -1,7 +1,7 @@
 """Shared helpers for the GEAK preprocessing and orchestration pipelines.
 
-All CLI entry points (``geak``, ``geak-preprocess``, ``geak-orchestrate``,
-``run-tasks``, ``task-generator``) import from this module so that harness
+All CLI entry points (``geak``, ``geak-preprocess``, ``run-tasks``,
+``task-generator``) import from this module so that harness
 extraction, validation, profiling, model loading, agent filtering, and
 pipeline-context injection are always identical regardless of entry point.
 """
@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = get_repo_root()
 
 REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
+# ``--iterations`` is RECOMMENDED, not required. See
+# ``minisweagent.run.preprocess.harness_utils`` for the canonical contract.
+RECOMMENDED_HARNESS_FLAGS = ("--iterations",)
 
 MAX_HARNESS_RETRIES = 2
 
@@ -43,6 +46,108 @@ DEFAULT_EVAL_BENCHMARK_ITERATIONS = int(os.getenv("GEAK_EVAL_BENCHMARK_ITERATION
 DEFAULT_AGENT_BENCHMARK_ITERATIONS = DEFAULT_EVAL_BENCHMARK_ITERATIONS
 DEFAULT_PIPELINE_OUTPUT_DIR = "geak_output"
 DEFAULT_HETEROGENEOUS = False
+
+# Modes accepted by ``--mode``. See ``run/budget.py`` and ``run.budgets`` /
+# ``run.presets`` in ``geak.yaml``.
+RUN_MODES: tuple[str, ...] = ("quick", "full")
+DEFAULT_RUN_MODE: str = "full"
+
+
+def apply_mode_presets(config: dict, mode: str) -> dict:
+    """Deep-merge ``config["run"]["presets"][mode]`` into *config*.
+
+    Mode controls only ``orchestrator.max_rounds`` (and any other future
+    non-env knobs); step / cost / iteration limits intentionally remain
+    user-controlled to avoid silent overrides of ``GEAK_*_STEP_LIMIT`` etc.
+    that users may have set in their shell.
+
+    Precedence:
+      - For ``max_rounds``: CLI ``--max-rounds`` > mode preset > ``GEAK_MAX_ROUNDS``
+        env > built-in default. Mode wins over env because that is its job.
+      - For step/cost limits: CLI > YAML ``agent.*`` > ``GEAK_*`` env > default.
+        Mode is *not* in this chain.
+      - For ``total_s`` / ``finalize_grace_s`` / preprocess caps: CLI override
+        flag > mode preset > built-in default. No env vars participate.
+
+    Returns the same dict (mutated) for caller convenience.
+    """
+    if mode not in RUN_MODES:
+        raise ValueError(f"Unknown run mode {mode!r}; expected one of {RUN_MODES}")
+
+    presets = (((config.get("run") or {}).get("presets")) or {}).get(mode) or {}
+    if not presets:
+        logger.debug("apply_mode_presets: no presets defined for mode=%s", mode)
+        return config
+
+    # Snapshot the leaf values that *will* change under deep-merge so the
+    # log line reflects the actual config delta instead of the preset tree.
+    # Walking the preset tree alone would, e.g., claim we "injected" a dict
+    # at a key where ``_deep_merge`` actually replaced a non-dict scalar
+    # with a fresh dict subtree.
+    def _collect_preset_changes(base: dict, override: dict, prefix: str = "") -> list[tuple[str, Any, Any]]:
+        changes: list[tuple[str, Any, Any]] = []
+        for k, v in override.items():
+            key = f"{prefix}.{k}" if prefix else k
+            base_v = base.get(k) if isinstance(base, dict) else None
+            if isinstance(v, dict) and isinstance(base_v, dict):
+                changes.extend(_collect_preset_changes(base_v, v, key))
+            else:
+                changes.append((key, base_v, v))
+        return changes
+
+    deltas = _collect_preset_changes(config, presets)
+
+    def _deep_merge(base: dict, override: dict) -> dict:
+        for k, v in override.items():
+            if isinstance(v, dict) and isinstance(base.get(k), dict):
+                _deep_merge(base[k], v)
+            else:
+                base[k] = copy.deepcopy(v)
+        return base
+
+    _deep_merge(config, presets)
+
+    parts: list[str] = []
+    for key, before, after in deltas:
+        if before is None:
+            parts.append(f"+{key}={after}")
+        elif before == after:
+            parts.append(f"={key}={after}")
+        else:
+            parts.append(f"{key}: {before}->{after}")
+    logger.info("apply_mode_presets: mode=%s applied %s", mode, ", ".join(parts) if parts else "(no changes)")
+    return config
+
+
+def resolve_max_rounds(
+    *,
+    cli_max_rounds: int | None,
+    config: dict | None = None,
+    default: int = 5,
+) -> tuple[int, str]:
+    """Resolve ``max_rounds`` per the documented precedence chain.
+
+    Returns ``(value, source)`` where ``source`` is one of
+    ``"cli"``, ``"mode"``, ``"env"``, ``"default"`` and is suitable for
+    surfacing in the budget banner so users can tell that ``--mode`` overrode
+    ``GEAK_MAX_ROUNDS`` (or did not).
+    """
+    if cli_max_rounds is not None:
+        return int(cli_max_rounds), "cli"
+
+    if config is not None:
+        mode_val = (config.get("orchestrator") or {}).get("max_rounds")
+        if mode_val is not None:
+            return int(mode_val), "mode"
+
+    env_val = os.environ.get("GEAK_MAX_ROUNDS")
+    if env_val:
+        try:
+            return int(env_val), "env"
+        except ValueError:
+            logger.warning("GEAK_MAX_ROUNDS=%r is not an integer; falling back to default", env_val)
+
+    return int(default), "default"
 
 
 # ── agent filtering ──────────────────────────────────────────────────
@@ -324,17 +429,17 @@ _GPU_ALLOC_IN_PROFILE_RE = re.compile(
 def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
     """Static-analyse a harness script to verify it supports required CLI flags.
 
-    Checks that the harness uses an argument-parsing library (argparse, click,
-    or typer) and defines all four required flags: ``--correctness``,
-    ``--profile``, ``--benchmark``, and ``--full-benchmark``.  Also checks
-    that the ``run_profile`` function (if present) does not allocate tensors
-    directly on CUDA, which would pollute the profiler trace with GPU RNG /
-    memset kernels.
-
-    Returns ``(valid, errors)`` where *errors* is empty when *valid* is True.
+    Mirror of :func:`minisweagent.run.preprocess.harness_utils.validate_harness`
+    -- see that docstring for the contract. The two copies exist because of
+    the deliberate decoupling between ``run/`` and ``run/preprocess/``;
+    helpers like ``_strip_python_comments`` are imported from
+    ``harness_utils`` so the comment-stripping behaviour stays in lockstep.
     """
+    from minisweagent.run.preprocess.harness_utils import _strip_python_comments
+
     harness = Path(harness_path)
     errors: list[str] = []
+    warnings: list[str] = []
 
     if not harness.is_file():
         return False, [f"Harness file not found: {harness}"]
@@ -348,9 +453,25 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
             "CLI flags like --profile and --correctness will be silently ignored"
         )
 
+    # Strip comments before substring-checking required flags so that a
+    # ``# --iterations N not yet supported`` comment does not falsely
+    # satisfy the validator. Must mirror the equivalent helper in
+    # ``preprocess/harness_utils.py``.
+    code_only_source = _strip_python_comments(source)
     for flag in REQUIRED_HARNESS_FLAGS:
-        if flag not in source:
+        if flag not in code_only_source:
             errors.append(f"Harness source does not define '{flag}' flag")
+
+    for flag in RECOMMENDED_HARNESS_FLAGS:
+        if flag not in code_only_source:
+            msg = (
+                f"Harness {harness} does not define recommended flag '{flag}'; "
+                f"GEAK will skip passing it on the harness CLI and rely on "
+                f"GEAK_BENCHMARK_ITERATIONS only. Have your harness honour "
+                f"that env var if you want to control iteration counts."
+            )
+            logger.warning(msg)
+            warnings.append(msg)
 
     # Check for GPU-side tensor allocation inside the profile function.
     # rocprofv3 captures ALL GPU kernels, so torch.randn(..., device='cuda')
@@ -372,7 +493,8 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
             )
             break  # one warning is enough
 
-    return len(errors) == 0, errors
+    valid = len(errors) == 0
+    return valid, (warnings if valid else errors)
 
 
 # ── harness runtime execution ─────────────────────────────────────────

@@ -8,7 +8,6 @@ from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models.test_models import DeterministicModel
 
-
 # --- Helpers ---
 
 

@@ -490,7 +490,7 @@ def main():
                 batch, gpu = futures[future]
                 try:
                     results = future.result()
-                    for name, (runs, report) in results.items():
+                    for name, (_runs, report) in results.items():
                         all_reports[name] = report
                 except Exception as exc:
                     print(f"  Batch {batch} on GPU {gpu} FAILED: {exc}")

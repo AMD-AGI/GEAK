@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import ast
 import copy
+import functools
 import importlib
 import logging
 import os
@@ -33,8 +34,56 @@ from minisweagent.run.utils.gpu_arch import (
 )
 
 REQUIRED_HARNESS_FLAGS = ("--profile", "--correctness", "--benchmark", "--full-benchmark")
+# ``--iterations`` is RECOMMENDED, not required: harnesses that decline to
+# accept it can still participate in a run as long as they either honour
+# ``GEAK_BENCHMARK_ITERATIONS`` from the environment or are content with
+# their hardcoded default. GEAK gates every callsite that would otherwise
+# pass ``--iterations N`` so the harness CLI never sees an unrecognized
+# flag. See ``harness_supports_iterations``.
+RECOMMENDED_HARNESS_FLAGS = ("--iterations",)
 
 MAX_HARNESS_RETRIES = 2
+
+# Iteration shim injected at the top of pipeline-generated harnesses (Triton
+# split, etc.) when the source's __main__ block doesn't natively accept
+# ``--iterations N``. It strips ``--iterations`` from sys.argv so the existing
+# argparse doesn't crash with "unrecognized arguments", and forwards the value
+# to GEAK_BENCHMARK_ITERATIONS so harness code that reads the env var picks it
+# up. The literal string ``--iterations`` keeps validate_harness() satisfied.
+_GEAK_ITERATIONS_SHIM = """\
+# --- GEAK iteration shim (auto-injected) ---------------------------------
+# Accepts "--iterations N" and "--iterations=N" without modifying the
+# downstream argparse. Forwards the value via GEAK_BENCHMARK_ITERATIONS.
+import os as _geak_os_iter
+import sys as _geak_sys_iter
+
+
+def _geak_consume_iterations() -> None:
+    argv = _geak_sys_iter.argv
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        if token == "--iterations" and i + 1 < len(argv):
+            try:
+                _geak_os_iter.environ["GEAK_BENCHMARK_ITERATIONS"] = str(int(argv[i + 1]))
+            except (TypeError, ValueError):
+                pass
+            del argv[i:i + 2]
+            continue
+        if token.startswith("--iterations="):
+            try:
+                _geak_os_iter.environ["GEAK_BENCHMARK_ITERATIONS"] = str(int(token.split("=", 1)[1]))
+            except (TypeError, ValueError):
+                pass
+            del argv[i]
+            continue
+        i += 1
+
+
+_geak_consume_iterations()
+# --- end GEAK iteration shim ---------------------------------------------
+
+"""
 
 # Use one canonical benchmark definition everywhere. The legacy
 # GEAK_AGENT_BENCHMARK_ITERATIONS split is intentionally ignored so
@@ -656,22 +705,25 @@ def _generate_c_like_python_harness(
             return fallback_ms
 
 
-        def _run_once() -> tuple[subprocess.CompletedProcess[str], float]:
+        def _run_once(iterations: int | None) -> tuple[subprocess.CompletedProcess[str], float]:
             binary = _compile_binary()
+            run_env = os.environ.copy()
+            if iterations is not None:
+                run_env["GEAK_BENCHMARK_ITERATIONS"] = str(iterations)
             t0 = time.perf_counter()
             proc = subprocess.run(
                 [str(binary)],
                 capture_output=True,
                 text=True,
                 cwd=str(SOURCE_DIR),
-                env=os.environ.copy(),
+                env=run_env,
             )
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             return proc, elapsed_ms
 
 
-        def _run_mode(measure: bool) -> int:
-            proc, elapsed_ms = _run_once()
+        def _run_mode(measure: bool, iterations: int | None) -> int:
+            proc, elapsed_ms = _run_once(iterations)
             if proc.stdout:
                 sys.stdout.write(proc.stdout)
             if proc.stderr:
@@ -682,20 +734,20 @@ def _generate_c_like_python_harness(
             return proc.returncode
 
 
-        def run_correctness() -> int:
-            return _run_mode(measure=False)
+        def run_correctness(iterations: int | None) -> int:
+            return _run_mode(measure=False, iterations=iterations)
 
 
-        def run_profile() -> int:
-            return _run_mode(measure=False)
+        def run_profile(iterations: int | None) -> int:
+            return _run_mode(measure=False, iterations=iterations)
 
 
-        def run_benchmark() -> int:
-            return _run_mode(measure=True)
+        def run_benchmark(iterations: int | None) -> int:
+            return _run_mode(measure=True, iterations=iterations)
 
 
-        def run_full_benchmark() -> int:
-            return _run_mode(measure=True)
+        def run_full_benchmark(iterations: int | None) -> int:
+            return _run_mode(measure=True, iterations=iterations)
 
 
         def main() -> int:
@@ -705,15 +757,32 @@ def _generate_c_like_python_harness(
             group.add_argument("--profile", action="store_true")
             group.add_argument("--benchmark", action="store_true")
             group.add_argument("--full-benchmark", action="store_true")
-            parser.parse_known_args()
+            # --iterations N is part of the GEAK harness contract. The native
+            # binary reads GEAK_BENCHMARK_ITERATIONS from its environment.
+            parser.add_argument(
+                "--iterations",
+                type=int,
+                default=None,
+                help="Override GEAK_BENCHMARK_ITERATIONS for benchmark loops.",
+            )
+            args, _ = parser.parse_known_args()
 
-            if parser.parse_known_args()[0].correctness:
-                return run_correctness()
-            if parser.parse_known_args()[0].profile:
-                return run_profile()
-            if parser.parse_known_args()[0].benchmark:
-                return run_benchmark()
-            return run_full_benchmark()
+            iters = args.iterations
+            if iters is None:
+                env_iters = os.environ.get("GEAK_BENCHMARK_ITERATIONS")
+                if env_iters:
+                    try:
+                        iters = int(env_iters)
+                    except ValueError:
+                        iters = None
+
+            if args.correctness:
+                return run_correctness(iters)
+            if args.profile:
+                return run_profile(iters)
+            if args.benchmark:
+                return run_benchmark(iters)
+            return run_full_benchmark(iters)
 
 
         if __name__ == "__main__":
@@ -1008,6 +1077,13 @@ def detect_and_split_kernel_from_harness(
         "    _geak_sys.path.insert(0, _KERNEL_DIR)\n"
         "\n"
     )
+    # 2a. --iterations shim: the GEAK harness contract requires that every
+    # harness accepts --iterations N. The split source may not implement it
+    # natively, so we strip it from sys.argv and forward the value via
+    # GEAK_BENCHMARK_ITERATIONS so any os.environ reads pick it up.
+    raw_main_source = main_chunk or ""
+    if "--iterations" not in raw_main_source and "--iterations" not in raw_imports:
+        harness_parts.append(_GEAK_ITERATIONS_SHIM)
     # 3. Star-import kernel module
     harness_parts.append(f"from {stem} import *\n\n")
     # 4. Test functions (sorted by original line order for determinism)
@@ -1053,20 +1129,133 @@ _GPU_ALLOC_IN_PROFILE_RE = re.compile(
 )
 
 
+def _strip_python_comments(source: str) -> str:
+    """Strip ``#`` line comments from ``source`` while preserving ``#`` that
+    appear inside string literals.
+
+    Used to make the harness flag-presence check robust against flags that
+    only appear inside comments such as ``# --iterations N not yet supported``
+    -- those are not actually wired up and shouldn't satisfy
+    ``validate_harness``. We can't naively strip ``#``-to-EOL because string
+    literals containing ``#`` are common (e.g. URLs, regex patterns).
+
+    We use ``tokenize`` to enumerate comment spans and blank them out by
+    character offset; the surrounding tokens are preserved verbatim. Falls
+    back to the unchanged source if tokenization fails (e.g. invalid Python).
+    """
+    import io as _io
+    import tokenize as _tokenize
+
+    try:
+        tokens = list(_tokenize.generate_tokens(_io.StringIO(source).readline))
+    except (_tokenize.TokenError, IndentationError, SyntaxError):
+        return source
+
+    # Collect (lineno-1, col_start, col_end) spans for every COMMENT token,
+    # then blank those spans on the corresponding source lines. Comments
+    # always end at EOL so we don't need to worry about multi-line spans.
+    spans_by_line: dict[int, list[tuple[int, int]]] = {}
+    for tok in tokens:
+        if tok.type != _tokenize.COMMENT:
+            continue
+        line_idx = tok.start[0] - 1
+        spans_by_line.setdefault(line_idx, []).append((tok.start[1], tok.end[1]))
+
+    if not spans_by_line:
+        return source
+
+    lines = source.splitlines(keepends=True)
+    for line_idx, spans in spans_by_line.items():
+        if line_idx >= len(lines):
+            continue
+        line = lines[line_idx]
+        # Blank each span (left-to-right; spans on the same line don't overlap).
+        for start_col, end_col in sorted(spans):
+            line = line[:start_col] + (" " * (end_col - start_col)) + line[end_col:]
+        lines[line_idx] = line
+    return "".join(lines)
+
+
+# Regex matching a ``--iterations N`` or ``--iterations=N`` token pair in a
+# whitespace-separated argv string. Anchored at start-of-string or
+# whitespace so we don't match inside other long flags.
+_ITERATIONS_TOKEN_RE = re.compile(r"(?:^|\s)--iterations(?:\s+\d+|=\d+)(?=\s|$)")
+
+
+def _strip_iterations_tokens(extra_args: str) -> str:
+    """Remove any ``--iterations N`` / ``--iterations=N`` tokens from an
+    argv-style string and collapse the resulting whitespace.
+
+    Used at GEAK's harness-invocation choke points to scrub ``--iterations``
+    out of ``GEAK_BENCHMARK_EXTRA_ARGS`` before it reaches a harness that
+    didn't declare the flag.
+    """
+    cleaned = _ITERATIONS_TOKEN_RE.sub(" ", extra_args)
+    return " ".join(cleaned.split())
+
+
+@functools.lru_cache(maxsize=512)
+def harness_supports_iterations(harness_path: str | os.PathLike) -> bool:
+    """Cheap static check: does this harness register ``--iterations`` as
+    a CLI argument?
+
+    The check strips Python comments (via :func:`_strip_python_comments`)
+    before looking for the literal flag, so a stray ``# TODO --iterations N``
+    comment does not falsely satisfy the predicate (mirroring the behaviour
+    of :func:`validate_harness`).
+
+    Returns ``False`` on read errors so callers treat unreadable harnesses
+    the same as harnesses that decline the flag (i.e. don't pass
+    ``--iterations`` to them).
+
+    Memoized per-path; clear with :func:`reset_harness_support_cache` after
+    rewriting a harness on disk so subsequent calls re-read the file.
+    """
+    try:
+        text = Path(harness_path).read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.debug("harness_supports_iterations: read failed for %s: %s", harness_path, exc)
+        return False
+    return "--iterations" in _strip_python_comments(text)
+
+
+def reset_harness_support_cache() -> None:
+    """Clear the ``harness_supports_iterations`` cache.
+
+    Call after any code path that rewrites a harness file in place so the
+    next ``harness_supports_iterations`` call re-reads from disk. Cheap;
+    the cache is rebuilt lazily.
+    """
+    harness_supports_iterations.cache_clear()
+
+
 def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
     """Static-analyse a harness script to verify it supports required CLI flags.
 
     Checks that the harness uses an argument-parsing library (argparse, click,
-    or typer) and defines all four required flags: ``--correctness``,
-    ``--profile``, ``--benchmark``, and ``--full-benchmark``.  Also checks
-    that the ``run_profile`` function (if present) does not allocate tensors
-    directly on CUDA, which would pollute the profiler trace with GPU RNG /
-    memset kernels.
+    or typer) and defines all four *required* flags: ``--correctness``,
+    ``--profile``, ``--benchmark``, and ``--full-benchmark``.  Missing required
+    flags hard-fail validation.
 
-    Returns ``(valid, errors)`` where *errors* is empty when *valid* is True.
+    ``--iterations`` is *recommended* but not required: missing it produces a
+    ``WARNING`` log line and is reported in the second tuple element, but
+    ``valid`` is still ``True``. GEAK callsites that pass iteration counts
+    consult :func:`harness_supports_iterations` and silently omit
+    ``--iterations`` from harness invocations when the flag is not declared.
+    Iteration counts still flow via the ``GEAK_BENCHMARK_ITERATIONS`` env var
+    for harnesses that read it.
+
+    Also checks that the ``run_profile`` function (if present) does not
+    allocate tensors directly on CUDA, which would pollute the profiler trace
+    with GPU RNG / memset kernels.
+
+    Returns ``(valid, messages)`` where *messages* contains both fatal errors
+    (when *valid* is False) and non-fatal warnings (when *valid* is True with
+    a missing recommended flag).
     """
     harness = Path(harness_path)
     errors: list[str] = []
+    warnings: list[str] = []
 
     if not harness.is_file():
         return False, [f"Harness file not found: {harness}"]
@@ -1080,9 +1269,26 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
             "CLI flags like --profile and --correctness will be silently ignored"
         )
 
+    # Strip comments before substring-checking required flags so that a
+    # ``# --iterations N not yet supported`` comment does not falsely
+    # satisfy the validator. The shim path that injects ``--iterations``
+    # handling at runtime as a string literal in code (not just a comment)
+    # still passes.
+    code_only_source = _strip_python_comments(source)
     for flag in REQUIRED_HARNESS_FLAGS:
-        if flag not in source:
+        if flag not in code_only_source:
             errors.append(f"Harness source does not define '{flag}' flag")
+
+    for flag in RECOMMENDED_HARNESS_FLAGS:
+        if flag not in code_only_source:
+            msg = (
+                f"Harness {harness} does not define recommended flag '{flag}'; "
+                f"GEAK will skip passing it on the harness CLI and rely on "
+                f"GEAK_BENCHMARK_ITERATIONS only. Have your harness honour "
+                f"that env var if you want to control iteration counts."
+            )
+            logger.warning(msg)
+            warnings.append(msg)
 
     # Check for GPU-side tensor allocation inside the profile function.
     # rocprofv3 captures ALL GPU kernels, so torch.randn(..., device='cuda')
@@ -1104,7 +1310,12 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
             )
             break  # one warning is enough
 
-    return len(errors) == 0, errors
+    valid = len(errors) == 0
+    # When validation passes, surface non-fatal warnings to the caller so a
+    # ``logger.info("errors=%s", errors)`` line at the call site still
+    # mentions the missing recommended flag. When validation fails, hide
+    # warnings to keep the error list focused on what's actually broken.
+    return valid, (warnings if valid else errors)
 
 
 # ── harness runtime execution ─────────────────────────────────────────

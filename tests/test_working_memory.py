@@ -5,14 +5,13 @@ from __future__ import annotations
 import pytest
 
 from minisweagent.memory.working_memory import (
+    MAX_INSIGHTS,
     Insight,
     WorkingMemory,
     classify_change,
     extract_insight_from_tool_result,
     summarize_change,
-    MAX_INSIGHTS,
 )
-
 
 # ---------------------------------------------------------------------------
 # Insight dataclass

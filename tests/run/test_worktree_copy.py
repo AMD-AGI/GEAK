@@ -18,7 +18,6 @@ from minisweagent.run.task_file import (
     _resolve_output_root,
 )
 
-
 # ---------------------------------------------------------------------------
 # _resolve_output_root
 # ---------------------------------------------------------------------------
@@ -54,7 +53,7 @@ class TestResolveOutputRoot:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
+@pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
     """Create a minimal git repo with one commit."""
     repo = tmp_path / "repo"

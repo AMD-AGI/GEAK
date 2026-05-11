@@ -97,7 +97,28 @@ def _run_single(
     if mode in ("benchmark", "full-benchmark"):
         extra = env.get("GEAK_BENCHMARK_EXTRA_ARGS", "").strip()
         if extra:
-            cmd.extend(extra.split())
+            # Belt-and-suspenders: even if an upstream construction site
+            # forgot to gate on the harness's declared flags, scrub
+            # ``--iterations N`` here so we never pass an unrecognized flag
+            # to a harness that didn't declare it. The iteration count is
+            # still available via ``GEAK_BENCHMARK_ITERATIONS`` for
+            # harnesses that read it.
+            from minisweagent.run.preprocess.harness_utils import (
+                _strip_iterations_tokens,
+                harness_supports_iterations,
+            )
+
+            if not harness_supports_iterations(harness_path):
+                scrubbed = _strip_iterations_tokens(extra)
+                if scrubbed != extra:
+                    logger.debug(
+                        "_run_single: stripped --iterations tokens from EXTRA_ARGS for "
+                        "harness %s (does not declare --iterations)",
+                        harness_path,
+                    )
+                extra = scrubbed
+            if extra:
+                cmd.extend(extra.split())
 
     # Wrap in a login shell so /etc/profile.d/* is sourced. This ensures
     # FlyDSL env setup (PYTHONPATH, LD_LIBRARY_PATH) is available even

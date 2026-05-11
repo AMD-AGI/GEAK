@@ -45,7 +45,6 @@ from minisweagent.run.preprocess.harness_utils import (
     detect_and_split_kernel_from_harness,
     execute_harness_validation,
     extract_harness_path,
-    run_baseline_profile,
     validate_harness,
 )
 from minisweagent.run.preprocess.testcase_cache import (
@@ -57,6 +56,70 @@ from minisweagent.run.preprocess.testcase_cache import (
 )
 
 # ── main entry point ─────────────────────────────────────────────────
+
+
+def _filter_discovery_to_repo_root(disc_dict: dict[str, Any], repo_root: str | Path) -> dict[str, Any]:
+    """Drop ``tests`` / ``benchmarks`` whose ``file`` is outside ``repo_root``.
+
+    The ``automated_test_discovery`` MCP can return harnesses from sibling
+    kernel directories (e.g. when the kernel sits in a benchmark suite of
+    related kernels). Letting those flow into ``execute_harness_validation``
+    triggers "Harness ... is outside repo_root -- cannot rewrite relative
+    imports" warnings and picks the wrong workload.
+
+    Returns a *new* dict with the filtered lists; counts in
+    ``total_tests_found`` / ``total_benchmarks_found`` are also updated so
+    the saved ``discovery.json`` is internally consistent.
+
+    A ``WARNING`` is logged when filtering removed any results so users can
+    see what was dropped without needing to diff against the raw MCP output.
+    """
+    if not isinstance(disc_dict, dict):
+        return disc_dict
+    try:
+        repo_resolved = Path(repo_root).resolve()
+    except (OSError, RuntimeError, RecursionError) as exc:
+        # ``Path.resolve()`` can raise ``RecursionError`` on filesystems with
+        # symlink loops (NFS / macOS). Treat the same as "couldn't resolve"
+        # rather than crashing the preprocess pipeline.
+        logger.debug("_filter_discovery_to_repo_root: repo_root resolve failed (%s); skipping filter", exc)
+        return disc_dict
+
+    def _is_inside(file_path: Any) -> bool:
+        if not isinstance(file_path, (str, Path)):
+            return True  # don't drop entries we can't classify
+        try:
+            return Path(file_path).resolve().is_relative_to(repo_resolved)
+        except (OSError, RuntimeError, RecursionError):
+            return False
+
+    new_disc = dict(disc_dict)
+    dropped_total = 0
+    for key in ("tests", "benchmarks"):
+        items = disc_dict.get(key, [])
+        if not isinstance(items, list):
+            continue
+        kept = [t for t in items if isinstance(t, dict) and _is_inside(t.get("file"))]
+        if len(kept) != len(items):
+            dropped = [t.get("file") for t in items if t not in kept]
+            dropped_total += len(items) - len(kept)
+            logger.warning(
+                "[yellow]Test discovery: dropped %d %s outside repo_root %s: %s[/yellow]",
+                len(items) - len(kept),
+                key,
+                repo_resolved,
+                dropped[:5],
+            )
+            new_disc[key] = kept
+
+    if "total_tests_found" in new_disc:
+        new_disc["total_tests_found"] = len(new_disc.get("tests", []))
+    if "total_benchmarks_found" in new_disc:
+        new_disc["total_benchmarks_found"] = len(new_disc.get("benchmarks", []))
+
+    if dropped_total == 0:
+        return disc_dict  # unchanged; let caller short-circuit
+    return new_disc
 
 
 def _infer_repo_root(kernel_path: str) -> str:
@@ -411,6 +474,8 @@ def run_preprocessor(
     performance_command: str | list[str] | None = None,
     benchmark_timeout: int = 3600,
     target_language: str | None = None,
+    budget=None,
+    state=None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -448,6 +513,17 @@ def run_preprocessor(
     benchmark_timeout:
         Timeout in seconds for the benchmark baseline subprocess.
         Defaults to 3600s. Increase for kernels with long runtimes.
+    budget:
+        Optional ``RunBudget`` (from ``run/budget.py``). When supplied, the
+        ``benchmark_timeout`` and other per-subprocess timeouts are clamped to
+        ``deadline.cap(...)`` so a near-hard-cap preprocess cannot run past
+        the ceiling.
+    state:
+        Optional ``PreprocessState`` (from ``run/state.py``). When supplied,
+        each stage updates ``state.current_stage`` so the watchdog soft-stop
+        handler can apply its stage-aware policy. Spawned subprocesses /
+        ``mp.Process`` instances are tracked in ``state.registry`` so the
+        watchdog can terminate them.
 
     Returns
     -------
@@ -459,6 +535,22 @@ def run_preprocessor(
     _preprocess_t0 = time.monotonic()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Lazy import to avoid a circular dependency at module load time:
+    # state.py -> benchmark_parsing -> preprocess package -> ... back here.
+    from minisweagent.run.state import (
+        PreprocessAborted,
+        PreprocessStage,
+        PreprocessState,
+        build_thin_baseline_metrics,
+    )
+
+    if state is None:
+        state = PreprocessState(output_dir=output_dir)
+    else:
+        # Propagate output_dir if caller didn't preset it.
+        if state.output_dir is None:
+            state.output_dir = output_dir
 
     ctx: dict[str, Any] = {}
 
@@ -587,6 +679,17 @@ def run_preprocessor(
             disc_dict = _discover_fn(**_discovery_kwargs)
         except Exception as exc:
             logger.warning("[yellow]Test discovery failed: %s[/yellow]", exc)
+
+        # Filter out tests/benchmarks living OUTSIDE the kernel's repo_root.
+        # The automated_test_discovery MCP searches broadly enough to find
+        # harnesses for unrelated kernels in sibling directories
+        # (e.g. .../L3/fused_rms_fp8/test_kernel_harness.py when the user
+        # is optimizing .../L3/gemm_a16wfp4/kernel.py). Those harnesses
+        # then fail with "outside repo_root -- cannot rewrite relative
+        # imports" warnings or pick the wrong workload entirely.
+        _filtered = _filter_discovery_to_repo_root(disc_dict, repo_root)
+        if _filtered != disc_dict:
+            disc_dict = _filtered
 
         ctx["discovery"] = disc_dict
         (output_dir / "discovery.json").write_text(json.dumps(disc_dict, indent=2, default=str))
@@ -1035,6 +1138,7 @@ def run_preprocessor(
         )
         if harness_path_for_baseline and harness_results:
             logger.info("[bold cyan]--- Step 4/7: Baseline collection ---[/bold cyan]")
+            state.set_stage(PreprocessStage.HARNESS_BENCHMARK)
             extra = f"--iterations {eval_iters}"
             logger.info("  Re-running all modes with %s for baselines...", extra)
             bl_ok, bl_errors, baseline_results = execute_harness_validation(
@@ -1053,6 +1157,38 @@ def run_preprocessor(
                     benchmark_baseline = r["stdout"]
                 if r["mode"] == "full-benchmark" and r["success"]:
                     full_benchmark_baseline = r["stdout"]
+
+            # Hard-fail when no benchmark mode produced output. Without a
+            # baseline the orchestrator cannot validate any optimization, so
+            # progressing to commandment generation + the optimizer wastes
+            # GPU time and silently masks contract bugs (e.g. a harness that
+            # rejects --iterations). Gated by an explicit escape hatch for
+            # debugging only.
+            _allow_broken = os.environ.get("GEAK_ALLOW_BROKEN_HARNESS", "").strip() == "1"
+            if benchmark_baseline is None and full_benchmark_baseline is None:
+                _summary_lines = [
+                    "Baseline harness execution produced no benchmark output;",
+                    "neither --benchmark nor --full-benchmark succeeded.",
+                    f"harness={harness_path_for_baseline}",
+                ]
+                if bl_errors:
+                    _summary_lines.append("errors:")
+                    _summary_lines.extend(f"  - {e}" for e in bl_errors[:4])
+                _abort_msg = "\n".join(_summary_lines)
+                if _allow_broken:
+                    logger.warning(
+                        "[GEAK_ALLOW_BROKEN_HARNESS=1] continuing despite broken baseline:\n%s",
+                        _abort_msg,
+                    )
+                else:
+                    logger.error(
+                        "Refusing to progress to optimization (set GEAK_ALLOW_BROKEN_HARNESS=1 to override):\n%s",
+                        _abort_msg,
+                    )
+                    raise PreprocessAborted(
+                        "harness baseline failed in every mode -- "
+                        "cannot generate a validatable commandment.\n" + _abort_msg
+                    )
         elif harness_results:
             for r in harness_results:
                 if r["mode"] == "benchmark" and r["success"]:
@@ -1075,10 +1211,13 @@ def run_preprocessor(
 
     # ── 5. kernel-profile (via profiler-mcp) ─────────────────────────
     logger.info("[bold cyan]--- Step 5/7: Kernel profiling (Metrix instrumented) ---[/bold cyan]")
+    state.set_stage(PreprocessStage.KERNEL_PROFILE)
 
     _profile_t0 = time.monotonic()
     profiling: dict[str, Any] | None = None
-    if eval_command:
+    if state.skip_profiling:
+        logger.warning("  Skipping kernel-profile stage (state.skip_profiling=True)")
+    elif eval_command:
         _cwd = str(repo_root) if repo_root else None
 
         if correctness_cmd:
@@ -1110,21 +1249,23 @@ def run_preprocessor(
 
         if not perf_cmd:
             logger.info("  Skipping profiling (no performance_command in eval_command)")
+        elif state.skip_profiling:
+            logger.warning("  Skipping profiling (state.skip_profiling=True)")
         else:
             logger.info("  Profiling with performance_command: %s", perf_cmd)
             try:
-                _ensure_mcp_importable()
-                profiler_server = importlib.import_module("profiler_mcp.server")
-                profile_kernel = profiler_server.profile_kernel
+                from minisweagent.run.preprocess.profiler_runner import run_profiler_with_handle
 
-                _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
-                profiling = _profile_fn(
-                    command=perf_cmd,
+                _profile_timeout = budget.deadline_for_preprocess().remaining() if budget else None
+                profiling = run_profiler_with_handle(
+                    state,
+                    perf_cmd=perf_cmd,
                     backend="metrix",
+                    gpu_id=gpu_id,
+                    workdir=_cwd,
                     num_replays=3,
                     quick=False,
-                    gpu_devices=str(gpu_id),
-                    workdir=_cwd,
+                    timeout_s=_profile_timeout,
                 )
             except Exception as exc:
                 logger.warning("[yellow]Profiling failed: %s[/yellow]", exc, exc_info=True)
@@ -1161,10 +1302,25 @@ def run_preprocessor(
         ctx["harness_path"] = extract_harness_path(test_command)
         (output_dir / "harness_path.txt").write_text(ctx["harness_path"])
 
-        try:
-            profiling = run_baseline_profile(test_command, gpu_id=gpu_id)
-        except Exception as exc:
-            logger.warning("[yellow]Profiling failed: %s[/yellow]", exc, exc_info=True)
+        if state.skip_profiling:
+            logger.warning("  Skipping profiling (state.skip_profiling=True)")
+        else:
+            try:
+                from minisweagent.run.preprocess.profiler_runner import run_profiler_with_handle
+
+                _profile_timeout = budget.deadline_for_preprocess().remaining() if budget else None
+                profile_cmd = f"python {ctx['harness_path']} --profile"
+                profiling = run_profiler_with_handle(
+                    state,
+                    perf_cmd=profile_cmd,
+                    backend="metrix",
+                    gpu_id=gpu_id,
+                    num_replays=3,
+                    quick=False,
+                    timeout_s=_profile_timeout,
+                )
+            except Exception as exc:
+                logger.warning("[yellow]Profiling failed: %s[/yellow]", exc, exc_info=True)
     else:
         logger.info("  Skipping profiling (no test command found)")
 
@@ -1182,6 +1338,7 @@ def run_preprocessor(
 
     # ── 6. baseline-metrics ──────────────────────────────────────────
     logger.info("[bold cyan]--- Step 6/7: Baseline metrics ---[/bold cyan]")
+    state.set_stage(PreprocessStage.BASELINE_METRICS)
 
     baseline_metrics: dict[str, Any] | None = None
     if profiling and profiling.get("success", True):
@@ -1194,6 +1351,17 @@ def run_preprocessor(
             logger.info("  Baseline: %s µs, bottleneck=%s", dur, bn)
         except Exception as exc:
             logger.warning("[yellow]Baseline metrics failed: %s[/yellow]", exc, exc_info=True)
+    elif state.skip_profiling:
+        # Profiling was skipped by the soft-stop handler; build a thin metrics
+        # dict from benchmark_baseline.txt alone so the orchestrator can still
+        # run (with degraded -- but valid -- guidance).
+        bb_path = output_dir / "benchmark_baseline.txt"
+        bb_text = bb_path.read_text() if bb_path.exists() else ""
+        baseline_metrics = build_thin_baseline_metrics(bb_text)
+        logger.warning(
+            "  Built THIN baseline_metrics (profiling_skipped=True): duration_us=%s",
+            baseline_metrics.get("duration_us", "?"),
+        )
     else:
         logger.info("  Skipping baseline metrics (no profiling data)")
 
@@ -1232,6 +1400,7 @@ def run_preprocessor(
 
     # ── 7. commandment ───────────────────────────────────────────────
     logger.info("[bold cyan]--- Step 7/7: Commandment ---[/bold cyan]")
+    state.set_stage(PreprocessStage.COMMANDMENT)
 
     commandment: str | None = None
     if eval_command:
@@ -1316,7 +1485,15 @@ def run_preprocessor(
     # endregion
 
     _preprocess_elapsed = time.monotonic() - _preprocess_t0
-    logger.info("Preprocessing complete in %.0fs. Artefacts written to: %s", _preprocess_elapsed, output_dir)
+    state.mark_done()
+    if state.in_borrow_mode:
+        logger.warning(
+            "Preprocessing complete in %.0fs (borrowed time used). Artefacts written to: %s",
+            _preprocess_elapsed,
+            output_dir,
+        )
+    else:
+        logger.info("Preprocessing complete in %.0fs. Artefacts written to: %s", _preprocess_elapsed, output_dir)
     return ctx
 
 

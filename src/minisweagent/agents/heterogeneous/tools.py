@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from minisweagent.debug_runtime import emit_debug_log
+from minisweagent.run.task_file import read_task_file
 
 logger = logging.getLogger(__name__)
 
@@ -199,8 +200,6 @@ def _dispatch_stage_name(priority: int) -> str:
 
 def _group_task_files_by_dispatch_stage(task_files: list[Path]) -> list[tuple[str, list[Path]]]:
     """Group tasks by priority tier for staged dispatch."""
-    from minisweagent.run.task_file import read_task_file
-
     buckets: dict[str, list[Path]] = {}
     for tf in task_files:
         meta, _ = read_task_file(tf)
@@ -212,9 +211,15 @@ def _group_task_files_by_dispatch_stage(task_files: list[Path]) -> list[tuple[st
 
 
 def _stage_found_improvement(results_dir: Path, task_files: list[Path]) -> bool:
-    """Return True if any task in the stage produced speedup > 1.0."""
+    """Return True if any task in the stage produced speedup > 1.0.
+
+    A malformed ``best_results.json`` (e.g. agent crashed mid-write) is logged
+    at WARNING and treated as "no improvement detected for this task" rather
+    than silently skipped, so an operator can correlate the missing improvement
+    with the parse failure.
+    """
     for task_file in task_files:
-        meta, _ = __import__("minisweagent.run.task_file", fromlist=["read_task_file"]).read_task_file(task_file)
+        meta, _ = read_task_file(task_file)
         label = str(meta.get("label") or task_file.stem)
         best_results_path = results_dir / label / "best_results.json"
         if not best_results_path.is_file():
@@ -223,8 +228,12 @@ def _stage_found_improvement(results_dir: Path, task_files: list[Path]) -> bool:
             payload = json.loads(best_results_path.read_text())
             if float(payload.get("best_patch_speedup", 0) or 0) > 1.0:
                 return True
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            pass
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "_stage_found_improvement: could not parse %s (%s); treating as no improvement.",
+                best_results_path,
+                exc,
+            )
     return False
 
 
@@ -241,6 +250,21 @@ def tool_dispatch_tasks(
 
     output_dir = Path(ctx["output_dir"])
     gpu_ids = ctx.get("gpu_ids", [0])
+
+    # Honor wall-clock soft-stop: short-circuit dispatch if the budget has
+    # already run out (e.g. because preprocess overran into the optimization
+    # window). Without this we'd start a 30-minute parallel batch that the
+    # finalize-grace window can't accommodate.
+    _soft_stop = ctx.get("soft_stop")
+    _deadline = ctx.get("deadline")
+    if (_soft_stop is not None and _soft_stop.is_set()) or (_deadline is not None and _deadline.expired()):
+        logger.warning("tool_dispatch_tasks: SoftStop / deadline reached -- skipping dispatch.")
+        return json.dumps(
+            {
+                "status": "skipped",
+                "reason": "wall-clock soft-stop reached; finalize with best-so-far",
+            }
+        )
 
     if not task_files:
         tasks_base = output_dir / "tasks"
@@ -259,22 +283,30 @@ def tool_dispatch_tasks(
     logger.info("[bold yellow]Dispatching %d task(s)[/bold yellow] across GPU(s) %s.", len(task_paths), gpu_ids)
     _dispatch_t0 = time.monotonic()
     stages = _group_task_files_by_dispatch_stage(task_paths)
-    round_match = None
-    for tf in task_paths[:1]:
-        for part in tf.parts:
-            if part.startswith("round_"):
-                round_match = part
-                break
+    round_match = (
+        next((part for part in task_paths[0].parts if part.startswith("round_")), None) if task_paths else None
+    )
     results_base = output_dir / "results" / (round_match or "round_1")
 
     all_results: list[dict] = []
     for stage_name, stage_tasks in stages:
+        # Re-check between dispatch stages: a low-priority stage shouldn't
+        # start if SoftStop fired during a high-priority stage.
+        if (_soft_stop is not None and _soft_stop.is_set()) or (_deadline is not None and _deadline.expired()):
+            logger.warning(
+                "tool_dispatch_tasks: SoftStop / deadline reached between stages; skipping '%s'.",
+                stage_name,
+            )
+            break
         logger.info("tool_dispatch_tasks: running stage '%s' (%d tasks).", stage_name, len(stage_tasks))
         stage_result = run_task_batch(
             task_files=stage_tasks,
             gpu_ids=gpu_ids,
             output_dir=results_base,
             model_factory=ctx.get("model_factory"),
+            deadline=_deadline,
+            soft_stop=_soft_stop,
+            registry=ctx.get("registry"),
         )
         all_results.append(
             {
@@ -287,11 +319,6 @@ def tool_dispatch_tasks(
             logger.info(
                 "tool_dispatch_tasks: improvement found in stage '%s'; skipping lower-priority stages.", stage_name
             )
-            for remaining_stage, _remaining_tasks in stages:
-                if remaining_stage == stage_name:
-                    continue
-                if _dispatch_stage_name(0) == remaining_stage:
-                    continue
             break
 
     _dispatch_elapsed = time.monotonic() - _dispatch_t0
@@ -317,8 +344,19 @@ def tool_collect_results(
     results_dir: str | None = None,
     **_extra,
 ) -> str:
-    """Read and summarize results from completed tasks."""
+    """Read and summarize results from completed tasks.
+
+    Honors ``ctx["soft_stop"]`` as a polite "stop spending time" signal: if
+    SoftStop has fired, narrow the scan to only the most recent round on
+    disk and skip the cross-round walk that ``scan_previous_results`` would
+    otherwise do. The result-scanner is fast in practice but in pathological
+    cases (thousands of patches across many rounds) this matters when we are
+    racing the finalize-grace window.
+    """
     output_dir = Path(ctx["output_dir"])
+    _soft_stop = ctx.get("soft_stop")
+    _soft_stopped = _soft_stop is not None and _soft_stop.is_set()
+
     if results_dir:
         base = Path(results_dir)
     else:
@@ -330,7 +368,32 @@ def tool_collect_results(
             )
             base = round_dirs[-1] if round_dirs else base
 
-    from minisweagent.agents.heterogeneous.result_scanning import scan_previous_results
+    from minisweagent.agents.heterogeneous.result_scanning import (
+        scan_previous_results,
+        scan_single_round_results,
+    )
+
+    if _soft_stopped:
+        # Honour SoftStop: do only a single-round scan even if ``base`` was
+        # explicitly set to the multi-round ``results/`` directory.
+        if base.is_dir() and base.name.startswith("round_"):
+            target = base
+        elif base.is_dir():
+            round_dirs = sorted(
+                (d for d in base.iterdir() if d.is_dir() and d.name.startswith("round_")),
+                key=lambda d: d.name,
+            )
+            target = round_dirs[-1] if round_dirs else base
+        else:
+            target = base
+        logger.warning(
+            "tool_collect_results: SoftStop reached -- short-circuiting to a single-round scan of %s.",
+            target,
+        )
+        sections = scan_single_round_results(target) if target.is_dir() else []
+        if not sections:
+            return "No results found (SoftStop reached)."
+        return "## Previous Round Results (SoftStop reached)\n\n" + "\n\n".join(sections) + "\n"
 
     logger.debug("tool_collect_results: scanning %s", base)
     summary = scan_previous_results(base)

@@ -81,6 +81,36 @@ class TestDeriveOutputDir:
         out_dir = mini_module._derive_output_dir(d, None)
         assert out_dir == d.resolve()
 
+    # The next three tests pass RELATIVE paths -- which was the gap that let
+    # commit c07285cc silently regress the load-bearing ``output.resolve()``
+    # call originally added in 3b0ff0ac. The pre-existing tests in this class
+    # passed only because tmp_path is always absolute, so .resolve() was a
+    # no-op and the assertions held either way.
+
+    def test_relative_directory_resolves_to_absolute(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        rel = Path("outputs/silu")
+        out_dir = mini_module._derive_output_dir(rel, None)
+        assert out_dir.is_absolute(), f"_derive_output_dir must always return absolute; got {out_dir!r}"
+        assert out_dir == (tmp_path / "outputs" / "silu").resolve()
+
+    def test_relative_file_path_resolves_parent_to_absolute(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        rel = Path("outputs/silu/run.traj.json")
+        out_dir = mini_module._derive_output_dir(rel, None)
+        assert out_dir.is_absolute()
+        assert out_dir == (tmp_path / "outputs" / "silu").resolve()
+
+    def test_bare_relative_name_resolves_to_cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A user passing ``--output silu`` (no subdirs) must still get an absolute
+        # path anchored at cwd, not be left as a bare relative name.
+        monkeypatch.chdir(tmp_path)
+        out_dir = mini_module._derive_output_dir(Path("silu"), None)
+        assert out_dir.is_absolute()
+        assert out_dir == (tmp_path / "silu").resolve()
+
 
 class TestFinalReportToBestpatchresult:
     def test_none_returns_none(self) -> None:
@@ -120,6 +150,7 @@ class TestTryPromoteToHarness:
                     "    p.add_argument('--profile', action='store_true')",
                     "    p.add_argument('--benchmark', action='store_true')",
                     "    p.add_argument('--full-benchmark', action='store_true')",
+                    "    p.add_argument('--iterations', type=int, default=None)",
                     "    p.parse_args()",
                     "",
                     "if __name__ == '__main__':",

@@ -305,8 +305,20 @@ def run_parallel_heterogeneous(
     redirect_output_fn=redirect_output_to_file,
     save_traj_fn=None,
     console=None,
+    *,
+    deadline=None,
+    soft_stop=None,
+    registry=None,
 ) -> list[tuple[int, Any, Any, Any]]:
-    """Run heterogeneous parallel agents from AgentSpec list."""
+    """Run heterogeneous parallel agents from AgentSpec list.
+
+    ``deadline`` / ``soft_stop`` / ``registry``: see ``run/budget.py`` and
+    ``run/state.py``. Submissions are serialized under ``registry.lock`` to
+    close the (check + submit + track) race; the poll loop uses
+    ``concurrent.futures.wait(timeout=2.0)`` instead of ``as_completed`` so
+    SoftStop is observed mid-dispatch rather than only between agent
+    completions.
+    """
     num_agents = len(agent_specs)
     labels = [s.label or s.agent_class.__name__ for s in agent_specs]
     if console:
@@ -320,6 +332,13 @@ def run_parallel_heterogeneous(
 
     def run_spec_agent(agent_id: int, spec):
         """Run one agent from an AgentSpec."""
+        # Defense in depth: SoftStop may have fired between submission and
+        # the executor actually starting this thread. Bail before we spawn
+        # any Popen (which would otherwise leak past terminate_all()).
+        if soft_stop is not None and soft_stop.is_set():
+            logger.info("run_spec_agent[%d]: SoftStop set before start; skipping", agent_id)
+            return agent_id, None, "SoftStop", "skipped before start"
+
         if is_git_repo:
             worktree_path = create_worktree(repo_path, worktree_base / f"task_{agent_id}")
         else:
@@ -384,6 +403,15 @@ def run_parallel_heterogeneous(
             agent.base_repo_path = repo_path_resolved
         if hasattr(agent, "log_file"):
             agent.log_file = log_file
+        # Wire wall-clock soft-stop into the sub-agent's step loop so it
+        # terminates between LLM calls when the watchdog fires.
+        if soft_stop is not None:
+            agent._soft_stop = soft_stop
+        # Run-level ProcessRegistry -> save_and_test inner subprocess.run.
+        if registry is not None:
+            agent._registry = registry
+            if hasattr(agent, "_setup_save_and_test_context"):
+                agent._setup_save_and_test_context()
 
         with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"Agent {agent_id} ({label}) Conversation Log\n")
@@ -406,17 +434,79 @@ def run_parallel_heterogeneous(
 
         return agent_id, agent, exit_status, result
 
-    # Run all agents concurrently
-    results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_agents) as executor:
-        futures = {executor.submit(run_spec_agent, i, spec): i for i, spec in enumerate(agent_specs)}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                r = future.result()
-                results.append(r)
-            except Exception as e:
-                agent_id = futures[future]
-                logger.error("Error in heterogeneous agent %d: %s", agent_id, e, exc_info=True)
+    # Run all agents concurrently. Use a poll loop instead of as_completed so
+    # SoftStop is observed mid-dispatch (as_completed blocks until at least
+    # one future completes, which can be tens of minutes for sub-agents).
+    #
+    # NOTE: we intentionally do NOT use ``with ThreadPoolExecutor(...) as ex:``
+    # here, because that calls ``shutdown(wait=True)`` on exit and would block
+    # the orchestrator's deadline-finalize path waiting for stuck workers
+    # (e.g. agents mid-LLM-call). On SoftStop we want to detach the executor
+    # via ``shutdown(wait=False, cancel_futures=True)`` and return immediately
+    # so the orchestrator can call finalize_run within the finalize_grace
+    # window. The hard-kill watchdog remains as the absolute backstop.
+    results: list = []
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=num_agents)
+    soft_stop_observed = False
+    try:
+        futures: dict[concurrent.futures.Future, int] = {}
+        for i, spec in enumerate(agent_specs):
+            # Race-proof submit-and-track: hold registry.lock across (soft_stop
+            # check + executor.submit + register_future) so terminate_all()
+            # cannot miss a worker that has already spawned a Popen.
+            # register_future also wires a done-callback that removes the
+            # future on completion, so terminate_all's "futures=N" log line
+            # reflects only in-flight workers.
+            if registry is not None:
+                with registry.lock:
+                    if soft_stop is not None and soft_stop.is_set():
+                        logger.warning(
+                            "run_parallel_heterogeneous: SoftStop set before submitting agent %d/%d",
+                            i,
+                            num_agents,
+                        )
+                        soft_stop_observed = True
+                        break
+                    fut = executor.submit(run_spec_agent, i, spec)
+                    registry.register_future(fut)
+            else:
+                if soft_stop is not None and soft_stop.is_set():
+                    soft_stop_observed = True
+                    break
+                fut = executor.submit(run_spec_agent, i, spec)
+            futures[fut] = i
+
+        pending = set(futures.keys())
+        while pending:
+            if soft_stop is not None and soft_stop.is_set():
+                logger.warning(
+                    "run_parallel_heterogeneous: SoftStop set during dispatch; "
+                    "cancelling %d in-flight, terminating subprocesses",
+                    len(pending),
+                )
+                if registry is not None:
+                    registry.terminate_all()
+                for f in pending:
+                    f.cancel()
+                soft_stop_observed = True
+                break
+            done, pending = concurrent.futures.wait(pending, timeout=2.0)
+            for f in done:
+                agent_id = futures[f]
+                try:
+                    r = f.result()
+                    results.append(r)
+                except concurrent.futures.CancelledError:
+                    logger.info("Heterogeneous agent %d was cancelled", agent_id)
+                except Exception as e:
+                    logger.error("Error in heterogeneous agent %d: %s", agent_id, e, exc_info=True)
+    finally:
+        # Detach instead of waiting on stuck workers when SoftStop fired;
+        # otherwise drain normally so caller sees a fully-completed batch.
+        if soft_stop_observed:
+            executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            executor.shutdown(wait=True)
     return results
 
 
@@ -434,6 +524,10 @@ def run_pool(
     redirect_output_fn=redirect_output_to_file,
     save_traj_fn=None,
     console=None,
+    *,
+    deadline=None,
+    soft_stop=None,
+    registry=None,
 ) -> list[tuple[int, Any, Any, Any]]:
     """Run M tasks across N GPU slots with overflow queuing.
 
@@ -482,6 +576,12 @@ def run_pool(
 
     def execute_task(task_id: int, task) -> tuple[int, Any, Any, Any]:
         """Execute a single task on dynamically-assigned GPU(s)."""
+        # Defense in depth: SoftStop may have fired between submission and
+        # the executor actually starting this thread.
+        if soft_stop is not None and soft_stop.is_set():
+            logger.info("execute_task[%d]: SoftStop set before start; skipping", task_id)
+            return task_id, None, "SoftStop", "skipped before start"
+
         needed = getattr(task, "num_gpus", 1) or 1
         needed = min(needed, n_slots)
         acquired_gpus: list[int] = []
@@ -597,6 +697,14 @@ def run_pool(
                 agent.base_repo_path = repo_path_resolved
             if hasattr(agent, "log_file"):
                 agent.log_file = log_file
+            # Wall-clock soft-stop -> sub-agent step loop.
+            if soft_stop is not None:
+                agent._soft_stop = soft_stop
+            # Run-level ProcessRegistry -> save_and_test inner subprocess.run.
+            if registry is not None:
+                agent._registry = registry
+                if hasattr(agent, "_setup_save_and_test_context"):
+                    agent._setup_save_and_test_context()
 
             try:
                 from minisweagent.memory.integration import (  # pylint: disable=import-error,no-name-in-module
@@ -775,54 +883,105 @@ def run_pool(
     _progress_thread = threading.Thread(target=_report_progress, daemon=True)
     _progress_thread.start()
 
-    # Submit ALL M tasks; ThreadPoolExecutor(max_workers=N) queues overflow
-    results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=n_slots) as executor:
-        futures = {executor.submit(execute_task, tid, task): tid for tid, task in sorted_tasks}
+    # Submit ALL M tasks; ThreadPoolExecutor(max_workers=N) queues overflow.
+    # Use a poll loop so SoftStop is observed mid-dispatch.
+    #
+    # NOTE: we intentionally do NOT use ``with ThreadPoolExecutor(...) as ex:``
+    # here. ``with`` calls ``shutdown(wait=True)`` on exit, which would block
+    # the orchestrator's deadline-finalize path waiting for stuck workers
+    # (e.g. agents mid-LLM-call). On SoftStop we detach the executor via
+    # ``shutdown(wait=False, cancel_futures=True)`` and return immediately so
+    # the orchestrator can call finalize_run within finalize_grace_s.
+    results: list = []
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=n_slots)
+    soft_stop_observed = False
+    try:
+        futures: dict[concurrent.futures.Future, int] = {}
+        for tid, task in sorted_tasks:
+            if registry is not None:
+                with registry.lock:
+                    if soft_stop is not None and soft_stop.is_set():
+                        logger.warning(
+                            "run_pool: SoftStop set before submitting task %d; not submitting further",
+                            tid,
+                        )
+                        soft_stop_observed = True
+                        break
+                    fut = executor.submit(execute_task, tid, task)
+                    registry.register_future(fut)
+            else:
+                if soft_stop is not None and soft_stop.is_set():
+                    soft_stop_observed = True
+                    break
+                fut = executor.submit(execute_task, tid, task)
+            futures[fut] = tid
+
         # region agent log
         emit_debug_log(
             "parallel_agent.py:_run_pool:futures_submitted",
             "Submitted pool tasks to ThreadPoolExecutor",
             {
                 "n_slots": n_slots,
-                "n_tasks": n_tasks,
-                "task_ids": [tid for tid, _task in sorted_tasks],
+                "n_tasks": len(futures),
+                "task_ids": list(futures.values()),
             },
             hypothesis_id="H8",
         )
         # endregion
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                r = future.result()
-                results.append(r)
-                # region agent log
-                emit_debug_log(
-                    "parallel_agent.py:_run_pool:future_completed",
-                    "Pool future completed successfully",
-                    {
-                        "task_id": futures[future],
-                        "results_collected": len(results),
-                        "exit_status": str(r[2]) if len(r) > 2 else None,
-                    },
-                    hypothesis_id="H8",
+
+        pending = set(futures.keys())
+        while pending:
+            if soft_stop is not None and soft_stop.is_set():
+                logger.warning(
+                    "run_pool: SoftStop set during dispatch; cancelling %d in-flight, terminating subprocesses",
+                    len(pending),
                 )
-                # endregion
-            except Exception as e:
+                if registry is not None:
+                    registry.terminate_all()
+                for f in pending:
+                    f.cancel()
+                soft_stop_observed = True
+                break
+            done, pending = concurrent.futures.wait(pending, timeout=2.0)
+            for future in done:
                 task_id = futures[future]
-                logger.error("Error in pool task %d: %s", task_id, e, exc_info=True)
-                # region agent log
-                emit_debug_log(
-                    "parallel_agent.py:_run_pool:future_exception",
-                    "Pool future raised exception while collecting result",
-                    {
-                        "task_id": task_id,
-                        "error_type": type(e).__name__,
-                        "error": str(e),
-                        "results_collected": len(results),
-                    },
-                    hypothesis_id="H8",
-                )
-                # endregion
+                try:
+                    r = future.result()
+                    results.append(r)
+                    # region agent log
+                    emit_debug_log(
+                        "parallel_agent.py:_run_pool:future_completed",
+                        "Pool future completed successfully",
+                        {
+                            "task_id": task_id,
+                            "results_collected": len(results),
+                            "exit_status": str(r[2]) if len(r) > 2 else None,
+                        },
+                        hypothesis_id="H8",
+                    )
+                    # endregion
+                except concurrent.futures.CancelledError:
+                    logger.info("Pool task %d cancelled", task_id)
+                except Exception as e:
+                    logger.error("Error in pool task %d: %s", task_id, e, exc_info=True)
+                    # region agent log
+                    emit_debug_log(
+                        "parallel_agent.py:_run_pool:future_exception",
+                        "Pool future raised exception while collecting result",
+                        {
+                            "task_id": task_id,
+                            "error_type": type(e).__name__,
+                            "error": str(e),
+                            "results_collected": len(results),
+                        },
+                        hypothesis_id="H8",
+                    )
+                    # endregion
+    finally:
+        if soft_stop_observed:
+            executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            executor.shutdown(wait=True)
 
     _progress_stop.set()
     _progress_thread.join(timeout=2)

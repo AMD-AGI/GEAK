@@ -202,7 +202,7 @@ class TestCheckImportedTriton:
 
     def test_binary_file_no_crash(self, tmpdir):
         """Importing a module path that resolves to a binary file."""
-        bad = _write(tmpdir / "binary_mod.py", "\x00\x01\x02\xff" * 100)
+        _write(tmpdir / "binary_mod.py", "\x00\x01\x02\xff" * 100)
         wrapper = _write(tmpdir / "w.py", "from binary_mod import thing\n")
         assert _check_imported_triton(wrapper.read_text(), wrapper) is False
 

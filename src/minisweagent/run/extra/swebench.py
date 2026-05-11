@@ -139,6 +139,8 @@ def process_instance(
 
     agent = None
     extra_info = None
+    exit_status: str | None = None
+    result: str | None = None
 
     try:
         env = get_sb_environment(config, instance)

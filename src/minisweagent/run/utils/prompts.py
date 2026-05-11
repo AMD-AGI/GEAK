@@ -3,7 +3,10 @@
 # Shared system line for one-shot JSON extraction from task text (parse_task_info + parse_pipeline_params).
 JSON_EXTRACTION_SYSTEM_PROMPT = (
     "You are a helpful assistant that extracts structured configuration from the user's task. "
-    "Always respond with valid JSON. Don't use tools; you must return the JSON results in one query."
+    "ALWAYS respond with a single, valid JSON object as your entire output -- no preamble, no "
+    "markdown, no explanation, no tool calls, no questions. If a value is uncertain, GUESS the "
+    "best plausible value and proceed; never return prose like 'I need to check' or 'let me first'."
+    " Do not investigate the filesystem; you have only the user's task text and must answer from it."
 )
 
 # User message templates: call .format(task_content=...)
@@ -11,7 +14,11 @@ PARSE_TASK_INFO_USER_TEMPLATE = """Analyze the following optimization task and e
 
 Extract the following information (return null if not found):
 1. kernel_name: The name of the kernel/function being optimized (e.g., "gemm", "matmul", "conv2d")
-2. kernel_url: The kernel URL or local path if provided
+2. kernel_url: The path or URL to the SPECIFIC KERNEL FILE to optimize. This MUST be a path
+   ending in a file extension (e.g. ``.py``, ``.hip``, ``.cu``, ``.flydsl``), NOT a directory.
+   If the task only mentions a directory and says something like "the kernel is in <DIR>",
+   set this to ``<DIR>/kernel.py`` (or the appropriate extension for the kernel_type) -- do
+   NOT return the bare directory.
 3. kernel_type: Kernel type, strictly one of "hip", "triton", "pytorch2flydsl", "flydsl", or "other".
    Use "pytorch2flydsl" when the task mentions translating PyTorch code to FlyDSL, converting PyTorch to FlyDSL, or pytorch2flydsl translation.
    Use "flydsl" when the task is about optimizing existing FlyDSL code (not translating from PyTorch).
@@ -54,6 +61,15 @@ Extract the following (return null if not found or not applicable):
 4. max_rounds: Maximum number of optimization rounds (integer). Only set if explicitly mentioned.
 5. start_round: Round number to resume from (integer, 1-based). Only set if explicitly mentioned.
 6. pipeline_intent: true if the task describes kernel optimization, performance improvement, GPU kernel work, or profiling. false if it describes general coding tasks like bug fixes, refactoring, or feature additions.
+7. mode: Wall-clock budget profile -- "quick" or "full". Only set if the user explicitly chooses one.
+   - "quick" -> ~1-hour total budget. Triggered by phrases like: "quick mode", "quick run",
+     "fast run", "quick optimization", "1 hour", "one hour", "1h", "shorter run", "tight budget",
+     "smoke test the optimization", "limit to 60 minutes", "--mode quick", "mode=quick".
+   - "full" -> ~2-hour total budget. Triggered by phrases like: "full mode", "full run",
+     "thorough run", "long run", "2 hours", "two hours", "2h", "extended run", "deep optimization",
+     "--mode full", "mode=full".
+   - null if neither is mentioned. Do NOT infer a mode from the kernel size or complexity --
+     only set when the user explicitly chooses one.
 
 Return ONLY a valid JSON object. Example:
 {{{{
@@ -62,7 +78,8 @@ Return ONLY a valid JSON object. Example:
   "heterogeneous": null,
   "max_rounds": 5,
   "start_round": null,
-  "pipeline_intent": true
+  "pipeline_intent": true,
+  "mode": "quick"
 }}}}
 
 Here is the task content:

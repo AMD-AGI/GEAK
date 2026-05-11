@@ -42,6 +42,10 @@ def run_homogeneous_agent(
     output_dir: Path | None = None,
     model_name: str | None = None,
     console: Console | None = None,
+    *,
+    deadline=None,
+    soft_stop=None,
+    registry=None,
 ) -> BestPatchResult | None:
     """
     Run homogeneous parallel agents.
@@ -145,6 +149,9 @@ def run_homogeneous_agent(
             console=console,
             model_factory=lambda: get_model(model_name, model_config.copy()),
             env_factory=lambda: env_class(**copy.deepcopy(env_kwargs)),
+            deadline=deadline,
+            soft_stop=soft_stop,
+            registry=registry,
         )
         _elapsed = time.monotonic() - _t0
 

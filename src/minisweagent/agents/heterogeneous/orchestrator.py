@@ -45,14 +45,56 @@ def run_llm_steps(
     Returns a finalize report dict if the LLM called ``finalize``,
     otherwise ``None`` (the LLM responded with text, signalling it is
     ready for the next phase).
+
+    The Deadline / SoftStop event are read from ``ctx`` (set by
+    ``run_heterogeneous_orchestrator``) and polled between LLM steps so that
+    once SoftStop fires the loop emits a "finalize now" prompt and exits as
+    soon as the LLM acknowledges (or after one more step if it doesn't).
     """
     max_steps = int(os.getenv("GEAK_ORCHESTRATOR_STEP_LIMIT", "200"))
     step = 0
     _wm = ctx.get("working_memory")
+    _deadline = ctx.get("deadline")
+    _soft_stop = ctx.get("soft_stop")
+    _softstop_prompt_emitted = False
 
     while step < max_steps:
         step += 1
         logger.debug("[dim]%s step %d[/dim]", phase, step)
+
+        # Cooperative deadline check between LLM steps. The watchdog flips
+        # ``soft_stop`` finalize_grace_s before the hard deadline; we get one
+        # chance to ask the LLM to finalize gracefully before we hit the
+        # actual deadline and the orchestrator falls back to programmatic
+        # finalize. Don't re-emit the prompt on subsequent iterations.
+        _stop = (_soft_stop is not None and _soft_stop.is_set()) or (_deadline is not None and _deadline.expired())
+        if _stop and not _softstop_prompt_emitted:
+            logger.warning(
+                "[%s] SoftStop / deadline reached at step %d -- requesting finalize from LLM.",
+                phase,
+                step,
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "TIME BUDGET REACHED: the wall-clock soft-stop has fired. "
+                        "Stop generating new tasks. Call **finalize** immediately with a "
+                        "summary of the best results across all rounds so far. Do not call "
+                        "generate_tasks or dispatch_tasks again."
+                    ),
+                }
+            )
+            _softstop_prompt_emitted = True
+        elif _stop and _softstop_prompt_emitted:
+            # We already asked once; if the LLM produced text without calling
+            # finalize, give up the loop so the caller can do programmatic
+            # finalize.
+            logger.warning(
+                "[%s] LLM did not finalize within one step of SoftStop; exiting LLM loop.",
+                phase,
+            )
+            return None
 
         if _wm and phase != "explore":
             _wm.update_step(step, 0.0)
@@ -185,12 +227,29 @@ def run_heterogeneous_orchestrator(
     output_dir: Path,
     max_rounds: int,
     start_round: int,
+    *,
+    deadline=None,
+    soft_stop=None,
+    registry=None,
 ) -> dict[str, Any]:
     """Run the heterogeneous orchestrator with LLM-driven tool calling.
 
     This is the main heterogeneous entry point, called by
     ``run/orchestrator.py:run_orchestrator`` when ``heterogeneous=True``.
+
+    ``deadline`` / ``soft_stop`` / ``registry`` (all optional) are threaded
+    through ``ctx`` so the round loop, ``run_llm_steps``, and the
+    parallel-dispatch helpers can poll them and abort cleanly when the
+    wall-clock budget runs out.
     """
+    if start_round > 1:
+        # Resume warning: budget clock is fresh at the parent level, but the
+        # caller may have intended to inherit it. Make the behavior visible.
+        logger.warning(
+            "Resume detected (start_round=%d). The wall-clock budget timer was reset "
+            "to T0=now; this run gets a fresh budget regardless of prior elapsed time.",
+            start_round,
+        )
     from minisweagent.agents.heterogeneous.task_generator import _extract_kernel_meta
     from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
     from minisweagent.run.postprocess.results import (
@@ -230,6 +289,9 @@ def run_heterogeneous_orchestrator(
         "model_factory": model_factory,
         "agent_class": StrategyInteractiveAgent,
         "toolruntime": toolruntime,
+        "deadline": deadline,
+        "soft_stop": soft_stop,
+        "registry": registry,
     }
 
     tools_schema = build_tools_schema(toolruntime)
@@ -354,6 +416,39 @@ def run_heterogeneous_orchestrator(
         {"role": "user", "content": instance_msg},
     ]
 
+    # Smoke-test the COMMANDMENT contract once before fanning out sub-agents.
+    # If the harness rejects --iterations or the SETUP/CORRECTNESS section
+    # cannot execute, abort here instead of letting every worker burn its
+    # iteration budget on a contract that can never succeed.
+    try:
+        from minisweagent.run.postprocess.evaluation import (
+            CommandmentExecutionError,
+            preflight_commandment_contract,
+        )
+
+        _preflight_repo_root = str(preprocess_ctx.get("repo_root") or "")
+        _preflight_harness = str(preprocess_ctx.get("harness_path") or "")
+        _preflight_commandment = preprocess_dir / "COMMANDMENT.md"
+        _preflight_gpu = gpu_ids[0] if gpu_ids else 0
+        if _preflight_repo_root and _preflight_harness and _preflight_commandment.exists():
+            preflight_commandment_contract(
+                _preflight_commandment,
+                _preflight_repo_root,
+                _preflight_harness,
+                _preflight_gpu,
+            )
+        else:
+            logger.warning(
+                "Skipping COMMANDMENT preflight: repo_root=%r, harness_path=%r, commandment_exists=%s",
+                _preflight_repo_root,
+                _preflight_harness,
+                _preflight_commandment.exists(),
+            )
+    except CommandmentExecutionError:
+        # Re-raise so the orchestrator/mini.py wrapper exits non-zero
+        # before any sub-agent is launched.
+        raise
+
     if start_round > 1:
         logger.info("Resuming from round %d; loading prior evaluations 1..%d.", start_round, start_round - 1)
         for prev_round in range(1, start_round):
@@ -398,6 +493,41 @@ def run_heterogeneous_orchestrator(
                 return finalize_result
 
         for round_num in range(start_round, max_rounds + 1):
+            # Per-round budget check: if SoftStop fired between rounds, we go
+            # straight to a final-finalize phase using the remaining grace.
+            if (soft_stop is not None and soft_stop.is_set()) or (deadline is not None and deadline.expired()):
+                logger.warning(
+                    "[bold yellow]Wall-clock budget reached before round %d -- skipping to finalize.[/bold yellow]",
+                    round_num,
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "TIME BUDGET REACHED: the wall-clock soft-stop has fired between rounds. "
+                            "Call **finalize** immediately with a summary of the best results across "
+                            "all rounds completed so far."
+                        ),
+                    }
+                )
+                finalize_result = run_llm_steps(
+                    model,
+                    messages,
+                    ctx,
+                    phase="deadline_finalize",
+                )
+                if finalize_result is not None:
+                    report = finalize_run(ctx, output_dir, finalize_result=finalize_result)
+                    _log_final_summary(report)
+                    return report
+                # If even the soft-stop finalize prompt didn't produce a
+                # finalize tool call, fall back to the programmatic
+                # finalize_run with no LLM-generated finalize_result.
+                logger.warning("Falling back to programmatic finalize_run (no LLM finalize).")
+                report = finalize_run(ctx, output_dir)
+                _log_final_summary(report)
+                return report
+
             is_last = round_num == max_rounds
             final_tag = " [bold red](FINAL)[/bold red]" if is_last else ""
             color = "bold green" if not is_last else "bold red"
