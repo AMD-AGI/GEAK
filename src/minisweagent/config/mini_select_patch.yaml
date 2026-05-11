@@ -13,8 +13,9 @@ agent:
     - Prioritize the user-provided metric (if any). The user metric (shown in the task) is the SOURCE OF TRUTH for how to compute speedup.
     - Prefer patches that pass tests and improve the prioritized metric.
     - You MUST compute and report the FINAL speedup by reading:
-      - the baseline test log, please use patch_0 in parallel_0 folders as baseline. If no data, use patch_0 in other parallel folders as baseline.
+      - the **original baseline**: find `benchmark_baseline.txt` by walking up from the work directory (it is written during preprocessing at the optimization output root). This is the canonical unmodified kernel performance. Only if `benchmark_baseline.txt` does not exist anywhere above the work directory, fall back to `patch_0_test.txt` in `parallel_0`.
       - the selected patch's test log (prefer the log inside the patch's own `parallel_*` folder).
+    - Speedup MUST always be computed relative to the original `benchmark_baseline.txt`, NOT relative to `patch_0_test.txt` (which may already be an optimized kernel from a prior round).
     - You MUST only consider aligned points by benchmark entry (same benchmark line / same test name), and enforce equal counts:
       - The number of extracted metric points MUST match between baseline and patch
       - If the counts do not match, the patch's test is INVALID and MUST be excluded from consideration.
@@ -23,9 +24,10 @@ agent:
     - If the user provides a metric, compute speedup using the user's metric definition (what to measure + whether higher/lower is better).
       - Example (lower is better, e.g. latency/time): speedup = baseline_metric / patch_metric
       - Example (higher is better, e.g. throughput/bandwidth): speedup = patch_metric / baseline_metric
+    - Unless the user explicitly requests a different aggregation method, always use **geometric mean** of per-benchmark-entry speedups as the overall speedup. Do NOT use arithmetic mean or total-time ratio.
     - Only if the user does NOT provide a metric, fall back to:
-      - latency/time: speedup = baseline_time / patch_time
-      - throughput/bandwidth: speedup = patch_metric / baseline_metric
+      - latency/time: per-entry speedup = baseline_time / patch_time, then geometric mean across all entries
+      - throughput/bandwidth: per-entry speedup = patch_metric / baseline_metric, then geometric mean across all entries
 
     ## Finishing the task (VERY IMPORTANT)
     - You MUST NOT output `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` from inside any script/heredoc.
@@ -69,7 +71,8 @@ agent:
     ## Inputs
     - Work directory (absolute): {{base_patch_dir}}
     - Expected parallel runs (hint): {{num_parallel}}
-    - Baseline test log (you must locate it): `{{base_patch_dir}}/parallel_*/patch_0_test.txt` or `{{base_patch_dir}}/patch_0_test.txt`
+    - Original baseline log (preferred): walk up from `{{base_patch_dir}}` to find `benchmark_baseline.txt` (canonical unmodified kernel performance)
+    - Fallback baseline: `{{base_patch_dir}}/parallel_*/patch_0_test.txt` or `{{base_patch_dir}}/patch_0_test.txt` (only if `benchmark_baseline.txt` not found)
     - Patch files: `{{base_patch_dir}}/parallel_*/patch_*.patch` or `{{base_patch_dir}}/patch_*.patch`
     - Patch test logs: `{{base_patch_dir}}/parallel_*/patch_*_test.txt` or `{{base_patch_dir}}/patch_*_test.txt`
   

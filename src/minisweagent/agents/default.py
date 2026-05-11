@@ -539,6 +539,11 @@ class DefaultAgent:
 
         return result
 
+    @staticmethod
+    def _use_select_patch_agent_flag() -> bool:
+        val = os.environ.get("GEAK_USE_SELECT_PATCH_AGENT", "").strip().lower()
+        return val in ("1", "true", "yes", "on")
+
     def _run_select_patch_agent(self) -> None:
         if not self.config.patch_output_dir:
             return
@@ -547,14 +552,34 @@ class DefaultAgent:
         if not base_patch_dir.exists():
             return
 
-        # Try deterministic benchmark parsing first -- avoids LLM cost
+        if self._use_select_patch_agent_flag():
+            self._run_llm_select_patch(base_patch_dir)
+        else:
+            self._run_deterministic_select_patch(base_patch_dir)
+
+    def _run_llm_select_patch(self, base_patch_dir: Path) -> None:
+        """Use SelectPatchAgent (LLM) to pick the best patch."""
+        try:
+            from minisweagent.agents.select_patch_agent import run_select_patch
+
+            num_parallel = sum(
+                1 for d in base_patch_dir.iterdir()
+                if d.is_dir() and (d.name.startswith("parallel_") or d.name.startswith("task_"))
+            ) or 1
+
+            logger.info("Using SelectPatchAgent (LLM) for best patch selection in %s.", base_patch_dir.name)
+            run_select_patch(base_patch_dir, num_parallel, self.config.metric, self.model)
+        except Exception as exc:
+            logger.warning("_run_llm_select_patch failed: %s", exc)
+
+    def _run_deterministic_select_patch(self, base_patch_dir: Path) -> None:
+        """Deterministic benchmark-based patch selection (default)."""
         from minisweagent.run.postprocess.benchmark_parsing import rewrite_best_results
 
         det_result = rewrite_best_results(base_patch_dir)
         if det_result:
             return
 
-        # Fall back to LLM-based selection only if deterministic parsing failed
         try:
             from minisweagent.agents.select_patch_agent import SelectPatchAgent
             from minisweagent.config import load_agent_config
@@ -579,10 +604,9 @@ class DefaultAgent:
             if task:
                 select_agent.run(task, _skip_select_patch=True)
 
-            # Final deterministic override as safety net
             rewrite_best_results(base_patch_dir)
         except Exception as exc:
-            logger.debug("_run_select_patch_agent: failed: %s", exc)
+            logger.debug("_run_deterministic_select_patch: failed: %s", exc)
             return
 
     def execute_action(self, action: dict) -> dict:

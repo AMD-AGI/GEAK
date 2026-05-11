@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
-"""Backup mini entry with kernel-type routing."""
+"""Mini entry point — all kernels route through the heterogeneous orchestrator."""
 
-import json
 import logging
+import os
 import shlex
 import subprocess
 import sys
@@ -19,16 +19,14 @@ from prompt_toolkit.shortcuts import PromptSession
 from rich.console import Console
 
 from minisweagent import global_config_dir
-from minisweagent.agents.homogeneous.homogeneous_agent import parse_gpu_ids, run_homogeneous_agent
+from minisweagent.agents.homogeneous.homogeneous_agent import parse_gpu_ids
 from minisweagent.agents.parallel_agent import BestPatchResult
 from minisweagent.config import builtin_config_dir, get_config_path
-from minisweagent.environments import get_environment_class
 from minisweagent.models import get_model
 from minisweagent.run.extra.config import configure_if_first_time
 from minisweagent.run.orchestrator import run_orchestrator
 from minisweagent.run.preprocess.preprocessor import run_preprocessor
 from minisweagent.run.utils.task_parser import (
-    _resolve_path_case,
     display_parsed_config,
     extract_user_constraints,
     parse_task_info,
@@ -166,6 +164,8 @@ def main(
 
     configure_if_first_time()
 
+    os.environ.setdefault("GEAK_MEMORY_DISABLE", "1")
+
     # 1) Config merge — explicit UTF-8 avoids locale-dependent decoding for YAML on some platforms
     base_config_path = builtin_config_dir / "mini_kernel_strategy_list.yaml"
     config = yaml.safe_load(base_config_path.read_text(encoding="utf-8")) or {}
@@ -295,7 +295,6 @@ def main(
         logger.info("User task input (%d chars): %s", len(task_content), task_content[:500])
 
     # 2a) LLM-driven pipeline param extraction
-    heterogeneous = None
     max_rounds = None
     if task_content:
         from minisweagent.run.utils.task_parser import parse_pipeline_params
@@ -304,10 +303,6 @@ def main(
         pipeline_params = parse_pipeline_params(task_content, model)
         logger.debug("pipeline_params: %s", pipeline_params)
 
-        # Apply non-None extracted values (CLI flags still take priority)
-        if pipeline_params.get("heterogeneous") is not None and heterogeneous is None:
-            heterogeneous = pipeline_params["heterogeneous"]
-            logger.info("Using heterogeneous mode.")
         if pipeline_params.get("max_rounds") is not None:
             max_rounds = pipeline_params["max_rounds"]
             logger.info("Using max rounds: %s.", max_rounds)
@@ -435,15 +430,6 @@ def main(
     _resolved_config_display = display_parsed_config(_display_cfg, str(preprocess_output_dir))
     logger.info("Resolved configuration:\n%s", _resolved_config_display)
 
-    _env_kwargs = dict(config.get("env", {}))
-    env_type = str(_env_kwargs.pop("type", _env_kwargs.pop("environment_class", "local"))).strip().lower() or "local"
-    try:
-        env_class = get_environment_class(env_type)
-        env = env_class(**_env_kwargs)
-    except Exception as e:
-        logger.error("[red]Error: failed to initialize env.type=%s: %s[/red]", env_type, e)
-        raise typer.Exit(1)
-
     harness_spec = config.get("patch", {}).get("harness")
     if not harness_spec and test_command:
         promoted = _try_promote_to_harness(test_command)
@@ -494,135 +480,52 @@ def main(
     if preprocess_ctx.get("repo_root") and repo is None:
         repo = Path(preprocess_ctx["repo_root"])
 
-    # kernel_type routing:
-    # - hip/flydsl/other -> homogeneous agent
-    # - triton -> heterogeneous orchestrator
-    # Auto-detect kernel type if heterogeneous flag was not set by LLM extraction or task parser
-    if heterogeneous is None:
-        _discovery = preprocess_ctx.get("discovery") or {}
-        _kernel_info = _discovery.get("kernel") or {}
-        _auto_kernel_type = _kernel_info.get("type")
+    commandment = preprocess_ctx.get("commandment")
+    if not commandment:
+        error_message = "No commandment found in preprocessor context. Check preprocessor logs for failures."
+        logger.error(error_message)
+        raise RuntimeError(error_message)
 
-        if (not _auto_kernel_type or _auto_kernel_type == "unknown") and preprocess_ctx.get("kernel_path"):
-            from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
-            _auto_kernel_type = _infer_kernel_type(Path(preprocess_ctx["kernel_path"]))
+    preprocess_ctx["user_instructions"] = task_content
 
-        # Always use heterogeneous orchestrator to enable subagent dispatch
-        heterogeneous = True
-        logger.info("Using heterogeneous mode (kernel_type=%s).", _auto_kernel_type)
-
-    if heterogeneous:
-        commandment = preprocess_ctx.get("commandment")
-        if not commandment:
-            error_message = "No commandment found in preprocessor context. Check preprocessor logs for failures."
-            logger.error(error_message)
-            raise RuntimeError(error_message)
-
-        preprocess_ctx["user_instructions"] = task_content
-
-        extracted = extract_user_constraints(task_content, model)
-        _addendum_parts: list[str] = []
-        if extracted["constraints"]:
-            _addendum_parts.append("## USER-SPECIFIED CONSTRAINTS\n\nThese are mandatory. Violation means rejection.\n")
-            _addendum_parts.extend(f"- {c}" for c in extracted["constraints"])
-        if extracted["directives"]:
-            _addendum_parts.append(
-                "\n## PRESCRIBED OPTIMIZATION DIRECTIVES\n\n"
-                "These are the user's prescribed optimization strategies. Prioritize them, but\n"
-                "also explore additional directions beyond these.\n"
-                "NOTE: Any performance numbers in the original user request come from full-model\n"
-                "profiling under different conditions. Use ONLY the GEAK-measured baseline metrics\n"
-                "for before/after speedup comparisons.\n"
-            )
-            _addendum_parts.extend(f"- {d}" for d in extracted["directives"])
-        if _addendum_parts:
-            preprocess_ctx["commandment"] = commandment + "\n\n" + "\n".join(_addendum_parts)
-            _commandment_path = preprocess_output_dir / "COMMANDMENT.md"
-            _commandment_path.write_text(preprocess_ctx["commandment"], encoding="utf-8")
-            logger.info(
-                "Enriched commandment with %d constraints and %d directives (written to %s).",
-                len(extracted["constraints"]),
-                len(extracted["directives"]),
-                _commandment_path,
-            )
-
-        preprocess_ctx["rag_enabled"] = rag_enabled
-        report = run_orchestrator(
-            preprocess_ctx=preprocess_ctx,
-            gpu_ids=parsed_gpu_ids,
-            model=model,
-            model_factory=lambda: get_model(model_name, config.get("model", {})),
-            output_dir=preprocess_output_dir,
-            max_rounds=max_rounds or config.get("orchestrator", {}).get("max_rounds"),
-            heterogeneous=True,
+    extracted = extract_user_constraints(task_content, model)
+    _addendum_parts: list[str] = []
+    if extracted["constraints"]:
+        _addendum_parts.append("## USER-SPECIFIED CONSTRAINTS\n\nThese are mandatory. Violation means rejection.\n")
+        _addendum_parts.extend(f"- {c}" for c in extracted["constraints"])
+    if extracted["directives"]:
+        _addendum_parts.append(
+            "\n## PRESCRIBED OPTIMIZATION DIRECTIVES\n\n"
+            "These are the user's prescribed optimization strategies. Prioritize them, but\n"
+            "also explore additional directions beyond these.\n"
+            "NOTE: Any performance numbers in the original user request come from full-model\n"
+            "profiling under different conditions. Use ONLY the GEAK-measured baseline metrics\n"
+            "for before/after speedup comparisons.\n"
         )
-        logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
-        return _final_report_to_bestpatchresult(report)
-
-    metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
-    logger.info("Using metric: %s", metric)
-
-    # Cross-session memory injection for homogeneous mode
-    _kernel_path = preprocess_ctx.get("kernel_path", "")
-    _bm = preprocess_ctx.get("baseline_metrics") or {}
-    if isinstance(_bm, str):
-        try:
-            _bm = json.loads(_bm)
-        except Exception:
-            _bm = {}
-    try:
-        from minisweagent.memory.integration import assemble_memory_context
-        _mem_ctx = assemble_memory_context(
-            kernel_path=_kernel_path,
-            bottleneck_type=_bm.get("bottleneck", ""),
-            profiling_metrics=_bm,
+        _addendum_parts.extend(f"- {d}" for d in extracted["directives"])
+    if _addendum_parts:
+        preprocess_ctx["commandment"] = commandment + "\n\n" + "\n".join(_addendum_parts)
+        _commandment_path = preprocess_output_dir / "COMMANDMENT.md"
+        _commandment_path.write_text(preprocess_ctx["commandment"], encoding="utf-8")
+        logger.info(
+            "Enriched commandment with %d constraints and %d directives (written to %s).",
+            len(extracted["constraints"]),
+            len(extracted["directives"]),
+            _commandment_path,
         )
-        if _mem_ctx:
-            task_content = (
-                task_content
-                + "\n\n### Optimization Memory (from past kernel optimization runs)\n"
-                + _mem_ctx
-            )
-            logger.info("Cross-session memory injected into homogeneous task (%d chars)", len(_mem_ctx))
-        else:
-            logger.info("Cross-session memory: no relevant experiences found")
-    except Exception as _mem_exc:
-        logger.warning("Cross-session memory unavailable: %s", _mem_exc)
 
-    agent_config = dict(config.get("agent", {}))
-    agent_config["save_patch"] = True
-    agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
-    agent_config["metric"] = metric
-    agent_config["patch_output_dir"] = str(preprocess_output_dir)
-    logger.debug("Homogeneous agent_config: %s", agent_config)
-
-    repo_path = repo or config.get("patch", {}).get("repo")
-    if repo_path:
-        p = Path(repo_path)
-        if not p.exists():
-            resolved = _resolve_path_case(p)
-            if resolved is not None:
-                p = resolved
-        repo_path = p.resolve()
-    logger.info("Resolved repo path: %s", repo_path)
-
-    result = run_homogeneous_agent(
-        config=config,
-        task_content=task_content,
+    preprocess_ctx["rag_enabled"] = rag_enabled
+    report = run_orchestrator(
+        preprocess_ctx=preprocess_ctx,
+        gpu_ids=parsed_gpu_ids,
         model=model,
-        env=env,
-        env_class=env.__class__,
-        env_kwargs=_env_kwargs,
-        agent_config=agent_config,
-        repo=repo_path,
-        num_parallel=num_parallel,
-        gpu_ids=gpu_ids,
+        model_factory=lambda: get_model(model_name, config.get("model", {})),
         output_dir=preprocess_output_dir,
-        model_name=model_name,
-        console=console,
+        max_rounds=max_rounds or config.get("orchestrator", {}).get("max_rounds"),
+        heterogeneous=True,
     )
     logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
-    return result
+    return _final_report_to_bestpatchresult(report)
 
 
 if __name__ == "__main__":

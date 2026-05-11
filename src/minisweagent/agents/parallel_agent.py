@@ -132,28 +132,31 @@ class ParallelAgent(DefaultAgent):
     def _select_best_from_parallel_runs(
         base_patch_dir: Path, num_parallel: int, metric: str | None, model_factory
     ) -> BestPatchResult | None:
-        """Select the best patch from multiple parallel runs using SelectPatchAgent."""
-        logger.info("Selecting best patch from %d parallel runs via SelectPatchAgent.", num_parallel)
+        """Select the best patch from multiple parallel runs."""
+        _use_llm = os.environ.get("GEAK_USE_SELECT_PATCH_AGENT", "").strip().lower() in ("1", "true", "yes", "on")
 
-        model = model_factory()
-        _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
-
-        # Only call rewrite_best_results when patch_*_test.txt files exist
-        # directly in base_patch_dir (heterogeneous flat layout).  In
-        # homogeneous/parallel mode the files live in subdirectories
-        # (parallel_0/, parallel_1/) so compute_best_patch cannot find them
-        # and the fallback would incorrectly clamp the LLM's speedup to 1.0.
-        if list(base_patch_dir.glob("patch_*_test.txt")):
+        if _use_llm:
+            logger.info("Selecting best patch from %d parallel runs via SelectPatchAgent (LLM).", num_parallel)
+            model = model_factory()
+            _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
+        else:
+            logger.info("Selecting best patch from %d parallel runs via deterministic parsing.", num_parallel)
+            best_patch_id = None
             from minisweagent.run.postprocess.benchmark_parsing import rewrite_best_results
 
             det_result = rewrite_best_results(base_patch_dir)
             if det_result:
-                best_patch_id = det_result.get("best_patch_id", best_patch_id)
+                best_patch_id = det_result.get("best_patch_id")
                 logger.info(
-                    "Deterministic override: %s (%sx)",
+                    "Deterministic selection: %s (%sx)",
                     best_patch_id,
                     det_result.get("best_patch_speedup", "?"),
                 )
+            if not best_patch_id:
+                logger.info("Deterministic parsing found no winner; falling back to SelectPatchAgent.")
+                model = model_factory()
+                _, best_patch_id = run_select_patch(base_patch_dir, num_parallel, metric, model)
+                rewrite_best_results(base_patch_dir)
 
         if not best_patch_id:
             logger.warning("SelectPatchAgent did not produce best_results.json.")

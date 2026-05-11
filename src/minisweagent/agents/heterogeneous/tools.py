@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -118,37 +119,79 @@ def tool_generate_tasks(
     if ctx.get("registry"):
         kwargs["registry"] = ctx["registry"]
 
-    emit_debug_log(
-        "heterogeneous_orchestrator:tool_generate_tasks:before_gen",
-        "Invoking task generator with orchestrator model",
-        {
-            "round_num": round_num,
-            "previous_results_dir": str(kwargs.get("previous_results_dir")),
-        },
-        hypothesis_id="H0",
-    )
+    # ── Parallel-explore mode: skip LLM task generator ─────────────
+    _skip = os.environ.get("GEAK_SKIP_TASKGEN", "").strip()
+    if _skip and _skip not in ("0", "false", "no"):
+        from minisweagent.agents.agent_spec import AgentTask
 
-    try:
-        tasks = _gen(**kwargs)
-    except Exception as gen_exc:
-        if "LimitsExceeded" in type(gen_exc).__name__ or "LimitsExceeded" in str(gen_exc):
-            logger.warning(
-                "Task generator hit limits (round %d), treating as convergence: %s",
-                round_num,
-                gen_exc,
+        num_gpus = len(ctx.get("gpu_ids", [0]))
+        user_prompt = (ctx.get("user_instructions") or "").strip()
+        kp = kernel_meta.get("kernel_path", str(ctx.get("kernel_path", "")))
+        if not user_prompt:
+            user_prompt = f"Optimize the kernel at {kp} for maximum performance."
+
+        _registry = ctx.get("registry")
+        _DEFAULT_SUBAGENT = "general-kernel-optimization"
+        _subagent_name: str | None = None
+        if _registry is not None:
+            _subagent_name = _registry.match_language(kp) if kp else None
+            if _subagent_name is None and _registry.get(_DEFAULT_SUBAGENT) is not None:
+                _subagent_name = _DEFAULT_SUBAGENT
+            elif _subagent_name is not None and _registry.get(_subagent_name) is None:
+                _subagent_name = None
+
+        _task_config = {"agent_name": _subagent_name} if _subagent_name else {}
+
+        tasks = [
+            AgentTask(
+                agent_class=ctx["agent_class"],
+                task=user_prompt,
+                label=f"parallel-explore-{i}",
+                priority=0,
+                kernel_language=kernel_meta.get("kernel_language", "python"),
+                num_gpus=1,
+                config=_task_config,
             )
-            return json.dumps({"tasks": [], "convergence": True, "reason": str(gen_exc)})
-        raise
+            for i in range(num_gpus)
+        ]
+        logger.info(
+            "[bold yellow]Parallel-explore mode[/bold yellow] (GEAK_SKIP_TASKGEN): "
+            "created %d generic task(s) with subagent %r, skipping LLM task generator.",
+            num_gpus,
+            _subagent_name,
+        )
+    else:
+        emit_debug_log(
+            "heterogeneous_orchestrator:tool_generate_tasks:before_gen",
+            "Invoking task generator with orchestrator model",
+            {
+                "round_num": round_num,
+                "previous_results_dir": str(kwargs.get("previous_results_dir")),
+            },
+            hypothesis_id="H0",
+        )
 
-    emit_debug_log(
-        "heterogeneous_orchestrator:tool_generate_tasks:after_gen",
-        "Task generator completed",
-        {
-            "round_num": round_num,
-            "task_count": len(tasks),
-        },
-        hypothesis_id="H0",
-    )
+        try:
+            tasks = _gen(**kwargs)
+        except Exception as gen_exc:
+            if "LimitsExceeded" in type(gen_exc).__name__ or "LimitsExceeded" in str(gen_exc):
+                logger.warning(
+                    "Task generator hit limits (round %d), treating as convergence: %s",
+                    round_num,
+                    gen_exc,
+                )
+                return json.dumps({"tasks": [], "convergence": True, "reason": str(gen_exc)})
+            raise
+
+        emit_debug_log(
+            "heterogeneous_orchestrator:tool_generate_tasks:after_gen",
+            "Task generator completed",
+            {
+                "round_num": round_num,
+                "task_count": len(tasks),
+            },
+            hypothesis_id="H0",
+        )
 
     from minisweagent.agents.heterogeneous.task_generator import write_task_files
 

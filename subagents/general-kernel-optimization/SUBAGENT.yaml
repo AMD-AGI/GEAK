@@ -56,13 +56,11 @@ agent:
     {% endif %}
 
     3. **Establish Baseline Performance**
-       - **CRITICAL**: Measure original implementation performance BEFORE any optimization
-       - **ALWAYS use the `save_and_test` tool** to measure baseline performance:
-         Call `save_and_test` tool with description: "baseline"
+       - First check if `benchmark_baseline.txt` exists by walking up from your working directory (up to 5 parent levels). This file contains the canonical original kernel benchmark captured during preprocessing.
+       - **If `benchmark_baseline.txt` exists**: read it and use its metrics as your baseline reference. Do NOT run `save_and_test` with "baseline" — the original baseline is already recorded and running it again would measure the starting patch (which may already be optimized from a prior round), giving a misleading baseline.
+       - **If `benchmark_baseline.txt` does NOT exist**: use `save_and_test` tool with description "baseline" to measure original performance.
        - **DO NOT construct manual test commands or benchmarks.**
-       - The system will automatically run tests and save results
        - Record key metrics summary in your strategy file (bandwidth, throughput, latency, occupancy, etc.)
-       - Include reference to the detailed log file
        - This baseline is your reference point - all strategy results will be compared against it
 
     4. Before listing strategies, identify the bottleneck of the current kernel:

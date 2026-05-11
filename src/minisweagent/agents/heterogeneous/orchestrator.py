@@ -50,6 +50,12 @@ def run_llm_steps(
     step = 0
     _wm = ctx.get("working_memory")
 
+    _explore_log = None
+    if phase == "explore":
+        _explore_log_path = Path(ctx["output_dir"]) / "explore.log"
+        _explore_log = open(_explore_log_path, "w")  # noqa: SIM115
+        logger.info("Exploration log: %s", _explore_log_path)
+
     while step < max_steps:
         step += 1
         logger.debug("[dim]%s step %d[/dim]", phase, step)
@@ -87,6 +93,9 @@ def run_llm_steps(
                 _first_line = content_text.strip().split("\n", 1)[0][:200]
                 _suffix = "..." if len(content_text.strip()) > len(_first_line) else ""
                 logger.info("  Orchestrator: %s%s", _first_line, _suffix)
+            if _explore_log:
+                _explore_log.write(f"[step {step}] Orchestrator text:\n{content_text[:2000]}\n")
+                _explore_log.close()
             messages.append({"role": "assistant", "content": content_text})
             return None
 
@@ -102,6 +111,8 @@ def run_llm_steps(
                 tool_args = {}
 
         logger.debug("  Tool: %s(%s)", tool_name, json.dumps(tool_args)[:200])
+        if _explore_log:
+            _explore_log.write(f"[step {step}] Tool: {tool_name}({json.dumps(tool_args)[:500]})\n")
 
         messages.append(
             {
@@ -126,6 +137,9 @@ def run_llm_steps(
         )
 
         logger.debug("  Result: %s", result_str[:300])
+        if _explore_log:
+            _explore_log.write(f"[step {step}] Result: {result_str[:1000]}\n")
+            _explore_log.flush()
 
         if _wm:
             try:
@@ -146,8 +160,12 @@ def run_llm_steps(
                 logger.warning("Finalize payload is not valid JSON; wrapping as summary text.")
                 report = {"summary": result_str}
             logger.info("[bold green]Orchestrator: Optimisation finalised.[/bold green]")
+            if _explore_log:
+                _explore_log.close()
             return report
 
+    if _explore_log:
+        _explore_log.close()
     logger.warning(
         "Orchestrator hit step limit (%d) for phase %s — proceeding to next phase",
         max_steps,

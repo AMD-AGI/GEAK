@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -320,11 +321,18 @@ def post_round_evaluate(
     ctx[f"round_{round_num}_eval"] = round_eval
     if round_eval.best_patch:
         fb = round_eval.full_benchmark
-        # Only count rounds with an independently verified FULL_BENCHMARK result.
-        # Falling back to the agent's self-reported benchmark_speedup risks
-        # promoting a hallucinated or inflated speedup as the global best.
         current = fb.verified_speedup if fb and fb.verified_speedup is not None else None
-        if current is None:
+        _use_select_agent = os.environ.get("GEAK_USE_SELECT_PATCH_AGENT", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if current is None and _use_select_agent and round_eval.benchmark_speedup:
+            current = round_eval.benchmark_speedup
+            logger.info(
+                "Round %d: no verified speedup; using agent-reported %.4fx (GEAK_USE_SELECT_PATCH_AGENT=1).",
+                round_num,
+                current,
+            )
+        elif current is None:
             agent_speedup = round_eval.benchmark_speedup
             note = (
                 f"No FULL_BENCHMARK verified speedup available; "
@@ -338,7 +346,7 @@ def post_round_evaluate(
                 eval_path.write_text(json.dumps(eval_dict, indent=2, default=str))
             except (json.JSONDecodeError, OSError):
                 pass
-        elif current >= ctx.get("_best_global_speedup", 0):
+        if current is not None and current >= ctx.get("_best_global_speedup", 0):
             ctx["starting_patch"] = round_eval.best_patch
             ctx["_best_global_speedup"] = current
             logger.info(
