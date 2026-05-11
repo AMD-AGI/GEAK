@@ -25,9 +25,8 @@ from tenacity import (
 )
 
 from minisweagent.models import GLOBAL_MODEL_STATS
-from minisweagent.models.amd_base import AmdLlmModelConfig, filter_tools_for_amd_config
+from minisweagent.models.amd_base import AmdLlmModelConfig
 from minisweagent.models.utils.cache_control import set_cache_control
-from minisweagent.tools.tools_runtime import get_tools_list
 
 # ---------------------------------------------------------------------------
 # Logging — ``getLogger(...).setLevel()`` returns None; keep a real Logger.
@@ -59,6 +58,7 @@ LITELLM_COMPLETION_PARAM_KEYS: frozenset[str] = frozenset(
         "reasoning",
         # Anthropic extended thinking (e.g. {"type": "enabled", "budget_tokens": 10000}).
         "thinking",
+        "text",
     }
 )
 
@@ -207,15 +207,6 @@ def _register_litellm_registry(path: Path | str | None) -> None:
         litellm.utils.register_model(json.loads(p.read_text(encoding="utf-8")))
 
 
-def _filter_default_tools(
-    tools: list[dict[str, Any]],
-    *,
-    profiling: bool,
-    bash_tool: bool,
-) -> list[dict[str, Any]]:
-    return filter_tools_for_amd_config(tools, profiling=profiling, bash_tool=bash_tool)
-
-
 @dataclass
 class LitellmModelConfig(AmdLlmModelConfig):
     """Configuration for :class:`NewLitellmModel`."""
@@ -265,21 +256,19 @@ class LitellmModel:
         _normalize_api_base_from_kwargs(kwargs)
 
         self.config = LitellmModelConfig(**kwargs)
-        self.tools = get_tools_list(use_strategy_manager=self.config.use_strategy_manager)
-        self.tools = _filter_default_tools(
-            self.tools,
-            profiling=self.config.profiling,
-            bash_tool=self.config.bash_tool,
-        )
+        # Populated by :meth:`set_tools`; :class:`~minisweagent.agents.default.DefaultAgent`
+        # passes ``toolruntime.get_tools_list()`` after constructing :class:`~minisweagent.tools.tools_runtime.ToolRuntime`.
+        self.tools: list[dict[str, Any]] = []
         _register_litellm_registry(self.config.litellm_model_registry)
 
     def set_tools(self, tools: list[dict[str, Any]]) -> None:
-        """Replace the active tool schema (used by strategy / heterogeneous agents)."""
-        self.tools = _filter_default_tools(
-            tools,
-            profiling=self.config.profiling,
-            bash_tool=self.config.bash_tool,
-        )
+        """Replace the active OpenAI-style tool definitions (no model-side filtering).
+
+        Use the same list as :meth:`ToolRuntime.get_tools_list
+        <minisweagent.tools.tools_runtime.ToolRuntime.get_tools_list>` from the
+        agent's runtime so tool names match :meth:`ToolRuntime.dispatch`.
+        """
+        self.tools = list(tools)
 
     @retry(
         stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "10"))),
@@ -368,6 +357,8 @@ class LitellmModel:
 
 if __name__ == "__main__":
     # Quick smoke test
+    from minisweagent.tools.tools_runtime import ToolRuntime
+
     model_configs = [
         {
             "model_name": "openai/gpt-5",
@@ -402,5 +393,6 @@ if __name__ == "__main__":
     ]
     for model_config in model_configs:
         model = LitellmModel(**model_config)
+        model.set_tools(ToolRuntime.fetch_tools_list())
         response = model.query(messages)
         print(response)

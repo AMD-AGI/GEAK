@@ -7,11 +7,10 @@ from pathlib import Path
 
 import pytest
 
-# Ensure profiler-mcp and metrix-mcp are importable
+# Ensure profiler-mcp and GEAK agent src are importable
 _repo_root = str(Path(__file__).resolve().parent.parent.parent.parent)
 for sub in [
     str(Path(_repo_root) / "mcp_tools" / "profiler-mcp" / "src"),
-    str(Path(_repo_root) / "mcp_tools" / "metrix-mcp" / "src"),
     str(Path(_repo_root) / "src"),
 ]:
     if sub not in sys.path:

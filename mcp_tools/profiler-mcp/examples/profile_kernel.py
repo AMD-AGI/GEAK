@@ -23,14 +23,13 @@ import json
 import sys
 from pathlib import Path
 
-# Add profiler-mcp and metrix-mcp to path
+# Add profiler-mcp and GEAK agent src to path
 _script_dir = Path(__file__).resolve().parent
 _profiler_src = str(_script_dir.parent / "src")
 _repo_root = _script_dir.parent.parent.parent
-_metrix_src = str(_repo_root / "mcp_tools" / "metrix-mcp" / "src")
 _agent_src = str(_repo_root / "src")
 
-for _p in [_profiler_src, _metrix_src, _agent_src]:
+for _p in [_profiler_src, _agent_src]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

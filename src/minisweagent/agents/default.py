@@ -48,6 +48,8 @@ class AgentConfig:
     metric: str | None = None
     # Strategy manager configuration
     use_strategy_manager: bool = False
+    tool_profile: str = "full"
+    """``ToolRuntime`` profile: ``\"full\"`` or ``\"swe\"`` (see ``tools_runtime``)."""
     strategy_file_path: str = ".optimization_strategies.md"
     profiling_type: str | None = None
     codebase_context: str | None = None
@@ -134,6 +136,7 @@ class DefaultAgent:
             else ".optimization_strategies.md",
             on_strategy_change=self._get_strategy_callback(),
             patch_output_dir=self.config.patch_output_dir,
+            tool_profile=self.config.tool_profile,
         )
         if self.config.disabled_tools:
             self.toolruntime.disable_tools(self.config.disabled_tools)
@@ -171,6 +174,13 @@ class DefaultAgent:
             )
         if self.config.codebase_context:
             self.toolruntime.set_codebase_context(self.config.codebase_context)
+        # Keep model tool schemas in sync with this agent's ToolRuntime (dispatch table).
+        if hasattr(self.model, "set_tools"):
+            self.model.set_tools(self.toolruntime.get_tools_list())
+        else:
+            impl = getattr(self.model, "_impl", None)
+            if impl is not None and hasattr(impl, "set_tools"):
+                impl.set_tools(self.toolruntime.get_tools_list())
         self.skillruntime = SkillRuntime()
 
     def _get_strategy_file(self) -> str:

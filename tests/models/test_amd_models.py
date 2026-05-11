@@ -303,8 +303,8 @@ class TestAmdLlmModelRouter:
 
 
 class TestAmdLlmModelBaseSetTools:
-    def test_set_tools_filters_profiling(self):
-        config = AmdLlmModelConfig(model_name="claude-test", api_key="key", profiling=False)
+    def test_set_tools_stores_list_as_given(self):
+        config = AmdLlmModelConfig(model_name="claude-test", api_key="key")
         with patch.object(AmdClaudeModel, "_init_client"):
             model = AmdClaudeModel(config)
         tools = [
@@ -314,18 +314,5 @@ class TestAmdLlmModelBaseSetTools:
         ]
         model.set_tools(tools)
         names = [t["name"] for t in model.tools]
-        assert "profiling" not in names
-        assert "bash" in names
-        assert "submit" in names
-
-    def test_set_tools_keeps_profiling_when_enabled(self):
-        config = AmdLlmModelConfig(model_name="claude-test", api_key="key", profiling=True)
-        with patch.object(AmdClaudeModel, "_init_client"):
-            model = AmdClaudeModel(config)
-        tools = [
-            {"name": "bash", "description": "bash"},
-            {"name": "profiling", "description": "profiling"},
-        ]
-        model.set_tools(tools)
-        names = [t["name"] for t in model.tools]
-        assert "profiling" in names
+        assert names == ["bash", "profiling", "submit"]
+        assert model.tools is not tools

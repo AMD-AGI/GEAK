@@ -236,7 +236,10 @@ def run_heterogeneous_orchestrator(
     model_impl = getattr(model, "_impl", model)
     _orig = getattr(model_impl, "tools", None)
     original_tools = list(_orig) if isinstance(_orig, list) else _orig
-    model_impl.tools = tools_schema
+    if hasattr(model, "set_tools"):
+        model.set_tools(tools_schema)
+    else:
+        model_impl.tools = tools_schema
 
     bm = preprocess_ctx.get("baseline_metrics") or {}
     if not bm:
@@ -482,7 +485,12 @@ def run_heterogeneous_orchestrator(
     finally:
         logger.debug("Restoring original model tools schema.")
         if original_tools is not None:
-            model_impl.tools = original_tools
+            if hasattr(model, "set_tools"):
+                model.set_tools(original_tools)
+            else:
+                model_impl.tools = original_tools
+        elif hasattr(model, "set_tools"):
+            model.set_tools([])
         elif hasattr(model_impl, "tools"):
             model_impl.tools = []
 

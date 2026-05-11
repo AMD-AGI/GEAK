@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import importlib
 import json
 import logging
 import threading
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 from minisweagent import get_repo_root
 
 _MCP_TOOLS_ROOT = get_repo_root() / "mcp_tools"
+_sys_path_lock = threading.Lock()
 
 
 class MCPToolBridge:
@@ -91,16 +93,80 @@ class MCPToolBridge:
             return {"output": f"MCP tool error: {e!r}", "returncode": 1}
 
     def tool_list(self) -> list[dict[str, Any]]:
-        """List tools from the MCP server (same protocol as ``tools/list``). Uses the bridge's
-        persistent event loop so the client stays consistent with :meth:`call_tool`."""
+        """List tools (MCP ``tools/list`` wire-style dicts).
+
+        For the default in-repo ``mcp_tools/<server>/`` layout, tools are resolved
+        **in-process** (import ``<pkg>.server``, ``mcp.list_tools()``) with **no** stdio
+        subprocess. If that fails, the catalog for this server is empty (no stdio
+        fallback). Non-default ``server_config`` uses :class:`~minisweagent.tools.mcp_client.MCPClient`
+        (stdio), same transport as :meth:`call_tool`.
+        """
         return self._run_async(self._async_tool())
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _default_local_tool_list_eligible(self) -> bool:
+        """True when this bridge targets the checked-in package (not a custom command/cwd)."""
+        try:
+            return self.server_config == self._default_config(self.server_name)
+        except FileNotFoundError:
+            return False
+
+    async def _async_tool_catalog_inprocess(self) -> list[dict[str, Any]]:
+        """Build ``tools/list``-shaped dicts by importing the local server module (no subprocess)."""
+        import inspect
+        import sys
+
+        module_name = self.server_name.replace("-", "_")
+        src_dir = _MCP_TOOLS_ROOT / self.server_name / "src"
+        if not (src_dir / module_name / "server.py").is_file():
+            raise FileNotFoundError(f"No local server.py for {self.server_name!r}")
+
+        src_str = str(src_dir)
+        inserted = False
+        with _sys_path_lock:
+            if src_str not in sys.path:
+                sys.path.insert(0, src_str)
+                inserted = True
+        try:
+            mod = importlib.import_module(f"{module_name}.server")
+            app = getattr(mod, "mcp", None)
+            if app is None:
+                raise RuntimeError(f"{module_name}.server has no 'mcp' application object")
+
+            lt = app.list_tools
+            if inspect.iscoroutinefunction(lt):
+                sig = inspect.signature(lt)
+                if "run_middleware" in sig.parameters:
+                    catalog = list(await lt(run_middleware=False))
+                else:
+                    catalog = list(await lt())
+            else:
+                r = lt()
+                catalog = list(r) if r is not None else []
+            return _tool_catalog_to_wire_dicts(catalog)
+        finally:
+            if inserted:
+                with _sys_path_lock:
+                    try:
+                        sys.path.remove(src_str)
+                    except ValueError:
+                        pass
+
     async def _async_tool(self):
+        if self._default_local_tool_list_eligible():
+            try:
+                return await self._async_tool_catalog_inprocess()
+            except Exception as e:
+                logger.warning(
+                    "Local in-process tools/list failed for %r (%s); skipping catalog entry (no stdio fallback)",
+                    self.server_name,
+                    e,
+                )
+                return []
         client = await self._ensure_client()
-        await client.start()
         return await client.list_tools()
 
     async def _async_call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -265,7 +331,7 @@ def _coerce_mcp_tool_list(raw: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _populate_mcp_bridges() -> None:
+def _populate_mcp_bridges() -> list[MCPToolBridge]:
     _mcp_bridges: list[MCPToolBridge] = []
     for name in _discover_mcp_server_names():
         try:
@@ -320,6 +386,35 @@ def _allocate_unique_openai_name(base: str, server_name: str, registry: set[str]
     return candidate
 
 
+def _append_openai_tools_for_server(
+    server_name: str,
+    wire_tool_dicts: list[dict[str, Any]],
+    dest: list[dict[str, Any]],
+    used_openai_names: set[str],
+) -> None:
+    """Append OpenAI-style tool dicts for one server (shared by static discovery and stdio ``tools/list``)."""
+    for t in wire_tool_dicts:
+        try:
+            dest.append(_mcp_tool_to_tools_json_entry(t, server_name, used_openai_names))
+        except ValueError as e:
+            logger.warning("Skip bad MCP tool from %r: %s", server_name, e)
+
+
+def _tool_catalog_to_wire_dicts(catalog: list[Any]) -> list[dict[str, Any]]:
+    """Turn ``list_tools`` results into MCP wire-style dicts for :func:`_mcp_tool_to_tools_json_entry`."""
+    out: list[dict[str, Any]] = []
+    for obj in catalog:
+        try:
+            if isinstance(obj, dict):
+                out.append(obj)
+                continue
+            mcp_tool = obj.to_mcp_tool() if callable(getattr(obj, "to_mcp_tool", None)) else obj
+            out.append(mcp_tool.model_dump(mode="python", exclude_none=True))
+        except Exception as e:
+            logger.warning("Skip non-serializable MCP catalog entry (%s): %s", type(obj).__name__, e)
+    return out
+
+
 def collect_mcp_tools() -> tuple[list[MCPToolBridge], list[dict[str, Any]]]:
     """Discover bridges and build a flat list of OpenAI-style tool dicts per MCP tool."""
     _mcp_bridges = _populate_mcp_bridges()
@@ -345,10 +440,6 @@ def collect_mcp_tools() -> tuple[list[MCPToolBridge], list[dict[str, Any]]]:
                 pass  # empty list
             else:
                 logger.warning("Unexpected tool_list result for %r: %r", bridge.server_name, type(raw))
-        for t in tools:
-            try:
-                tool_lists.append(_mcp_tool_to_tools_json_entry(t, bridge.server_name, used_names))
-            except ValueError as e:
-                logger.warning("Skip bad tool from %r: %s", bridge.server_name, e)
+        _append_openai_tools_for_server(bridge.server_name, tools, tool_lists, used_names)
 
     return _mcp_bridges, tool_lists

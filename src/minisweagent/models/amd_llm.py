@@ -96,6 +96,8 @@ class AmdLlmModel:
 
 if __name__ == "__main__":
     # Quick smoke test
+    from minisweagent.tools.tools_runtime import ToolRuntime
+
     model_list = [
         "gpt-5",
         "claude-opus-4.6",
@@ -117,5 +119,6 @@ if __name__ == "__main__":
             model_name=model_name,
             api_key="",
         )
+        model.set_tools(ToolRuntime.fetch_tools_list())
         response = model.query(messages)
         print(response)

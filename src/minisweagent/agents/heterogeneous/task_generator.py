@@ -456,14 +456,14 @@ def _run_task_agent(
     """Run a read-only planning agent and return the submitted JSON text."""
     from minisweagent.agents.default import DefaultAgent
     from minisweagent.environments.local import LocalEnvironment
-    from minisweagent.tools.tools_runtime import get_tools_list
+    from minisweagent.tools.tools_runtime import ToolRuntime
 
     workspace = Path(workspace_path) if workspace_path else Path(kernel_path).parent
 
     _allowed_names = {"str_replace_editor", "submit"}
     if rag_enabled is not False:
         _allowed_names |= {"query", "optimize"}
-    read_only_tools = [t for t in get_tools_list() if t["name"] in _allowed_names]
+    read_only_tools = [t for t in ToolRuntime.fetch_tools_list() if t["name"] in _allowed_names]
     # AmdLlmModel forwards set_tools() to its _impl; snapshot the actual target.
     _model_target = getattr(model, "_impl", model)
     original_tools = list(_model_target.tools) if hasattr(_model_target, "tools") else None

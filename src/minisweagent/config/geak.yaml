@@ -26,6 +26,6 @@ model:
     text:
       verbosity: low
 tools:
-  profiling: false
+  profile_kernel: false
   profiling_type: profiling
   rag: false
