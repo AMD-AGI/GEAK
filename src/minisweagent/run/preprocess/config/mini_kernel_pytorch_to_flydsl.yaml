@@ -105,6 +105,7 @@ agent:
   cost_limit: 0
   step_limit: 200
   use_skills: true
+  tool_profile: translation
 
 model:
   model_class: amd_llm

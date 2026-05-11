@@ -27,6 +27,12 @@ _TOOL_PROFILES: dict[str, set[str] | None] = {
         "query",
         "optimize",
     },
+    "translation": {
+        "bash",
+        "str_replace_editor",
+        "save_and_test",
+        "submit",
+    },
 }
 
 

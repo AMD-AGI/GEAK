@@ -59,6 +59,7 @@ class AgentConfig:
     disabled_tools: list[str] = field(default_factory=list)
     source_file_paths: list[str] | None = None
     use_skills: bool = False
+    tool_profile: str = "full"
 
 
 # Unified observation truncation for both bash output and tool call results (head + tail).
