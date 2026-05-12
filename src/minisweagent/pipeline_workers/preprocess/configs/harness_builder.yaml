@@ -1,0 +1,51 @@
+# HarnessBuilder config — consumed by SubagentBase._load_config.
+#
+# Per execution plan §0.5(b): one-shot LLM subagent that produces a
+# universal-contract harness.py from a kernel + optional user tests +
+# the target KernelLanguage's Jinja harness template + builder hints.
+#
+# ``run()`` internally retries up to ``extra.max_retries`` times when
+# the first candidate fails the universal harness contract
+# (validate_harness in kernel_languages.contract).
+
+name: harness_builder
+
+# Default model — overridden at runtime by the model the caller attaches
+# to the subagent (TranslationPhase / HarnessPhase inject the CLI-
+# supplied model after construction).
+model_name: anthropic/claude-sonnet-4-5-20250929
+
+# Fallback prompts — the live HarnessBuilder reads
+# self.language.system_prompt / self.language.harness_template /
+# self.language.builder_hints and ignores these templates unless the
+# language bundle doesn't supply content.  Kept here to satisfy the
+# SubagentConfig dataclass contract and for smoke tests that exercise
+# the fallback path.
+
+system_template: |
+  You are a GPU kernel test-harness builder.  Your job is to produce a
+  single Python harness.py that evaluates a kernel against a universal
+  evaluation contract (--correctness / --benchmark / --full-benchmark /
+  --profile with stdout markers GEAK_RESULT_LATENCY_MS /
+  GEAK_RESULT_SPEEDUP).  Return ONLY the harness source code — no
+  prose, no markdown fences, no explanation.
+
+instance_template: |
+  Produce a harness.py for a {language_name} kernel that satisfies the
+  universal evaluation contract.  The full instance prompt is
+  assembled by HarnessBuilder._compose_harness_prompt; this template
+  is only used when callers bypass that helper.
+
+# Budget:
+#   step_limit = 1 because run() itself is one-shot per attempt.  The
+#   retry count on contract violation is separately capped by
+#   extra.max_retries (default 1 = up to 2 total round-trips).
+step_limit: 1
+cost_limit: 3.0
+temperature: 0.2
+
+extra:
+  # Number of EXTRA attempts allowed beyond the first one when the
+  # initial candidate fails validate_harness.  With the default 1, the
+  # builder makes at most 2 LLM calls per invocation.
+  max_retries: 1

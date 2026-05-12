@@ -19,6 +19,7 @@ Harness-generation helpers that support this pipeline also live here:
 The main entry points are ``run_preprocessor()`` and ``preprocessor.main()``.
 """
 
+from minisweagent.run.preprocess.orchestrator import run_preprocessor_via_orchestrator
 from minisweagent.run.preprocess.preprocessor import run_preprocessor
 
-__all__ = ["run_preprocessor"]
+__all__ = ["run_preprocessor", "run_preprocessor_via_orchestrator"]

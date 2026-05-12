@@ -175,10 +175,12 @@ def task_file_to_agent_task(task_file: Path):
     meta, body = read_task_file(task_file)
 
     from minisweagent.agents.agent_spec import _agent_type_to_class, filter_agent_type
-    from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+    from minisweagent.agents.optimization_agent import OptimizationAgent
 
+    agent_name = meta.get("agent_name", "")
     agent_type = filter_agent_type(meta.get("agent_type", "strategy_agent"))
-    agent_class = _agent_type_to_class().get(agent_type, StrategyInteractiveAgent)
+    type_to_class = _agent_type_to_class()
+    agent_class = type_to_class.get(agent_name, type_to_class.get(agent_type, OptimizationAgent))
 
     try:
         inherited_step_limit = int(os.environ.get("GEAK_AGENT_STEP_LIMIT", "200"))
@@ -194,6 +196,22 @@ def task_file_to_agent_task(task_file: Path):
         "mode": "yolo",
         "use_strategy_manager": True,
     }
+    if agent_name:
+        try:
+            from minisweagent.subagents import SubAgentRegistry
+
+            registry = SubAgentRegistry()
+            descriptor = registry.get(agent_name)
+            if descriptor is not None:
+                system_prompt = registry.load_system_prompt(descriptor)
+                if system_prompt:
+                    cfg["system_template"] = system_prompt
+                agent_cfg = dict(descriptor.agent_config)
+                agent_cfg.pop("system_template_file", None)
+                agent_cfg.pop("language_match", None)
+                cfg.update(agent_cfg)
+        except Exception as exc:
+            logger.warning("Failed to merge subagent config for %r: %s", agent_name, exc)
 
     # COMMANDMENT is the single source of truth for test commands.
     # Its SETUP + CORRECTNESS + BENCHMARK sections are executed verbatim.

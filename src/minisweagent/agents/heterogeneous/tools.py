@@ -32,8 +32,6 @@ def tool_generate_tasks(
 
     Returns a JSON string with a ``tasks`` key listing the created task file paths.
     """
-    from minisweagent.agents.heterogeneous.task_generator import generate_tasks as _gen
-
     output_dir = Path(ctx["output_dir"]) / "tasks" / f"round_{round_num}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -116,19 +114,36 @@ def tool_generate_tasks(
 
     kwargs["output_dir"] = Path(ctx["output_dir"])
     kwargs["rag_enabled"] = ctx.get("rag_enabled", False)
-
-    emit_debug_log(
-        "heterogeneous_orchestrator:tool_generate_tasks:before_gen",
-        "Invoking task generator with orchestrator model",
-        {
-            "round_num": round_num,
-            "previous_results_dir": str(kwargs.get("previous_results_dir")),
-        },
-        hypothesis_id="H0",
-    )
+    if ctx.get("subagent_registry") is not None:
+        kwargs["subagent_registry"] = ctx["subagent_registry"]
 
     try:
-        tasks = _gen(**kwargs)
+        from minisweagent.agents.heterogeneous.pipeline_task_generation import (
+            orchestrator_tasks_for_mode,
+        )
+
+        emit_debug_log(
+            "heterogeneous_orchestrator:tool_generate_tasks:before_gen",
+            "Invoking task generator with orchestrator model",
+            {
+                "round_num": round_num,
+                "previous_results_dir": str(kwargs.get("previous_results_dir")),
+                "task_generation": ctx.get("task_generation", "planned"),
+            },
+            hypothesis_id="H0",
+        )
+        tasks = orchestrator_tasks_for_mode(
+            task_generation=str(ctx.get("task_generation") or "planned"),
+            ctx=ctx,
+            kwargs_for_planned=kwargs,
+        )
+        from minisweagent.run.dispatch_plan import DispatchPlan
+
+        ctx[f"round_{round_num}_dispatch_plan"] = DispatchPlan.from_agent_tasks(
+            round_num=round_num,
+            mode=str(ctx.get("task_generation") or "planned"),
+            tasks=tasks,
+        )
     except Exception as gen_exc:
         if "LimitsExceeded" in type(gen_exc).__name__ or "LimitsExceeded" in str(gen_exc):
             logger.warning(

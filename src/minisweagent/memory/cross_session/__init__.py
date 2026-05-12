@@ -25,6 +25,30 @@ _backend_lock = threading.Lock()
 _config: CrossSessionConfig | None = None
 
 
+def classify_kernel_category(kernel_path: str) -> str:
+    """Classify a kernel into a coarse family based on its path."""
+    path_lower = kernel_path.lower()
+    for tag in ("gemm", "matmul", "mm"):
+        if tag in path_lower:
+            return "gemm"
+    for tag in ("attention", "atten", "mla", "sdpa"):
+        if tag in path_lower:
+            return "attention"
+    for tag in ("norm", "rms", "layernorm"):
+        if tag in path_lower:
+            return "normalization"
+    for tag in ("moe", "expert"):
+        if tag in path_lower:
+            return "moe"
+    for tag in ("rope", "rotary"):
+        if tag in path_lower:
+            return "positional_encoding"
+    for tag in ("nearest", "neighbor", "spatial", "radius"):
+        if tag in path_lower:
+            return "spatial_search"
+    return "unknown"
+
+
 def _get_config() -> CrossSessionConfig:
     global _config
     if _config is None:

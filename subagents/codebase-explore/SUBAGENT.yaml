@@ -1,0 +1,49 @@
+name: codebase-explore
+description: >-
+  Explore a kernel repository to identify GPU kernel files, their
+  dependencies, existing test/benchmark files, and the build system.
+  Use when kernel_url is not provided and the optimization target must
+  be discovered from a bare repository path.
+
+execution_mode: inprocess
+
+parameters:
+  - name: task
+    type: string
+    description: >-
+      Repository path and any hints about which kernel to optimize.
+      May include the repo root path, a subdirectory hint, or a
+      description of the kernel to find.
+    required: true
+
+agent:
+  system_template_file: SYSTEM_PROMPT.md
+  instance_template: |
+    Task: {{task}}
+  action_observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    <output>
+    {{ output.output -}}
+    </output>
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+
+    Format your response exactly as follows (no extra code blocks):
+    ```bash
+    <one shell command>
+    ```
+  step_limit: 50
+  cost_limit: 0.0
+  tool_profile: readonly
+
+env:
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+  timeout: 600
+
+model:
+  model_class: amd_llm
+  model_name: claude-opus-4.6
+  api_key: null

@@ -118,8 +118,11 @@ def run_homogeneous_agent(
     agent_config["repo"] = str(final_repo)
     agent_config["agent_class"] = base_agent_class
 
-    # Create output directory (pop from agent_config as ParallelAgentConfig doesn't accept it)
-    final_output_dir = Path(agent_config.pop("output_dir", None) or output_dir or "optimization_logs")
+    # Create output directory (pop from agent_config as ParallelAgentConfig doesn't accept it).
+    # Direct callers that omit output_dir should write under the target repo,
+    # not the process cwd, which may be an unwritable checkout root in tests.
+    configured_output = agent_config.pop("output_dir", None) or output_dir
+    final_output_dir = Path(configured_output) if configured_output else final_repo / "optimization_logs"
     final_output_dir.mkdir(parents=True, exist_ok=True)
 
     # Set patch_output_dir to output_dir so patches are saved alongside logs

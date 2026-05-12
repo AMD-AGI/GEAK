@@ -199,6 +199,7 @@ def generate_tasks(
     num_gpus: int = 1,
     output_dir: Path | None = None,
     rag_enabled: bool | None = None,
+    subagent_registry: Any = None,
 ) -> list[AgentTask]:
     """Generate optimization tasks using an LLM planning agent.
 
@@ -257,6 +258,7 @@ def generate_tasks(
         num_gpus=num_gpus,
         output_dir=output_dir,
         rag_enabled=rag_enabled,
+        subagent_registry=subagent_registry,
     )
 
     return _parse_llm_response(
@@ -292,6 +294,7 @@ def generate_tasks_from_content(
     num_gpus: int = 1,
     output_dir: Path | None = None,
     rag_enabled: bool | None = None,
+    subagent_registry: Any = None,
 ) -> list[AgentTask]:
     """Convenience wrapper that materializes in-memory content to temp files.
 
@@ -342,6 +345,7 @@ def generate_tasks_from_content(
             num_gpus=num_gpus,
             output_dir=output_dir,
             rag_enabled=rag_enabled,
+            subagent_registry=subagent_registry,
         )
     finally:
         for f in tmp_files:
@@ -386,6 +390,7 @@ def write_task_files(
             "label": t.label,
             "priority": t.priority,
             "agent_type": class_to_type.get(t.agent_class, "strategy_agent"),
+            "agent_name": t.config.get("agent_name", ""),
             "kernel_language": t.kernel_language,
             "kernel_path": kernel_path,
             "repo_root": repo_root,
@@ -452,6 +457,7 @@ def _run_task_agent(
     num_gpus: int = 1,
     output_dir: Path | None = None,
     rag_enabled: bool | None = None,
+    subagent_registry: Any = None,
 ) -> str:
     """Run a read-only planning agent and return the submitted JSON text."""
     from minisweagent.agents.default import DefaultAgent
@@ -603,6 +609,14 @@ def _run_task_agent(
         else:
             _rag_section = ""
         system_prompt = _SYSTEM_PROMPT.replace("__RAG_TOOLS_SECTION__", _rag_section)
+        if subagent_registry is not None:
+            system_prompt += (
+                "\n\n## Available Registry Subagents\n\n"
+                "When a task should use a specialized YAML subagent, include "
+                '`"agent_name": "<name>"` in the submitted task object. '
+                "Available subagents:\n"
+                f"{subagent_registry.build_taskgen_catalog()}\n"
+            )
         system_prompt = system_prompt + _build_agent_restriction_addendum()
 
         agent = DefaultAgent(
@@ -725,6 +739,7 @@ def _parse_llm_response(
             priority = 10
         priority = max(0, min(15, priority))
         agent_type = filter_agent_type(str(item.get("agent_type", "strategy_agent")))
+        agent_name = str(item.get("agent_name", "")) or ""
         kernel_language = str(item.get("kernel_language", "python"))
         task_prompt = str(item.get("task_prompt", ""))
         try:
@@ -736,11 +751,13 @@ def _parse_llm_response(
             logger.debug("_parse_llm_response: skipping task '%s' with empty prompt.", label)
             continue
 
-        resolved_class = type_to_class.get(agent_type, agent_class)
-        if agent_type not in type_to_class:
+        resolved_class = type_to_class.get(agent_name, type_to_class.get(agent_type, agent_class))
+        if agent_type not in type_to_class and not agent_name:
             logger.debug("_parse_llm_response: unknown agent_type %r for '%s'; using default class.", agent_type, label)
 
         cfg: dict[str, Any] = {}
+        if agent_name:
+            cfg["agent_name"] = agent_name
 
         tasks.append(
             AgentTask(
@@ -993,6 +1010,31 @@ def main():
                 }
             )
         print(json.dumps(output, indent=2))
+
+
+def generate_identical_parallel_tasks(
+    *,
+    base_task_context: str,
+    agent_class: type,
+    num_tasks: int,
+    kernel_language: str = "python",
+    priority: int = 10,
+    label_prefix: str = "parallel-worker",
+) -> list[AgentTask]:
+    """Return identical optimization tasks for fixed/mixed orchestration."""
+    if num_tasks < 1:
+        num_tasks = 1
+    return [
+        AgentTask(
+            agent_class=agent_class,
+            task=base_task_context,
+            label=f"{label_prefix}-{i}",
+            priority=priority,
+            kernel_language=kernel_language,
+            num_gpus=1,
+        )
+        for i in range(1, num_tasks + 1)
+    ]
 
 
 if __name__ == "__main__":

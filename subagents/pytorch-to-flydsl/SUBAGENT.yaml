@@ -1,0 +1,63 @@
+name: pytorch-to-flydsl
+description: >-
+  Translate PyTorch GPU kernels to FlyDSL. Handles GEMM, attention,
+  softmax, layernorm, element-wise ops, reductions, conv2d, and more.
+  Produces numerically identical results using FlyDSL layout algebra,
+  pre-built kernels, and preshuffle GEMM.
+
+execution_mode: inprocess
+
+parameters:
+  - name: task
+    type: string
+    description: >-
+      Free-form task description including the source PyTorch kernel path,
+      output path for the FlyDSL translation, and harness command for testing.
+    required: true
+
+agent:
+  system_template_file: SYSTEM_PROMPT.md
+  instance_template: |
+    ## Translation Task
+
+    {{task}}
+
+    ## FlyDSL Knowledge Base
+
+    {{knowledge_base}}
+
+    ## Workflow
+
+    1. Read the source PyTorch kernel to understand its computation
+    2. Plan the FlyDSL translation:
+       - Identify the computation pattern (element-wise, reduction, GEMM, attention)
+       - For GEMM/Linear: use `compile_preshuffle_gemm_a8` + `shuffle_weight` from `tests.utils`
+       - For attention/SDPA: use `build_flash_attn_func_module` from `kernels.flash_attn_func`
+       - For softmax/layernorm/rmsnorm: use pre-built kernels from `kernels.*` module
+       - For element-wise: use @flyc.kernel with layout algebra (logical_divide, slice, copy atoms)
+       - For Conv2d: im2col (F.unfold) + compile_preshuffle_gemm_a8 (fp16 cast); fallback: im2col + torch.mm
+       - For MaxPool2d: custom @flyc.kernel with arith.maximumf
+       - For BatchNorm2d: F.batch_norm (acceptable PyTorch fallback)
+    3. Write the FlyDSL translation to the specified output path
+    4. Test it using the harness command provided
+    5. If the test fails, read the error output and fix the translation
+    6. Once the test passes, submit: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+
+    ## Important
+
+    - Every response must contain exactly one action enclosed in triple backticks
+    - Directory or environment variable changes are not persistent
+    - Use `save_and_test` to validate your translation
+    - FlyDSL IS installed — do NOT create flycompute.py shims or mock modules
+
+  cost_limit: 0
+  step_limit: 200
+  use_skills: true
+
+model:
+  model_class: amd_llm
+  model_name: claude-opus-4.6
+  api_key: null
+  model_kwargs:
+    temperature: 0.0
+    max_tokens: 16000

@@ -105,13 +105,25 @@ def test_parse_valid_json():
 
 
 def test_parse_strategy_agent_uses_mapped_class():
-    from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+    from minisweagent.agents.optimization_agent import OptimizationAgent
 
     tasks = _parse_llm_response(
         '[{"label": "opt", "priority": 5, "agent_type": "strategy_agent", "task_prompt": "Do it"}]',
         FakeAgentClass,
     )
-    assert tasks[0].agent_class is StrategyInteractiveAgent
+    assert tasks[0].agent_class is OptimizationAgent
+
+
+def test_parse_agent_name_sets_registry_config():
+    from minisweagent.agents.optimization_agent import OptimizationAgent
+
+    tasks = _parse_llm_response(
+        '[{"label": "opt", "priority": 5, "agent_name": "general-kernel-optimization", "task_prompt": "Do it"}]',
+        FakeAgentClass,
+    )
+
+    assert tasks[0].agent_class is OptimizationAgent
+    assert tasks[0].config["agent_name"] == "general-kernel-optimization"
 
 
 def test_parse_rejects_non_array():

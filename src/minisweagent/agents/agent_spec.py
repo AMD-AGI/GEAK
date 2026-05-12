@@ -21,13 +21,22 @@ logger = logging.getLogger(__name__)
 def _agent_type_to_class() -> dict[str, type]:
     """Canonical mapping from task-file ``agent_type`` string to class.
 
-    Lazy import to avoid circular dependencies at module level.
+    Lazy import to avoid circular dependencies at module level. The YAML
+    subagent registry contributes names that resolve to the same
+    OptimizationAgent class; descriptor-specific prompts/config are merged
+    later when task files are dispatched.
     """
-    from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
+    from minisweagent.agents.optimization_agent import OptimizationAgent
 
-    return {
-        "strategy_agent": StrategyInteractiveAgent,
-    }
+    mapping: dict[str, type] = {"strategy_agent": OptimizationAgent}
+    try:
+        from minisweagent.subagents import SubAgentRegistry
+
+        for name in SubAgentRegistry().list_names():
+            mapping.setdefault(name, OptimizationAgent)
+    except Exception:
+        logger.debug("SubAgentRegistry unavailable; using built-in agent types only.")
+    return mapping
 
 
 def _agent_class_to_type() -> dict[type, str]:
@@ -35,7 +44,10 @@ def _agent_class_to_type() -> dict[type, str]:
     return {cls: name for name, cls in _agent_type_to_class().items()}
 
 
-ALL_AGENT_TYPES: frozenset[str] = frozenset({"strategy_agent"})
+def _all_agent_types() -> frozenset[str]:
+    return frozenset(_agent_type_to_class())
+
+ALL_AGENT_TYPES: frozenset[str] = _all_agent_types()
 
 _DEFAULT_FALLBACK_AGENT = "strategy_agent"
 
@@ -59,10 +71,10 @@ def get_allowed_agent_types() -> set[str] | None:
                 "Both GEAK_ALLOWED_AGENTS and GEAK_EXCLUDED_AGENTS are set; GEAK_ALLOWED_AGENTS takes precedence."
             )
         allowed = {t.strip() for t in allowed_raw.split(",") if t.strip()}
-        return allowed & ALL_AGENT_TYPES
+        return allowed & _all_agent_types()
 
     excluded = {t.strip() for t in excluded_raw.split(",") if t.strip()}
-    return ALL_AGENT_TYPES - excluded
+    return _all_agent_types() - excluded
 
 
 def filter_agent_type(agent_type: str) -> str:

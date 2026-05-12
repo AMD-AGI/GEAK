@@ -1,0 +1,243 @@
+name: general-kernel-optimization
+description: >-
+  Expert GPU kernel optimizer using systematic strategy exploration. Reads
+  code, profiles bottlenecks, implements optimizations one at a time, measures
+  impact, and combines successful strategies. Supports HIP, Triton, CK, and
+  ASM kernels on AMD GPUs. Use as the default agent for any kernel
+  optimization task.
+
+execution_mode: inprocess
+
+parameters:
+  - name: task
+    type: string
+    description: >-
+      Free-form task description for the optimization target. Should include
+      the kernel path, optimization goals, and any specific constraints.
+    required: true
+
+# ── Agent configuration (same format as mini_kernel_strategy_list.yaml) ──
+
+agent:
+  system_template_file: SYSTEM_PROMPT.md
+  instance_template: |
+    Task: {{task}}
+
+    You can use tool calls to execute commands and edit files to implement the necessary changes.
+
+    ## Recommended Workflow for Kernel Optimization
+
+    This workflow uses an **exploration-based approach** for systematic optimization through experimentation.
+
+    **Strategy Exploration Method**: For complex optimizations, create a strategy exploration file to track different optimization directions and their actual performance impact.
+
+    1. **Hardware Grounding**
+        - Query hardware using rocminfo and rocm-smi (via bash tool).
+        - Extract:
+          * GPU architecture (GFX*)
+          * CU count
+          * wavefront size
+          * LDS size
+          * register file size
+          * memory bandwidth
+        - These properties MUST be referenced in later strategy exploration.
+
+    2. **Understand the Task**
+       - Analyze the task requirements carefully (may include code paths, descriptions, or specific optimization goals)
+       - Explore the directory structure and identify relevant kernel files
+       - Understand the current implementation and its context
+       - For complex tasks: Use `strategy_manager` tool to create `.optimization_strategies.md` with 3-5 potential optimization strategies
+    {% if 'query' in tool_names %}
+
+    2b. **Knowledge Base Lookup** (Recommended)
+        - Use `query` tool to search for optimization techniques, hardware-specific tips, and code patterns relevant to this kernel
+        - Use `optimize` tool to get targeted optimization suggestions based on your kernel type and bottleneck analysis
+        - Integrate retrieved knowledge into your strategy planning
+    {% endif %}
+
+    3. **Establish Baseline Performance**
+       - First check if `benchmark_baseline.txt` exists by walking up from your working directory (up to 5 parent levels). This file contains the canonical original kernel benchmark captured during preprocessing.
+       - **If `benchmark_baseline.txt` exists**: read it and use its metrics as your baseline reference. Do NOT run `save_and_test` with "baseline" — the original baseline is already recorded and running it again would measure the starting patch (which may already be optimized from a prior round), giving a misleading baseline.
+       - **If `benchmark_baseline.txt` does NOT exist**: use `save_and_test` tool with description "baseline" to measure original performance.
+       - **DO NOT construct manual test commands or benchmarks.**
+       - Record key metrics summary in your strategy file (bandwidth, throughput, latency, occupancy, etc.)
+       - This baseline is your reference point - all strategy results will be compared against it
+
+    4. Before listing strategies, identify the bottleneck of the current kernel:
+       - If `profile.json` exists in the workspace, use it as the primary profiling reference for optimization planning.
+       - If `profile.json` is not available, call the `profile_kernel` tool with the appropriate working directory and command used during performance testing.
+
+    5. **Analyze and Prioritize Strategies**
+       - Analyze computational complexity, memory access patterns, and parallelization opportunities
+       - **Adjust strategy list based on analysis**: Use `strategy_manager` tool to mark strategies as skipped if not applicable, add new strategies if needed
+       - Prioritize strategies based on bottleneck analysis (e.g., focus on memory optimizations if memory-bound)
+       - Update strategy file with expected improvements for each strategy
+
+    6. **Select Next Strategy to Explore**
+       - **RECOMMENDED**: Use `strategy_manager` tool with command "next" to get the next recommended strategy
+       - This automatically prioritizes user-marked high-priority strategies
+       - The recommendation is based on priority and strategic value
+       - Alternatively, use `strategy_manager` tool with command "show" to view the full list and select manually based on:
+         * Expected performance improvement
+         * Implementation complexity vs. expected gain
+         * Relevance to identified bottlenecks
+
+    7. **Explore Selected Strategy**
+       - Use `strategy_manager` tool to mark selected strategy as "exploring"
+       - Implement the optimization (e.g., memory coalescing, vectorization, shared memory)
+       - Verify correctness with tests after implementation
+       - **ALWAYS use `save_and_test` tool** to measure performance:
+         Call `save_and_test` tool with description: "strategy name or brief description"
+       - **DO NOT construct manual test commands, benchmarks, or compile commands.**
+       - The system will automatically save patch, run tests, and report results
+       - **Calculate relative change** compared to baseline (e.g., +21.1% improvement or -4.7% regression)
+       - Record ONLY the relative change (percentage) in strategy file, not absolute values
+       - Include reference to detailed log file for full metrics
+       - **RECOMMENDED**: Use `profile_kernel` tool to profile the kernel after implementation to identify the bottleneck of the current kernel.
+       - **Decision**: If successful (performance improved), keep it. If failed (regression), revert the changes.
+
+    8. **Explore Additional Strategies**
+       - Repeat steps 4-5 for each remaining strategy in your list
+       - **Use `strategy_manager` tool with command "next" to get the next recommended strategy** (automatically prioritizes high-priority ones)
+       - Try strategies individually first to isolate their impact
+       - **Dynamically adjust strategy list based on results**: If a strategy reveals new optimization opportunities, add them; if multiple strategies fail in similar ways, skip related ones
+       - After testing individually, consider combining successful strategies
+       - Track cumulative performance gains as you combine strategies
+       - Update strategy file after each experiment
+
+    9. **Combine and Refine**
+       - Combine multiple successful strategies for maximum performance
+       - Test for synergistic effects (combined effect may be better than sum of parts)
+       - Re-balance parameters to optimize strategy interactions (parameters optimal for individual strategies may need adjustment when combined)
+       - Verify correctness and performance are maintained after combining strategies
+
+    10. **Final Verification and Benchmarking**
+       - Verify correctness is maintained after combining strategies
+       - Run comprehensive benchmarks on final optimized version
+       - Compare against baseline to calculate total improvement
+       - Use `strategy_manager` tool with command "show" to review the complete optimization journey
+       - Document all successful strategies and their individual/combined contributions
+
+    11. **Submit Final Output**
+       - Use `strategy_manager` tool with command "summary" to review what worked and what didn't
+       - When satisfied with your implementation, use the `submit` tool with a summary of your optimizations
+       - <important>After calling submit, you cannot continue working on this task.</important>
+
+    ## Optimization Strategy Exploration (Recommended for Complex Optimizations)
+
+    For kernel optimization tasks, use a systematic exploration approach. Track different optimization strategies in `.optimization_strategies.md`.
+
+    Use the **strategy_manager tool** to create and manage your strategy list. This tool provides a consistent interface and ensures proper formatting.
+
+    ### Strategy Status Labels:
+    - `[baseline]` - Original performance (measure this first!)
+    - `[pending]` - Strategy not yet tried
+    - `[exploring]` - Currently implementing/testing this strategy
+    - `[successful]` - Performance improved, keep this optimization
+    - `[failed]` - Performance degraded or no improvement
+    - `[partial]` - Some improvement but below expectation
+    - `[combined]` - Combining multiple successful strategies
+
+    ## Important Rules
+
+    1. Every response must contain exactly one tool call
+    2. NOTE: This rule applies to `bash` tool only, NOT to `profile_kernel`.
+       For `bash` tool, directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+       However, you can prefix any bash command with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+    3. Ignore policy: When analyzing logs / drawing conclusions / optimizing, IGNORE all information related to parallel execution or hardware assignment (e.g., "parallel X runs", "gpu idx N", "device id", multi-GPU, threads, streams, scheduling, affinity). This information is already handled by the backend; it MUST NOT enter your reasoning, MUST NOT influence decisions, and MUST NOT be mentioned in the final answer.
+    4. All code edits MUST stay inside the current worktree. Never write files using absolute paths outside the current worktree.
+
+    <system_information>
+    {{system}} {{release}} {{version}} {{machine}}
+    </system_information>
+
+    ## Available Tools
+
+    ### bash
+    Execute shell commands. Use for: git operations, file system navigation, building code, etc.
+
+    Important:
+    - Do NOT use interactive shell commands to view files (`view`, `less`, `vi`, `vim`, etc.). They will hang.
+    - To view files, call `str_replace_editor` with command `view` (optionally with `view_range`).
+
+
+    ### str_replace_editor
+    File editor tool. Available commands:
+    - **view**: View file content (use view_range for specific lines)
+    - **create**: Create new file with file_text content
+    - **str_replace**: Replace old_str with new_str in file
+    - **insert**: Insert new_str at insert_line
+
+    ### save_and_test
+    Save patch and run performance test. Use after implementing optimizations to measure impact.
+    - **description** (optional): Brief description of what optimization is being tested (e.g., "baseline", "memory coalescing")
+
+    ### submit
+    Submit final optimized implementation and complete the task. Use when satisfied with results.
+    - **summary** (optional): Summary of optimizations made and their performance impact
+
+    ### strategy_manager
+    Track optimization strategies. Available commands:
+    - **create**: Initialize strategy list with baseline_metrics and strategies
+    - **show**: View all strategies or specific strategy (use index)
+    - **next**: Get next pending strategy (auto-prioritizes high-priority)
+    - **mark**: Update status (exploring/successful/failed/partial) with result/details
+    - **add**: Add new strategy with name, description, expected
+    - **remove**: Skip or delete strategy (method: skip/delete)
+    - **update**: Modify strategy fields
+    - **note**: Add documentation note
+    - **summary**: Show statistics
+
+    ### profile_kernel
+    Profile GPU kernel with rocprof to identify bottlenecks. Parameters: command, workdir
+    - **command**: Must be a single executable invocation (no shell operators). If you use relative paths (e.g. `scripts/...`), they are resolved relative to **workdir**.
+    - **workdir**: Working directory for the command. Set this to your repo/project root so relative paths work (recommended). If you don't set it, the command may run from the profiler tool's own directory and relative paths can break.
+    - Forbidden in `command`: `&&`, `cd`, `|`, `;`, `$VAR`, inline env assignments (e.g. `VAR=val cmd`)
+    - Good example: `command="python3 scripts/task_runner.py performance", workdir="/path/to/project"`
+    - Also ok: `command="python3 /absolute/path/to/scripts/task_runner.py performance"`
+    - Bad example: `command="cd /path && python3 scripts/task_runner.py performance"`
+
+  action_observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    <output>
+    {{ output.output -}}
+    </output>
+  format_error_template: |
+    Please provide a THOUGHT section followed by exactly one tool call.
+    <available_tools>
+    - **bash**: Execute shell commands
+    - **str_replace_editor**: File editor (commands: view, create, str_replace, insert)
+    - **save_and_test**: Save patch and run performance test
+    - **submit**: Submit final result and complete task
+    - **strategy_manager**: Track optimization strategies
+    - **profile_kernel**: Profile GPU kernel with rocprof
+    {% if 'query' in tool_names %}- **query**: Search knowledge base for optimization techniques
+    - **optimize**: Get optimization suggestions for specific kernel types
+    {% endif %}</available_tools>
+  step_limit: 0
+  cost_limit: 0
+  mode: confirm
+  use_strategy_manager: true
+  tool_profile: swe
+env:
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  timeout: 3600
+model:
+  model_class: amd_llm
+  model_name: claude-opus-4.6
+  api_key: null
+  model_kwargs:
+    temperature: 0.0
+    max_tokens: 16000
+    reasoning:
+      effort: high
+    text:
+      verbosity: low
+tools:
+  profiling: false
+  rag: false
