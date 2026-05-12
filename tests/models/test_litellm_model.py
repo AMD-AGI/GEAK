@@ -2,9 +2,11 @@
 
 import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from minisweagent.models.litellm_model import (
     LITELLM_COMPLETION_PARAM_KEYS,
+    LitellmModel,
     _coerce_tool_arguments,
     _first_function_tool_call,
     _openai_tool_call_to_api_shape,
@@ -229,3 +231,82 @@ class TestCompletionParamKeys:
 
     def test_tools_key_present(self):
         assert "tools" in LITELLM_COMPLETION_PARAM_KEYS
+
+
+# ---------------------------------------------------------------------------
+# LitellmModel injects the AMD LLM gateway "user" header
+# ---------------------------------------------------------------------------
+
+
+def _fake_litellm_response() -> MagicMock:
+    """Build a minimal response object covering the fields LitellmModel.query reads."""
+    message = SimpleNamespace(content="hello", tool_calls=None)
+    choice = SimpleNamespace(message=message)
+    response = MagicMock()
+    response.choices = [choice]
+    response.model = "test-model"
+    response.model_dump.return_value = {}
+    return response
+
+
+class TestLitellmModelUserHeader:
+    def test_injects_resolved_user_when_no_headers(self, monkeypatch):
+        monkeypatch.setenv("GEAK_USER", "alice")
+        model = LitellmModel(
+            model_name="anthropic/claude-opus-4.6",
+            model_kwargs={"api_key": "k", "api_base": "https://example/test"},
+        )
+        with (
+            patch("minisweagent.models.litellm_model.litellm.completion", return_value=_fake_litellm_response()) as comp,
+            patch(
+                "minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost",
+                return_value=0.0,
+            ),
+        ):
+            model.query([{"role": "user", "content": "hi"}])
+        headers = comp.call_args.kwargs["extra_headers"]
+        assert headers["user"] == "alice"
+
+    def test_preserves_explicit_user_override(self, monkeypatch):
+        monkeypatch.setenv("GEAK_USER", "alice")
+        model = LitellmModel(
+            model_name="anthropic/claude-opus-4.6",
+            model_kwargs={
+                "api_key": "k",
+                "api_base": "https://example/test",
+                "extra_headers": {"user": "explicit", "Ocp-Apim-Subscription-Key": "k"},
+            },
+        )
+        with (
+            patch("minisweagent.models.litellm_model.litellm.completion", return_value=_fake_litellm_response()) as comp,
+            patch(
+                "minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost",
+                return_value=0.0,
+            ),
+        ):
+            model.query([{"role": "user", "content": "hi"}])
+        headers = comp.call_args.kwargs["extra_headers"]
+        assert headers["user"] == "explicit"
+        assert headers["Ocp-Apim-Subscription-Key"] == "k"
+
+    def test_merges_with_other_extra_headers(self, monkeypatch):
+        monkeypatch.setenv("GEAK_USER", "alice")
+        model = LitellmModel(
+            model_name="anthropic/claude-opus-4.6",
+            model_kwargs={
+                "api_key": "k",
+                "api_base": "https://example/test",
+                "extra_headers": {"Ocp-Apim-Subscription-Key": "k"},
+            },
+        )
+        with (
+            patch("minisweagent.models.litellm_model.litellm.completion", return_value=_fake_litellm_response()) as comp,
+            patch(
+                "minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost",
+                return_value=0.0,
+            ),
+        ):
+            model.query([{"role": "user", "content": "hi"}])
+        headers = comp.call_args.kwargs["extra_headers"]
+        assert headers["user"] == "alice"
+        assert headers["Ocp-Apim-Subscription-Key"] == "k"
