@@ -66,20 +66,25 @@ class TestDeriveOutputDir:
             "minisweagent.run.utils.task_parser.generate_patch_output_dir",
             side_effect=fake_generate,
         ):
-            out_dir = mini_module._derive_output_dir(None, "my_kernel")
+            out_dir, auto = mini_module._derive_output_dir(None, "my_kernel")
 
         assert out_dir == (tmp_path / "optimization_logs" / "kernel_fixed_ts").resolve()
+        # output=None -> geak generated the path. ``--keep-runs`` retention
+        # only ever acts on auto dirs.
+        assert auto is True
 
     def test_file_path_uses_parent_for_dir(self, tmp_path: Path) -> None:
         f = tmp_path / "run.traj.json"
-        out_dir = mini_module._derive_output_dir(f, None)
+        out_dir, auto = mini_module._derive_output_dir(f, None)
         assert out_dir == f.parent.resolve()
+        assert auto is False
 
     def test_directory_path_returns_dir(self, tmp_path: Path) -> None:
         d = tmp_path / "logs"
         d.mkdir()
-        out_dir = mini_module._derive_output_dir(d, None)
+        out_dir, auto = mini_module._derive_output_dir(d, None)
         assert out_dir == d.resolve()
+        assert auto is False
 
     # The next three tests pass RELATIVE paths -- which was the gap that let
     # commit c07285cc silently regress the load-bearing ``output.resolve()``
@@ -90,26 +95,29 @@ class TestDeriveOutputDir:
     def test_relative_directory_resolves_to_absolute(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         rel = Path("outputs/silu")
-        out_dir = mini_module._derive_output_dir(rel, None)
+        out_dir, auto = mini_module._derive_output_dir(rel, None)
         assert out_dir.is_absolute(), f"_derive_output_dir must always return absolute; got {out_dir!r}"
         assert out_dir == (tmp_path / "outputs" / "silu").resolve()
+        assert auto is False
 
     def test_relative_file_path_resolves_parent_to_absolute(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
         rel = Path("outputs/silu/run.traj.json")
-        out_dir = mini_module._derive_output_dir(rel, None)
+        out_dir, auto = mini_module._derive_output_dir(rel, None)
         assert out_dir.is_absolute()
         assert out_dir == (tmp_path / "outputs" / "silu").resolve()
+        assert auto is False
 
     def test_bare_relative_name_resolves_to_cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # A user passing ``--output silu`` (no subdirs) must still get an absolute
         # path anchored at cwd, not be left as a bare relative name.
         monkeypatch.chdir(tmp_path)
-        out_dir = mini_module._derive_output_dir(Path("silu"), None)
+        out_dir, auto = mini_module._derive_output_dir(Path("silu"), None)
         assert out_dir.is_absolute()
         assert out_dir == (tmp_path / "silu").resolve()
+        assert auto is False
 
 
 class TestFinalReportToBestpatchresult:

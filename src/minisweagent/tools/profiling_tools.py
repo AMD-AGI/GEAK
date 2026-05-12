@@ -30,9 +30,25 @@ class ProfilingAnalyzer:
         ]
 
     def cleanup(self):
-        """Remove the temporary profiling output directory."""
+        """Remove the temporary profiling output directory.
+
+        Kept public for any out-of-tree caller that didn't migrate to the
+        context-manager protocol below. New in-tree callers should prefer
+        ``with ProfilingAnalyzer(...) as analyzer:`` so the temp dir
+        cleanup is automatic and exception-safe.
+        """
         if self.output_path.exists():
             shutil.rmtree(self.output_path, ignore_errors=True)
+
+    def __enter__(self) -> "ProfilingAnalyzer":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        # Always run cleanup -- ``shutil.rmtree(..., ignore_errors=True)``
+        # never raises, so we don't risk masking an in-progress exception.
+        # Returning None (or False) means __exit__ does not suppress
+        # exceptions raised inside the ``with`` block.
+        self.cleanup()
 
     def _check_rocprof_compute(self):
         result_rocprof = subprocess.run(["rocprof-compute --version"], capture_output=True, text=True, shell=True)
