@@ -25,7 +25,7 @@ from tenacity import (
 )
 
 from minisweagent.models import GLOBAL_MODEL_STATS
-from minisweagent.models.amd_base import AmdLlmModelConfig
+from minisweagent.models.amd_base import AmdLlmModelConfig, get_amd_llm_user
 from minisweagent.models.utils.cache_control import set_cache_control
 
 # ---------------------------------------------------------------------------
@@ -292,6 +292,11 @@ class LitellmModel:
             self.tools,
             tool_cache_control=self.config.tool_cache_control,
         )
+        existing_headers = filtered.get("extra_headers") or {}
+        filtered["extra_headers"] = {
+            **existing_headers,
+            "user": existing_headers.get("user") or get_amd_llm_user(),
+        }
         try:
             return litellm.completion(
                 model=self.config.model_name,

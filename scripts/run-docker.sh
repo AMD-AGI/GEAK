@@ -93,6 +93,10 @@ while [[ $# -gt 0 ]]; do
             echo "  geak <github_url>                      Full optimization pipeline"
             echo ""
             echo "Requires: AMD_LLM_API_KEY environment variable"
+            echo ""
+            echo "USER and GEAK_USER are forwarded from the host so the AMD LLM gateway"
+            echo "can attribute requests; existing containers must be rebuilt with"
+            echo "--rebuild to pick up the change."
             exit 0
             ;;
         *)
@@ -218,6 +222,8 @@ docker run -d \
     -e AMD_LLM_API_KEY="${AMD_LLM_API_KEY}" \
     -e AMD_LLM_BASE_URL="${AMD_LLM_BASE_URL}" \
     -e GEAK_MODEL="${GEAK_MODEL}" \
+    -e USER="${USER}" \
+    -e GEAK_USER="${GEAK_USER:-${USER}}" \
     "${EDITABLE_ENV[@]}" \
     --shm-size 8G \
     "${VOLUME_ARGS[@]}" \
