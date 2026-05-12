@@ -134,10 +134,7 @@ def apply_and_commit_best_patch_detailed(
     patch_path = Path(result.best_patch_file).resolve()  # type: ignore[arg-type]
 
     if not _repo_is_clean(repo):
-        reason = (
-            f"repo {repo} has uncommitted tracked changes. "
-            "Commit or stash them first, then re-run apply manually."
-        )
+        reason = f"repo {repo} has uncommitted tracked changes. Commit or stash them first, then re-run apply manually."
         logger.warning("[geak apply] Skipping: %s", reason)
         return {"status": "skipped_dirty", "commit_sha": None, "reason": reason}
 
@@ -189,11 +186,7 @@ def cleanup_run_artifacts(
 
     assert output_dir is not None  # for type narrowing
     output_dir = Path(output_dir).resolve()
-    patch_path = (
-        Path(result.best_patch_file).resolve()
-        if (result is not None and result.best_patch_file)
-        else None
-    )
+    patch_path = Path(result.best_patch_file).resolve() if (result is not None and result.best_patch_file) else None
 
     return _cleanup_artifacts(output_dir, patch_path)
 
@@ -303,11 +296,7 @@ def _validate_cleanup_preconditions(
         return False
 
     has_report = (output_dir_path / _FINAL_REPORT_NAME).is_file()
-    has_patch = bool(
-        result is not None
-        and result.best_patch_file
-        and Path(result.best_patch_file).is_file()
-    )
+    has_patch = bool(result is not None and result.best_patch_file and Path(result.best_patch_file).is_file())
     if not (has_report or has_patch):
         logger.warning(
             "[geak --cleanup] Skipping: %s has neither %s nor a winning patch; "
@@ -426,7 +415,11 @@ def _apply_patch_to_repo(patch_path: Path, repo: Path) -> tuple[bool, str | None
             apply_result.returncode,
             stderr_tail,
         )
-        reason = f"git apply rc={apply_result.returncode}: {stderr_tail}" if stderr_tail else f"git apply rc={apply_result.returncode}"
+        reason = (
+            f"git apply rc={apply_result.returncode}: {stderr_tail}"
+            if stderr_tail
+            else f"git apply rc={apply_result.returncode}"
+        )
         return False, reason
 
     logger.info("[geak --cleanup] Applied %s to %s", patch_path, repo)

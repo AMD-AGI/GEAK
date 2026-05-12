@@ -36,16 +36,13 @@ from minisweagent.run.postprocess.finalize_apply import (
 )
 from minisweagent.utils.log import DEFAULT_LOG_FILENAME
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=str(repo), capture_output=True, text=True, check=True
-    )
+    return subprocess.run(["git", *args], cwd=str(repo), capture_output=True, text=True, check=True)
 
 
 @pytest.fixture
@@ -64,9 +61,7 @@ def repo(tmp_path: Path) -> Path:
 @pytest.fixture
 def good_patch(repo: Path) -> str:
     (repo / "kernel.py").write_text("def run():\n    return 42\n")
-    diff = subprocess.run(
-        ["git", "diff"], cwd=str(repo), capture_output=True, text=True, check=True
-    ).stdout
+    diff = subprocess.run(["git", "diff"], cwd=str(repo), capture_output=True, text=True, check=True).stdout
     _git(repo, "checkout", "--", "kernel.py")
     return diff
 
@@ -97,9 +92,7 @@ def _result_for(output_dir: Path) -> BestPatchResult:
 # ---------------------------------------------------------------------------
 
 
-def test_geak_agent_log_keeps_growing_after_cleanup(
-    repo: Path, output_dir: Path
-) -> None:
+def test_geak_agent_log_keeps_growing_after_cleanup(repo: Path, output_dir: Path) -> None:
     """The FileHandler open on ``output_dir/geak_agent.log`` keeps writing
     through ``cleanup_run_artifacts``. Pre-populates ``final_report.json`` +
     a winning ``.diff`` so cleanup actually runs (otherwise cleanup
@@ -186,9 +179,7 @@ def _build_hard_kill_handler(
         try:
             state_registry.terminate_all(escalate_after_s=5.0)
         except Exception:
-            logging.getLogger("minisweagent.run.mini").exception(
-                "hard-kill: registry.terminate_all() failed"
-            )
+            logging.getLogger("minisweagent.run.mini").exception("hard-kill: registry.terminate_all() failed")
 
         _msg = (
             f"[geak HARD-KILL] Wall-clock budget exceeded "
@@ -318,9 +309,7 @@ def test_hard_kill_handler_writes_stub_and_warns_without_running_cleanup(
 # ---------------------------------------------------------------------------
 
 
-def test_finalize_apply_and_cleanup_het_repo_root_fallback(
-    tmp_path: Path, repo: Path, good_patch: str
-) -> None:
+def test_finalize_apply_and_cleanup_het_repo_root_fallback(tmp_path: Path, repo: Path, good_patch: str) -> None:
     """When the het branch's caller derives effective_repo from
     preprocess_ctx['repo_root'] (no --repo passed), the apply path must
     use that repo. This catches regressions in the het ``effective_repo``
@@ -344,14 +333,10 @@ def test_finalize_apply_and_cleanup_het_repo_root_fallback(
     # Simulate what mini.py's het branch does: effective_repo derives from
     # preprocess_ctx['repo_root'] when --repo isn't supplied.
     fake_preprocess_ctx = {"repo_root": str(repo)}
-    effective_repo = None or (
-        Path(fake_preprocess_ctx["repo_root"]) if fake_preprocess_ctx.get("repo_root") else None
-    )
+    effective_repo = None or (Path(fake_preprocess_ctx["repo_root"]) if fake_preprocess_ctx.get("repo_root") else None)
     assert effective_repo is not None
 
-    outcome = finalize_apply_and_cleanup(
-        result, effective_repo, out, apply_best_patch=True, cleanup=True
-    )
+    outcome = finalize_apply_and_cleanup(result, effective_repo, out, apply_best_patch=True, cleanup=True)
 
     assert outcome["apply_status"] == "committed"
     assert outcome["commit_sha"] is not None and len(outcome["commit_sha"]) >= 7
@@ -393,9 +378,7 @@ def test_homo_finalize_uses_repo_path_when_repo_resolved_from_config(
     repo_path = Path(config_patch_repo).resolve()
     effective_repo = repo_path  # exactly what mini.py does on the homo path
 
-    outcome = finalize_apply_and_cleanup(
-        result, effective_repo, out, apply_best_patch=True, cleanup=True
-    )
+    outcome = finalize_apply_and_cleanup(result, effective_repo, out, apply_best_patch=True, cleanup=True)
 
     assert outcome["apply_status"] == "committed"
     assert outcome["commit_sha"] is not None and len(outcome["commit_sha"]) >= 7
@@ -407,9 +390,7 @@ def test_homo_finalize_uses_repo_path_when_repo_resolved_from_config(
 # ---------------------------------------------------------------------------
 
 
-def test_finalize_outcome_carries_apply_and_cleanup_status(
-    tmp_path: Path, repo: Path, good_patch: str
-) -> None:
+def test_finalize_outcome_carries_apply_and_cleanup_status(tmp_path: Path, repo: Path, good_patch: str) -> None:
     """The outcome dict shape is exactly what mini.py's finally reads."""
     out = tmp_path / "shape_check"
     out.mkdir()
@@ -434,9 +415,7 @@ def test_finalize_outcome_carries_apply_and_cleanup_status(
 
 def test_finalize_outcome_when_both_disabled() -> None:
     """``apply_best_patch=False, cleanup=False`` -> both statuses 'skipped_disabled'."""
-    outcome = finalize_apply_and_cleanup(
-        None, None, None, apply_best_patch=False, cleanup=False
-    )
+    outcome = finalize_apply_and_cleanup(None, None, None, apply_best_patch=False, cleanup=False)
     assert outcome == {
         "apply_status": "skipped_disabled",
         "cleanup_status": "skipped_disabled",
