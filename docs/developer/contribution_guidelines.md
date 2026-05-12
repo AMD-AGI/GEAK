@@ -39,20 +39,39 @@ fix/xxx     ──┘                                   hotfix ─────�
 - Check existing issues and PRs to avoid duplicate work.
 - For large changes, **open an issue first** to discuss the design.
 
-### 2. Create your branch
+### 2. Fork and clone
+
+External contributors do **not** have push access to `AMD-AGI/GEAK`. Fork the repository first, then work on your fork:
 
 ```bash
-git checkout main && git pull origin main
+# 1. Fork on GitHub: click "Fork" on https://github.com/AMD-AGI/GEAK
+# 2. Clone your fork locally
+git clone https://github.com/<your-username>/GEAK.git
+cd GEAK
+
+# 3. Add the upstream remote so you can sync later
+git remote add upstream https://github.com/AMD-AGI/GEAK.git
+```
+
+> **Maintainers** with write access can skip forking and push branches directly to `AMD-AGI/GEAK`.
+
+### 3. Create your branch
+
+Keep your `main` branch in sync with upstream before branching:
+
+```bash
+git fetch upstream
+git checkout main && git merge upstream/main
 git checkout -b feature/my-new-feature
 ```
 
-### 3. Develop
+### 4. Develop
 
 - Write code following the [Code Standards](#code-standards) below.
 - Add or update tests for any behavioral change.
 - Run the linter and tests locally before pushing (see [Local Checks](#local-checks)).
 
-### 4. Commit messages
+### 5. Commit messages
 
 Follow the [Conventional Commits](https://www.conventionalcommits.org/) format:
 
@@ -77,16 +96,24 @@ refactor(tools): extract common harness validation logic
 - Use imperative mood ("add", not "added" or "adds").
 - Reference issue numbers where applicable: `Fixes #123`.
 
-### 5. Open a pull request
+### 6. Push and open a pull request
 
-- Target branch: **`main`** (unless it's a hotfix to an active release branch).
+Push your branch to **your fork**, then open a PR against the upstream repository:
+
+```bash
+git push origin feature/my-new-feature
+# Then on GitHub: open a Pull Request from
+#   <your-username>/GEAK:feature/my-new-feature  →  AMD-AGI/GEAK:main
+```
+
+- Target branch: **`main`** on `AMD-AGI/GEAK` (unless it's a hotfix to an active release branch).
 - Fill in the PR template:
   - **Summary** — what and why (1–3 bullets).
   - **Test plan** — how you verified correctness.
   - **Related issues** — link to issues.
 - Add **exactly one** type label to describe the PR's primary intent (see [Labels](#labels) below). A PR should be focused — if you find yourself needing two type labels, split it into separate PRs.
 
-### 6. Draft PRs
+### 7. Draft PRs
 
 Use GitHub **Draft PRs** when your work is not yet ready for formal review:
 
@@ -97,13 +124,13 @@ Use GitHub **Draft PRs** when your work is not yet ready for formal review:
 
 > **Tip**: Opening a Draft PR early is encouraged — it's better to get feedback on the direction before investing days of work.
 
-### 7. Code review
+### 8. Code review
 
 - **At least 2 approval** from a maintainer is required to merge.
 - Address review comments with new commits (do not force-push during review so reviewers can see incremental changes).
 - Once approved, the **author** squash-merges via GitHub.
 
-### 8. After merge
+### 9. After merge
 
 - Delete the feature branch.
 - If the change needs a release note, add an entry to the changelog (see [Releases](#release-process)).
@@ -267,10 +294,8 @@ Every new source file should include the SPDX header:
 ## Quick Reference
 
 ```text
- Branch from main ──► Develop ──► Pre-commit + Tests ──► Open PR (→ main) ──► Review ──► Squash-merge
-                                                                               │
-                                                                         Fix comments
-                                                                         Push new commits
+ Fork AMD-AGI/GEAK ──► Clone ──► Branch from main ──► Develop ──► Pre-commit + Tests
+      ──► Push to fork ──► Open PR (fork → AMD-AGI/GEAK:main) ──► Review ──► Squash-merge
 
  Release flow:  main ──► release/vX.Y ──► tag vX.Y.0 ──► merge back to main
 ```
