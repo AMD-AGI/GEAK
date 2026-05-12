@@ -235,3 +235,7 @@ def main(
     if ctx.invoked_subcommand is None:
         console.print("Use [bold]--list[/bold] to see available subagents or [bold]run --agent NAME[/bold] to execute one.")
         console.print("Run [bold]geak-subagent --help[/bold] for full usage.")
+
+
+if __name__ == "__main__":
+    app()

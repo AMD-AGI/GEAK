@@ -160,6 +160,15 @@ def run_preprocessor_via_orchestrator(
     # the new phase bodies.  Only triggered during the refactor
     # transition — deletes once every phase owns its logic.
     result = ctx.to_dict()
+    if "harness" in ctx.phases_run and not result.get("baseline_metrics_path"):
+        try:
+            from minisweagent.run.preprocess.phases.harness import is_harness_only_mode
+
+            if is_harness_only_mode():
+                _validate_contract_artifacts(result, output_dir=Path(output_dir))
+                return result
+        except Exception:
+            logger.debug("Harness-only detection failed; considering legacy fallback.", exc_info=True)
     if not result.get("harness_path") or not result.get("baseline_metrics_path"):
         logger.debug(
             "Orchestrator produced partial ctx (harness_path=%s, baseline_metrics_path=%s); "

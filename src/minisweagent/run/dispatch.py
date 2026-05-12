@@ -197,6 +197,7 @@ def task_file_to_agent_task(task_file: Path):
         "use_strategy_manager": True,
     }
     if agent_name:
+        cfg["agent_name"] = agent_name
         try:
             from minisweagent.subagents import SubAgentRegistry
 
