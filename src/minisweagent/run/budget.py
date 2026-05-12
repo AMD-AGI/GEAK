@@ -372,9 +372,7 @@ class RunBudget:
         self._set_phase("optimization")
         opt_budget_s = max(
             0.0,
-            self.spec.total_s
-            - self.spec.kill_buffer_s
-            - max(0.0, float(actual_preprocess_s)),
+            self.spec.total_s - self.spec.kill_buffer_s - max(0.0, float(actual_preprocess_s)),
         )
         # opt_deadline is anchored on the *current* monotonic time so that the
         # split-allocation rule "opt = total - kill_buffer - preprocess_actual"

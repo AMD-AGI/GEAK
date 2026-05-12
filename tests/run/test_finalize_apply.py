@@ -722,9 +722,7 @@ def test_normalize_kept_report_handles_no_surviving_patch(repo: Path, output_dir
     assert kept["best_patch"] is None
 
 
-def test_normalize_kept_report_does_not_touch_summary_strings(
-    repo: Path, output_dir: Path
-) -> None:
+def test_normalize_kept_report_does_not_touch_summary_strings(repo: Path, output_dir: Path) -> None:
     """LLM-authored documents (summary / agent_summary / etc.) must come back byte-identical
     even if they paste paths under output_dir into free-text prose."""
     embedded = str(output_dir / "results" / "round_3" / "patch_0.patch")
@@ -753,9 +751,7 @@ def test_normalize_kept_report_does_not_touch_summary_strings(
     assert kept["round_summaries"][0]["summary"] == f"used {embedded}"
 
 
-def test_iterate_and_delete_handles_symlink_to_dir(
-    repo: Path, output_dir: Path, tmp_path: Path
-) -> None:
+def test_iterate_and_delete_handles_symlink_to_dir(repo: Path, output_dir: Path, tmp_path: Path) -> None:
     """A non-keep symlink-to-dir is unlinked, not recursed into; status='ran'."""
     target = tmp_path / "external_target"
     target.mkdir()

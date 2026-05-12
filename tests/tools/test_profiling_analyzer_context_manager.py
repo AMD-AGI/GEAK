@@ -28,11 +28,16 @@ def test_context_manager_calls_cleanup_on_exception() -> None:
     """An exception inside the ``with`` block propagates AND cleanup runs."""
 
     captured_path: Path | None = None
-    with pytest.raises(RuntimeError, match="simulated"):
+
+    def _body() -> None:
+        nonlocal captured_path
         with ProfilingAnalyzer(profiling_type="profiling") as analyzer:
             captured_path = analyzer.output_path
             assert captured_path.is_dir()
             raise RuntimeError("simulated failure inside with-block")
+
+    with pytest.raises(RuntimeError, match="simulated"):
+        _body()
 
     assert captured_path is not None
     assert not captured_path.exists(), "cleanup must run even when the body raises"

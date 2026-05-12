@@ -899,8 +899,11 @@ def main(
             # error to a "run failed; do not apply" state.
             _run_succeeded = True
             logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
+            # Assignment + return looks redundant but the outer finally
+            # reads ``result`` from the function scope; ``return X`` alone
+            # would leave it at its initial ``None``.
             result = _final_report_to_bestpatchresult(report)
-            return result
+            return result  # noqa: RET504
 
         metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
         logger.info("Using metric: %s", metric)
