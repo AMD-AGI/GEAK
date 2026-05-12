@@ -10,7 +10,7 @@ Exposes two independent operations and a coordinator:
 - ``cleanup_run_artifacts(result, output_dir)`` -- prunes per-run artifacts
   while preserving ``final_report.json`` and the winning ``.diff`` inside
   the original ``output_dir``. Independent of apply.
-- ``finalize_run(result, repo, output_dir, *, apply_best_patch, cleanup)``
+- ``finalize_apply_and_cleanup(result, repo, output_dir, *, apply_best_patch, cleanup)``
   -- CLI-level entry point that runs either/both according to the boolean
   flags.
 
@@ -111,7 +111,7 @@ def cleanup_run_artifacts(
     _cleanup_artifacts(output_dir, patch_path)
 
 
-def finalize_run(
+def finalize_apply_and_cleanup(
     result: BestPatchResult | None,
     repo: Path | None,
     output_dir: Path | None,

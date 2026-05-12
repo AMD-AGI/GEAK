@@ -831,12 +831,12 @@ def main(
             logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
             het_result = _final_report_to_bestpatchresult(report)
             if apply_best_patch or cleanup:
-                from minisweagent.run.postprocess.finalize_apply import finalize_run
+                from minisweagent.run.postprocess.finalize_apply import finalize_apply_and_cleanup
 
                 het_repo = repo or (
                     Path(preprocess_ctx["repo_root"]) if preprocess_ctx.get("repo_root") else None
                 )
-                finalize_run(
+                finalize_apply_and_cleanup(
                     het_result,
                     het_repo,
                     preprocess_output_dir,
@@ -911,9 +911,9 @@ def main(
         )
         logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
         if apply_best_patch or cleanup:
-            from minisweagent.run.postprocess.finalize_apply import finalize_run
+            from minisweagent.run.postprocess.finalize_apply import finalize_apply_and_cleanup
 
-            finalize_run(
+            finalize_apply_and_cleanup(
                 result,
                 repo_path or repo,
                 preprocess_output_dir,

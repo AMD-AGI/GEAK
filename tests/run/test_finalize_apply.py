@@ -1,6 +1,6 @@
 """Unit tests for ``minisweagent.run.postprocess.finalize_apply``.
 
-Exercises the ``apply_commit_and_cleanup`` hook end-to-end against a real
+Exercises the ``finalize_apply_and_cleanup`` hook end-to-end against a real
 temporary git repo, covering:
 
 - Happy path (apply + commit + cleanup keeps final_report.json + .diff).
@@ -28,7 +28,7 @@ from minisweagent.run.postprocess import finalize_apply
 from minisweagent.run.postprocess.finalize_apply import (
     apply_and_commit_best_patch,
     cleanup_run_artifacts,
-    finalize_run,
+    finalize_apply_and_cleanup,
 )
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -121,7 +121,7 @@ def _result_for(output_dir: Path, patch_name: str = "best_patch.diff") -> BestPa
 def test_happy_path_applies_commits_and_cleans(repo: Path, output_dir: Path) -> None:
     result = _result_for(output_dir)
 
-    finalize_run(result, repo, output_dir)
+    finalize_apply_and_cleanup(result, repo, output_dir)
 
     # Commit was created on top of "initial"
     log = (
@@ -153,7 +153,7 @@ def test_happy_path_applies_commits_and_cleans(repo: Path, output_dir: Path) -> 
 def test_happy_path_commit_body_references_report(repo: Path, output_dir: Path) -> None:
     result = _result_for(output_dir)
 
-    finalize_run(result, repo, output_dir)
+    finalize_apply_and_cleanup(result, repo, output_dir)
 
     body = subprocess.run(
         ["git", "log", "-1", "--pretty=%B"],
@@ -177,7 +177,7 @@ def test_dirty_repo_refuses_apply_only(repo: Path, output_dir: Path) -> None:
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    finalize_run(result, repo, output_dir)
+    finalize_apply_and_cleanup(result, repo, output_dir)
 
     after_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
     assert before_sha == after_sha, "No new commit should be made when repo is dirty"
@@ -194,7 +194,7 @@ def test_dirty_repo_with_no_cleanup_preserves_everything(repo: Path, output_dir:
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    finalize_run(result, repo, output_dir, cleanup=False)
+    finalize_apply_and_cleanup(result, repo, output_dir, cleanup=False)
 
     after_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
     assert before_sha == after_sha
@@ -230,7 +230,7 @@ def test_apply_failure_still_runs_cleanup_independently(repo: Path, output_dir: 
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    finalize_run(result, repo, output_dir)
+    finalize_apply_and_cleanup(result, repo, output_dir)
 
     after_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
     assert before_sha == after_sha
@@ -246,7 +246,7 @@ def test_apply_failure_with_no_cleanup_preserves_artifacts(repo: Path, output_di
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    finalize_run(result, repo, output_dir, cleanup=False)
+    finalize_apply_and_cleanup(result, repo, output_dir, cleanup=False)
 
     after_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
     assert before_sha == after_sha
@@ -284,7 +284,7 @@ def test_commit_failure_preserves_apply_with_no_cleanup(
     _install_commit_failure(monkeypatch)
     result = _result_for(output_dir)
 
-    finalize_run(result, repo, output_dir, cleanup=False)
+    finalize_apply_and_cleanup(result, repo, output_dir, cleanup=False)
 
     # Apply must have landed in the working tree (no rollback).
     assert (repo / "kernel.py").read_text() == "def run():\n    return 42\n"
@@ -330,7 +330,7 @@ def test_apply_precondition_short_circuits(repo: Path, output_dir: Path, make_ba
     result, r, o = make_bad(repo, output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    finalize_run(result, r, o, cleanup=False)
+    finalize_apply_and_cleanup(result, r, o, cleanup=False)
 
     after_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
     assert before_sha == after_sha
@@ -409,7 +409,7 @@ def test_commit_falls_back_to_default_identity(
     (out / "best_patch.diff").write_text(diff)
     result = _result_for(out)
 
-    finalize_run(result, repo_without_identity, out)
+    finalize_apply_and_cleanup(result, repo_without_identity, out)
 
     log = subprocess.run(
         ["git", "log", "-1", "--pretty=format:%an <%ae>"],
@@ -457,7 +457,7 @@ def test_commit_uses_geak_env_identity_override(
     (out / "best_patch.diff").write_text(diff)
     result = _result_for(out)
 
-    finalize_run(result, repo_without_identity, out)
+    finalize_apply_and_cleanup(result, repo_without_identity, out)
 
     author = subprocess.run(
         ["git", "log", "-1", "--pretty=format:%an <%ae>"],
@@ -475,7 +475,7 @@ def test_commit_preserves_existing_identity(repo: Path, output_dir: Path) -> Non
     _git(repo, "config", "user.email", "pre@configured.example")
     result = _result_for(output_dir)
 
-    finalize_run(result, repo, output_dir)
+    finalize_apply_and_cleanup(result, repo, output_dir)
 
     author = subprocess.run(
         ["git", "log", "-1", "--pretty=format:%an <%ae>"],
@@ -493,7 +493,7 @@ def test_non_git_repo_refuses_apply(tmp_path: Path, output_dir: Path) -> None:
     not_a_repo.mkdir()
     result = _result_for(output_dir)
 
-    finalize_run(result, not_a_repo, output_dir, cleanup=False)
+    finalize_apply_and_cleanup(result, not_a_repo, output_dir, cleanup=False)
 
     # Output dir untouched (cleanup=False).
     assert (output_dir / "logs" / "run.log").is_file()
@@ -508,7 +508,7 @@ def test_apply_only_without_cleanup(repo: Path, output_dir: Path) -> None:
     """--apply-best-patch --no-cleanup: commit happens, output_dir fully preserved."""
     result = _result_for(output_dir)
 
-    finalize_run(result, repo, output_dir, apply_best_patch=True, cleanup=False)
+    finalize_apply_and_cleanup(result, repo, output_dir, apply_best_patch=True, cleanup=False)
 
     log = _git(repo, "log", "--oneline").stdout.strip().splitlines()
     assert len(log) == 2
@@ -522,7 +522,7 @@ def test_cleanup_only_without_apply(repo: Path, output_dir: Path) -> None:
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    finalize_run(result, repo, output_dir, apply_best_patch=False, cleanup=True)
+    finalize_apply_and_cleanup(result, repo, output_dir, apply_best_patch=False, cleanup=True)
 
     after_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
     assert before_sha == after_sha
@@ -536,7 +536,7 @@ def test_both_disabled_is_noop(repo: Path, output_dir: Path) -> None:
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    finalize_run(result, repo, output_dir, apply_best_patch=False, cleanup=False)
+    finalize_apply_and_cleanup(result, repo, output_dir, apply_best_patch=False, cleanup=False)
 
     after_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
     assert before_sha == after_sha
