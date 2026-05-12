@@ -79,19 +79,22 @@ def test_deadline_cap_returns_zero_when_softstop_is_set():
 
 
 def test_commit_preprocess_under_cap_rolls_into_optimization():
-    """Preprocess under the soft cap leaves more time for optimization."""
-    budget = RunBudget(spec=_spec(total_s=10.0, soft_cap_s=2.0))
+    """Preprocess under the soft cap leaves more time for optimization.
+
+    Formula: ``opt_budget = max(0, total_s - kill_buffer_s - preprocess_actual)``.
+    """
+    budget = RunBudget(spec=_spec(total_s=10.0, soft_cap_s=2.0, kill_buffer_s=1.0))
     deadline = budget.commit_preprocess(actual_preprocess_s=1.0)
-    # opt budget = 10 - 1 = 9s remaining
-    assert deadline.remaining() == pytest.approx(9.0, abs=0.5)
+    # opt budget = 10 - 1 (kill_buffer) - 1 (preprocess) = 8s remaining
+    assert deadline.remaining() == pytest.approx(8.0, abs=0.5)
 
 
 def test_commit_preprocess_over_cap_borrows_from_optimization():
     """Preprocess overrunning soft cap shrinks opt; budget arithmetic handles it."""
-    budget = RunBudget(spec=_spec(total_s=10.0, soft_cap_s=2.0))
+    budget = RunBudget(spec=_spec(total_s=10.0, soft_cap_s=2.0, kill_buffer_s=1.0))
     deadline = budget.commit_preprocess(actual_preprocess_s=4.0)
-    # opt budget = 10 - 4 = 6s remaining
-    assert deadline.remaining() == pytest.approx(6.0, abs=0.5)
+    # opt budget = 10 - 1 (kill_buffer) - 4 (preprocess) = 5s remaining
+    assert deadline.remaining() == pytest.approx(5.0, abs=0.5)
 
 
 def test_commit_preprocess_at_or_past_total_clamps_to_zero():
@@ -107,10 +110,10 @@ def test_commit_preprocess_at_or_past_total_clamps_to_zero():
 
 def test_commit_preprocess_negative_actual_clamps_to_zero():
     """Defensive: negative actual_preprocess_s is treated as zero."""
-    budget = RunBudget(spec=_spec(total_s=10.0))
+    budget = RunBudget(spec=_spec(total_s=10.0, kill_buffer_s=1.0))
     deadline = budget.commit_preprocess(actual_preprocess_s=-5.0)
-    # opt budget = 10 - max(0, -5) = 10
-    assert deadline.remaining() == pytest.approx(10.0, abs=0.5)
+    # opt budget = 10 - 1 (kill_buffer) - max(0, -5) = 9
+    assert deadline.remaining() == pytest.approx(9.0, abs=0.5)
 
 
 def test_commit_preprocess_transitions_phase_to_optimization():
@@ -127,14 +130,13 @@ def test_commit_preprocess_transitions_phase_to_optimization():
 
 def test_optimization_watchdog_flips_soft_stop_on_schedule():
     """At softstop_at = opt_deadline - finalize_grace, soft_stop is set."""
-    # 200ms total, 100ms grace -> soft_stop fires at 100ms. Use generous
-    # buffer (300ms) for thread scheduling jitter.
     spec = BudgetSpec(
         mode="quick",
         total_s=10.0,
         preprocess_soft_cap_s=2.0,
         preprocess_hard_cap_fraction=0.5,
         finalize_grace_s=0.1,
+        kill_buffer_s=0.0,  # don't reserve buffer from the tiny opt window
     )
     budget = RunBudget(spec=spec)
     # Pretend preprocess used (10 - 0.2) = 9.8s, leaving 0.2s for opt.
@@ -211,8 +213,9 @@ def test_cancel_all_timers_idempotent():
 # ---------------------------------------------------------------------------
 
 
-def test_hard_kill_watchdog_fires_at_opt_deadline_plus_kill_buffer():
-    """The hard-kill watchdog must fire at ``opt_deadline + kill_buffer_s``.
+def test_hard_kill_watchdog_fires_at_started_at_plus_total_s():
+    """The hard-kill watchdog must fire at ``started_at + total_s`` -- the
+    absolute wall-clock cap, NOT derived from ``opt_deadline + kill_buffer_s``.
 
     This is the backstop that protects against a sub-agent stuck inside a
     long-running ``subprocess.run`` (e.g. a 30-min benchmark) that never
@@ -227,7 +230,7 @@ def test_hard_kill_watchdog_fires_at_opt_deadline_plus_kill_buffer():
         kill_buffer_s=0.1,
     )
     budget = RunBudget(spec=spec)
-    # Pretend preprocess used effectively no time so opt_deadline = now + 0.5s.
+    # Pretend preprocess used effectively no time so the absolute cap is now + 0.5s.
     budget.commit_preprocess(actual_preprocess_s=0.0)
     budget.schedule_optimization_watchdog()
 
@@ -237,7 +240,7 @@ def test_hard_kill_watchdog_fires_at_opt_deadline_plus_kill_buffer():
         fired.set()
 
     budget.schedule_optimization_hard_kill_watchdog(_on_kill)
-    # Should fire at opt_deadline (0.5s) + kill_buffer (0.1s) = 0.6s.
+    # Should fire at started_at + total_s = ~0.5s from start.
     # Generous timeout for thread scheduling jitter on shared CI.
     assert fired.wait(timeout=2.0), "hard-kill watchdog should have fired by now"
     budget.cancel_all_timers()
