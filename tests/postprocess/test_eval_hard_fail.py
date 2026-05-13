@@ -210,7 +210,7 @@ class TestProfileHardFail:
         from minisweagent.run.postprocess.evaluation import run_profile
 
         round_eval: dict = {}
-        (tmp_path / "profile.json").write_text('{"results":[],"warning":"fallback"}\n')
+        (tmp_path / "profile.json").write_text('{"results":[{"kernels":[]}],"warning":"fallback"}\n')
         (tmp_path / "baseline_metrics.json").write_text('{"duration_us":42.0}\n')
 
         with patch(
@@ -231,8 +231,37 @@ class TestProfileHardFail:
             )
 
         assert "profile_comparison" in round_eval
-        error = round_eval["profile_comparison"]["error"]
-        assert "No kernels found" in error or "missing 'results'" in error
+        assert round_eval["profile_comparison"]["profile_unavailable"] is True
+        assert round_eval["profile_comparison"]["error"] == "fallback"
+
+    def test_profile_success_false_json_records_unavailable(self, tmp_path):
+        from minisweagent.run.postprocess.evaluation import run_profile
+
+        round_eval: dict = {}
+        (tmp_path / "profile.json").write_text(
+            '{"success":false,"backend":"metrix","results":[],"error":"rocprofv3 failed"}\n'
+        )
+        (tmp_path / "baseline_metrics.json").write_text('{"duration_us":42.0}\n')
+
+        with patch(
+            "minisweagent.run.postprocess.evaluation.build_eval_script",
+            return_value=str(tmp_path / "fake.sh"),
+        ), patch(
+            "minisweagent.run.postprocess.evaluation.subprocess.run",
+            return_value=_completed(0, stdout="PROFILE: PASS\n"),
+        ):
+            run_profile(
+                eval_worktree=tmp_path,
+                eval_env={},
+                commandment_path=tmp_path / "COMMANDMENT.md",
+                pp_dir=tmp_path,
+                round_eval=round_eval,
+                round_num=1,
+                results_dir=tmp_path / "results",
+            )
+
+        assert round_eval["profile_comparison"]["profile_unavailable"] is True
+        assert round_eval["profile_comparison"]["error"] == "rocprofv3 failed"
 
 
 # ---------------------------------------------------------------------------

@@ -1688,6 +1688,22 @@ class TestCommandmentHardcodesHarness:
                     f"{section} still uses ${{GEAK_HARNESS}} variable"
                 )
 
+    def test_profile_uses_current_python_module_not_path_kernel_profile(self):
+        from minisweagent.run.preprocess.commandment import generate_commandment
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kernel = tmp_path / "kernel.py"
+            kernel.write_text("# kernel")
+            harness = tmp_path / "test_harness.py"
+            harness.write_text(self._HARNESS_SOURCE)
+
+            content = generate_commandment(
+                kernel_path=kernel, harness_path=harness, repo_root=tmp_path,
+            )
+
+            assert "-m minisweagent.run.preprocess.kernel_profile" in content
+            assert "command -v kernel-profile" not in content
+
     def test_harness_path_is_absolute_not_relative(self):
         """The hardcoded path must be absolute so agents can find it from any CWD."""
         from minisweagent.run.preprocess.commandment import generate_commandment

@@ -1351,6 +1351,19 @@ def run_preprocessor(
             logger.info("  Baseline: %s µs, bottleneck=%s", dur, bn)
         except Exception as exc:
             logger.warning("[yellow]Baseline metrics failed: %s[/yellow]", exc, exc_info=True)
+    elif profiling and not profiling.get("success", True):
+        bb_path = output_dir / "benchmark_baseline.txt"
+        bb_text = bb_path.read_text() if bb_path.exists() else ""
+        baseline_metrics = build_thin_baseline_metrics(bb_text)
+        baseline_metrics["profiling_failed"] = True
+        if profiling.get("error"):
+            baseline_metrics["profiling_error"] = str(profiling["error"])
+        elif profiling.get("warning"):
+            baseline_metrics["profiling_error"] = str(profiling["warning"])
+        logger.warning(
+            "  Built THIN baseline_metrics after profiler failure: duration_us=%s",
+            baseline_metrics.get("duration_us", "?"),
+        )
     elif state.skip_profiling:
         # Profiling was skipped by the soft-stop handler; build a thin metrics
         # dict from benchmark_baseline.txt alone so the orchestrator can still

@@ -42,6 +42,8 @@ from __future__ import annotations
 # pulling in the full minisweagent.tools package (whose __init__.py imports
 # heavy dependencies like typer via strategy_manager).
 import re
+import shlex
+import sys
 from pathlib import Path
 
 from minisweagent.run.preprocess.validate_commandment import (
@@ -140,6 +142,11 @@ def _warmup_block(command: str, warmup_runs: int) -> str:
     return f"for _i in $(seq 1 {warmup_runs}); do {command}; done"
 
 
+def _shell_double_quote_expandable(value: str) -> str:
+    """Double-quote a shell string while preserving env-var expansion."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`") + '"'
+
+
 def _profile_block(
     profile_command: str,
     profiler_target: str,
@@ -156,21 +163,21 @@ def _profile_block(
     mode and writes a minimal JSON profile marker.
     """
     warmup_block = _warmup_block(f"{profile_command} > /dev/null 2>&1 || true", warmup_runs)
+    profiler_cmd = (
+        f"{shlex.quote(sys.executable)} -m minisweagent.run.preprocess.kernel_profile "
+        f"{_shell_double_quote_expandable(profiler_target)} --gpu-devices ${{GEAK_GPU_DEVICE}} "
+        f"--replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json"
+    )
     fallback = (
         f"{profile_command} || true\n"
         "printf '%s\\n' "
-        """'{"results":[],"warning":"kernel-profile unavailable or failed"}' """
+        """'{"success":false,"backend":"fallback","results":[{"kernels":[]}],"warning":"kernel-profile unavailable or failed; harness --profile fallback ran"}' """
         "> ${GEAK_WORK_DIR}/profile.json"
     )
     return (
         f"{warmup_block}\n"
-        "if command -v kernel-profile >/dev/null 2>&1; then\n"
-        f"  if kernel-profile \"{profiler_target}\" --gpu-devices ${{GEAK_GPU_DEVICE}} "
-        f"--replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json; then\n"
-        "    :\n"
-        "  else\n"
-        f"    {fallback}\n"
-        "  fi\n"
+        f"if {profiler_cmd}; then\n"
+        "  :\n"
         "else\n"
         f"  {fallback}\n"
         "fi"

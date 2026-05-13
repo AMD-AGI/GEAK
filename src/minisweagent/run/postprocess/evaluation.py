@@ -608,6 +608,22 @@ def _check_config_mismatch(
         logger.debug("_check_config_mismatch: neither side has config lines; skipping comparison.")
 
 
+def _profile_unavailable_reason(profile_result: dict[str, Any]) -> str | None:
+    """Return a profiler-unavailable reason for known fallback/failure payloads."""
+    if profile_result.get("success") is False:
+        return str(
+            profile_result.get("error")
+            or profile_result.get("warning")
+            or "profiling reported success=false"
+        )
+    results = profile_result.get("results")
+    if isinstance(results, list):
+        has_kernels = any(isinstance(gpu_result, dict) and gpu_result.get("kernels") for gpu_result in results)
+        if not has_kernels and profile_result.get("warning"):
+            return str(profile_result["warning"])
+    return None
+
+
 def run_profile(
     eval_worktree: Path,
     eval_env: dict[str, str],
@@ -690,6 +706,20 @@ def run_profile(
         baseline_metrics = json.loads(baseline_metrics_path.read_text())
     except (json.JSONDecodeError, OSError):
         logger.warning("Failed to parse baseline metrics: %s", baseline_metrics_path, exc_info=True)
+        return
+
+    profile_unavailable = _profile_unavailable_reason(profile_result)
+    if profile_unavailable:
+        logger.warning("PROFILE: profiler unavailable: %s", profile_unavailable)
+        comparison = {
+            "baseline": baseline_metrics,
+            "optimized": {},
+            "profile_unavailable": True,
+            "error": profile_unavailable,
+        }
+        comparison_path = results_dir / "profile_comparison.json"
+        comparison_path.write_text(json.dumps(comparison, indent=2, default=str))
+        round_eval["profile_comparison"] = comparison
         return
 
     from minisweagent.run.preprocess.baseline import build_baseline_metrics
