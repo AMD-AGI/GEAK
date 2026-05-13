@@ -13,6 +13,13 @@ env:
   timeout: 3600
 model:
   model_class: amd_llm
+  # For local Codex CLI instead of AMD gateway, use:
+  # model_class: codex_cli
+  # model_name: codex-cli  # use the local Codex CLI default model/profile
+  # model_kwargs:
+  #   codex_bin: codex
+  #   sandbox: read-only
+  #   cwd: /path/to/worktree
   # claude-opus-4.6, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
   model_name: claude-opus-4.6
   api_key: ""

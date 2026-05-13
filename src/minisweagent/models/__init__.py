@@ -84,6 +84,7 @@ _MODEL_CLASS_MAPPING = {
     "litellm": "minisweagent.models.litellm_model.LitellmModel",
     "deterministic": "minisweagent.models.test_models.DeterministicModel",
     "amd_llm": "minisweagent.models.amd_llm.AmdLlmModel",
+    "codex_cli": "minisweagent.models.codex_cli.CodexCliModel",
 }
 
 
