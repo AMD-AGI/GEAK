@@ -4,6 +4,7 @@ Thin CLI wrapper around ``profiler_mcp.server.profile_kernel()``.  Supports
 two backends:
   - metrix (default): AMD Metrix Python API -- structured per-kernel metrics
   - rocprof-compute: rocprof-compute CLI -- deep roofline, instruction mix, cache analysis
+  - rocprof-legacy: rocprof v1 CLI -- timing-only kernel traces for Python workloads
 
 Both backends produce the same top-level JSON structure (backend-neutral) so that
 downstream tools like baseline-metrics work with either.
@@ -39,6 +40,9 @@ Examples (rocprof-compute backend):
   %(prog)s 'python3 kernel.py --profile' --backend rocprof-compute
   %(prog)s --backend rocprof-compute --workdir /path/to/repo \\
       --profiling-type roofline 'python3 kernel.py --profile'
+
+Examples (legacy rocprof timing backend):
+  %(prog)s 'python3 kernel.py --profile' --backend rocprof-legacy
 
 Pipeline chaining (read test command from discovery output):
   %(prog)s --from-discovery discovery.json --json -o profile.json
@@ -323,7 +327,7 @@ def main():
     )
     parser.add_argument(
         "--backend",
-        choices=["metrix", "rocprof-compute"],
+        choices=["metrix", "rocprof-compute", "rocprof-legacy"],
         default="metrix",
         help="Profiling backend (default: metrix)",
     )

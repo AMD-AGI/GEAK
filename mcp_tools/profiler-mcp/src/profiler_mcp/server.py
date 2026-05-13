@@ -9,12 +9,14 @@ Usage:
     python -m profiler_mcp.server # Same thing
 """
 
+import csv
 import logging
 import os
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
@@ -193,6 +195,171 @@ def _profile_with_rocprof(
     return result
 
 
+def _to_int(value: str | None, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value: str | None, default: float = 0.0) -> float:
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_rocprof_legacy_outputs(output_base: Path) -> list[dict[str, Any]]:
+    """Parse legacy rocprof stats/trace CSV into backend-neutral kernels."""
+    stats_path = output_base.with_suffix(".stats.csv")
+    trace_path = output_base.with_suffix(".csv")
+
+    trace_by_name: dict[str, list[dict[str, str]]] = {}
+    if trace_path.exists():
+        with trace_path.open(newline="") as f:
+            for row in csv.DictReader(f):
+                name = row.get("KernelName")
+                if name:
+                    trace_by_name.setdefault(name, []).append(row)
+
+    kernels: list[dict[str, Any]] = []
+    if stats_path.exists():
+        with stats_path.open(newline="") as f:
+            for row in csv.DictReader(f):
+                name = row.get("Name")
+                if not name:
+                    continue
+                calls = _to_int(row.get("Calls"))
+                total_ns = _to_float(row.get("TotalDurationNs"))
+                avg_ns = _to_float(row.get("AverageNs"))
+                percentage = _to_float(row.get("Percentage"))
+                traces = trace_by_name.get(name, [])
+                durations = [_to_float(r.get("DurationNs")) for r in traces if r.get("DurationNs")]
+                sample = traces[0] if traces else {}
+                total_us = total_ns / 1000.0
+                avg_us = avg_ns / 1000.0
+                metrics: dict[str, Any] = {
+                    "duration_us": total_us,
+                    "duration_us_avg": avg_us,
+                    "dispatch_count": calls,
+                    "profile_percentage": percentage,
+                    "timing_only": True,
+                }
+                if durations:
+                    metrics["duration_us_min"] = min(durations) / 1000.0
+                    metrics["duration_us_max"] = max(durations) / 1000.0
+                for key, column in (
+                    ("grid_size", "grd"),
+                    ("workgroup_size", "wgr"),
+                    ("lds_bytes", "lds"),
+                    ("scratch_bytes", "scr"),
+                    ("arch_vgpr", "arch_vgpr"),
+                    ("accum_vgpr", "accum_vgpr"),
+                    ("sgpr", "sgpr"),
+                    ("wave_size", "wave_size"),
+                ):
+                    if column in sample:
+                        metrics[key] = _to_int(sample.get(column))
+                kernels.append(
+                    {
+                        "name": name,
+                        "duration_us": total_us,
+                        "bottleneck": "unknown",
+                        "observations": [
+                            "Captured by legacy rocprof timing-only backend.",
+                            f"Calls={calls}, avg={avg_us:.3f} us, total={total_us:.3f} us.",
+                        ],
+                        "metrics": metrics,
+                    }
+                )
+
+    if not kernels and trace_by_name:
+        for name, traces in trace_by_name.items():
+            durations = [_to_float(r.get("DurationNs")) for r in traces if r.get("DurationNs")]
+            total_us = sum(durations) / 1000.0
+            avg_us = total_us / len(durations) if durations else 0.0
+            kernels.append(
+                {
+                    "name": name,
+                    "duration_us": total_us,
+                    "bottleneck": "unknown",
+                    "observations": [
+                        "Captured by legacy rocprof timing-only backend.",
+                        f"Calls={len(traces)}, avg={avg_us:.3f} us, total={total_us:.3f} us.",
+                    ],
+                    "metrics": {
+                        "duration_us": total_us,
+                        "duration_us_avg": avg_us,
+                        "dispatch_count": len(traces),
+                        "timing_only": True,
+                    },
+                }
+            )
+
+    kernels.sort(key=lambda k: k.get("duration_us", 0), reverse=True)
+    return kernels
+
+
+def _profile_with_rocprof_legacy(
+    command: str,
+    workdir: str | None = None,
+    gpu_devices: str | list[str] | None = None,
+) -> dict[str, Any]:
+    """Profile Python/TileLang-friendly kernel timing with legacy rocprof.
+
+    ROCm 7.0.2's rocprofv3 can abort while Python GPU runtimes dynamically
+    load extensions. The legacy rocprof path does not expose Metrix counters,
+    but it reliably captures kernel names and dispatch timing for Python
+    workloads on this MI300 stack.
+    """
+    if isinstance(gpu_devices, list):
+        device = str(gpu_devices[0]) if gpu_devices else "0"
+    elif gpu_devices is None:
+        device = os.environ.get("HIP_VISIBLE_DEVICES") or "0"
+    else:
+        device = str(gpu_devices).split(",", 1)[0] or "0"
+
+    with tempfile.TemporaryDirectory(prefix="geak-rocprof-legacy-") as tmp:
+        output_base = Path(tmp) / "rocprof_legacy"
+        cmd = ["rocprof", "--timestamp", "on", "--stats", "-o", str(output_base.with_suffix(".csv"))]
+        cmd.extend(shlex.split(command))
+        env = os.environ.copy()
+        env["HIP_VISIBLE_DEVICES"] = device
+        result = subprocess.run(
+            cmd,
+            cwd=workdir or None,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+        if result.returncode != 0:
+            return {
+                "success": False,
+                "backend": "rocprof-legacy",
+                "error": (
+                    f"rocprof legacy failed with exit code {result.returncode}\n"
+                    f"stdout: {result.stdout}\nstderr: {result.stderr}"
+                ),
+                "results": [],
+            }
+
+        kernels = _parse_rocprof_legacy_outputs(output_base)
+        return {
+            "success": bool(kernels),
+            "backend": "rocprof-legacy",
+            "warning": "timing-only profile; hardware counters are unavailable from legacy rocprof",
+            "results": [
+                {
+                    "device_id": device,
+                    "gpu_info": {"detected": False, "device_id": device},
+                    "kernels": kernels,
+                }
+            ],
+            "error": "" if kernels else "legacy rocprof completed but produced no kernels",
+        }
+
+
 # ---------------------------------------------------------------------------
 # Warmup helper (backend-agnostic)
 # ---------------------------------------------------------------------------
@@ -229,7 +396,7 @@ def _warmup(command: str, warmup_runs: int) -> None:
 @mcp.tool()
 def profile_kernel(
     command: str,
-    backend: Literal["metrix", "rocprof-compute"],
+    backend: Literal["metrix", "rocprof-compute", "rocprof-legacy"],
     workdir: str | None = None,
     profiling_type: str = "profiling",
     num_replays: int = 3,
@@ -243,8 +410,9 @@ def profile_kernel(
 
     Args:
         command: Command to execute (e.g. 'python3 kernel.py').
-        backend: Required. Either 'metrix' (structured AMD Metrix profiling) or
-                 'rocprof-compute' (roofline/instruction-level analysis).
+        backend: Required. 'metrix' for structured AMD Metrix profiling,
+                 'rocprof-compute' for roofline/instruction-level analysis, or
+                 'rocprof-legacy' for timing-only Python/TileLang-friendly traces.
         workdir: Working directory for the command.
         profiling_type: For rocprof-compute: 'profiling' (full), 'roofline', or
                         'profiler_analyzer'. Ignored for metrix.
@@ -294,11 +462,17 @@ def profile_kernel(
                 workdir=workdir,
                 profiling_type=profiling_type,
             )
+        elif backend == "rocprof-legacy":
+            return _profile_with_rocprof_legacy(
+                command=command,
+                workdir=workdir,
+                gpu_devices=gpu_devices,
+            )
         else:
             return {
                 "success": False,
                 "backend": backend,
-                "error": f"Unknown backend '{backend}'. Use 'metrix' or 'rocprof-compute'.",
+                "error": f"Unknown backend '{backend}'. Use 'metrix', 'rocprof-compute', or 'rocprof-legacy'.",
                 "results": [],
             }
     except Exception as e:

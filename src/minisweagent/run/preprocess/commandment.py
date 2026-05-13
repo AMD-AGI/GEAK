@@ -64,6 +64,7 @@ def generate_commandment(
     warmup_runs: int = 2,
     profile_replays: int = 5,
     kernel_language: str = "python",
+    profile_backend: str = "metrix",
 ) -> str:
     """Generate a valid COMMANDMENT.md and return its content.
 
@@ -86,6 +87,9 @@ def generate_commandment(
         profile_replays: Number of replay passes for ``kernel-profile``.
         kernel_language: ``"python"``, ``"cpp"``, or ``"asm"``.  When
             ``"cpp"``, SETUP includes a build step and JIT cache isolation.
+        profile_backend: Profiling backend for ``kernel-profile``.  TileLang
+            Python workloads may use ``"rocprof-legacy"`` on ROCm stacks where
+            rocprofv3 fails during Python extension loading.
 
     Returns:
         The content of a valid COMMANDMENT.md as a string.
@@ -115,6 +119,7 @@ def generate_commandment(
             inner_kernel_relpath=inner_kernel_relpath,
             warmup_runs=warmup_runs,
             profile_replays=profile_replays,
+            profile_backend=profile_backend,
         )
     else:
         content = _generate_simple(
@@ -124,6 +129,7 @@ def generate_commandment(
             warmup_runs=warmup_runs,
             profile_replays=profile_replays,
             kernel_language=kernel_language,
+            profile_backend=profile_backend,
         )
 
     return _validate_and_fix(content, harness_path=str(harness_path))
@@ -153,6 +159,7 @@ def _profile_block(
     *,
     warmup_runs: int,
     profile_replays: int,
+    profile_backend: str = "metrix",
 ) -> str:
     """Build a PROFILE section that degrades gracefully when Metrix is unavailable.
 
@@ -166,7 +173,7 @@ def _profile_block(
     profiler_cmd = (
         f"{shlex.quote(sys.executable)} -m minisweagent.run.preprocess.kernel_profile "
         f"{_shell_double_quote_expandable(profiler_target)} --gpu-devices ${{GEAK_GPU_DEVICE}} "
-        f"--replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json"
+        f"--backend {shlex.quote(profile_backend)} --replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json"
     )
     fallback = (
         f"{profile_command} || true\n"
@@ -202,6 +209,7 @@ def _generate_simple(
     warmup_runs: int,
     profile_replays: int,
     kernel_language: str = "python",
+    profile_backend: str = "metrix",
 ) -> str:
     """Generate COMMANDMENT for a simple (non-inner) kernel.
 
@@ -219,6 +227,7 @@ def _generate_simple(
         profile_command,
         warmup_runs=warmup_runs,
         profile_replays=profile_replays,
+        profile_backend=profile_backend,
     )
 
     if kernel_language == "cpp":
@@ -266,6 +275,7 @@ def _generate_inner_kernel(
     inner_kernel_relpath: str,
     warmup_runs: int,
     profile_replays: int,
+    profile_backend: str = "metrix",
 ) -> str:
     """Generate COMMANDMENT for an inner kernel (imported by a wrapper).
 
@@ -296,6 +306,7 @@ def _generate_inner_kernel(
         profile_command,
         warmup_runs=warmup_runs,
         profile_replays=profile_replays,
+        profile_backend=profile_backend,
     )
 
     setup_lines = [
@@ -390,6 +401,7 @@ def generate_commandment_from_commands(
     *,
     warmup_runs: int = 2,
     profile_replays: int = 5,
+    profile_backend: str = "metrix",
 ) -> str:
     """Generate a valid COMMANDMENT.md from explicit compile/correctness/performance commands.
 
@@ -453,6 +465,7 @@ def generate_commandment_from_commands(
         profile_command,
         warmup_runs=warmup_runs,
         profile_replays=profile_replays,
+        profile_backend=profile_backend,
     )
 
     # BENCHMARK and FULL_BENCHMARK

@@ -712,7 +712,7 @@ def run_preprocessor(
         test_command = None
         harness_results: list[dict] | None = None
         selected_harness_source: str | None = None
-        _uta_model = model or (model_factory() if model_factory else None)
+        _uta_model = None if harness else model or (model_factory() if model_factory else None)
         testcase_cache_dir = None if harness else get_testcase_cache_dir()
         testcase_cache_key = build_testcase_cache_key(kernel_url, kernel_path)
         testcase_cache_entry = (
@@ -1213,6 +1213,12 @@ def run_preprocessor(
     logger.info("[bold cyan]--- Step 5/7: Kernel profiling (Metrix instrumented) ---[/bold cyan]")
     state.set_stage(PreprocessStage.KERNEL_PROFILE)
 
+    _profile_kernel_type = (disc_dict.get("kernel") or {}).get("type", "")
+    _profile_backend = os.environ.get("GEAK_PROFILE_BACKEND", "").strip()
+    if not _profile_backend:
+        _profile_backend = "rocprof-legacy" if _profile_kernel_type == "tilelang" else "metrix"
+    logger.info("  Profile backend: %s", _profile_backend)
+
     _profile_t0 = time.monotonic()
     profiling: dict[str, Any] | None = None
     if state.skip_profiling:
@@ -1260,7 +1266,7 @@ def run_preprocessor(
                 profiling = run_profiler_with_handle(
                     state,
                     perf_cmd=perf_cmd,
-                    backend="metrix",
+                    backend=_profile_backend,
                     gpu_id=gpu_id,
                     workdir=_cwd,
                     num_replays=3,
@@ -1313,7 +1319,7 @@ def run_preprocessor(
                 profiling = run_profiler_with_handle(
                     state,
                     perf_cmd=profile_cmd,
-                    backend="metrix",
+                    backend=_profile_backend,
                     gpu_id=gpu_id,
                     num_replays=3,
                     quick=False,
@@ -1426,6 +1432,7 @@ def run_preprocessor(
                 correctness_command=correctness_cmd,
                 performance_command=perf_cmd or eval_command,
                 repo_root=repo_root,
+                profile_backend=_profile_backend,
             )
             ctx["test_command"] = eval_command
             logger.info("  COMMANDMENT.md generated (from eval command)")
@@ -1445,6 +1452,7 @@ def run_preprocessor(
                 harness_path=harness,
                 repo_root=repo_root,
                 kernel_language=_kl,
+                profile_backend=_profile_backend,
             )
             logger.info("  COMMANDMENT.md generated (from harness)")
         except Exception as exc:

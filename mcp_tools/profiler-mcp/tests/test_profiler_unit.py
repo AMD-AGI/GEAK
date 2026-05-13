@@ -14,6 +14,7 @@ import pytest
 # ---------------------------------------------------------------------------
 from profiler_mcp.server import (
     _normalize_command,
+    _parse_rocprof_legacy_outputs,
     mcp,
     profile_kernel,
 )
@@ -96,6 +97,48 @@ class TestRocprofDispatch:
         assert result["backend"] == "rocprof-compute"
 
 
+class TestRocprofLegacyDispatch:
+    @patch("profiler_mcp.server._profile_with_rocprof_legacy")
+    def test_dispatches_to_rocprof_legacy(self, mock_legacy):
+        mock_legacy.return_value = {
+            "success": True,
+            "backend": "rocprof-legacy",
+            "results": [{"kernels": []}],
+        }
+        result = _call(
+            command="python3 kernel.py",
+            backend="rocprof-legacy",
+            workdir="/tmp",
+            gpu_devices="0",
+        )
+        mock_legacy.assert_called_once_with(
+            command="python3 kernel.py",
+            workdir="/tmp",
+            gpu_devices="0",
+        )
+        assert result["success"] is True
+        assert result["backend"] == "rocprof-legacy"
+
+    def test_parse_rocprof_legacy_outputs(self, tmp_path):
+        base = tmp_path / "trace"
+        (tmp_path / "trace.stats.csv").write_text(
+            '"Name","Calls","TotalDurationNs","AverageNs","Percentage"\n'
+            '"my_kernel",2,1000,500,75.0\n'
+        )
+        (tmp_path / "trace.csv").write_text(
+            '"Index","KernelName","grd","wgr","lds","scr","arch_vgpr","accum_vgpr","sgpr","wave_size","DurationNs"\n'
+            '0,"my_kernel",256,64,0,0,12,0,32,64,400\n'
+            '1,"my_kernel",256,64,0,0,12,0,32,64,600\n'
+        )
+        kernels = _parse_rocprof_legacy_outputs(base)
+        assert len(kernels) == 1
+        assert kernels[0]["name"] == "my_kernel"
+        assert kernels[0]["duration_us"] == 1.0
+        assert kernels[0]["metrics"]["duration_us_avg"] == 0.5
+        assert kernels[0]["metrics"]["dispatch_count"] == 2
+        assert kernels[0]["metrics"]["arch_vgpr"] == 12
+
+
 class TestMetrixErrorHandling:
     @patch("profiler_mcp.server._profile_with_metrix")
     def test_exception_returns_graceful_failure(self, mock_metrix):
@@ -157,7 +200,7 @@ class TestSchemaParams:
     def test_backend_schema_enum(self):
         tool = _get_tool_schema()
         backend_prop = tool.parameters.get("properties", {}).get("backend", {})
-        assert backend_prop.get("enum") == ["metrix", "rocprof-compute"]
+        assert backend_prop.get("enum") == ["metrix", "rocprof-compute", "rocprof-legacy"]
 
 
 class TestMissingBackend:
