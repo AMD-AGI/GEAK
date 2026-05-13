@@ -29,7 +29,7 @@ import os as _os
 _SPEEDUP_THRESHOLD = float(_os.environ.get("GEAK_MEMORY_MIN_SPEEDUP", "1.10"))
 
 # Regexes for extracting high-signal optimization parameters from a winning
-# Triton patch. Each captured value is surfaced to the LLM as a short,
+# Triton/TileLang patch. Each captured value is surfaced to the LLM as a short,
 # actionable ``key params`` list so it can apply the specific value directly
 # rather than having to parse a 5k-char diff.
 _PARAM_PATTERNS = [

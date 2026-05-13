@@ -135,6 +135,85 @@ class TestDiscoveryScoring:
             score = _relevance_score(unrelated, kernel, "topk", ["topk"])
         assert score <= 1.0, "Unrelated file should score low (path proximity may add up to 1.0)"
 
+    def test_tilelang_alias_tl_classifies_as_tilelang_not_triton(self):
+        from automated_test_discovery.server import _get_kernel_type
+
+        source = """\
+import tilelang.language as tl
+
+@tl.prim_func
+def main():
+    with tl.Kernel(1, threads=128):
+        pass
+"""
+        assert _get_kernel_type(source, ".py") == "tilelang"
+
+    def test_extracts_multiline_tilelang_decorated_functions(self):
+        from automated_test_discovery.server import _extract_python_kernel_functions
+
+        source = """\
+import tilelang
+from tilelang import language as T
+
+@tilelang.jit(
+    out_idx=[-1],
+    pass_configs={"tl.disable_warp_specialized": True},
+)
+def flash_decode(block_m: int):
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            pass
+    return main
+"""
+        assert _extract_python_kernel_functions(source) == ["flash_decode", "main"]
+
+    def test_tilelang_discovery_prefers_python_tilelang_tests_over_cpp_name_matches(self):
+        from automated_test_discovery.server import discover
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\nname = 'tilelang-smoke'\n")
+            kernel = root / "examples" / "grouped_gemm" / "example_grouped_gemm_fwd.py"
+            kernel.parent.mkdir(parents=True)
+            kernel.write_text(
+                """\
+import tilelang
+import tilelang.language as T
+
+@tilelang.jit(out_idx=[2])
+def grouped_gemm():
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=128):
+            pass
+    return kernel
+"""
+            )
+            py_test = root / "testing" / "python" / "test_grouped_gemm_fwd.py"
+            py_test.parent.mkdir(parents=True)
+            py_test.write_text(
+                """\
+import tilelang
+from examples.grouped_gemm.example_grouped_gemm_fwd import grouped_gemm
+
+def test_grouped_gemm_fwd():
+    assert grouped_gemm is not None
+"""
+            )
+            cpp_test = root / "3rdparty" / "composable_kernel" / "test" / "grouped_convnd_fwd"
+            cpp_test.mkdir(parents=True)
+            (cpp_test / "test_grouped_convnd_fwd_dataset_xdl.cpp").write_text(
+                "TEST(GroupedConvndFwd, grouped_gemm_fwd) { EXPECT_TRUE(true); }\n"
+            )
+
+            result = discover(str(kernel), max_tests=3, max_benchmarks=1, use_llm=False)
+
+        assert result["kernel"]["type"] == "tilelang"
+        assert result["tests"], "Expected at least one TileLang Python test candidate"
+        assert result["tests"][0]["file"].endswith("test_grouped_gemm_fwd.py")
+        assert all(not t["file"].endswith(".cpp") for t in result["tests"])
+
 
 # ===================================================================
 # Test 2b: KernelMeta contract
@@ -1307,6 +1386,44 @@ int main(int argc, char** argv) {
 }
 '''
 
+    _MERGED_TILELANG_SOURCE = '''\
+import argparse
+import tilelang
+import tilelang.language as T
+
+@tilelang.jit
+def my_kernel():
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            pass
+    return main
+
+def run_correctness(args):
+    my_kernel()
+
+def run_profile(args):
+    run_correctness(args)
+
+def run_benchmark(args):
+    pass
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--correctness", action="store_true")
+    group.add_argument("--profile", action="store_true")
+    group.add_argument("--benchmark", action="store_true")
+    group.add_argument("--full-benchmark", action="store_true")
+    args = parser.parse_args()
+    if args.correctness:
+        run_correctness(args)
+    elif args.profile:
+        run_profile(args)
+    else:
+        run_benchmark(args)
+'''
+
     def test_splits_tests_out_leaves_kernel(self):
         """Test functions must be extracted to new harness; clean kernel written to output_dir."""
         from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
@@ -1345,6 +1462,41 @@ int main(int argc, char** argv) {
             assert "__main__" in harness_text
             assert "from my_kernel import *" in harness_text
             assert "@triton.jit" not in harness_text
+
+    def test_splits_tilelang_tests_out_leaves_kernel(self):
+        """TileLang merged files should split the same way Triton merged files do."""
+        from minisweagent.run.preprocess.harness_utils import detect_and_split_kernel_from_harness
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_dir = tmp_path / "repo"
+            src_dir.mkdir()
+            merged = src_dir / "my_tilelang_kernel.py"
+            merged.write_text(self._MERGED_TILELANG_SOURCE)
+            out_dir = tmp_path / "output"
+            out_dir.mkdir()
+
+            result = detect_and_split_kernel_from_harness(merged, out_dir)
+            assert result is not None, "Expected TileLang split to occur"
+            new_harness_path, kernel_path = result
+
+            original_text = merged.read_text()
+            assert "run_correctness" in original_text
+            assert "@tilelang.jit" in original_text
+
+            assert kernel_path == str(out_dir / "my_tilelang_kernel.py")
+            kernel_text = Path(kernel_path).read_text()
+            assert "@tilelang.jit" in kernel_text
+            assert "@T.prim_func" in kernel_text
+            assert "run_correctness" not in kernel_text
+            assert "__main__" not in kernel_text
+
+            harness_text = Path(new_harness_path).read_text()
+            assert "run_correctness" in harness_text
+            assert "run_profile" in harness_text
+            assert "__main__" in harness_text
+            assert "from my_tilelang_kernel import *" in harness_text
+            assert "@tilelang.jit" not in harness_text
+            assert "@T.prim_func" not in harness_text
 
     def test_split_injects_iterations_shim_when_source_lacks_it(self):
         """Triton split must inject the --iterations shim when source argparse omits it."""

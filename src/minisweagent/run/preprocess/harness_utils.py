@@ -464,7 +464,21 @@ def _materialize_validated_harness(
 # ── kernel-in-harness detection and splitting ────────────────────────
 
 # Markers that indicate a Python file contains kernel definitions (not just test logic)
-_TRITON_KERNEL_MARKERS = ("@triton.jit", "@triton.autotune", "triton.jit", "tl.constexpr")
+_PYTHON_DSL_KERNEL_MARKERS = (
+    "@triton.jit",
+    "@triton.autotune",
+    "triton.jit",
+    "tl.constexpr",
+    "@tilelang.jit",
+    "@tilelang.autotune",
+    "@T.prim_func",
+    "@tl.prim_func",
+    "tilelang.jit",
+    "tilelang.autotune",
+    "tilelang.language",
+    "T.Kernel",
+    "tl.Kernel",
+)
 # HIP/CUDA markers for non-Python kernels (detected via regex in source text)
 _HIP_KERNEL_RE = re.compile(r"\b(__global__|__kernel__|__device__)\b")
 _C_LIKE_KERNEL_SOURCE_SUFFIXES = frozenset({".hip", ".cu", ".cpp", ".cc", ".cxx"})
@@ -472,38 +486,38 @@ _C_LIKE_TEST_ENTRY_RE = re.compile(
     r"(?m)^(?P<signature>[^\n{;#]*\b(?P<name>main|run_[A-Za-z_]\w*|test_[A-Za-z_]\w*)\s*\([^;{]*\)\s*)\{"
 )
 
-_TRITON_DECORATOR_NAMES = frozenset({"triton.jit", "triton.autotune", "jit", "autotune"})
-
-
-def _is_triton_decorator(decorator: ast.expr) -> bool:
-    """Return True if decorator node is @triton.jit or @triton.autotune."""
+def _is_python_dsl_kernel_decorator(decorator: ast.expr) -> bool:
+    """Return True if decorator node marks a Triton or TileLang kernel."""
     if isinstance(decorator, ast.Attribute):
         return (
             isinstance(decorator.value, ast.Name)
-            and decorator.value.id == "triton"
-            and decorator.attr in ("jit", "autotune")
+            and (
+                (decorator.value.id == "triton" and decorator.attr in ("jit", "autotune"))
+                or (decorator.value.id == "tilelang" and decorator.attr in ("jit", "autotune"))
+                or (decorator.value.id in {"T", "tl"} and decorator.attr == "prim_func")
+            )
         )
     if isinstance(decorator, ast.Name):
-        return decorator.id in ("jit", "autotune")
-    # @triton.autotune(...) call
+        return decorator.id in ("jit", "autotune", "prim_func")
+    # @triton.autotune(...), @tilelang.jit(...), @T.prim_func(...), @tl.prim_func(...)
     if isinstance(decorator, ast.Call):
-        return _is_triton_decorator(decorator.func)
+        return _is_python_dsl_kernel_decorator(decorator.func)
     return False
 
 
 def _harness_has_kernel_definitions(source: str) -> bool:
     """Return True if the Python source contains embedded kernel definitions."""
-    if not any(marker in source for marker in _TRITON_KERNEL_MARKERS):
+    if not any(marker in source for marker in _PYTHON_DSL_KERNEL_MARKERS):
         return False
     # Confirm with AST to avoid false positives (e.g. comments mentioning @triton.jit)
     try:
         tree = ast.parse(source)
     except SyntaxError:
         # Fall back to text match if AST fails
-        return any(marker in source for marker in _TRITON_KERNEL_MARKERS)
+        return any(marker in source for marker in _PYTHON_DSL_KERNEL_MARKERS)
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if any(_is_triton_decorator(d) for d in node.decorator_list):
+            if any(_is_python_dsl_kernel_decorator(d) for d in node.decorator_list):
                 return True
     return False
 
@@ -858,8 +872,9 @@ def detect_and_split_kernel_from_harness(
 ) -> tuple[str, str] | None:
     """Split test logic out of a merged kernel+harness file.
 
-    When a single file contains both kernel definitions (``@triton.jit`` /
-    ``@triton.autotune``) and test/harness logic, agents would see mixed
+    When a single file contains both Python DSL kernel definitions (for
+    example ``@triton.jit``, ``@tilelang.jit``, or ``@T.prim_func``) and
+    test/harness logic, agents would see mixed
     content and patch evaluation would be unreliable.  This function:
 
     1. Detects whether the file contains both kernel defs and test roots.
@@ -869,8 +884,8 @@ def detect_and_split_kernel_from_harness(
        etc.), and functions called from an ``if __name__ == "__main__"``
        block.
     3. Uses BFS from those seeds to collect all same-file functions they
-       call—**except** functions decorated with ``@triton.jit`` /
-       ``@triton.autotune``, which belong to the kernel and must stay.
+       call—**except** functions decorated as Triton/TileLang kernels,
+       which belong to the kernel and must stay.
     4. Strips the collected test functions (and the ``__main__`` block)
        from the original file so the original becomes a clean kernel file.
     5. Writes a new ``test_<stem>_harness.py`` in ``output_dir`` containing:
@@ -906,11 +921,11 @@ def detect_and_split_kernel_from_harness(
     # ── helpers ────────────────────────────────────────────────────────
     _GEAK_FLAGS = {"--correctness", "--profile", "--benchmark", "--full-benchmark"}
 
-    def _is_triton_fn(node: ast.AST) -> bool:
-        """True if node is a function decorated with @triton.jit / @triton.autotune."""
+    def _is_python_dsl_kernel_fn(node: ast.AST) -> bool:
+        """True if node is a function decorated as a Python DSL kernel."""
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return False
-        return any(_is_triton_decorator(d) for d in node.decorator_list)
+        return any(_is_python_dsl_kernel_decorator(d) for d in node.decorator_list)
 
     def _is_test_decorator(decorator: ast.expr) -> bool:
         s = ast.unparse(decorator)
@@ -965,7 +980,7 @@ def detect_and_split_kernel_from_harness(
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if _is_triton_fn(node):
+        if _is_python_dsl_kernel_fn(node):
             continue  # never seed from kernel functions
         name = node.name
         # GEAK naming conventions
@@ -984,7 +999,7 @@ def detect_and_split_kernel_from_harness(
     if main_block is not None:
         seeds.update(
             _collect_called_names(main_block)
-            - {name for name, nodes in fn_map.items() if all(_is_triton_fn(n) for n in nodes)}
+            - {name for name, nodes in fn_map.items() if all(_is_python_dsl_kernel_fn(n) for n in nodes)}
         )
 
     if not seeds:
@@ -1001,8 +1016,8 @@ def detect_and_split_kernel_from_harness(
         nodes = fn_map.get(name)
         if nodes is None:
             continue
-        # Skip if ALL definitions for this name are triton kernel fns
-        if all(_is_triton_fn(n) for n in nodes):
+        # Skip if ALL definitions for this name are DSL kernel functions.
+        if all(_is_python_dsl_kernel_fn(n) for n in nodes):
             continue
         test_fns.add(name)
         for n in nodes:
@@ -1548,9 +1563,9 @@ _BOTTLENECK_GUIDANCE: dict[str, str] = {
         "wavefront; consider split-K or multi-pass approaches.\n"
         "4. ALTERNATIVE ALGORITHMS: Try a fundamentally different algorithm for the same "
         "computation (different reduction tree, different scan, tiled vs non-tiled, etc.).\n"
-        "5. COMPILER GUIDANCE: Restructure Triton/HIP code to help the compiler generate "
-        "better ISA -- avoid tl.where in hot loops, use tl.constexpr aggressively, "
-        "minimize live variables across tl.dot calls.\n"
+        "5. COMPILER GUIDANCE: Restructure Triton/TileLang/HIP code to help the compiler generate "
+        "better ISA -- keep hot loops simple, use compile-time constants aggressively, "
+        "and minimize live variables across matrix operations.\n"
     ),
     "memory-bound": (
         "## Optimization Guidance (bottleneck: memory-bound)\n"

@@ -33,7 +33,7 @@ class ExperienceRecord:
     kernel_path: str = ""
     kernel_name: str = ""
     kernel_category: str = "unknown"
-    kernel_language: str = "unknown"  # triton, hip, cuda
+    kernel_language: str = "unknown"  # triton, tilelang, hip, cuda
     repo_url: str = ""
 
     # Profiling fingerprint

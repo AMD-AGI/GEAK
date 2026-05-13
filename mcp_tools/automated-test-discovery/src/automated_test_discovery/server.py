@@ -10,6 +10,7 @@ Two-phase discovery for GPU kernels:
 No configuration files needed - uses content-based detection.
 """
 
+import ast
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ mcp = FastMCP(
     Single tool: discover - finds tests, benchmarks, and kernel info.
     
     Provide a kernel file path OR a repository directory and it returns everything:
-    - Kernel name and type (triton/hip/cuda)
+    - Kernel name and type (triton/tilelang/hip/cuda)
     - Related test files with confidence scores and run commands
     - Related benchmark files with confidence scores
     - Project workspace path
@@ -51,8 +52,13 @@ mcp = FastMCP(
 KERNEL_PATTERNS = [
     r"@triton\.jit",
     r"@triton\.autotune",
+    r"@tilelang\.jit",
+    r"@tilelang\.autotune",
+    r"@T\.prim_func",
+    r"@tl\.prim_func",
     r"__global__\s+void",
     r"tl\.load|tl\.store",
+    r"T\.Kernel|tl\.Kernel",
 ]
 
 TEST_KEYWORDS = [
@@ -103,6 +109,8 @@ SKIP_DIRS = {
     ".tox",
     ".pytest_cache",
 }
+
+GENERIC_FUNCTION_NAMES = {"kernel", "main", "forward", "backward", "run", "test"}
 
 
 # ============================================================================
@@ -232,6 +240,37 @@ def _score_as_bench(path: Path) -> float:
     return score
 
 
+def _candidate_backend_adjustment(path: Path, kernel_type: str) -> float | None:
+    """Return a score adjustment for backend compatibility, or None to skip.
+
+    TileLang kernels are Python DSL kernels. In a mixed monorepo, generic name
+    matching can otherwise rank unrelated CK/HIP/C++ tests above actual
+    TileLang Python tests when names share words like "grouped" or "gemm".
+    """
+    normalized = str(kernel_type or "").strip().lower()
+    if normalized != "tilelang":
+        return 0.0
+
+    if path.suffix != ".py":
+        return None
+
+    score = 0.0
+    path_text = str(path).lower()
+    if "tilelang" in path_text or "tile-lang" in path_text:
+        score += 1.0
+
+    try:
+        content = path.read_text(errors="ignore")[:4096]
+    except Exception:
+        content = ""
+    if _has_tilelang_markers(content) or "import tilelang" in content or "from tilelang" in content:
+        score += 1.5
+    if "triton" in path_text and "tilelang" not in content:
+        score -= 0.5
+
+    return score
+
+
 def _get_test_command(path: Path) -> str:
     try:
         content = path.read_text()
@@ -274,7 +313,14 @@ def _expand_workspace(kernel_path: Path) -> Path:
 
 
 def _get_kernel_type(content: str, suffix: str = "", file_path: Path | None = None) -> str:
-    if "@triton" in content or "tl." in content:
+    if _has_tilelang_markers(content):
+        return "tilelang"
+    if "import tilelang" in content or "from tilelang" in content:
+        if file_path is not None:
+            if _imports_tilelang_kernels(content, file_path):
+                return "tilelang"
+        return "tilelang"
+    if _has_triton_markers(content):
         return "triton"
     if "import triton" in content:
         if file_path is not None:
@@ -292,6 +338,98 @@ def _get_kernel_type(content: str, suffix: str = "", file_path: Path | None = No
     if suffix in (".cu", ".hip", ".cpp"):
         return "hip" if "hip" in content.lower() else "cuda"
     return "unknown"
+
+
+def _has_tilelang_markers(content: str) -> bool:
+    return any(
+        marker in content
+        for marker in (
+            "@tilelang.jit",
+            "@tilelang.autotune",
+            "@T.prim_func",
+            "@tl.prim_func",
+            "tilelang.jit",
+            "tilelang.autotune",
+            "tilelang.language",
+            "T.Kernel",
+            "tl.Kernel",
+        )
+    )
+
+
+def _has_triton_markers(content: str) -> bool:
+    return any(
+        marker in content
+        for marker in (
+            "@triton.jit",
+            "@triton.autotune",
+            "triton.jit",
+            "triton.autotune",
+            "triton.language",
+            "tl.load",
+            "tl.store",
+            "tl.program_id",
+            "tl.arange",
+            "tl.dot",
+            "tl.constexpr",
+        )
+    )
+
+
+_PYTHON_KERNEL_DECORATORS = frozenset(
+    {
+        "triton.jit",
+        "triton.autotune",
+        "tilelang.jit",
+        "tilelang.autotune",
+        "T.prim_func",
+        "tl.prim_func",
+        "flyc.kernel",
+    }
+)
+
+
+def _decorator_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Call):
+        return _decorator_name(node.func)
+    if isinstance(node, ast.Attribute):
+        base = _decorator_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    if isinstance(node, ast.Name):
+        return node.id
+    return ""
+
+
+def _extract_python_kernel_functions(content: str) -> list[str]:
+    """Extract Python DSL kernel functions, including multi-line decorators."""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return _extract_python_kernel_functions_regex(content)
+
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if any(_decorator_name(decorator) in _PYTHON_KERNEL_DECORATORS for decorator in node.decorator_list):
+            if node.name not in names:
+                names.append(node.name)
+    return names
+
+
+def _extract_python_kernel_functions_regex(content: str) -> list[str]:
+    """Best-effort fallback for syntactically invalid Python files."""
+    names: list[str] = []
+    patterns = (
+        r"@triton\.jit\s*\n\s*def\s+(\w+)",
+        r"@(?:tilelang\.(?:jit|autotune)|(?:T|tl)\.prim_func)(?:\([^)]*\))?\s*\n\s*def\s+(\w+)",
+        r"@flyc\.kernel\s*\n\s*def\s+(\w+)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, content):
+            if match.group(1) not in names:
+                names.append(match.group(1))
+    return names
 
 
 def _imports_triton_kernels(content: str, file_path: Path, _depth: int = 0) -> bool:
@@ -325,10 +463,44 @@ def _imports_triton_kernels(content: str, file_path: Path, _depth: int = 0) -> b
                 imported_content = candidate.read_text(errors="ignore")[:8192]
             except OSError:
                 continue
-            if "@triton.jit" in imported_content or "@triton.autotune" in imported_content:
+            if _has_triton_markers(imported_content):
                 return True
             if _depth < 2 and "import triton" in imported_content:
                 if _imports_triton_kernels(imported_content, candidate, _depth + 1):
+                    return True
+            break
+    return False
+
+
+def _imports_tilelang_kernels(content: str, file_path: Path, _depth: int = 0) -> bool:
+    """Check whether a Python file imports modules containing TileLang kernels."""
+    if _depth > 2:
+        return False
+
+    import_re = re.compile(r"^\s*from\s+([\w.]+)\s+import\s", re.MULTILINE)
+
+    search_dirs = [file_path.parent]
+    for sp in sys.path:
+        p = Path(sp)
+        if p.is_dir():
+            search_dirs.append(p)
+
+    for m in import_re.finditer(content):
+        module_path = m.group(1).replace(".", "/")
+        for base in search_dirs:
+            candidate = base / f"{module_path}.py"
+            if not candidate.is_file():
+                candidate = base / module_path / "__init__.py"
+            if not candidate.is_file():
+                continue
+            try:
+                imported_content = candidate.read_text(errors="ignore")[:8192]
+            except OSError:
+                continue
+            if _has_tilelang_markers(imported_content):
+                return True
+            if _depth < 2 and ("import tilelang" in imported_content or "from tilelang" in imported_content):
+                if _imports_tilelang_kernels(imported_content, candidate, _depth + 1):
                     return True
             break
     return False
@@ -563,7 +735,7 @@ def discover(
 
     Returns:
         Complete discovery result with:
-        - kernel: Name, type (triton/hip/cuda), file path  (or list when directory)
+        - kernel: Name, type (triton/tilelang/hip/cuda), file path  (or list when directory)
         - workspace: Detected project root directory
         - tests: List of {file, name, confidence, command} sorted by relevance
         - benchmarks: List of {file, name, confidence, command} sorted by relevance
@@ -596,13 +768,7 @@ def discover(
         if kernel_name.lower() in _GENERIC_STEMS and path.parent.name:
             kernel_name = path.parent.name
         kernel_type = _get_kernel_type(content, path.suffix, path)
-        kernel_functions = []
-        for m in re.finditer(r"@triton\.jit\s*\n\s*def\s+(\w+)", content):
-            if m.group(1) not in kernel_functions:
-                kernel_functions.append(m.group(1))
-        for m in re.finditer(r"@flyc\.kernel\s*\n\s*def\s+(\w+)", content):
-            if m.group(1) not in kernel_functions:
-                kernel_functions.append(m.group(1))
+        kernel_functions = _extract_python_kernel_functions(content)
         for m in re.finditer(r"__global__\s+void\s+(\w+)", content):
             if m.group(1) not in kernel_functions:
                 kernel_functions.append(m.group(1))
@@ -696,10 +862,13 @@ def discover(
             per_kernel_benchmarks: list[dict] = []
 
             for fp in candidate_files:
+                backend_adjustment = _candidate_backend_adjustment(fp, str(k.get("type", "")))
+                if backend_adjustment is None:
+                    continue
                 relevance = _relevance_score(fp, kpath, kname, kparts)
 
                 if fp in candidate_test_scores:
-                    combined = candidate_test_scores[fp] + relevance
+                    combined = candidate_test_scores[fp] + relevance + backend_adjustment
                     entry = {
                         "file": str(fp),
                         "name": fp.name,
@@ -712,7 +881,7 @@ def discover(
                         global_test_seen.add(str(fp))
 
                 if fp in candidate_bench_scores:
-                    combined = candidate_bench_scores[fp] + relevance
+                    combined = candidate_bench_scores[fp] + relevance + backend_adjustment
                     entry = {
                         "file": str(fp),
                         "name": fp.name,
@@ -781,13 +950,10 @@ def discover(
     kernel_functions: list[str] = []
     if kernel_function:
         kernel_functions.append(kernel_function)
-    # Also extract @triton.jit, @flyc.kernel decorated functions and __global__ functions
-    for m in re.finditer(r"@triton\.jit\s*\n\s*def\s+(\w+)", content):
-        if m.group(1) not in kernel_functions:
-            kernel_functions.append(m.group(1))
-    for m in re.finditer(r"@flyc\.kernel\s*\n\s*def\s+(\w+)", content):
-        if m.group(1) not in kernel_functions:
-            kernel_functions.append(m.group(1))
+    # Also extract Python DSL decorated functions and __global__ functions.
+    for name in _extract_python_kernel_functions(content):
+        if name not in kernel_functions:
+            kernel_functions.append(name)
     for m in re.finditer(r"__global__\s+void\s+(\w+)", content):
         if m.group(1) not in kernel_functions:
             kernel_functions.append(m.group(1))
@@ -812,13 +978,22 @@ def discover(
             if _is_kernel_file(file_path):
                 continue
 
+            backend_adjustment = _candidate_backend_adjustment(file_path, kernel_type)
+            if backend_adjustment is None:
+                continue
             relevance = _relevance_score(file_path, path, kernel_name, kernel_parts)
 
-            # Bonus: if kernel_function name appears inside the test file content
-            if kernel_functions and relevance < 2.0:
+            # Bonus: if a specific kernel function appears inside the test file
+            # content. Ignore generic nested names such as TileLang's common
+            # ``kernel``/``main`` prim_func wrappers, which otherwise match
+            # nearly every TileLang test in a large monorepo.
+            if kernel_functions:
                 try:
                     test_content = file_path.read_text()
                     for kf in kernel_functions:
+                        normalized_kf = str(kf).strip().lower()
+                        if len(normalized_kf) <= 3 or normalized_kf in GENERIC_FUNCTION_NAMES:
+                            continue
                         if kf in test_content:
                             relevance += 2.0
                             break
@@ -827,7 +1002,7 @@ def discover(
 
             test_score = _score_as_test(file_path)
             if test_score >= 0.3:
-                combined = test_score + relevance
+                combined = test_score + relevance + backend_adjustment
                 tests.append(
                     {
                         "file": str(file_path),
@@ -839,7 +1014,7 @@ def discover(
 
             bench_score = _score_as_bench(file_path)
             if bench_score >= 0.3:
-                combined = bench_score + relevance
+                combined = bench_score + relevance + backend_adjustment
                 benchmarks.append(
                     {
                         "file": str(file_path),

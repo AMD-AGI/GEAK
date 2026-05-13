@@ -43,6 +43,10 @@ class TestNormalizeKernelType:
         [
             ("triton", "triton"),
             ("Triton", "triton"),
+            ("tilelang", "tilelang"),
+            ("TileLang", "tilelang"),
+            ("tile-lang", "tilelang"),
+            ("tile_lang", "tilelang"),
             ("hip", "hip"),
             ("rocm", "hip"),
             ("rocblas", "hip"),
@@ -53,6 +57,14 @@ class TestNormalizeKernelType:
     )
     def test_mapping(self, value: object, expected: str) -> None:
         assert mini_module._normalize_kernel_type(value) == expected
+
+    @pytest.mark.parametrize("value", ["triton", "tilelang", "tile-lang", "TileLang"])
+    def test_heterogeneous_kernel_types(self, value: object) -> None:
+        assert mini_module._is_heterogeneous_kernel_type(value)
+
+    @pytest.mark.parametrize("value", ["hip", "flydsl", "other", None])
+    def test_non_heterogeneous_kernel_types(self, value: object) -> None:
+        assert not mini_module._is_heterogeneous_kernel_type(value)
 
 
 class TestDeriveOutputDir:

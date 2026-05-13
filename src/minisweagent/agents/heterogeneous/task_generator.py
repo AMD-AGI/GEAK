@@ -74,15 +74,27 @@ _KNOWLEDGE_BASE_REL = "knowledge_base/optimization_strategies.py"
 def _infer_kernel_type(kernel_path: Path) -> str:
     """Infer kernel_type from file content/extension when discovery.json is absent.
 
-    For Python files, checks for direct Triton markers first, then follows
+    For Python files, checks for direct Triton/TileLang markers first, then follows
     ``from X import ...`` statements (up to 2 levels) to detect wrapper files
-    that import Triton kernels from other modules.
+    that import DSL kernels from other modules.
     """
     ext = kernel_path.suffix.lower()
     if ext == ".py":
         try:
             text = kernel_path.read_text(errors="ignore")
-            if "@triton" in text or "tl." in text:
+            if _has_tilelang_markers(text):
+                logger.debug("_infer_kernel_type: tilelang markers found in %s", kernel_path.name)
+                return "tilelang"
+            if "import tilelang" in text or "from tilelang" in text:
+                if _check_imported_tilelang(text, kernel_path):
+                    logger.debug("_infer_kernel_type: tilelang detected via import-follow in %s", kernel_path.name)
+                    return "tilelang"
+                logger.debug(
+                    "_infer_kernel_type: bare tilelang import in %s; classifying as tilelang.",
+                    kernel_path.name,
+                )
+                return "tilelang"
+            if _has_triton_markers(text):
                 logger.debug("_infer_kernel_type: triton markers found in %s", kernel_path.name)
                 return "triton"
             if "import triton" in text:
@@ -95,7 +107,7 @@ def _infer_kernel_type(kernel_path: Path) -> str:
                 return "flydsl"
         except OSError as exc:
             logger.debug("_infer_kernel_type: could not read %s: %s", kernel_path, exc)
-        logger.debug("_infer_kernel_type: no triton markers in %s; returning 'unknown'.", kernel_path.name)
+        logger.debug("_infer_kernel_type: no recognized Python DSL markers in %s; returning 'unknown'.", kernel_path.name)
         return "unknown"
     if ext in (".cu", ".hip", ".hpp", ".cpp"):
         path_lower = str(kernel_path).lower()
@@ -106,6 +118,44 @@ def _infer_kernel_type(kernel_path: Path) -> str:
         return "hip"
     logger.debug("_infer_kernel_type: unrecognised extension %s; returning 'unknown'.", ext)
     return "unknown"
+
+
+def _has_tilelang_markers(content: str) -> bool:
+    """Return True when source text contains TileLang kernel-level markers."""
+    return any(
+        marker in content
+        for marker in (
+            "@tilelang.jit",
+            "@tilelang.autotune",
+            "@T.prim_func",
+            "@tl.prim_func",
+            "tilelang.jit",
+            "tilelang.autotune",
+            "tilelang.language",
+            "T.Kernel",
+            "tl.Kernel",
+        )
+    )
+
+
+def _has_triton_markers(content: str) -> bool:
+    """Return True when source text contains Triton kernel-level markers."""
+    return any(
+        marker in content
+        for marker in (
+            "@triton.jit",
+            "@triton.autotune",
+            "triton.jit",
+            "triton.autotune",
+            "triton.language",
+            "tl.load",
+            "tl.store",
+            "tl.program_id",
+            "tl.arange",
+            "tl.dot",
+            "tl.constexpr",
+        )
+    )
 
 
 def _check_imported_triton(content: str, file_path: Path, _depth: int = 0) -> bool:
@@ -135,10 +185,46 @@ def _check_imported_triton(content: str, file_path: Path, _depth: int = 0) -> bo
                 imported = candidate.read_text(errors="ignore")[:8192]
             except OSError:
                 continue
-            if "@triton.jit" in imported or "@triton.autotune" in imported:
+            if _has_triton_markers(imported):
                 return True
             if _depth < 2 and "import triton" in imported:
                 if _check_imported_triton(imported, candidate, _depth + 1):
+                    return True
+            break
+    return False
+
+
+def _check_imported_tilelang(content: str, file_path: Path, _depth: int = 0) -> bool:
+    """Follow imports to check if any imported module contains TileLang kernels."""
+    if _depth > 2:
+        return False
+
+    import re
+    import sys
+
+    import_re = re.compile(r"^\s*from\s+([\w.]+)\s+import\s", re.MULTILINE)
+    search_dirs = [file_path.parent]
+    for sp in sys.path:
+        p = Path(sp)
+        if p.is_dir():
+            search_dirs.append(p)
+
+    for m in import_re.finditer(content):
+        module_path = m.group(1).replace(".", "/")
+        for base in search_dirs:
+            candidate = base / f"{module_path}.py"
+            if not candidate.is_file():
+                candidate = base / module_path / "__init__.py"
+            if not candidate.is_file():
+                continue
+            try:
+                imported = candidate.read_text(errors="ignore")[:8192]
+            except OSError:
+                continue
+            if _has_tilelang_markers(imported):
+                return True
+            if _depth < 2 and ("import tilelang" in imported or "from tilelang" in imported):
+                if _check_imported_tilelang(imported, candidate, _depth + 1):
                     return True
             break
     return False

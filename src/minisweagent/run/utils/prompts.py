@@ -19,8 +19,9 @@ Extract the following information (return null if not found):
    If the task only mentions a directory and says something like "the kernel is in <DIR>",
    set this to ``<DIR>/kernel.py`` (or the appropriate extension for the kernel_type) -- do
    NOT return the bare directory.
-3. kernel_type: Kernel type, strictly one of "hip", "triton", "pytorch2flydsl", "flydsl", or "other".
+3. kernel_type: Kernel type, strictly one of "hip", "triton", "tilelang", "pytorch2flydsl", "flydsl", or "other".
    Use "pytorch2flydsl" when the task mentions translating PyTorch code to FlyDSL, converting PyTorch to FlyDSL, or pytorch2flydsl translation.
+   Use "tilelang" when the task is about optimizing existing TileLang / tile-lang code.
    Use "flydsl" when the task is about optimizing existing FlyDSL code (not translating from PyTorch).
 4. repo: The repository path mentioned in the task (absolute path or relative path)
 5. test_command: The command to run tests or benchmarks
@@ -35,7 +36,7 @@ Return ONLY a valid JSON object with these keys. Example:
 {{
   "kernel_name": "matmul",
   "kernel_url": "https://github.com/org/repo/blob/main/kernel.py",
-  "kernel_type": "triton",  // one of: "hip", "triton", "pytorch2flydsl", "flydsl", "other"
+  "kernel_type": "triton",  // one of: "hip", "triton", "tilelang", "pytorch2flydsl", "flydsl", "other"
   "repo": "/path/to/repo",
   "test_command": "python test.py",
   "metric": "Extract throughput in GFLOPS",

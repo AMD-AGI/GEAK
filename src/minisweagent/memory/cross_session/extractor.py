@@ -157,11 +157,20 @@ def _build_kernel_structure(code: str, language: str, category: str) -> str:
     bits = [f"{language} kernel, {category} category"]
     n_jit = code.count("@triton.jit")
     n_autotune = code.count("@triton.autotune")
+    n_tilelang_jit = code.count("@tilelang.jit")
+    n_tilelang_prim = code.count("@T.prim_func") + code.count("@tl.prim_func")
+    n_tilelang_autotune = code.count("@tilelang.autotune")
     n_cls = code.count("class ")
     if n_jit:
         bits.append(f"{n_jit} @triton.jit kernel(s)")
     if n_autotune:
         bits.append(f"{n_autotune} @triton.autotune block(s)")
+    if n_tilelang_jit:
+        bits.append(f"{n_tilelang_jit} @tilelang.jit kernel(s)")
+    if n_tilelang_prim:
+        bits.append(f"{n_tilelang_prim} TileLang prim_func(s)")
+    if n_tilelang_autotune:
+        bits.append(f"{n_tilelang_autotune} @tilelang.autotune block(s)")
     if n_cls:
         bits.append(f"{n_cls} Python class(es)")
     if "torch.utils.cpp_extension" in code or "load_inline" in code:
@@ -449,6 +458,8 @@ def _summarize_patch(patch_text: str) -> str:
                     "warp",
                     "tl.",
                     "triton",
+                    "T.",
+                    "tilelang",
                     "autotune",
                     "config",
                     "shared",
@@ -497,6 +508,8 @@ def _extract_hardware(profiling_metrics: dict) -> str:
 def _infer_language(kernel_path: str) -> str:
     """Infer kernel language from file path and extension."""
     p = kernel_path.lower()
+    if "tilelang" in p or "tile-lang" in p:
+        return "tilelang"
     if any(k in p for k in ("triton", ".py")):
         if "hip" in p or "rocm" in p:
             return "hip"

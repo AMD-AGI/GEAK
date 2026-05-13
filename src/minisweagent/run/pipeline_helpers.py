@@ -711,9 +711,9 @@ _BOTTLENECK_GUIDANCE: dict[str, str] = {
         "wavefront; consider split-K or multi-pass approaches.\n"
         "4. ALTERNATIVE ALGORITHMS: Try a fundamentally different algorithm for the same "
         "computation (different reduction tree, different scan, tiled vs non-tiled, etc.).\n"
-        "5. COMPILER GUIDANCE: Restructure Triton/HIP code to help the compiler generate "
-        "better ISA -- avoid tl.where in hot loops, use tl.constexpr aggressively, "
-        "minimize live variables across tl.dot calls.\n"
+        "5. COMPILER GUIDANCE: Restructure Triton/TileLang/HIP code to help the compiler generate "
+        "better ISA -- keep hot loops simple, use compile-time constants aggressively, "
+        "and minimize live variables across matrix operations.\n"
     ),
     "memory-bound": (
         "## Optimization Guidance (bottleneck: memory-bound)\n"

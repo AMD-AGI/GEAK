@@ -57,7 +57,7 @@ def _is_hip_like_kernel(kernel: dict[str, Any]) -> bool:
     path = str(kernel.get("file_path", "")).lower()
     ext = Path(path).suffix.lower()
     kernel_type = str(kernel.get("kernel_type", "")).lower()
-    if kernel_type in {"triton", "ck", "asm"}:
+    if kernel_type in {"triton", "tilelang", "ck", "asm"}:
         return False
     return kernel_type == "hip" or (
         ext in {".hpp", ".h", ".cpp", ".cu", ".hip"} and any(token in path for token in ("rocprim", "hip", "rocm"))
@@ -72,9 +72,19 @@ def _is_triton_like_kernel(kernel: dict[str, Any]) -> bool:
     return "triton" in path and path.endswith(".py")
 
 
+def _is_tilelang_like_kernel(kernel: dict[str, Any]) -> bool:
+    path = str(kernel.get("file_path", "")).lower()
+    kernel_type = str(kernel.get("kernel_type", "")).lower()
+    if kernel_type == "tilelang":
+        return True
+    return "tilelang" in path and path.endswith(".py")
+
+
 def _detect_backend(kernel: dict[str, Any]) -> str:
     if _is_triton_like_kernel(kernel):
         return "triton"
+    if _is_tilelang_like_kernel(kernel):
+        return "tilelang"
     if _is_hip_like_kernel(kernel):
         return "hip"
     return "generic"
@@ -291,11 +301,79 @@ def _build_hip_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]
     return "\n".join(lines)
 
 
+def _build_tilelang_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]) -> str:
+    bottleneck = _normalized_bottleneck(baseline_metrics)
+
+    prefer_first = [
+        "Algorithmic TileLang kernel-body rewrites inside @tilelang.jit / @T.prim_func functions.",
+        "T.Kernel grid/thread mapping changes that improve useful work per block without moving work into Python wrappers.",
+        "Tile-shape and memory-scope changes: global-to-shared staging, fragment reuse, and fewer redundant T.copy loads/stores.",
+    ]
+    consider_next = [
+        "T.Pipelined / num_stages adjustments when they support a concrete producer-consumer overlap plan.",
+        "Shape-specialized TileLang variants when one generic kernel is serving clearly different input regimes.",
+        "Thread-level parallel loop restructuring with T.Parallel, T.serial, or T.unroll based on the profiled hot path.",
+    ]
+    deprioritize = [
+        "Python wrapper dispatch caches or import-routing changes unless profiling clearly shows host dispatch dominates.",
+        "Pure compile-target or backend toggles without a kernel-body hypothesis.",
+        "Parameter-only sweeps that do not change tiling, memory movement, or computation structure.",
+    ]
+
+    if bottleneck == "memory":
+        prefer_first.extend(
+            [
+                "Reduce global-memory traffic by increasing shared/fragment reuse within each TileLang tile.",
+                "Improve coalescing and edge-mask structure around T.copy / buffer access patterns.",
+            ]
+        )
+    elif bottleneck == "compute":
+        _matrix_label = "WMMA" if is_wmma_capable(detect_gpu_arch()) else "MFMA"
+        prefer_first.extend(
+            [
+                f"Restructure tiles around {_matrix_label}-friendly work decomposition where the operation maps to matrix math.",
+                "Reduce scalar instruction count in inner loops with T.unroll and cheaper math formulations.",
+            ]
+        )
+    elif bottleneck == "latency":
+        prefer_first.extend(
+            [
+                "Fuse short adjacent TileLang work into a single kernel body when correctness allows.",
+                "Increase useful work per T.Kernel launch or specialize small-shape paths to reduce launch-amortized latency.",
+            ]
+        )
+    elif bottleneck == "lds":
+        prefer_first.extend(
+            [
+                "Reduce shared-memory footprint or bank conflicts by changing TileLang shared layouts and staging order.",
+                "Move short-lived values from shared buffers to fragments/registers when it improves occupancy.",
+            ]
+        )
+
+    lines = [
+        "TileLang backend detected. Prefer profiling-driven TileLang kernel-body strategies over wrapper or target toggles.",
+        *_profiling_summary_lines(baseline_metrics),
+        "Planning policy:",
+        "- Fill most task slots with 'Prefer First' families below.",
+        "- Only add wrapper / compile-target / parameter-sweep tasks after at least 3 preferred-family tasks exist.",
+        "- Leave GPUs idle if the remaining ideas are only low-priority wrapper work.",
+        "Prefer First:",
+        *[f"- {item}" for item in prefer_first],
+        "Consider Next:",
+        *[f"- {item}" for item in consider_next],
+        "Deprioritize Until Later:",
+        *[f"- {item}" for item in deprioritize],
+    ]
+    return "\n".join(lines)
+
+
 def _build_workload_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]) -> str:
     """Return backend/workload-specific guidance for task planning."""
     backend = _detect_backend(kernel)
     if backend == "triton":
         return _build_triton_guidance(kernel, baseline_metrics)
+    if backend == "tilelang":
+        return _build_tilelang_guidance(kernel, baseline_metrics)
     if backend == "hip":
         return _build_hip_guidance(kernel, baseline_metrics)
     if not baseline_metrics:

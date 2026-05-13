@@ -76,6 +76,8 @@ def _normalize_kernel_type(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text == "triton":
         return "triton"
+    if text in {"tilelang", "tile-lang", "tile_lang"}:
+        return "tilelang"
     if text in {"hip", "rocm", "rocblas"}:
         return "hip"
     if text == "pytorch2flydsl":
@@ -83,6 +85,13 @@ def _normalize_kernel_type(value: Any) -> str:
     if text == "flydsl":
         return "flydsl"
     return "other"
+
+
+_HETEROGENEOUS_KERNEL_TYPES = frozenset({"triton", "tilelang"})
+
+
+def _is_heterogeneous_kernel_type(value: Any) -> bool:
+    return _normalize_kernel_type(value) in _HETEROGENEOUS_KERNEL_TYPES
 
 
 def _derive_output_dir(output: Path | None, kernel_name: str | None) -> Path:
@@ -407,7 +416,7 @@ def main(
             from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
 
             inferred = _normalize_kernel_type(_infer_kernel_type(kp))
-            if inferred in {"hip", "triton", "flydsl"}:
+            if inferred in {"hip", "triton", "tilelang", "flydsl"}:
                 kernel_type = inferred
                 logger.info("Updated kernel_type using kernel path: %s", kernel_type)
 
@@ -700,7 +709,7 @@ def main(
 
     # kernel_type routing:
     # - hip/flydsl/other -> homogeneous agent
-    # - triton -> heterogeneous orchestrator
+    # - triton/tilelang -> heterogeneous orchestrator
     # Auto-detect kernel type if heterogeneous flag was not set by LLM extraction or task parser
     if heterogeneous is None:
         _discovery = preprocess_ctx.get("discovery") or {}
@@ -711,7 +720,7 @@ def main(
             from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
             _auto_kernel_type = _infer_kernel_type(Path(preprocess_ctx["kernel_path"]))
 
-        if _auto_kernel_type == "triton":
+        if _is_heterogeneous_kernel_type(_auto_kernel_type):
             heterogeneous = True
             logger.info("Using heterogeneous mode based on discovery.")
         else:

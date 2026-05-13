@@ -1,7 +1,8 @@
-"""Tests for Triton kernel type inference, including wrapper files.
+"""Tests for Python DSL kernel type inference, including wrapper files.
 
 Covers:
 - Direct @triton.jit / @triton.autotune / tl. usage
+- Direct TileLang @tilelang.jit / @T.prim_func / T.Kernel usage
 - Wrapper files that import Triton kernels from submodules
 - Depth-limited BFS (max 2 levels of import following)
 - Cycle detection and missing modules
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from minisweagent.agents.heterogeneous.task_generator import (
+    _check_imported_tilelang,
     _check_imported_triton,
     _infer_kernel_type,
 )
@@ -54,6 +56,27 @@ class TestDirectDetection:
         """File that does `import triton` but no @jit or tl. -- still triton."""
         f = _write(tmpdir / "k.py", "import triton\nimport triton.language as tl\ndef wrapper(): pass\n")
         assert _infer_kernel_type(f) == "triton"
+
+    def test_tilelang_jit_decorator(self, tmpdir):
+        f = _write(
+            tmpdir / "k.py",
+            "import tilelang\n@tilelang.jit\ndef my_kernel(): pass\n",
+        )
+        assert _infer_kernel_type(f) == "tilelang"
+
+    def test_tilelang_prim_func_decorator(self, tmpdir):
+        f = _write(
+            tmpdir / "k.py",
+            "import tilelang.language as T\n@T.prim_func\ndef main():\n    with T.Kernel(1, threads=128):\n        pass\n",
+        )
+        assert _infer_kernel_type(f) == "tilelang"
+
+    def test_tilelang_language_alias_tl_does_not_look_like_triton(self, tmpdir):
+        f = _write(
+            tmpdir / "k.py",
+            "import tilelang.language as tl\n@tl.prim_func\ndef main():\n    with tl.Kernel(1, threads=128):\n        pass\n",
+        )
+        assert _infer_kernel_type(f) == "tilelang"
 
     def test_plain_python(self, tmpdir):
         f = _write(tmpdir / "k.py", "import torch\ndef foo(): return 1\n")
@@ -151,6 +174,17 @@ class TestImportFollowing:
         f = _write(tmpdir / "pkg" / "api.py", "import triton\nfrom .triton_impl import impl\n")
         assert _infer_kernel_type(f) == "triton"
 
+    def test_tilelang_wrapper_imports_kernel_module(self, tmpdir):
+        """Wrapper imports from a local module that has a TileLang kernel."""
+        _write(tmpdir / "ops" / "__init__.py", "")
+        _write(
+            tmpdir / "ops" / "kernels.py",
+            "import tilelang.language as T\n@T.prim_func\ndef fused_add():\n    with T.Kernel(1, threads=128):\n        pass\n",
+        )
+        f = _write(tmpdir / "wrapper.py", "import tilelang\nfrom ops.kernels import fused_add\n")
+        assert _infer_kernel_type(f) == "tilelang"
+        assert _check_imported_tilelang(f.read_text(), f)
+
 
 # ── _check_imported_triton specifically ────────────────────────────────
 
@@ -222,3 +256,20 @@ class TestCheckImportedTriton:
         _write(tmpdir / "kernels.py", "@triton.jit\ndef k(): pass\n")
         wrapper = _write(tmpdir / "w.py", "from utils import helper\nfrom kernels import k\n")
         assert _check_imported_triton(wrapper.read_text(), wrapper) is True
+
+
+class TestCheckImportedTileLang:
+    def test_finds_prim_func_in_imported_module(self, tmpdir):
+        _write(tmpdir / "kernels.py", "@T.prim_func\ndef k(): pass\n")
+        wrapper = _write(tmpdir / "w.py", "from kernels import k\n")
+        assert _check_imported_tilelang(wrapper.read_text(), wrapper) is True
+
+    def test_finds_tilelang_jit_in_imported_module(self, tmpdir):
+        _write(tmpdir / "kernels.py", "@tilelang.jit\ndef k(): pass\n")
+        wrapper = _write(tmpdir / "w.py", "from kernels import k\n")
+        assert _check_imported_tilelang(wrapper.read_text(), wrapper) is True
+
+    def test_no_tilelang_in_imported_module(self, tmpdir):
+        _write(tmpdir / "utils.py", "def helper(): return 1\n")
+        wrapper = _write(tmpdir / "w.py", "from utils import helper\n")
+        assert _check_imported_tilelang(wrapper.read_text(), wrapper) is False

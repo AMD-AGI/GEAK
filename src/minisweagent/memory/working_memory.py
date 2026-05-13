@@ -521,12 +521,12 @@ class WorkingMemory:
                 "[CEILING REACHED] Last 3 benchmarks within noise. "
                 "STOP parameter tuning. OPTIONS: (1) SUBMIT best result now, "
                 "(2) Try fundamentally different algorithm, "
-                "(3) Try @triton.autotune with shape-specific configs."
+                "(3) Try backend-native autotune with shape-specific configs."
             )
         elif self.is_diminishing_returns():
             parts.append(
                 "[DIMINISHING] Last 3 results within 1%. Try a different approach: "
-                "@triton.autotune, shape-specialized kernel variants, or a different algorithm."
+                "backend-native autotune, shape-specialized kernel variants, or a different algorithm."
             )
 
         # V2 Change 4: Approach diversity enforcer
@@ -551,7 +551,7 @@ class WorkingMemory:
                 "balanced": "Bottleneck: balanced -- parameter tuning won't help. Focus on algorithmic changes or fusion; treat dispatch-path edits as a last resort.",
                 "memory": "Bottleneck: memory -- try vectorized loads, LDS staging, or fuse ops.",
                 "compute": f"Bottleneck: compute -- try {_matrix_instr}, reduce instructions, or fuse ops.",
-                "latency": "Bottleneck: latency -- increase work per kernel, fuse with adjacent kernels, or try @triton.autotune.",
+                "latency": "Bottleneck: latency -- increase work per kernel, fuse with adjacent kernels, or try backend-native autotune.",
             }
             hint = _bn_hint.get(self.bottleneck_type)
             if hint:
@@ -630,6 +630,8 @@ def classify_change(text: str) -> str:
         r"num_warps\s*=",
         r"num_stages\s*=",
         r"@triton\.autotune",
+        r"@tilelang\.autotune",
+        r"tilelang\.autotune",
         r"waves_per_eu",
         r"BLOCK_SIZE\s*=",
     ]
@@ -693,7 +695,7 @@ def _summarize_change(text: str) -> str:
             return f"TUNE({specific_tuning.group(1)}={specific_tuning.group(2)})"
 
     indicators = [
-        (r"@triton\.autotune|triton\.Config|autotun", "TUNE(autotune/config)"),
+        (r"@(?:triton|tilelang)\.autotune|triton\.Config|tilelang\.autotune|autotun", "TUNE(autotune/config)"),
         (
             r"\b(aiter|ck|tensile|rocblas|cublas|cutlass|flash_attention|"
             r"scaled_dot_product_attention|enable_gqa|dispatch)\b",
@@ -707,7 +709,7 @@ def _summarize_change(text: str) -> str:
         (r"\b(vector\w*|float2|float4|half2|half4|int2|int4|packed|simd|mfma|wmma)\b", "ALGO(vectorization)"),
         (r"\b(__shared__|shared memory|lds|smem|cache\w*|prefetch|register\w*|coalesc\w*)\b", "ALGO(memory hierarchy)"),
         (
-            r"__global__|__device__|@triton\.jit|template\s*<|def\s+\w+\(|struct\s+\w+|class\s+\w+",
+            r"__global__|__device__|@triton\.jit|@tilelang\.jit|@T\.prim_func|@tl\.prim_func|template\s*<|def\s+\w+\(|struct\s+\w+|class\s+\w+",
             "ALGO(new kernel/helper)",
         ),
         (

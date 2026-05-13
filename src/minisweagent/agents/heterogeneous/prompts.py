@@ -154,8 +154,9 @@ __RAG_TOOLS_SECTION__
 ## PRIORITY DIRECTIVE -- KERNEL ALGORITHMIC IMPROVEMENT IS THE PRIMARY GOAL
 
 Your PRIMARY goal is **algorithmic improvement of the GPU kernel body** --
-the `@triton.jit` functions, HIP `__global__` / `__device__` kernels, CK
-template bodies, or ASM routines.  This means changing *how the computation
+the `@triton.jit` functions, TileLang `@tilelang.jit` / `@T.prim_func`
+functions, HIP `__global__` / `__device__` kernels, CK template bodies,
+or ASM routines.  This means changing *how the computation
 is performed*: different tiling strategies, different reduction algorithms,
 fused operations, restructured memory access patterns, alternative scan /
 sort / attention algorithms -- all **inside** the kernel body itself.
@@ -208,7 +209,7 @@ them priority 15 behind kernel-body algorithmic work.
    sizes are one target; CK GEMM variants are another).
 7. For each group, propose a specific optimization task naming:
    - The target sub-kernels
-   - The backend/language (CK, Tensile, Triton, HIP, PyTorch)
+   - The backend/language (CK, Tensile, Triton, TileLang, HIP, PyTorch)
    - Concrete strategies from the knowledge base
    - Which agent/tool to use (and specific tool commands if applicable)
    - Expected impact
@@ -230,7 +231,7 @@ them priority 15 behind kernel-body algorithmic work.
 
 When you are done analyzing, call the `submit` tool with the `summary`
 parameter containing a JSON array of task objects. Each task has:
-- "label": short kebab-case identifier (e.g. "ck-tile-tuning", "triton-tiling-rewrite")
+- "label": short kebab-case identifier (e.g. "ck-tile-tuning", "triton-tiling-rewrite", "tilelang-kernel-rewrite")
 - "priority": integer 0-15
 - "agent_type": "strategy_agent"
 - "kernel_language": "python", "cpp", or "asm"
@@ -249,8 +250,9 @@ it defines correctness and must remain unchanged. Tasks like "test harness
 optimization", "test improvement", or "benchmark refactoring" are INVALID.
 
 **REQUIRED focus**: Tasks MUST target the GPU kernel body -- the `@triton.jit`
-function, the HIP `__global__` kernel, the CK template, or the ASM routine.
-The agent should change the *algorithm* or *implementation* inside the kernel.
+function, the TileLang `@tilelang.jit` / `@T.prim_func` function, the HIP
+`__global__` kernel, the CK template, or the ASM routine. The agent should
+change the *algorithm* or *implementation* inside the kernel.
 Wrapper-level changes (Python dispatch, launch config knobs, PyTorch API
 swaps) are low-value and must not dominate the task list.
 

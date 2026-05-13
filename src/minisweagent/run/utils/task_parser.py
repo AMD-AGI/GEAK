@@ -191,6 +191,7 @@ _KERNEL_FILENAME_GUESSES: tuple[str, ...] = (
 )
 _KERNEL_TYPE_TO_EXT: dict[str, tuple[str, ...]] = {
     "triton": (".py",),
+    "tilelang": (".py",),
     "hip": (".hip", ".cu", ".cpp"),
     "flydsl": (".flydsl", ".py"),
     "pytorch2flydsl": (".py",),
@@ -321,7 +322,7 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
     kernel_type = str(raw_kernel_type or "").strip().lower()
     logger.info("parse_task_info: kernel_type: %s", kernel_type)
 
-    if kernel_type not in {"hip", "triton", "pytorch2flydsl", "flydsl", "other"}:
+    if kernel_type not in {"hip", "triton", "tilelang", "pytorch2flydsl", "flydsl", "other"}:
         if raw_kernel_type not in (None, ""):
             logger.warning(
                 "parse_task_info: invalid kernel_type %r; normalizing to 'other'.",
@@ -434,7 +435,7 @@ def parse_task_info(task_content: str, model) -> dict:
     Extracts:
     - kernel_name: Name of the kernel being optimized
     - kernel_url: URL/path of the kernel being optimized
-    - kernel_type: One of hip/triton/flydsl/other
+    - kernel_type: One of hip/triton/tilelang/flydsl/other
     - repo: Repository path
     - test_command: Command to test the optimization
     - metric: Performance metric to extract

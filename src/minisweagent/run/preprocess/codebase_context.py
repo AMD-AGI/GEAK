@@ -275,6 +275,7 @@ _DOCSTRING_RE = re.compile(
     r'^(?:[ \t]*#[^\n]*\n)*[ \t]*(?:\'\'\'|""")(.+?)(?:\'\'\'|""")', re.DOTALL
 )  # Python module docstring
 _TRITON_JIT_RE = re.compile(r"@triton\.(?:jit|autotune)")  # Triton kernel decorator
+_TILELANG_KERNEL_RE = re.compile(r"@(?:tilelang\.(?:jit|autotune)|(?:T|tl)\.prim_func)")  # TileLang decorators
 _GLOBAL_RE = re.compile(r"__global__\s+void\s+(\w+)")  # HIP/CUDA kernel function
 
 
@@ -296,6 +297,8 @@ def _describe_file(path: Path) -> str:
     if suffix == ".py":
         if _TRITON_JIT_RE.search(source):
             return "Triton kernel definitions (@triton.jit)"
+        if _TILELANG_KERNEL_RE.search(source) or "T.Kernel" in source or "tl.Kernel" in source:
+            return "TileLang kernel definitions (@tilelang.jit / @T.prim_func)"
         if re.search(r"^class\s+\w+", source, re.MULTILINE):
             return "Class definitions"
         return "Python module"

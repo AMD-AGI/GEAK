@@ -49,6 +49,14 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- Set `PYTHONPATH` before the process starts if the package is not installed.\n"
         "- Use fixed random seed (`torch.manual_seed(42)`) and fixed tensor sizes."
     ),
+    "tilelang": (
+        "This is a TileLang kernel (Python DSL with @tilelang.jit / @T.prim_func, JIT-compiled via TVM).\n"
+        "- No hipcc build step is needed for normal Python TileLang kernels, but the `tilelang` package must import successfully.\n"
+        "- Import via Python package path. Do NOT use importlib.util; rely on PYTHONPATH from COMMANDMENT SETUP.\n"
+        "- Use `torch.testing.assert_close` for correctness validation.\n"
+        "- Benchmark with `torch.cuda.Event` around the callable after warmup. Include warmup because TileLang compiles on first use.\n"
+        "- Optimize TileLang code inside @tilelang.jit / @T.prim_func only (tile shapes, memory scopes, T.Kernel mapping, T.copy/T.Pipelined usage)."
+    ),
     "hip": (
         "This is a HIP kernel (C++ compiled with hipcc).\n"
         "- A build step is REQUIRED before running tests.\n"
@@ -95,7 +103,7 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
     ),
     "unknown": (
         "Kernel type could not be determined automatically.\n"
-        "- Inspect the source file to determine if it is Triton, HIP, CUDA, or FlyDSL.\n"
+        "- Inspect the source file to determine if it is Triton, TileLang, HIP, CUDA, or FlyDSL.\n"
         "- Apply the appropriate testing strategy based on your analysis."
     ),
 }

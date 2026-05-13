@@ -68,6 +68,24 @@ class TestParseTaskInfo:
         assert out["kernel_type"] == "triton"
         assert out["num_parallel"] == 2
 
+    def test_accepts_tilelang_kernel_type(self) -> None:
+        payload = {
+            "kernel_name": "flash_decode",
+            "kernel_url": "https://example.com/k.py",
+            "kernel_type": "tilelang",
+            "repo": None,
+            "test_command": "pytest",
+            "metric": "latency",
+            "num_parallel": None,
+            "gpu_ids": None,
+            "output_dir": None,
+            "model": "m",
+            "config": None,
+        }
+        out = tp.parse_task_info("task", self._Model(json.dumps(payload)))
+        assert out["kernel_name"] == "flash_decode"
+        assert out["kernel_type"] == "tilelang"
+
     def test_strips_json_from_markdown_fence(self) -> None:
         inner = json.dumps(
             {

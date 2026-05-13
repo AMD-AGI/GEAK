@@ -334,6 +334,7 @@ class TestClassifyChange:
         assert classify_change("BLOCK_SIZE = 256") == "tuning"
         assert classify_change("num_warps = 4") == "tuning"
         assert classify_change("@triton.autotune") == "tuning"
+        assert classify_change("@tilelang.autotune") == "tuning"
 
     def test_wrapper_default(self):
         assert classify_change("import torch") == "wrapper"
