@@ -22,6 +22,14 @@ from pathlib import Path
 # Metrics where summation is the correct aggregation (total cost).
 _SUM_METRICS = {"duration_us", "duration_us_min", "duration_us_max", "duration_us_median"}
 # All other numeric metrics use duration-weighted averaging.
+_RUNTIME_KERNEL_HINTS = (
+    "__amd_rocclr_",
+    "__hip_",
+    "copybuffer",
+    "fillbuffer",
+    "memcpy",
+    "memset",
+)
 
 
 def _sanitize_value(v):
@@ -33,6 +41,14 @@ def _sanitize_value(v):
     if isinstance(v, list):
         return [_sanitize_value(item) for item in v]
     return v
+
+
+def _kernel_role(kernel_name: str) -> str:
+    """Classify framework/runtime kernels separately from user kernels."""
+    lowered = kernel_name.lower()
+    if any(hint in lowered for hint in _RUNTIME_KERNEL_HINTS):
+        return "runtime"
+    return "primary"
 
 
 def list_kernels(profiler_result: dict, gpu_index: int = 0) -> list[dict]:
@@ -175,6 +191,9 @@ def _format_baseline(selected: list[dict]) -> dict:
 
     aggregated = aggregate_metrics(selected)
     dominant = selected[0]
+    primary_candidates = [k for k in selected if _kernel_role(str(k.get("name", ""))) == "primary"]
+    primary = primary_candidates[0] if primary_candidates else dominant
+    runtime_kernel_names = [k["name"] for k in selected if _kernel_role(str(k.get("name", ""))) == "runtime"]
 
     if len(selected) == 1:
         kernel_name = dominant["name"]
@@ -199,16 +218,25 @@ def _format_baseline(selected: list[dict]) -> dict:
         top_kernels.append(
             {
                 "name": k["name"],
+                "role": _kernel_role(str(k.get("name", ""))),
                 "duration_us": round(k_dur, 3),
                 "pct_of_total": round(100.0 * k_dur / total_dur, 1),
                 "bottleneck": k.get("bottleneck", "unknown"),
             }
         )
 
+    primary_dur = primary.get("duration_us", primary.get("metrics", {}).get("duration_us", 0))
     result = {
         "duration_us": canonical_dur,
         "kernel_name": kernel_name,
         "kernel_names": [k["name"] for k in selected],
+        "primary_kernel_name": primary["name"],
+        "primary_kernel_duration_us": round(primary_dur, 3),
+        "primary_kernel_pct_of_total": round(100.0 * primary_dur / total_dur, 1),
+        "primary_kernel_bottleneck": primary.get("bottleneck", "unknown"),
+        "runtime_kernel_names": runtime_kernel_names,
+        "profile_kernel_count": len(selected),
+        "runtime_kernel_count": len(runtime_kernel_names),
         "metrics": aggregated,
         "bottleneck": dominant.get("bottleneck", "unknown"),
         "observations": observations,

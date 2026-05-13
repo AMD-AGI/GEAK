@@ -98,7 +98,7 @@ def _profiling_summary_lines(baseline_metrics: dict[str, Any]) -> list[str]:
     hbm_util = _safe_float(metrics.get("memory.hbm_bandwidth_utilization"))
     l2_hit = _safe_float(metrics.get("memory.l2_hit_rate"))
     bottleneck = _normalized_bottleneck(baseline_metrics)
-    return [
+    lines = [
         "Profiling summary:",
         (
             f"- Bottleneck: {bottleneck}"
@@ -107,6 +107,19 @@ def _profiling_summary_lines(baseline_metrics: dict[str, Any]) -> list[str]:
             f"; L2 hit rate: {_format_optional_float(l2_hit, '%')}"
         ),
     ]
+    primary_kernel = baseline_metrics.get("primary_kernel_name")
+    if primary_kernel:
+        primary_duration = _safe_float(baseline_metrics.get("primary_kernel_duration_us"))
+        primary_pct = _safe_float(baseline_metrics.get("primary_kernel_pct_of_total"))
+        lines.append(
+            f"- Primary kernel: {primary_kernel}"
+            f"; duration: {_format_optional_float(primary_duration, ' us')}"
+            f"; share: {_format_optional_float(primary_pct, '%')}"
+        )
+    runtime_count = baseline_metrics.get("runtime_kernel_count")
+    if runtime_count:
+        lines.append(f"- Runtime/copy kernels in profile: {runtime_count}")
+    return lines
 
 
 def _build_triton_guidance(kernel: dict[str, Any], baseline_metrics: dict[str, Any]) -> str:

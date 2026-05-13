@@ -47,6 +47,10 @@ from minisweagent.run.preprocess.harness_utils import (
     extract_harness_path,
     validate_harness,
 )
+from minisweagent.run.preprocess.profile_policy import (
+    ProfileBackendDecision,
+    profile_result_has_kernels,
+)
 from minisweagent.run.preprocess.testcase_cache import (
     build_testcase_cache_key,
     get_testcase_cache_dir,
@@ -56,6 +60,95 @@ from minisweagent.run.preprocess.testcase_cache import (
 )
 
 # ── main entry point ─────────────────────────────────────────────────
+
+
+def _run_profiler_with_policy(
+    state: Any,
+    *,
+    perf_cmd: str,
+    backend_decision: ProfileBackendDecision,
+    gpu_id: int,
+    workdir: str | None = None,
+    num_replays: int = 3,
+    quick: bool = False,
+    timeout_s: float | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Run the selected profiler backend and retry the policy fallback when needed."""
+    from minisweagent.run.preprocess.profiler_runner import run_profiler_with_handle
+
+    primary_backend = backend_decision.backend
+    fallback_backend = backend_decision.fallback_backend
+    primary_exc: Exception | None = None
+    try:
+        primary_result = run_profiler_with_handle(
+            state,
+            perf_cmd=perf_cmd,
+            backend=primary_backend,
+            gpu_id=gpu_id,
+            workdir=workdir,
+            num_replays=num_replays,
+            quick=quick,
+            timeout_s=timeout_s,
+        )
+    except Exception as exc:
+        primary_exc = exc
+        primary_result = None
+
+    if fallback_backend and not profile_result_has_kernels(primary_result):
+        if primary_exc is not None:
+            logger.warning(
+                "[yellow]Profile backend %s raised %s; retrying with %s[/yellow]",
+                primary_backend,
+                primary_exc,
+                fallback_backend,
+            )
+        else:
+            logger.warning(
+                "[yellow]Profile backend %s produced no usable kernels; retrying with %s[/yellow]",
+                primary_backend,
+                fallback_backend,
+            )
+        try:
+            fallback_result = run_profiler_with_handle(
+                state,
+                perf_cmd=perf_cmd,
+                backend=fallback_backend,
+                gpu_id=gpu_id,
+                workdir=workdir,
+                num_replays=num_replays,
+                quick=quick,
+                timeout_s=timeout_s,
+            )
+        except Exception as fallback_exc:
+            logger.warning(
+                "[yellow]Profile fallback backend %s failed: %s[/yellow]",
+                fallback_backend,
+                fallback_exc,
+                exc_info=True,
+            )
+            if isinstance(primary_result, dict):
+                primary_result["profile_backend_effective"] = primary_backend
+                primary_result["profile_backend_policy"] = backend_decision.to_dict()
+                primary_result["profile_backend_fallback"] = fallback_backend
+                primary_result["profile_backend_fallback_error"] = str(fallback_exc)
+                return primary_result, primary_backend
+            if primary_exc is not None:
+                raise primary_exc from fallback_exc
+            return None, primary_backend
+
+        if isinstance(fallback_result, dict):
+            fallback_result["profile_backend_effective"] = fallback_backend
+            fallback_result["profile_backend_policy"] = backend_decision.to_dict()
+            fallback_result["profile_backend_fallback_from"] = primary_backend
+        return fallback_result, fallback_backend
+
+    if primary_exc is not None:
+        raise primary_exc
+
+    if isinstance(primary_result, dict):
+        primary_result["profile_backend_effective"] = primary_backend
+        primary_result["profile_backend_policy"] = backend_decision.to_dict()
+    return primary_result, primary_backend
 
 
 def _filter_discovery_to_repo_root(disc_dict: dict[str, Any], repo_root: str | Path) -> dict[str, Any]:
@@ -1213,11 +1306,16 @@ def run_preprocessor(
     logger.info("[bold cyan]--- Step 5/7: Kernel profiling (Metrix instrumented) ---[/bold cyan]")
     state.set_stage(PreprocessStage.KERNEL_PROFILE)
 
+    from minisweagent.run.preprocess.profile_policy import choose_profile_backend
+
     _profile_kernel_type = (disc_dict.get("kernel") or {}).get("type", "")
-    _profile_backend = os.environ.get("GEAK_PROFILE_BACKEND", "").strip()
-    if not _profile_backend:
-        _profile_backend = "rocprof-legacy" if _profile_kernel_type == "tilelang" else "metrix"
-    logger.info("  Profile backend: %s", _profile_backend)
+    _profile_decision = choose_profile_backend(_profile_kernel_type)
+    _profile_backend = _profile_decision.backend
+    _profile_backend_active = _profile_backend
+    ctx["profile_backend_policy"] = _profile_decision.to_dict()
+    logger.info("  Profile backend: %s (%s)", _profile_backend, _profile_decision.reason)
+    if _profile_decision.fallback_backend:
+        logger.info("  Profile fallback backend: %s", _profile_decision.fallback_backend)
 
     _profile_t0 = time.monotonic()
     profiling: dict[str, Any] | None = None
@@ -1260,13 +1358,11 @@ def run_preprocessor(
         else:
             logger.info("  Profiling with performance_command: %s", perf_cmd)
             try:
-                from minisweagent.run.preprocess.profiler_runner import run_profiler_with_handle
-
                 _profile_timeout = budget.deadline_for_preprocess().remaining() if budget else None
-                profiling = run_profiler_with_handle(
+                profiling, _profile_backend_active = _run_profiler_with_policy(
                     state,
                     perf_cmd=perf_cmd,
-                    backend=_profile_backend,
+                    backend_decision=_profile_decision,
                     gpu_id=gpu_id,
                     workdir=_cwd,
                     num_replays=3,
@@ -1312,14 +1408,12 @@ def run_preprocessor(
             logger.warning("  Skipping profiling (state.skip_profiling=True)")
         else:
             try:
-                from minisweagent.run.preprocess.profiler_runner import run_profiler_with_handle
-
                 _profile_timeout = budget.deadline_for_preprocess().remaining() if budget else None
-                profile_cmd = f"python {ctx['harness_path']} --profile"
-                profiling = run_profiler_with_handle(
+                profile_cmd = f"{shlex.quote(sys.executable)} {shlex.quote(ctx['harness_path'])} --profile"
+                profiling, _profile_backend_active = _run_profiler_with_policy(
                     state,
                     perf_cmd=profile_cmd,
-                    backend=_profile_backend,
+                    backend_decision=_profile_decision,
                     gpu_id=gpu_id,
                     num_replays=3,
                     quick=False,
@@ -1332,6 +1426,7 @@ def run_preprocessor(
 
     _profile_elapsed = time.monotonic() - _profile_t0
     ctx["profiling"] = profiling
+    ctx["profile_backend"] = _profile_backend_active
     if profiling:
         (output_dir / "profile.json").write_text(json.dumps(profiling, indent=2, default=str))
         # Also save to the original work repo
@@ -1417,6 +1512,22 @@ def run_preprocessor(
             repo_baseline_path.write_text(json.dumps(baseline_metrics, indent=2, default=str))
             logger.info("  Baseline metrics saved to %s", repo_baseline_path)
 
+    from minisweagent.run.preprocess.profile_policy import env_truthy, validate_required_profile
+
+    if env_truthy("GEAK_REQUIRE_PROFILE"):
+        profile_ok, profile_reason = validate_required_profile(profiling, baseline_metrics)
+        if not profile_ok:
+            error_path = output_dir / "profile_required_error.txt"
+            profile_path = output_dir / "profile.json"
+            baseline_path = output_dir / "baseline_metrics.json"
+            message = (
+                "GEAK_REQUIRE_PROFILE=1 but profiler data is not valid for profile-guided optimization: "
+                f"{profile_reason}. profile={profile_path} baseline_metrics={baseline_path}"
+            )
+            error_path.write_text(message + "\n")
+            logger.error(message)
+            raise PreprocessAborted(message)
+
     # ── 7. commandment ───────────────────────────────────────────────
     logger.info("[bold cyan]--- Step 7/7: Commandment ---[/bold cyan]")
     state.set_stage(PreprocessStage.COMMANDMENT)
@@ -1432,7 +1543,7 @@ def run_preprocessor(
                 correctness_command=correctness_cmd,
                 performance_command=perf_cmd or eval_command,
                 repo_root=repo_root,
-                profile_backend=_profile_backend,
+                profile_backend=_profile_backend_active,
             )
             ctx["test_command"] = eval_command
             logger.info("  COMMANDMENT.md generated (from eval command)")
@@ -1452,7 +1563,7 @@ def run_preprocessor(
                 harness_path=harness,
                 repo_root=repo_root,
                 kernel_language=_kl,
-                profile_backend=_profile_backend,
+                profile_backend=_profile_backend_active,
             )
             logger.info("  COMMANDMENT.md generated (from harness)")
         except Exception as exc:
@@ -1487,6 +1598,7 @@ def run_preprocessor(
             "benchmark_baseline_present": bool(benchmark_baseline),
             "full_benchmark_baseline_present": bool(full_benchmark_baseline),
             "profiling_success": None if profiling is None else bool(profiling.get("success", True)),
+            "profile_backend": _profile_backend_active,
             "baseline_bottleneck": (baseline_metrics or {}).get("bottleneck"),
             "baseline_duration_us": (baseline_metrics or {}).get("duration_us"),
             "commandment_present": bool(commandment),

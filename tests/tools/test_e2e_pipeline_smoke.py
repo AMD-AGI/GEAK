@@ -156,6 +156,20 @@ class TestE2EPipelineSmoke:
         assert baseline["metrics"]["duration_us"] == pytest.approx(8.5)
         assert len(baseline["observations"]) > 0
 
+    def test_step4b_baseline_metrics_marks_primary_and_runtime_kernels(self):
+        """include_all keeps compatibility while exposing primary/runtime attribution."""
+        baseline = build_baseline_metrics(
+            SYNTHETIC_PROFILER_OUTPUT,
+            include_all=True,
+        )
+
+        assert baseline["kernel_name"] == "add_kernel_0d1d2d3d4+1"
+        assert baseline["primary_kernel_name"] == "add_kernel_0d1d2d3d4"
+        assert baseline["runtime_kernel_names"] == ["Memcpy DtoD (Device -> Device)"]
+        assert baseline["runtime_kernel_count"] == 1
+        assert baseline["top_kernels"][0]["role"] == "primary"
+        assert baseline["top_kernels"][1]["role"] == "runtime"
+
     def test_step5_baseline_json_roundtrip(self):
         """Write baseline_metrics.json, read it back, parse as OpenEvolve would."""
         baseline = build_baseline_metrics(

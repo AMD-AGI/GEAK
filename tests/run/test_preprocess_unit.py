@@ -12,6 +12,100 @@ from unittest.mock import patch
 
 import pytest
 
+
+class TestProfilePolicy:
+    def test_tilelang_prefers_metrix_on_rocm72(self, monkeypatch):
+        from minisweagent.run.preprocess import profile_policy
+
+        monkeypatch.setattr(profile_policy, "detect_rocprofv3_rocm_version", lambda: "7.2.0")
+
+        decision = profile_policy.choose_profile_backend("tilelang", env={})
+
+        assert decision.backend == "metrix"
+        assert decision.fallback_backend == "rocprof-legacy"
+        assert decision.rocm_version == "7.2.0"
+        assert not decision.explicit
+
+    def test_tilelang_uses_legacy_on_unknown_or_old_rocm(self, monkeypatch):
+        from minisweagent.run.preprocess import profile_policy
+
+        monkeypatch.setattr(profile_policy, "detect_rocprofv3_rocm_version", lambda: "7.0.2")
+
+        decision = profile_policy.choose_profile_backend("tilelang", env={})
+
+        assert decision.backend == "rocprof-legacy"
+        assert decision.fallback_backend is None
+
+    def test_explicit_profile_backend_overrides_policy(self, monkeypatch):
+        from minisweagent.run.preprocess import profile_policy
+
+        monkeypatch.setattr(profile_policy, "detect_rocprofv3_rocm_version", lambda: "7.2.0")
+
+        decision = profile_policy.choose_profile_backend("tilelang", env={"GEAK_PROFILE_BACKEND": "rocprof-legacy"})
+
+        assert decision.backend == "rocprof-legacy"
+        assert decision.fallback_backend is None
+        assert decision.explicit
+
+    def test_required_profile_validation_rejects_thin_metrics(self):
+        from minisweagent.run.preprocess.profile_policy import validate_required_profile
+
+        profiling = {"success": True, "results": [{"kernels": [{"name": "main_kernel"}]}]}
+        thin_metrics = {"duration_us": 12.0, "profiling_failed": True}
+
+        ok, reason = validate_required_profile(profiling, thin_metrics)
+
+        assert not ok
+        assert "baseline_metrics" in reason
+
+    def test_required_profile_validation_accepts_kernel_profile_metrics(self):
+        from minisweagent.run.preprocess.profile_policy import validate_required_profile
+
+        profiling = {"success": True, "results": [{"kernels": [{"name": "main_kernel"}]}]}
+        baseline_metrics = {
+            "duration_us": 12.0,
+            "metrics": {"duration_us": 12.0, "memory.l2_hit_rate": 80.0},
+            "top_kernels": [{"name": "main_kernel"}],
+        }
+
+        ok, reason = validate_required_profile(profiling, baseline_metrics)
+
+        assert ok
+        assert reason == ""
+
+    def test_profile_runner_policy_retries_fallback_when_primary_has_no_kernels(self, monkeypatch):
+        from minisweagent.run.preprocess import profiler_runner
+        from minisweagent.run.preprocess.preprocessor import _run_profiler_with_policy
+        from minisweagent.run.preprocess.profile_policy import ProfileBackendDecision
+
+        calls: list[str] = []
+
+        def fake_run_profiler(*args, backend: str, **kwargs):
+            calls.append(backend)
+            if backend == "metrix":
+                return {"success": True, "results": [{"kernels": []}]}
+            return {"success": True, "results": [{"kernels": [{"name": "main_kernel"}]}]}
+
+        monkeypatch.setattr(profiler_runner, "run_profiler_with_handle", fake_run_profiler)
+
+        profiling, backend = _run_profiler_with_policy(
+            object(),
+            perf_cmd="python harness.py --profile",
+            backend_decision=ProfileBackendDecision(
+                backend="metrix",
+                explicit=False,
+                reason="test",
+                fallback_backend="rocprof-legacy",
+            ),
+            gpu_id=0,
+        )
+
+        assert calls == ["metrix", "rocprof-legacy"]
+        assert backend == "rocprof-legacy"
+        assert profiling["profile_backend_effective"] == "rocprof-legacy"
+        assert profiling["profile_backend_fallback_from"] == "metrix"
+
+
 # ===================================================================
 # Test 1: _pick() determinism and correctness
 # ===================================================================
