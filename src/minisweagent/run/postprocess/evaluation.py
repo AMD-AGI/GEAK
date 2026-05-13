@@ -694,7 +694,20 @@ def run_profile(
 
     from minisweagent.run.preprocess.baseline import build_baseline_metrics
 
-    optimized_metrics = build_baseline_metrics(profile_result, include_all=True)
+    try:
+        optimized_metrics = build_baseline_metrics(profile_result, include_all=True)
+    except ValueError as exc:
+        logger.warning("PROFILE: unable to build optimized baseline metrics: %s", exc)
+        comparison = {
+            "baseline": baseline_metrics,
+            "optimized": {},
+            "error": str(exc),
+        }
+        comparison_path = results_dir / "profile_comparison.json"
+        comparison_path.write_text(json.dumps(comparison, indent=2, default=str))
+        round_eval["profile_comparison"] = comparison
+        return
+
     comparison: dict[str, Any] = {
         "baseline": baseline_metrics,
         "optimized": optimized_metrics,

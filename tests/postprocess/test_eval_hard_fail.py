@@ -206,6 +206,34 @@ class TestProfileHardFail:
         assert "command not found" in exc_info.value.detail
         assert round_eval["status"] == "commandment_execution_failed"
 
+    def test_profile_empty_fallback_json_does_not_raise(self, tmp_path):
+        from minisweagent.run.postprocess.evaluation import run_profile
+
+        round_eval: dict = {}
+        (tmp_path / "profile.json").write_text('{"results":[],"warning":"fallback"}\n')
+        (tmp_path / "baseline_metrics.json").write_text('{"duration_us":42.0}\n')
+
+        with patch(
+            "minisweagent.run.postprocess.evaluation.build_eval_script",
+            return_value=str(tmp_path / "fake.sh"),
+        ), patch(
+            "minisweagent.run.postprocess.evaluation.subprocess.run",
+            return_value=_completed(0, stdout="PROFILE: PASS\n"),
+        ):
+            run_profile(
+                eval_worktree=tmp_path,
+                eval_env={},
+                commandment_path=tmp_path / "COMMANDMENT.md",
+                pp_dir=tmp_path,
+                round_eval=round_eval,
+                round_num=1,
+                results_dir=tmp_path / "results",
+            )
+
+        assert "profile_comparison" in round_eval
+        error = round_eval["profile_comparison"]["error"]
+        assert "No kernels found" in error or "missing 'results'" in error
+
 
 # ---------------------------------------------------------------------------
 # preflight_commandment_contract

@@ -140,6 +140,43 @@ def _warmup_block(command: str, warmup_runs: int) -> str:
     return f"for _i in $(seq 1 {warmup_runs}); do {command}; done"
 
 
+def _profile_block(
+    profile_command: str,
+    profiler_target: str,
+    *,
+    warmup_runs: int,
+    profile_replays: int,
+) -> str:
+    """Build a PROFILE section that degrades gracefully when Metrix is unavailable.
+
+    ``kernel-profile`` may be missing in a lightweight environment, and on some
+    ROCm/TileLang combinations rocprofv3 can fail after process start.  The
+    optimization contract should still be able to run correctness and latency
+    evaluation in that case, so PROFILE falls back to the harness' ``--profile``
+    mode and writes a minimal JSON profile marker.
+    """
+    warmup_block = _warmup_block(f"{profile_command} > /dev/null 2>&1 || true", warmup_runs)
+    fallback = (
+        f"{profile_command} || true\n"
+        "printf '%s\\n' "
+        """'{"results":[],"warning":"kernel-profile unavailable or failed"}' """
+        "> ${GEAK_WORK_DIR}/profile.json"
+    )
+    return (
+        f"{warmup_block}\n"
+        "if command -v kernel-profile >/dev/null 2>&1; then\n"
+        f"  if kernel-profile \"{profiler_target}\" --gpu-devices ${{GEAK_GPU_DEVICE}} "
+        f"--replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json; then\n"
+        "    :\n"
+        "  else\n"
+        f"    {fallback}\n"
+        "  fi\n"
+        "else\n"
+        f"  {fallback}\n"
+        "fi"
+    )
+
+
 def _detect_build_command(repo_root: Path) -> str:
     """Return the appropriate build command for a C++ repo."""
     if (repo_root / "setup.py").exists() or (repo_root / "pyproject.toml").exists():
@@ -169,9 +206,12 @@ def _generate_simple(
       * ``GEAK_GPU_DEVICE`` -- GPU device ID
     """
     harness_abs = str(harness_path.resolve())
-    warmup_block = _warmup_block(
-        f"${{GEAK_WORK_DIR}}/run.sh {harness_abs} --profile > /dev/null 2>&1 || true",
-        warmup_runs,
+    profile_command = f"${{GEAK_WORK_DIR}}/run.sh {harness_abs} --profile"
+    profile_section = _profile_block(
+        profile_command,
+        profile_command,
+        warmup_runs=warmup_runs,
+        profile_replays=profile_replays,
     )
 
     if kernel_language == "cpp":
@@ -202,8 +242,7 @@ def _generate_simple(
 ${{GEAK_WORK_DIR}}/run.sh {harness_abs} --correctness
 
 ## PROFILE
-{warmup_block}
-kernel-profile "${{GEAK_WORK_DIR}}/run.sh {harness_abs} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json
+{profile_section}
 
 ## BENCHMARK
 ${{GEAK_WORK_DIR}}/run.sh {harness_abs} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
@@ -244,9 +283,12 @@ def _generate_inner_kernel(
     # Copy candidate to the correct import path
     copy_cmd = f"cp ${{GEAK_WORK_DIR}}/{kernel_path.name} ${{GEAK_WORK_DIR}}/{rel_dir}/{basename}"
 
-    warmup_block = _warmup_block(
-        "${GEAK_WORK_DIR}/run_harness.sh --profile > /dev/null 2>&1 || true",  # harness path is baked into run_harness.sh
-        warmup_runs,
+    profile_command = "${GEAK_WORK_DIR}/run_harness.sh --profile"
+    profile_section = _profile_block(
+        profile_command,
+        profile_command,
+        warmup_runs=warmup_runs,
+        profile_replays=profile_replays,
     )
 
     setup_lines = [
@@ -274,8 +316,7 @@ def _generate_inner_kernel(
 ${{GEAK_WORK_DIR}}/run_harness.sh --correctness
 
 ## PROFILE
-{warmup_block}
-kernel-profile "${{GEAK_WORK_DIR}}/run_harness.sh --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json
+{profile_section}
 
 ## BENCHMARK
 ${{GEAK_WORK_DIR}}/run_harness.sh --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
@@ -399,15 +440,12 @@ def generate_commandment_from_commands(
 
     # PROFILE: use correctness command for profiling if no separate profile command
     profile_target = correctness_cmd or performance_cmd or "echo 'no profile target'"
-    warmup_block = _warmup_block(
-        f"cd ${{GEAK_WORK_DIR}} && {profile_target} > /dev/null 2>&1 || true",
-        warmup_runs,
-    )
-    profile_section = (
-        f"{warmup_block}\n"
-        f'kernel-profile "cd ${{GEAK_WORK_DIR}} && {profile_target}" '
-        f"--gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays} "
-        f"--json -o ${{GEAK_WORK_DIR}}/profile.json"
+    profile_command = f'bash -c "cd ${{GEAK_WORK_DIR}} && {profile_target}"'
+    profile_section = _profile_block(
+        profile_command,
+        profile_command,
+        warmup_runs=warmup_runs,
+        profile_replays=profile_replays,
     )
 
     # BENCHMARK and FULL_BENCHMARK
