@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -9,8 +10,9 @@ class EnvRegistry:
     calls without using environment variables (which are problematic because you cannot
     set them in a subprocess).
 
-    The default file location is `/root/.swe-agent-env`, though this can be overridden
-    by the `env_file` argument or the `SWE_AGENT_ENV_FILE` environment variable.
+    The default file location is a user-writable temp file, though this can be
+    overridden by the `env_file` argument or the `SWE_AGENT_ENV_FILE`
+    environment variable.
     """
 
     def __init__(self, env_file: Path | None = None):
@@ -19,10 +21,12 @@ class EnvRegistry:
     @property
     def env_file(self) -> Path:
         if self._env_file is None:
-            env_file = Path(os.environ.get("SWE_AGENT_ENV_FILE", "/root/.swe-agent-env"))
+            default_path = Path(tempfile.gettempdir()) / f"swe-agent-env-{os.getuid()}.json"
+            env_file = Path(os.environ.get("SWE_AGENT_ENV_FILE", str(default_path)))
         else:
             env_file = self._env_file
         if not env_file.exists():
+            env_file.parent.mkdir(parents=True, exist_ok=True)
             env_file.write_text("{}")
         return env_file
 

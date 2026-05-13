@@ -42,6 +42,7 @@ from __future__ import annotations
 # pulling in the full minisweagent.tools package (whose __init__.py imports
 # heavy dependencies like typer via strategy_manager).
 import re
+import sys
 from pathlib import Path
 
 from minisweagent.run.preprocess.validate_commandment import (
@@ -169,6 +170,7 @@ def _generate_simple(
       * ``GEAK_GPU_DEVICE`` -- GPU device ID
     """
     harness_abs = str(harness_path.resolve())
+    python_exe = sys.executable
     warmup_block = _warmup_block(
         f"${{GEAK_WORK_DIR}}/run.sh {harness_abs} --profile > /dev/null 2>&1 || true",
         warmup_runs,
@@ -181,16 +183,18 @@ def _generate_simple(
             "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
             "export HIP_VISIBLE_DEVICES=%s\\n"
             "export AITER_JIT_DIR=%s/.aiter_jit\\n"
-            'cd "%s" && exec python3 "$@"\\n\' '
+            'cd "%s" && exec "%s" "$@"\\n\' '
             '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" "${GEAK_WORK_DIR}" '
+            f'"{python_exe}" '
             "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
         )
     else:
         setup_section = (
             "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
             "export HIP_VISIBLE_DEVICES=%s\\n"
-            'cd "%s" && exec python3 "$@"\\n\' '
+            'cd "%s" && exec "%s" "$@"\\n\' '
             '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
+            f'"{python_exe}" '
             "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
         )
 
@@ -257,10 +261,12 @@ def _generate_inner_kernel(
         setup_lines.append(f"touch {init_touch}")
 
     harness_abs = str(harness_path.resolve())
+    python_exe = sys.executable
     setup_lines.append(
         f"printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${{PYTHONPATH}}\\n"
-        f'export HIP_VISIBLE_DEVICES=%s\\ncd "%s" && exec python3 {harness_abs} "$@"\\n\' '
-        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" > ${GEAK_WORK_DIR}/run_harness.sh '
+        f'export HIP_VISIBLE_DEVICES=%s\\ncd "%s" && exec "%s" "%s" "$@"\\n\' '
+        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
+        f'"{python_exe}" "{harness_abs}" > ${{GEAK_WORK_DIR}}/run_harness.sh '
         "&& chmod +x ${GEAK_WORK_DIR}/run_harness.sh"
     )
 

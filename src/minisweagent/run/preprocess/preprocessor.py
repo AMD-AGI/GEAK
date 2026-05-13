@@ -1309,7 +1309,7 @@ def run_preprocessor(
                 from minisweagent.run.preprocess.profiler_runner import run_profiler_with_handle
 
                 _profile_timeout = budget.deadline_for_preprocess().remaining() if budget else None
-                profile_cmd = f"python {ctx['harness_path']} --profile"
+                profile_cmd = f"{shlex.quote(sys.executable)} {shlex.quote(ctx['harness_path'])} --profile"
                 profiling = run_profiler_with_handle(
                     state,
                     perf_cmd=profile_cmd,

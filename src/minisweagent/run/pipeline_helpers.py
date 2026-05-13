@@ -1035,7 +1035,7 @@ def run_baseline_profile(test_command: str, gpu_id: int = 0) -> dict:
     profile_kernel = profile_server.profile_kernel
 
     harness = extract_harness_path(test_command)
-    profile_cmd = f"python {harness} --profile"
+    profile_cmd = f"{shlex.quote(sys.executable)} {shlex.quote(harness)} --profile"
 
     _profile_fn = getattr(profile_kernel, "fn", profile_kernel)
     return _profile_fn(
