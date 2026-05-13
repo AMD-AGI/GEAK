@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -111,6 +112,18 @@ def format_messages_for_codex(messages: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
+def normalize_plain_finish_sentinel(content: str) -> str:
+    """Wrap Codex CLI's plain finish sentinel in GEAK's bash action format."""
+    stripped = content.strip()
+    if stripped == "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT":
+        command = "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'"
+    elif re.fullmatch(r"echo\s+(['\"])COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\1", stripped):
+        command = stripped
+    else:
+        return content
+    return f"```bash\n{command}\n```"
+
+
 class CodexCliModel:
     """Use ``codex exec`` as a local GEAK model backend."""
 
@@ -204,6 +217,7 @@ class CodexCliModel:
         if kwargs:
             raise TypeError(f"CodexCliModel.query does not support per-call kwargs yet: {sorted(kwargs)}")
         content, extra = self._run_codex(self._build_prompt(messages))
+        content = normalize_plain_finish_sentinel(content)
         self.n_calls += 1
         self.cost += self.config.cost_per_call
         GLOBAL_MODEL_STATS.add(self.config.cost_per_call)

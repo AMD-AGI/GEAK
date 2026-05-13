@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from minisweagent.models import get_model
-from minisweagent.models.codex_cli import CodexCliModel, format_messages_for_codex
+from minisweagent.models.codex_cli import CodexCliModel, format_messages_for_codex, normalize_plain_finish_sentinel
 
 
 def test_format_messages_for_codex_includes_roles_tool_calls_and_tool_results():
@@ -65,6 +65,29 @@ def test_query_reads_output_last_message_and_updates_stats(tmp_path):
     assert model.n_calls == 1
     assert model.cost == 0.25
     assert run.call_args.kwargs["input"].startswith(model.config.prompt_preamble)
+
+
+def test_normalize_plain_finish_sentinel_wraps_bare_echo():
+    assert normalize_plain_finish_sentinel("echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'") == (
+        "```bash\n"
+        "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\n"
+        "```"
+    )
+
+
+def test_query_normalizes_plain_finish_sentinel(tmp_path):
+    def fake_run(cmd, input, text, capture_output, timeout, check, env):  # noqa: A002
+        out_path = Path(cmd[cmd.index("--output-last-message") + 1])
+        out_path.write_text("echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    model = CodexCliModel(codex_bin="codex")
+
+    with patch("minisweagent.models.codex_cli.subprocess.run", side_effect=fake_run):
+        result = model.query([{"role": "user", "content": "finish"}])
+
+    assert result["content"] == "```bash\necho 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\n```"
+    assert result["tools"] == ""
 
 
 def test_query_raises_on_codex_failure():
