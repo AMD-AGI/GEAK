@@ -154,6 +154,8 @@ class AgentConfig:
     # cleanly.
     mode: Literal["yolo"] = "yolo"
 
+    agent_name: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Observation truncation (from DefaultAgent — byte-identical)
@@ -284,10 +286,10 @@ class OptimizationAgent:
 
         # ── Tell the model which tools it can call (from StrategyAgent) ──
         if hasattr(self.model, "set_tools"):
-            self.model.set_tools(self.toolruntime.get_tools_schema())
+            self.model.set_tools(self.toolruntime.get_tools_list())
         else:
             model_impl = getattr(self.model, "_impl", self.model)
-            model_impl.tools = self.toolruntime.get_tools_schema()
+            model_impl.tools = self.toolruntime.get_tools_list()
 
         # ── Initial strategy data ping for UI (from StrategyAgent) ──
         if self.config.use_strategy_manager:

@@ -29,6 +29,7 @@ _ROOT_GENERATED_FILES = {
     "cmake_install.cmake",
     "Makefile",
     "_geak_eval_cmd.sh",
+    "_geak_harness",
     "baseline_metrics.json",
     "profile.json",
 }
@@ -47,6 +48,8 @@ _ROOT_GENERATED_GLOBS = (
     "*.obj",
     "*.out",
     "*.bin",
+    "*.orig_backup",
+    "*.baseline_*",
 )
 
 
@@ -124,6 +127,11 @@ def _parse_git_diff_paths(header: str) -> tuple[str, str] | None:
     return a_path, b_path
 
 
+def _section_is_binary(section_lines: list[str]) -> bool:
+    """True when a diff section contains a GIT binary patch (never source code)."""
+    return any("GIT binary patch" in line for line in section_lines[:10])
+
+
 def strip_generated_helper_sections(patch_text: str) -> tuple[str, list[str]]:
     """Drop diff sections that touch generated helper artifacts.
 
@@ -165,6 +173,9 @@ def strip_generated_helper_sections(patch_text: str) -> tuple[str, list[str]]:
             continue
         a_path, b_path = parsed
         if is_generated_helper_artifact(a_path) or is_generated_helper_artifact(b_path):
+            removed.append(b_path or a_path)
+            continue
+        if _section_is_binary(section):
             removed.append(b_path or a_path)
             continue
         kept.extend(section)

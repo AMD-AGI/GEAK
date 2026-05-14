@@ -431,6 +431,7 @@ def run_heterogeneous_orchestrator(
         from minisweagent.run.postprocess.evaluation import (
             CommandmentExecutionError,
             preflight_commandment_contract,
+            recapture_commandment_baseline,
         )
 
         _preflight_repo_root = str(preprocess_ctx.get("repo_root") or "")
@@ -443,6 +444,13 @@ def run_heterogeneous_orchestrator(
                 _preflight_repo_root,
                 _preflight_harness,
                 _preflight_gpu,
+            )
+            recapture_commandment_baseline(
+                _preflight_commandment,
+                _preflight_repo_root,
+                _preflight_harness,
+                _preflight_gpu,
+                preprocess_dir,
             )
         else:
             logger.warning(

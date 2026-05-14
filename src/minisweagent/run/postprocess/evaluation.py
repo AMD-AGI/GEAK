@@ -124,14 +124,50 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
 
     git_env = get_git_safe_env(output_dir)
     if is_git:
-        subprocess.run(
-            ["git", "worktree", "add", "--detach", str(eval_dir)],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            check=True,
-            env=git_env,
-        )
+        try:
+            subprocess.run(
+                ["git", "worktree", "add", "--detach", str(eval_dir)],
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+                check=True,
+                env=git_env,
+            )
+        except subprocess.CalledProcessError as e:
+            error_msg = (e.stderr or e.stdout or str(e)).lower()
+            recoverable = (
+                "missing but already registered worktree" in error_msg
+                or "already used by worktree" in error_msg
+                or "already exists" in error_msg
+            )
+            if not recoverable:
+                raise RuntimeError(
+                    f"git worktree add failed (rc={e.returncode}): {e.stderr or e.stdout}"
+                ) from e
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                cwd=str(repo),
+                check=False,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(eval_dir)],
+                cwd=str(repo),
+                check=False,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+            subprocess.run(
+                ["git", "worktree", "add", "--detach", "-f", str(eval_dir)],
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+                check=True,
+                env=git_env,
+            )
     else:
         shutil.copytree(str(repo), str(eval_dir), dirs_exist_ok=True)
         subprocess.run(["git", "init"], cwd=str(eval_dir), capture_output=True, text=True, check=True, env=git_env)
@@ -388,6 +424,69 @@ def preflight_commandment_contract(
         raise CommandmentExecutionError("PREFLIGHT", result.returncode, detail)
 
     logger.info("preflight_commandment_contract: PASS")
+
+
+def recapture_commandment_baseline(
+    commandment_path: Path,
+    repo_root: str,
+    harness_path: str,
+    gpu_id: int,
+    pp_dir: Path,
+    *,
+    timeout_s: int = 1200,
+) -> bool:
+    """Re-capture baseline using COMMANDMENT sections for format parity.
+
+    Runs SETUP + FULL_BENCHMARK on the *unpatched* repo so the baseline
+    output format exactly matches what ``run_correctness_and_benchmark``
+    will produce for candidates.  Falls back to BENCHMARK if
+    FULL_BENCHMARK is absent.  Overwrites the preprocessed baseline files
+    only on success; returns True if baseline was recaptured.
+    """
+    repo_root_path = Path(repo_root).resolve()
+    env = build_eval_env(repo_root_path, repo_root, harness_path, gpu_id)
+
+    for section_name in ["FULL_BENCHMARK", "BENCHMARK"]:
+        script = build_eval_script(str(commandment_path), ["SETUP", section_name])
+        if not script:
+            continue
+        logger.info(
+            "recapture_commandment_baseline: running SETUP+%s on %s",
+            section_name,
+            repo_root_path,
+        )
+        try:
+            result = subprocess.run(
+                ["bash", script],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                cwd=str(repo_root_path),
+                env=env,
+            )
+        except Exception as exc:
+            logger.warning("recapture_commandment_baseline: %s failed: %s", section_name, exc)
+            continue
+        if result.returncode != 0:
+            logger.warning(
+                "recapture_commandment_baseline: %s exited %d", section_name, result.returncode
+            )
+            continue
+        stdout = result.stdout.strip()
+        if not stdout:
+            logger.warning(
+                "recapture_commandment_baseline: %s produced empty stdout", section_name
+            )
+            continue
+        (pp_dir / "full_benchmark_baseline.txt").write_text(stdout)
+        (pp_dir / "benchmark_baseline.txt").write_text(stdout)
+        logger.info("recapture_commandment_baseline: recaptured (%d bytes)", len(stdout))
+        return True
+
+    logger.info(
+        "recapture_commandment_baseline: no benchmark section found; keeping preprocessed baseline"
+    )
+    return False
 
 
 def run_correctness_and_benchmark(
