@@ -8,7 +8,7 @@ Comparison of GEAK_v3 and GEAK Skills Mode optimization results on AMD MI300X (g
 
 - **Hardware**: AMD MI300X (gfx942), 304 CUs
 - **GEAK_v3**: Standalone GEAK agent with centralized evaluator
-- **GEAK Skills Mode**: GEAK skills running on Claude Code (Opus), 2 parallel workers per kernel, 3 optimization rounds
+- **GEAK Skills Mode**: GEAK skills running on Claude Code (Opus), 2 parallel workers per kernel (each worker on a dedicated GPU), 3 optimization rounds, 13 kernels launched in parallel across 26 GPUs
 
 ## Per-Kernel Results
 
@@ -53,9 +53,13 @@ Comparison of GEAK_v3 and GEAK Skills Mode optimization results on AMD MI300X (g
 3. GEAK skill installed (see [README](../../README.md#geak-skills-mode-claude-code))
 4. A kernel task directory with source file and Makefile
 
+> **Important**: `num_parallel` must not exceed the number of GPUs in `gpu_ids`.
+> Each worker needs a dedicated GPU for accurate benchmarking. Sharing a GPU between
+> workers causes timing interference and unreliable results.
+
 ### Single Kernel
 
-Copy the following prompt into Claude Code to optimize a single kernel:
+Copy the following prompt into Claude Code to optimize a single kernel (2 workers, 2 GPUs):
 
 ```
 /geak --kernel_path /absolute/path/to/kernel.hip --repo_path /absolute/path/to/kernel_dir --num_parallel 2 --gpu_ids 0,1 --max_rounds 3
@@ -67,14 +71,16 @@ Example with a SiLU kernel:
 /geak --kernel_path /home/user/kernel_tasks/silu/silu.hip --repo_path /home/user/kernel_tasks/silu --num_parallel 2 --gpu_ids 0,1 --max_rounds 3
 ```
 
+If you only have 1 GPU available, use `--num_parallel 1 --gpu_ids 0`.
+
 ### Batch Run (Multiple Kernels)
 
-To reproduce the full 13-kernel benchmark, paste this prompt into Claude Code. It will launch one GEAK optimization per kernel in parallel, each on a separate GPU:
+To reproduce the full 13-kernel benchmark, paste this prompt into Claude Code. It will launch one GEAK optimization per kernel in parallel, each allocated a dedicated GPU pair:
 
 ```
 Below is a list of kernel directories, each containing a .hip kernel file and a Makefile.
 For each kernel, run the GEAK skill to optimize it. Launch all kernels in parallel using
-separate background agents, each on its own GPU.
+separate background agents, each on its own dedicated GPU pair.
 
 Kernel directories (under /path/to/kernel_tasks/):
 - assign_score_withk
@@ -95,9 +101,14 @@ For each kernel directory DIR:
 1. Find the .hip file: KERNEL=$(find /path/to/kernel_tasks/$DIR -name "*.hip" | head -1)
 2. Run: /geak --kernel_path $KERNEL --repo_path /path/to/kernel_tasks/$DIR --num_parallel 2 --gpu_ids <assigned_gpu_pair>
 
-Assign GPU pairs sequentially: kernel 0 gets GPUs 0,1; kernel 1 gets GPUs 2,3; etc.
+Each kernel needs 2 dedicated GPUs (num_parallel=2). Assign GPU pairs sequentially
+so no GPU is shared: kernel 0 gets GPUs 0,1; kernel 1 gets GPUs 2,3; etc.
+This requires 26 GPUs total for 13 kernels.
+
 After all optimizations complete, collect results from each kernel_eval/*/report/final_report.json
 and generate a summary table with arithmetic mean speedup per kernel.
 ```
 
 Replace `/path/to/kernel_tasks/` with the actual absolute path to your kernel task directory.
+
+For fewer GPUs, reduce `num_parallel` to 1 (1 GPU per kernel = 13 GPUs total).
