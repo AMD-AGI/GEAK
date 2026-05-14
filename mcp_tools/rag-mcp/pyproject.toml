@@ -10,6 +10,7 @@ dependencies = [
     "langchain-community",
     "langchain-huggingface",
     "langchain-core",
+    "langchain-openai",
     "faiss-cpu",
     "sentence-transformers",
     "rank-bm25",

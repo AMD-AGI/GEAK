@@ -23,7 +23,7 @@ pip install -e mcp_tools/rag-mcp
 python scripts/build_index.py --force
 ```
 
-This builds FAISS and BM25 indexes from the documents in `knowledge-base/`. The index is saved to `~/.cache/amd-ai-devtool/semantic-index/`. First run will also download the embedding model (~1.3 GB).
+This builds FAISS and BM25 indexes from the documents in `knowledge-base/`. The index is saved to `~/.cache/amd-ai-devtool/semantic-index/`. First run will also download the embedding model (~1.3 GB) unless a remote embedding endpoint is configured — see [Remote embedding endpoint](#remote-embedding-endpoint).
 
 ### Step 3: Enable RAG in config
 
@@ -70,6 +70,32 @@ When `rag: true`, GEAK performs two checks before running the pipeline:
 
 1. **Dependency check** — Verifies that `rag-mcp` package is installed. If not, an error is shown with the install command.
 2. **Index check** — Verifies that the semantic index exists at `~/.cache/amd-ai-devtool/semantic-index/`. If not, an error is shown with the build command.
+
+## Remote embedding endpoint
+
+CPU embedding inference is slow (`build_index.py` can take an hour on a
+few thousand chunks) and GPU embedding is not always available. To skip
+the local embedding model entirely, point both `build_index.py` and the
+RAG MCP server at an OpenAI-compatible `/v1/embeddings` endpoint (for
+example a LiteLLM proxy that fronts a hosted embedding model):
+
+```bash
+export GEAK_EMBEDDING_BASE_URL="https://your-embedding-endpoint/v1"
+export GEAK_EMBEDDING_API_KEY="<your-key>"          # falls back to OPENAI_API_KEY / SAFE_API_KEY
+export GEAK_EMBEDDING_MODEL="BAAI/bge-large-en-v1.5"  # defaults to the same name passed to build_index.py
+```
+
+When `GEAK_EMBEDDING_BASE_URL` is set:
+
+- `python scripts/build_index.py` builds FAISS using remote embeddings
+  (no 1.3 GB model download, no local GPU/CPU inference).
+- The RAG MCP server's `query` / `optimize` tools issue remote embedding
+  calls at query time using the same endpoint.
+
+Leave `GEAK_EMBEDDING_BASE_URL` unset to keep the historical local
+HuggingFace path. The deployed gateway URL is intentionally not bundled
+in this repo — set the environment variables in your local profile or
+deployment scripts.
 
 ## Postprocessor
 

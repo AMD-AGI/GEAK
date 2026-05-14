@@ -27,13 +27,14 @@ from typing import Callable
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import (
     Language,
     MarkdownHeaderTextSplitter,
     RecursiveCharacterTextSplitter,
 )
 from rank_bm25 import BM25Okapi
+
+from rag_mcp.embedding_factory import make_embeddings, remote_endpoint_configured
 
 
 # Default paths
@@ -617,13 +618,24 @@ def build_index(
         print(f"    Layer {layer}: {layer_counts[layer]} chunks")
     
     # Step 3: Initialize embeddings
-    print(f"\nStep 3: Initializing embeddings ({model_name}) on {embedding_device}...")
-    embeddings = HuggingFaceEmbeddings(
-        model_name=model_name,
-        model_kwargs={"device": embedding_device},
-        encode_kwargs={"normalize_embeddings": True},
+    if remote_endpoint_configured():
+        print(
+            f"\nStep 3: Initializing embeddings via remote endpoint "
+            f"(GEAK_EMBEDDING_BASE_URL) using model={model_name}..."
+        )
+    else:
+        print(
+            f"\nStep 3: Initializing embeddings ({model_name}) on {embedding_device}..."
+        )
+    embeddings = make_embeddings(
+        huggingface_model_name=model_name,
+        device=embedding_device,
+        normalize=True,
     )
-    print(f"  ✓ Embeddings model loaded on {embedding_device}")
+    if remote_endpoint_configured():
+        print("  ✓ Embeddings client configured against remote endpoint")
+    else:
+        print(f"  ✓ Embeddings model loaded on {embedding_device}")
     
     # Step 4: Build FAISS index
     print("\nStep 4: Building FAISS index...")

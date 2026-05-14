@@ -91,13 +91,14 @@ class HybridRetriever:
 
     @property
     def embeddings(self):
-        """Lazy load HuggingFace embeddings."""
+        """Lazy load embeddings (remote OpenAI-compatible endpoint or local HF)."""
         if self._embeddings is None:
-            from langchain_huggingface import HuggingFaceEmbeddings
-            self._embeddings = HuggingFaceEmbeddings(
-                model_name=self.embedding_model,
-                model_kwargs={"device": "cpu"},
-                encode_kwargs={"normalize_embeddings": True},
+            from rag_mcp.embedding_factory import make_embeddings
+
+            self._embeddings = make_embeddings(
+                huggingface_model_name=self.embedding_model,
+                device="cpu",
+                normalize=True,
             )
         return self._embeddings
 
