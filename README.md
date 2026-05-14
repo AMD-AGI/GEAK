@@ -12,20 +12,110 @@ A collection of reusable skills for GPU kernel performance optimization. These s
 
 GEAK is a 6-phase autonomous pipeline that analyzes, profiles, and optimizes GPU kernels (Triton or HIP) on AMD MI300X hardware. It spawns parallel optimization workers, each exploring a different strategy, and selects the best verified result.
 
-### Pipeline
+### Architecture
 
+```mermaid
+flowchart TD
+    User([User / Agent]) -->|"/geak --kernel_path ... --repo_path ..."| Orch
+
+    subgraph Orch["Orchestrator (SKILL.md)"]
+        direction TB
+        P1["Phase 1: Analyze<br/><i>analyze.md</i>"]
+        P2["Phase 2: Test Harness<br/><i>test_harness.md</i>"]
+        P3["Phase 3: Profile<br/><i>profile.md</i>"]
+        P4["Phase 4: Plan<br/><i>plan.md</i>"]
+        P6["Phase 6: Evaluate<br/><i>evaluate.md</i>"]
+        P1 --> P2 --> P3 --> P4
+        P4 -.->|generate N tasks| Spawn
+        Collect -.-> P6
+    end
+
+    subgraph KB["Knowledge Base"]
+        direction TB
+        K1["amd_mi300x_guide.md"]
+        K2["hip_patterns.md<br/>triton_patterns.md"]
+        K3["optimization_strategies.md"]
+        K4["profiling_analysis.md"]
+        K5["working_memory_guide.md"]
+    end
+
+    subgraph Scripts["Scripts"]
+        S1["create_harness.py"]
+        S2["profile_kernel.sh"]
+    end
+
+    P1 -.- K1
+    P2 -.- S1
+    P3 -.- S2
+    P3 -.- K4
+    P4 -.- K3
+    P4 -.- K2
+
+    subgraph Phase5["Phase 5: Parallel Optimization"]
+        direction TB
+        Spawn(["Spawn Workers"])
+        subgraph Workers["  "]
+            direction LR
+            W0["Worker 0<br/>GPU 0<br/>Strategy A"]
+            W1["Worker 1<br/>GPU 1<br/>Strategy B"]
+            W2["Worker 2<br/>GPU 2<br/>Strategy C"]
+            WN["Worker N<br/>GPU N<br/>Strategy ..."]
+        end
+        Collect(["Collect Results"])
+        Spawn --> Workers --> Collect
+    end
+
+    subgraph Shared["Shared Context (read-only)"]
+        direction LR
+        SC1["Kernel Source"]
+        SC2["Test Harness<br/>+ COMMANDMENT"]
+        SC3["Baseline Metrics<br/>+ Profiling"]
+        SC4["Knowledge Files"]
+    end
+
+    Workers -.->|reads| Shared
+
+    subgraph Output["Output (kernel_eval/)"]
+        direction LR
+        O1["baseline/<br/><i>original kernel</i>"]
+        O2["optimized/<br/><i>best kernel + patch</i>"]
+        O3["report/<br/><i>final_report.json</i><br/><i>summary.md</i>"]
+    end
+
+    P6 --> Output
 ```
-Phase 1: Analyze        Understand kernel type, dependencies, hardware
-             |
-Phase 2: Test Harness   Create/discover tests, generate evaluation contract
-             |
-Phase 3: Profile        Profile with rocprof-compute, classify bottleneck
-             |
-Phase 4: Plan           Generate diverse optimization strategies
-             |
-Phase 5: Optimize       Spawn N parallel workers on separate GPUs
-             |
-Phase 6: Evaluate       Verify results, select best, generate report
+
+#### Worker Lifecycle (Phase 5 Detail)
+
+Each worker is an independent sub-agent running the 11-step workflow from `optimize_worker.md`:
+
+```mermaid
+flowchart LR
+    subgraph Worker["Worker N (optimize_worker.md)"]
+        direction TB
+        R["Read profiling<br/>+ kernel source"] --> Plan["Plan strategy"]
+        Plan --> Impl["Implement<br/>optimization"]
+        Impl --> Test{"Correctness<br/>pass?"}
+        Test -->|No| Revert["Revert changes"]
+        Revert --> Impl
+        Test -->|Yes| Bench["Benchmark"]
+        Bench --> Check{"Speedup<br/>> 1.0x?"}
+        Check -->|Yes| Save["Save patch<br/>+ update best"]
+        Check -->|No| Guard{"Budget<br/>remaining?"}
+        Save --> Guard
+        Guard -->|Yes| Impl
+        Guard -->|No| Submit["Submit<br/>worker_result.json"]
+    end
+
+    subgraph Guards["Self-Monitoring Guards"]
+        direction TB
+        G1["10 steps no improvement → consider stop"]
+        G2["Same error 3x → switch approach"]
+        G3["3 results within 1% → stop tuning"]
+        G4["Speedup > 1.0x → SAVE immediately"]
+    end
+
+    Worker -.-> Guards
 ```
 
 ### Features
