@@ -1,6 +1,6 @@
 # PerfSkills
 
-A collection of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skills for GPU kernel performance optimization.
+A collection of reusable skills for GPU kernel performance optimization. These skills encode expert-level optimization knowledge and workflows that can be consumed by any LLM-based coding agent.
 
 ## Available Skills
 
@@ -15,16 +15,16 @@ GEAK is a 6-phase autonomous pipeline that analyzes, profiles, and optimizes GPU
 ### Pipeline
 
 ```
-Phase 1: Analyze       Understand kernel type, dependencies, hardware
-              |
+Phase 1: Analyze        Understand kernel type, dependencies, hardware
+             |
 Phase 2: Test Harness   Create/discover tests, generate evaluation contract
-              |
+             |
 Phase 3: Profile        Profile with rocprof-compute, classify bottleneck
-              |
+             |
 Phase 4: Plan           Generate diverse optimization strategies
-              |
+             |
 Phase 5: Optimize       Spawn N parallel workers on separate GPUs
-              |
+             |
 Phase 6: Evaluate       Verify results, select best, generate report
 ```
 
@@ -51,13 +51,16 @@ Phase 6: Evaluate       Verify results, select best, generate report
   - `hipcc` compiler
   - `rocprof-compute` (profiling)
   - Python 3.8+
-  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
 
-## Quick Start
+## Usage
 
-### 1. Install the skill
+GEAK skills are agent-agnostic -- they provide structured optimization knowledge and workflows that any LLM-based coding agent can follow. Below are specific integration methods.
 
-Copy or symlink the `skills/geak` directory into your Claude Code skills location:
+### GEAK Skills Mode (Claude Code)
+
+The native integration with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Skills are loaded as slash commands with full tool access (Bash, Read, Write, Edit, Agent).
+
+**Install:**
 
 ```bash
 # Option A: Copy to project-local skills
@@ -68,9 +71,7 @@ cp -r /path/to/PerfSkills/skills/geak .claude/skills/
 ln -s /path/to/PerfSkills/skills/geak .claude/skills/geak
 ```
 
-### 2. Run optimization
-
-In Claude Code, invoke the skill:
+**Run:**
 
 ```
 /geak --kernel_path /path/to/kernel.hip --repo_path /path/to/repo
@@ -86,7 +87,18 @@ With optional parameters:
       --max_rounds 3
 ```
 
-### 3. Check results
+### Other Agents
+
+The skills are plain Markdown files with structured instructions. To integrate with other agents:
+
+1. **Feed `SKILL.md` as the system/orchestrator prompt** -- it defines the full 6-phase pipeline
+2. **Load knowledge files on demand** -- `knowledge/*.md` provides domain expertise (hardware specs, optimization patterns, profiling interpretation)
+3. **Use sub-skills as phase instructions** -- `sub_skills/*.md` contains step-by-step instructions for each phase
+4. **Run scripts directly** -- `scripts/create_harness.py` and `scripts/profile_kernel.sh` are standalone tools
+
+The agent needs the ability to: read/write files, execute shell commands, and (for Phase 5) spawn parallel sub-agents.
+
+### Output
 
 All outputs are saved under `./kernel_eval/<kernel_name>_<timestamp>/`:
 
@@ -100,31 +112,75 @@ kernel_eval/<kernel_name>_<YYYYMMDD_HHMMSS>/
     └── summary.md          # Human-readable summary
 ```
 
-## Benchmark Results
+## Benchmark
 
-Tested on 13 HIP kernels on AMD MI300X. Speedup = arithmetic mean across test cases per kernel.
+### Running the Evaluation
 
-| Kernel | GEAK_v3 | Claude Code GEAK | Winner |
-|--------|---------|------------------|--------|
+To reproduce the benchmark on your own kernel set:
+
+1. **Prepare kernel tasks** -- each kernel in its own directory with source file and Makefile:
+   ```
+   kernel_tasks/
+   ├── my_kernel_1/
+   │   ├── my_kernel_1.hip
+   │   └── Makefile
+   ├── my_kernel_2/
+   │   └── ...
+   ```
+
+2. **Run GEAK on each kernel** (example with Claude Code Skills Mode):
+   ```
+   cd kernel_tasks/my_kernel_1
+   /geak --kernel_path $(pwd)/my_kernel_1.hip \
+         --repo_path $(pwd) \
+         --num_parallel 2 \
+         --gpu_ids 0,1
+   ```
+
+3. **Collect results** from `kernel_eval/*/report/final_report.json`. Each report contains per-test-case speedups and aggregate metrics (geometric mean, arithmetic mean).
+
+4. **Batch run** -- to optimize multiple kernels, launch one GEAK instance per kernel on separate GPUs:
+   ```bash
+   # Example: 13 kernels across 13 GPUs
+   for i in $(seq 0 12); do
+       kernel_dir=$(ls -d kernel_tasks/*/ | sed -n "$((i+1))p")
+       kernel_file=$(find "$kernel_dir" -name "*.hip" | head -1)
+       # Launch each on its own GPU pair
+       /geak --kernel_path "$kernel_file" \
+             --repo_path "$kernel_dir" \
+             --gpu_ids "$((i*2)),$((i*2+1))"
+   done
+   ```
+
+### Results
+
+See [examples/results/](examples/results/) for detailed benchmark reports.
+
+**GEAK Skills Mode vs GEAK_v3** on 13 HIP kernels (AMD MI300X):
+
+| Kernel | GEAK_v3 | Skills Mode | Winner |
+|--------|---------|-------------|--------|
 | roipoint_pool3d | 16.82x | 14.61x | GEAK_v3 |
-| ball_query | 11.62x | 13.14x | Claude Code |
+| ball_query | 11.62x | 13.14x | Skills Mode |
 | roiaware_pool3d | 10.24x | 9.92x | GEAK_v3 |
-| three_nn | 1.43x | 8.82x | Claude Code |
-| knn | FAIL | 6.56x | Claude Code |
-| assign_score_withk | 3.76x | 4.00x | Claude Code |
-| silu | 1.21x | 1.26x | Claude Code |
-| matrix_multiplication | 1.14x | 1.19x | Claude Code |
-| three_interpolate | 1.01x | 1.15x | Claude Code |
-| furthest_point_sample | FAIL | 1.04x | Claude Code |
+| three_nn | 1.43x | 8.82x | Skills Mode |
+| knn | FAIL | 6.56x | Skills Mode |
+| assign_score_withk | 3.76x | 4.00x | Skills Mode |
+| silu | 1.21x | 1.26x | Skills Mode |
+| matrix_multiplication | 1.14x | 1.19x | Skills Mode |
+| three_interpolate | 1.01x | 1.15x | Skills Mode |
+| furthest_point_sample | FAIL | 1.04x | Skills Mode |
 | points_in_boxes | 1.03x | 1.04x | Tie |
 | gather_points | 1.32x | 0.96x | GEAK_v3 |
-| mla_decode | N/A | 586.00x | Claude Code |
+| mla_decode | N/A | 586.00x | Skills Mode |
 
-| Summary | GEAK_v3 | Claude Code |
+| Summary | GEAK_v3 | Skills Mode |
 |---------|---------|-------------|
 | Wins | 3 | 9 |
 | Failures | 2 | 0 |
 | Arith Mean (12 common, fail=1.0x) | 4.30x | 5.31x |
+
+Full analysis: [examples/results/geak_skills_mode_vs_geak_v3.md](examples/results/geak_skills_mode_vs_geak_v3.md)
 
 ## Repository Structure
 
@@ -132,26 +188,29 @@ Tested on 13 HIP kernels on AMD MI300X. Speedup = arithmetic mean across test ca
 PerfSkills/
 ├── README.md
 ├── LICENSE
+├── examples/
+│   └── results/                       # Benchmark reports
+│       └── geak_skills_mode_vs_geak_v3.md
 ├── skills/
 │   └── geak/
-│       ├── SKILL.md                  # Main orchestrator (6-phase pipeline)
-│       ├── knowledge/                # Domain knowledge base
-│       │   ├── amd_mi300x_guide.md   # MI300X hardware reference
-│       │   ├── hip_patterns.md       # HIP optimization patterns
-│       │   ├── triton_patterns.md    # Triton optimization patterns
+│       ├── SKILL.md                   # Main orchestrator (6-phase pipeline)
+│       ├── knowledge/                 # Domain knowledge base
+│       │   ├── amd_mi300x_guide.md    # MI300X hardware reference
+│       │   ├── hip_patterns.md        # HIP optimization patterns
+│       │   ├── triton_patterns.md     # Triton optimization patterns
 │       │   ├── optimization_strategies.md  # Per-bottleneck strategies
-│       │   ├── profiling_analysis.md # Profiling interpretation guide
-│       │   └── working_memory_guide.md    # Worker self-monitoring
-│       ├── scripts/                  # Tooling
-│       │   ├── create_harness.py     # Test harness generator
-│       │   └── profile_kernel.sh     # Profiling wrapper
-│       └── sub_skills/               # Phase instructions
-│           ├── analyze.md            # Phase 1: Kernel analysis
-│           ├── test_harness.md       # Phase 2: Test setup
-│           ├── profile.md            # Phase 3: Profiling
-│           ├── plan.md              # Phase 4: Strategy planning
-│           ├── optimize_worker.md    # Phase 5: Worker instructions
-│           └── evaluate.md           # Phase 6: Result evaluation
+│       │   ├── profiling_analysis.md  # Profiling interpretation guide
+│       │   └── working_memory_guide.md     # Worker self-monitoring
+│       ├── scripts/                   # Tooling
+│       │   ├── create_harness.py      # Test harness generator
+│       │   └── profile_kernel.sh      # Profiling wrapper
+│       └── sub_skills/                # Phase instructions
+│           ├── analyze.md             # Phase 1: Kernel analysis
+│           ├── test_harness.md        # Phase 2: Test setup
+│           ├── profile.md             # Phase 3: Profiling
+│           ├── plan.md               # Phase 4: Strategy planning
+│           ├── optimize_worker.md     # Phase 5: Worker instructions
+│           └── evaluate.md            # Phase 6: Result evaluation
 ```
 
 ## License
