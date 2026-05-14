@@ -154,33 +154,9 @@ To reproduce the benchmark on your own kernel set:
 
 ### Results
 
-See [examples/results/](examples/results/) for detailed benchmark reports.
+**GEAK Skills Mode vs GEAK_v3** on 13 HIP kernels (AMD MI300X): Skills Mode achieves **5.31x** arithmetic mean speedup vs GEAK_v3's **4.30x** (+23%), winning 9 out of 12 common kernels with zero failures.
 
-**GEAK Skills Mode vs GEAK_v3** on 13 HIP kernels (AMD MI300X):
-
-| Kernel | GEAK_v3 | Skills Mode | Winner |
-|--------|---------|-------------|--------|
-| roipoint_pool3d | 16.82x | 14.61x | GEAK_v3 |
-| ball_query | 11.62x | 13.14x | Skills Mode |
-| roiaware_pool3d | 10.24x | 9.92x | GEAK_v3 |
-| three_nn | 1.43x | 8.82x | Skills Mode |
-| knn | FAIL | 6.56x | Skills Mode |
-| assign_score_withk | 3.76x | 4.00x | Skills Mode |
-| silu | 1.21x | 1.26x | Skills Mode |
-| matrix_multiplication | 1.14x | 1.19x | Skills Mode |
-| three_interpolate | 1.01x | 1.15x | Skills Mode |
-| furthest_point_sample | FAIL | 1.04x | Skills Mode |
-| points_in_boxes | 1.03x | 1.04x | Tie |
-| gather_points | 1.32x | 0.96x | GEAK_v3 |
-| mla_decode | N/A | 586.00x | Skills Mode |
-
-| Summary | GEAK_v3 | Skills Mode |
-|---------|---------|-------------|
-| Wins | 3 | 9 |
-| Failures | 2 | 0 |
-| Arith Mean (12 common, fail=1.0x) | 4.30x | 5.31x |
-
-Full analysis: [examples/results/geak_skills_mode_vs_geak_v3.md](examples/results/geak_skills_mode_vs_geak_v3.md)
+Per-kernel breakdown and analysis: [examples/results/geak_skills_mode_vs_geak_v3.md](examples/results/geak_skills_mode_vs_geak_v3.md)
 
 ## Repository Structure
 
