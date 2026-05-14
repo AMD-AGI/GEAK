@@ -53,10 +53,6 @@ Comparison of GEAK_v3 and GEAK Skills Mode optimization results on AMD MI300X (g
 3. GEAK skill installed (see [README](../../README.md#geak-skills-mode-claude-code))
 4. A kernel task directory with source file and Makefile
 
-> **Important**: `num_parallel` must not exceed the number of GPUs in `gpu_ids`.
-> Each worker needs a dedicated GPU for accurate benchmarking. Sharing a GPU between
-> workers causes timing interference and unreliable results.
-
 ### Single Kernel
 
 Copy the following prompt into Claude Code to optimize a single kernel (2 workers, 2 GPUs):
