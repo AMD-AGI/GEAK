@@ -210,12 +210,18 @@ def run_unit_test_agent(
     preferred_harness_path: Path | None = None,
     kernel_path: Path | None = None,
     discovery_context: str = "",
+    user_task: str | None = None,
 ) -> str:
     """Run UnitTestAgent in ``repo`` and return the extracted test command string.
 
     If *discovery_context* is provided (e.g. from :func:`format_discovery_for_agent`),
     it is appended to the task prompt so the agent starts with pre-scanned results
     instead of exploring from scratch.
+
+    If *user_task* is provided (the user's `-t` prompt forwarded from mini.py via
+    run_preprocessor), it is prepended as a HIGHEST-PRIORITY context block so the
+    UTA can honour production-shape contracts the user supplied (overriding the
+    default "benchmark file → ALL_SHAPES" rule in the system prompt).
     """
     agent_config, _ = load_preprocess_agent_config("mini_unit_test_agent")
 
@@ -257,6 +263,19 @@ def run_unit_test_agent(
             task += f"\nKernel repo-relative directory: {rel_kernel_dir.as_posix()}"
     if discovery_context:
         task += f"\n\n{discovery_context}"
+
+    if user_task and user_task.strip():
+        # Prepend the user's -t prompt as a HIGHEST-PRIORITY context block.
+        # The mini_unit_test_agent.yaml system prompt has a matching rule
+        # that recognises this block and uses its shape/dtype contract in
+        # preference to the discovered benchmark file's defaults.
+        task = (
+            "USER TASK CONTEXT (production workload contract -- HIGHEST PRIORITY):\n"
+            "================================================================\n"
+            + user_task.strip()
+            + "\n================================================================\n\n"
+            + task
+        )
 
     exit_status, result = agent.run(task)
     if exit_status != "Submitted":

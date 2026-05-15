@@ -476,6 +476,7 @@ def run_preprocessor(
     target_language: str | None = None,
     budget=None,
     state=None,
+    user_task: str | None = None,
 ) -> dict[str, Any]:
     """Run all preprocessing steps and return a context dict.
 
@@ -922,6 +923,7 @@ def run_preprocessor(
                     kernel_path=Path(kernel_path),
                     discovery_context=discovery_context,
                     gpu_id=gpu_id,
+                    user_task=user_task,
                 )
                 _uta_harness = extract_harness_path(test_command)
                 _uta_harness = _ensure_harness_has_no_kernel_defs(_uta_harness, output_dir, ctx)
@@ -971,6 +973,7 @@ def run_preprocessor(
                                     log_dir=output_dir,
                                     gpu_id=gpu_id,
                                     validation_feedback=shape_feedback,
+                                    user_task=user_task,
                                 )
                                 if shapes_ok:
                                     if shape_feedback:

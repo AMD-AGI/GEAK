@@ -579,6 +579,9 @@ def main(
         target_language=_target_language,
         budget=budget,
         state=state,
+        # Forward the user's -t task to the preprocess sub-agents (UTA + ShapeFixer)
+        # so a USER TASK CONTEXT block can override op-test default shapes.
+        user_task=task_content,
     )
     logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
 

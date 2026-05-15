@@ -548,9 +548,7 @@ class ParallelAgent(DefaultAgent):
                     logger.debug("Parallel agent %d assigned GPU(s) %s", agent_id, devs)
                     if console:
                         with _stdout_lock:
-                            console.print(
-                                f"[bold green]Parallel agent {agent_id} using GPU(s) {devs}[/bold green]"
-                            )
+                            console.print(f"[bold green]Parallel agent {agent_id} using GPU(s) {devs}[/bold green]")
                             if hasattr(sys.stdout, "flush"):
                                 sys.stdout.flush()
             env_config_dict["env"] = new_env
