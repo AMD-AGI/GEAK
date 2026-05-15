@@ -21,6 +21,7 @@ class AmdOpenAIModel(AmdLlmModelBase):
 
     def _init_client(self):
         api_key = self._get_api_key()
+        user = self._get_user()
         base_url = self.config.base_url or f"https://llm-api.amd.com/openai/{self.config.model_name}"
         self.client = openai.AzureOpenAI(
             api_key="dummy",
@@ -28,6 +29,7 @@ class AmdOpenAIModel(AmdLlmModelBase):
             base_url=base_url,
             default_headers={
                 "Ocp-Apim-Subscription-Key": api_key,
+                "user": user,
             },
         )
 

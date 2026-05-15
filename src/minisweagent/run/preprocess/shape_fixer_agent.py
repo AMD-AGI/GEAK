@@ -136,6 +136,7 @@ def _build_shape_fixer_task(
     kernel_path: Path | None,
     gpu_id: int,
     validation_feedback: list[str] | None,
+    user_task: str | None = None,
 ) -> str:
     quoted_harness = shlex.quote(str(harness_path))
     validation_prefix = f"HIP_VISIBLE_DEVICES={gpu_id} GEAK_BENCHMARK_ITERATIONS=5"
@@ -180,7 +181,24 @@ def _build_shape_fixer_task(
             ]
         )
 
-    return "\n".join(lines) + "\n"
+    body = "\n".join(lines) + "\n"
+
+    if user_task and user_task.strip():
+        # The user's -t prompt is the HIGHEST-PRIORITY contract: if it
+        # specifies production shapes/dtypes, those override the "source
+        # file is authoritative" rule above. The mini_shape_fixer.yaml
+        # system prompt has a matching override rule that recognises this
+        # block. Do NOT flag a harness as drifting from the benchmark file
+        # if the harness's shapes match the user task contract instead.
+        prefix = (
+            "USER TASK CONTEXT (production workload contract -- HIGHEST PRIORITY):\n"
+            "================================================================\n"
+            + user_task.strip()
+            + "\n================================================================\n\n"
+        )
+        body = prefix + body
+
+    return body
 
 
 def run_shape_fixer(
@@ -193,6 +211,7 @@ def run_shape_fixer(
     log_dir: Path | None = None,
     gpu_id: int = 0,
     validation_feedback: list[str] | None = None,
+    user_task: str | None = None,
 ) -> bool:
     """Run the shape fixer agent. Returns True if shapes were verified or fixed."""
     try:
@@ -228,6 +247,7 @@ def run_shape_fixer(
         kernel_path=kernel_path,
         gpu_id=gpu_id,
         validation_feedback=validation_feedback,
+        user_task=user_task,
     )
 
     timeout_s = int(os.environ.get("GEAK_SHAPE_FIXER_TIMEOUT", "300"))

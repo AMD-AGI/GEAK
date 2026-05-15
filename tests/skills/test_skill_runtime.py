@@ -187,3 +187,49 @@ class TestSkillRuntimeIntegration:
             s = runtime.skills["silu-optimization"]
             assert s.path == _USER_SKILLS_SILU.parent
             assert "AMD" in s.description or "silu" in s.description.lower()
+
+
+_SKILLS_ROOT = _REPO_ROOT / "skills"
+
+_EXPECTED_FLYDSL_DOCS = [
+    "flydsl_optimization.md",
+    "flydsl_debug_kernel.md",
+    "flydsl_tile_programming.md",
+]
+
+
+class TestFlydslUnifiedSkillIntegration:
+    def test_flydsl_skill_parse_metadata(self):
+        skill_dir = _SKILLS_ROOT / "flydsl"
+        assert (skill_dir / "SKILL.md").is_file()
+
+        rt = SkillRuntime.__new__(SkillRuntime)
+        desc = rt._parse_metadata(skill_dir)
+
+        assert desc.name == "flydsl"
+        assert desc.path == skill_dir
+        assert desc.description.strip()
+
+    def test_init_discovers_flydsl_skill(self):
+        runtime = SkillRuntime()
+
+        assert "flydsl" in runtime.skills
+        assert runtime.skills["flydsl"].path == _SKILLS_ROOT / "flydsl"
+
+    def test_flydsl_skill_has_docs_subdirectory(self):
+        docs_dir = _SKILLS_ROOT / "flydsl" / "docs"
+        assert docs_dir.is_dir(), "flydsl missing docs/ subdirectory"
+        for doc_name in _EXPECTED_FLYDSL_DOCS:
+            doc_path = docs_dir / doc_name
+            assert doc_path.is_file(), f"flydsl missing doc: {doc_name}"
+            content = doc_path.read_text(encoding="utf-8")
+            assert content.strip(), f"flydsl doc {doc_name} is empty"
+
+    def test_flydsl_skill_md_references_docs(self):
+        skill_md = (_SKILLS_ROOT / "flydsl" / "SKILL.md").read_text(encoding="utf-8")
+        assert "docs/" in skill_md, "flydsl SKILL.md does not reference docs/ subdirectory"
+
+    def test_flydsl_optimization_not_separate_skill(self):
+        """flydsl-optimization should not exist as a separate skill anymore."""
+        runtime = SkillRuntime()
+        assert "flydsl-optimization" not in runtime.skills

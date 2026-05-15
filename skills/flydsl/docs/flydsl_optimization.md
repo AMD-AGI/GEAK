@@ -1,6 +1,8 @@
 ---
-name: flydsl-optimization
-description: Use when optimizing FlyDSL kernels (@flyc.kernel / flydsl.compiler) on AMD GPUs.
+layer: "flydsl"
+category: "optimization"
+tags: ["flydsl", "optimization", "kernel", "amd", "gpu", "mfma", "lds"]
+last_updated: 2026-06-01
 ---
 
 # FlyDSL Kernel Optimization Workflow
