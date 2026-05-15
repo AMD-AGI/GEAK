@@ -993,8 +993,10 @@ class SaveAndTestTool:
             self._log(error_msg)
             return error_msg, False, -1
 
-        # Guardrail: restore any non-source files the agent modified
-        self._restore_non_source_files()
+        # NOTE: protected-file restoration (_restore_non_source_files) removed.
+        # It was silently reverting the optimization target when the file lived
+        # inside a _PROTECTED_DIRS directory (e.g. tests/), causing the agent
+        # to always benchmark the unmodified baseline.
 
         test_env = self._build_test_env()
         self._restore_missing_harness_helper()
