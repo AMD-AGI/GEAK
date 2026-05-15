@@ -219,3 +219,4 @@ __marimo__/
 
 # GEAK runtime artifacts
 kernel_eval/
+exp/
