@@ -62,6 +62,99 @@ class TestParseGpuIds:
         assert parse_gpu_ids(",0,1") == [0, 1]
 
 
+# --- Test ParallelAgent._gpu_groups_for_homogeneous_parallel ---
+
+
+class TestGpuGroupsForHomogeneousParallel:
+    """Regression guard for the partition table introduced when
+    homogeneous mode started distributing "extra" GPUs across parallel
+    agents instead of leaving them idle (commit ``aaf54f7``).
+
+    Previously, ``--num-parallel 1 --gpus 0,1,2,3,4,5,6,7`` exposed
+    only ``cuda:0`` to the single agent.  After ``aaf54f7`` the same
+    invocation exposes all 8 GPUs (e.g. TP across the listed group).
+    This behaviour change is intentional but easy to break silently,
+    so we lock the full table here.
+    """
+
+    @staticmethod
+    def _groups(gpu_ids, n):
+        return ParallelAgent._gpu_groups_for_homogeneous_parallel(gpu_ids, n)
+
+    def test_one_gpu_per_agent_when_equal(self):
+        """N agents, N GPUs: one per agent."""
+        assert self._groups([0, 1, 2, 3], 4) == [[0], [1], [2], [3]]
+
+    def test_even_split_two_agents(self):
+        """4 GPUs, 2 agents: clean half-split."""
+        assert self._groups([0, 1, 2, 3], 2) == [[0, 1], [2, 3]]
+
+    def test_single_agent_gets_all_gpus(self):
+        """1 agent, 8 GPUs: the agent sees ALL 8 (TP-style usage).
+
+        This is the post-``aaf54f7`` behaviour change.  Previously the
+        single agent would have seen only ``cuda:0``.
+        """
+        assert self._groups([0, 1, 2, 3, 4, 5, 6, 7], 1) == [[0, 1, 2, 3, 4, 5, 6, 7]]
+
+    def test_more_agents_than_gpus(self):
+        """1 GPU, 4 agents: only the first agent gets a GPU; the rest
+        get empty groups (no HIP_VISIBLE_DEVICES override).
+        """
+        assert self._groups([0], 4) == [[0], [], [], []]
+
+    def test_uneven_split_assigns_remainder_to_first_agents(self):
+        """5 GPUs, 3 agents: contiguous; size differs by ≤1 across
+        agents; the leftover GPUs go to the first agents in order."""
+        assert self._groups([0, 1, 2, 3, 4], 3) == [[0, 1], [2, 3], [4]]
+
+    def test_uneven_split_8_into_3(self):
+        """8 GPUs, 3 agents: contiguous split ``[[0,1,2],[3,4,5],[6,7]]``."""
+        assert self._groups([0, 1, 2, 3, 4, 5, 6, 7], 3) == [
+            [0, 1, 2],
+            [3, 4, 5],
+            [6, 7],
+        ]
+
+    def test_no_gpus(self):
+        """Empty GPU list returns one empty group per agent."""
+        assert self._groups([], 2) == [[], []]
+
+    def test_zero_parallel_returns_empty(self):
+        """Defensive: ``num_parallel == 0`` returns an empty top-level
+        list (not a crash, not ``[[]]``)."""
+        assert self._groups([0, 1, 2, 3], 0) == []
+        assert self._groups([], 0) == []
+
+    def test_partition_property(self):
+        """For any (gpu_ids, num_parallel) with num_parallel > 0,
+        concatenating the groups must reproduce the input list, and the
+        group count must equal ``num_parallel``."""
+        cases = [
+            ([0, 1, 2, 3], 2),
+            ([0, 1, 2, 3, 4, 5, 6, 7], 1),
+            ([0, 1, 2, 3, 4, 5, 6, 7], 3),
+            ([0, 1, 2, 3, 4, 5, 6, 7], 8),
+            ([0, 1, 2, 3, 4], 7),
+        ]
+        for gpu_ids, n in cases:
+            groups = self._groups(gpu_ids, n)
+            assert len(groups) == n, (gpu_ids, n, groups)
+            flat: list[int] = []
+            for g in groups:
+                flat.extend(g)
+            assert flat == gpu_ids, (gpu_ids, n, groups)
+
+    def test_group_sizes_balanced_within_one(self):
+        """Sanity: when num_parallel <= len(gpu_ids), the largest group
+        is at most one element larger than the smallest non-empty group
+        (no big imbalances)."""
+        gpu_ids = list(range(11))
+        groups = self._groups(gpu_ids, 4)
+        sizes = [len(g) for g in groups]
+        assert max(sizes) - min(sizes) <= 1, (sizes, groups)
+
+
 # --- Test HomogeneousAgent Configuration ---
 
 

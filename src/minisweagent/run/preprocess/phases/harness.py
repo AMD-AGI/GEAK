@@ -113,12 +113,12 @@ class HarnessPhase(Phase):
         # raises for a contract failure; it just returns None.  Layer 5
         # picks up the seed automatically.
         layers: list[tuple[str, Any]] = [
-            ("already_set",        self._layer1_already_set),
-            ("explicit_harness",   self._layer2_explicit),
-            ("split_hint",         self._layer3_split_hint),
-            ("testcase_cache",    self._layer4_cache),
-            ("harness_builder",   self._layer5_harness_builder),
-            ("unit_test_agent",   self._layer6_unit_test_agent),
+            ("already_set", self._layer1_already_set),
+            ("explicit_harness", self._layer2_explicit),
+            ("split_hint", self._layer3_split_hint),
+            ("testcase_cache", self._layer4_cache),
+            ("harness_builder", self._layer5_harness_builder),
+            ("unit_test_agent", self._layer6_unit_test_agent),
             ("discovery_fallback", self._layer7_discovery_fallback),
         ]
 
@@ -143,9 +143,7 @@ class HarnessPhase(Phase):
             # pipelines used discovery-only fallbacks that may still be
             # valid test commands.  We record the failure in
             # testcase_selection so callers can diagnose.
-            logger.debug(
-                "HarnessPhase: no layer produced a harness; deferring to legacy."
-            )
+            logger.debug("HarnessPhase: no layer produced a harness; deferring to legacy.")
             ctx.testcase_selection = testcase_selection
             ctx.phases_run.append(self.name)
             return
@@ -173,9 +171,7 @@ class HarnessPhase(Phase):
     # Layer 1 — harness_path already populated by a previous phase
     # ──────────────────────────────────────────────────────────────────
 
-    def _layer1_already_set(
-        self, ctx: PhaseContext, _selection: dict[str, Any]
-    ) -> _LayerResult | None:
+    def _layer1_already_set(self, ctx: PhaseContext, _selection: dict[str, Any]) -> _LayerResult | None:
         """Short-circuit: some upstream phase already set ``ctx.harness_path``."""
         if not ctx.harness_path:
             return None
@@ -190,9 +186,7 @@ class HarnessPhase(Phase):
     # Layer 2 — explicit --harness from caller (CLI flag)
     # ──────────────────────────────────────────────────────────────────
 
-    def _layer2_explicit(
-        self, ctx: PhaseContext, selection: dict[str, Any]
-    ) -> _LayerResult | None:
+    def _layer2_explicit(self, ctx: PhaseContext, selection: dict[str, Any]) -> _LayerResult | None:
         """User passed ``--harness`` on the CLI or mentioned one in the prompt.
 
         Validate the user's harness against the FULL language contract
@@ -297,9 +291,7 @@ class HarnessPhase(Phase):
 
         # Full contract passes — strip any kernel defs and adopt the
         # user's harness as the pipeline's canonical harness.
-        resolved_path = _ensure_harness_has_no_kernel_defs(
-            resolved_path, Path(ctx.output_dir), {}
-        )
+        resolved_path = _ensure_harness_has_no_kernel_defs(resolved_path, Path(ctx.output_dir), {})
         return _LayerResult(
             harness_path=resolved_path,
             test_command=_build_test_command(resolved_path),
@@ -311,9 +303,7 @@ class HarnessPhase(Phase):
     # Layer 3 — split-harness-hint from DiscoveryPhase
     # ──────────────────────────────────────────────────────────────────
 
-    def _layer3_split_hint(
-        self, ctx: PhaseContext, _selection: dict[str, Any]
-    ) -> _LayerResult | None:
+    def _layer3_split_hint(self, ctx: PhaseContext, _selection: dict[str, Any]) -> _LayerResult | None:
         """DiscoveryPhase detected a merged kernel and split off a harness."""
         if not ctx.split_harness_hint or ctx.harness:
             return None
@@ -331,9 +321,7 @@ class HarnessPhase(Phase):
         if not ok_static:
             return None
 
-        ok_runtime, _, results = execute_harness_validation(
-            candidate, repo_root=ctx.repo_root, gpu_id=ctx.gpu_id
-        )
+        ok_runtime, _, results = execute_harness_validation(candidate, repo_root=ctx.repo_root, gpu_id=ctx.gpu_id)
         if not ok_runtime:
             return None
 
@@ -348,9 +336,7 @@ class HarnessPhase(Phase):
     # Layer 4 — testcase_cache hit
     # ──────────────────────────────────────────────────────────────────
 
-    def _layer4_cache(
-        self, ctx: PhaseContext, selection: dict[str, Any]
-    ) -> _LayerResult | None:
+    def _layer4_cache(self, ctx: PhaseContext, selection: dict[str, Any]) -> _LayerResult | None:
         """Previously-validated canonical harness retrieved from cache."""
         # The cache is skipped when the caller passed --harness (Layer 2
         # wins in that case); Layer 2 has already run when we get here.
@@ -394,9 +380,7 @@ class HarnessPhase(Phase):
 
         if _should_skip_cached_harness(manifest, ctx.discovery or {}):
             selection["cache_skipped"] = True
-            selection["cache_skip_reason"] = (
-                "focused_test_required_for_irrelevant_top_test"
-            )
+            selection["cache_skip_reason"] = "focused_test_required_for_irrelevant_top_test"
             selection["cache_skipped_source"] = manifest.get("source")
             return None
 
@@ -410,16 +394,14 @@ class HarnessPhase(Phase):
         if not ok_runtime:
             return None
 
-        candidate_cmd, candidate_harness, candidate_results = (
-            _materialize_preprocessor_harness(
-                test_command=candidate_cmd,
-                harness_path=candidate_harness,
-                repo_root=ctx.repo_root,
-                output_dir=Path(ctx.output_dir),
-                kernel_path=ctx.kernel_path,
-                gpu_id=ctx.gpu_id,
-                harness_results=candidate_results,
-            )
+        candidate_cmd, candidate_harness, candidate_results = _materialize_preprocessor_harness(
+            test_command=candidate_cmd,
+            harness_path=candidate_harness,
+            repo_root=ctx.repo_root,
+            output_dir=Path(ctx.output_dir),
+            kernel_path=ctx.kernel_path,
+            gpu_id=ctx.gpu_id,
+            harness_results=candidate_results,
         )
         selection["reused_cache"] = True
         return _LayerResult(
@@ -433,9 +415,7 @@ class HarnessPhase(Phase):
     # Layer 5 — HarnessBuilder (D1): LLM subagent using Jinja template
     # ──────────────────────────────────────────────────────────────────
 
-    def _layer5_harness_builder(
-        self, ctx: PhaseContext, _selection: dict[str, Any]
-    ) -> _LayerResult | None:
+    def _layer5_harness_builder(self, ctx: PhaseContext, _selection: dict[str, Any]) -> _LayerResult | None:
         """LLM-driven harness builder (D1).  Preferred over UTA (Layer 6)
         because it emits universal-contract harnesses by construction."""
         if ctx.language is None:
@@ -558,9 +538,7 @@ class HarnessPhase(Phase):
     # Layer 6 — UnitTestAgent (legacy) + optional shape-fixer
     # ──────────────────────────────────────────────────────────────────
 
-    def _layer6_unit_test_agent(
-        self, ctx: PhaseContext, _selection: dict[str, Any]
-    ) -> _LayerResult | None:
+    def _layer6_unit_test_agent(self, ctx: PhaseContext, _selection: dict[str, Any]) -> _LayerResult | None:
         """Legacy UnitTestAgent produces a harness from discovery + codebase
         context.  Followed by shape-fixer to correct shape mismatches against
         the user's benchmarks/tests."""
@@ -597,12 +575,10 @@ class HarnessPhase(Phase):
         discovery_context = format_discovery_for_agent(disc_result)
 
         if ctx.codebase_context_path and Path(ctx.codebase_context_path).exists():
-            discovery_context = (
-                Path(ctx.codebase_context_path).read_text() + "\n\n" + discovery_context
-            )
+            discovery_context = Path(ctx.codebase_context_path).read_text() + "\n\n" + discovery_context
 
-        tests = (disc_dict.get("tests") or [])
-        benchmarks = (disc_dict.get("benchmarks") or [])
+        tests = disc_dict.get("tests") or []
+        benchmarks = disc_dict.get("benchmarks") or []
         repo_native = _build_repo_native_reference_context(
             tests=tests, benchmarks=benchmarks, kernel_path=ctx.kernel_path
         )
@@ -624,21 +600,18 @@ class HarnessPhase(Phase):
             kernel_path=Path(ctx.kernel_path),
             discovery_context=discovery_context,
             gpu_id=ctx.gpu_id,
+            user_task=ctx.user_task,
         )
 
         # Strip kernel defs from the emitted harness (harness imports, not defines).
         uta_harness = extract_harness_path(test_command)
-        uta_harness = _ensure_harness_has_no_kernel_defs(
-            uta_harness, Path(ctx.output_dir), {}
-        )
+        uta_harness = _ensure_harness_has_no_kernel_defs(uta_harness, Path(ctx.output_dir), {})
         if uta_harness != extract_harness_path(test_command):
-            test_command = test_command.replace(
-                extract_harness_path(test_command), uta_harness
-            )
+            test_command = test_command.replace(extract_harness_path(test_command), uta_harness)
 
         # Shape-fixer: align harness shapes with the user's benchmark/test
         # files.  Failure doesn't block; we keep the UTA harness as-is.
-        if (benchmarks or tests):
+        if benchmarks or tests:
             try:
                 harness_results = self._run_shape_fixer(
                     ctx=ctx,
@@ -669,9 +642,7 @@ class HarnessPhase(Phase):
             source_label="unit_test_agent",
         )
 
-    def _try_discovery_candidates(
-        self, ctx: PhaseContext
-    ) -> _LayerResult | None:
+    def _try_discovery_candidates(self, ctx: PhaseContext) -> _LayerResult | None:
         """Pre-UTA fast path: iterate validated discovery candidates.
 
         Legacy behavior from ``preprocessor.py:697-768`` — discovery
@@ -697,9 +668,7 @@ class HarnessPhase(Phase):
         tests = disc_dict.get("tests") or []
         benchmarks = disc_dict.get("benchmarks") or []
 
-        candidates = _build_harness_candidates(
-            tests, benchmarks, disc_dict, ctx.kernel_path
-        )
+        candidates = _build_harness_candidates(tests, benchmarks, disc_dict, ctx.kernel_path)
         if not candidates:
             return None
 
@@ -721,19 +690,15 @@ class HarnessPhase(Phase):
                 if not ok_runtime:
                     continue
 
-                candidate_harness = _ensure_harness_has_no_kernel_defs(
-                    candidate_harness, Path(ctx.output_dir), {}
-                )
-                candidate_cmd, candidate_harness, results = (
-                    _materialize_preprocessor_harness(
-                        test_command=candidate_cmd,
-                        harness_path=candidate_harness,
-                        repo_root=ctx.repo_root,
-                        output_dir=Path(ctx.output_dir),
-                        kernel_path=ctx.kernel_path,
-                        gpu_id=ctx.gpu_id,
-                        harness_results=results,
-                    )
+                candidate_harness = _ensure_harness_has_no_kernel_defs(candidate_harness, Path(ctx.output_dir), {})
+                candidate_cmd, candidate_harness, results = _materialize_preprocessor_harness(
+                    test_command=candidate_cmd,
+                    harness_path=candidate_harness,
+                    repo_root=ctx.repo_root,
+                    output_dir=Path(ctx.output_dir),
+                    kernel_path=ctx.kernel_path,
+                    gpu_id=ctx.gpu_id,
+                    harness_results=results,
                 )
                 return _LayerResult(
                     harness_path=str(candidate_harness),
@@ -796,6 +761,7 @@ class HarnessPhase(Phase):
                 log_dir=Path(ctx.output_dir),
                 gpu_id=ctx.gpu_id,
                 validation_feedback=shape_feedback,
+                user_task=ctx.user_task,
             )
             if not shapes_ok:
                 _restore_harness_file(harness_file, original_source)
@@ -821,9 +787,7 @@ class HarnessPhase(Phase):
     # Layer 7 — discovery focused_test / tests[0] fallback
     # ──────────────────────────────────────────────────────────────────
 
-    def _layer7_discovery_fallback(
-        self, ctx: PhaseContext, _selection: dict[str, Any]
-    ) -> _LayerResult | None:
+    def _layer7_discovery_fallback(self, ctx: PhaseContext, _selection: dict[str, Any]) -> _LayerResult | None:
         """Last-resort: use whatever command discovery produced, unvalidated.
 
         These commands may not follow the universal contract (often
@@ -877,15 +841,11 @@ class HarnessPhase(Phase):
         }
 
     @staticmethod
-    def _persist_harness_results(
-        ctx: PhaseContext, results: list[dict]
-    ) -> None:
+    def _persist_harness_results(ctx: PhaseContext, results: list[dict]) -> None:
         if not results:
             return
         try:
-            (Path(ctx.output_dir) / "harness_results.json").write_text(
-                json.dumps(results, indent=2, default=str)
-            )
+            (Path(ctx.output_dir) / "harness_results.json").write_text(json.dumps(results, indent=2, default=str))
         except Exception as exc:
             logger.debug("Failed to persist harness_results.json: %s", exc)
 
@@ -931,9 +891,7 @@ class HarnessPhase(Phase):
                 kernel_path=ctx.kernel_path,
                 harness_results=result.harness_results,
             )
-            selection["saved_cache_manifest"] = (
-                str(manifest_path) if manifest_path else None
-            )
+            selection["saved_cache_manifest"] = str(manifest_path) if manifest_path else None
         except Exception as exc:
             selection["cache_save_error"] = str(exc)
 
@@ -957,10 +915,7 @@ class HarnessPhase(Phase):
 
 def _build_test_command(harness_path: str) -> str:
     """Legacy-compatible test command: ``python3 <harness> --correctness``."""
-    return (
-        f"{shlex.quote(sys.executable)} "
-        f"{shlex.quote(str(Path(harness_path).resolve()))} --correctness"
-    )
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(harness_path).resolve()))} --correctness"
 
 
 def _resolve_model(ctx: PhaseContext) -> Any:
@@ -1071,21 +1026,61 @@ def _read_codebase_context(ctx: PhaseContext) -> str:
 
 
 _TREE_MAX_DEPTH = 3
-_TREE_MAX_ENTRIES = 200       # total entries shown in the tree listing
-_AUTOINCLUDE_FILE_BYTES = 4096   # files <= this size get included verbatim
+_TREE_MAX_ENTRIES = 200  # total entries shown in the tree listing
+_AUTOINCLUDE_FILE_BYTES = 4096  # files <= this size get included verbatim
 _AUTOINCLUDE_TOTAL_BYTES = 32768  # total auto-included bytes per repo (cap)
-_NOISE_DIRS = frozenset({
-    ".git", ".github", ".cache", "__pycache__", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", ".venv", "venv", "node_modules",
-    "build", ".next", "dist", "target", "third_party", "vendor",
-    "tools_runtime",  # GEAK-internal tooling, never relevant to harnessing
-})
-_NOISE_SUFFIXES = frozenset({
-    ".pyc", ".pyo", ".so", ".o", ".a", ".lib", ".dll", ".dylib",
-    ".exe", ".bin", ".out", ".class", ".jar", ".tar", ".tgz",
-    ".zip", ".gz", ".bz2", ".xz", ".7z", ".pkl", ".npy", ".pt",
-    ".pth", ".onnx", ".bin", ".lock",
-})
+_NOISE_DIRS = frozenset(
+    {
+        ".git",
+        ".github",
+        ".cache",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".venv",
+        "venv",
+        "node_modules",
+        "build",
+        ".next",
+        "dist",
+        "target",
+        "third_party",
+        "vendor",
+        "tools_runtime",  # GEAK-internal tooling, never relevant to harnessing
+    }
+)
+_NOISE_SUFFIXES = frozenset(
+    {
+        ".pyc",
+        ".pyo",
+        ".so",
+        ".o",
+        ".a",
+        ".lib",
+        ".dll",
+        ".dylib",
+        ".exe",
+        ".bin",
+        ".out",
+        ".class",
+        ".jar",
+        ".tar",
+        ".tgz",
+        ".zip",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".pkl",
+        ".npy",
+        ".pt",
+        ".pth",
+        ".onnx",
+        ".bin",
+        ".lock",
+    }
+)
 
 
 def _is_noise(path: Path) -> bool:
@@ -1174,10 +1169,7 @@ def _render_autoinclude_files(repo_root: Path) -> str:
             continue
 
         rel = path.relative_to(repo_root)
-        chunk = (
-            f"\n### `{rel}`  ({size} B)\n\n"
-            f"```\n{content.rstrip()}\n```"
-        )
+        chunk = f"\n### `{rel}`  ({size} B)\n\n```\n{content.rstrip()}\n```"
         if total_bytes + len(chunk) > _AUTOINCLUDE_TOTAL_BYTES:
             break
         chunks.append(chunk)

@@ -601,7 +601,12 @@ def extract_user_constraints(task_content: str, model) -> dict[str, list[str]]:
 
 # Max length of the kernel-derived path segment (before ``_<YYYYMMDD>_<HHMMSS>``).
 # Long symbols (e.g. hipBLASLt ``Cijk_*``) are shortened to keep the leaf short.
-_MAX_KERNEL_DIR_STEM_LEN = 20
+#
+# 48 chars balances filesystem-friendly path length against the ergonomics of
+# scanning logs by eye: at 20 a Cijk-style kernel was reduced to ~11 chars +
+# hash and effectively unrecognisable; at 48 the human-meaningful prefix is
+# preserved before the disambiguating SHA-256 digest is appended.
+_MAX_KERNEL_DIR_STEM_LEN = 48
 
 
 def _sanitize_kernel_name_for_patch_dir(kernel_name: str) -> str:

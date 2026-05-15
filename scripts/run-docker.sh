@@ -206,6 +206,21 @@ if [ "$EDITABLE" = true ]; then
     EDITABLE_ENV=(-e GEAK_EDITABLE=1)
 fi
 
+# Build USER / GEAK_USER forwarding flags conditionally:
+# - Only forward USER / GEAK_USER if they are non-empty on the host. Forwarding
+#   `-e USER=""` would clobber whatever USER the container image sets up (e.g.
+#   `root` from the Docker default), breaking anything inside the container
+#   that reads $USER. The AMD LLM gateway "user" header resolver in
+#   get_amd_llm_user() already tolerates missing/empty values and falls back
+#   gracefully (GEAK_USER -> USER -> os.getlogin() -> "unknown").
+USER_ENV_ARGS=()
+if [ -n "${USER:-}" ]; then
+    USER_ENV_ARGS+=(-e USER="${USER}")
+fi
+if [ -n "${GEAK_USER:-${USER:-}}" ]; then
+    USER_ENV_ARGS+=(-e GEAK_USER="${GEAK_USER:-${USER}}")
+fi
+
 # Run new container in detached mode with persistent process
 echo "Creating and starting new container ${CONTAINER_NAME}..."
 docker run -d \
@@ -222,8 +237,7 @@ docker run -d \
     -e AMD_LLM_API_KEY="${AMD_LLM_API_KEY}" \
     -e AMD_LLM_BASE_URL="${AMD_LLM_BASE_URL}" \
     -e GEAK_MODEL="${GEAK_MODEL}" \
-    -e USER="${USER}" \
-    -e GEAK_USER="${GEAK_USER:-${USER}}" \
+    "${USER_ENV_ARGS[@]}" \
     "${EDITABLE_ENV[@]}" \
     --shm-size 8G \
     "${VOLUME_ARGS[@]}" \

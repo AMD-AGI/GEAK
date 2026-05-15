@@ -92,6 +92,23 @@ class PhaseContext:
     target_language: str | None = None
     translate_only: bool = False
 
+    # ── Inputs (user task contract) ─────────────────────────────────────
+    user_task: str | None = None
+    """User-supplied ``-t`` prompt forwarded from ``mini.py``.
+
+    When set and non-empty, harness-producing phases prepend it as a
+    ``USER TASK CONTEXT (HIGHEST PRIORITY)`` block to the UnitTestAgent
+    and ShapeFixerAgent task prompts.  The matching system-prompt YAMLs
+    (``mini_unit_test_agent.yaml`` / ``mini_shape_fixer.yaml``) then
+    override the discovered benchmark file's default shape/dtype sweep
+    with the production contract from the user task.
+
+    Wired by :func:`run_preprocessor_via_orchestrator`; consumed by
+    :class:`~minisweagent.run.preprocess.phases.harness.HarnessPhase`
+    (``_layer6_unit_test_agent`` and ``_run_shape_fixer``).  Backward-
+    compatible: ``None`` falls back to the legacy discovery-driven
+    behaviour."""
+
     # ── Outputs (populated by phases) ───────────────────────────────────
     kernel_path: str = ""
     repo_root: str = ""
