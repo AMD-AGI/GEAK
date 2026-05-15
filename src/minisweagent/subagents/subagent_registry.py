@@ -414,8 +414,7 @@ class SubAgentRegistry:
                     "agent_name": {
                         "type": "string",
                         "description": (
-                            "Name of a registered subagent to use. "
-                            f"Available: {', '.join(agent_names)}."
+                            f"Name of a registered subagent to use. Available: {', '.join(agent_names)}."
                             if agent_names
                             else "No subagents registered."
                         ),

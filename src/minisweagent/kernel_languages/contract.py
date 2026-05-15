@@ -75,8 +75,7 @@ def validate_harness(path: Path) -> None:
         # likely just a legacy harness pre-PR-2; don't break those.
         if missing_flags and missing_markers:
             raise ContractViolation(
-                f"harness {path} missing required flags {missing_flags} "
-                f"AND required markers {missing_markers}"
+                f"harness {path} missing required flags {missing_flags} AND required markers {missing_markers}"
             )
 
 

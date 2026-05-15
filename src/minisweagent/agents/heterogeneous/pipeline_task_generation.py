@@ -36,8 +36,10 @@ def orchestrator_tasks_for_mode(
         behavior.
     """
     from minisweagent.agents.heterogeneous.task_generator import (
-        generate_tasks as generate_planned_tasks,
         generate_identical_parallel_tasks,
+    )
+    from minisweagent.agents.heterogeneous.task_generator import (
+        generate_tasks as generate_planned_tasks,
     )
 
     tg = str(task_generation or "planned").strip().lower()

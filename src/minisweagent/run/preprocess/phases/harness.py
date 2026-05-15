@@ -343,19 +343,19 @@ class HarnessPhase(Phase):
         if ctx.harness:
             return None
 
-        from minisweagent.run.preprocess.testcase_cache import (
-            _should_skip_cached_harness,
-            build_testcase_cache_key,
-            get_testcase_cache_dir,
-            get_testcase_cache_entry,
-            materialize_cached_harness,
-        )
         from minisweagent.run.preprocess.harness_utils import (
             execute_harness_validation,
             validate_harness,
         )
         from minisweagent.run.preprocess.preprocessor import (
             _materialize_preprocessor_harness,
+            _should_skip_cached_harness,
+        )
+        from minisweagent.run.preprocess.testcase_cache import (
+            build_testcase_cache_key,
+            get_testcase_cache_dir,
+            get_testcase_cache_entry,
+            materialize_cached_harness,
         )
 
         cache_dir = get_testcase_cache_dir()
@@ -436,13 +436,13 @@ class HarnessPhase(Phase):
             return None
 
         try:
-            from minisweagent.run.preprocess.harness_utils import (
-                execute_harness_validation,
-            )
             from minisweagent.pipeline_workers.base import SubagentConfig
             from minisweagent.pipeline_workers.preprocess.harness_builder import (
-                HarnessBuildFailed,
                 HarnessBuilder,
+                HarnessBuildFailed,
+            )
+            from minisweagent.run.preprocess.harness_utils import (
+                execute_harness_validation,
             )
         except ImportError:
             return None

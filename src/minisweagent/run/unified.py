@@ -45,9 +45,10 @@ while ``_run_planned`` delegates to ``run_orchestrator`` (whose
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from minisweagent.run.compose import ComposeInputs, Mode, compose_task_body
 
@@ -183,8 +184,7 @@ def _run_planned(ctx: PipelineContext, task_generation: str = "planned"):
         # Planned mode requires the commandment because the planner LLM
         # references it per sub-task.  Fixed mode skips this check.
         raise RuntimeError(
-            "planned mode requires ``commandment`` in preprocess_ctx; "
-            "check preprocessor logs for failures."
+            "planned mode requires ``commandment`` in preprocess_ctx; check preprocessor logs for failures."
         )
 
     pctx.setdefault("user_instructions", ctx.user_prompt)
@@ -303,9 +303,7 @@ def _run_fixed(ctx: PipelineContext):
 
         # Track the best result across all rounds.
         round_speedup = getattr(round_best, "best_speedup", None) if round_best else None
-        if round_speedup is not None and (
-            best_speedup is None or round_speedup > best_speedup
-        ):
+        if round_speedup is not None and (best_speedup is None or round_speedup > best_speedup):
             best_speedup = round_speedup
             best_result = round_best
 
@@ -352,9 +350,7 @@ def _invoke_fixed_runner(
         # callers still see artefacts directly under output_dir
         # (legacy behaviour preserved).
         max_rounds = max(1, int(ctx.max_rounds or 1))
-        round_output_dir = (
-            ctx.output_dir / f"round_{round_num}" if max_rounds > 1 else ctx.output_dir
-        )
+        round_output_dir = ctx.output_dir / f"round_{round_num}" if max_rounds > 1 else ctx.output_dir
         round_output_dir.mkdir(parents=True, exist_ok=True)
         agent_config["patch_output_dir"] = str(round_output_dir)
 
