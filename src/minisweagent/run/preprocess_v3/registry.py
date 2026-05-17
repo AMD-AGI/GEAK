@@ -47,6 +47,24 @@ _REQUIRED_FIELDS = ("name", "description", "system_prompt")
 _KNOWN_FIELDS = (*_REQUIRED_FIELDS, "model", "tools", "max_steps")
 _SUBAGENT_FILE = "SUBAGENT.yaml"
 
+#: Sentinel value for :attr:`SubagentSpec.max_steps` meaning "unlimited steps".
+#: Selected because:
+#:
+#: * ``0`` is a common "default disabled" pattern in other config surfaces
+#:   in this codebase (e.g. ``OptimizationAgent.cost_limit == 0`` disables
+#:   the cost gate); reusing ``0`` here would silently disable the step
+#:   budget on every YAML that omits the field. We want the ``max_steps``
+#:   sentinel to be an *opt-in* signal, not a default.
+#: * ``None`` would force the field type to ``int | None`` and ripple
+#:   through to every consumer; an in-band ``int`` sentinel keeps the
+#:   contract uniform.
+#: * ``-1`` is the conventional "unlimited" sentinel in argparse / shell
+#:   tooling and is unambiguous (no positive integer means "unlimited").
+#:
+#: Use :attr:`SubagentSpec.is_unlimited_steps` rather than comparing to
+#: this constant directly so call sites stay readable.
+UNLIMITED_MAX_STEPS: int = -1
+
 
 def _default_root() -> Path:
     """Resolve the default discovery root to ``<repo>/subagents/preprocess``.
@@ -76,6 +94,14 @@ class SubagentSpec:
     actually consumes get first-class attributes. Anything else the YAML
     carries (custom routing hints, future runtime knobs) survives in
     :attr:`extras` so writers don't get punished for being expressive.
+
+    ``max_steps`` accepts the sentinel :data:`UNLIMITED_MAX_STEPS` (``-1``)
+    to opt out of the step budget — the v3 ``harness-generator`` subagent
+    uses this because legitimate harness generation can take many tool-call
+    rounds (read README, install package, inspect tests, write harness,
+    iterate against errors) and a hard cap pessimises slow-but-correct
+    runs. All other negative values and ``0`` are rejected at parse time
+    so the sentinel meaning stays unambiguous.
     """
 
     name: str
@@ -85,6 +111,11 @@ class SubagentSpec:
     tools: list[str] = field(default_factory=list)
     max_steps: int = 30
     extras: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_unlimited_steps(self) -> bool:
+        """``True`` when :attr:`max_steps` carries the unlimited sentinel."""
+        return self.max_steps == UNLIMITED_MAX_STEPS
 
 
 def _validate_and_build(name_hint: str, data: dict[str, Any], source: Path) -> SubagentSpec:
@@ -117,6 +148,18 @@ def _validate_and_build(name_hint: str, data: dict[str, Any], source: Path) -> S
         max_steps = int(max_steps_raw)
     except (TypeError, ValueError) as exc:
         raise SubagentSpecError(f"{source}: 'max_steps' must be an integer (got {max_steps_raw!r})") from exc
+
+    # ``max_steps`` is either a positive integer step cap or the
+    # :data:`UNLIMITED_MAX_STEPS` sentinel. Anything else is a YAML
+    # mistake and we surface it loudly so writers get a precise error
+    # rather than mysterious behaviour at run time (e.g. ``0`` would
+    # otherwise be interpreted as "no budget" in some agent loops, but
+    # silently halt before any step in others).
+    if max_steps != UNLIMITED_MAX_STEPS and max_steps <= 0:
+        raise SubagentSpecError(
+            f"{source}: 'max_steps' must be a positive integer or the unlimited sentinel "
+            f"{UNLIMITED_MAX_STEPS} (got {max_steps_raw!r})"
+        )
 
     extras = {k: v for k, v in data.items() if k not in _KNOWN_FIELDS}
 
@@ -210,4 +253,5 @@ __all__ = [
     "SubagentRegistry",
     "SubagentSpec",
     "SubagentSpecError",
+    "UNLIMITED_MAX_STEPS",
 ]

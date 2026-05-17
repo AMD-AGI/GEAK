@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from minisweagent.run.preprocess_v3.registry import (
+    UNLIMITED_MAX_STEPS,
     SubagentRegistry,
     SubagentSpec,
     SubagentSpecError,
@@ -62,6 +63,27 @@ name: bad
 description: This file has invalid YAML
 system_prompt: "you are bad"
   this_is: : not yaml :
+"""
+
+_UNLIMITED_STEPS_YAML = """\
+name: epsilon
+description: Subagent with the unlimited-steps sentinel.
+system_prompt: "You are epsilon."
+max_steps: -1
+"""
+
+_ZERO_STEPS_YAML = """\
+name: zeta
+description: Subagent with an invalid max_steps of zero.
+system_prompt: "You are zeta."
+max_steps: 0
+"""
+
+_NEGATIVE_STEPS_YAML = """\
+name: eta
+description: Subagent with an out-of-range negative max_steps.
+system_prompt: "You are eta."
+max_steps: -5
 """
 
 
@@ -220,3 +242,51 @@ def test_default_root_resolves_to_repo_subagents_preprocess() -> None:
     registry = SubagentRegistry()
     assert registry.root.name == "preprocess"
     assert registry.root.parent.name == "subagents"
+
+
+# ---------------------------------------------------------------------------
+# max_steps: unlimited sentinel + invalid values
+# ---------------------------------------------------------------------------
+
+
+def test_max_steps_unlimited_sentinel_parses(tmp_path: Path) -> None:
+    """``max_steps: -1`` parses fine and ``is_unlimited_steps`` is ``True``."""
+    _write_subagent(tmp_path, "epsilon", _UNLIMITED_STEPS_YAML)
+
+    spec = SubagentRegistry(root=tmp_path).discover()["epsilon"]
+
+    assert spec.max_steps == UNLIMITED_MAX_STEPS
+    assert spec.is_unlimited_steps is True
+
+
+def test_max_steps_default_is_not_unlimited(tmp_path: Path) -> None:
+    """The default ``max_steps`` of 30 keeps ``is_unlimited_steps`` ``False``.
+
+    ``_BETA_YAML`` omits ``max_steps`` so this is the default-path coverage:
+    the orchestrator must not accidentally treat default-budget subagents
+    as unlimited.
+    """
+    _write_subagent(tmp_path, "beta", _BETA_YAML)
+
+    spec = SubagentRegistry(root=tmp_path).discover()["beta"]
+
+    assert spec.max_steps == 30
+    assert spec.is_unlimited_steps is False
+
+
+def test_max_steps_zero_raises(tmp_path: Path) -> None:
+    """``max_steps: 0`` is an unambiguous error — the runtime would halt at step 1."""
+    _write_subagent(tmp_path, "zeta", _ZERO_STEPS_YAML)
+    registry = SubagentRegistry(root=tmp_path)
+
+    with pytest.raises(SubagentSpecError, match="positive integer or the unlimited sentinel"):
+        registry.discover()
+
+
+def test_max_steps_other_negative_raises(tmp_path: Path) -> None:
+    """Negative values other than ``-1`` are rejected so the sentinel is unambiguous."""
+    _write_subagent(tmp_path, "eta", _NEGATIVE_STEPS_YAML)
+    registry = SubagentRegistry(root=tmp_path)
+
+    with pytest.raises(SubagentSpecError, match="positive integer or the unlimited sentinel"):
+        registry.discover()
