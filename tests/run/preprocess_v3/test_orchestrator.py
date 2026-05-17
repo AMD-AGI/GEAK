@@ -119,11 +119,13 @@ def test_system_prompt_names_all_six_steps() -> None:
     assert "COMMANDMENT" in sp
 
 
-def test_system_prompt_lists_all_seven_tools() -> None:
+def test_system_prompt_lists_all_eight_tools() -> None:
     """Every registered tool's name must appear in the system prompt.
 
-    Without this, the LLM doesn't know it can call them. The 7-tool
-    inventory is locked by commit set 4.
+    Without this, the LLM doesn't know it can call them. The 8-tool
+    inventory was locked by commit set 4 + commit set 7
+    (``commandment_from_user_command`` added for the Path-A
+    short-circuit).
     """
     cfg = PreprocessOrchestratorConfig()
     sp = cfg.system_template
@@ -134,10 +136,57 @@ def test_system_prompt_lists_all_seven_tools() -> None:
         "collect_baseline",
         "collect_profile",
         "render_commandment",
+        "commandment_from_user_command",
         "finish_preprocess",
     ]
     for tool in expected_tools:
         assert tool in sp, f"system prompt missing tool name {tool!r}"
+
+
+def test_system_prompt_has_step_0_path_decision_section() -> None:
+    """The orchestrator prompt explains how to pick Path A vs Path B
+    BEFORE any other action (commit set 7).
+    """
+    cfg = PreprocessOrchestratorConfig()
+    sp = cfg.system_template
+    assert "Step 0" in sp, "system prompt missing 'Step 0' marker for Path A/B decision"
+    assert "Path A" in sp and "Path B" in sp, "system prompt missing Path A / Path B section"
+
+
+def test_system_prompt_step_0_names_path_a_trigger_tool() -> None:
+    """Step 0 must name ``commandment_from_user_command`` as the Path-A
+    trigger (the LLM picks the path by which tool it calls first).
+    """
+    cfg = PreprocessOrchestratorConfig()
+    sp = cfg.system_template
+    step_0_marker = sp.index("Step 0")
+    # Trigger tool name must appear somewhere AFTER the Step 0 marker.
+    after_step_0 = sp[step_0_marker:]
+    assert "commandment_from_user_command" in after_step_0
+
+
+def test_system_prompt_step_0_says_path_a_skips_subagents() -> None:
+    """Step 0 must tell the LLM that Path A skips the 3 always-on
+    subagents (harness-generator / harness-verifier / speedup-verify).
+    """
+    cfg = PreprocessOrchestratorConfig()
+    sp = cfg.system_template
+    step_0_marker = sp.index("Step 0")
+    after_step_0 = sp[step_0_marker:]
+    # The dispatch_subagent skip rule must be explicit.
+    assert "harness-generator" in after_step_0
+    assert "skipped" in after_step_0.lower() or "do not call" in after_step_0.lower()
+
+
+def test_system_prompt_has_path_a_partial_mode_coverage_section() -> None:
+    """The orchestrator prompt explains how to handle Path-A partial
+    mode coverage (inferring modes from the source command).
+    """
+    cfg = PreprocessOrchestratorConfig()
+    sp = cfg.system_template
+    assert "partial mode coverage" in sp.lower() or "Partial mode coverage" in sp
+    assert "inferred_modes" in sp
+    assert "PATH_A_PARTIAL_COVERAGE" in sp
 
 
 def test_system_prompt_encodes_finish_contract() -> None:
