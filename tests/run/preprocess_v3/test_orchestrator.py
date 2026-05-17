@@ -1,0 +1,436 @@
+"""Tests for ``minisweagent.run.preprocess_v3.orchestrator``.
+
+This commit covers the agent skeleton — config defaults, system-prompt
+contract, ``PreprocessResult`` dataclass shape, tool registration shim.
+The full tool-suite + dispatch loop tests land alongside commit 5
+(orchestrator tools wiring).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from minisweagent.kernel_languages.base import KernelLanguage
+from minisweagent.run.preprocess_v3.orchestrator import (
+    FormatError,
+    LimitsExceeded,
+    PreprocessOrchestratorAgent,
+    PreprocessOrchestratorConfig,
+    PreprocessResult,
+    ToolEntry,
+)
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+class _StubModel:
+    """Minimal model stub for skeleton-level tests.
+
+    The orchestrator only touches: ``model.query(messages)`` (returns a
+    response dict), ``model.n_calls`` (int), ``model.cost`` (float), and
+    optionally ``model.set_tools(schemas)``. We script ``query`` to
+    return a queue of canned responses.
+    """
+
+    def __init__(self, responses: list[dict] | None = None) -> None:
+        self._responses = list(responses or [])
+        self.n_calls = 0
+        self.cost = 0.0
+        self.tools_set: list | None = None
+        self.queries: list[list[dict]] = []
+
+    def set_tools(self, schemas: list) -> None:
+        self.tools_set = list(schemas)
+
+    def query(self, messages: list[dict]) -> dict:
+        self.queries.append(list(messages))
+        self.n_calls += 1
+        if not self._responses:
+            return {"content": ""}
+        return self._responses.pop(0)
+
+
+_LANG = KernelLanguage(
+    name="triton",
+    file_extensions=frozenset({".py"}),
+    detect_hints=(r"@triton\.jit",),
+    kb_namespace="triton",
+)
+
+
+# ---------------------------------------------------------------------------
+# Config defaults
+# ---------------------------------------------------------------------------
+
+
+def test_config_defaults() -> None:
+    """Default config matches the commit-set spec.
+
+    Values are fixed so a future drift (e.g. someone bumping ``step_limit``
+    in the dataclass) shows up as a test failure rather than a silent
+    behaviour change in CI.
+    """
+    cfg = PreprocessOrchestratorConfig()
+
+    assert cfg.model == "amd-llm-router"
+    assert cfg.model_class == "amd_llm"
+    assert cfg.step_limit == 200
+    assert cfg.cost_limit == 0.0
+    assert cfg.gpu_id == 0
+    assert cfg.repo is None
+    assert cfg.flydsl_repo is None
+    # System + instance templates are non-empty Jinja strings.
+    assert "{{kernel_path}}" in cfg.instance_template
+    assert "v3 GEAK Preprocess Orchestrator" in cfg.system_template
+
+
+def test_config_is_frozen() -> None:
+    """Config is a frozen dataclass — can't be mutated after construction."""
+    cfg = PreprocessOrchestratorConfig()
+    with pytest.raises(Exception):
+        cfg.step_limit = 50  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# System prompt contract
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_names_all_six_steps() -> None:
+    """Every step name from the design doc must appear in the system prompt.
+
+    The orchestrator prompt is the only place these step names are
+    enumerated for the LLM; if a future edit drops a step heading, the
+    LLM will silently skip that step. Pinning the names here catches
+    that.
+    """
+    cfg = PreprocessOrchestratorConfig()
+    sp = cfg.system_template
+    assert "codebase-explore" in sp or "codebase_explore" in sp
+    assert "translate" in sp.lower()
+    assert "harness generation" in sp.lower() or "harness-generator" in sp
+    assert "harness-verifier" in sp
+    assert "baseline + profile" in sp.lower() or "baseline" in sp
+    assert "speedup-verify" in sp
+    assert "COMMANDMENT" in sp
+
+
+def test_system_prompt_lists_all_seven_tools() -> None:
+    """Every registered tool's name must appear in the system prompt.
+
+    Without this, the LLM doesn't know it can call them. The 7-tool
+    inventory is locked by commit set 4.
+    """
+    cfg = PreprocessOrchestratorConfig()
+    sp = cfg.system_template
+    expected_tools = [
+        "codebase_explore",
+        "translate_to_flydsl",
+        "dispatch_subagent",
+        "collect_baseline",
+        "collect_profile",
+        "render_commandment",
+        "finish_preprocess",
+    ]
+    for tool in expected_tools:
+        assert tool in sp, f"system prompt missing tool name {tool!r}"
+
+
+def test_system_prompt_encodes_finish_contract() -> None:
+    """The ``finish_preprocess`` completion contract must be explicit."""
+    cfg = PreprocessOrchestratorConfig()
+    sp = cfg.system_template
+    assert "finish_preprocess" in sp
+    # Termination semantics must be unambiguous so the LLM doesn't keep
+    # calling tools after a finish.
+    assert "terminat" in sp.lower()
+
+
+def test_system_prompt_is_practical_length() -> None:
+    """The system prompt should be 80-180 lines (commit-set requirement).
+
+    Counts only non-empty source lines since blank-line padding is just
+    visual whitespace that the model strips.
+    """
+    cfg = PreprocessOrchestratorConfig()
+    line_count = sum(1 for line in cfg.system_template.splitlines() if line.strip())
+    assert 80 <= line_count <= 220, f"system prompt has {line_count} non-empty lines, expected 80-180-ish"
+
+
+def test_system_prompt_lists_three_subagent_names() -> None:
+    """Lock the three valid ``dispatch_subagent`` name choices in the prompt."""
+    cfg = PreprocessOrchestratorConfig()
+    sp = cfg.system_template
+    for sub in ("harness-generator", "harness-verifier", "speedup-verify"):
+        assert sub in sp, f"missing subagent name {sub!r} in system prompt"
+
+
+def test_system_prompt_states_translation_is_tool_not_subagent() -> None:
+    """Decision 3: translation is a tool call, not a subagent dispatch.
+
+    The prompt must say so explicitly because the LLM has both
+    ``translate_to_flydsl`` and ``dispatch_subagent`` available and could
+    plausibly call ``dispatch_subagent("pytorch-to-flydsl", ...)``
+    (which would fail since that subagent is not registered).
+    """
+    cfg = PreprocessOrchestratorConfig()
+    sp = cfg.system_template
+    assert "tool call" in sp.lower() and "translation" in sp.lower()
+
+
+# ---------------------------------------------------------------------------
+# Agent construction
+# ---------------------------------------------------------------------------
+
+
+def test_agent_constructs_with_default_config() -> None:
+    """Empty-arg construction is supported (uses default config + no tools)."""
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+
+    assert isinstance(agent.config, PreprocessOrchestratorConfig)
+    assert agent.config.step_limit == 200
+    assert agent.tool_names == []
+    assert agent.messages == []
+
+
+def test_agent_accepts_explicit_config() -> None:
+    """Explicit config overrides the default."""
+    cfg = PreprocessOrchestratorConfig(step_limit=42, gpu_id=3)
+    agent = PreprocessOrchestratorAgent(model=_StubModel(), config=cfg)
+
+    assert agent.config.step_limit == 42
+    assert agent.config.gpu_id == 3
+
+
+def test_register_tool_validates_schema_name() -> None:
+    """``register_tool`` rejects schemas whose ``name`` doesn't match the key."""
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+
+    bad_schema = {"name": "wrong_name", "type": "function"}
+    with pytest.raises(ValueError, match="schema must be a dict with name"):
+        agent.register_tool("right_name", bad_schema, lambda **_: {})
+
+
+def test_register_tool_records_schema_and_callable() -> None:
+    """Successful registration shows up in ``tool_names`` + ``get_tool_schemas``."""
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+
+    def _impl(**_kwargs):
+        return {"output": "ok"}
+
+    schema = {
+        "name": "dummy",
+        "type": "function",
+        "description": "Dummy tool",
+        "parameters": {"type": "object", "properties": {}},
+    }
+    agent.register_tool("dummy", schema, _impl)
+
+    assert agent.tool_names == ["dummy"]
+    schemas = agent.get_tool_schemas()
+    assert len(schemas) == 1
+    assert schemas[0]["name"] == "dummy"
+
+
+# ---------------------------------------------------------------------------
+# Step loop / dispatch primitives
+# ---------------------------------------------------------------------------
+
+
+def test_step_raises_format_error_when_response_has_no_tool_call() -> None:
+    """Text-only responses are not actionable — the orchestrator must escalate."""
+    model = _StubModel(responses=[{"content": "I'm thinking..."}])
+    agent = PreprocessOrchestratorAgent(model=model)
+
+    with pytest.raises(FormatError, match="no tool call"):
+        agent.step()
+
+
+def test_step_dispatches_tool_and_records_observation() -> None:
+    """A tool call returns a dict observation appended as ``role="tool"``."""
+    model = _StubModel(
+        responses=[
+            {
+                "content": "",
+                "tools": {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"x": 42}'},
+                },
+            },
+        ],
+    )
+    agent = PreprocessOrchestratorAgent(model=model)
+
+    captured = {}
+
+    def _echo(**kwargs):
+        captured.update(kwargs)
+        return {"echoed": kwargs}
+
+    schema = {
+        "name": "echo",
+        "type": "function",
+        "description": "Echo args back.",
+        "parameters": {
+            "type": "object",
+            "properties": {"x": {"type": "integer"}},
+            "required": ["x"],
+        },
+    }
+    agent.register_tool("echo", schema, _echo)
+
+    observation = agent.step()
+    assert observation == {"echoed": {"x": 42}}
+    assert captured == {"x": 42}
+    # Two messages appended: assistant tool-call + tool result.
+    assert agent.messages[-2]["role"] == "assistant"
+    assert agent.messages[-1]["role"] == "tool"
+    assert agent.messages[-1]["name"] == "echo"
+
+
+def test_step_raises_limits_exceeded_when_step_count_exceeds_cap() -> None:
+    """``step_limit`` is enforced at the top of ``step()``."""
+    model = _StubModel()
+    model.n_calls = 10
+    agent = PreprocessOrchestratorAgent(
+        model=model,
+        config=PreprocessOrchestratorConfig(step_limit=10),
+    )
+
+    with pytest.raises(LimitsExceeded):
+        agent.step()
+
+
+def test_step_raises_limits_exceeded_when_cost_exceeds_cap() -> None:
+    """``cost_limit`` is enforced at the top of ``step()``."""
+    model = _StubModel()
+    model.cost = 5.0
+    agent = PreprocessOrchestratorAgent(
+        model=model,
+        config=PreprocessOrchestratorConfig(cost_limit=5.0),
+    )
+
+    with pytest.raises(LimitsExceeded):
+        agent.step()
+
+
+def test_unknown_tool_returns_error_observation() -> None:
+    """Calling an unregistered tool produces an error obs the LLM can read."""
+    model = _StubModel(
+        responses=[
+            {
+                "content": "",
+                "tools": {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "nope", "arguments": "{}"},
+                },
+            },
+        ],
+    )
+    agent = PreprocessOrchestratorAgent(model=model)
+
+    observation = agent.step()
+    assert "error" in observation
+    assert "Unknown tool" in observation["error"]
+
+
+def test_tool_arguments_accept_dict_or_json_string() -> None:
+    """LiteLLM may pass arguments as a JSON string; orchestrator must coerce."""
+    model = _StubModel(
+        responses=[
+            {
+                "content": "",
+                "tools": {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": {"x": 1}},
+                },
+            },
+        ],
+    )
+    agent = PreprocessOrchestratorAgent(model=model)
+    agent.register_tool(
+        "echo",
+        {
+            "name": "echo",
+            "type": "function",
+            "description": "echo",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        lambda **kw: {"got": kw},
+    )
+
+    obs = agent.step()
+    assert obs == {"got": {"x": 1}}
+
+
+# ---------------------------------------------------------------------------
+# PreprocessResult
+# ---------------------------------------------------------------------------
+
+
+def test_preprocess_result_defaults_sensibly() -> None:
+    """Required fields are typed; optional fields default to None / empty list."""
+    result = PreprocessResult(
+        success=False,
+        kernel_language=_LANG,
+        kernel_path=Path("/tmp/kernel.py"),
+    )
+    assert result.harness_path is None
+    assert result.baseline is None
+    assert result.profile is None
+    assert result.codebase_context is None
+    assert result.commandment_path is None
+    assert result.translation is None
+    assert result.subagent_runs == []
+    assert result.elapsed_s == 0.0
+    assert result.errors == []
+
+
+def test_preprocess_result_is_frozen() -> None:
+    """Immutability so the orchestrator can hand the result around safely."""
+    result = PreprocessResult(
+        success=False,
+        kernel_language=_LANG,
+        kernel_path=Path("/tmp/kernel.py"),
+    )
+    with pytest.raises(Exception):
+        result.success = True  # type: ignore[misc]
+
+
+def test_preprocess_result_carries_subagent_runs() -> None:
+    """``subagent_runs`` carries one dict per dispatch call."""
+    runs = [
+        {"name": "harness-generator", "success": True, "elapsed_s": 10.0},
+        {"name": "harness-verifier", "success": True, "elapsed_s": 2.0},
+    ]
+    result = PreprocessResult(
+        success=True,
+        kernel_language=_LANG,
+        kernel_path=Path("/tmp/kernel.py"),
+        subagent_runs=runs,
+    )
+    assert len(result.subagent_runs) == 2
+    assert result.subagent_runs[0]["name"] == "harness-generator"
+
+
+# ---------------------------------------------------------------------------
+# ToolEntry
+# ---------------------------------------------------------------------------
+
+
+def test_tool_entry_holds_schema_and_callable() -> None:
+    """Sanity: the registration container exposes both fields."""
+
+    def _f(**_):
+        return {}
+
+    entry = ToolEntry(schema={"name": "x"}, callable=_f)
+    assert entry.schema == {"name": "x"}
+    assert entry.callable is _f
