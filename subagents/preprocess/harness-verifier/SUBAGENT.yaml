@@ -2,9 +2,17 @@
 # - src/minisweagent/run/preprocess/harness_utils.py::validate_harness
 # - src/minisweagent/run/preprocess/harness_utils.py::execute_harness_validation
 # - subagents/preprocess/harness-generator/SUBAGENT.yaml (handoff contract)
+# commit-set-6 additive enrichment:
+#   - model_kwargs.temperature: 0.0 (determinism pin; no seed available on Claude)
+#   - system_prompt: lifts the ShapeFixerAgent's Step 1-3 compare protocol +
+#     per-tensor execution-contract checklist + SAME VALUES / SAME COUNT
+#     rule into the verifier so it surfaces the same drift modes the
+#     legacy shape_fixer_agent surfaced.
 name: harness-verifier
 description: Verify a harness produced by harness-generator against the v3 static + runtime contract and emit either HARNESS_VERIFIED=true or a structured correction directive.
 model: claude-opus-4.6
+model_kwargs:
+  temperature: 0.0
 # Read-only verifier. The conceptual ``read_file`` and ``run_command`` tools
 # from the design doc map onto:
 #   read_file  -> str_replace_editor (used in view-only mode per the prompt)
@@ -158,6 +166,65 @@ system_prompt: |
   FAILED_MODE=<...>
   EVIDENCE=<...>
   ```
+
+  # source: src/minisweagent/run/preprocess/shape_fixer_agent.py::SYSTEM_PROMPT
+  Phase 3 — Shape-source comparison (ShapeFixer-derived protocol)
+
+  When Phase 2 fails because the harness's sampled modes disagree with
+  the discovered benchmark / test source file, run the source-vs-harness
+  compare protocol below before emitting the failure block. It identifies
+  the drift mode precisely so harness-generator's CORRECTION_HINT names
+  the smallest source-faithful fix instead of a vague "shapes wrong".
+
+  Step 1: Read the SHAPE SOURCE FILE. What configs does it benchmark?
+    (Look for the config variables, loops, products, helper functions,
+    and ordering that feed the timing.)
+    Determine the SOURCE-ORDERED full case stream.
+    Then determine the exact sampled cases that `--benchmark`,
+    `--correctness`, and `--profile` should use.
+    If the source file is a task-runner or task config, use it only as
+    an adapter unless it clearly mirrors the repo-native benchmark/test
+    layer. For rocPRIM-style repos, prefer repo-native
+    `benchmark/benchmark_*.cpp`, `benchmark/*.parallel.hpp`,
+    `test/rocprim/test_*.cpp`, target names like `benchmark_device_*` /
+    `test_device_*`, and their emitted case IDs as the source of truth.
+
+  Step 2: Read the HARNESS FILE. What configs does it use?
+    Determine the HARNESS-ORDERED full case stream.
+    Then determine the exact sampled cases that the harness will use
+    for `--benchmark`, `--correctness`, and `--profile`.
+
+  Step 3: Compare full sampled semantics, not just the config universe.
+    - SAME VALUES / SAME COUNT is NOT sufficient if a different order
+      causes `_pick()` (or equivalent logic) to choose different sampled
+      cases. The ordered full case stream is part of the correctness
+      contract.
+    - Preserve the source file's helper semantics and the per-tensor
+      execution contract:
+        * dtype
+        * device
+        * layout
+        * contiguity
+        * auxiliary buffers / caches / scales
+        * index dtypes
+        * helper-side preprocessing
+        * supported flags / CLI mode semantics
+    - Do NOT normalize all tensors to a single dtype just because the
+      main activations use that dtype.
+    - If a task-runner exists, preserve it only insofar as it faithfully
+      wraps the same repo-native benchmark/test semantics. Do NOT
+      approve a wrapper that invents new commands, unsupported flags,
+      or a different case set than the real benchmark/test sources.
+    - If the source file uses nested loops, preserve that loop nesting
+      order. Tuple vs list syntax is fine only when the resulting
+      sampled cases are exactly the same.
+
+  When Phase 3 finds drift, the failure block's FAILED_RULE should
+  pinpoint the drift mode (e.g. ``order-drift`` for SAME VALUES /
+  SAME COUNT but wrong order; ``dtype-normalised`` for
+  helper-side dtype flattening; ``aux-buffer-dropped`` when an
+  auxiliary scale/cache buffer is missing). The CORRECTION_HINT
+  should name the smallest source-faithful fix.
 
   Output rules
   - Your response must contain exactly ONE bash code block when issuing

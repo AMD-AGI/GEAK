@@ -273,6 +273,69 @@ def test_harness_verifier_authored_fresh_marker_preserved() -> None:
     assert raw.startswith("# source: authored fresh"), raw[:120]
 
 
+def test_harness_verifier_includes_shape_fixer_provenance_tag() -> None:
+    """Commit set 6 enrichment carries a ``# source: ...shape_fixer_agent.py`` comment.
+
+    The YAML comment is dropped on parse but lives in the raw file so a
+    later maintainer can trace the lifted block back to its origin.
+    """
+    raw = (_V3_ROOT / "harness-verifier" / "SUBAGENT.yaml").read_text(encoding="utf-8")
+    assert "shape_fixer_agent.py::SYSTEM_PROMPT" in raw, "missing source provenance tag for the lifted ShapeFixer block"
+
+
+def test_harness_verifier_temperature_pinned_to_zero(registry_specs: dict[str, SubagentSpec]) -> None:
+    """``model_kwargs.temperature == 0.0`` for determinism (no seed on Claude)."""
+    spec = registry_specs["harness-verifier"]
+    assert spec.model_kwargs.get("temperature") == 0.0
+
+
+def test_harness_verifier_does_not_set_kb_template(registry_specs: dict[str, SubagentSpec]) -> None:
+    """The verifier's tips are language-agnostic and inline; no KB injection."""
+    spec = registry_specs["harness-verifier"]
+    assert spec.knowledge_base_template is None
+
+
+def test_harness_verifier_includes_shape_fixer_step_protocol(registry_specs: dict[str, SubagentSpec]) -> None:
+    """Lifted Step 1-3 source-vs-harness compare protocol from ShapeFixer."""
+    spec = registry_specs["harness-verifier"]
+    sp = spec.system_prompt
+    assert "Step 1:" in sp
+    assert "Step 2:" in sp
+    assert "Step 3:" in sp
+    assert "SHAPE SOURCE FILE" in sp
+    assert "HARNESS FILE" in sp
+    assert "SOURCE-ORDERED full case stream" in sp
+    assert "HARNESS-ORDERED full case stream" in sp
+
+
+def test_harness_verifier_includes_same_values_same_count_rule(
+    registry_specs: dict[str, SubagentSpec],
+) -> None:
+    """The canonical ShapeFixer order-drift rule, verbatim where it fits."""
+    spec = registry_specs["harness-verifier"]
+    assert "SAME VALUES / SAME COUNT" in spec.system_prompt
+    assert "_pick()" in spec.system_prompt
+
+
+def test_harness_verifier_includes_per_tensor_execution_contract_checklist(
+    registry_specs: dict[str, SubagentSpec],
+) -> None:
+    """Lifted per-tensor execution-contract checklist from ShapeFixer."""
+    spec = registry_specs["harness-verifier"]
+    sp = spec.system_prompt
+    for token in (
+        "dtype",
+        "device",
+        "layout",
+        "contiguity",
+        "auxiliary",
+        "index dtypes",
+        "helper-side preprocessing",
+        "supported flags",
+    ):
+        assert token in sp, f"missing per-tensor contract token {token!r}"
+
+
 # ---------------------------------------------------------------------------
 # Cross-cutting: the always-on set
 # ---------------------------------------------------------------------------
