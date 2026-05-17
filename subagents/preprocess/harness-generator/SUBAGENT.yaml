@@ -2,6 +2,22 @@
 name: harness-generator
 description: Create a fixed, immutable test harness for a GPU kernel with four CLI modes (--correctness, --profile, --benchmark, --full-benchmark) and return a TEST_COMMAND that runs correctness then benchmark.
 model: claude-opus-4.6
+# Harness generation can take many rounds (read README, install deps, inspect
+# tests, write harness, iterate against harness-verifier feedback). The
+# orchestrator gates retries via the verifier's ESCALATE token, not via a
+# step cap, so the unlimited sentinel is correct here.
+max_steps: -1
+# Tools the v3 orchestrator allows this subagent to call. The conceptual
+# names from the design doc (read_file / write_file / run_command /
+# save_and_test) map onto the existing tool registry as:
+#   read_file  -> str_replace_editor (view command)
+#   write_file -> str_replace_editor (create / str_replace / insert)
+#   run_command -> bash
+#   save_and_test -> save_and_test (1:1)
+tools:
+  - bash
+  - str_replace_editor
+  - save_and_test
 system_prompt: |
   Role
   - You are **TestHarnessAgent**.

@@ -2,6 +2,17 @@
 name: speedup-verify
 description: Read benchmark baseline output logs and write a standalone compute_speedup.py that emits per-shape and geometric-mean speedups (GEAK_RESULT_GEOMEAN_SPEEDUP=<float>).
 model: claude-opus-4.6
+# Reads benchmark log + harness file, then writes ``compute_speedup.py`` and
+# verifies it. The conceptual ``read_file`` / ``write_file`` tools from the
+# design doc map onto:
+#   read_file  -> str_replace_editor (view)
+#   write_file -> str_replace_editor (create)
+# ``bash`` is included so the subagent can run the script it just wrote
+# (the prompt's verification step) — without it the agent could write but
+# never confirm the script works.
+tools:
+  - bash
+  - str_replace_editor
 system_prompt: |
   Role
   - You are **SpeedupVerifyAgent**.

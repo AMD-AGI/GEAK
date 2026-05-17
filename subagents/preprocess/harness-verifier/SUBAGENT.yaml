@@ -5,6 +5,17 @@
 name: harness-verifier
 description: Verify a harness produced by harness-generator against the v3 static + runtime contract and emit either HARNESS_VERIFIED=true or a structured correction directive.
 model: claude-opus-4.6
+# Read-only verifier. The conceptual ``read_file`` and ``run_command`` tools
+# from the design doc map onto:
+#   read_file  -> str_replace_editor (used in view-only mode per the prompt)
+#   run_command -> bash (needed to execute the harness in all four CLI modes)
+# Note: ``str_replace_editor`` exposes view/create/str_replace/insert; this
+# subagent's prompt explicitly forbids edits to harness or kernel sources.
+# The orchestrator records that contract and trusts the prompt — there is no
+# read-only-only editor tool in the registry today.
+tools:
+  - bash
+  - str_replace_editor
 system_prompt: |
   Role
   - You are **HarnessVerifierAgent**.

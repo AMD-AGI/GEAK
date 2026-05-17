@@ -217,11 +217,106 @@ def test_harness_verifier_authored_fresh_marker_preserved() -> None:
 def test_all_three_always_on_subagents_present(registry_specs: dict[str, SubagentSpec]) -> None:
     """Commit set 3 ships exactly these three v3 always-on subagents.
 
-    ``pytorch-to-flydsl`` is deliberately NOT shipped here — it lands in
-    commit set 3.5 / 4 once the parallel investigation completes. This
-    test pins that contract so an accidental drop-in of an extra YAML
-    fails loudly before it reaches main.
+    ``pytorch-to-flydsl`` is deliberately NOT shipped here — translation
+    is dispatched as a deterministic tool call, not via subagent dispatch
+    (commit set 4 decision). This test pins that contract so an accidental
+    drop-in of an extra YAML fails loudly before it reaches main.
     """
     expected = {"harness-generator", "harness-verifier", "speedup-verify"}
     discovered = set(registry_specs)
     assert discovered == expected, f"expected exactly {sorted(expected)} v3 subagents, got {sorted(discovered)}"
+
+
+# ---------------------------------------------------------------------------
+# tools: enumeration per subagent (commit set 4)
+#
+# The v3 orchestrator restricts a child subagent's tool surface to the set
+# declared in its YAML. The exact registry names here matter — the
+# orchestrator looks them up against the tool registry verbatim, so a typo
+# (or a divergence from the registry) silently disables a tool.
+#
+# The conceptual names from the design doc (``read_file``, ``write_file``,
+# ``run_command``) don't exist 1:1 in the registry. The mapping the
+# orchestrator commits to is:
+#
+#   read_file   -> str_replace_editor (view sub-command)
+#   write_file  -> str_replace_editor (create / str_replace / insert)
+#   run_command -> bash
+#   save_and_test -> save_and_test (1:1)
+# ---------------------------------------------------------------------------
+
+
+def test_harness_generator_tools(registry_specs: dict[str, SubagentSpec]) -> None:
+    """harness-generator can read/write/exec/save-and-test (full toolbox).
+
+    Order isn't part of the contract — we compare as sets so YAML reordering
+    doesn't break the suite.
+    """
+    spec = registry_specs["harness-generator"]
+    assert set(spec.tools) == {"bash", "str_replace_editor", "save_and_test"}, (
+        f"unexpected tools for harness-generator: {spec.tools!r}"
+    )
+
+
+def test_harness_verifier_tools(registry_specs: dict[str, SubagentSpec]) -> None:
+    """harness-verifier is the read-only set: bash + str_replace_editor.
+
+    The prompt forbids edits to kernel/harness sources; the registry has no
+    "view-only" editor today, so we ship ``str_replace_editor`` and rely on
+    the prompt's read-only contract. If a future commit adds a true
+    read-only viewer, this test should be updated to require it.
+    """
+    spec = registry_specs["harness-verifier"]
+    assert set(spec.tools) == {"bash", "str_replace_editor"}, f"unexpected tools for harness-verifier: {spec.tools!r}"
+
+
+def test_speedup_verify_tools(registry_specs: dict[str, SubagentSpec]) -> None:
+    """speedup-verify needs read+write (script generation) + bash (verification).
+
+    The prompt's workflow ends with running the generated script against
+    the baseline output to confirm a ~1.0x speedup; bash is required for
+    that verification step.
+    """
+    spec = registry_specs["speedup-verify"]
+    assert set(spec.tools) == {"bash", "str_replace_editor"}, f"unexpected tools for speedup-verify: {spec.tools!r}"
+
+
+# ---------------------------------------------------------------------------
+# max_steps configuration per subagent (commit set 4)
+# ---------------------------------------------------------------------------
+
+
+def test_harness_generator_uses_unlimited_steps(registry_specs: dict[str, SubagentSpec]) -> None:
+    """harness-generator opts in to the unlimited-steps sentinel.
+
+    Harness generation can take many tool-call rounds (README, deps, tests,
+    iteration against verifier feedback). Capping it at 30 steps would
+    pessimise slow-but-correct runs; the orchestrator gates retries via
+    ``harness-verifier``'s ESCALATE token instead.
+    """
+    spec = registry_specs["harness-generator"]
+    assert spec.max_steps == -1
+    assert spec.is_unlimited_steps is True
+
+
+def test_harness_verifier_uses_default_steps(registry_specs: dict[str, SubagentSpec]) -> None:
+    """harness-verifier sticks to the 30-step default.
+
+    Verification is mechanical (static checks + 4 timed harness invocations)
+    and should never need many tool-call rounds. The default cap protects
+    against runaway loops if a model keeps re-running validation.
+    """
+    spec = registry_specs["harness-verifier"]
+    assert spec.max_steps == 30
+    assert spec.is_unlimited_steps is False
+
+
+def test_speedup_verify_uses_default_steps(registry_specs: dict[str, SubagentSpec]) -> None:
+    """speedup-verify sticks to the 30-step default.
+
+    Writing one Python script + verifying it should be a small handful of
+    steps; the default cap is a safety net.
+    """
+    spec = registry_specs["speedup-verify"]
+    assert spec.max_steps == 30
+    assert spec.is_unlimited_steps is False
