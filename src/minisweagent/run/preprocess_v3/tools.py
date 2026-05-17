@@ -17,26 +17,30 @@ Tools come in two flavours:
   orchestrator's pending :class:`PreprocessResult` payload and raises
   :class:`FinishedSuccessfully` to terminate the loop.
 
-Why a v3-native dispatcher instead of reusing ``SubAgentTool``?
----------------------------------------------------------------
+Why a v3-native dispatcher + a v3-native subagent?
+--------------------------------------------------
 
-The legacy :class:`minisweagent.tools.sub_agent_tool.SubAgentTool`:
+The legacy :class:`minisweagent.tools.sub_agent_tool.SubAgentTool` plus
+its :class:`minisweagent.agents.default.DefaultAgent` child:
 
-1. Hard-codes :class:`minisweagent.agents.default.DefaultAgent` as the
-   child class.
-2. Hard-codes :class:`minisweagent.subagents.SubAgentRegistry` (the rich
-   legacy descriptor model) as its routing source.
-3. Has no concept of the v3 ``max_steps == -1`` sentinel — it normalises
+1. Hard-codes the rich legacy descriptor model
+   (:class:`minisweagent.subagents.SubAgentRegistry`) as its routing
+   source.
+2. Has no concept of the v3 ``max_steps == -1`` sentinel — it normalises
    step limits via ``MIN_CHILD_STEP_LIMIT = 150``.
-4. Has no concept of a per-subagent restricted tool set — child agents
-   inherit the parent's tool surface.
+3. Has no concept of a per-subagent restricted tool set — child agents
+   inherit the parent's tool surface (~30 tools).
+4. Drags in strategy manager, save/test, working memory, RAG
+   postprocessor, MCP bridges, and a select-patch agent — none of which
+   is appropriate for a short-lived preprocess subagent that produces a
+   single deliverable.
 
-The v3 contract needs all four points to be different. Implementing a
-v3-native dispatcher (this module's :class:`PreprocessSubagentDispatcher`)
-keeps the legacy ``SubAgentTool`` untouched — important because the
-legacy heterogeneous orchestrator still uses it — while letting the v3
-side honor its own contract. This is the divergence noted in the
-commit-set 4 design doc.
+The v3 contract needs all four points to be different.
+:class:`PreprocessSubagentDispatcher` (this module) plus
+:class:`minisweagent.run.preprocess_v3.subagent.PreprocessSubagent`
+together provide the v3-native path. The legacy ``SubAgentTool`` +
+``DefaultAgent`` stay untouched — important because the legacy
+heterogeneous orchestrator still uses them.
 """
 
 from __future__ import annotations
@@ -121,13 +125,16 @@ class PreprocessSubagentDispatcher:
             agent_factory:
                 Optional callable returning a fresh agent for the
                 subagent run. Defaults to building a
-                :class:`minisweagent.agents.default.DefaultAgent` —
-                imported lazily so this module doesn't drag in the
-                legacy class at import time. Tests inject a stub here.
+                :class:`minisweagent.run.preprocess_v3.subagent.PreprocessSubagent`
+                (the v3-native class — imported lazily inside
+                ``_run_child`` so the import graph stays minimal).
+                Tests inject a stub here.
             env_factory:
-                Optional callable returning a fresh
-                :class:`minisweagent.environments.local.LocalEnvironment`.
-                Defaults to the real env — overridden in tests.
+                Optional callable. Reserved for future use; the v3
+                subagent does not need a separate environment object
+                (it routes commands through its own tool whitelist).
+                Kept on the constructor for backward compatibility
+                with the previous signature.
         """
         self._registry = registry
         self._agent_factory = agent_factory
@@ -235,32 +242,22 @@ class PreprocessSubagentDispatcher:
             agent = self._agent_factory(spec=spec, model=model, cwd=cwd)
             return agent.run(task)
 
-        # Lazy default: build a DefaultAgent via the legacy class. Imported
-        # here (rather than at module top) so unit tests that pass an
-        # ``agent_factory`` can avoid the legacy import entirely.
-        # TODO(commit-set-5): replace DefaultAgent with v3-native subagent class.
-        from minisweagent.agents.default import DefaultAgent
-        from minisweagent.environments.local import LocalEnvironment
-
-        env = self._env_factory() if self._env_factory else LocalEnvironment(cwd=cwd or ".")
+        # v3-native default: build a PreprocessSubagent. The class
+        # natively honours ``spec.tools`` (whitelist), ``spec.max_steps``
+        # (with the ``UNLIMITED_MAX_STEPS == -1`` -> ``step_limit=0``
+        # projection), and ``spec.system_prompt``. The legacy
+        # ``DefaultAgent`` is no longer imported from this module.
+        from minisweagent.run.preprocess_v3.subagent import PreprocessSubagent
 
         step_limit = 0 if spec.is_unlimited_steps else int(spec.max_steps)
-        agent_kwargs: dict[str, Any] = {
-            "system_template": spec.system_prompt,
-            "step_limit": step_limit,
-            "cost_limit": 0.0,
-        }
-
-        agent = DefaultAgent(model, env, **agent_kwargs)
-        if spec.tools:
-            try:
-                allowed = set(spec.tools)
-                disable = [name for name in agent.toolruntime._tool_table if name not in allowed]
-                if disable:
-                    agent.toolruntime.disable_tools(disable)
-            except Exception as exc:
-                logger.warning("Tool restriction failed for %s: %s", spec.name, exc)
-
+        agent = PreprocessSubagent(
+            model=model,
+            system_prompt=spec.system_prompt,
+            tools=list(spec.tools) if spec.tools else [],
+            step_limit=step_limit,
+            cost_limit=0.0,
+            cwd=cwd,
+        )
         return agent.run(task)
 
 
