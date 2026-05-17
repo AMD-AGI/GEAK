@@ -42,6 +42,7 @@ the planner and dispatcher, and driving the unified round loop via
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -244,6 +245,31 @@ def _enrich_prompt_for_round(
     return base_prompt
 
 
+# ── Incremental report persistence ──────────────────────────────────
+
+
+def _save_incremental_report(
+    ctx: dict[str, Any],
+    output_dir: Path,
+    completed_round: int,
+) -> None:
+    """Best-effort incremental final_report.json after each round.
+
+    If the process is killed by a GPU fault before finalize_run(),
+    the last incremental report preserves the best verified result.
+    Overwritten by finalize_run() at natural completion.
+    """
+    try:
+        from minisweagent.run.postprocess.results import auto_finalize
+
+        report = auto_finalize(ctx)
+        report["status"] = f"incremental_after_round_{completed_round}"
+        report_path = output_dir / "final_report.json"
+        report_path.write_text(json.dumps(report, indent=2, default=str))
+    except Exception:
+        logger.debug("incremental report save failed (non-fatal)", exc_info=True)
+
+
 # ── Unified round loop ───────────────────────────────────────────────
 
 
@@ -393,6 +419,7 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
             round_evals.append(round_eval_dict)
 
         logger.info("Round %d complete.", round_num)
+        _save_incremental_report(postprocess_ctx, output_dir, round_num)
 
     # ── Finalize ─────────────────────────────────────────────────
     report = finalize_run(postprocess_ctx, output_dir)

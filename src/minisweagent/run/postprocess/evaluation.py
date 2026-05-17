@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -398,36 +399,50 @@ def preflight_commandment_contract(
         "preflight_commandment_contract: smoke-testing COMMANDMENT against %s with iterations=1",
         repo_root_path,
     )
-    try:
-        result = subprocess.run(
-            ["bash", script],
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            cwd=str(repo_root_path),
-            env=env,
-        )
-    except Exception as exc:
-        raise CommandmentExecutionError(
-            "PREFLIGHT", None, f"SETUP+CORRECTNESS subprocess failed to complete: {exc}"
-        ) from exc
+    max_attempts = 3
+    last_result = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = subprocess.run(
+                ["bash", script],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                cwd=str(repo_root_path),
+                env=env,
+            )
+        except Exception as exc:
+            raise CommandmentExecutionError(
+                "PREFLIGHT", None, f"SETUP+CORRECTNESS subprocess failed to complete: {exc}"
+            ) from exc
 
-    if result.returncode != 0:
-        stderr_tail = _format_stderr_tail(result.stderr)
-        broken = _stderr_indicates_broken_contract(result.stderr)
-        detail = (
-            f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
-            if broken is not None
-            else f"non-zero exit; stderr tail:\n{stderr_tail}"
-        )
-        logger.error(
-            "preflight_commandment_contract: FAILED (rc=%d) -- aborting before sub-agent fan-out:\n%s",
-            result.returncode,
-            stderr_tail,
-        )
-        raise CommandmentExecutionError("PREFLIGHT", result.returncode, detail)
+        if result.returncode == 0:
+            logger.info(
+                "preflight_commandment_contract: PASS (attempt %d/%d)",
+                attempt, max_attempts,
+            )
+            return
 
-    logger.info("preflight_commandment_contract: PASS")
+        last_result = result
+        if attempt < max_attempts:
+            logger.warning(
+                "preflight_commandment_contract: FAIL on attempt %d/%d (rc=%d), retrying in 5s...",
+                attempt, max_attempts, result.returncode,
+            )
+            time.sleep(5)
+
+    stderr_tail = _format_stderr_tail(last_result.stderr)
+    broken = _stderr_indicates_broken_contract(last_result.stderr)
+    detail = (
+        f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
+        if broken is not None
+        else f"non-zero exit after {max_attempts} attempts; stderr tail:\n{stderr_tail}"
+    )
+    logger.error(
+        "preflight_commandment_contract: FAILED after %d attempts (rc=%d):\n%s",
+        max_attempts, last_result.returncode, stderr_tail,
+    )
+    raise CommandmentExecutionError("PREFLIGHT", last_result.returncode, detail)
 
 
 def recapture_commandment_baseline(
