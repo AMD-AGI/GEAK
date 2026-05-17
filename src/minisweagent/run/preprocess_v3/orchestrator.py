@@ -678,32 +678,91 @@ class PreprocessOrchestratorAgent:
         errors: list[str],
         elapsed_s: float,
     ) -> PreprocessResult:
-        """Assemble the :class:`PreprocessResult` from finish payload + context."""
+        """Assemble the :class:`PreprocessResult` from finish payload + context.
+
+        Success semantics (commit set 5a — fix for open question #7):
+
+        * Loop-level ``errors`` (e.g. ``LimitsExceeded``) always invalidate
+          ``success``.
+        * ``finish_preprocess(errors=[...])`` — i.e. the LLM gracefully
+          gave up after exhausting the harness-verifier retry budget — is
+          treated as failure: the per-step errors are folded into
+          ``result.errors`` and ``success`` is ``False``.
+        * Missing required artifacts (``harness_path`` or ``baseline``)
+          downgrade a nominally clean run to ``success=False`` too — a
+          finish payload with neither is meaningless to the downstream
+          pipeline.
+        """
         kernel_language = context.get("kernel_language")
         kernel_path = _coerce_path(context.get("kernel_path")) or Path()
 
         collected = self._collected
-        success = finish_payload is not None and not errors
+        merged_errors = list(errors)
+        if finish_payload is not None:
+            for err in finish_payload.get("errors") or []:
+                if err and err not in merged_errors:
+                    merged_errors.append(str(err))
 
         translated_path = None
         translation: TranslationResult | None = collected.get("translation")
         if translation is not None and translation.translated_kernel_path is not None:
             translated_path = translation.translated_kernel_path
 
+        harness_path = _coerce_path(collected.get("harness_path"))
+        baseline = collected.get("baseline")
+        success = self._finalize_success(
+            finish_payload=finish_payload,
+            errors=merged_errors,
+            harness_path=harness_path,
+            baseline=baseline,
+        )
+
         return PreprocessResult(
             success=success,
             kernel_language=kernel_language,  # type: ignore[arg-type]
             kernel_path=translated_path or kernel_path,
-            harness_path=_coerce_path(collected.get("harness_path")),
-            baseline=collected.get("baseline"),
+            harness_path=harness_path,
+            baseline=baseline,
             profile=collected.get("profile"),
             codebase_context=collected.get("codebase_context"),
             commandment_path=_coerce_path(collected.get("commandment_path")),
             translation=translation,
             subagent_runs=list(self._subagent_runs),
             elapsed_s=elapsed_s,
-            errors=list(errors),
+            errors=merged_errors,
         )
+
+    @staticmethod
+    def _finalize_success(
+        *,
+        finish_payload: dict[str, Any] | None,
+        errors: list[str],
+        harness_path: Path | None,
+        baseline: Any,
+    ) -> bool:
+        """Compute the final ``success`` flag for the :class:`PreprocessResult`.
+
+        ``True`` iff **all** of:
+
+        * ``finish_preprocess`` was actually called (so we have a payload).
+        * No accumulated ``errors`` (loop-level or finish-payload-level).
+        * ``harness_path`` is populated.
+        * ``baseline`` metrics were collected.
+
+        Any other combination is a partial / failed run — the rest of the
+        pipeline will refuse to proceed without these artefacts, so
+        surface the failure early instead of letting downstream crash on
+        a missing harness path.
+        """
+        if finish_payload is None:
+            return False
+        if errors:
+            return False
+        if harness_path is None:
+            return False
+        if baseline is None:
+            return False
+        return True
 
     # -----------------------------------------------------------------
     # Model wiring

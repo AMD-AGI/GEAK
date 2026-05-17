@@ -699,13 +699,181 @@ def test_orchestrator_does_not_loop_forever_when_verifier_keeps_rejecting(
         gpu_id=0,
     )
 
-    # finish_preprocess succeeded with errors recorded inside its payload —
-    # but the loop terminated cleanly (no LimitsExceeded, no FormatError).
-    # The PreprocessResult.success flag is True because finish was called
-    # and no exception was raised during the loop; per-step failures live
-    # in the finish payload, which we don't currently fold back into
-    # result.errors. Pin that contract.
+    # Commit set 5a (fix for open question #7): when the LLM gracefully
+    # calls ``finish_preprocess(errors=[...])`` because the harness
+    # verifier rejected every attempt, the orchestrator MUST surface that
+    # as a failure. Pre-fix this asserted ``success is True`` because the
+    # finish payload was ignored — that was a silent contract bug.
     assert model.script == []  # script consumed cleanly
     names = [r["name"] for r in result.subagent_runs]
     assert names.count("harness-generator") == 3
     assert names.count("harness-verifier") == 3
+    assert result.success is False, "give-up via finish_preprocess(errors=...) must mark failure"
+    assert any("rejected 3 attempts" in err for err in result.errors), (
+        f"errors from finish_preprocess must be folded into result.errors; got {result.errors!r}"
+    )
+
+
+def test_orchestrator_marks_failure_when_finish_omits_harness(
+    tmp_path: Path,
+    monkeypatch,
+    empty_registry: SubagentRegistry,
+) -> None:
+    """``finish_preprocess`` with no harness_path AND errors yields success=False.
+
+    Mirrors the realistic give-up case: the LLM hit the retry cap, never
+    produced a verified harness, and finished with a non-empty errors
+    array. Even if no Python exception was raised inside the loop,
+    ``result.success`` must be ``False`` because the downstream pipeline
+    cannot proceed without a harness_path.
+    """
+    repo, kernel_path = _build_fixture_repo(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    _patch_deterministic_tools(monkeypatch, harness_path=tmp_path / "nonexistent_harness.py")
+
+    class _AlwaysRejectingDispatcher:
+        def __init__(self, registry):
+            self.registry = registry
+
+        def __call__(self, *, name, task, model, cwd=None, context=None):
+            if name == "harness-verifier":
+                return {
+                    "name": name,
+                    "success": False,
+                    "output": "HARNESS_VERIFIED=false\nESCALATE=false",
+                    "elapsed_s": 0.1,
+                }
+            return {"name": name, "success": True, "output": "ok", "elapsed_s": 0.1}
+
+    codebase_context_path = out_dir / "CODEBASE_CONTEXT.md"
+    script = [
+        (
+            "codebase_explore",
+            {
+                "repo_root": str(repo),
+                "kernel_path": str(kernel_path),
+                "out_path": str(codebase_context_path),
+            },
+        ),
+        ("dispatch_subagent", {"name": "harness-generator", "task": "attempt 1"}),
+        ("dispatch_subagent", {"name": "harness-verifier", "task": "verify 1"}),
+        (
+            "finish_preprocess",
+            {
+                "errors": ["max retries exhausted"],
+                "summary": "Verifier never approved; giving up.",
+            },
+        ),
+    ]
+
+    model = _ScriptedModel(script)
+    agent = PreprocessOrchestratorAgent(model=model)
+    register_default_tools(
+        agent,
+        kernel_language=_LANG,
+        registry=empty_registry,
+        dispatcher=_AlwaysRejectingDispatcher(empty_registry),
+    )
+
+    result = agent.run(
+        task="Give-up path: no harness, no baseline.",
+        kernel_path=kernel_path,
+        repo_root=repo,
+        kernel_language=_LANG,
+        source_language="triton",
+        target_language="triton",
+        output_dir=out_dir,
+        gpu_id=0,
+    )
+
+    assert model.script == []  # script consumed cleanly
+    assert result.success is False
+    assert result.harness_path is None
+    assert result.baseline is None
+    assert "max retries exhausted" in result.errors
+
+
+def test_orchestrator_marks_failure_when_baseline_missing(
+    tmp_path: Path,
+    monkeypatch,
+    empty_registry: SubagentRegistry,
+) -> None:
+    """A finish_preprocess with no errors but no baseline still fails.
+
+    Pins the strict success contract from commit set 5a: even an empty
+    ``errors`` list isn't enough — ``baseline`` and ``harness_path`` must
+    both be populated for ``success=True``. Otherwise the optimisation
+    loop will hit ``KeyError`` on ``preprocess_ctx['baseline_metrics']``.
+    """
+    repo, kernel_path = _build_fixture_repo(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    harness_path = out_dir / "test_harness.py"
+    harness_path.write_text(_HARNESS_BODY, encoding="utf-8")
+
+    _patch_deterministic_tools(monkeypatch, harness_path=harness_path)
+
+    class _OnlyGenDispatcher:
+        def __init__(self, registry):
+            self.registry = registry
+
+        def __call__(self, *, name, task, model, cwd=None, context=None):
+            if name == "harness-verifier":
+                return {
+                    "name": name,
+                    "success": True,
+                    "output": f"HARNESS_VERIFIED=true\nHARNESS_PATH={harness_path}",
+                    "elapsed_s": 0.1,
+                }
+            return {"name": name, "success": True, "output": "ok", "elapsed_s": 0.1}
+
+    codebase_context_path = out_dir / "CODEBASE_CONTEXT.md"
+    # Note: NO collect_baseline call in this script — the LLM skips it
+    # (a realistic misbehaviour to guard against).
+    script = [
+        (
+            "codebase_explore",
+            {
+                "repo_root": str(repo),
+                "kernel_path": str(kernel_path),
+                "out_path": str(codebase_context_path),
+            },
+        ),
+        ("dispatch_subagent", {"name": "harness-generator", "task": "attempt 1"}),
+        ("dispatch_subagent", {"name": "harness-verifier", "task": "verify 1"}),
+        (
+            "finish_preprocess",
+            {
+                "harness_path": str(harness_path),
+                "errors": [],
+                "summary": "Done (but baseline was never collected).",
+            },
+        ),
+    ]
+
+    model = _ScriptedModel(script)
+    agent = PreprocessOrchestratorAgent(model=model)
+    register_default_tools(
+        agent,
+        kernel_language=_LANG,
+        registry=empty_registry,
+        dispatcher=_OnlyGenDispatcher(empty_registry),
+    )
+
+    result = agent.run(
+        task="Skip-baseline path.",
+        kernel_path=kernel_path,
+        repo_root=repo,
+        kernel_language=_LANG,
+        source_language="triton",
+        target_language="triton",
+        output_dir=out_dir,
+        gpu_id=0,
+    )
+
+    assert model.script == []
+    assert result.harness_path == harness_path
+    assert result.baseline is None
+    assert result.success is False
