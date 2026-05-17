@@ -173,6 +173,109 @@ Expect:
   and print `GEAK_RESULT_LATENCY_MS=<float>` as the last line of
   `--benchmark`.
 
+## Path-A validation
+
+Commit set 7 added a **Path-A short-circuit** to the orchestrator. When
+the task prompt carries explicit run instructions, the orchestrator
+calls the new `commandment_from_user_command` tool to render
+`COMMANDMENT.md` directly from the user's command and SKIPS the
+`harness-generator` / `harness-verifier` / `speedup-verify` subagent
+dispatches. The decision is encoded in the orchestrator's `Step 0`
+system-prompt section — it's LLM judgment, not a regex on the task.
+
+### Example invocation
+
+```bash
+geak \
+  -t 'run via python my_kernel.py --benchmark --shape 4096' \
+  --kernel <path-to-my_kernel.py> \
+  --output ./validation_runs/path_a_v3 \
+  --gpus 0
+```
+
+The `run via ...` phrasing (or any explicit `python ...`,
+`./bench ...`, or `make bench`-style invocation in the task) is what
+triggers Path A.
+
+### Expected artifacts (Path A)
+
+Under `./validation_runs/path_a_v3/`:
+
+- `CODEBASE_CONTEXT.md` — still produced (Path A calls
+  `codebase_explore` after the short-circuit; the artifact is useful
+  to downstream consumers regardless of path).
+- `baseline_metrics.json` — still produced (Path A calls
+  `collect_baseline` against the kernel using the user's command).
+- `profile.json` — still produced (Path A calls `collect_profile`).
+- `COMMANDMENT.md` — produced by `commandment_from_user_command` with
+  the user's command projected into the 5 canonical sections.
+- **No `test_harness.py`** — Path A does not generate a harness; the
+  harness IS the user's run command.
+- **No subagent_run entries** for `harness-generator`,
+  `harness-verifier`, or `speedup-verify` in the resulting
+  `preprocess_ctx`. The `v3_subagent_runs` list should be empty on a
+  clean Path-A run.
+
+### Confirming `path_taken="A"` from the run log
+
+The orchestrator records the structural decision on
+`PreprocessResult.path_taken` and surfaces it via the adapter into
+`preprocess_ctx`. Grep the run output for either:
+
+```bash
+grep -E 'path_taken|commandment_from_user_command' \
+  ./validation_runs/path_a_v3/*.log
+```
+
+or inspect the `preprocess_ctx.json` directly:
+
+```python
+import json
+ctx = json.loads(open("./validation_runs/path_a_v3/preprocess_ctx.json").read())
+print(ctx.get("v3_path_taken"))  # expect "A"
+```
+
+The `commandment_from_user_command` tool name appears in
+`result.tool_calls` exactly once for a Path-A run, and never appears
+for a Path-B run.
+
+### Partial-mode-coverage warnings
+
+If the user's command covers only one mode (e.g. `--benchmark`) and
+the LLM asks the tool to infer the others, the rendered
+`COMMANDMENT.md` carries `# PATH_A_PARTIAL_COVERAGE: <mode> inferred
+from <source-mode>` markers in the inferred sections. Grep for them
+on a Path-A run to confirm:
+
+```bash
+grep -c PATH_A_PARTIAL_COVERAGE ./validation_runs/path_a_v3/COMMANDMENT.md
+```
+
+Three matches is typical for a `--benchmark`-only source command
+(correctness, profile, and full_benchmark all inferred).
+
+### Reverting Path A if it misbehaves
+
+The Path-A short-circuit is orchestrator-side only. The three always-on
+subagents are unchanged. To temporarily disable Path A without
+reverting all of commit set 7, revert the system-prompt commit (commit
+3 of the set) so the LLM no longer knows about Step 0:
+
+```bash
+# Find the commit that updated the system prompt:
+git log --oneline --grep='orchestrator system prompt teaches Path-A'
+# Revert that single commit.
+git revert <sha>
+```
+
+A full revert of the commit set (back to the 6-step-only flow) is:
+
+```bash
+# Walk back from HEAD to the commit before the set started:
+git log --oneline -n 10
+git revert <sha-1>..<sha-5>  # or one-by-one
+```
+
 ## What to do if v3 fails
 
 1. Capture the failure: copy the run's stdout/stderr and any

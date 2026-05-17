@@ -10,6 +10,18 @@ The v3 orchestrator (`PreprocessOrchestratorAgent`) calls these three
 subagents via `dispatch_subagent`; everything else in the 6-step flow is a
 deterministic tool call.
 
+> **Note on the Path-A short-circuit (commit set 7).** When the user's
+> task prompt already carries explicit run instructions (e.g. `run via
+> python my_kernel.py --benchmark`), the orchestrator's `Step 0` system
+> prompt section instructs the LLM to call the
+> `commandment_from_user_command` tool instead of dispatching
+> `harness-generator`. That short-circuit skips all three of the
+> subagents listed below. The subagents themselves are unchanged — Path
+> A is purely an orchestrator-side bypass. See the orchestrator's `Step
+> 0 — Path A vs Path B decision` section
+> (`src/minisweagent/run/preprocess_v3/orchestrator.py`) for the
+> selection logic.
+
 | Subagent           | Pipeline step                      | `max_steps`  | `tools`                                  |
 |--------------------|------------------------------------|--------------|------------------------------------------|
 | `harness-generator`| Step 3a — build the test harness    | `-1` (unlimited) | `bash`, `str_replace_editor`, `save_and_test` |
