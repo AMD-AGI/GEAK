@@ -114,17 +114,12 @@ def validate_translation_performance(
         multiples of source.
     """
     if source_latency_ms <= 0:
-        raise ValueError(
-            f"source_latency_ms must be > 0; got {source_latency_ms}"
-        )
+        raise ValueError(f"source_latency_ms must be > 0; got {source_latency_ms}")
     if target_latency_ms <= 0:
-        raise ValueError(
-            f"target_latency_ms must be > 0; got {target_latency_ms}"
-        )
+        raise ValueError(f"target_latency_ms must be > 0; got {target_latency_ms}")
     if not 0 < fail_threshold < warn_threshold < 1:
         raise ValueError(
-            f"thresholds must satisfy 0 < fail_threshold ({fail_threshold}) < "
-            f"warn_threshold ({warn_threshold}) < 1"
+            f"thresholds must satisfy 0 < fail_threshold ({fail_threshold}) < warn_threshold ({warn_threshold}) < 1"
         )
 
     ratio = target_latency_ms / source_latency_ms
@@ -193,8 +188,7 @@ def _extract_entry_points(source: str, language: str) -> set[str]:
     # Other languages: try both.  Translation pairs outside the
     # registered set should still produce a non-empty set when
     # possible.
-    out = _extract_python_entry_points(source) | _extract_hip_entry_points(source)
-    return out
+    return _extract_python_entry_points(source) | _extract_hip_entry_points(source)
 
 
 def _always_true_verifier(_candidate: str) -> bool:
@@ -210,6 +204,14 @@ class TranslationPhase(Phase):
     """Gate + run.  Only executes when ``target_language`` is set and differs from source."""
 
     name = "translation"
+
+    # Optional model handle that callers (e.g. orchestrator harnesses or
+    # tests) may attach via ``phase._injected_model = model`` BEFORE
+    # running.  When set, :meth:`_build_agent` reuses it instead of
+    # letting :class:`TranslationAgent` resolve a fresh one from
+    # ``SubagentConfig.model_name``.  Declared at class scope so pylint
+    # / type-checkers can see the attribute exists.
+    _injected_model: Any = None
 
     def is_applicable(self, ctx: PhaseContext) -> bool:
         return bool(ctx.target_language)
@@ -291,8 +293,7 @@ class TranslationPhase(Phase):
         if not result.ok:
             raise RuntimeError(
                 f"TranslationAgent exhausted {result.attempts_used} attempts without passing verify_fn.  "
-                f"Feedback history:\n  - "
-                + "\n  - ".join(result.feedback_history[-3:])
+                f"Feedback history:\n  - " + "\n  - ".join(result.feedback_history[-3:])
             )
 
         # Write the translated kernel next to the source file with a
@@ -405,9 +406,7 @@ class TranslationPhase(Phase):
         """
         harness = getattr(ctx, "harness", None) or getattr(ctx, "harness_path", None)
         if not harness:
-            logger.debug(
-                "  D4 source-correctness: no ctx.harness/harness_path; skipping."
-            )
+            logger.debug("  D4 source-correctness: no ctx.harness/harness_path; skipping.")
             return None
 
         harness_path = Path(harness)
@@ -422,10 +421,7 @@ class TranslationPhase(Phase):
         import subprocess
         import sys
 
-        cmd = (
-            f"{shlex.quote(sys.executable)} "
-            f"{shlex.quote(str(harness_path.resolve()))} --correctness"
-        )
+        cmd = f"{shlex.quote(sys.executable)} {shlex.quote(str(harness_path.resolve()))} --correctness"
         repo_root = getattr(ctx, "repo_root", None)
         cwd = str(Path(repo_root).resolve()) if repo_root else None
 
@@ -519,9 +515,7 @@ class TranslationPhase(Phase):
             r"__global__|cudaLaunchKernel|\bcuda[A-Z]\w*\s*\("
             r"|#\s*include\s*[<\"]cuda"
         )
-        _TRITON_MARKERS = re.compile(
-            r"@triton\.jit\b|\btl\.|\bfrom\s+triton\b|\bimport\s+triton\b"
-        )
+        _TRITON_MARKERS = re.compile(r"@triton\.jit\b|\btl\.|\bfrom\s+triton\b|\bimport\s+triton\b")
 
         def _verify(candidate: str) -> tuple[bool, str]:
             # Layer 2 (syntactic) — cheapest check, runs first so we

@@ -24,17 +24,15 @@ a hard contract, so we do not raise).
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from minisweagent.pipeline_workers.base import SubagentBase
 
 if TYPE_CHECKING:  # pragma: no cover
-    from minisweagent.kernel_languages.base import KernelLanguage
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -178,9 +176,7 @@ class KernelAnalysisAgent(SubagentBase):
         kernel_path = inputs.get("kernel_path")
         out_path = inputs.get("out_path")
         if kernel_path is None or out_path is None:
-            raise ValueError(
-                "KernelAnalysisAgent.run requires 'kernel_path' and 'out_path' inputs."
-            )
+            raise ValueError("KernelAnalysisAgent.run requires 'kernel_path' and 'out_path' inputs.")
         kernel_path = Path(kernel_path)
         out_path = Path(out_path)
         if not kernel_path.is_file():
@@ -283,8 +279,7 @@ class KernelAnalysisAgent(SubagentBase):
         # so ExplorePhase can decide whether to feed it to the task body.
         out_path.write_text(last_markdown, encoding="utf-8")
         logger.warning(
-            "KernelAnalysisAgent exhausted %d attempt(s); best-effort "
-            "markdown written to %s (missing headers: %s)",
+            "KernelAnalysisAgent exhausted %d attempt(s); best-effort markdown written to %s (missing headers: %s)",
             total_attempts,
             out_path,
             last_missing,
@@ -359,8 +354,7 @@ class KernelAnalysisAgent(SubagentBase):
             ]
         else:
             parts += [
-                "Return ONLY the markdown for the four sections.  No fences, "
-                "no prose before or after.",
+                "Return ONLY the markdown for the four sections.  No fences, no prose before or after.",
             ]
 
         return system, "\n".join(parts)

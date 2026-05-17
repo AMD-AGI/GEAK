@@ -20,9 +20,10 @@ See docs/refactor/EXECUTION_PLAN.md §16.2 for the full design rationale.
 from __future__ import annotations
 
 from abc import ABC
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from minisweagent.kernel_languages.base import KernelLanguage
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class SubagentConfig:
@@ -42,19 +44,20 @@ class SubagentConfig:
     30-turn budget of a long optimization round.
     """
 
-    name: str                                                  # subagent's name (e.g. "harness_builder")
-    model_name: str                                            # which LLM model to use
-    system_template: str                                       # str.format-style; e.g. with {language_name}, {system_prompt}
-    instance_template: str                                     # per-invocation user prompt template
-    step_limit: int = 20                                       # max LLM turns before LimitsExceeded
-    cost_limit: float = 3.0                                    # USD cost ceiling per invocation
+    name: str  # subagent's name (e.g. "harness_builder")
+    model_name: str  # which LLM model to use
+    system_template: str  # str.format-style; e.g. with {language_name}, {system_prompt}
+    instance_template: str  # per-invocation user prompt template
+    step_limit: int = 20  # max LLM turns before LimitsExceeded
+    cost_limit: float = 3.0  # USD cost ceiling per invocation
     temperature: float = 0.2
-    extra: Dict[str, Any] = field(default_factory=dict)         # subagent-specific extras
+    extra: dict[str, Any] = field(default_factory=dict)  # subagent-specific extras
 
 
 # ---------------------------------------------------------------------------
 # SubagentBase — the ONE base class for every subagent
 # ---------------------------------------------------------------------------
+
 
 class SubagentBase(ABC):
     """Base for narrow-task LLM subagents. Peer of OptimizationAgent (NOT a subclass).
@@ -73,8 +76,7 @@ class SubagentBase(ABC):
         consumes programmatically. Unstructured chat is not the job of a subagent.
     """
 
-    def __init__(self, language: "KernelLanguage", config_path: Optional[Path] = None,
-                 config: Optional[SubagentConfig] = None):
+    def __init__(self, language: KernelLanguage, config_path: Path | None = None, config: SubagentConfig | None = None):
         self.language = language
         if config is not None:
             self.config = config
@@ -140,12 +142,9 @@ class SubagentBase(ABC):
         try:
             import yaml
         except ImportError as e:
-            raise RuntimeError(
-                "PyYAML required to load subagent configs. Install with "
-                "`pip install pyyaml`."
-            ) from e
+            raise RuntimeError("PyYAML required to load subagent configs. Install with `pip install pyyaml`.") from e
 
-        with open(path, "r") as f:
+        with open(path) as f:
             data = yaml.safe_load(f) or {}
 
         return SubagentConfig(
@@ -165,7 +164,7 @@ class SubagentBase(ABC):
         Subclasses pass their task-specific variables (plus they get
         `{language_name}` and related common vars for free).
         """
-        common: Dict[str, Any] = {
+        common: dict[str, Any] = {
             "language_name": self.language.name,
         }
         common.update(template_vars)

@@ -27,10 +27,8 @@ translation_hints) land in later commits as they become required by consumers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from functools import cached_property
+from dataclasses import dataclass
 from pathlib import Path
-from typing import FrozenSet
 
 
 @dataclass(frozen=True)
@@ -48,7 +46,7 @@ class KernelLanguage:
     name: str
     """Unique language identifier: 'triton', 'hip', 'flydsl', ..."""
 
-    file_extensions: FrozenSet[str]
+    file_extensions: frozenset[str]
     """File extensions this language claims, e.g. frozenset({'.py'}) for Triton.
     Used by `registry.detect_best(path)` as a prefilter."""
 
@@ -135,7 +133,7 @@ class KernelLanguage:
     ``<dir>/_fallback.md``.  See plan §0.5(b) Translation phase."""
 
     # ─── tools (populated in PR-3) ───
-    tool_set: FrozenSet[str] = frozenset()
+    tool_set: frozenset[str] = frozenset()
     """Tool names the main agent receives for this language. Examples:
     Triton: frozenset({'bash', 'str_replace_editor', 'save_and_test', 'submit',
                        'strategy_manager', 'profile_kernel', 'query', 'optimize',

@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, Optional
 
 from minisweagent.kernel_languages.base import KernelLanguage
 
@@ -36,20 +35,20 @@ class _Registry:
     """Singleton registry. Access via module-level `registry` instance."""
 
     def __init__(self) -> None:
-        self._langs: Dict[str, KernelLanguage] = {}
+        self._langs: dict[str, KernelLanguage] = {}
 
     def register(self, lang: KernelLanguage) -> None:
         """Register a language. Idempotent — re-registration overwrites."""
         self._langs[lang.name] = lang
 
-    def get(self, name: str) -> Optional[KernelLanguage]:
+    def get(self, name: str) -> KernelLanguage | None:
         """Look up a language by its canonical `name`. None if not found."""
         return self._langs.get(name)
 
     def all(self) -> list[KernelLanguage]:
         return list(self._langs.values())
 
-    def detect_best(self, path: Path) -> Optional[KernelLanguage]:
+    def detect_best(self, path: Path) -> KernelLanguage | None:
         """Find the most likely language for a kernel file.
 
         Score = file_extension match + detect_hints regex hits in file content.
@@ -81,7 +80,7 @@ class _Registry:
         scored.sort(key=lambda t: -t[0])
         return scored[0][1]
 
-    def detect_best_by_name(self, name: str) -> Optional[KernelLanguage]:
+    def detect_best_by_name(self, name: str) -> KernelLanguage | None:
         """Legacy shim for code that passes a string like 'triton' instead of a Path.
 
         Replaces ``_normalize_kernel_type`` from today's ``cli.py``.
@@ -92,12 +91,12 @@ class _Registry:
         aliases = {
             "rocm": "hip",
             "rocblas": "hip",
-            "cuda": "triton",   # legacy compatibility; GEAK's Triton supports CUDA-style wrappers too
+            "cuda": "triton",  # legacy compatibility; GEAK's Triton supports CUDA-style wrappers too
         }
         canonical = aliases.get(n, n)
         return self.get(canonical)
 
-    def _detect_by_extension(self, path: Path) -> Optional[KernelLanguage]:
+    def _detect_by_extension(self, path: Path) -> KernelLanguage | None:
         ext = path.suffix.lower()
         for lang in self._langs.values():
             if ext in lang.file_extensions:
@@ -112,6 +111,7 @@ registry = _Registry()
 # ---------------------------------------------------------------------------
 # Auto-register built-in languages at import time
 # ---------------------------------------------------------------------------
+
 
 def _bootstrap_builtin_languages() -> None:
     """Import built-in language modules so they register themselves.

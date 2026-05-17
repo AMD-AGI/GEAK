@@ -90,7 +90,7 @@ def _extract_kernel_latency_ms(text: str) -> tuple[float | None, str]:
     """
     # Strip ANSI escape sequences — SGR codes like \x1b[92m contain digits
     # followed by 'm' which the per-line regex misreads as "<N> ms".
-    text = re.sub(r'\x1b\[[0-9;]*m', '', text)
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
 
     # Layer 1: subprocess already emitted the canonical marker
     if re.search(r"GEAK_RESULT_LATENCY_MS=[\d.]+", text):
@@ -103,8 +103,11 @@ def _extract_kernel_latency_ms(text: str) -> tuple[float | None, str]:
         (r"BENCHMARK_METRIC:\s*median_latency_ms=([\d.]+(?:e[+-]?\d+)?)", 0),
         (r"median_latency_ms:\s*([\d.]+(?:e[+-]?\d+)?)", 0),
         (r"Geomean\s*\(ms\)\s*:\s*([\d.]+(?:e[+-]?\d+)?)", 0),
-        (r"(?:[Mm]edian\s+(?:latency|time)[\w\s]*|total\s+median\s+time)"
-         r"\s*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms", 0),
+        (
+            r"(?:[Mm]edian\s+(?:latency|time)[\w\s]*|total\s+median\s+time)"
+            r"\s*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms",
+            0,
+        ),
     ]
     for pat, _flags in _summary_patterns:
         m = re.search(pat, text, re.IGNORECASE)
@@ -295,7 +298,7 @@ def materialize_shell_contract_harness(
     # which must NOT be interpolated by this generator's f-string.  We use
     # a plain string (no f-prefix) for the tail.
     tail = textwrap.dedent(
-        '''\
+        """\
 
         def main() -> None:
             parser = argparse.ArgumentParser()
@@ -345,7 +348,7 @@ def materialize_shell_contract_harness(
 
         if __name__ == "__main__":
             main()
-        '''
+        """
     )
     body = head + "\n" + _PARSER_SOURCE + "\n" + tail
     out.write_text(body, encoding="utf-8")

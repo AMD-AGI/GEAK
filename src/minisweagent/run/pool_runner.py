@@ -24,15 +24,18 @@ identically; the only difference is the task body.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from minisweagent.agents.agent_spec import AgentTask
+from minisweagent.run.unified import PipelineContext
 from minisweagent.run.utils.parallel_helpers import (
     redirect_output_to_file,
+)
+from minisweagent.run.utils.parallel_helpers import (
     run_pool as _run_pool_impl,
 )
-from minisweagent.run.unified import PipelineContext
 
 logger = logging.getLogger(__name__)
 

@@ -347,11 +347,19 @@ def _init_llm_client():
     try:
         import anthropic
 
+        try:
+            from minisweagent.models.amd_base import get_amd_llm_user
+
+            user = get_amd_llm_user()
+        except Exception:
+            user = os.environ.get("GEAK_USER") or os.environ.get("USER") or "unknown"
+
         return anthropic.Anthropic(
             api_key="dummy",
             base_url="https://llm-api.amd.com/Anthropic",
             default_headers={
                 "Ocp-Apim-Subscription-Key": api_key,
+                "user": user,
                 "anthropic-version": "2023-10-16",
             },
         )

@@ -47,6 +47,7 @@ def _agent_class_to_type() -> dict[type, str]:
 def _all_agent_types() -> frozenset[str]:
     return frozenset(_agent_type_to_class())
 
+
 ALL_AGENT_TYPES: frozenset[str] = _all_agent_types()
 
 _DEFAULT_FALLBACK_AGENT = "strategy_agent"
