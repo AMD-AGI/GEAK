@@ -34,9 +34,7 @@ from minisweagent.run.pipeline_helpers import (
     apply_mode_presets,
     resolve_max_rounds,
 )
-from minisweagent.run.preprocess.orchestrator import (
-    run_preprocessor_via_orchestrator as run_preprocessor,
-)
+from minisweagent.run.preprocess_v3.adapter import run_preprocess_v3 as run_preprocessor
 from minisweagent.run.state import (
     PreprocessState,
     preprocess_hard_stop_handler,
