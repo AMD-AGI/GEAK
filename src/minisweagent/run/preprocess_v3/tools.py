@@ -1,0 +1,763 @@
+"""Tool implementations for the v3 preprocess orchestrator.
+
+Each tool here is the LLM-callable bridge between an
+``OpenAI/LiteLLM``-style tool call and one of the v3 preprocess modules.
+Tools come in two flavours:
+
+* **Deterministic tools** (``codebase_explore``, ``translate_to_flydsl``,
+  ``collect_baseline``, ``collect_profile``, ``render_commandment``) —
+  call directly into the v3 module with no LLM step of their own.
+
+* **LLM-dispatch tool** (``dispatch_subagent``) — looks up the named
+  subagent in :class:`SubagentRegistry`, builds an
+  :class:`PreprocessSubagentDispatcher`, runs it, and returns a
+  structured summary.
+
+* **Completion sentinel** (``finish_preprocess``) — populates the
+  orchestrator's pending :class:`PreprocessResult` payload and raises
+  :class:`FinishedSuccessfully` to terminate the loop.
+
+Why a v3-native dispatcher instead of reusing ``SubAgentTool``?
+---------------------------------------------------------------
+
+The legacy :class:`minisweagent.tools.sub_agent_tool.SubAgentTool`:
+
+1. Hard-codes :class:`minisweagent.agents.default.DefaultAgent` as the
+   child class.
+2. Hard-codes :class:`minisweagent.subagents.SubAgentRegistry` (the rich
+   legacy descriptor model) as its routing source.
+3. Has no concept of the v3 ``max_steps == -1`` sentinel — it normalises
+   step limits via ``MIN_CHILD_STEP_LIMIT = 150``.
+4. Has no concept of a per-subagent restricted tool set — child agents
+   inherit the parent's tool surface.
+
+The v3 contract needs all four points to be different. Implementing a
+v3-native dispatcher (this module's :class:`PreprocessSubagentDispatcher`)
+keeps the legacy ``SubAgentTool`` untouched — important because the
+legacy heterogeneous orchestrator still uses it — while letting the v3
+side honor its own contract. This is the divergence noted in the
+commit-set 4 design doc.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from minisweagent.kernel_languages.base import KernelLanguage
+from minisweagent.run.preprocess_v3.baseline import (
+    BaselineMetrics,
+    ProfileResult,
+    collect_baseline_metrics,
+    collect_profile,
+)
+from minisweagent.run.preprocess_v3.commandment import CommandmentContext, render_commandment
+from minisweagent.run.preprocess_v3.explore import CodebaseContext, explore_codebase
+from minisweagent.run.preprocess_v3.orchestrator import (
+    FinishedSuccessfully,
+    PreprocessOrchestratorAgent,
+)
+from minisweagent.run.preprocess_v3.registry import SubagentRegistry, SubagentSpec
+from minisweagent.run.preprocess_v3.translate import TranslationResult, translate_to_flydsl
+
+logger = logging.getLogger(__name__)
+
+
+#: Subagent names the orchestrator may dispatch. Anything outside this
+#: set is rejected at the schema layer (enum) AND at the dispatcher (an
+#: extra defensive check, in case the LLM bypasses the schema).
+ALLOWED_SUBAGENT_NAMES: tuple[str, ...] = (
+    "harness-generator",
+    "harness-verifier",
+    "speedup-verify",
+)
+
+
+# ---------------------------------------------------------------------------
+# v3-native subagent dispatcher
+#
+# Replaces the legacy SubAgentTool for the v3 preprocess flow.
+# ---------------------------------------------------------------------------
+
+
+class PreprocessSubagentDispatcher:
+    """Run a v3 preprocess subagent and project the outcome to a dict.
+
+    Mirrors the legacy ``SubAgentTool.__call__`` interface (takes a
+    ``task`` string + budget hints + an optional system prompt override,
+    returns ``{output, returncode}``) but reads its routing exclusively
+    from :class:`SubagentRegistry` and honors v3 sentinels:
+
+    * ``spec.max_steps == -1`` (UNLIMITED) — pass ``step_limit=0`` to the
+      child (matches ``DefaultAgent.AgentConfig`` convention: 0 = "no
+      step cap").
+    * ``spec.tools`` — restrict the child agent's tool surface via
+      ``ToolRuntime.disable_tools`` for tools NOT in the spec (white-list
+      semantics).
+    * ``spec.system_prompt`` — inject as the child's ``system_template``.
+
+    The class is intentionally constructed lazily inside
+    :func:`build_dispatch_subagent_tool` so unit tests can swap in a
+    mock factory without spinning up the full ``ToolRuntime``.
+    """
+
+    def __init__(
+        self,
+        registry: SubagentRegistry,
+        *,
+        agent_factory: Callable[..., Any] | None = None,
+        env_factory: Callable[[], Any] | None = None,
+    ) -> None:
+        """Build the dispatcher.
+
+        Args:
+            registry:
+                v3 :class:`SubagentRegistry` instance. The dispatcher
+                resolves subagent names through ``registry.get(name)``.
+            agent_factory:
+                Optional callable returning a fresh agent for the
+                subagent run. Defaults to building a
+                :class:`minisweagent.agents.default.DefaultAgent` —
+                imported lazily so this module doesn't drag in the
+                legacy class at import time. Tests inject a stub here.
+            env_factory:
+                Optional callable returning a fresh
+                :class:`minisweagent.environments.local.LocalEnvironment`.
+                Defaults to the real env — overridden in tests.
+        """
+        self._registry = registry
+        self._agent_factory = agent_factory
+        self._env_factory = env_factory
+
+    def __call__(
+        self,
+        *,
+        name: str,
+        task: str,
+        model: Any,
+        cwd: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Dispatch a single subagent run.
+
+        Args:
+            name:
+                One of the names declared in
+                :data:`ALLOWED_SUBAGENT_NAMES`. Anything else returns a
+                structured error rather than raising — the orchestrator
+                surfaces the error to the LLM.
+            task:
+                Free-form task string handed to the child agent's
+                ``run`` method.
+            model:
+                Model instance the child uses. Per commit-set decision
+                4, the orchestrator passes its own ``self.model`` here
+                (global AMD-router routing).
+            cwd:
+                Working directory for the child. Defaults to the
+                process CWD.
+            context:
+                Optional extra dict merged into the child's task as a
+                preamble. Useful for passing the codebase context text
+                or harness path without inflating the task string.
+
+        Returns:
+            ``{name, success, output, returncode, system_prompt_used,
+              max_steps, elapsed_s}``.
+        """
+        if name not in ALLOWED_SUBAGENT_NAMES:
+            return {
+                "name": name,
+                "success": False,
+                "error": f"Subagent {name!r} is not in the v3 allow-list {list(ALLOWED_SUBAGENT_NAMES)}",
+                "elapsed_s": 0.0,
+            }
+
+        try:
+            spec = self._registry.get(name)
+        except KeyError as exc:
+            return {
+                "name": name,
+                "success": False,
+                "error": f"Subagent {name!r} not found in registry: {exc}",
+                "elapsed_s": 0.0,
+            }
+
+        full_task = task if not context else self._format_context_preamble(context) + "\n\n" + task
+
+        t0 = time.monotonic()
+        try:
+            exit_status, message = self._run_child(spec=spec, task=full_task, model=model, cwd=cwd)
+        except Exception as exc:
+            logger.exception("Subagent %r dispatch failed", name)
+            return {
+                "name": name,
+                "success": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "elapsed_s": round(time.monotonic() - t0, 3),
+                "max_steps": spec.max_steps,
+            }
+        elapsed_s = round(time.monotonic() - t0, 3)
+
+        success = exit_status in {"Submitted", "FinishedSuccessfully"} or "VERIFIED=true" in message
+        return {
+            "name": name,
+            "success": success,
+            "exit_status": exit_status,
+            "output": message,
+            "elapsed_s": elapsed_s,
+            "max_steps": spec.max_steps,
+            "is_unlimited_steps": spec.is_unlimited_steps,
+        }
+
+    @staticmethod
+    def _format_context_preamble(context: dict[str, Any]) -> str:
+        """Render an optional context dict as a Markdown preamble."""
+        lines = ["## Context"]
+        for key, value in context.items():
+            lines.append(f"- **{key}**: {value}")
+        return "\n".join(lines)
+
+    def _run_child(
+        self,
+        *,
+        spec: SubagentSpec,
+        task: str,
+        model: Any,
+        cwd: str | None,
+    ) -> tuple[str, str]:
+        """Build + run the child agent. Returns ``(exit_status, message)``."""
+        if self._agent_factory is not None:
+            agent = self._agent_factory(spec=spec, model=model, cwd=cwd)
+            return agent.run(task)
+
+        # Lazy default: build a DefaultAgent via the legacy class. Imported
+        # here (rather than at module top) so unit tests that pass an
+        # ``agent_factory`` can avoid the legacy import entirely.
+        # TODO(commit-set-5): replace DefaultAgent with v3-native subagent class.
+        from minisweagent.agents.default import DefaultAgent
+        from minisweagent.environments.local import LocalEnvironment
+
+        env = self._env_factory() if self._env_factory else LocalEnvironment(cwd=cwd or ".")
+
+        step_limit = 0 if spec.is_unlimited_steps else int(spec.max_steps)
+        agent_kwargs: dict[str, Any] = {
+            "system_template": spec.system_prompt,
+            "step_limit": step_limit,
+            "cost_limit": 0.0,
+        }
+
+        agent = DefaultAgent(model, env, **agent_kwargs)
+        if spec.tools:
+            try:
+                allowed = set(spec.tools)
+                disable = [name for name in agent.toolruntime._tool_table if name not in allowed]
+                if disable:
+                    agent.toolruntime.disable_tools(disable)
+            except Exception as exc:
+                logger.warning("Tool restriction failed for %s: %s", spec.name, exc)
+
+        return agent.run(task)
+
+
+# ---------------------------------------------------------------------------
+# Tool schemas
+# ---------------------------------------------------------------------------
+
+
+def _schema_codebase_explore() -> dict[str, Any]:
+    return {
+        "name": "codebase_explore",
+        "type": "function",
+        "description": (
+            "Step 1 — deterministic. Walk the repo from the kernel and produce "
+            "CODEBASE_CONTEXT.md plus a list of in-repo dependencies. Always "
+            "call this first."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo_root": {"type": "string", "description": "Absolute path to the repository root."},
+                "kernel_path": {"type": "string", "description": "Absolute path to the target kernel."},
+                "out_path": {
+                    "type": "string",
+                    "description": "Where to write CODEBASE_CONTEXT.md.",
+                },
+            },
+            "required": ["repo_root", "kernel_path", "out_path"],
+        },
+    }
+
+
+def _schema_translate_to_flydsl() -> dict[str, Any]:
+    return {
+        "name": "translate_to_flydsl",
+        "type": "function",
+        "description": (
+            "Step 2 — translate a PyTorch kernel to FlyDSL. Call ONLY when "
+            "source_language != target_language and target_language == 'flydsl'. "
+            "Wraps run_translation; not idempotent."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source_path": {"type": "string", "description": "Source kernel (e.g. PyTorch nn.Module file)."},
+                "output_dir": {"type": "string", "description": "Where the candidate FlyDSL kernel is written."},
+            },
+            "required": ["source_path", "output_dir"],
+        },
+    }
+
+
+def _schema_dispatch_subagent() -> dict[str, Any]:
+    return {
+        "name": "dispatch_subagent",
+        "type": "function",
+        "description": (
+            "Steps 3a, 3b, 5 — dispatch one of the three v3 preprocess subagents "
+            "(harness-generator, harness-verifier, speedup-verify) with a focused "
+            "task string. Use harness-generator and harness-verifier in alternation "
+            "during step 3 (max 3 generator attempts). Use speedup-verify only "
+            "after baseline metrics exist."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": list(ALLOWED_SUBAGENT_NAMES),
+                    "description": "Subagent name. Must be one of the three v3 preprocess subagents.",
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Task description forwarded to the child agent.",
+                },
+                "context": {
+                    "type": "object",
+                    "description": "Optional context dict (rendered as a Markdown preamble before the task).",
+                },
+            },
+            "required": ["name", "task"],
+        },
+    }
+
+
+def _schema_collect_baseline() -> dict[str, Any]:
+    return {
+        "name": "collect_baseline",
+        "type": "function",
+        "description": (
+            "Step 4 part 1 — deterministic. Run the harness in --benchmark mode "
+            "``repeats`` times, parse the latency markers, return the median + "
+            "samples + raw outputs."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "harness_path": {"type": "string", "description": "Absolute path to the verified harness."},
+                "repeats": {"type": "integer", "description": "Number of benchmark invocations.", "default": 5},
+                "work_dir": {"type": "string", "description": "Working directory + PYTHONPATH prefix."},
+                "gpu_id": {"type": "integer", "description": "HIP_VISIBLE_DEVICES value.", "default": 0},
+            },
+            "required": ["harness_path"],
+        },
+    }
+
+
+def _schema_collect_profile() -> dict[str, Any]:
+    return {
+        "name": "collect_profile",
+        "type": "function",
+        "description": (
+            "Step 4 part 2 — deterministic. Profile the harness in --profile mode "
+            "via profiler-mcp. Returns a structured profile dict."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "harness_path": {"type": "string", "description": "Absolute path to the verified harness."},
+                "work_dir": {"type": "string", "description": "Working directory."},
+                "gpu_id": {"type": "integer", "description": "HIP_VISIBLE_DEVICES value.", "default": 0},
+                "out_path": {"type": "string", "description": "Optional path to write the profile JSON."},
+            },
+            "required": ["harness_path"],
+        },
+    }
+
+
+def _schema_render_commandment() -> dict[str, Any]:
+    return {
+        "name": "render_commandment",
+        "type": "function",
+        "description": (
+            "Step 6 — deterministic. Render COMMANDMENT.md via the per-language "
+            "Jinja template (or the legacy generator on fallback). Call last, "
+            "after all other artifacts exist."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kernel_path": {"type": "string", "description": "Absolute path to the kernel."},
+                "harness_path": {"type": "string", "description": "Absolute path to the verified harness."},
+                "repo_root": {"type": "string", "description": "Repository root."},
+                "out_path": {"type": "string", "description": "Where to write COMMANDMENT.md."},
+                "baseline_metrics": {
+                    "type": "object",
+                    "description": "Optional baseline metrics dict (median_ms, samples_ms, etc.).",
+                },
+            },
+            "required": ["kernel_path", "harness_path", "repo_root", "out_path"],
+        },
+    }
+
+
+def _schema_finish_preprocess() -> dict[str, Any]:
+    return {
+        "name": "finish_preprocess",
+        "type": "function",
+        "description": (
+            "Completion sentinel — call when all 6 steps succeeded (or you have "
+            "exhausted retries and want to surface a partial result). The "
+            "orchestrator terminates the LLM loop after this returns."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "harness_path": {"type": "string", "description": "Absolute path to the verified harness."},
+                "commandment_path": {"type": "string", "description": "Absolute path to COMMANDMENT.md."},
+                "errors": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Collected non-fatal errors.",
+                },
+                "summary": {"type": "string", "description": "One-paragraph summary of the run."},
+            },
+            "required": [],
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
+
+
+def _make_tool_codebase_explore(
+    agent: PreprocessOrchestratorAgent,
+    kernel_language: KernelLanguage,
+) -> Callable[..., dict[str, Any]]:
+    """Bind ``codebase_explore`` to the agent's collected-state mutator.
+
+    The tool stores the produced :class:`CodebaseContext` on the agent's
+    private ``_collected`` dict so ``finish_preprocess`` can copy it into
+    the final result without the LLM having to re-pass it through the
+    final tool call.
+    """
+
+    def _impl(
+        repo_root: str,
+        kernel_path: str,
+        out_path: str,
+    ) -> dict[str, Any]:
+        ctx: CodebaseContext = explore_codebase(
+            Path(repo_root),
+            Path(kernel_path),
+            kernel_language,
+            out_path=Path(out_path),
+        )
+        agent._collected["codebase_context"] = ctx
+        return {
+            "ok": True,
+            "out_path": str(ctx.out_path) if ctx.out_path else None,
+            "n_files": len(ctx.files),
+            "files_preview": ctx.files[:10],
+            "text_length": len(ctx.text),
+        }
+
+    return _impl
+
+
+def _make_tool_translate_to_flydsl(
+    agent: PreprocessOrchestratorAgent,
+) -> Callable[..., dict[str, Any]]:
+    def _impl(source_path: str, output_dir: str) -> dict[str, Any]:
+        result: TranslationResult = translate_to_flydsl(
+            source_path=Path(source_path),
+            output_dir=Path(output_dir),
+            gpu_id=agent.config.gpu_id,
+            model=agent.model,
+            repo=agent.config.repo,
+            flydsl_repo=agent.config.flydsl_repo,
+        )
+        agent._collected["translation"] = result
+        return {
+            "ok": result.success,
+            "translated_kernel_path": str(result.translated_kernel_path) if result.translated_kernel_path else None,
+            "speedup": result.speedup,
+            "self_review": result.self_review,
+            "errors": result.errors,
+            "elapsed_s": result.elapsed_s,
+        }
+
+    return _impl
+
+
+def _make_tool_dispatch_subagent(
+    agent: PreprocessOrchestratorAgent,
+    dispatcher: PreprocessSubagentDispatcher,
+) -> Callable[..., dict[str, Any]]:
+    def _impl(name: str, task: str, context: dict | None = None) -> dict[str, Any]:
+        result = dispatcher(name=name, task=task, model=agent.model, context=context)
+        agent._subagent_runs.append(result)
+        # Populate orchestrator state from the subagent output where
+        # possible — the LLM still needs to call later tools, but we
+        # surface the parsed harness path / verifier verdict so it
+        # doesn't have to re-derive them.
+        output = result.get("output", "") or ""
+        if name == "harness-generator":
+            for line in output.splitlines():
+                if line.startswith("TEST_COMMAND:"):
+                    agent._collected.setdefault("test_command", line.split(":", 1)[1].strip())
+        if name == "harness-verifier":
+            for line in output.splitlines():
+                if line.startswith("HARNESS_PATH="):
+                    agent._collected["harness_path"] = line.split("=", 1)[1].strip()
+        return result
+
+    return _impl
+
+
+def _make_tool_collect_baseline(
+    agent: PreprocessOrchestratorAgent,
+) -> Callable[..., dict[str, Any]]:
+    def _impl(
+        harness_path: str,
+        repeats: int = 5,
+        work_dir: str | None = None,
+        gpu_id: int | None = None,
+    ) -> dict[str, Any]:
+        baseline: BaselineMetrics = collect_baseline_metrics(
+            Path(harness_path),
+            repeats=repeats,
+            work_dir=Path(work_dir) if work_dir else None,
+            gpu_id=gpu_id if gpu_id is not None else agent.config.gpu_id,
+        )
+        agent._collected["baseline"] = baseline
+        return {
+            "ok": baseline.success,
+            "median_ms": baseline.median_ms,
+            "samples_ms": baseline.samples_ms,
+            "stdev_ms": baseline.stdev_ms,
+            "repeats": baseline.repeats,
+            "command": baseline.command,
+        }
+
+    return _impl
+
+
+def _make_tool_collect_profile(
+    agent: PreprocessOrchestratorAgent,
+) -> Callable[..., dict[str, Any]]:
+    def _impl(
+        harness_path: str,
+        work_dir: str | None = None,
+        gpu_id: int | None = None,
+        out_path: str | None = None,
+    ) -> dict[str, Any]:
+        profile: ProfileResult = collect_profile(
+            Path(harness_path),
+            work_dir=Path(work_dir) if work_dir else None,
+            gpu_id=gpu_id if gpu_id is not None else agent.config.gpu_id,
+            out_path=Path(out_path) if out_path else None,
+        )
+        agent._collected["profile"] = profile
+        return {
+            "ok": profile.success,
+            "command": profile.command,
+            "backend": profile.backend,
+            "profile_path": str(profile.profile_path) if profile.profile_path else None,
+        }
+
+    return _impl
+
+
+def _make_tool_render_commandment(
+    agent: PreprocessOrchestratorAgent,
+    kernel_language: KernelLanguage,
+) -> Callable[..., dict[str, Any]]:
+    def _impl(
+        kernel_path: str,
+        harness_path: str,
+        repo_root: str,
+        out_path: str,
+        baseline_metrics: dict | None = None,
+    ) -> dict[str, Any]:
+        ctx = CommandmentContext(
+            kernel_path=Path(kernel_path),
+            harness_path=Path(harness_path),
+            repo_root=Path(repo_root),
+            baseline_metrics=baseline_metrics,
+        )
+        text = render_commandment(kernel_language, ctx, out_path=Path(out_path))
+        agent._collected["commandment_path"] = out_path
+        return {
+            "ok": True,
+            "out_path": out_path,
+            "text_length": len(text),
+        }
+
+    return _impl
+
+
+def _make_tool_finish_preprocess(
+    agent: PreprocessOrchestratorAgent,
+) -> Callable[..., dict[str, Any]]:
+    def _impl(
+        harness_path: str | None = None,
+        commandment_path: str | None = None,
+        errors: list | None = None,
+        summary: str = "",
+    ) -> dict[str, Any]:
+        if harness_path:
+            agent._collected["harness_path"] = harness_path
+        if commandment_path:
+            agent._collected["commandment_path"] = commandment_path
+        payload = {
+            "harness_path": harness_path,
+            "commandment_path": commandment_path,
+            "errors": list(errors or []),
+            "summary": summary,
+        }
+        agent._finish_payload = payload
+        raise FinishedSuccessfully(payload)
+
+    return _impl
+
+
+# ---------------------------------------------------------------------------
+# Registration helper
+# ---------------------------------------------------------------------------
+
+
+def register_default_tools(
+    agent: PreprocessOrchestratorAgent,
+    *,
+    kernel_language: KernelLanguage,
+    registry: SubagentRegistry | None = None,
+    dispatcher: PreprocessSubagentDispatcher | None = None,
+) -> None:
+    """Register all 7 v3 preprocess tools on ``agent``.
+
+    Args:
+        agent:
+            Target agent. Tools are bound to its ``_collected`` /
+            ``_subagent_runs`` mutable state so the eventual
+            :class:`PreprocessResult` carries every artifact.
+        kernel_language:
+            Language resolved by step 0b. Threaded into
+            ``codebase_explore`` and ``render_commandment``.
+        registry:
+            v3 :class:`SubagentRegistry`. Defaults to a fresh
+            registry that points at the in-repo
+            ``subagents/preprocess/`` tree.
+        dispatcher:
+            Pre-built :class:`PreprocessSubagentDispatcher`. When
+            ``None``, one is constructed from ``registry``. Tests
+            inject a stub dispatcher here to keep
+            ``dispatch_subagent`` deterministic.
+    """
+    registry = registry or SubagentRegistry()
+    dispatcher = dispatcher or PreprocessSubagentDispatcher(registry)
+
+    agent.register_tool(
+        "codebase_explore",
+        _schema_codebase_explore(),
+        _make_tool_codebase_explore(agent, kernel_language),
+    )
+    agent.register_tool(
+        "translate_to_flydsl",
+        _schema_translate_to_flydsl(),
+        _make_tool_translate_to_flydsl(agent),
+    )
+    agent.register_tool(
+        "dispatch_subagent",
+        _schema_dispatch_subagent(),
+        _make_tool_dispatch_subagent(agent, dispatcher),
+    )
+    agent.register_tool(
+        "collect_baseline",
+        _schema_collect_baseline(),
+        _make_tool_collect_baseline(agent),
+    )
+    agent.register_tool(
+        "collect_profile",
+        _schema_collect_profile(),
+        _make_tool_collect_profile(agent),
+    )
+    agent.register_tool(
+        "render_commandment",
+        _schema_render_commandment(),
+        _make_tool_render_commandment(agent, kernel_language),
+    )
+    agent.register_tool(
+        "finish_preprocess",
+        _schema_finish_preprocess(),
+        _make_tool_finish_preprocess(agent),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Schema validation helpers (used by tests; small + dependency-free)
+# ---------------------------------------------------------------------------
+
+
+def validate_call_against_schema(schema: dict[str, Any], args: dict[str, Any]) -> tuple[bool, str]:
+    """Lightweight argument validation against an OpenAI tool schema.
+
+    Implements just enough of JSON Schema to catch:
+
+    * missing required fields,
+    * top-level type mismatch (object vs other),
+    * ``enum`` violations on string properties.
+
+    Returns ``(ok, message)``. Used by the orchestrator tests to ensure
+    each tool's schema is well-formed without dragging in a full JSON
+    Schema implementation.
+    """
+    parameters = schema.get("parameters", {}) or {}
+    if parameters.get("type") != "object":
+        return False, f"schema {schema.get('name')!r}: parameters.type must be 'object'"
+    if not isinstance(args, dict):
+        return False, f"args must be a dict (got {type(args).__name__})"
+
+    required = parameters.get("required", []) or []
+    for key in required:
+        if key not in args:
+            return False, f"missing required field {key!r}"
+
+    properties = parameters.get("properties", {}) or {}
+    for key, value in args.items():
+        prop = properties.get(key)
+        if not prop:
+            continue
+        enum = prop.get("enum")
+        if enum is not None and value not in enum:
+            return False, f"field {key!r} value {value!r} is not in enum {enum}"
+    return True, "ok"
+
+
+__all__ = [
+    "ALLOWED_SUBAGENT_NAMES",
+    "PreprocessSubagentDispatcher",
+    "register_default_tools",
+    "validate_call_against_schema",
+]
+
+
+def _serialize_json(payload: Any) -> str:
+    """Module-level JSON helper kept for symmetry with future tool result handlers."""
+    return json.dumps(payload, default=str)

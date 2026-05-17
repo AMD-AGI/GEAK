@@ -434,3 +434,300 @@ def test_tool_entry_holds_schema_and_callable() -> None:
     entry = ToolEntry(schema={"name": "x"}, callable=_f)
     assert entry.schema == {"name": "x"}
     assert entry.callable is _f
+
+
+# ---------------------------------------------------------------------------
+# Tool wiring (commit 5)
+#
+# These tests exercise the 7-tool registration helper from
+# ``minisweagent.run.preprocess_v3.tools``. They use a stub
+# ``PreprocessSubagentDispatcher`` that returns canned results so we never
+# spin up a real DefaultAgent.
+# ---------------------------------------------------------------------------
+
+
+from minisweagent.run.preprocess_v3.tools import (  # noqa: E402  (intentional late import)
+    ALLOWED_SUBAGENT_NAMES,
+    PreprocessSubagentDispatcher,
+    register_default_tools,
+    validate_call_against_schema,
+)
+
+
+class _StubDispatcher:
+    """Stub dispatcher that records calls without spawning a child agent."""
+
+    def __init__(self, response: dict | None = None) -> None:
+        self.calls: list[dict] = []
+        self.response = response or {
+            "name": "harness-generator",
+            "success": True,
+            "output": "TEST_COMMAND: cd /tmp && python harness.py --correctness && python harness.py --benchmark",
+            "elapsed_s": 0.1,
+            "max_steps": -1,
+            "is_unlimited_steps": True,
+        }
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        return dict(self.response, name=kwargs.get("name", self.response.get("name")))
+
+
+def _make_agent_with_tools(
+    *,
+    dispatcher=None,
+    registry=None,
+):
+    from minisweagent.run.preprocess_v3.registry import SubagentRegistry
+
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    register_default_tools(
+        agent,
+        kernel_language=_LANG,
+        registry=registry or SubagentRegistry(root=Path("/nonexistent")),
+        dispatcher=dispatcher or _StubDispatcher(),
+    )
+    return agent
+
+
+def test_register_default_tools_registers_all_seven() -> None:
+    """All 7 tool names must be registered in ``tool_names``."""
+    agent = _make_agent_with_tools()
+    assert sorted(agent.tool_names) == sorted(
+        [
+            "codebase_explore",
+            "translate_to_flydsl",
+            "dispatch_subagent",
+            "collect_baseline",
+            "collect_profile",
+            "render_commandment",
+            "finish_preprocess",
+        ]
+    )
+
+
+def test_register_default_tools_schemas_are_function_type() -> None:
+    """Every registered schema declares ``type='function'`` and a parameters object."""
+    agent = _make_agent_with_tools()
+    for schema in agent.get_tool_schemas():
+        assert schema["type"] == "function"
+        assert schema["parameters"]["type"] == "object"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "good_args"),
+    [
+        (
+            "codebase_explore",
+            {"repo_root": "/tmp/repo", "kernel_path": "/tmp/repo/k.py", "out_path": "/tmp/out/CC.md"},
+        ),
+        (
+            "translate_to_flydsl",
+            {"source_path": "/tmp/k.py", "output_dir": "/tmp/out"},
+        ),
+        (
+            "dispatch_subagent",
+            {"name": "harness-generator", "task": "Build a harness for the kernel."},
+        ),
+        ("collect_baseline", {"harness_path": "/tmp/h.py"}),
+        ("collect_profile", {"harness_path": "/tmp/h.py"}),
+        (
+            "render_commandment",
+            {
+                "kernel_path": "/tmp/k.py",
+                "harness_path": "/tmp/h.py",
+                "repo_root": "/tmp/repo",
+                "out_path": "/tmp/out/CMD.md",
+            },
+        ),
+        ("finish_preprocess", {}),
+    ],
+)
+def test_each_schema_validates_known_good_call(tool_name: str, good_args: dict) -> None:
+    """Each tool's schema must accept a known-good argument set."""
+    agent = _make_agent_with_tools()
+    schema = next(s for s in agent.get_tool_schemas() if s["name"] == tool_name)
+    ok, msg = validate_call_against_schema(schema, good_args)
+    assert ok, f"{tool_name} rejected good args: {msg}"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "bad_args", "reason"),
+    [
+        ("codebase_explore", {"repo_root": "/tmp"}, "missing required"),
+        ("translate_to_flydsl", {"source_path": "/tmp"}, "missing required"),
+        ("dispatch_subagent", {"task": "do stuff"}, "missing required"),
+        ("collect_baseline", {}, "missing required"),
+        ("collect_profile", {}, "missing required"),
+        ("render_commandment", {"kernel_path": "/tmp/k.py"}, "missing required"),
+    ],
+)
+def test_each_schema_rejects_known_bad_call(tool_name: str, bad_args: dict, reason: str) -> None:
+    """Each tool's schema must reject a call missing a required argument."""
+    agent = _make_agent_with_tools()
+    schema = next(s for s in agent.get_tool_schemas() if s["name"] == tool_name)
+    ok, msg = validate_call_against_schema(schema, bad_args)
+    assert not ok
+    assert reason in msg
+
+
+def test_dispatch_subagent_schema_enforces_allow_list() -> None:
+    """The ``dispatch_subagent`` schema's enum must reject unknown names."""
+    agent = _make_agent_with_tools()
+    schema = next(s for s in agent.get_tool_schemas() if s["name"] == "dispatch_subagent")
+
+    ok_good, _ = validate_call_against_schema(schema, {"name": "harness-generator", "task": "go"})
+    ok_bad, msg_bad = validate_call_against_schema(schema, {"name": "pytorch-to-flydsl", "task": "go"})
+
+    assert ok_good is True
+    assert ok_bad is False
+    assert "enum" in msg_bad
+
+
+def test_dispatch_subagent_schema_enum_lists_three_subagents() -> None:
+    """Exactly the three v3 subagents are listed in the enum.
+
+    Pin the contract so a future addition fails this test loudly until
+    the orchestrator's system prompt is updated to mention the new
+    subagent.
+    """
+    agent = _make_agent_with_tools()
+    schema = next(s for s in agent.get_tool_schemas() if s["name"] == "dispatch_subagent")
+    enum = schema["parameters"]["properties"]["name"]["enum"]
+    assert sorted(enum) == sorted(ALLOWED_SUBAGENT_NAMES)
+    assert "pytorch-to-flydsl" not in enum
+
+
+# ---------------------------------------------------------------------------
+# Tool dispatch behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_finish_preprocess_terminates_loop_with_payload() -> None:
+    """``finish_preprocess`` raises ``FinishedSuccessfully`` carrying its payload."""
+    from minisweagent.run.preprocess_v3.orchestrator import FinishedSuccessfully
+
+    agent = _make_agent_with_tools()
+    finish_tool = agent._tools["finish_preprocess"].callable
+
+    with pytest.raises(FinishedSuccessfully) as excinfo:
+        finish_tool(
+            harness_path="/tmp/h.py",
+            commandment_path="/tmp/CMD.md",
+            errors=[],
+            summary="OK",
+        )
+    assert excinfo.value.payload["harness_path"] == "/tmp/h.py"
+    assert excinfo.value.payload["summary"] == "OK"
+
+
+def test_dispatch_subagent_records_subagent_run() -> None:
+    """Calling ``dispatch_subagent`` appends a result to ``_subagent_runs``."""
+    dispatcher = _StubDispatcher()
+    agent = _make_agent_with_tools(dispatcher=dispatcher)
+
+    dispatch_tool = agent._tools["dispatch_subagent"].callable
+    result = dispatch_tool(name="harness-generator", task="Generate a harness")
+
+    assert result["success"] is True
+    assert result["name"] == "harness-generator"
+    assert len(agent._subagent_runs) == 1
+    assert dispatcher.calls[0]["name"] == "harness-generator"
+
+
+def test_dispatch_subagent_extracts_test_command_from_generator_output() -> None:
+    """The orchestrator parses ``TEST_COMMAND:`` from harness-generator output."""
+    agent = _make_agent_with_tools()
+    dispatch_tool = agent._tools["dispatch_subagent"].callable
+
+    dispatch_tool(name="harness-generator", task="Generate")
+
+    assert "test_command" in agent._collected
+    assert "python harness.py" in agent._collected["test_command"]
+
+
+def test_dispatch_subagent_extracts_harness_path_from_verifier_output() -> None:
+    """The orchestrator parses ``HARNESS_PATH=`` from harness-verifier output."""
+    verifier_response = {
+        "name": "harness-verifier",
+        "success": True,
+        "output": "HARNESS_VERIFIED=true\nHARNESS_PATH=/tmp/harness.py\nMODES_PASSED=correctness,profile,benchmark,full-benchmark",
+        "elapsed_s": 0.1,
+        "max_steps": 30,
+        "is_unlimited_steps": False,
+    }
+    agent = _make_agent_with_tools(dispatcher=_StubDispatcher(verifier_response))
+    dispatch_tool = agent._tools["dispatch_subagent"].callable
+
+    dispatch_tool(name="harness-verifier", task="Verify it")
+
+    assert agent._collected["harness_path"] == "/tmp/harness.py"
+
+
+# ---------------------------------------------------------------------------
+# PreprocessSubagentDispatcher allow-list
+# ---------------------------------------------------------------------------
+
+
+def test_dispatcher_rejects_unknown_subagent_name() -> None:
+    """The dispatcher itself enforces the allow-list (defence in depth)."""
+    from minisweagent.run.preprocess_v3.registry import SubagentRegistry
+
+    dispatcher = PreprocessSubagentDispatcher(SubagentRegistry(root=Path("/nonexistent")))
+    result = dispatcher(name="not-a-real-subagent", task="x", model=None)
+
+    assert result["success"] is False
+    assert "allow-list" in result["error"]
+
+
+def test_dispatcher_returns_structured_error_on_missing_registry_entry(tmp_path) -> None:
+    """A name in the allow-list but missing from disk yields a structured error."""
+    from minisweagent.run.preprocess_v3.registry import SubagentRegistry
+
+    empty_registry = SubagentRegistry(root=tmp_path)
+    dispatcher = PreprocessSubagentDispatcher(empty_registry)
+    result = dispatcher(name="harness-generator", task="x", model=None)
+
+    assert result["success"] is False
+    assert "not found in registry" in result["error"]
+
+
+def test_dispatcher_propagates_unlimited_steps(tmp_path) -> None:
+    """``spec.max_steps == -1`` translates to ``step_limit=0`` for the child.
+
+    The legacy ``DefaultAgent.AgentConfig`` convention is ``step_limit=0``
+    means unlimited; the dispatcher must honor the v3 sentinel.
+    """
+    from minisweagent.run.preprocess_v3.registry import SubagentRegistry
+
+    yaml_body = """\
+name: harness-generator
+description: Test subagent.
+system_prompt: "You are."
+max_steps: -1
+"""
+    folder = tmp_path / "harness-generator"
+    folder.mkdir()
+    (folder / "SUBAGENT.yaml").write_text(yaml_body, encoding="utf-8")
+
+    captured: dict = {}
+
+    def fake_factory(*, spec, model, cwd):
+        captured["spec"] = spec
+
+        class _Agent:
+            def run(self, _task):
+                return ("Submitted", "ok")
+
+        return _Agent()
+
+    dispatcher = PreprocessSubagentDispatcher(
+        SubagentRegistry(root=tmp_path),
+        agent_factory=fake_factory,
+    )
+    result = dispatcher(name="harness-generator", task="x", model=object())
+
+    assert result["success"] is True
+    assert result["max_steps"] == -1
+    assert result["is_unlimited_steps"] is True
+    assert captured["spec"].is_unlimited_steps is True
