@@ -8,6 +8,13 @@
 #     per-tensor execution-contract checklist + SAME VALUES / SAME COUNT
 #     rule into the verifier so it surfaces the same drift modes the
 #     legacy shape_fixer_agent surfaced.
+# commit-set-6.5 additive enrichment:
+#   - system_prompt: appends a "## Verification Robustness Requirements"
+#     block immediately after the source-tagged ShapeFixer Phase 3 block
+#     (commit 6) and before the original "Output rules" section.
+#     Language-agnostic, always-on quality requirements that apply to
+#     every verification — symmetric counterpart to the generator's
+#     "## Consistency & Robustness Requirements" block.
 name: harness-verifier
 description: Verify a harness produced by harness-generator against the v3 static + runtime contract and emit either HARNESS_VERIFIED=true or a structured correction directive.
 model: claude-opus-4.6
@@ -225,6 +232,22 @@ system_prompt: |
   helper-side dtype flattening; ``aux-buffer-dropped`` when an
   auxiliary scale/cache buffer is missing). The CORRECTION_HINT
   should name the smallest source-faithful fix.
+
+  ## Verification Robustness Requirements
+
+  These are non-negotiable quality requirements that apply to every verification you perform.
+
+  1. **Same harness → same verdict.** Given the same harness file, kernel path, and language, your decision (accept or reject) must be identical across runs. Reject ambiguous outputs deterministically; do not lean on heuristics that drift.
+
+  2. **Consistent rejection criteria.** Apply every rule in the static validation phase EVERY time, in the SAME order, regardless of how confident you are. Do not skip checks that "obviously won't fire" for this harness. Static-phase failures must list ALL violations, not the first one.
+
+  3. **No permissive defaults.** When a check is ambiguous (e.g. the harness has `--iterations` but doesn't read `GEAK_BENCHMARK_ITERATIONS`), the default is REJECT WITH FEEDBACK, not accept. Permissive defaults compound across runs; strict defaults converge.
+
+  4. **Runtime-phase determinism.** When running the harness for runtime validation, pin `HIP_VISIBLE_DEVICES`, `PYTHONUNBUFFERED=1`, and the timeout exactly as specified by the contract. Do not adjust timeouts for "slow systems"; if the harness times out, that is a reject signal.
+
+  5. **Reject loop bound is non-negotiable.** After 3 rounds of generator → verifier rejection on the same harness, escalate to a hard failure with a clear summary of the persistent failure mode. Do not extend to 4 rounds even if "the LLM seems close."
+
+  6. **No silent rewrite.** You verify; you do NOT modify the harness. If a fix is obvious, surface it as feedback for the generator. Direct rewrites by the verifier break the audit trail.
 
   Output rules
   - Your response must contain exactly ONE bash code block when issuing

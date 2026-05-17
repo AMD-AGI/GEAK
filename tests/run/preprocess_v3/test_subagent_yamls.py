@@ -425,6 +425,88 @@ def test_harness_verifier_includes_per_tensor_execution_contract_checklist(
 
 
 # ---------------------------------------------------------------------------
+# commit-set-6.5 enrichment: Verification Robustness Requirements block
+#
+# Symmetric counterpart to the generator's Consistency block. Lives in the
+# verifier SUBAGENT YAML, sits after the source-tagged ShapeFixer Phase 3
+# block (commit 6) and before the legacy "Output rules" section.
+# ---------------------------------------------------------------------------
+
+
+def test_harness_verifier_includes_verification_robustness_heading(
+    registry_specs: dict[str, SubagentSpec],
+) -> None:
+    """The ``## Verification Robustness Requirements`` heading is present exactly once."""
+    spec = registry_specs["harness-verifier"]
+    sp = spec.system_prompt
+    heading = "## Verification Robustness Requirements"
+    assert heading in sp, "missing Verification Robustness Requirements heading"
+    assert sp.count(heading) == 1, f"heading must appear exactly once, found {sp.count(heading)}"
+
+
+def test_harness_verifier_robustness_block_has_six_numbered_rules(
+    registry_specs: dict[str, SubagentSpec],
+) -> None:
+    """All six numbered rule headings are present inside the block.
+
+    The numbered headings are the contract anchors; a future edit that
+    drops, renumbers, or paraphrases one should fail loudly rather than
+    silently weaken the deterministic-verification requirements.
+    """
+    spec = registry_specs["harness-verifier"]
+    sp = spec.system_prompt
+    block_start = sp.index("## Verification Robustness Requirements")
+    block_end = sp.index("Output rules", block_start)
+    block_body = sp[block_start:block_end]
+
+    expected_rule_headings = (
+        "1. **Same harness → same verdict.**",
+        "2. **Consistent rejection criteria.**",
+        "3. **No permissive defaults.**",
+        "4. **Runtime-phase determinism.**",
+        "5. **Reject loop bound is non-negotiable.**",
+        "6. **No silent rewrite.**",
+    )
+    for heading in expected_rule_headings:
+        assert heading in block_body, f"missing rule heading {heading!r} in block body"
+
+
+def test_harness_verifier_robustness_block_lands_after_shape_fixer(
+    registry_specs: dict[str, SubagentSpec],
+) -> None:
+    """The block sits AFTER Phase 3 (commit-6 ShapeFixer lift) and BEFORE ``Output rules``.
+
+    This pins the structural insertion point chosen in commit set 6.5:
+    Phase 1 / Phase 2 (legacy) -> Phase 3 ShapeFixer block (commit 6) ->
+    Verification Robustness block (commit 6.5) -> legacy Output rules.
+    Mirrors the symmetric placement in the harness-generator YAML
+    (KB block -> Consistency block -> seam -> Goal).
+    """
+    spec = registry_specs["harness-verifier"]
+    sp = spec.system_prompt
+
+    idx_phase3 = sp.index("Phase 3 — Shape-source comparison")
+    idx_block = sp.index("## Verification Robustness Requirements")
+    idx_output = sp.index("Output rules")
+
+    assert idx_phase3 < idx_block < idx_output, (
+        f"expected order phase3<block<output, got {idx_phase3=} {idx_block=} {idx_output=}"
+    )
+
+
+def test_harness_verifier_robustness_block_marker_in_yaml_header() -> None:
+    """The raw file carries a ``# commit-set-6.5`` provenance comment.
+
+    YAML comments are dropped on parse so we read the raw text directly,
+    mirroring the marker convention used for prior commit-set additions
+    so each enrichment is traceable back to the commit that introduced it.
+    """
+    raw = (_V3_ROOT / "harness-verifier" / "SUBAGENT.yaml").read_text(encoding="utf-8")
+    assert "# commit-set-6.5 additive enrichment:" in raw
+    assert "Verification Robustness Requirements" in raw
+
+
+# ---------------------------------------------------------------------------
 # Cross-cutting: the always-on set
 # ---------------------------------------------------------------------------
 
