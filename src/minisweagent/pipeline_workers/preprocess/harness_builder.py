@@ -32,12 +32,12 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from minisweagent.pipeline_workers.base import SubagentBase
 
 if TYPE_CHECKING:  # pragma: no cover
-    from minisweagent.kernel_languages.base import KernelLanguage
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -226,9 +226,7 @@ class HarnessBuilder(SubagentBase):
         kernel_path = inputs.get("kernel_path")
         out_path = inputs.get("out_path")
         if kernel_path is None or out_path is None:
-            raise ValueError(
-                "HarnessBuilder.run requires 'kernel_path' and 'out_path' inputs."
-            )
+            raise ValueError("HarnessBuilder.run requires 'kernel_path' and 'out_path' inputs.")
         kernel_path = Path(kernel_path)
         out_path = Path(out_path)
         if not kernel_path.is_file():
@@ -245,9 +243,7 @@ class HarnessBuilder(SubagentBase):
         # non-compliant harness; the source variant is for tests and
         # direct programmatic calls.
         seed_harness_source_raw = inputs.get("seed_harness_source")
-        seed_harness_source = (
-            str(seed_harness_source_raw) if seed_harness_source_raw else ""
-        )
+        seed_harness_source = str(seed_harness_source_raw) if seed_harness_source_raw else ""
         seed_harness_path_raw = inputs.get("seed_harness_path")
         if seed_harness_path_raw and not seed_harness_source:
             _sp = Path(seed_harness_path_raw)
@@ -283,13 +279,9 @@ class HarnessBuilder(SubagentBase):
             retries_raw = cfg_extra.get("max_retries")
 
         max_wallclock_seconds = (
-            float(wallclock_raw)
-            if wallclock_raw is not None
-            else float(_DEFAULT_WALLCLOCK_BUDGET_S)
+            float(wallclock_raw) if wallclock_raw is not None else float(_DEFAULT_WALLCLOCK_BUDGET_S)
         )
-        max_retries: int | None = (
-            max(0, int(retries_raw)) if retries_raw is not None else None
-        )
+        max_retries: int | None = max(0, int(retries_raw)) if retries_raw is not None else None
 
         kernel_source = self._safe_read(kernel_path)
         user_tests_blob = self._read_user_tests(user_test_files)
@@ -400,9 +392,7 @@ class HarnessBuilder(SubagentBase):
                 seed_harness_source=seed_harness_source,
             )
 
-            cap_str = (
-                f"/{max_attempts_cap}" if max_attempts_cap is not None else ""
-            )
+            cap_str = f"/{max_attempts_cap}" if max_attempts_cap is not None else ""
             logger.info(
                 "HarnessBuilder attempt %d%s (%.0fs of %.0fs budget remaining)",
                 attempt,
@@ -508,8 +498,7 @@ class HarnessBuilder(SubagentBase):
             template_blob = ""
         if template_blob.strip():
             parts += [
-                "JINJA HARNESS SKELETON (fill in the placeholders — emit plain Python, "
-                "NOT Jinja):",
+                "JINJA HARNESS SKELETON (fill in the placeholders — emit plain Python, NOT Jinja):",
                 "```",
                 template_blob.rstrip(),
                 "```",
@@ -557,8 +546,7 @@ class HarnessBuilder(SubagentBase):
 
         if seed_harness_source.strip():
             parts += [
-                "STARTING HARNESS (user-provided — fix contract violations "
-                "in this file, DO NOT rewrite from scratch):",
+                "STARTING HARNESS (user-provided — fix contract violations in this file, DO NOT rewrite from scratch):",
                 "```",
                 seed_harness_source.rstrip(),
                 "```",
@@ -676,9 +664,10 @@ class HarnessBuilder(SubagentBase):
         if not stripped:
             return ""
         first_line = stripped.split("\n", 1)[0].strip()
-        if first_line.startswith(
-            ("#!", "#", '"""', "'''", "import ", "from ", "def ", "class ", "@")
-        ) or first_line == "if __name__":
+        if (
+            first_line.startswith(("#!", "#", '"""', "'''", "import ", "from ", "def ", "class ", "@"))
+            or first_line == "if __name__"
+        ):
             return text
 
         # Case 2 (no closing fence): response begins with ``` but the
@@ -693,7 +682,7 @@ class HarnessBuilder(SubagentBase):
         # looking line and discard preamble.
         m = _PYTHON_LINE_START_RE.search(text)
         if m:
-            return text[m.start():].rstrip() + "\n"
+            return text[m.start() :].rstrip() + "\n"
 
         # Pure prose — give up; let the validator complain about the
         # missing flags/markers (which is the right error message

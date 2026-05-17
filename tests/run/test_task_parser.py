@@ -421,9 +421,7 @@ class TestPromoteKernelUrlDirToFile:
         d = tmp_path / "my_kernel_dir"
         d.mkdir()
         (d / "kernel.py").write_text("# kernel\n")
-        promoted = tp._promote_kernel_url_dir_to_file(
-            str(d), kernel_name_hint=None, kernel_type="triton"
-        )
+        promoted = tp._promote_kernel_url_dir_to_file(str(d), kernel_name_hint=None, kernel_type="triton")
         assert promoted == str(d / "kernel.py")
 
     def test_prefers_kernel_name_hint_with_extension(self, tmp_path: Path) -> None:
@@ -432,9 +430,7 @@ class TestPromoteKernelUrlDirToFile:
         d.mkdir()
         (d / "kernel.py").write_text("# generic\n")
         (d / "my_silu.py").write_text("# specific\n")
-        promoted = tp._promote_kernel_url_dir_to_file(
-            str(d), kernel_name_hint="my_silu", kernel_type="triton"
-        )
+        promoted = tp._promote_kernel_url_dir_to_file(str(d), kernel_name_hint="my_silu", kernel_type="triton")
         assert promoted == str(d / "my_silu.py")
 
     def test_promotes_single_hip_file_in_directory(self, tmp_path: Path) -> None:
@@ -442,9 +438,7 @@ class TestPromoteKernelUrlDirToFile:
         d.mkdir()
         # No ``kernel.py`` / ``kernel.hip``; just one .hip file.
         (d / "silu_mul.hip").write_text("// hip\n")
-        promoted = tp._promote_kernel_url_dir_to_file(
-            str(d), kernel_name_hint=None, kernel_type="hip"
-        )
+        promoted = tp._promote_kernel_url_dir_to_file(str(d), kernel_name_hint=None, kernel_type="hip")
         assert promoted == str(d / "silu_mul.hip")
 
     def test_does_not_promote_when_directory_has_no_kernel_file(self, tmp_path: Path) -> None:
@@ -473,16 +467,12 @@ class TestPromoteKernelUrlDirToFile:
     def test_passthrough_when_kernel_url_is_already_a_file(self, tmp_path: Path) -> None:
         f = tmp_path / "kernel.py"
         f.write_text("# kernel\n")
-        promoted = tp._promote_kernel_url_dir_to_file(
-            str(f), kernel_name_hint=None, kernel_type="triton"
-        )
+        promoted = tp._promote_kernel_url_dir_to_file(str(f), kernel_name_hint=None, kernel_type="triton")
         assert promoted == str(f)
 
     def test_passthrough_when_path_does_not_exist(self) -> None:
         # A non-existent path is also not a directory; we leave it alone.
-        promoted = tp._promote_kernel_url_dir_to_file(
-            "/no/such/path", kernel_name_hint=None, kernel_type="triton"
-        )
+        promoted = tp._promote_kernel_url_dir_to_file("/no/such/path", kernel_name_hint=None, kernel_type="triton")
         assert promoted == "/no/such/path"
 
 
@@ -517,6 +507,55 @@ class TestNormalizeParsedTaskInfoIntegratesPromotion:
         }
         out = tp.parse_task_info("t", self._model(json.dumps(payload)))
         assert out["kernel_url"] == str(d / "kernel.py")
+
+
+class TestSanitizeKernelNameForPatchDir:
+    """Lock the contract of ``_sanitize_kernel_name_for_patch_dir`` so a
+    future cap tweak does not silently change directory layout.
+
+    The cap (``_MAX_KERNEL_DIR_STEM_LEN``) is intentionally a balance
+    between log-readability (longer = recognisable kernel names) and
+    filesystem path length budget.  Bumping the cap is fine; making it
+    smaller again should require an explicit test update.
+    """
+
+    def test_short_name_round_trips_unchanged(self) -> None:
+        assert tp._sanitize_kernel_name_for_patch_dir("act_and_mul") == "act_and_mul"
+
+    def test_path_separator_becomes_underscore(self) -> None:
+        assert tp._sanitize_kernel_name_for_patch_dir("my/kernel") == "my_kernel"
+
+    def test_long_name_gets_hashed_suffix(self) -> None:
+        """Long names are truncated to ``cap-1-8`` chars + ``_`` + 8-hex
+        SHA-256 prefix.  The two-tier shape (prefix + digest) ensures
+        uniqueness without dropping the human-meaningful prefix."""
+        long_name = "Cijk_Alik_Bjlk_HBH_MT128x128x32_SE_K1_AS_AmpereTC"
+        out = tp._sanitize_kernel_name_for_patch_dir(long_name)
+        assert len(out) == tp._MAX_KERNEL_DIR_STEM_LEN
+        # The human-meaningful prefix is preserved verbatim.
+        assert out.startswith("Cijk_Alik_Bjlk_HBH")
+        # And ends with ``_<8-hex>``.
+        assert out[-9] == "_"
+        assert all(c in "0123456789abcdef" for c in out[-8:])
+
+    def test_long_name_is_deterministic(self) -> None:
+        """Identical input yields identical sanitised stem (matters for
+        log resumption / patch directory reuse)."""
+        long_name = "Cijk_" + "x" * 80
+        a = tp._sanitize_kernel_name_for_patch_dir(long_name)
+        b = tp._sanitize_kernel_name_for_patch_dir(long_name)
+        assert a == b
+
+    def test_cap_value_is_at_least_recognisable(self) -> None:
+        """Sanity floor: the cap must leave room for >= 12 characters of
+        human-meaningful prefix (after ``_<8-hex>`` overhead).  Below
+        that, hipBLASLt-style kernel names become unidentifiable in
+        ``logs/`` listings.
+        """
+        assert tp._MAX_KERNEL_DIR_STEM_LEN >= 12 + 1 + 8, (
+            "Stem cap is too small to retain a recognisable kernel prefix; "
+            f"got {tp._MAX_KERNEL_DIR_STEM_LEN}, need >= 21."
+        )
 
 
 class TestGeneratePatchOutputDir:

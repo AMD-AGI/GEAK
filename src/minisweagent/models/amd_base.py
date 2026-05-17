@@ -12,6 +12,30 @@ from minisweagent.models import GLOBAL_MODEL_STATS
 logger = logging.getLogger(__name__)
 
 
+def get_amd_llm_user() -> str:
+    """Resolve the username to attach to AMD LLM gateway requests.
+
+    Order of resolution (first non-empty wins):
+      1. ``$GEAK_USER``  -- explicit override knob.
+      2. ``$USER``       -- conventional POSIX env var, forwarded into the
+         container by ``scripts/run-docker.sh``.
+      3. ``os.getlogin()`` -- bare-metal fallback when no env vars are set.
+      4. ``"unknown"``   -- last-resort sentinel.
+
+    Env-var lookups are checked before ``os.getlogin()`` because the latter
+    raises ``OSError`` under ``docker exec`` (no controlling utmp entry), so
+    it cannot be relied on inside the GEAK container.
+    """
+    for var in ("GEAK_USER", "USER"):
+        val = os.getenv(var)
+        if val:
+            return val
+    try:
+        return os.getlogin()
+    except OSError:
+        return "unknown"
+
+
 @dataclass
 class AmdLlmModelConfig:
     model_name: str
@@ -85,10 +109,7 @@ class AmdLlmModelBase:
         return api_key
 
     def _get_user(self) -> str:
-        try:
-            return os.getlogin()
-        except OSError:
-            return os.getenv("USER", "unknown")
+        return get_amd_llm_user()
 
     # ------------------------------------------------------------------
     # Abstract interface

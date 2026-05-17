@@ -43,7 +43,6 @@ from typing import Literal
 
 from jinja2 import StrictUndefined, Template
 from rich.console import Console
-from rich.rule import Rule
 
 from minisweagent import Environment, Model
 from minisweagent.skills.skill_runtime import SkillRuntime
@@ -56,6 +55,7 @@ console = Console(highlight=False)
 # ---------------------------------------------------------------------------
 # Exceptions (shared primitives — callers import from this module)
 # ---------------------------------------------------------------------------
+
 
 class NonTerminatingException(Exception):
     """Raised for conditions that can be handled by the agent."""
@@ -84,6 +84,7 @@ class LimitsExceeded(TerminatingException):
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class AgentConfig:
@@ -193,6 +194,7 @@ def truncate_observation(text: str) -> str:
 # OptimizationAgent — the unified class
 # ---------------------------------------------------------------------------
 
+
 class OptimizationAgent:
     """THE GEAK agent. Merges the 4-layer chain into one standalone class.
 
@@ -230,13 +232,9 @@ class OptimizationAgent:
         self.toolruntime = ToolRuntime(
             use_strategy_manager=self.config.use_strategy_manager,
             strategy_file=(
-                self._get_strategy_file()
-                if self.config.use_strategy_manager
-                else ".optimization_strategies.md"
+                self._get_strategy_file() if self.config.use_strategy_manager else ".optimization_strategies.md"
             ),
-            on_strategy_change=self._on_strategy_changed
-            if self.config.use_strategy_manager
-            else None,
+            on_strategy_change=self._on_strategy_changed if self.config.use_strategy_manager else None,
             patch_output_dir=self.config.patch_output_dir,
             tool_profile=self.config.tool_profile,
         )
@@ -284,10 +282,10 @@ class OptimizationAgent:
 
         # ── Tell the model which tools it can call (from StrategyAgent) ──
         if hasattr(self.model, "set_tools"):
-            self.model.set_tools(self.toolruntime.get_tools_schema())
+            self.model.set_tools(self.toolruntime.get_tools_list())
         else:
             model_impl = getattr(self.model, "_impl", self.model)
-            model_impl.tools = self.toolruntime.get_tools_schema()
+            model_impl.tools = self.toolruntime.get_tools_list()
 
         # ── Initial strategy data ping for UI (from StrategyAgent) ──
         if self.config.use_strategy_manager:
@@ -352,17 +350,19 @@ class OptimizationAgent:
                     "logFile": strategy_list.baseline.log_file,
                 }
             for idx, strategy in enumerate(strategy_list.strategies, start=1):
-                result["strategies"].append({
-                    "index": idx,
-                    "name": strategy.name,
-                    "status": strategy.status.value,
-                    "description": strategy.description,
-                    "priority": strategy.priority,
-                    "expected": strategy.expected,
-                    "target": strategy.target,
-                    "result": strategy.result,
-                    "details": strategy.details,
-                })
+                result["strategies"].append(
+                    {
+                        "index": idx,
+                        "name": strategy.name,
+                        "status": strategy.status.value,
+                        "description": strategy.description,
+                        "priority": strategy.priority,
+                        "expected": strategy.expected,
+                        "target": strategy.target,
+                        "result": strategy.result,
+                        "details": strategy.details,
+                    }
+                )
             self._print_strategy_changed(result)
             print(
                 f"[DEBUG] Strategy data updated: {len(result['strategies'])} strategies",
@@ -394,9 +394,7 @@ class OptimizationAgent:
                     "partial": "orange",
                     "skipped": "dim",
                 }.get(s["status"], "white")
-                console.print(
-                    f"  [{status_color}]{s['index']}. {s['name']}[/{status_color}] - {s['status']}"
-                )
+                console.print(f"  [{status_color}]{s['index']}. {s['name']}[/{status_color}] - {s['status']}")
             if len(strategies) > 5:
                 console.print(f"  [dim]... and {len(strategies) - 5} more[/dim]")
 
@@ -436,11 +434,7 @@ class OptimizationAgent:
     # ===============================================================
 
     def render_template(self, template: str, **kwargs) -> str:
-        template_vars = (
-            asdict(self.config)
-            | self.env.get_template_vars()
-            | self.model.get_template_vars()
-        )
+        template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
         all_vars = template_vars | self.extra_template_vars | kwargs
         return Template(template, undefined=StrictUndefined).render(**all_vars)
 
@@ -569,8 +563,7 @@ class OptimizationAgent:
         None of these fire in production (audit §7).
         """
         if not self._allow_one_summary_step and (
-            0 < self.config.step_limit <= self.model.n_calls
-            or 0 < self.config.cost_limit <= self.model.cost
+            0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost
         ):
             raise LimitsExceeded()
         if self._allow_one_summary_step:
@@ -706,9 +699,12 @@ class OptimizationAgent:
                                                 pass
                                         if isinstance(tool_args, dict):
                                             edit_keys = (
-                                                "old_str", "new_str",
-                                                "old_string", "new_string",
-                                                "old_text", "new_text",
+                                                "old_str",
+                                                "new_str",
+                                                "old_string",
+                                                "new_string",
+                                                "old_text",
+                                                "new_text",
                                             )
                                             edit_args = {k: tool_args[k] for k in edit_keys if k in tool_args}
                                             if edit_args:
@@ -745,9 +741,7 @@ class OptimizationAgent:
                 self.render_template(self.config.timeout_template, action=action, output=output)
             )
         except TimeoutError:
-            raise ExecutionTimeoutError(
-                self.render_template(self.config.timeout_template, action=action, output="")
-            )
+            raise ExecutionTimeoutError(self.render_template(self.config.timeout_template, action=action, output=""))
         self.has_finished(output)
         return output
 

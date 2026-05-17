@@ -1,5 +1,6 @@
 """Parse optimization task information from user input."""
 
+import hashlib
 import json
 import logging
 import re
@@ -598,6 +599,33 @@ def extract_user_constraints(task_content: str, model) -> dict[str, list[str]]:
     return result
 
 
+# Max length of the kernel-derived path segment (before ``_<YYYYMMDD>_<HHMMSS>``).
+# Long symbols (e.g. hipBLASLt ``Cijk_*``) are shortened to keep the leaf short.
+#
+# 48 chars balances filesystem-friendly path length against the ergonomics of
+# scanning logs by eye: at 20 a Cijk-style kernel was reduced to ~11 chars +
+# hash and effectively unrecognisable; at 48 the human-meaningful prefix is
+# preserved before the disambiguating SHA-256 digest is appended.
+_MAX_KERNEL_DIR_STEM_LEN = 48
+
+
+def _sanitize_kernel_name_for_patch_dir(kernel_name: str) -> str:
+    """Return a filesystem-safe, bounded-length stem for log / output directories."""
+    clean_name = re.sub(r"[^\w\-]", "_", kernel_name)
+    if len(clean_name) <= _MAX_KERNEL_DIR_STEM_LEN:
+        return clean_name
+    digest = hashlib.sha256(clean_name.encode("utf-8")).hexdigest()[:8]
+    take = _MAX_KERNEL_DIR_STEM_LEN - 1 - len(digest)
+    take = max(1, take)
+    shortened = f"{clean_name[:take]}_{digest}"
+    logger.debug(
+        "Sanitized long kernel_name for patch dir (%d -> %d chars).",
+        len(clean_name),
+        len(shortened),
+    )
+    return shortened
+
+
 def generate_patch_output_dir(kernel_name: str | None, base_dir: str = "optimization_logs") -> str:
     """Generate patch output directory based on kernel name and timestamp.
 
@@ -606,9 +634,8 @@ def generate_patch_output_dir(kernel_name: str | None, base_dir: str = "optimiza
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if kernel_name:
-        # Clean kernel name (replace special characters with underscores)
-        clean_name = re.sub(r"[^\w\-]", "_", kernel_name)
-        dir_name = f"{clean_name}_{timestamp}"
+        dir_stem = _sanitize_kernel_name_for_patch_dir(str(kernel_name))
+        dir_name = f"{dir_stem}_{timestamp}"
     else:
         dir_name = f"optimization_{timestamp}"
 

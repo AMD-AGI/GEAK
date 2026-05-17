@@ -5,7 +5,8 @@ PyTorch -> FlyDSL).  It is configured via a translation-specific YAML
 (e.g. ``mini_kernel_pytorch_to_flydsl.yaml``) and receives FlyDSL
 knowledge base content as a template variable.
 
-The layered design mirrors :mod:`~minisweagent.agents.unit_test_agent`:
+The layered design mirrors
+:mod:`~minisweagent.run.preprocess.unit_test_agent`:
 
 - ``TranslationAgent``        — minimal ``DefaultAgent`` subclass
 - ``run_translation_agent()`` — single-round wrapper (build task, call

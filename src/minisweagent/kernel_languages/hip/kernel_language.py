@@ -30,7 +30,7 @@ HIP = KernelLanguage(
     detect_hints=(
         r"__global__\s+void\b",
         r"hipLaunchKernelGGL\b",
-        r"\bhip[A-Z]\w*\(",              # hipMalloc, hipMemcpy, etc.
+        r"\bhip[A-Z]\w*\(",  # hipMalloc, hipMemcpy, etc.
         r'#include\s*[<"]hip/hip_runtime\.h',
         r"torch\.utils\.cpp_extension",
         r"scripts/task_runner\.py.*(compile|correctness|performance)",

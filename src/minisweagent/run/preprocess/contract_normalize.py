@@ -132,9 +132,7 @@ def build_evaluation_contract(ctx: Any) -> dict[str, Any]:
     """Assemble the v1 ``evaluation_contract`` dict from ``PhaseContext``."""
     lang = getattr(ctx.language, "name", None) if ctx.language is not None else None
     eval_cmd = getattr(ctx, "eval_command", None)
-    tier0_compile = infer_compile_command_from_eval(
-        eval_cmd if isinstance(eval_cmd, str) else None
-    )
+    tier0_compile = infer_compile_command_from_eval(eval_cmd if isinstance(eval_cmd, str) else None)
     return {
         "version": 1,
         "kernel_language": lang,

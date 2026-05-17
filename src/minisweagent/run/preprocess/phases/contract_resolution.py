@@ -34,9 +34,7 @@ class ContractResolutionPhase(Phase):
     def run(self, ctx: PhaseContext) -> None:
         self._log_enter()
         if not ctx.kernel_path:
-            logger.warning(
-                "ContractResolutionPhase: no kernel_path; skipping contract freeze."
-            )
+            logger.warning("ContractResolutionPhase: no kernel_path; skipping contract freeze.")
             ctx.phases_skipped.append((self.name, "no kernel_path"))
             return
 

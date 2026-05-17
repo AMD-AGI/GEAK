@@ -27,8 +27,9 @@ Architectural contract (per execution plan §0.5(b) and user direction):
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from minisweagent.pipeline_workers.base import SubagentBase
 
@@ -125,16 +126,11 @@ class TranslationAgent(SubagentBase):
         source_code = inputs.get("source_code")
         source_language = inputs.get("source_language")
         if not source_code or not source_language:
-            raise ValueError(
-                "TranslationAgent.loop requires ``source_code`` and ``source_language`` "
-                "in inputs."
-            )
+            raise ValueError("TranslationAgent.loop requires ``source_code`` and ``source_language`` in inputs.")
         if max_attempts < 1:
             raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
 
-        summarize_fn: Callable[[int, str], str] = inputs.get(
-            "summarize_fn", _default_summarize_failure
-        )
+        summarize_fn: Callable[[int, str], str] = inputs.get("summarize_fn", _default_summarize_failure)
         hints = inputs.get("hints", "")
 
         src_lang_name = getattr(source_language, "name", str(source_language))

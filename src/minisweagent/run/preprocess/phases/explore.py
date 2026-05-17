@@ -266,9 +266,7 @@ def _try_kernel_analysis(ctx: PhaseContext, *, output_dir: Path) -> None:
     re-reading from disk).
     """
     if os.environ.get("GEAK_USE_KERNEL_ANALYSIS", "0") != "1":
-        logger.debug(
-            "  KernelAnalysisAgent: gated off (GEAK_USE_KERNEL_ANALYSIS!=1); skipping."
-        )
+        logger.debug("  KernelAnalysisAgent: gated off (GEAK_USE_KERNEL_ANALYSIS!=1); skipping.")
         return
     if ctx.language is None:
         logger.debug("  KernelAnalysisAgent: ctx.language is None; skipping rubric.")
@@ -311,11 +309,7 @@ def _try_kernel_analysis(ctx: PhaseContext, *, output_dir: Path) -> None:
             out_path=out_path,
             profile=ctx.profiling,
             baseline_metrics=ctx.baseline_metrics,
-            codebase_context_path=(
-                Path(ctx.codebase_context_path)
-                if ctx.codebase_context_path
-                else None
-            ),
+            codebase_context_path=(Path(ctx.codebase_context_path) if ctx.codebase_context_path else None),
             max_retries=int(config.extra.get("max_retries", 1)),
         )
     except Exception as exc:  # noqa: BLE001 — shield the phase
