@@ -51,14 +51,14 @@ def test_harness_generator_is_registered(registry_specs: dict[str, SubagentSpec]
     assert "harness-generator" in SubagentRegistry(root=_V3_ROOT).names()
 
 
-def test_harness_generator_prompt_is_verbatim_lift(registry_specs: dict[str, SubagentSpec]) -> None:
-    """The v3 ``system_prompt`` must equal the legacy SYSTEM_PROMPT.md body.
+def test_harness_generator_prompt_role_prefix_matches_legacy(registry_specs: dict[str, SubagentSpec]) -> None:
+    """The opening Role section is still a verbatim lift from the legacy SYSTEM_PROMPT.md.
 
-    We compare the first :data:`_VERBATIM_PREFIX_CHARS` characters strictly
-    so the test name promise ("verbatim port") still fails loudly if anyone
-    later paraphrases the opening role definition. We then assert the full
-    body matches too — the prefix check just gives a tighter failure
-    message when only the start drifts.
+    Commit set 6 *additively* enriches the prompt with a
+    ``## Language-Specific Knowledge Base`` block between Role and Goal;
+    the surrounding legacy text is preserved unchanged. This test pins
+    the opening so anyone who paraphrases the Role definition (the
+    canonical TestHarnessAgent contract) sees a loud failure.
     """
     legacy_prompt = (_LEGACY_ROOT / "harness-generator" / "SYSTEM_PROMPT.md").read_text(encoding="utf-8")
 
@@ -67,7 +67,71 @@ def test_harness_generator_prompt_is_verbatim_lift(registry_specs: dict[str, Sub
     assert spec.system_prompt[:_VERBATIM_PREFIX_CHARS] == legacy_prompt[:_VERBATIM_PREFIX_CHARS], (
         "system_prompt prefix drifted from legacy SYSTEM_PROMPT.md"
     )
-    assert spec.system_prompt == legacy_prompt, "system_prompt body drifted from legacy SYSTEM_PROMPT.md"
+
+
+def test_harness_generator_prompt_preserves_legacy_body(registry_specs: dict[str, SubagentSpec]) -> None:
+    """Every non-trivial legacy paragraph still appears in the enriched prompt.
+
+    The enrichment only INSERTS a KB block between Role and Goal; it does
+    not remove anything. We assert a handful of canonical legacy phrases
+    that span the breadth of the legacy file so the additive contract is
+    pinned.
+    """
+    spec = registry_specs["harness-generator"]
+    sp = spec.system_prompt
+    for canonical_phrase in (
+        "TestHarnessAgent",
+        "MINI_SWE_AGENT_FINAL_OUTPUT",
+        "TEST_COMMAND",
+        "--correctness",
+        "--profile",
+        "--benchmark",
+        "--full-benchmark",
+        "harness_shapes_source.txt",
+        "torch.manual_seed(42)",
+        "GEAK_RESULT_LATENCY_MS",
+        "GEAK_SHAPES_USED",
+    ):
+        assert canonical_phrase in sp, f"missing legacy phrase {canonical_phrase!r}"
+
+
+def test_harness_generator_has_kb_placeholder(registry_specs: dict[str, SubagentSpec]) -> None:
+    """The literal ``{{knowledge_base}}`` placeholder is present before rendering.
+
+    The dispatcher fills it in at child-spawn time via
+    ``load_harness_kb(self.kernel_language)``. The KB block is wrapped
+    in a clearly-labelled markdown heading so the rendered prompt makes
+    the injection point visually obvious to the model.
+    """
+    spec = registry_specs["harness-generator"]
+    assert "## Language-Specific Knowledge Base" in spec.system_prompt
+    assert "{{knowledge_base}}" in spec.system_prompt
+
+
+def test_harness_generator_kb_placeholder_renders_after_substitution(
+    registry_specs: dict[str, SubagentSpec],
+) -> None:
+    """After rendering with a fake KB string, the placeholder is replaced."""
+    from jinja2 import StrictUndefined, Template
+
+    spec = registry_specs["harness-generator"]
+    rendered = Template(spec.system_prompt, undefined=StrictUndefined).render(knowledge_base="MY_FAKE_KB_BODY")
+    assert "{{knowledge_base}}" not in rendered
+    assert "MY_FAKE_KB_BODY" in rendered
+
+
+def test_harness_generator_uses_from_kernel_language_kb_template(
+    registry_specs: dict[str, SubagentSpec],
+) -> None:
+    """``knowledge_base_template`` is set to the recognised tag."""
+    spec = registry_specs["harness-generator"]
+    assert spec.knowledge_base_template == "from_kernel_language"
+
+
+def test_harness_generator_temperature_pinned_to_zero(registry_specs: dict[str, SubagentSpec]) -> None:
+    """``model_kwargs.temperature == 0.0`` for determinism (no seed on Claude)."""
+    spec = registry_specs["harness-generator"]
+    assert spec.model_kwargs.get("temperature") == 0.0
 
 
 def test_harness_generator_description_is_concise(registry_specs: dict[str, SubagentSpec]) -> None:
