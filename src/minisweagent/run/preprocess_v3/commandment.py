@@ -270,6 +270,103 @@ def _legacy_render(
     )
 
 
+#: Section keys for :func:`render_commandment_from_sections`, in the order
+#: required by ``kernel_languages.contract.validate_commandment``. The 4
+#: trailing keys mirror the harness CLI modes (``--correctness``,
+#: ``--profile``, ``--benchmark``, ``--full-benchmark``); ``setup`` is the
+#: leading section that the harness contract calls ``## Setup``.
+COMMANDMENT_SECTION_KEYS: tuple[str, ...] = (
+    "setup",
+    "correctness",
+    "benchmark",
+    "full_benchmark",
+    "profile",
+)
+
+#: Mapping from section key -> markdown ``## <Heading>`` text. Pinned so the
+#: rendered headings match ``REQUIRED_COMMANDMENT_SECTIONS`` exactly.
+_COMMANDMENT_SECTION_HEADINGS: dict[str, str] = {
+    "setup": "Setup",
+    "correctness": "Correctness",
+    "benchmark": "Benchmark",
+    "full_benchmark": "Full Benchmark",
+    "profile": "Profile",
+}
+
+
+def render_commandment_from_sections(
+    sections: dict[str, str],
+    *,
+    out_path: Path | None = None,
+    preamble: str | None = None,
+) -> str:
+    r"""Render a ``COMMANDMENT.md`` from a ``{section_key: body}`` mapping.
+
+    Sibling of :func:`render_commandment`. The full ``render_commandment``
+    flow uses per-language Jinja templates and the legacy Python generators;
+    it does not accept user-provided section bodies because the legacy
+    generators own the body strings end-to-end. The Path-A short-circuit
+    (commit set 7) needs to project a user-supplied free-form run command
+    into the canonical COMMANDMENT structure section-by-section, which is
+    what this function does.
+
+    The output is structurally compliant with
+    :data:`minisweagent.kernel_languages.contract.REQUIRED_COMMANDMENT_SECTIONS`:
+    five level-2 sections (``Setup``, ``Correctness``, ``Benchmark``,
+    ``Full Benchmark``, ``Profile``) in order, each wrapping its body in a
+    ``\`\`\`bash`` fence so the contract's "fenced block must parse as
+    shell" requirement holds. Empty / missing keys fall back to a single
+    ``# PATH_A_PARTIAL_COVERAGE: <key> not covered`` warning marker
+    comment so downstream consumers can grep for the marker and fail
+    loudly if they need that mode.
+
+    Args:
+        sections:
+            Mapping from a key in :data:`COMMANDMENT_SECTION_KEYS` to a
+            section body string (typically a shell command). Unknown
+            keys are ignored. Missing keys render as the
+            ``PATH_A_PARTIAL_COVERAGE`` warning marker.
+        out_path:
+            When supplied, the rendered text is also written there
+            (parent directories created on demand). Re-running with the
+            same ``out_path`` is idempotent.
+        preamble:
+            Optional markdown text inserted between the ``# Commandment``
+            title and the first ``## Setup`` section. Used by the Path-A
+            tool to record the source user command + LLM notes as an
+            HTML comment for audit.
+
+    Returns:
+        The rendered ``COMMANDMENT.md`` text.
+    """
+    lines: list[str] = ["# Commandment", ""]
+    if preamble:
+        preamble_text = preamble.strip()
+        if preamble_text:
+            lines.append(preamble_text)
+            lines.append("")
+    for key in COMMANDMENT_SECTION_KEYS:
+        heading = _COMMANDMENT_SECTION_HEADINGS[key]
+        body_raw = sections.get(key, "")
+        body = body_raw.strip() if body_raw else ""
+        if not body:
+            body = f"# PATH_A_PARTIAL_COVERAGE: {key} not covered"
+        lines.append(f"## {heading}")
+        lines.append("")
+        lines.append("```bash")
+        lines.append(body)
+        lines.append("```")
+        lines.append("")
+    text = "\n".join(lines).rstrip() + "\n"
+
+    if out_path is not None:
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+
+    return text
+
+
 def render_commandment(
     kernel_language: KernelLanguage,
     context: CommandmentContext,
@@ -324,4 +421,9 @@ def render_commandment(
     return text
 
 
-__all__ = ["CommandmentContext", "render_commandment"]
+__all__ = [
+    "COMMANDMENT_SECTION_KEYS",
+    "CommandmentContext",
+    "render_commandment",
+    "render_commandment_from_sections",
+]

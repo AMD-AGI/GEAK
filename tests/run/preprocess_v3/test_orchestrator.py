@@ -490,8 +490,13 @@ def _make_agent_with_tools(
     return agent
 
 
-def test_register_default_tools_registers_all_seven() -> None:
-    """All 7 tool names must be registered in ``tool_names``."""
+def test_register_default_tools_registers_all_eight() -> None:
+    """All 8 tool names must be registered in ``tool_names``.
+
+    Commit set 7 added ``commandment_from_user_command`` for the Path-A
+    short-circuit. The original 7 tools are unchanged; the 8th is
+    additive.
+    """
     agent = _make_agent_with_tools()
     assert sorted(agent.tool_names) == sorted(
         [
@@ -501,6 +506,7 @@ def test_register_default_tools_registers_all_seven() -> None:
             "collect_baseline",
             "collect_profile",
             "render_commandment",
+            "commandment_from_user_command",
             "finish_preprocess",
         ]
     )

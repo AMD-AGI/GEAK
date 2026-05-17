@@ -50,6 +50,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,11 @@ from minisweagent.run.preprocess_v3.baseline import (
     collect_baseline_metrics,
     collect_profile,
 )
-from minisweagent.run.preprocess_v3.commandment import CommandmentContext, render_commandment
+from minisweagent.run.preprocess_v3.commandment import (
+    CommandmentContext,
+    render_commandment,
+    render_commandment_from_sections,
+)
 from minisweagent.run.preprocess_v3.explore import CodebaseContext, explore_codebase
 from minisweagent.run.preprocess_v3.harness_kb import load_harness_kb
 from minisweagent.run.preprocess_v3.orchestrator import (
@@ -81,6 +86,56 @@ ALLOWED_SUBAGENT_NAMES: tuple[str, ...] = (
     "harness-verifier",
     "speedup-verify",
 )
+
+#: Mode names the Path-A short-circuit understands. Maps 1:1 to the four
+#: harness CLI flags (``--correctness``, ``--profile``, ``--benchmark``,
+#: ``--full-benchmark``). Used to validate ``modes_covered`` /
+#: ``inferred_modes`` arguments on the
+#: ``commandment_from_user_command`` tool and to drive the per-section
+#: body assembly when projecting the user's command into a
+#: ``COMMANDMENT.md``.
+PATH_A_MODES: tuple[str, ...] = ("correctness", "profile", "benchmark", "full_benchmark")
+
+
+# ---------------------------------------------------------------------------
+# Path-A dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RunInstructions:
+    """Parsed user-provided run instructions for the Path-A short-circuit.
+
+    When the orchestrator detects (via LLM judgment, see ``Step 0`` in the
+    system prompt) that the user's task prompt already contains explicit
+    run instructions, it bypasses the harness-generator / harness-verifier
+    / speedup-verify subagent dispatches and emits a ``COMMANDMENT.md``
+    directly from those instructions. This dataclass captures the parsed
+    shape of that decision so :class:`PreprocessResult` consumers have an
+    audit trail of which command was used and which modes were inferred.
+
+    Attributes:
+        raw_command:
+            The user-provided shell command verbatim (whitespace
+            trimmed). Required, non-empty.
+        modes_covered:
+            Subset of :data:`PATH_A_MODES` the LLM concluded the
+            command directly covers (e.g. ``("benchmark",)`` for a
+            command that ends in ``--benchmark``).
+        inferred_modes:
+            Subset of :data:`PATH_A_MODES` the LLM asked the
+            orchestrator to fill in by inference from the covered
+            modes (e.g. ``("correctness",)`` inferred from a
+            ``--benchmark`` command by swapping the flag).
+        notes:
+            Free-form LLM justification, recorded for audit. Empty
+            string is the no-notes default.
+    """
+
+    raw_command: str
+    modes_covered: tuple[str, ...]
+    inferred_modes: tuple[str, ...] = ()
+    notes: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +561,72 @@ def _schema_finish_preprocess() -> dict[str, Any]:
     }
 
 
+def _schema_commandment_from_user_command() -> dict[str, Any]:
+    return {
+        "name": "commandment_from_user_command",
+        "type": "function",
+        "description": (
+            "Path-A short-circuit (Step 0 alternative to the 6-step flow). Call "
+            "ONLY when the user's task prompt already contains explicit run "
+            "instructions (a literal command-line invocation, a reference to an "
+            "existing harness file, or a make-target). Renders a "
+            "COMMANDMENT.md directly from the user's command — skipping "
+            "harness-generator, harness-verifier, and speedup-verify subagent "
+            "dispatches entirely. Mutually exclusive with calling "
+            "dispatch_subagent('harness-generator', ...) — the orchestrator's "
+            "path is determined by which of these two tools is called first."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "run_command": {
+                    "type": "string",
+                    "description": (
+                        "The user-provided shell command, verbatim. Must be non-empty. "
+                        "Example: 'cd /repo && python my_kernel.py --benchmark --shape 4096'."
+                    ),
+                },
+                "out_path": {
+                    "type": "string",
+                    "description": "Where to write COMMANDMENT.md.",
+                },
+                "modes_covered": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": list(PATH_A_MODES),
+                    },
+                    "description": (
+                        "Subset of ('correctness', 'profile', 'benchmark', 'full_benchmark') "
+                        "the run_command directly covers."
+                    ),
+                },
+                "inferred_modes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": list(PATH_A_MODES),
+                    },
+                    "description": (
+                        "Modes the LLM is asking the tool to fill in from the covered modes "
+                        "by inference (e.g. swap --benchmark -> --correctness). Each entry "
+                        "in this list produces a PATH_A_PARTIAL_COVERAGE warning marker in "
+                        "the rendered COMMANDMENT."
+                    ),
+                },
+                "notes": {
+                    "type": "string",
+                    "description": (
+                        "Short audit note explaining the Path-A choice (e.g. 'benchmark-only "
+                        "command; inferring the other modes by flag substitution')."
+                    ),
+                },
+            },
+            "required": ["run_command", "out_path"],
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
@@ -678,6 +799,141 @@ def _make_tool_render_commandment(
     return _impl
 
 
+def _make_tool_commandment_from_user_command(
+    agent: PreprocessOrchestratorAgent,
+) -> Callable[..., dict[str, Any]]:
+    """Bind ``commandment_from_user_command`` — the Path-A short-circuit tool.
+
+    Behaviour:
+
+    1. Validate that ``run_command`` is a non-empty shell command.
+       (Empty / whitespace-only commands raise ``ValueError`` so the
+       orchestrator's dispatch loop turns the failure into a clear
+       ``{"error": ...}`` observation for the LLM to react to.)
+    2. Project the single ``run_command`` into the 5-section
+       COMMANDMENT structure (``Setup``, ``Correctness``, ``Benchmark``,
+       ``Full Benchmark``, ``Profile``) by treating each entry in
+       ``modes_covered`` as a direct copy of the command into that
+       section's body, each entry in ``inferred_modes`` (and not in
+       ``modes_covered``) as the command with a
+       ``PATH_A_PARTIAL_COVERAGE`` warning marker prepended, and modes
+       in neither list as a bare warning marker (no command).
+    3. Write the rendered ``COMMANDMENT.md`` to ``out_path`` via
+       :func:`render_commandment_from_sections`.
+    4. Record the parsed :class:`RunInstructions` on
+       ``agent._collected["run_instructions"]`` for audit + downstream
+       consumers, and the commandment path on
+       ``agent._collected["commandment_path"]`` so
+       ``finish_preprocess`` doesn't have to repeat it.
+
+    Returns:
+        ``{ok, commandment_path, modes_emitted, warnings, text_length}``.
+    """
+
+    def _impl(
+        run_command: str,
+        out_path: str,
+        modes_covered: list[str] | None = None,
+        inferred_modes: list[str] | None = None,
+        notes: str = "",
+    ) -> dict[str, Any]:
+        if not isinstance(run_command, str) or not run_command.strip():
+            raise ValueError(
+                "commandment_from_user_command: run_command must be a non-empty "
+                "shell command. Path A is meaningless without an explicit "
+                "user-provided run instruction — if you intended Path B, call "
+                "dispatch_subagent('harness-generator', ...) instead."
+            )
+        if not isinstance(out_path, str) or not out_path.strip():
+            raise ValueError(
+                "commandment_from_user_command: out_path must be a non-empty "
+                "filesystem path for the rendered COMMANDMENT.md."
+            )
+
+        cmd = run_command.strip()
+        modes_covered_tup = _normalise_modes(modes_covered)
+        inferred_modes_tup = _normalise_modes(inferred_modes)
+        source_mode = modes_covered_tup[0] if modes_covered_tup else None
+
+        sections: dict[str, str] = {
+            "setup": ("# Path-A: user-provided run command assumes the environment is ready.\ntrue"),
+        }
+        warnings: list[str] = []
+        modes_emitted: list[str] = []
+
+        for mode in PATH_A_MODES:
+            if mode in modes_covered_tup:
+                sections[mode] = cmd
+                modes_emitted.append(mode)
+            elif mode in inferred_modes_tup:
+                src = source_mode or "<unspecified>"
+                marker_line = f"# PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}"
+                sections[mode] = f"{marker_line}\n{cmd}"
+                warnings.append(f"PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}")
+                modes_emitted.append(mode)
+            else:
+                sections[mode] = f"# PATH_A_PARTIAL_COVERAGE: {mode} not covered"
+                warnings.append(f"PATH_A_PARTIAL_COVERAGE: {mode} not covered")
+
+        preamble_lines = ["<!-- Path-A short-circuit: rendered from user-provided run command -->"]
+        preamble_lines.append(f"<!-- raw_command: {cmd} -->")
+        if notes:
+            preamble_lines.append(f"<!-- notes: {notes} -->")
+        preamble = "\n".join(preamble_lines)
+
+        out_path_obj = Path(out_path)
+        text = render_commandment_from_sections(
+            sections,
+            out_path=out_path_obj,
+            preamble=preamble,
+        )
+
+        instructions = RunInstructions(
+            raw_command=cmd,
+            modes_covered=modes_covered_tup,
+            inferred_modes=inferred_modes_tup,
+            notes=notes or "",
+        )
+        agent._collected["commandment_path"] = str(out_path_obj)
+        agent._collected["run_instructions"] = instructions
+
+        return {
+            "ok": True,
+            "commandment_path": str(out_path_obj),
+            "modes_emitted": modes_emitted,
+            "warnings": warnings,
+            "text_length": len(text),
+        }
+
+    return _impl
+
+
+def _normalise_modes(value: Any) -> tuple[str, ...]:
+    """Coerce a possibly-``None`` list of mode strings to a stripped tuple.
+
+    Unknown values (modes not in :data:`PATH_A_MODES`) are dropped with a
+    debug log so a noisy LLM doesn't crash the tool; the contract is
+    enforced by the schema's enum, this is just defence-in-depth.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        return ()
+    cleaned: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        stripped = item.strip()
+        if not stripped:
+            continue
+        if stripped not in PATH_A_MODES:
+            logger.debug("commandment_from_user_command: dropping unknown mode %r", stripped)
+            continue
+        if stripped not in cleaned:
+            cleaned.append(stripped)
+    return tuple(cleaned)
+
+
 def _make_tool_finish_preprocess(
     agent: PreprocessOrchestratorAgent,
 ) -> Callable[..., dict[str, Any]]:
@@ -769,6 +1025,11 @@ def register_default_tools(
         _make_tool_render_commandment(agent, kernel_language),
     )
     agent.register_tool(
+        "commandment_from_user_command",
+        _schema_commandment_from_user_command(),
+        _make_tool_commandment_from_user_command(agent),
+    )
+    agent.register_tool(
         "finish_preprocess",
         _schema_finish_preprocess(),
         _make_tool_finish_preprocess(agent),
@@ -817,7 +1078,9 @@ def validate_call_against_schema(schema: dict[str, Any], args: dict[str, Any]) -
 
 __all__ = [
     "ALLOWED_SUBAGENT_NAMES",
+    "PATH_A_MODES",
     "PreprocessSubagentDispatcher",
+    "RunInstructions",
     "register_default_tools",
     "validate_call_against_schema",
 ]
