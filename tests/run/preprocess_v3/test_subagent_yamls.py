@@ -154,6 +154,94 @@ def test_harness_generator_source_comment_marker_preserved() -> None:
 
 
 # ---------------------------------------------------------------------------
+# commit-set-6.5 enrichment: Consistency & Robustness Requirements block
+#
+# Quality requirements live in the SUBAGENT YAML (single source of truth,
+# language-agnostic, always-on) — they are deliberately NOT duplicated into
+# the per-language KBs under ``skills/<lang>/``. The block sits between the
+# commit-6 ``{{knowledge_base}}`` injection and the legacy ``Goal`` section,
+# inside the "additive enrichment" zone marked by ``## (Existing content
+# continues below)``.
+# ---------------------------------------------------------------------------
+
+
+def test_harness_generator_includes_consistency_robustness_heading(
+    registry_specs: dict[str, SubagentSpec],
+) -> None:
+    """The ``## Consistency & Robustness Requirements`` heading is present exactly once."""
+    spec = registry_specs["harness-generator"]
+    sp = spec.system_prompt
+    heading = "## Consistency & Robustness Requirements"
+    assert heading in sp, "missing Consistency & Robustness Requirements heading"
+    assert sp.count(heading) == 1, f"heading must appear exactly once, found {sp.count(heading)}"
+
+
+def test_harness_generator_consistency_block_has_seven_numbered_rules(
+    registry_specs: dict[str, SubagentSpec],
+) -> None:
+    """All seven numbered rule headings are present inside the block.
+
+    The numbered headings are the contract anchors for the block; if a
+    future edit drops, renumbers, or paraphrases one we want a loud
+    failure rather than a quiet drift in the deterministic-generation
+    requirements.
+    """
+    spec = registry_specs["harness-generator"]
+    sp = spec.system_prompt
+    block_start = sp.index("## Consistency & Robustness Requirements")
+    block_end = sp.index("## (Existing content continues below)", block_start)
+    block_body = sp[block_start:block_end]
+
+    expected_rule_headings = (
+        "1. **Same input → same harness.**",
+        "2. **Same shapes across all 4 CLI modes.**",
+        "3. **Hard-fail with clear messages. No silent skips.**",
+        "4. **Idempotent artifact production.**",
+        "5. **Deterministic algorithms where applicable.**",
+        "6. **Single command produces a complete, verifiable artifact.**",
+        "7. **Same harness must work across all baseline-vs-optimized swaps.**",
+    )
+    for heading in expected_rule_headings:
+        assert heading in block_body, f"missing rule heading {heading!r} in block body"
+
+
+def test_harness_generator_consistency_block_lands_before_goal(
+    registry_specs: dict[str, SubagentSpec],
+) -> None:
+    """The block sits AFTER the ``{{knowledge_base}}`` injection and BEFORE ``Goal``.
+
+    This pins the structural insertion point chosen in commit set 6.5:
+    KB block (commit 6) → Consistency block (commit 6.5) → seam marker →
+    legacy ``Goal`` section. Pinning the order keeps the model's reading
+    flow stable: quality requirements appear immediately after the
+    language-specific KB and before any language-agnostic procedural rules.
+    """
+    spec = registry_specs["harness-generator"]
+    sp = spec.system_prompt
+
+    idx_kb = sp.index("## Language-Specific Knowledge Base")
+    idx_block = sp.index("## Consistency & Robustness Requirements")
+    idx_seam = sp.index("## (Existing content continues below)")
+    idx_goal = sp.index("\nGoal\n")
+
+    assert idx_kb < idx_block < idx_seam < idx_goal, (
+        f"expected order kb<block<seam<goal, got {idx_kb=} {idx_block=} {idx_seam=} {idx_goal=}"
+    )
+
+
+def test_harness_generator_consistency_block_marker_in_yaml_header() -> None:
+    """The raw file carries a ``# commit-set-6.5`` provenance comment.
+
+    YAML comments are dropped on parse so we read the raw text. Mirrors
+    the commit-set-6 marker convention so a future maintainer can trace
+    each additive enrichment back to the commit that introduced it.
+    """
+    raw = (_V3_ROOT / "harness-generator" / "SUBAGENT.yaml").read_text(encoding="utf-8")
+    assert "# commit-set-6.5 additive enrichment:" in raw
+    assert "Consistency & Robustness Requirements" in raw
+
+
+# ---------------------------------------------------------------------------
 # speedup-verify (verbatim port)
 # ---------------------------------------------------------------------------
 
