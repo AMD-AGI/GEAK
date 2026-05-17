@@ -87,3 +87,52 @@ def test_harness_generator_source_comment_marker_preserved() -> None:
     """
     raw = (_V3_ROOT / "harness-generator" / "SUBAGENT.yaml").read_text(encoding="utf-8")
     assert raw.startswith("# source: subagents/harness-generator/SYSTEM_PROMPT.md"), raw[:120]
+
+
+# ---------------------------------------------------------------------------
+# speedup-verify (verbatim port)
+# ---------------------------------------------------------------------------
+
+
+def test_speedup_verify_is_registered(registry_specs: dict[str, SubagentSpec]) -> None:
+    assert "speedup-verify" in registry_specs
+    assert "speedup-verify" in SubagentRegistry(root=_V3_ROOT).names()
+
+
+def test_speedup_verify_prompt_is_verbatim_lift(registry_specs: dict[str, SubagentSpec]) -> None:
+    legacy_prompt = (_LEGACY_ROOT / "speedup-verify" / "SYSTEM_PROMPT.md").read_text(encoding="utf-8")
+
+    spec = registry_specs["speedup-verify"]
+    assert spec.system_prompt, "system_prompt must be non-empty"
+    assert spec.system_prompt[:_VERBATIM_PREFIX_CHARS] == legacy_prompt[:_VERBATIM_PREFIX_CHARS], (
+        "system_prompt prefix drifted from legacy SYSTEM_PROMPT.md"
+    )
+    assert spec.system_prompt == legacy_prompt, "system_prompt body drifted from legacy SYSTEM_PROMPT.md"
+
+
+def test_speedup_verify_description_is_concise(registry_specs: dict[str, SubagentSpec]) -> None:
+    spec = registry_specs["speedup-verify"]
+    assert spec.description, "description must be non-empty"
+    assert len(spec.description) <= _DESCRIPTION_MAX_CHARS, (
+        f"description is {len(spec.description)} chars, max is {_DESCRIPTION_MAX_CHARS}"
+    )
+    assert "\n" not in spec.description, "description must be a single line"
+
+
+def test_speedup_verify_marker_contract_preserved(registry_specs: dict[str, SubagentSpec]) -> None:
+    """The ``GEAK_RESULT_GEOMEAN_SPEEDUP=<float>`` marker is a hard contract.
+
+    The orchestrator (commit set 4) parses this exact token off the
+    speedup-verify subagent's output, so it must remain in the prompt
+    body verbatim. Asserting it here keeps a future reflow from silently
+    dropping the marker name.
+    """
+    spec = registry_specs["speedup-verify"]
+    assert "GEAK_RESULT_GEOMEAN_SPEEDUP=" in spec.system_prompt, (
+        "GEAK_RESULT_GEOMEAN_SPEEDUP marker missing from speedup-verify prompt"
+    )
+
+
+def test_speedup_verify_source_comment_marker_preserved() -> None:
+    raw = (_V3_ROOT / "speedup-verify" / "SUBAGENT.yaml").read_text(encoding="utf-8")
+    assert raw.startswith("# source: subagents/speedup-verify/SYSTEM_PROMPT.md"), raw[:120]
