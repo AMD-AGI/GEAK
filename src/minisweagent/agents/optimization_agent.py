@@ -155,6 +155,8 @@ class AgentConfig:
     # cleanly.
     mode: Literal["yolo"] = "yolo"
 
+    agent_name: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Observation truncation (from DefaultAgent — byte-identical)

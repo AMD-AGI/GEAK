@@ -65,6 +65,17 @@ def _build_ensemble_factory(base_factory):
     return _ensemble_factory
 
 
+def _normalize_section_name(name: str) -> str:
+    """Canonicalize a section name for case- / whitespace-insensitive matching.
+
+    The COMMANDMENT contract uses title-case multi-word names like
+    ``## Full Benchmark`` while legacy callers use ``## FULL_BENCHMARK``.
+    Both normalize to the same upper-snake_case token so callers can pass
+    either form and templates can render in either style.
+    """
+    return "_".join(name.strip().upper().split())
+
+
 def _read_commandment_section(commandment_path: str, section: str) -> str | None:
     """Read a section from a COMMANDMENT.md file verbatim.
 
@@ -72,6 +83,10 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
     ``"CORRECTNESS"``, ``"PROFILE"``, ``"BENCHMARK"``,
     ``"FULL_BENCHMARK"``), exactly as written.  No parsing, no extraction,
     no transformation.
+
+    Section-name matching is case-insensitive and whitespace-flexible:
+    ``## Full Benchmark`` matches ``section="FULL_BENCHMARK"`` just as
+    ``## FULL_BENCHMARK`` does.
 
     Fenced code blocks (```bash, ```, etc.) are stripped automatically.
     """
@@ -83,13 +98,16 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
 
     lines: list[str] = []
     in_section = False
-    # Pattern to match fenced code block markers (```bash, ```sh, ```, etc.)
     fence_pattern = re.compile(r"^```\w*$")
+    header_re = re.compile(r"^##\s+([A-Za-z][\w\s\-]*?)\s*:?\s*$")
+
+    target = _normalize_section_name(section)
 
     for raw_line in text.splitlines():
-        header = re.match(r"^##\s+(\w+)", raw_line.strip())
+        header = header_re.match(raw_line.strip())
         if header:
-            if header.group(1) == section:
+            candidate = _normalize_section_name(header.group(1))
+            if candidate == target:
                 in_section = True
                 continue
             elif in_section:
@@ -97,7 +115,6 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
             continue
         if in_section:
             stripped = raw_line.strip()
-            # Skip fenced code block markers
             if fence_pattern.match(stripped):
                 continue
             if stripped:
