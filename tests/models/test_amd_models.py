@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from minisweagent.models.amd_base import AmdLlmModelConfig
+from minisweagent.models.amd_base import AmdLlmModelConfig, get_amd_llm_user
 from minisweagent.models.amd_claude import AmdClaudeModel, convert_openai_tools_to_claude
 from minisweagent.models.amd_llm import AmdLlmModel
 from minisweagent.models.amd_openai import AmdOpenAIModel
@@ -316,3 +316,82 @@ class TestAmdLlmModelBaseSetTools:
         names = [t["name"] for t in model.tools]
         assert names == ["bash", "profiling", "submit"]
         assert model.tools is not tools
+
+
+# ---------------------------------------------------------------------------
+# get_amd_llm_user
+# ---------------------------------------------------------------------------
+
+
+class TestGetAmdLlmUser:
+    def test_prefers_geak_user(self, monkeypatch):
+        monkeypatch.setenv("GEAK_USER", "foo")
+        monkeypatch.setenv("USER", "bar")
+        assert get_amd_llm_user() == "foo"
+
+    def test_falls_back_to_user(self, monkeypatch):
+        monkeypatch.delenv("GEAK_USER", raising=False)
+        monkeypatch.setenv("USER", "bar")
+        assert get_amd_llm_user() == "bar"
+
+    def test_empty_env_vars_skipped(self, monkeypatch):
+        monkeypatch.setenv("GEAK_USER", "")
+        monkeypatch.setenv("USER", "bar")
+        assert get_amd_llm_user() == "bar"
+
+    def test_unknown_in_container_like_env(self, monkeypatch):
+        monkeypatch.delenv("GEAK_USER", raising=False)
+        monkeypatch.delenv("USER", raising=False)
+        with patch("minisweagent.models.amd_base.os.getlogin", side_effect=OSError):
+            assert get_amd_llm_user() == "unknown"
+
+    def test_getlogin_fallback_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("GEAK_USER", raising=False)
+        monkeypatch.delenv("USER", raising=False)
+        with patch("minisweagent.models.amd_base.os.getlogin", return_value="login_user"):
+            assert get_amd_llm_user() == "login_user"
+
+
+# ---------------------------------------------------------------------------
+# "user" request header is attached by each AMD model backend
+# ---------------------------------------------------------------------------
+
+
+class TestAmdModelUserHeader:
+    """Verify the AMD LLM gateway "user" header is set for every backend."""
+
+    def test_amd_claude_sends_user_header(self, monkeypatch):
+        monkeypatch.setenv("GEAK_USER", "alice")
+        config = AmdLlmModelConfig(model_name="claude-sonnet-4.5", api_key="test-key")
+        with patch("minisweagent.models.amd_claude.anthropic.Anthropic") as ctor:
+            AmdClaudeModel(config)
+        ctor.assert_called_once()
+        headers = ctor.call_args.kwargs["default_headers"]
+        assert headers["user"] == "alice"
+        assert headers["Ocp-Apim-Subscription-Key"] == "test-key"
+
+    def test_amd_openai_sends_user_header(self, monkeypatch):
+        monkeypatch.setenv("GEAK_USER", "bob")
+        config = AmdLlmModelConfig(model_name="gpt-5", api_key="test-key")
+        with patch("minisweagent.models.amd_openai.openai.AzureOpenAI") as ctor:
+            AmdOpenAIModel(config)
+        ctor.assert_called_once()
+        headers = ctor.call_args.kwargs["default_headers"]
+        assert headers["user"] == "bob"
+        assert headers["Ocp-Apim-Subscription-Key"] == "test-key"
+
+    def test_amd_gemini_sends_user_header(self, monkeypatch):
+        # google.genai is an optional/heavy dep; skip if unavailable in the
+        # test environment rather than failing the whole module.
+        pytest.importorskip("google.genai")
+        from minisweagent.models.amd_gemini import AmdGeminiModel
+
+        monkeypatch.setenv("GEAK_USER", "carol")
+        config = AmdLlmModelConfig(model_name="gemini-2.5-pro", api_key="test-key")
+        with patch("minisweagent.models.amd_gemini.genai.Client") as ctor:
+            AmdGeminiModel(config)
+        ctor.assert_called_once()
+        http_options = ctor.call_args.kwargs["http_options"]
+        headers = http_options.headers
+        assert headers["user"] == "carol"
+        assert headers["Ocp-Apim-Subscription-Key"] == "test-key"

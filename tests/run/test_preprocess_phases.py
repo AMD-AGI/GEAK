@@ -217,9 +217,271 @@ class TestCliUsesOrchestrator:
         # in the orchestrator module; after ``as run_preprocessor``
         # aliasing the __name__ attribute still reveals the real source.
         assert rp.__module__ == "minisweagent.run.preprocess.orchestrator", (
-            f"mini.run_preprocessor must come from the orchestrator shim; "
-            f"got {rp.__module__}"
+            f"mini.run_preprocessor must come from the orchestrator shim; got {rp.__module__}"
         )
+
+
+class TestUserTaskPlumbing:
+    """Regression guards for the ``user_task`` plumbing introduced by
+    PR #226's import of upstream commit ``15e113c``.
+
+    Two failure modes the original sync PR missed:
+
+    1.  ``mini.py`` splats ``user_task=task_content`` into
+        ``run_preprocessor`` which on ``gwiab`` resolves to the
+        orchestrator shim.  Before this fix the shim did not accept
+        ``user_task`` and every preprocess call raised ``TypeError``.
+
+    2.  Even if the shim accepts the kwarg, the value must survive the
+        trip through :class:`PhaseContext` into
+        :class:`~minisweagent.run.preprocess.phases.harness.HarnessPhase`
+        so the UnitTestAgent / ShapeFixerAgent prompts actually receive
+        a ``USER TASK CONTEXT`` block.  Without this the feature ships
+        dead-on-arrival on the modular pipeline.
+    """
+
+    _USER_TASK_PROBE = "PROBE_USER_TASK_42::production-contract"
+
+    def test_orchestrator_shim_accepts_user_task_kwarg(self, tmp_path: Path) -> None:
+        """Direct regression for the crash: passing ``user_task`` into
+        the shim used to raise ``TypeError`` because the kwarg was not
+        declared on the signature.  All phases stubbed out so this is a
+        pure plumbing test."""
+        from minisweagent.run.preprocess import orchestrator as orch_mod
+
+        class _NoOpPhase(Phase):
+            name = "noop"
+
+            def run(self, ctx):
+                # Mark mandatory outputs as populated so the legacy
+                # fallback is not invoked — we only want to exercise the
+                # PhaseContext construction here.
+                ctx.harness_path = "/tmp/h.py"
+                ctx.baseline_metrics_path = str(tmp_path / "bm.json")
+
+        with (
+            patch(
+                "minisweagent.run.preprocess.orchestrator.DiscoveryPhase",
+                _NoOpPhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.HarnessPhase",
+                _NoOpPhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.BaselinePhase",
+                _NoOpPhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.ExplorePhase",
+                _NoOpPhase,
+            ),
+        ):
+            orch_mod.run_preprocessor_via_orchestrator(
+                kernel_url="dummy",
+                output_dir=tmp_path,
+                user_task=self._USER_TASK_PROBE,
+            )
+
+    def test_user_task_round_trips_through_phase_context(self, tmp_path: Path) -> None:
+        """Verify the value passed into the shim reaches phases via
+        ``ctx.user_task`` (rather than being dropped on the floor)."""
+        from minisweagent.run.preprocess import orchestrator as orch_mod
+
+        captured: dict[str, str | None] = {"user_task": "SENTINEL_NOT_SET"}
+
+        class _CapturePhase(Phase):
+            name = "capture"
+
+            def run(self, ctx):
+                captured["user_task"] = ctx.user_task
+                ctx.harness_path = "/tmp/h.py"
+                ctx.baseline_metrics_path = str(tmp_path / "bm.json")
+
+        with (
+            patch(
+                "minisweagent.run.preprocess.orchestrator.DiscoveryPhase",
+                _CapturePhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.HarnessPhase",
+                _CapturePhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.BaselinePhase",
+                _CapturePhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.ExplorePhase",
+                _CapturePhase,
+            ),
+        ):
+            orch_mod.run_preprocessor_via_orchestrator(
+                kernel_url="dummy",
+                output_dir=tmp_path,
+                user_task=self._USER_TASK_PROBE,
+            )
+
+        assert captured["user_task"] == self._USER_TASK_PROBE
+
+    def test_user_task_forwarded_to_legacy_fallback(self, tmp_path: Path) -> None:
+        """When phases leave mandatory outputs empty, the legacy
+        fallback runs — and must receive ``user_task`` so the legacy
+        UTA / ShapeFixer chain stays consistent with the new pipeline.
+        """
+        from minisweagent.run.preprocess import orchestrator as orch_mod
+
+        captured: dict = {}
+
+        def _fake_legacy(**kwargs):
+            captured.update(kwargs)
+            return {
+                "kernel_path": "/tmp/k.py",
+                "repo_root": str(tmp_path),
+                "harness_path": "/tmp/harness.py",
+                "baseline_metrics_path": str(tmp_path / "bm.json"),
+                "commandment": "BASE",
+            }
+
+        class _NoOpPhase(Phase):
+            name = "noop"
+
+            def run(self, ctx):
+                pass
+
+        with (
+            patch(
+                "minisweagent.run.preprocess.orchestrator.DiscoveryPhase",
+                _NoOpPhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.HarnessPhase",
+                _NoOpPhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.BaselinePhase",
+                _NoOpPhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.ExplorePhase",
+                _NoOpPhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.preprocessor.run_preprocessor",
+                _fake_legacy,
+            ),
+        ):
+            orch_mod.run_preprocessor_via_orchestrator(
+                kernel_url="dummy",
+                output_dir=tmp_path,
+                user_task=self._USER_TASK_PROBE,
+            )
+
+        assert captured.get("user_task") == self._USER_TASK_PROBE
+
+
+class TestUserTaskAgentPrompt:
+    """End-of-pipeline check: the ``USER TASK CONTEXT`` block actually
+    lands in the agent task strings the LLM sees.  The YAML
+    system-prompt overrides in ``mini_unit_test_agent.yaml`` /
+    ``mini_shape_fixer.yaml`` only fire when this block is present, so
+    the prepend logic is part of the feature contract.
+    """
+
+    _USER_TASK_PROBE = "PROBE_USER_TASK_42::production-contract"
+
+    def test_shape_fixer_task_prepends_user_task_block(self, tmp_path: Path) -> None:
+        from minisweagent.run.preprocess.shape_fixer_agent import _build_shape_fixer_task
+
+        bench = tmp_path / "bench.py"
+        bench.write_text("# fake benchmark\n")
+        harness = tmp_path / "harness.py"
+        harness.write_text("# fake harness\n")
+
+        body = _build_shape_fixer_task(
+            benchmark_file=bench,
+            harness_path=harness,
+            kernel_path=None,
+            gpu_id=0,
+            validation_feedback=None,
+            user_task=self._USER_TASK_PROBE,
+        )
+        assert "USER TASK CONTEXT (production workload contract -- HIGHEST PRIORITY):" in body
+        assert self._USER_TASK_PROBE in body
+        # Sentinel for the ordering: the block must come BEFORE the
+        # "SHAPE SOURCE FILE" header, otherwise the YAML override rule
+        # cannot recognise it as the highest-priority section.
+        assert body.index(self._USER_TASK_PROBE) < body.index("SHAPE SOURCE FILE")
+
+    def test_shape_fixer_task_unchanged_when_user_task_none(self, tmp_path: Path) -> None:
+        """Backward-compat: when ``user_task`` is None or empty the
+        prefix must not be added (the legacy discovery-driven behaviour
+        is preserved verbatim).
+        """
+        from minisweagent.run.preprocess.shape_fixer_agent import _build_shape_fixer_task
+
+        bench = tmp_path / "bench.py"
+        bench.write_text("# fake\n")
+        harness = tmp_path / "harness.py"
+        harness.write_text("# fake\n")
+
+        for empty in (None, "", "   "):
+            body = _build_shape_fixer_task(
+                benchmark_file=bench,
+                harness_path=harness,
+                kernel_path=None,
+                gpu_id=0,
+                validation_feedback=None,
+                user_task=empty,
+            )
+            assert "USER TASK CONTEXT" not in body
+
+    def test_unit_test_agent_task_prepends_user_task_block(self, tmp_path: Path) -> None:
+        """End-to-end on the UnitTestAgent path: when ``run_unit_test_agent``
+        is invoked with a non-empty ``user_task``, the constructed agent
+        task string must start with the ``USER TASK CONTEXT`` block.
+
+        We stub the model and the agent's ``run`` method so this test
+        is hermetic — no LLM call, no real repo.
+        """
+        from unittest.mock import MagicMock
+
+        from minisweagent.run.preprocess import unit_test_agent as uta_mod
+
+        captured: dict[str, str] = {}
+
+        class _StubAgent:
+            log_file = None
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, task: str):
+                captured["task"] = task
+                return ("Submitted", "TEST_COMMAND: python /tmp/h.py --correctness")
+
+        with (
+            patch.object(uta_mod, "UnitTestAgent", _StubAgent),
+            patch.object(uta_mod, "LocalEnvironment", MagicMock()),
+            patch.object(
+                uta_mod,
+                "load_preprocess_agent_config",
+                return_value=({}, {}),
+            ),
+        ):
+            uta_mod.run_unit_test_agent(
+                model=MagicMock(),
+                repo=tmp_path,
+                kernel_name="probe_kernel",
+                user_task=self._USER_TASK_PROBE,
+            )
+
+        task = captured["task"]
+        assert "USER TASK CONTEXT (production workload contract -- HIGHEST PRIORITY):" in task
+        assert self._USER_TASK_PROBE in task
+        # Ordering: prefix must precede the per-kernel preamble so the
+        # YAML rule sees it as HIGHEST PRIORITY.
+        assert task.index(self._USER_TASK_PROBE) < task.index("Create a fixed test harness")
 
 
 class TestLegacyFallback:
@@ -252,21 +514,27 @@ class TestLegacyFallback:
             def run(self, ctx):
                 pass
 
-        with patch(
-            "minisweagent.run.preprocess.orchestrator.DiscoveryPhase",
-            _NoOpPhase,
-        ), patch(
-            "minisweagent.run.preprocess.orchestrator.HarnessPhase",
-            _NoOpPhase,
-        ), patch(
-            "minisweagent.run.preprocess.orchestrator.BaselinePhase",
-            _NoOpPhase,
-        ), patch(
-            "minisweagent.run.preprocess.orchestrator.ExplorePhase",
-            _NoOpPhase,
-        ), patch(
-            "minisweagent.run.preprocess.preprocessor.run_preprocessor",
-            _fake_legacy,
+        with (
+            patch(
+                "minisweagent.run.preprocess.orchestrator.DiscoveryPhase",
+                _NoOpPhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.HarnessPhase",
+                _NoOpPhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.BaselinePhase",
+                _NoOpPhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.orchestrator.ExplorePhase",
+                _NoOpPhase,
+            ),
+            patch(
+                "minisweagent.run.preprocess.preprocessor.run_preprocessor",
+                _fake_legacy,
+            ),
         ):
             result = orch_mod.run_preprocessor_via_orchestrator(
                 kernel_url="dummy",

@@ -361,6 +361,27 @@ class ParallelAgent(DefaultAgent):
             text,
         )
 
+    @staticmethod
+    def _gpu_groups_for_homogeneous_parallel(gpu_ids: list[int], num_parallel: int) -> list[list[int]]:
+        """Partition ``gpu_ids`` into ``num_parallel`` contiguous groups (sizes differ by at most one).
+
+        - One parallel agent receives every ID (e.g. TP across all listed GPUs).
+        - ``N`` agents split the list in order: ``[0,1,2,3]`` with ``N==2`` → ``[[0,1],[2,3]]``.
+        """
+        if num_parallel <= 0:
+            return []
+        n = len(gpu_ids)
+        if n == 0:
+            return [[] for _ in range(num_parallel)]
+        base, rem = divmod(n, num_parallel)
+        groups: list[list[int]] = []
+        idx = 0
+        for i in range(num_parallel):
+            sz = base + (1 if i < rem else 0)
+            groups.append(gpu_ids[idx : idx + sz])
+            idx += sz
+        return groups
+
     @classmethod
     def run_parallel(
         cls,
@@ -389,7 +410,9 @@ class ParallelAgent(DefaultAgent):
         Supports three modes (checked in priority order):
         - Pool (preferred): pass tasks (list[AgentTask]) for M tasks on N GPUs.
         - Heterogeneous (legacy): pass agent_specs (list[AgentSpec]).
-        - Homogeneous (default): num_parallel identical agents, each with 1 GPU.
+        - Homogeneous (default): num_parallel identical agents; ``gpu_ids`` are split
+          into that many contiguous groups (one agent → all IDs visible; two agents
+          on four IDs → two pairs, etc.).
 
         ``deadline`` / ``soft_stop`` / ``registry`` are forwarded to the
         chosen helper so spawned subprocesses are tracked and the dispatch
@@ -463,10 +486,15 @@ class ParallelAgent(DefaultAgent):
 
         if gpu_ids and len(gpu_ids) < num_parallel:
             logger.warning(
-                "Only %d GPU IDs for %d parallel agents; some agents will not have GPU isolation.",
+                "Fewer GPU IDs (%d) than parallel agents (%d); some agents get an empty GPU group "
+                "(no HIP_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES override).",
                 len(gpu_ids),
                 num_parallel,
             )
+
+        agent_gpu_groups: list[list[int]] | None = (
+            cls._gpu_groups_for_homogeneous_parallel(gpu_ids, num_parallel) if gpu_ids else None
+        )
 
         def run_single_agent(agent_id: int):
             """Run a single parallel agent instance."""
@@ -510,17 +538,19 @@ class ParallelAgent(DefaultAgent):
             new_env[repo_path_str] = worktree_path_str
             new_env["GEAK_WORK_DIR"] = worktree_path_str
             new_env["GEAK_REPO_ROOT"] = repo_path_str
-            if gpu_ids and agent_id < len(gpu_ids):
-                gpu_id = gpu_ids[agent_id]
-                new_env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
-                new_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-                new_env["GEAK_GPU_DEVICE"] = str(gpu_id)
-                logger.debug("Parallel agent %d assigned GPU %d", agent_id, gpu_id)
-                if console:
-                    with _stdout_lock:
-                        console.print(f"[bold green]Parallel agent {agent_id} using GPU {gpu_id}[/bold green]")
-                        if hasattr(sys.stdout, "flush"):
-                            sys.stdout.flush()
+            if agent_gpu_groups is not None and agent_id < len(agent_gpu_groups):
+                grp = agent_gpu_groups[agent_id]
+                if grp:
+                    devs = ",".join(str(g) for g in grp)
+                    new_env["HIP_VISIBLE_DEVICES"] = devs
+                    new_env["CUDA_VISIBLE_DEVICES"] = devs
+                    new_env["GEAK_GPU_DEVICE"] = devs
+                    logger.debug("Parallel agent %d assigned GPU(s) %s", agent_id, devs)
+                    if console:
+                        with _stdout_lock:
+                            console.print(f"[bold green]Parallel agent {agent_id} using GPU(s) {devs}[/bold green]")
+                            if hasattr(sys.stdout, "flush"):
+                                sys.stdout.flush()
             env_config_dict["env"] = new_env
             parallel_env = type(base_env)(**env_config_dict)
 

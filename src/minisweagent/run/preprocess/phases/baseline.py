@@ -270,9 +270,7 @@ class BaselinePhase(Phase):
                     )
                     for r in baseline_results:
                         status = "PASS" if r["success"] else "FAIL"
-                        logger.info(
-                            "    --%s: %s (%ss)", r["mode"], status, r["duration_s"]
-                        )
+                        logger.info("    --%s: %s (%ss)", r["mode"], status, r["duration_s"])
                     if not bl_ok:
                         logger.warning("  Baseline re-run had failures: %s", bl_errors)
                     for r in baseline_results:
@@ -318,9 +316,7 @@ class BaselinePhase(Phase):
         if profiling:
             (output_dir / "profile.json").write_text(json.dumps(profiling, indent=2, default=str))
             if ctx.repo_root:
-                (Path(ctx.repo_root) / "profile.json").write_text(
-                    json.dumps(profiling, indent=2, default=str)
-                )
+                (Path(ctx.repo_root) / "profile.json").write_text(json.dumps(profiling, indent=2, default=str))
                 logger.info(
                     "  Profiling complete in %.0fs (also saved to %s/profile.json)",
                     profile_elapsed,

@@ -99,10 +99,7 @@ class PreprocessOrchestrator:
                 )
 
                 if is_harness_only_mode():
-                    logger.info(
-                        "GEAK_HARNESS_ONLY=1: returning after HarnessPhase "
-                        "(skipping baseline + explore)."
-                    )
+                    logger.info("GEAK_HARNESS_ONLY=1: returning after HarnessPhase (skipping baseline + explore).")
                     return ctx
 
         return ctx
@@ -126,6 +123,7 @@ def run_preprocessor_via_orchestrator(
     translate_only: bool = False,
     budget: Any = None,
     state: Any = None,
+    user_task: str | None = None,
 ) -> dict[str, Any]:
     """Drop-in shim for the legacy ``run_preprocessor`` signature.
 
@@ -135,6 +133,12 @@ def run_preprocessor_via_orchestrator(
     logic yet cause the orchestrator to delegate to
     ``run_preprocessor`` (legacy) for the missing steps.  This keeps
     every commit rollback-safe.
+
+    ``user_task`` is the user's ``-t`` prompt forwarded from ``mini.py``.
+    HarnessPhase reads it from ``ctx.user_task`` to prepend a
+    ``USER TASK CONTEXT`` block to the UnitTestAgent and ShapeFixerAgent
+    tasks (see :class:`~minisweagent.run.preprocess.phases.base.PhaseContext`
+    for the wider contract).
     """
     ctx = PhaseContext(
         kernel_url=kernel_url,
@@ -151,6 +155,7 @@ def run_preprocessor_via_orchestrator(
         console=console,
         target_language=target_language,
         translate_only=translate_only,
+        user_task=user_task,
     )
 
     orch = PreprocessOrchestrator()
@@ -194,6 +199,7 @@ def run_preprocessor_via_orchestrator(
             target_language=target_language,
             budget=budget,
             state=state,
+            user_task=user_task,
         )
         # Legacy wins for fields where the new phases didn't produce
         # output; new phases win for fields they did populate.

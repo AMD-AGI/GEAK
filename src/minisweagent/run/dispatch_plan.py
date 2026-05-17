@@ -29,7 +29,7 @@ class DispatchPlanItem:
     config: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_agent_task(cls, task: AgentTask) -> "DispatchPlanItem":
+    def from_agent_task(cls, task: AgentTask) -> DispatchPlanItem:
         return cls(
             label=task.label,
             task=task.task,
@@ -72,7 +72,7 @@ class DispatchPlan:
         round_num: int,
         mode: str,
         tasks: list[AgentTask],
-    ) -> "DispatchPlan":
+    ) -> DispatchPlan:
         return cls(
             round_num=round_num,
             mode=mode,

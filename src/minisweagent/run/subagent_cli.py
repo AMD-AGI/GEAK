@@ -61,7 +61,9 @@ def run_subagent(
     step_limit: int = typer.Option(0, "--step-limit", help="Override step limit (0 = default)."),
     cost_limit: float = typer.Option(0.0, "--cost-limit", help="Override cost limit (0.0 = default)."),
     yes: bool = typer.Option(False, "-y", "--yes", help="Run in yolo mode (no confirmations)."),
-    args: list[str] | None = typer.Argument(None, help="Positional arguments passed to subprocess subagents (e.g. paths)."),
+    args: list[str] | None = typer.Argument(
+        None, help="Positional arguments passed to subprocess subagents (e.g. paths)."
+    ),
 ) -> None:
     """Run a registered subagent with the given prompt."""
     import os
@@ -85,8 +87,7 @@ def run_subagent(
         raise typer.Exit(1)
 
     console.print(
-        f"[bold cyan]Running subagent:[/bold cyan] {descriptor.name} "
-        f"([green]{descriptor.execution_mode}[/green])"
+        f"[bold cyan]Running subagent:[/bold cyan] {descriptor.name} ([green]{descriptor.execution_mode}[/green])"
     )
 
     if descriptor.execution_mode == "subprocess":
@@ -233,7 +234,9 @@ def main(
         list_subagents()
         raise typer.Exit(0)
     if ctx.invoked_subcommand is None:
-        console.print("Use [bold]--list[/bold] to see available subagents or [bold]run --agent NAME[/bold] to execute one.")
+        console.print(
+            "Use [bold]--list[/bold] to see available subagents or [bold]run --agent NAME[/bold] to execute one."
+        )
         console.print("Run [bold]geak-subagent --help[/bold] for full usage.")
 
 

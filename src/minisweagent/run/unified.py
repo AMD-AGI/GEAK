@@ -43,9 +43,10 @@ the planner and dispatcher, and driving the unified round loop via
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from minisweagent.run.compose import ComposeInputs, Mode, compose_task_body
 
