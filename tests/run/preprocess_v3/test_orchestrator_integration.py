@@ -24,6 +24,7 @@ are replaced via monkeypatch.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -793,6 +794,329 @@ def test_orchestrator_marks_failure_when_finish_omits_harness(
     assert result.harness_path is None
     assert result.baseline is None
     assert "max retries exhausted" in result.errors
+
+
+def test_existing_path_b_still_default(
+    tmp_path: Path,
+    monkeypatch,
+    empty_registry: SubagentRegistry,
+) -> None:
+    """Sanity test: a task prompt with no run instructions still drives
+    the existing Path-B 6-step flow unchanged.
+
+    Mirrors the happy-path script (no ``commandment_from_user_command``
+    call) and asserts ``result.path_taken == "B"`` to pin the default.
+    """
+    repo, kernel_path = _build_fixture_repo(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    harness_path = out_dir / "test_harness.py"
+    harness_path.write_text(_HARNESS_BODY, encoding="utf-8")
+
+    _patch_deterministic_tools(monkeypatch, harness_path=harness_path)
+
+    class _PathBDispatcher:
+        def __init__(self, registry):
+            self.registry = registry
+
+        def __call__(self, *, name, task, model, cwd=None, context=None):
+            if name == "harness-generator":
+                return {
+                    "name": name,
+                    "success": True,
+                    "output": f"TEST_COMMAND: cd {repo} && python {harness_path} --benchmark",
+                    "elapsed_s": 0.1,
+                }
+            if name == "harness-verifier":
+                return {
+                    "name": name,
+                    "success": True,
+                    "output": f"HARNESS_VERIFIED=true\nHARNESS_PATH={harness_path}",
+                    "elapsed_s": 0.1,
+                }
+            return {"name": name, "success": True, "output": "ok", "elapsed_s": 0.1}
+
+    commandment_path = out_dir / "COMMANDMENT.md"
+    codebase_context_path = out_dir / "CODEBASE_CONTEXT.md"
+
+    script = [
+        (
+            "codebase_explore",
+            {
+                "repo_root": str(repo),
+                "kernel_path": str(kernel_path),
+                "out_path": str(codebase_context_path),
+            },
+        ),
+        ("dispatch_subagent", {"name": "harness-generator", "task": "build harness"}),
+        ("dispatch_subagent", {"name": "harness-verifier", "task": "verify"}),
+        ("collect_baseline", {"harness_path": str(harness_path)}),
+        ("collect_profile", {"harness_path": str(harness_path)}),
+        ("dispatch_subagent", {"name": "speedup-verify", "task": "speedup"}),
+        (
+            "render_commandment",
+            {
+                "kernel_path": str(kernel_path),
+                "harness_path": str(harness_path),
+                "repo_root": str(repo),
+                "out_path": str(commandment_path),
+            },
+        ),
+        (
+            "finish_preprocess",
+            {
+                "harness_path": str(harness_path),
+                "commandment_path": str(commandment_path),
+                "errors": [],
+                "summary": "Path B descriptive task — default flow.",
+            },
+        ),
+    ]
+
+    model = _ScriptedModel(script)
+    agent = PreprocessOrchestratorAgent(model=model)
+    register_default_tools(
+        agent,
+        kernel_language=_LANG,
+        registry=empty_registry,
+        dispatcher=_PathBDispatcher(empty_registry),
+    )
+
+    result = agent.run(
+        task="Optimize the add_kernel for B=2048 D=128 fp16.",
+        kernel_path=kernel_path,
+        repo_root=repo,
+        kernel_language=_LANG,
+        source_language="triton",
+        target_language="triton",
+        output_dir=out_dir,
+        gpu_id=0,
+    )
+
+    assert model.script == []
+    assert result.success is True, f"errors: {result.errors}"
+    assert result.path_taken == "B"
+    # No commandment_from_user_command call appears in the audit log.
+    names_called = [c["name"] for c in result.tool_calls]
+    assert "commandment_from_user_command" not in names_called
+
+
+# ---------------------------------------------------------------------------
+# Path-A integration tests (commit set 7)
+# ---------------------------------------------------------------------------
+
+
+def test_orchestrator_takes_path_a_when_task_has_explicit_run_command(
+    tmp_path: Path,
+    monkeypatch,
+    empty_registry: SubagentRegistry,
+) -> None:
+    """Path-A happy path: the LLM detects an explicit run command in the
+    task prompt and short-circuits the 6-step flow.
+
+    Asserts:
+    * ``result.success is True``.
+    * ``result.path_taken == "A"``.
+    * ``result.commandment_path`` resolves to a file containing the
+      user's command.
+    * ``result.harness_path is None`` — Path A doesn't generate a
+      harness; the harness IS the user's command.
+    * The 3 always-on subagents (harness-generator, harness-verifier,
+      speedup-verify) were NEVER dispatched.
+    * ``PATH_A_PARTIAL_COVERAGE`` warning markers appear in the
+      rendered COMMANDMENT.md for every inferred mode.
+    """
+    repo, kernel_path = _build_fixture_repo(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    harness_path_unused = out_dir / "kernel.py"  # the file the user command references
+
+    _patch_deterministic_tools(monkeypatch, harness_path=harness_path_unused)
+
+    user_run_command = f"python {kernel_path} --benchmark --shape 4096"
+    commandment_path = out_dir / "COMMANDMENT.md"
+    codebase_context_path = out_dir / "CODEBASE_CONTEXT.md"
+
+    dispatcher_history: list[dict] = []
+
+    class _Path_A_Dispatcher:
+        """A dispatcher that fails loudly if any subagent is invoked on Path A."""
+
+        def __init__(self, registry):
+            self.registry = registry
+
+        def __call__(self, *, name, task, model, cwd=None, context=None):
+            dispatcher_history.append({"name": name})
+            pytest.fail(
+                f"Path A must NOT dispatch any subagent; got {name!r}. "
+                f"The 3 always-on subagents (harness-generator, harness-verifier, "
+                f"speedup-verify) are skipped on the Path-A short-circuit."
+            )
+
+    script = [
+        (
+            "commandment_from_user_command",
+            {
+                "run_command": user_run_command,
+                "out_path": str(commandment_path),
+                "modes_covered": ["benchmark"],
+                "inferred_modes": ["correctness", "profile", "full_benchmark"],
+                "notes": "benchmark-only command; inferring the other modes",
+            },
+        ),
+        (
+            "codebase_explore",
+            {
+                "repo_root": str(repo),
+                "kernel_path": str(kernel_path),
+                "out_path": str(codebase_context_path),
+            },
+        ),
+        ("collect_baseline", {"harness_path": str(kernel_path)}),
+        ("collect_profile", {"harness_path": str(kernel_path)}),
+        (
+            "finish_preprocess",
+            {
+                "commandment_path": str(commandment_path),
+                "errors": [],
+                "summary": "Path A short-circuit: user-provided run command.",
+            },
+        ),
+    ]
+
+    model = _ScriptedModel(script)
+    agent = PreprocessOrchestratorAgent(model=model)
+    register_default_tools(
+        agent,
+        kernel_language=_LANG,
+        registry=empty_registry,
+        dispatcher=_Path_A_Dispatcher(empty_registry),
+    )
+
+    result = agent.run(
+        task=f"run via {user_run_command}",
+        kernel_path=kernel_path,
+        repo_root=repo,
+        kernel_language=_LANG,
+        source_language="triton",
+        target_language="triton",
+        output_dir=out_dir,
+        gpu_id=0,
+    )
+
+    assert model.script == [], f"unconsumed script entries: {model.script}"
+    assert result.success is True, f"unexpected failure errors: {result.errors}"
+    assert result.path_taken == "A"
+    assert result.commandment_path == commandment_path
+    assert result.harness_path is None, "Path A must not populate harness_path"
+
+    # The 3 subagents were never dispatched.
+    assert dispatcher_history == [], f"Path A dispatched a subagent (forbidden): {dispatcher_history}"
+    assert result.subagent_runs == []
+    for forbidden in ("harness-generator", "harness-verifier", "speedup-verify"):
+        for entry in result.tool_calls:
+            args = entry.get("args") or {}
+            assert args.get("name") != forbidden, (
+                f"Path A tool_calls must not target subagent {forbidden!r}; got {entry!r}"
+            )
+
+    # COMMANDMENT contains the user's command + PATH_A_PARTIAL_COVERAGE markers.
+    body = commandment_path.read_text()
+    assert user_run_command in body
+    assert "PATH_A_PARTIAL_COVERAGE: correctness inferred from benchmark" in body
+    assert "PATH_A_PARTIAL_COVERAGE: profile inferred from benchmark" in body
+    assert "PATH_A_PARTIAL_COVERAGE: full_benchmark inferred from benchmark" in body
+
+    # tool_calls captures the commandment_from_user_command invocation.
+    tool_names = [c["name"] for c in result.tool_calls]
+    assert "commandment_from_user_command" in tool_names
+    assert tool_names[0] == "commandment_from_user_command", (
+        "Path A's first tool call must be commandment_from_user_command"
+    )
+
+
+def test_orchestrator_path_a_rejects_empty_command(
+    tmp_path: Path,
+    monkeypatch,
+    empty_registry: SubagentRegistry,
+) -> None:
+    """The ``commandment_from_user_command`` tool rejects an empty
+    ``run_command`` with a clear validation error, and the orchestrator
+    surfaces that error to the LLM as a tool observation.
+
+    The LLM in this test simply gives up after seeing the error
+    (calling finish_preprocess with the error recorded), and the
+    orchestrator's result reflects the failure.
+    """
+    repo, kernel_path = _build_fixture_repo(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    _patch_deterministic_tools(monkeypatch, harness_path=tmp_path / "missing.py")
+
+    commandment_path_unused = out_dir / "COMMANDMENT.md"
+
+    script = [
+        (
+            "commandment_from_user_command",
+            {
+                "run_command": "",  # invalid — empty
+                "out_path": str(commandment_path_unused),
+                "modes_covered": [],
+            },
+        ),
+        (
+            "finish_preprocess",
+            {
+                "errors": ["commandment_from_user_command rejected empty run_command"],
+                "summary": "Path A failed — empty user command.",
+            },
+        ),
+    ]
+
+    model = _ScriptedModel(script)
+    agent = PreprocessOrchestratorAgent(model=model)
+
+    class _NoDispatchDispatcher:
+        def __init__(self, registry):
+            self.registry = registry
+
+        def __call__(self, *, name, task, model, cwd=None, context=None):
+            pytest.fail(f"empty-command Path A must not dispatch subagent {name!r}")
+
+    register_default_tools(
+        agent,
+        kernel_language=_LANG,
+        registry=empty_registry,
+        dispatcher=_NoDispatchDispatcher(empty_registry),
+    )
+
+    result = agent.run(
+        task="run via ''",
+        kernel_path=kernel_path,
+        repo_root=repo,
+        kernel_language=_LANG,
+        source_language="triton",
+        target_language="triton",
+        output_dir=out_dir,
+        gpu_id=0,
+    )
+
+    assert model.script == []
+    # The orchestrator records the Path-A choice (the LLM did call the
+    # tool, even though the tool rejected the empty argument), so the
+    # path_taken is still "A".
+    assert result.path_taken == "A"
+    assert result.success is False
+    # The validation error from the tool is surfaced as a tool
+    # observation; the LLM-supplied finish error is folded into
+    # result.errors. Verify the audit trail by inspecting the tool
+    # observation message history.
+    observations = [m for m in agent.messages if m.get("role") == "tool"]
+    assert observations, "expected at least one tool observation"
+    first_obs = json.loads(observations[0]["content"])
+    assert "error" in first_obs, f"first observation must surface the validation error: {first_obs}"
+    assert "non-empty shell command" in first_obs["error"]
 
 
 def test_orchestrator_marks_failure_when_baseline_missing(
