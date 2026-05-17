@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 _REQUIRED_FIELDS = ("name", "description", "system_prompt")
-_KNOWN_FIELDS = (*_REQUIRED_FIELDS, "model", "tools", "max_steps")
+_KNOWN_FIELDS = (*_REQUIRED_FIELDS, "model", "tools", "max_steps", "knowledge_base_template", "model_kwargs")
 _SUBAGENT_FILE = "SUBAGENT.yaml"
 
 #: Sentinel value for :attr:`SubagentSpec.max_steps` meaning "unlimited steps".
@@ -110,6 +110,28 @@ class SubagentSpec:
     model: str | None = None
     tools: list[str] = field(default_factory=list)
     max_steps: int = 30
+    knowledge_base_template: str | None = None
+    """Optional knowledge-base routing tag.
+
+    When set, the dispatcher decides how to resolve the tag into a string
+    that is injected into the child subagent's ``{{knowledge_base}}``
+    Jinja placeholder. Currently the only recognised value is
+    ``"from_kernel_language"``, which tells the dispatcher to call
+    :func:`minisweagent.run.preprocess_v3.harness_kb.load_harness_kb` with
+    the active :class:`KernelLanguage` and inject the result. The set of
+    allowed values is intentionally open-ended at the schema layer so a
+    future routing key (e.g. ``"from_repo_kind"``) can be added without
+    rev-locking the registry; the dispatcher is the source of truth for
+    which tags it actually understands.
+    """
+    model_kwargs: dict[str, Any] = field(default_factory=dict)
+    """Optional model-call kwargs (e.g. ``{"temperature": 0.0}``).
+
+    Mirrors the ``model_kwargs`` block on the legacy mini-swe-agent YAMLs;
+    the dispatcher merges this into the model invocation. Used by v3 to
+    pin determinism on the harness-generator and harness-verifier
+    subagents without modifying their system prompts.
+    """
     extras: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -161,6 +183,20 @@ def _validate_and_build(name_hint: str, data: dict[str, Any], source: Path) -> S
             f"{UNLIMITED_MAX_STEPS} (got {max_steps_raw!r})"
         )
 
+    kb_template_raw = data.get("knowledge_base_template", None)
+    if kb_template_raw is not None and not isinstance(kb_template_raw, str):
+        raise SubagentSpecError(
+            f"{source}: 'knowledge_base_template' must be a string when set "
+            f"(got {type(kb_template_raw).__name__}: {kb_template_raw!r})"
+        )
+    kb_template = kb_template_raw.strip() if isinstance(kb_template_raw, str) else None
+    if kb_template == "":
+        kb_template = None
+
+    model_kwargs_raw = data.get("model_kwargs", {}) or {}
+    if not isinstance(model_kwargs_raw, dict):
+        raise SubagentSpecError(f"{source}: 'model_kwargs' must be a mapping (got {type(model_kwargs_raw).__name__})")
+
     extras = {k: v for k, v in data.items() if k not in _KNOWN_FIELDS}
 
     return SubagentSpec(
@@ -170,6 +206,8 @@ def _validate_and_build(name_hint: str, data: dict[str, Any], source: Path) -> S
         model=(str(data["model"]).strip() if data.get("model") else None),
         tools=[str(t) for t in tools],
         max_steps=max_steps,
+        knowledge_base_template=kb_template,
+        model_kwargs=dict(model_kwargs_raw),
         extras=extras,
     )
 

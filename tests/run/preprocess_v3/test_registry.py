@@ -86,6 +86,36 @@ system_prompt: "You are eta."
 max_steps: -5
 """
 
+_KB_TEMPLATE_YAML = """\
+name: theta
+description: Subagent that opts in to KB injection.
+system_prompt: "You are theta. KB: {{knowledge_base}}"
+knowledge_base_template: from_kernel_language
+"""
+
+_KB_TEMPLATE_NON_STRING_YAML = """\
+name: iota
+description: Subagent whose KB template is not a string.
+system_prompt: "You are iota."
+knowledge_base_template:
+  not: a-string
+"""
+
+_MODEL_KWARGS_YAML = """\
+name: kappa
+description: Subagent with a determinism pin.
+system_prompt: "You are kappa."
+model_kwargs:
+  temperature: 0.0
+"""
+
+_MODEL_KWARGS_NON_MAPPING_YAML = """\
+name: lambda
+description: Subagent whose model_kwargs is not a mapping.
+system_prompt: "You are lambda."
+model_kwargs: temperature=0.0
+"""
+
 
 def _write_subagent(root: Path, name: str, body: str) -> Path:
     folder = root / name
@@ -289,4 +319,71 @@ def test_max_steps_other_negative_raises(tmp_path: Path) -> None:
     registry = SubagentRegistry(root=tmp_path)
 
     with pytest.raises(SubagentSpecError, match="positive integer or the unlimited sentinel"):
+        registry.discover()
+
+
+# ---------------------------------------------------------------------------
+# knowledge_base_template field (commit set 6)
+# ---------------------------------------------------------------------------
+
+
+def test_knowledge_base_template_defaults_to_none(tmp_path: Path) -> None:
+    """Omitting the field leaves :attr:`knowledge_base_template` as ``None``."""
+    _write_subagent(tmp_path, "beta", _BETA_YAML)
+
+    spec = SubagentRegistry(root=tmp_path).discover()["beta"]
+
+    assert spec.knowledge_base_template is None
+
+
+def test_knowledge_base_template_accepts_string(tmp_path: Path) -> None:
+    """A string value is parsed into the typed field, not stashed in ``extras``."""
+    _write_subagent(tmp_path, "theta", _KB_TEMPLATE_YAML)
+
+    spec = SubagentRegistry(root=tmp_path).discover()["theta"]
+
+    assert spec.knowledge_base_template == "from_kernel_language"
+    assert "knowledge_base_template" not in spec.extras
+
+
+def test_knowledge_base_template_from_kernel_language_parsed_correctly(tmp_path: Path) -> None:
+    """The recognised ``from_kernel_language`` tag survives the round trip verbatim."""
+    _write_subagent(tmp_path, "theta", _KB_TEMPLATE_YAML)
+
+    spec = SubagentRegistry(root=tmp_path).discover()["theta"]
+
+    assert spec.knowledge_base_template == "from_kernel_language"
+
+
+def test_knowledge_base_template_rejects_non_string(tmp_path: Path) -> None:
+    """Non-string values (mappings, lists) are rejected with a clear error."""
+    _write_subagent(tmp_path, "iota", _KB_TEMPLATE_NON_STRING_YAML)
+    registry = SubagentRegistry(root=tmp_path)
+
+    with pytest.raises(SubagentSpecError, match="'knowledge_base_template' must be a string"):
+        registry.discover()
+
+
+# ---------------------------------------------------------------------------
+# model_kwargs field (commit set 6 — determinism pin)
+# ---------------------------------------------------------------------------
+
+
+def test_model_kwargs_defaults_to_empty(tmp_path: Path) -> None:
+    _write_subagent(tmp_path, "beta", _BETA_YAML)
+    spec = SubagentRegistry(root=tmp_path).discover()["beta"]
+    assert spec.model_kwargs == {}
+
+
+def test_model_kwargs_accepts_temperature_pin(tmp_path: Path) -> None:
+    _write_subagent(tmp_path, "kappa", _MODEL_KWARGS_YAML)
+    spec = SubagentRegistry(root=tmp_path).discover()["kappa"]
+    assert spec.model_kwargs == {"temperature": 0.0}
+    assert "model_kwargs" not in spec.extras
+
+
+def test_model_kwargs_rejects_non_mapping(tmp_path: Path) -> None:
+    _write_subagent(tmp_path, "lambda", _MODEL_KWARGS_NON_MAPPING_YAML)
+    registry = SubagentRegistry(root=tmp_path)
+    with pytest.raises(SubagentSpecError, match="'model_kwargs' must be a mapping"):
         registry.discover()
