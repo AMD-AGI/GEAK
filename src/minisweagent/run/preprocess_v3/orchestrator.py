@@ -46,7 +46,7 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from jinja2 import StrictUndefined, Template
 
@@ -378,6 +378,25 @@ class PreprocessResult:
         subagent_runs:
             One dict per ``dispatch_subagent`` call summarising name,
             success, and short output. Order matches dispatch order.
+        tool_calls:
+            One dict per dispatched tool call (every entry in the LLM
+            loop's tool history, not just subagent dispatches). Each
+            entry carries ``{name, args}``. This is the canonical
+            audit trail for which tools the LLM actually invoked —
+            ``path_taken`` is derived from it.
+        path_taken:
+            Which structural path the orchestrator followed.
+
+            * ``"A"`` — Path-A short-circuit: the LLM called
+              ``commandment_from_user_command`` (the user's task
+              prompt carried explicit run instructions). The
+              harness-generator / harness-verifier / speedup-verify
+              subagents are skipped on this path.
+            * ``"B"`` — Path-B / standard 6-step flow (the default
+              for legacy / descriptive task prompts).
+
+            Computed from ``tool_calls`` in :meth:`_build_result`;
+            never set directly by callers.
         elapsed_s:
             Wall-clock seconds spent inside ``run()``.
         errors:
@@ -395,6 +414,8 @@ class PreprocessResult:
     commandment_path: Path | None = None
     translation: TranslationResult | None = None
     subagent_runs: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    path_taken: Literal["A", "B"] = "B"
     elapsed_s: float = 0.0
     errors: list[str] = field(default_factory=list)
 
@@ -470,6 +491,12 @@ class PreprocessOrchestratorAgent:
         self._tools: dict[str, ToolEntry] = {}
         self._extra_template_vars: dict[str, Any] = {}
         self._subagent_runs: list[dict[str, Any]] = []
+        # Generic tool-call audit log — populated by ``_dispatch_tool`` for
+        # every LLM-invoked tool. Distinct from ``_subagent_runs`` (which
+        # only captures ``dispatch_subagent`` outputs). Used to compute
+        # ``PreprocessResult.path_taken`` (Path A iff the LLM called
+        # ``commandment_from_user_command`` at least once).
+        self._tool_calls: list[dict[str, Any]] = []
         self._collected: dict[str, Any] = {}
         self._finish_payload: dict[str, Any] | None = None
 
@@ -582,9 +609,19 @@ class PreprocessOrchestratorAgent:
         return {}
 
     def _dispatch_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        """Look up the tool by name and invoke it."""
+        """Look up the tool by name and invoke it.
+
+        Every dispatch is appended to ``self._tool_calls`` as a
+        ``{name, args}`` entry — including dispatches to unknown tools
+        and dispatches that raise — so the eventual
+        :class:`PreprocessResult.tool_calls` audit trail reflects what
+        the LLM actually tried, not what worked. The
+        :class:`PreprocessResult.path_taken` flag reads this list to
+        decide A vs B.
+        """
         if not name:
             return {"error": "Tool call missing 'name' field"}
+        self._tool_calls.append({"name": name, "args": dict(args)})
         if name not in self._tools:
             return {
                 "error": (
@@ -627,6 +664,7 @@ class PreprocessOrchestratorAgent:
         self.messages = []
         self._extra_template_vars = {"task": task, **_stringify_paths(context)}
         self._subagent_runs = []
+        self._tool_calls = []
         self._collected = {}
         self._finish_payload = None
 
@@ -692,6 +730,17 @@ class PreprocessOrchestratorAgent:
           downgrade a nominally clean run to ``success=False`` too — a
           finish payload with neither is meaningless to the downstream
           pipeline.
+
+        Path-A vs Path-B (commit set 7):
+
+        * ``path_taken`` is computed from ``self._tool_calls``: Path A
+          iff the LLM called ``commandment_from_user_command`` at least
+          once during the run. Otherwise Path B (the default 6-step
+          flow).
+        * Success criteria branch on ``path_taken``: Path A requires a
+          ``commandment_path`` artifact but does NOT require a
+          ``harness_path`` (the harness is the user's command, not a
+          file we own). Path B keeps the existing strict criteria.
         """
         kernel_language = context.get("kernel_language")
         kernel_path = _coerce_path(context.get("kernel_path")) or Path()
@@ -710,11 +759,15 @@ class PreprocessOrchestratorAgent:
 
         harness_path = _coerce_path(collected.get("harness_path"))
         baseline = collected.get("baseline")
+        commandment_path = _coerce_path(collected.get("commandment_path"))
+        path_taken = _derive_path_taken(self._tool_calls)
         success = self._finalize_success(
             finish_payload=finish_payload,
             errors=merged_errors,
             harness_path=harness_path,
             baseline=baseline,
+            path_taken=path_taken,
+            commandment_path=commandment_path,
         )
 
         return PreprocessResult(
@@ -725,9 +778,11 @@ class PreprocessOrchestratorAgent:
             baseline=baseline,
             profile=collected.get("profile"),
             codebase_context=collected.get("codebase_context"),
-            commandment_path=_coerce_path(collected.get("commandment_path")),
+            commandment_path=commandment_path,
             translation=translation,
             subagent_runs=list(self._subagent_runs),
+            tool_calls=list(self._tool_calls),
+            path_taken=path_taken,
             elapsed_s=elapsed_s,
             errors=merged_errors,
         )
@@ -739,25 +794,42 @@ class PreprocessOrchestratorAgent:
         errors: list[str],
         harness_path: Path | None,
         baseline: Any,
+        path_taken: Literal["A", "B"] = "B",
+        commandment_path: Path | None = None,
     ) -> bool:
         """Compute the final ``success`` flag for the :class:`PreprocessResult`.
 
-        ``True`` iff **all** of:
+        Universal preconditions (both paths):
 
         * ``finish_preprocess`` was actually called (so we have a payload).
         * No accumulated ``errors`` (loop-level or finish-payload-level).
-        * ``harness_path`` is populated.
-        * ``baseline`` metrics were collected.
 
-        Any other combination is a partial / failed run — the rest of the
-        pipeline will refuse to proceed without these artefacts, so
-        surface the failure early instead of letting downstream crash on
-        a missing harness path.
+        Path-specific criteria:
+
+        * **Path A** — the harness IS the user's run command, not a file
+          artifact we own; ``harness_path`` may be ``None``. Required
+          artifact is ``commandment_path`` (the rendered COMMANDMENT.md
+          that captures the user's command). ``baseline`` is helpful but
+          not required (the LLM may opt to skip it on a Path-A run if
+          the user only asked for a one-shot command).
+        * **Path B** — existing strict criteria preserved from commit
+          set 5a: ``harness_path`` AND ``baseline`` must both be
+          populated. Missing either downgrades the run to
+          ``success=False`` because the downstream optimisation loop
+          ``KeyError``s on the missing artefact.
+
+        Any other combination is a partial / failed run — the rest of
+        the pipeline will refuse to proceed without these artefacts,
+        so surface the failure early instead of letting downstream
+        crash.
         """
         if finish_payload is None:
             return False
         if errors:
             return False
+        if path_taken == "A":
+            return commandment_path is not None
+        # Path B (default).
         if harness_path is None:
             return False
         if baseline is None:
@@ -787,6 +859,29 @@ class PreprocessOrchestratorAgent:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+#: Name of the tool whose presence in the LLM's tool-call history toggles
+#: the orchestrator from Path B (6-step flow) to Path A (short-circuit).
+#: Defined here (not in ``tools.py``) so the orchestrator can derive
+#: ``path_taken`` without importing ``tools.py`` (which would create a
+#: circular dependency).
+_PATH_A_TRIGGER_TOOL_NAME: str = "commandment_from_user_command"
+
+
+def _derive_path_taken(tool_calls: list[dict[str, Any]]) -> Literal["A", "B"]:
+    """Return ``"A"`` iff the LLM called the Path-A short-circuit tool.
+
+    The decision is purely structural: if
+    ``commandment_from_user_command`` appears anywhere in the recorded
+    tool-call audit log, the run is Path A; otherwise Path B. This is
+    intentionally LLM-driven (the LLM picks the tool based on Step 0 of
+    the system prompt), not regex-based on the task prompt.
+    """
+    for call in tool_calls:
+        if call.get("name") == _PATH_A_TRIGGER_TOOL_NAME:
+            return "A"
+    return "B"
 
 
 _PATH_KEY_RE = re.compile(r"(?:^|_)(path|dir|root|repo)$")

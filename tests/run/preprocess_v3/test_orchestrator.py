@@ -421,6 +421,166 @@ def test_preprocess_result_carries_subagent_runs() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Path-A vs Path-B (commit set 7)
+# ---------------------------------------------------------------------------
+
+
+def test_preprocess_result_path_taken_defaults_to_b() -> None:
+    """Legacy callers (constructing a result with no ``path_taken``) default
+    to ``"B"`` — the existing 6-step flow."""
+    result = PreprocessResult(
+        success=False,
+        kernel_language=_LANG,
+        kernel_path=Path("/tmp/kernel.py"),
+    )
+    assert result.path_taken == "B"
+    assert result.tool_calls == []
+
+
+def test_preprocess_result_accepts_path_taken_a() -> None:
+    """Constructing a result with ``path_taken="A"`` is valid."""
+    result = PreprocessResult(
+        success=True,
+        kernel_language=_LANG,
+        kernel_path=Path("/tmp/kernel.py"),
+        harness_path=None,
+        commandment_path=Path("/tmp/COMMANDMENT.md"),
+        path_taken="A",
+    )
+    assert result.path_taken == "A"
+    assert result.harness_path is None
+
+
+def test_finalize_success_path_a_with_commandment_returns_true() -> None:
+    """Path A succeeds when COMMANDMENT exists, even without a harness."""
+    success = PreprocessOrchestratorAgent._finalize_success(
+        finish_payload={"summary": "ok"},
+        errors=[],
+        harness_path=None,
+        baseline=None,
+        path_taken="A",
+        commandment_path=Path("/tmp/COMMANDMENT.md"),
+    )
+    assert success is True
+
+
+def test_finalize_success_path_a_without_commandment_returns_false() -> None:
+    """Path A still fails if no COMMANDMENT was emitted."""
+    success = PreprocessOrchestratorAgent._finalize_success(
+        finish_payload={"summary": "ok"},
+        errors=[],
+        harness_path=None,
+        baseline=None,
+        path_taken="A",
+        commandment_path=None,
+    )
+    assert success is False
+
+
+def test_finalize_success_path_a_propagates_errors() -> None:
+    """Loop-level errors invalidate Path A success too."""
+    success = PreprocessOrchestratorAgent._finalize_success(
+        finish_payload={"summary": "ok"},
+        errors=["some error"],
+        harness_path=None,
+        baseline=None,
+        path_taken="A",
+        commandment_path=Path("/tmp/COMMANDMENT.md"),
+    )
+    assert success is False
+
+
+def test_finalize_success_path_b_without_harness_returns_false() -> None:
+    """Path B with no harness_path fails (existing contract preserved)."""
+    success = PreprocessOrchestratorAgent._finalize_success(
+        finish_payload={"summary": "ok"},
+        errors=[],
+        harness_path=None,
+        baseline=object(),
+        path_taken="B",
+        commandment_path=Path("/tmp/COMMANDMENT.md"),
+    )
+    assert success is False
+
+
+def test_finalize_success_path_b_default_is_b() -> None:
+    """The ``path_taken`` default is ``"B"``; baseline must be present."""
+    success = PreprocessOrchestratorAgent._finalize_success(
+        finish_payload={"summary": "ok"},
+        errors=[],
+        harness_path=Path("/tmp/h.py"),
+        baseline=object(),
+    )
+    assert success is True
+
+
+def test_finalize_success_path_b_without_baseline_returns_false() -> None:
+    """Path B without baseline fails (existing strict criteria preserved)."""
+    success = PreprocessOrchestratorAgent._finalize_success(
+        finish_payload={"summary": "ok"},
+        errors=[],
+        harness_path=Path("/tmp/h.py"),
+        baseline=None,
+        path_taken="B",
+        commandment_path=Path("/tmp/COMMANDMENT.md"),
+    )
+    assert success is False
+
+
+def test_dispatch_loop_records_tool_calls_in_audit_log() -> None:
+    """Every dispatched tool call appears in ``agent._tool_calls``."""
+    model = _StubModel(
+        responses=[
+            {
+                "content": "",
+                "tools": {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"x": 1}'},
+                },
+            },
+        ],
+    )
+    agent = PreprocessOrchestratorAgent(model=model)
+    agent.register_tool(
+        "echo",
+        {
+            "name": "echo",
+            "type": "function",
+            "description": "echo",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        lambda **kw: {"ok": True, "args": kw},
+    )
+
+    agent.step()
+    assert len(agent._tool_calls) == 1
+    assert agent._tool_calls[0]["name"] == "echo"
+    assert agent._tool_calls[0]["args"] == {"x": 1}
+
+
+def test_dispatch_loop_records_failed_tool_calls_too() -> None:
+    """The audit log captures even failed dispatches (unknown tools)."""
+    model = _StubModel(
+        responses=[
+            {
+                "content": "",
+                "tools": {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "nope", "arguments": "{}"},
+                },
+            },
+        ],
+    )
+    agent = PreprocessOrchestratorAgent(model=model)
+
+    agent.step()
+    assert len(agent._tool_calls) == 1
+    assert agent._tool_calls[0]["name"] == "nope"
+
+
+# ---------------------------------------------------------------------------
 # ToolEntry
 # ---------------------------------------------------------------------------
 
