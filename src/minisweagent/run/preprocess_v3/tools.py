@@ -45,6 +45,7 @@ heterogeneous orchestrator still uses them.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import time
@@ -61,6 +62,7 @@ from minisweagent.run.preprocess_v3.baseline import (
 )
 from minisweagent.run.preprocess_v3.commandment import CommandmentContext, render_commandment
 from minisweagent.run.preprocess_v3.explore import CodebaseContext, explore_codebase
+from minisweagent.run.preprocess_v3.harness_kb import load_harness_kb
 from minisweagent.run.preprocess_v3.orchestrator import (
     FinishedSuccessfully,
     PreprocessOrchestratorAgent,
@@ -115,6 +117,7 @@ class PreprocessSubagentDispatcher:
         *,
         agent_factory: Callable[..., Any] | None = None,
         env_factory: Callable[[], Any] | None = None,
+        kernel_language: KernelLanguage | None = None,
     ) -> None:
         """Build the dispatcher.
 
@@ -135,10 +138,23 @@ class PreprocessSubagentDispatcher:
                 (it routes commands through its own tool whitelist).
                 Kept on the constructor for backward compatibility
                 with the previous signature.
+            kernel_language:
+                Optional :class:`KernelLanguage` instance. When the
+                dispatched subagent's spec carries
+                ``knowledge_base_template == "from_kernel_language"``
+                and ``kernel_language`` is set, the dispatcher calls
+                :func:`load_harness_kb` and injects the result as
+                ``{"knowledge_base": <string>}`` into the child's
+                ``extra_template_vars`` (which the child's
+                ``render_template`` consumes when rendering the
+                system prompt). Defaults to ``None`` — graceful
+                degradation: the child's ``{{knowledge_base}}``
+                placeholder, if present, renders as the empty string.
         """
         self._registry = registry
         self._agent_factory = agent_factory
         self._env_factory = env_factory
+        self.kernel_language = kernel_language
 
     def __call__(
         self,
@@ -196,9 +212,17 @@ class PreprocessSubagentDispatcher:
 
         full_task = task if not context else self._format_context_preamble(context) + "\n\n" + task
 
+        extra_template_vars = self._resolve_extra_template_vars(spec)
+
         t0 = time.monotonic()
         try:
-            exit_status, message = self._run_child(spec=spec, task=full_task, model=model, cwd=cwd)
+            exit_status, message = self._run_child(
+                spec=spec,
+                task=full_task,
+                model=model,
+                cwd=cwd,
+                extra_template_vars=extra_template_vars,
+            )
         except Exception as exc:
             logger.exception("Subagent %r dispatch failed", name)
             return {
@@ -229,6 +253,39 @@ class PreprocessSubagentDispatcher:
             lines.append(f"- **{key}**: {value}")
         return "\n".join(lines)
 
+    def _resolve_extra_template_vars(self, spec: SubagentSpec) -> dict[str, Any]:
+        """Compute the per-dispatch ``extra_template_vars`` for the child.
+
+        Recognises the ``knowledge_base_template == "from_kernel_language"``
+        routing tag on :class:`SubagentSpec`. When the tag is present AND
+        the dispatcher was constructed with a ``kernel_language``,
+        ``{"knowledge_base": load_harness_kb(self.kernel_language)}`` is
+        added. In every other case (tag missing, tag unknown, language
+        unset, language has no on-disk KB) the placeholder is filled
+        with the empty string so the child's Jinja
+        ``StrictUndefined`` renderer does not crash on the unresolved
+        ``{{knowledge_base}}`` variable.
+        """
+        vars_out: dict[str, Any] = {}
+        tag = spec.knowledge_base_template
+        if tag == "from_kernel_language":
+            if self.kernel_language is not None:
+                vars_out["knowledge_base"] = load_harness_kb(self.kernel_language)
+            else:
+                logger.debug(
+                    "knowledge_base_template=from_kernel_language on subagent %r but "
+                    "dispatcher has no kernel_language; injecting empty KB",
+                    spec.name,
+                )
+                vars_out["knowledge_base"] = ""
+        elif tag is not None:
+            logger.warning(
+                "Unknown knowledge_base_template tag %r on subagent %r; no KB injected",
+                tag,
+                spec.name,
+            )
+        return vars_out
+
     def _run_child(
         self,
         *,
@@ -236,10 +293,20 @@ class PreprocessSubagentDispatcher:
         task: str,
         model: Any,
         cwd: str | None,
+        extra_template_vars: dict[str, Any] | None = None,
     ) -> tuple[str, str]:
         """Build + run the child agent. Returns ``(exit_status, message)``."""
         if self._agent_factory is not None:
-            agent = self._agent_factory(spec=spec, model=model, cwd=cwd)
+            kwargs: dict[str, Any] = {"spec": spec, "model": model, "cwd": cwd}
+            # Only forward ``extra_template_vars`` when the factory
+            # accepts it (either as a named parameter or via ``**kwargs``).
+            # This keeps older test fakes that pin a strict kwarg list
+            # working unchanged.
+            sig = inspect.signature(self._agent_factory)
+            has_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            if "extra_template_vars" in sig.parameters or has_kwargs:
+                kwargs["extra_template_vars"] = extra_template_vars or {}
+            agent = self._agent_factory(**kwargs)
             return agent.run(task)
 
         # v3-native default: build a PreprocessSubagent. The class
@@ -257,6 +324,7 @@ class PreprocessSubagentDispatcher:
             step_limit=step_limit,
             cost_limit=0.0,
             cwd=cwd,
+            extra_template_vars=extra_template_vars or {},
         )
         return agent.run(task)
 
@@ -668,7 +736,7 @@ def register_default_tools(
             ``dispatch_subagent`` deterministic.
     """
     registry = registry or SubagentRegistry()
-    dispatcher = dispatcher or PreprocessSubagentDispatcher(registry)
+    dispatcher = dispatcher or PreprocessSubagentDispatcher(registry, kernel_language=kernel_language)
 
     agent.register_tool(
         "codebase_explore",
