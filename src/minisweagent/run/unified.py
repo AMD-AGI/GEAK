@@ -35,11 +35,9 @@ After the phase completes, ``ctx.kernel_path`` and ``ctx.language`` are
 swapped to the translated kernel and the normal fixed/planned/auto
 pipeline continues.
 
-``run_pipeline`` is responsible for resolving the tool set, composing the
-task body (via ``run/compose.py``), and dispatching to the shared pool
-runner.  ``_run_fixed`` drives the round loop for fixed mode directly,
-while ``_run_planned`` delegates to ``run_orchestrator`` (whose
-``run_planned_orchestrator`` internals own the round loop already).
+``run_pipeline`` is responsible for resolving the tool set, initializing
+the planner and dispatcher, and driving the unified round loop via
+``_run_unified_loop``.
 """
 
 from __future__ import annotations
@@ -125,269 +123,279 @@ def _resolve_tools(ctx: PipelineContext, mode: Mode):
 
 
 def run_pipeline(ctx: PipelineContext, mode: Mode):
-    """Drive one full optimization pipeline and return the final report.
+    """Drive one full optimization pipeline and return a FinalReport.
 
-    This is the canonical entry point.  It resolves tools once, composes
-    the task body once (for ``fixed``), and dispatches.  Fixed mode is
-    driven by ``_run_fixed`` (round loop inline here); planned mode
-    delegates to ``run_orchestrator``; mixed mode splits workers 50/50
-    between fixed and planned strategies.  All paths ultimately
-    instantiate the same ``OptimizationAgent`` on each worker.
+    Single entry point for all modes.  Resolves tools once, then
+    delegates to ``_run_unified_loop`` which runs the same deterministic
+    round loop regardless of mode.
     """
     logger.info(
-        "run_pipeline: mode=%s kernel_language=%s output_dir=%s max_rounds=%s rag_enabled=%s",
+        "run_pipeline: mode=%s kernel_language=%s output_dir=%s max_rounds=%s",
         mode,
         ctx.kernel_language,
         ctx.output_dir,
         ctx.max_rounds,
-        ctx.rag_enabled,
     )
-
     _ = _resolve_tools(ctx, mode)
 
-    if mode == "planned":
-        return _run_planned(ctx)
-    if mode == "mixed":
-        return _run_planned(ctx, task_generation="mixed")
-    if mode == "fixed":
-        return _run_fixed(ctx)
-    if mode == "translate":
-        # Translation is a *preprocess phase*, not a run_pipeline mode.
-        # Reject early with a pointer to the correct entry point so
-        # callers migrate rather than silently fall back.
-        raise ValueError(
-            "mode='translate' is not a run_pipeline mode.  Translation runs as a "
-            "conditional preprocess phase (see preprocess/phases/translation.py) "
-            "before run_pipeline.  Use ``geak --target-language ...`` or "
-            "``geak translate`` at the CLI, not run_pipeline(..., mode='translate')."
-        )
-    raise ValueError(f"Unknown pipeline mode: {mode!r}")
+    if mode not in ("fixed", "planned", "mixed"):
+        raise ValueError(f"Unknown pipeline mode: {mode!r}")
+
+    return _run_unified_loop(ctx, mode)
 
 
-def _run_planned(ctx: PipelineContext, task_generation: str = "planned"):
-    """Dispatch into the planner-driven parallel path.
+# ── Postprocess context builder ──────────────────────────────────────
 
-    The planner (``task_generator``) composes its own per-task bodies, so
-    here we only massage the top-level preprocess context (commandment
-    presence check, constraint / directive addenda, rag flag) before
-    delegating.
 
-    ``mixed`` asks the orchestrator to split workers between fixed and
-    planner-generated task bodies.
+def _build_postprocess_ctx(pipeline_ctx: PipelineContext) -> dict[str, Any]:
+    """Build the ctx dict that post_round_evaluate and finalize_run expect.
+
+    Maps PipelineContext fields to the dict keys consumed by:
+    - evaluate_round_best: output_dir, preprocess_dir, repo_root,
+      harness_path, gpu_ids
+    - post_round_evaluate: starting_patch, _best_global_speedup
+      (mutated each round)
+    - finalize_run / auto_finalize: output_dir, kernel_path,
+      baseline_metrics
     """
-    from minisweagent.run.orchestrator import run_orchestrator
+    return {
+        **pipeline_ctx.preprocess_ctx,
+        "output_dir": str(pipeline_ctx.output_dir),
+        "preprocess_dir": str(pipeline_ctx.output_dir),
+        "repo_root": str(pipeline_ctx.repo or ""),
+        "harness_path": str(pipeline_ctx.preprocess_ctx.get("harness_path", "")),
+        "gpu_ids": list(pipeline_ctx.gpu_ids),
+        "kernel_path": str(pipeline_ctx.preprocess_ctx.get("kernel_path", "")),
+        "baseline_metrics": pipeline_ctx.preprocess_ctx.get("baseline_metrics", {}),
+        "model": pipeline_ctx.model,
+        "model_factory": pipeline_ctx.model_factory,
+        "starting_patch": "",
+        "_best_global_speedup": 0,
+        "deadline": pipeline_ctx.deadline,
+        "soft_stop": pipeline_ctx.soft_stop,
+        "registry": pipeline_ctx.registry,
+        "user_instructions": pipeline_ctx.user_prompt,
+        "rag_enabled": pipeline_ctx.rag_enabled,
+    }
 
-    pctx = dict(ctx.preprocess_ctx)
-    commandment = pctx.get("commandment")
-    if not commandment:
-        # Planned mode requires the commandment because the planner LLM
-        # references it per sub-task.  Fixed mode skips this check.
-        raise RuntimeError(
-            "planned mode requires ``commandment`` in preprocess_ctx; "
-            "check preprocessor logs for failures."
+
+# ── Round-loop helpers ───────────────────────────────────────────────
+
+
+def _should_stop_before_round(ctx: PipelineContext) -> bool:
+    """Check if soft_stop or deadline have fired."""
+    if ctx.soft_stop is not None and ctx.soft_stop.is_set():
+        return True
+    if ctx.deadline is not None and ctx.deadline.expired():
+        return True
+    return False
+
+
+def _resolve_task_file_meta(
+    pp_dir: Path,
+    kernel_path: str,
+    repo_root: str,
+    harness_path: str,
+    test_command: str | None,
+) -> dict[str, str | None]:
+    """Resolve paths for ``write_dispatch_plan_as_task_files`` kwargs."""
+
+    def _if_exists(p: Path) -> str | None:
+        return str(p) if p.exists() else None
+
+    return {
+        "commandment": _if_exists(pp_dir / "COMMANDMENT.md"),
+        "baseline_metrics": _if_exists(pp_dir / "baseline_metrics.json"),
+        "profiling": _if_exists(pp_dir / "profile.json"),
+        "codebase_context": _if_exists(pp_dir / "CODEBASE_CONTEXT.md"),
+        "benchmark_baseline": _if_exists(pp_dir / "benchmark_baseline.txt"),
+        "harness_path": harness_path or None,
+        "kernel_path": kernel_path or None,
+        "repo_root": repo_root or None,
+        "test_command": str(test_command) if test_command else None,
+    }
+
+
+def _enrich_prompt_for_round(
+    base_prompt: str,
+    mode: Mode,
+    round_num: int,
+    round_evals: list[dict[str, Any]],
+) -> str:
+    """Enrich user prompt with prior round data for the planner.
+
+    Fixed mode: append best speedup from prior rounds so the LLM has a
+    concrete target.  Planned/mixed: base prompt unchanged (the planner
+    receives ``round_evals`` separately via ``build_pool``).
+    """
+    if mode == "fixed" and round_num > 1 and round_evals:
+        best_so_far = max(
+            (e.get("benchmark_speedup", 1.0) for e in round_evals),
+            default=1.0,
         )
-
-    pctx.setdefault("user_instructions", ctx.user_prompt)
-    pctx["rag_enabled"] = ctx.rag_enabled
-    pctx["output_dir"] = str(ctx.output_dir) if ctx.output_dir else pctx.get("output_dir")
-    if ctx.num_parallel is not None:
-        pctx["parallel_worker_count"] = ctx.num_parallel
-    if task_generation in {"fixed", "mixed"}:
-        pctx["fixed_parallel_task_body"] = compose_task_body(
-            ComposeInputs(
-                user_prompt=ctx.user_prompt,
-                mode="fixed",
-                preprocess_ctx=ctx.preprocess_ctx,
-                kernel_language=ctx.kernel_language,
-                extra_addenda=list(ctx.extra_addenda),
+        if best_so_far > 1.0:
+            return base_prompt + (
+                f"\n\n## Previous Rounds\n\n"
+                f"The best candidate across rounds 1..{round_num - 1} "
+                f"achieved {best_so_far:.3f}x speedup.  Beat it or explore "
+                f"strategies not yet tried."
             )
-        )
+    return base_prompt
 
-    # Extra addenda (user-specified constraints / directives extracted by
-    # the caller) get appended to the commandment so every sub-task sees
-    # them.
-    if ctx.extra_addenda:
-        addendum = "\n\n".join(a.strip() for a in ctx.extra_addenda if a and a.strip())
-        if addendum:
-            pctx["commandment"] = (commandment + "\n\n" + addendum).strip()
-            if ctx.output_dir is not None:
-                try:
-                    _cm_path = Path(ctx.output_dir) / "COMMANDMENT.md"
-                    _cm_path.write_text(pctx["commandment"], encoding="utf-8")
-                    logger.info("Enriched commandment written to %s", _cm_path)
-                except Exception as exc:
-                    logger.warning("Failed to persist enriched commandment: %s", exc)
 
-    return run_orchestrator(
-        preprocess_ctx=pctx,
-        gpu_ids=ctx.gpu_ids,
+# ── Unified round loop ───────────────────────────────────────────────
+
+
+def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
+    """Single mode-blind round loop for all pipeline modes.
+
+    Mode differences collapse to one integer K inside
+    ``Dispatcher._k_for_mode``.  The loop itself is identical for
+    fixed, planned, and mixed.
+    """
+    from minisweagent.agents.heterogeneous.task_generator import _extract_kernel_meta
+    from minisweagent.agents.optimization_agent import OptimizationAgent
+    from minisweagent.run.dispatch import run_staged_task_batch
+    from minisweagent.run.dispatcher.selector import Dispatcher
+    from minisweagent.run.dispatcher.writer import write_dispatch_plan_as_task_files
+    from minisweagent.run.planner.task_planner import TaskPlanner
+    from minisweagent.run.postprocess.evaluation import (
+        preflight_commandment_contract,
+        recapture_commandment_baseline,
+    )
+    from minisweagent.run.postprocess.results import finalize_run, post_round_evaluate
+    from minisweagent.subagents import SubAgentRegistry
+
+    output_dir = Path(ctx.output_dir)
+    pp_dir = output_dir
+    postprocess_ctx = _build_postprocess_ctx(ctx)
+    max_rounds = max(1, int(ctx.max_rounds or 5))
+    n_workers = ctx.num_parallel or len(ctx.gpu_ids) or 1
+
+    # ── Extract kernel metadata ──────────────────────────────────
+    disc_dict = ctx.preprocess_ctx.get("discovery") or {}
+    kernel_path = str(ctx.preprocess_ctx.get("kernel_path", ""))
+    kernel_meta = _extract_kernel_meta(disc_dict, kernel_path)
+
+    # ── Preflight COMMANDMENT contract ───────────────────────────
+    commandment_path = pp_dir / "COMMANDMENT.md"
+    repo_root = str(ctx.repo or ctx.preprocess_ctx.get("repo_root", ""))
+    harness_path = str(ctx.preprocess_ctx.get("harness_path", ""))
+    gpu_id = ctx.gpu_ids[0] if ctx.gpu_ids else 0
+
+    if repo_root and harness_path and commandment_path.exists():
+        try:
+            preflight_commandment_contract(
+                commandment_path, repo_root, harness_path, gpu_id,
+            )
+            recapture_commandment_baseline(
+                commandment_path, repo_root, harness_path, gpu_id, pp_dir,
+            )
+        except Exception as exc:
+            logger.error("Preflight contract failed: %s", exc)
+            raise
+
+    # ── Initialize planner + dispatcher ──────────────────────────
+    planner = TaskPlanner(
         model=ctx.model,
-        model_factory=ctx.model_factory,
-        output_dir=ctx.output_dir,
-        max_rounds=ctx.max_rounds,
-        heterogeneous=True,
-        task_generation=task_generation,
-        deadline=ctx.deadline,
-        soft_stop=ctx.soft_stop,
-        registry=ctx.registry,
+        subagent_registry=SubAgentRegistry(),
+        preprocess_ctx=ctx.preprocess_ctx,
+        kernel_meta=kernel_meta,
+    )
+    dispatcher = Dispatcher()
+
+    # ── Resolve metadata paths for task file writing ─────────────
+    task_file_kwargs = _resolve_task_file_meta(
+        pp_dir, kernel_path, repo_root, harness_path, ctx.test_command,
     )
 
+    round_evals: list[dict[str, Any]] = []
 
-def _run_fixed(ctx: PipelineContext):
-    """Run fixed mode with an explicit round loop.
-
-    The round loop is the single most important structural difference
-    between the legacy fixed-mode path and the diagram's end state:
-
-      - Legacy (pre-refactor): the fixed runner ran ONCE with
-        ``num_parallel`` copies.  Fixed mode was effectively "1 round ×
-        N parallel agents".
-      - Diagram (this implementation): iterate ``max_rounds`` times;
-        each round spawns ``num_parallel`` copies that re-attempt the
-        optimization.  The best result across all rounds wins.
-
-    Between rounds, the task body is enriched with a short summary of
-    the best speedup found so far so subsequent rounds can build on
-    (or diverge from) earlier wins.  Planned mode is unchanged — its
-    planner already does explicit multi-round iteration.
-    """
-    from minisweagent.agents.homogeneous.homogeneous_agent import run_homogeneous_agent
-
-    max_rounds = max(1, int(ctx.max_rounds or 1))
-    best_result = None
-    best_speedup: float | None = None
-    last_round_result: Any = None
-
+    # ── Round loop ───────────────────────────────────────────────
     for round_num in range(1, max_rounds + 1):
+        if _should_stop_before_round(ctx):
+            logger.warning(
+                "Budget reached before round %d; finalizing.", round_num,
+            )
+            break
+
+        is_last = round_num == max_rounds
+        tag = " (FINAL)" if is_last else ""
         logger.info(
-            "[bold cyan]%s[/bold cyan]\n  [bold]Fixed-mode round %d/%d[/bold]\n[bold cyan]%s[/bold cyan]",
-            "=" * 60,
+            "\n════════════════════════════════════════════════════════════\n"
+            "  Round %d/%d%s  (mode=%s, workers=%d)\n"
+            "════════════════════════════════════════════════════════════",
             round_num,
             max_rounds,
-            "=" * 60,
+            tag,
+            mode,
+            n_workers,
         )
 
-        # Compose the task body for this round.  On rounds > 1 we
-        # append the previous best so the LLM has a concrete target
-        # to beat — same signal the planned-mode planner gets from
-        # its ``round_N_evaluation.json`` input.
-        round_addenda = list(ctx.extra_addenda)
-        if round_num > 1 and best_speedup is not None:
-            round_addenda.append(
-                f"## Previous Rounds\n\n"
-                f"The best candidate across rounds 1..{round_num - 1} "
-                f"achieved a verified speedup of {best_speedup:.3f}x.  "
-                f"Use this as a lower bound — the current round's goal is "
-                f"to find an approach that beats it, OR to confirm the "
-                f"strategy generalises across seeds.  Explore strategies "
-                f"not already exhausted in earlier rounds."
+        if postprocess_ctx.get("starting_patch"):
+            logger.info(
+                "Starting from best patch so far: %s",
+                postprocess_ctx["starting_patch"],
             )
 
-        body = compose_task_body(
-            ComposeInputs(
-                user_prompt=ctx.user_prompt,
-                mode="fixed",
-                preprocess_ctx=ctx.preprocess_ctx,
-                kernel_language=ctx.kernel_language,
-                extra_addenda=round_addenda,
-            )
+        # 1. PLAN — generate M candidate tasks
+        user_prompt_for_round = _enrich_prompt_for_round(
+            ctx.user_prompt, mode, round_num, round_evals,
         )
-
-        round_best = _invoke_fixed_runner(
-            ctx=ctx,
-            body=body,
-            run_fixed_mode=run_homogeneous_agent,
+        pool = planner.build_pool(
             round_num=round_num,
-        )
-        last_round_result = round_best
-
-        # Track the best result across all rounds.
-        round_speedup = getattr(round_best, "best_speedup", None) if round_best else None
-        if round_speedup is not None and (
-            best_speedup is None or round_speedup > best_speedup
-        ):
-            best_speedup = round_speedup
-            best_result = round_best
-
-        logger.info(
-            "Fixed-mode round %d complete (this round best: %s; overall best: %s)",
-            round_num,
-            f"{round_speedup:.3f}x" if round_speedup is not None else "—",
-            f"{best_speedup:.3f}x" if best_speedup is not None else "—",
+            user_prompt=user_prompt_for_round,
+            round_evals=round_evals,
+            mode=mode,
+            agent_class=OptimizationAgent,
+            output_dir=output_dir,
+            num_gpus=len(ctx.gpu_ids),
+            rag_enabled=ctx.rag_enabled,
         )
 
-    # Prefer the best-by-speedup result across rounds.  When no round
-    # produced a measurable speedup, fall back to the last round's raw
-    # result so callers see the same shape as legacy single-round
-    # invocations (which always returned whatever ``run_fixed_mode``
-    # gave them, with or without a ``best_speedup`` attribute).
-    return best_result if best_result is not None else last_round_result
+        # 2. SELECT — pick N tasks from pool
+        plan = dispatcher.select(pool, mode, n_workers)
 
-
-def _invoke_fixed_runner(
-    *,
-    ctx: PipelineContext,
-    body: str,
-    run_fixed_mode: Callable[..., Any],
-    round_num: int,
-) -> Any:
-    """Call ``run_fixed_mode`` with kwargs built from ``ctx``.
-
-    Isolated so the round loop body stays readable and tests can mock
-    just the invocation without tangling with kwarg plumbing.  Takes
-    ``round_num`` so the fixed-mode runner writes per-round artefacts
-    into ``<output_dir>/round_N/`` subdirs (matching planned mode's
-    convention).
-    """
-    agent_config = dict(ctx.config.get("agent", {}))
-    agent_config["save_patch"] = True
-    if ctx.test_command is not None:
-        agent_config["test_command"] = ctx.test_command
-    if ctx.metric is not None:
-        agent_config["metric"] = ctx.metric
-
-    round_output_dir: Path | None = None
-    if ctx.output_dir is not None:
-        # Only nest per-round when max_rounds > 1 so single-round
-        # callers still see artefacts directly under output_dir
-        # (legacy behaviour preserved).
-        max_rounds = max(1, int(ctx.max_rounds or 1))
-        round_output_dir = (
-            ctx.output_dir / f"round_{round_num}" if max_rounds > 1 else ctx.output_dir
+        # 3. WRITE — .md task files for traceability
+        task_files = write_dispatch_plan_as_task_files(
+            plan,
+            output_dir,
+            round_num=round_num,
+            starting_patch=postprocess_ctx.get("starting_patch") or None,
+            **task_file_kwargs,
         )
-        round_output_dir.mkdir(parents=True, exist_ok=True)
-        agent_config["patch_output_dir"] = str(round_output_dir)
 
-    kwargs: dict[str, Any] = dict(
-        config=ctx.config,
-        task_content=body,
-        model=ctx.model,
-        env=ctx.env,
-        env_class=ctx.env_class,
-        env_kwargs=ctx.env_kwargs,
-        agent_config=agent_config,
-        repo=ctx.repo,
-    )
-    if ctx.num_parallel is not None:
-        kwargs["num_parallel"] = ctx.num_parallel
-    if ctx.gpu_ids:
-        # run_fixed_mode takes a string and re-parses internally;
-        # re-serialize the canonical list[int] form.
-        kwargs["gpu_ids"] = ",".join(str(g) for g in ctx.gpu_ids)
-    if round_output_dir is not None:
-        kwargs["output_dir"] = round_output_dir
-    if ctx.model_name is not None:
-        kwargs["model_name"] = ctx.model_name
-    if ctx.console is not None:
-        kwargs["console"] = ctx.console
-    if ctx.deadline is not None:
-        kwargs["deadline"] = ctx.deadline
-    if ctx.soft_stop is not None:
-        kwargs["soft_stop"] = ctx.soft_stop
-    if ctx.registry is not None:
-        kwargs["registry"] = ctx.registry
+        # 4. EXECUTE — staged dispatch with early exit on improvement
+        results_dir = output_dir / "results" / f"round_{round_num}"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        run_staged_task_batch(
+            task_files=task_files,
+            gpu_ids=ctx.gpu_ids,
+            output_dir=results_dir,
+            model_factory=ctx.model_factory,
+            console=ctx.console,
+            deadline=ctx.deadline,
+            soft_stop=ctx.soft_stop,
+            registry=ctx.registry,
+        )
 
-    return run_fixed_mode(**kwargs)
+        # 5. EVALUATE — FULL_BENCHMARK verification (all modes)
+        round_eval = post_round_evaluate(
+            postprocess_ctx, round_num, output_dir,
+        )
+        if round_eval is not None:
+            round_eval_dict = (
+                round_eval.to_dict()
+                if hasattr(round_eval, "to_dict")
+                else round_eval
+            )
+            round_evals.append(round_eval_dict)
+
+        logger.info("Round %d complete.", round_num)
+
+    # ── Finalize ─────────────────────────────────────────────────
+    report = finalize_run(postprocess_ctx, output_dir)
+    return report
 
 
 __all__ = ["PipelineContext", "run_pipeline"]

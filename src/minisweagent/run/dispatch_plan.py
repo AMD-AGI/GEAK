@@ -22,6 +22,7 @@ class DispatchPlanItem:
     task: str
     agent_type: str = "strategy_agent"
     agent_name: str = ""
+    kind: str = "planned"
     priority: int = 10
     kernel_language: str = "python"
     num_gpus: int = 1
@@ -33,6 +34,7 @@ class DispatchPlanItem:
             label=task.label,
             task=task.task,
             agent_name=str(task.config.get("agent_name", "") or ""),
+            kind=str(task.config.get("kind", "planned") or "planned"),
             priority=task.priority,
             kernel_language=task.kernel_language,
             num_gpus=task.num_gpus,
@@ -43,6 +45,7 @@ class DispatchPlanItem:
         config = dict(self.config)
         if self.agent_name:
             config["agent_name"] = self.agent_name
+        config["kind"] = self.kind
         return AgentTask(
             agent_class=agent_class,
             task=self.task,
@@ -89,6 +92,7 @@ class DispatchPlan:
                     "priority": item.priority,
                     "agent_type": item.agent_type,
                     "agent_name": item.agent_name,
+                    "kind": item.kind,
                     "kernel_language": item.kernel_language,
                     "num_gpus": item.num_gpus,
                     "task_prompt": item.task,

@@ -20,10 +20,14 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import math
+
 from minisweagent.run.postprocess.benchmark_parsing import (
+    compute_shape_speedups,
     extract_benchmark_config_lines,
     extract_latency_ms,
     parse_shape_count,
+    parse_shape_latencies_ms,
     parse_total_kernel_time_ms,
 )
 from minisweagent.run.utils.generated_artifacts import (
@@ -124,14 +128,50 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
 
     git_env = get_git_safe_env(output_dir)
     if is_git:
-        subprocess.run(
-            ["git", "worktree", "add", "--detach", str(eval_dir)],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            check=True,
-            env=git_env,
-        )
+        try:
+            subprocess.run(
+                ["git", "worktree", "add", "--detach", str(eval_dir)],
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+                check=True,
+                env=git_env,
+            )
+        except subprocess.CalledProcessError as e:
+            error_msg = (e.stderr or e.stdout or str(e)).lower()
+            recoverable = (
+                "missing but already registered worktree" in error_msg
+                or "already used by worktree" in error_msg
+                or "already exists" in error_msg
+            )
+            if not recoverable:
+                raise RuntimeError(
+                    f"git worktree add failed (rc={e.returncode}): {e.stderr or e.stdout}"
+                ) from e
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                cwd=str(repo),
+                check=False,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(eval_dir)],
+                cwd=str(repo),
+                check=False,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+            subprocess.run(
+                ["git", "worktree", "add", "--detach", "-f", str(eval_dir)],
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+                check=True,
+                env=git_env,
+            )
     else:
         shutil.copytree(str(repo), str(eval_dir), dirs_exist_ok=True)
         subprocess.run(["git", "init"], cwd=str(eval_dir), capture_output=True, text=True, check=True, env=git_env)
@@ -390,6 +430,69 @@ def preflight_commandment_contract(
     logger.info("preflight_commandment_contract: PASS")
 
 
+def recapture_commandment_baseline(
+    commandment_path: Path,
+    repo_root: str,
+    harness_path: str,
+    gpu_id: int,
+    pp_dir: Path,
+    *,
+    timeout_s: int = 1200,
+) -> bool:
+    """Re-capture baseline using COMMANDMENT sections for format parity.
+
+    Runs SETUP + FULL_BENCHMARK on the *unpatched* repo so the baseline
+    output format exactly matches what ``run_correctness_and_benchmark``
+    will produce for candidates.  Falls back to BENCHMARK if
+    FULL_BENCHMARK is absent.  Overwrites the preprocessed baseline files
+    only on success; returns True if baseline was recaptured.
+    """
+    repo_root_path = Path(repo_root).resolve()
+    env = build_eval_env(repo_root_path, repo_root, harness_path, gpu_id)
+
+    for section_name in ["FULL_BENCHMARK", "BENCHMARK"]:
+        script = build_eval_script(str(commandment_path), ["SETUP", section_name])
+        if not script:
+            continue
+        logger.info(
+            "recapture_commandment_baseline: running SETUP+%s on %s",
+            section_name,
+            repo_root_path,
+        )
+        try:
+            result = subprocess.run(
+                ["bash", script],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                cwd=str(repo_root_path),
+                env=env,
+            )
+        except Exception as exc:
+            logger.warning("recapture_commandment_baseline: %s failed: %s", section_name, exc)
+            continue
+        if result.returncode != 0:
+            logger.warning(
+                "recapture_commandment_baseline: %s exited %d", section_name, result.returncode
+            )
+            continue
+        stdout = result.stdout.strip()
+        if not stdout:
+            logger.warning(
+                "recapture_commandment_baseline: %s produced empty stdout", section_name
+            )
+            continue
+        (pp_dir / "full_benchmark_baseline.txt").write_text(stdout)
+        (pp_dir / "benchmark_baseline.txt").write_text(stdout)
+        logger.info("recapture_commandment_baseline: recaptured (%d bytes)", len(stdout))
+        return True
+
+    logger.info(
+        "recapture_commandment_baseline: no benchmark section found; keeping preprocessed baseline"
+    )
+    return False
+
+
 def run_correctness_and_benchmark(
     eval_worktree: Path,
     eval_env: dict[str, str],
@@ -547,6 +650,17 @@ def _compute_verified_speedup(
     baseline_ms = extract_latency_ms(baseline_text)
 
     if candidate_ms is None or baseline_ms is None:
+        candidate_shapes = parse_shape_latencies_ms(candidate_stdout)
+        baseline_shapes = parse_shape_latencies_ms(baseline_text)
+        shape_speedups = compute_shape_speedups(baseline_shapes, candidate_shapes)
+        if shape_speedups:
+            vals = [s["speedup"] for s in shape_speedups.values()]
+            geomean = math.exp(sum(math.log(v) for v in vals) / len(vals))
+            round_eval[section_key]["verified_speedup"] = round(geomean, 4)
+            round_eval[section_key]["per_shape_speedups"] = shape_speedups
+            round_eval[section_key]["speedup_method"] = "per_shape_geomean"
+            logger.info("  Verified speedup (per-shape geomean): %.4fx (%d shapes)", geomean, len(shape_speedups))
+            return
         msg = f"latency parse failed (candidate_ms={candidate_ms}, baseline_ms={baseline_ms})"
         logger.warning("Could not extract latency: %s", msg)
         round_eval[section_key]["failure_reason"] = msg
@@ -679,6 +793,14 @@ def run_profile(
         profile_result = json.loads(dest.read_text())
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Failed to parse profile output: %s", exc)
+        return
+
+    if not profile_result.get("success", True):
+        logger.warning(
+            "Profiler reported failure for round %d — skipping profile comparison: %s",
+            round_num,
+            profile_result.get("error", "unknown error"),
+        )
         return
 
     baseline_metrics_path = pp_dir / "baseline_metrics.json"

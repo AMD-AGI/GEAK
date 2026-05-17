@@ -9,6 +9,7 @@ calls this; so does the ``run-tasks`` CLI indirectly.
 from __future__ import annotations
 
 import itertools
+import json
 import logging
 import os
 import re
@@ -65,6 +66,17 @@ def _build_ensemble_factory(base_factory):
     return _ensemble_factory
 
 
+def _normalize_section_name(name: str) -> str:
+    """Canonicalize a section name for case- / whitespace-insensitive matching.
+
+    The COMMANDMENT contract uses title-case multi-word names like
+    ``## Full Benchmark`` while legacy callers use ``## FULL_BENCHMARK``.
+    Both normalize to the same upper-snake_case token so callers can pass
+    either form and templates can render in either style.
+    """
+    return "_".join(name.strip().upper().split())
+
+
 def _read_commandment_section(commandment_path: str, section: str) -> str | None:
     """Read a section from a COMMANDMENT.md file verbatim.
 
@@ -72,6 +84,10 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
     ``"CORRECTNESS"``, ``"PROFILE"``, ``"BENCHMARK"``,
     ``"FULL_BENCHMARK"``), exactly as written.  No parsing, no extraction,
     no transformation.
+
+    Section-name matching is case-insensitive and whitespace-flexible:
+    ``## Full Benchmark`` matches ``section="FULL_BENCHMARK"`` just as
+    ``## FULL_BENCHMARK`` does.
 
     Fenced code blocks (```bash, ```, etc.) are stripped automatically.
     """
@@ -83,13 +99,16 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
 
     lines: list[str] = []
     in_section = False
-    # Pattern to match fenced code block markers (```bash, ```sh, ```, etc.)
     fence_pattern = re.compile(r"^```\w*$")
+    header_re = re.compile(r"^##\s+([A-Za-z][\w\s\-]*?)\s*:?\s*$")
+
+    target = _normalize_section_name(section)
 
     for raw_line in text.splitlines():
-        header = re.match(r"^##\s+(\w+)", raw_line.strip())
+        header = header_re.match(raw_line.strip())
         if header:
-            if header.group(1) == section:
+            candidate = _normalize_section_name(header.group(1))
+            if candidate == target:
                 in_section = True
                 continue
             elif in_section:
@@ -97,7 +116,6 @@ def _read_commandment_section(commandment_path: str, section: str) -> str | None
             continue
         if in_section:
             stripped = raw_line.strip()
-            # Skip fenced code block markers
             if fence_pattern.match(stripped):
                 continue
             if stripped:
@@ -174,13 +192,10 @@ def task_file_to_agent_task(task_file: Path):
 
     meta, body = read_task_file(task_file)
 
-    from minisweagent.agents.agent_spec import _agent_type_to_class, filter_agent_type
     from minisweagent.agents.optimization_agent import OptimizationAgent
 
     agent_name = meta.get("agent_name", "")
-    agent_type = filter_agent_type(meta.get("agent_type", "strategy_agent"))
-    type_to_class = _agent_type_to_class()
-    agent_class = type_to_class.get(agent_name, type_to_class.get(agent_type, OptimizationAgent))
+    agent_class = OptimizationAgent
 
     try:
         inherited_step_limit = int(os.environ.get("GEAK_AGENT_STEP_LIMIT", "200"))
@@ -528,3 +543,117 @@ def run_from_task(
         model_factory=model_factory,
         console=console,
     )
+
+
+# ── Staged dispatch (relocated from agents/heterogeneous/tools.py) ───
+
+
+def _dispatch_stage_name(priority: int) -> str:
+    if priority <= 5:
+        return "high"
+    if priority <= 10:
+        return "medium"
+    return "low"
+
+
+def _group_task_files_by_dispatch_stage(
+    task_files: list[Path],
+) -> list[tuple[str, list[Path]]]:
+    """Group tasks by priority tier for staged dispatch."""
+    from minisweagent.run.task_file import read_task_file
+
+    buckets: dict[str, list[Path]] = {}
+    for tf in task_files:
+        meta, _ = read_task_file(tf)
+        pri = int(meta.get("priority", 10))
+        stage = _dispatch_stage_name(pri)
+        buckets.setdefault(stage, []).append(tf)
+    order = ["high", "medium", "low"]
+    return [(s, buckets[s]) for s in order if s in buckets]
+
+
+def _stage_found_improvement(results_dir: Path, task_files: list[Path]) -> bool:
+    """Return True if any task in the stage produced speedup > 1.0."""
+    from minisweagent.run.task_file import read_task_file
+
+    for task_file in task_files:
+        meta, _ = read_task_file(task_file)
+        label = str(meta.get("label") or task_file.stem)
+        best_results_path = results_dir / label / "best_results.json"
+        if not best_results_path.is_file():
+            continue
+        try:
+            payload = json.loads(best_results_path.read_text())
+            if float(payload.get("best_patch_speedup", 0) or 0) > 1.0:
+                return True
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "_stage_found_improvement: could not parse %s (%s); treating as no improvement.",
+                best_results_path,
+                exc,
+            )
+    return False
+
+
+def run_staged_task_batch(
+    task_files: list[Path],
+    gpu_ids: list[int],
+    output_dir: Path,
+    model_factory,
+    *,
+    console=None,
+    deadline=None,
+    soft_stop=None,
+    registry=None,
+) -> dict[str, Any]:
+    """Priority-staged dispatch with early exit on improvement.
+
+    Groups task files by priority tier (high 1-5, medium 6-10, low 11+).
+    Runs stages sequentially.  If a stage finds improvement (speedup > 1.0),
+    lower-priority stages are skipped.  Checks soft_stop/deadline between
+    stages.
+    """
+    stages = _group_task_files_by_dispatch_stage(task_files)
+    all_results: list[dict[str, Any]] = []
+
+    for stage_name, stage_tasks in stages:
+        if soft_stop is not None and soft_stop.is_set():
+            logger.info("run_staged_task_batch: soft_stop set; skipping stage '%s'.", stage_name)
+            break
+        if deadline is not None and deadline.expired():
+            logger.info("run_staged_task_batch: deadline expired; skipping stage '%s'.", stage_name)
+            break
+
+        logger.info(
+            "run_staged_task_batch: running stage '%s' (%d tasks).",
+            stage_name,
+            len(stage_tasks),
+        )
+        stage_result = run_task_batch(
+            task_files=stage_tasks,
+            gpu_ids=gpu_ids,
+            output_dir=output_dir,
+            model_factory=model_factory,
+            console=console,
+            deadline=deadline,
+            soft_stop=soft_stop,
+            registry=registry,
+        )
+        all_results.append({
+            "stage": stage_name,
+            "tasks": len(stage_tasks),
+            "result": stage_result,
+        })
+
+        if _stage_found_improvement(output_dir, stage_tasks):
+            logger.info(
+                "run_staged_task_batch: improvement found in stage '%s'; skipping lower-priority stages.",
+                stage_name,
+            )
+            break
+
+    return {
+        "status": "completed",
+        "results_dir": str(output_dir),
+        "stages": all_results,
+    }

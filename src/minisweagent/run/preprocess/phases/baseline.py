@@ -121,6 +121,14 @@ def _enrich_metrics_with_benchmark(
         return baseline_metrics
     bb_text = bb_path.read_text()
     bm_val = extract_latency_ms(bb_text)
+    if bm_val is None:
+        logger.warning(
+            "Could not parse benchmark latency from %s — "
+            "verified speedups will not be available for this kernel. "
+            "Output preview: %s",
+            bb_path,
+            bb_text[:200].replace("\n", " "),
+        )
     if bm_val is not None:
         baseline_metrics["benchmark_duration_us"] = bm_val * 1000.0
         if "duration_us" in baseline_metrics:

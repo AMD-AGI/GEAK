@@ -21,7 +21,6 @@ from prompt_toolkit.shortcuts import PromptSession
 from rich.console import Console
 
 from minisweagent import global_config_dir
-from minisweagent.agents.homogeneous.homogeneous_agent import parse_gpu_ids
 from minisweagent.agents.parallel_agent import BestPatchResult
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments import get_environment_class
@@ -54,6 +53,12 @@ logger = logging.getLogger(__name__)
 console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich")
 prompt_session = PromptSession(history=FileHistory(global_config_dir / "mini_task_history.txt"))
+
+
+def _parse_gpu_ids(gpu_ids_str: str | None) -> list[int]:
+    if not gpu_ids_str:
+        return [0]
+    return [int(x.strip()) for x in gpu_ids_str.split(",") if x.strip()]
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -197,6 +202,11 @@ def main(
         "--total-budget-s",
         help="Override the mode's total wall-clock budget (seconds). Escape hatch for testing.",
     ),
+    pipeline_mode: str | None = typer.Option(
+        None,
+        "--pipeline-mode",
+        help="Dispatch mode: fixed | planned | mixed. Overrides GEAK_PIPELINE_MODE env.",
+    ),
 ):
     # fmt: on
     del visual
@@ -235,12 +245,7 @@ def main(
     config = _deep_merge(config, user_config)
 
     # Validate --mode early but defer the full precedence resolution + preset
-    # injection until AFTER parse_pipeline_params runs. The natural-language
-    # extractor can return ``mode`` from phrases like "quick mode" or "1 hour
-    # run", and we want CLI > task > YAML > default precedence to be applied
-    # in one place. apply_mode_presets only injects orchestrator.max_rounds,
-    # which is only consumed below when run_orchestrator is called, so
-    # deferring is safe.
+    # injection until AFTER parse_pipeline_params runs.
     if mode is not None:
         _normalized_cli_mode = mode.strip().lower()
         if _normalized_cli_mode not in RUN_MODES:
@@ -350,7 +355,6 @@ def main(
         logger.info("User task input (%d chars): %s", len(task_content), task_content[:500])
 
     # 2a) LLM-driven pipeline param extraction
-    heterogeneous = None
     max_rounds = None
     task_extracted_mode: str | None = None
     if task_content:
@@ -360,10 +364,6 @@ def main(
         pipeline_params = parse_pipeline_params(task_content, model)
         logger.debug("pipeline_params: %s", pipeline_params)
 
-        # Apply non-None extracted values (CLI flags still take priority)
-        if pipeline_params.get("heterogeneous") is not None and heterogeneous is None:
-            heterogeneous = pipeline_params["heterogeneous"]
-            logger.info("Using heterogeneous mode.")
         if pipeline_params.get("max_rounds") is not None:
             max_rounds = pipeline_params["max_rounds"]
             logger.info("Using max rounds: %s.", max_rounds)
@@ -458,7 +458,7 @@ def main(
         )
         raise typer.Exit(1)
 
-    parsed_gpu_ids = parse_gpu_ids(gpu_ids)
+    parsed_gpu_ids = _parse_gpu_ids(gpu_ids)
 
     # Auto-detect num_parallel from gpu_ids when not explicitly provided.
     if num_parallel is None:
@@ -699,26 +699,6 @@ def main(
     if preprocess_ctx.get("repo_root") and repo is None:
         repo = Path(preprocess_ctx["repo_root"])
 
-    # kernel_type routing:
-    # - hip/flydsl/other -> homogeneous agent
-    # - triton -> heterogeneous orchestrator
-    # Auto-detect kernel type if heterogeneous flag was not set by LLM extraction or task parser
-    if heterogeneous is None:
-        _discovery = preprocess_ctx.get("discovery") or {}
-        _kernel_info = _discovery.get("kernel") or {}
-        _auto_kernel_type = _kernel_info.get("type")
-
-        if (not _auto_kernel_type or _auto_kernel_type == "unknown") and preprocess_ctx.get("kernel_path"):
-            from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
-            _auto_kernel_type = _infer_kernel_type(Path(preprocess_ctx["kernel_path"]))
-
-        if _auto_kernel_type == "triton":
-            heterogeneous = True
-            logger.info("Using heterogeneous mode based on discovery.")
-        else:
-            heterogeneous = False
-            logger.info("Using homogeneous mode based on discovery.")
-
     # Resolve max_rounds via the documented precedence chain:
     # CLI --max-rounds (if any future flag added) > config (mode preset) >
     # GEAK_MAX_ROUNDS env > default. ``max_rounds`` from task parsing acts as
@@ -772,8 +752,16 @@ def main(
 
         from minisweagent.run.unified import PipelineContext, run_pipeline
 
-        pipeline_mode = "planned" if heterogeneous else "fixed"
-        logger.info("Running unified pipeline mode: %s", pipeline_mode)
+        _valid_modes = {"fixed", "planned", "mixed"}
+        if pipeline_mode is not None and pipeline_mode in _valid_modes:
+            _mode_source = "cli"
+        elif (_env_mode := os.environ.get("GEAK_PIPELINE_MODE")) in _valid_modes:
+            pipeline_mode, _mode_source = _env_mode, "env"
+        elif (_yaml_mode := (config.get("pipeline") or {}).get("mode")) in _valid_modes:
+            pipeline_mode, _mode_source = _yaml_mode, "yaml"
+        else:
+            pipeline_mode, _mode_source = "mixed", "default"
+        logger.info("Running unified pipeline mode: %s (source=%s)", pipeline_mode, _mode_source)
         pipeline_result = run_pipeline(
             PipelineContext(
                 preprocess_ctx=preprocess_ctx,
@@ -803,9 +791,7 @@ def main(
             mode=pipeline_mode,
         )
         logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
-        if heterogeneous:
-            return _final_report_to_bestpatchresult(pipeline_result)
-        return pipeline_result
+        return _final_report_to_bestpatchresult(pipeline_result)
     finally:
         budget.cancel_all_timers()
         try:
