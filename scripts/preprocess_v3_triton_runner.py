@@ -74,7 +74,14 @@ from preprocess_v3_triton_oracle import (  # noqa: E402
     shape_signature,
 )
 
-DEFAULT_PER_RUN_TIMEOUT_S = 1800
+# Per-scenario wall-clock cap. The Triton runner already short-circuits
+# at ``PreprocessResult`` — see ``child_run_scenario`` below: the agent
+# emits the result and the function returns. There is no round loop
+# downstream, so this runner is the in-process equivalent of running
+# ``geak --preprocess-only``. 600s is sized for a healthy preprocess
+# (1-5 minutes wall-clock) plus headroom for the verifier-escalation
+# scenario which retries the harness-generator subagent.
+DEFAULT_PER_RUN_TIMEOUT_S = 600
 DEFAULT_DETERMINISM_RUNS = 3
 
 # Triton-flavor cross-language markers (INVERSE of HIP runner):
