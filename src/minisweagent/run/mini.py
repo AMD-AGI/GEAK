@@ -185,6 +185,7 @@ def main(
     config_spec: Path | None = typer.Option(None, "-c", "--config", help="Path to config file"),
     output: Path | None = typer.Option(None, "-o", "--output", help="Output trajectory file or directory"),
     exit_immediately: bool = typer.Option(False, "--exit-immediately", help="Exit immediately", rich_help_panel="Advanced"),
+    preprocess_only: bool = typer.Option(False, "--preprocess-only", help="Run preprocessing only; skip the optimization round loop and exit after preprocess artifacts are written.", rich_help_panel="Advanced"),
     repo: Path | None = typer.Option(None, "--repo", help="Target Repository path."),
     kernel_url: str | None = typer.Option(None, "--kernel-url", "--kernel-path", help="Target kernel source (path or URL)."),
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
@@ -259,6 +260,8 @@ def main(
     if exit_immediately:
         config.setdefault("agent", {})["confirm_exit"] = False
         logger.info("Running in exit-immediately mode.")
+    if preprocess_only:
+        logger.info("Running in preprocess-only mode: round loop will be skipped.")
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
         logger.info("Using model class: %s.", model_class)
@@ -788,6 +791,7 @@ def main(
                 deadline=opt_deadline,
                 soft_stop=budget.soft_stop,
                 registry=state.registry,
+                preprocess_only=preprocess_only,
             ),
             mode=pipeline_mode,
         )
