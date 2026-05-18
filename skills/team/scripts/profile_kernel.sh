@@ -42,7 +42,7 @@ if [ -n "$PROFILER" ]; then
     echo ""
     echo "=== Profiling with $PROFILER ==="
 
-    WORKLOAD_DIR="/tmp/team_v2_workloads/profile_$(date +%s)"
+    WORKLOAD_DIR="/tmp/team_workloads/profile_$(date +%s)"
     mkdir -p "$(dirname "$WORKLOAD_DIR")"
 
     # Profile (with GPU lock)

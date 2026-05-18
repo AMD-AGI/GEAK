@@ -8,7 +8,7 @@ set -euo pipefail
 GPU_ID="${1:?Usage: gpu_lock.sh <gpu_id> <command...>}"
 shift
 
-LOCK_DIR="/tmp/team_v2_gpu_locks"
+LOCK_DIR="/tmp/team_gpu_locks"
 mkdir -p "$LOCK_DIR"
 LOCK_FILE="${LOCK_DIR}/gpu_${GPU_ID}.lock"
 
