@@ -2,10 +2,8 @@
 
 The registry discovers ``SUBAGENT.yaml`` definitions under
 ``subagents/preprocess/<name>/`` and exposes them as :class:`SubagentSpec`
-dataclasses. PR 3 will populate the directory with the actual subagent
-bodies (``harness-generator``, ``harness-verifier``, ``speedup-verify``,
-``pytorch-to-flydsl``); this PR ships only the discovery / validation
-skeleton plus tests.
+dataclasses. The current subagent bodies in scope are
+``harness-generator`` and ``harness-verifier``.
 
 Design notes
 ------------

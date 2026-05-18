@@ -84,7 +84,6 @@ logger = logging.getLogger(__name__)
 ALLOWED_SUBAGENT_NAMES: tuple[str, ...] = (
     "harness-generator",
     "harness-verifier",
-    "speedup-verify",
 )
 
 #: Mode names the Path-A short-circuit understands. Maps 1:1 to the four
@@ -109,8 +108,8 @@ class RunInstructions:
     When the orchestrator detects (via LLM judgment, see ``Step 0`` in the
     system prompt) that the user's task prompt already contains explicit
     run instructions, it bypasses the harness-generator / harness-verifier
-    / speedup-verify subagent dispatches and emits a ``COMMANDMENT.md``
-    directly from those instructions. This dataclass captures the parsed
+    subagent dispatches and emits a ``COMMANDMENT.md`` directly from those
+    instructions. This dataclass captures the parsed
     shape of that decision so :class:`PreprocessResult` consumers have an
     audit trail of which command was used and which modes were inferred.
 
@@ -457,11 +456,12 @@ def _schema_dispatch_subagent() -> dict[str, Any]:
         "name": "dispatch_subagent",
         "type": "function",
         "description": (
-            "Steps 3a, 3b, 5 — dispatch one of the three v3 preprocess subagents "
-            "(harness-generator, harness-verifier, speedup-verify) with a focused "
-            "task string. Use harness-generator and harness-verifier in alternation "
-            "during step 3 (max 3 generator attempts). Use speedup-verify only "
-            "after baseline metrics exist."
+            "Step 3a / 3b — dispatch one of the two v3 preprocess subagents "
+            "(harness-generator, harness-verifier) with a focused task string. "
+            "Use them in alternation during step 3 (max 3 generator attempts). "
+            "On step 3b (verifier), pass the four COMMANDMENT_<MODE> commands "
+            "from harness-generator's output as ``commandment_commands`` in the "
+            "context so the verifier runs the declared commands verbatim."
         ),
         "parameters": {
             "type": "object",
@@ -597,8 +597,8 @@ def _schema_commandment_from_user_command() -> dict[str, Any]:
             "instructions (a literal command-line invocation, a reference to an "
             "existing harness file, or a make-target). Renders a "
             "COMMANDMENT.md directly from the user's command — skipping "
-            "harness-generator, harness-verifier, and speedup-verify subagent "
-            "dispatches entirely. Mutually exclusive with calling "
+            "harness-generator and harness-verifier subagent dispatches "
+            "entirely. Mutually exclusive with calling "
             "dispatch_subagent('harness-generator', ...) — the orchestrator's "
             "path is determined by which of these two tools is called first."
         ),
