@@ -1,28 +1,27 @@
-"""Tests for the unified round loop in ``run/unified.py`` (fixed mode).
+"""Tests for the unified round loop helpers in ``run/unified.py``.
 
-Pins the new behavior added in the unified-round-loop commit:
-
-  - Fixed mode iterates ``ctx.max_rounds`` times (default 1 preserves
-    legacy "one round × N parallel" shape).
-  - Best result across rounds wins (track ``best_speedup``).
-  - Per-round artefacts go to ``output_dir/round_N/`` when
-    ``max_rounds > 1``; single-round callers keep flat output layout.
-  - Round > 1 task bodies include the previous-best summary as an
-    extra addendum.
+Tests the deterministic helpers that the unified loop relies on:
+  - ``_enrich_prompt_for_round``: round > 1 injects previous-best summary
+  - ``_should_stop_before_round``: soft_stop / deadline gating
+  - ``_build_postprocess_ctx``: maps PipelineContext to dict
+  - ``_resolve_task_file_meta``: resolves metadata paths
 """
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from minisweagent.run.unified import (
     PipelineContext,
-    _invoke_fixed_runner,
-    _run_fixed,
+    _build_postprocess_ctx,
+    _enrich_prompt_for_round,
+    _resolve_task_file_meta,
+    _should_stop_before_round,
 )
 
 
@@ -31,281 +30,153 @@ from minisweagent.run.unified import (
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _make_ctx(tmp_path: Path, *, max_rounds: int | None = None) -> PipelineContext:
-    """Minimal PipelineContext for fixed-mode tests."""
-    return PipelineContext(
-        preprocess_ctx={"kernel_path": "/tmp/k.py"},
-        user_prompt="Optimize this kernel.",
-        kernel_language="triton",
-        output_dir=tmp_path,
-        gpu_ids=[0],
-        model=MagicMock(),
-        max_rounds=max_rounds,
-        env=MagicMock(),
-        env_class=MagicMock(),
-        env_kwargs={},
-        repo=tmp_path,
-        num_parallel=2,
-    )
-
-
-def _fake_round_result(speedup: float | None = 1.2) -> SimpleNamespace:
-    return SimpleNamespace(
-        best_speedup=speedup,
-        patch_id="p",
-        agent_id=0,
-        patch_dir=None,
-        best_patch_file=None,
-        llm_conclusion="",
-    )
+def _make_ctx(tmp_path: Path | None = None, **overrides) -> PipelineContext:
+    base = {
+        "preprocess_ctx": {"kernel_path": "/tmp/k.py"},
+        "user_prompt": "Optimize this kernel.",
+        "output_dir": tmp_path or Path("/tmp/out"),
+        "gpu_ids": [0],
+    }
+    base.update(overrides)
+    return PipelineContext(**base)
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Round loop basics
+# _enrich_prompt_for_round
 # ──────────────────────────────────────────────────────────────────────
 
 
-class TestRoundCount:
-    def test_default_max_rounds_runs_once(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path)  # max_rounds=None -> coerced to 1
-        runner = MagicMock(return_value=_fake_round_result())
+class TestEnrichPrompt:
+    def test_round1_returns_base_prompt(self):
+        result = _enrich_prompt_for_round("base prompt", "fixed", 1, [])
+        assert result == "base prompt"
 
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            runner,
-        ):
-            result = _run_fixed(ctx)
+    def test_fixed_round2_with_prior_results_adds_summary(self):
+        evals = [{"benchmark_speedup": 1.5}]
+        result = _enrich_prompt_for_round("base prompt", "fixed", 2, evals)
+        assert "Previous Rounds" in result
+        assert "1.500x" in result
+        assert "base prompt" in result
 
-        assert runner.call_count == 1
-        assert result.best_speedup == 1.2
+    def test_fixed_round2_no_improvement_returns_base(self):
+        evals = [{"benchmark_speedup": 1.0}]
+        result = _enrich_prompt_for_round("base prompt", "fixed", 2, evals)
+        assert result == "base prompt"
 
-    def test_max_rounds_three_runs_three_times(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, max_rounds=3)
-        runner = MagicMock(side_effect=[
-            _fake_round_result(1.1),
-            _fake_round_result(1.3),
-            _fake_round_result(1.2),
-        ])
+    def test_planned_mode_returns_base_unchanged(self):
+        evals = [{"benchmark_speedup": 2.0}]
+        result = _enrich_prompt_for_round("base prompt", "planned", 2, evals)
+        assert result == "base prompt"
 
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            runner,
-        ):
-            result = _run_fixed(ctx)
+    def test_mixed_mode_returns_base_unchanged(self):
+        evals = [{"benchmark_speedup": 2.0}]
+        result = _enrich_prompt_for_round("base prompt", "mixed", 2, evals)
+        assert result == "base prompt"
 
-        assert runner.call_count == 3
-        # Best across rounds wins (1.3 > 1.2 > 1.1)
-        assert result.best_speedup == 1.3
-
-    def test_max_rounds_zero_coerced_to_one(self, tmp_path: Path) -> None:
-        """Defensive: 0 or negative max_rounds shouldn't skip the loop."""
-        ctx = _make_ctx(tmp_path, max_rounds=0)
-        runner = MagicMock(return_value=_fake_round_result())
-
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            runner,
-        ):
-            _run_fixed(ctx)
-
-        assert runner.call_count == 1
+    def test_empty_evals_returns_base(self):
+        result = _enrich_prompt_for_round("base prompt", "fixed", 2, [])
+        assert result == "base prompt"
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Best-across-rounds selection
+# _should_stop_before_round
 # ──────────────────────────────────────────────────────────────────────
 
 
-class TestBestSelection:
-    def test_picks_highest_speedup(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, max_rounds=3)
-        results = [
-            _fake_round_result(1.1),
-            _fake_round_result(2.0),  # winner
-            _fake_round_result(1.5),
-        ]
-        runner = MagicMock(side_effect=results)
+class TestShouldStop:
+    def test_no_stop_signals(self):
+        ctx = _make_ctx()
+        assert _should_stop_before_round(ctx) is False
 
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            runner,
-        ):
-            result = _run_fixed(ctx)
-        assert result is results[1]
-        assert result.best_speedup == 2.0
+    def test_soft_stop_set(self):
+        evt = threading.Event()
+        evt.set()
+        ctx = _make_ctx(soft_stop=evt)
+        assert _should_stop_before_round(ctx) is True
 
-    def test_returns_none_when_all_rounds_fail(self, tmp_path: Path) -> None:
-        """When every round returns None (no best), overall best is None."""
-        ctx = _make_ctx(tmp_path, max_rounds=2)
-        runner = MagicMock(side_effect=[None, None])
+    def test_soft_stop_not_set(self):
+        evt = threading.Event()
+        ctx = _make_ctx(soft_stop=evt)
+        assert _should_stop_before_round(ctx) is False
 
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            runner,
-        ):
-            result = _run_fixed(ctx)
-        assert result is None
+    def test_deadline_expired(self):
+        deadline = SimpleNamespace(expired=lambda: True)
+        ctx = _make_ctx(deadline=deadline)
+        assert _should_stop_before_round(ctx) is True
 
-    def test_picks_winning_round_when_others_are_none(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, max_rounds=3)
-        winner = _fake_round_result(1.4)
-        runner = MagicMock(side_effect=[None, winner, None])
-
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            runner,
-        ):
-            result = _run_fixed(ctx)
-        assert result is winner
+    def test_deadline_not_expired(self):
+        deadline = SimpleNamespace(expired=lambda: False)
+        ctx = _make_ctx(deadline=deadline)
+        assert _should_stop_before_round(ctx) is False
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Per-round artefact nesting
+# _build_postprocess_ctx
 # ──────────────────────────────────────────────────────────────────────
 
 
-class TestPerRoundArtefactDirs:
-    def test_single_round_keeps_flat_output_dir(self, tmp_path: Path) -> None:
-        """max_rounds=1 preserves legacy flat layout — no round_1/ subdir."""
-        ctx = _make_ctx(tmp_path, max_rounds=1)
-        captured_kwargs: list[dict] = []
-
-        def _runner(**kwargs):
-            captured_kwargs.append(kwargs)
-            return _fake_round_result()
-
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            _runner,
-        ):
-            _run_fixed(ctx)
-
-        assert len(captured_kwargs) == 1
-        # output_dir stays flat (tmp_path itself, not tmp_path/round_1)
-        assert captured_kwargs[0]["output_dir"] == tmp_path
-
-    def test_multi_round_nests_output_dirs(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, max_rounds=3)
-        captured_kwargs: list[dict] = []
-
-        def _runner(**kwargs):
-            captured_kwargs.append(kwargs)
-            return _fake_round_result()
-
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            _runner,
-        ):
-            _run_fixed(ctx)
-
-        assert len(captured_kwargs) == 3
-        for i, call_kwargs in enumerate(captured_kwargs, start=1):
-            expected = tmp_path / f"round_{i}"
-            assert call_kwargs["output_dir"] == expected
-            assert expected.is_dir()
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Round > 1 task body enrichment
-# ──────────────────────────────────────────────────────────────────────
-
-
-class TestPreviousBestInTaskBody:
-    def test_first_round_body_has_no_previous_best(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, max_rounds=2)
-        captured_bodies: list[str] = []
-
-        def _runner(**kwargs):
-            captured_bodies.append(kwargs["task_content"])
-            return _fake_round_result(1.5)
-
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            _runner,
-        ):
-            _run_fixed(ctx)
-
-        # Round 1 body: no "Previous Rounds" section
-        assert "Previous Rounds" not in captured_bodies[0]
-
-    def test_second_round_body_mentions_previous_best(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, max_rounds=2)
-        captured_bodies: list[str] = []
-
-        def _runner(**kwargs):
-            captured_bodies.append(kwargs["task_content"])
-            return _fake_round_result(1.5)
-
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            _runner,
-        ):
-            _run_fixed(ctx)
-
-        assert len(captured_bodies) == 2
-        # Round 2 body mentions the previous best speedup
-        assert "Previous Rounds" in captured_bodies[1]
-        assert "1.500x" in captured_bodies[1]
-        # AND still carries the original user prompt
-        assert "Optimize this kernel." in captured_bodies[1]
-
-    def test_no_previous_best_when_round1_returns_none(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, max_rounds=2)
-        captured_bodies: list[str] = []
-
-        def _runner(**kwargs):
-            captured_bodies.append(kwargs["task_content"])
-            return None  # round 1 produces no best
-
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            _runner,
-        ):
-            _run_fixed(ctx)
-
-        # Round 2 body has no previous-best block because round 1 gave None
-        assert "Previous Rounds" not in captured_bodies[1]
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Kwargs plumbing
-# ──────────────────────────────────────────────────────────────────────
-
-
-class TestKwargsPlumbing:
-    def test_model_and_config_flow_through(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, max_rounds=1)
-        ctx.config = {"agent": {"extra_setting": "foo"}, "model": {"name": "m"}}
-        ctx.test_command = "python3 /tmp/h.py --correctness"
-        captured_kwargs: list[dict] = []
-
-        def _runner(**kwargs):
-            captured_kwargs.append(kwargs)
-            return _fake_round_result()
-
-        with patch(
-            "minisweagent.agents.homogeneous.homogeneous_agent.run_homogeneous_agent",
-            _runner,
-        ):
-            _run_fixed(ctx)
-
-        kwargs = captured_kwargs[0]
-        assert kwargs["config"] == ctx.config
-        assert kwargs["model"] is ctx.model
-        assert kwargs["agent_config"]["save_patch"] is True
-        assert kwargs["agent_config"]["test_command"] == ctx.test_command
-        assert kwargs["agent_config"]["extra_setting"] == "foo"
-        assert kwargs["gpu_ids"] == "0"
-
-    def test_invoke_helper_preserves_num_parallel(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, max_rounds=1)
-        ctx.num_parallel = 4
-        captured_kwargs: list[dict] = []
-
-        _invoke_fixed_runner(
-            ctx=ctx,
-            body="hello",
-            run_fixed_mode=lambda **kwargs: captured_kwargs.append(kwargs) or None,
-            round_num=1,
+class TestBuildPostprocessCtx:
+    def test_basic_fields(self, tmp_path: Path):
+        ctx = _make_ctx(
+            tmp_path,
+            preprocess_ctx={
+                "kernel_path": "/tmp/k.py",
+                "harness_path": "/tmp/h.py",
+                "baseline_metrics": {"latency": 10.0},
+            },
+            repo=tmp_path,
+            model=MagicMock(),
+            model_factory=MagicMock(),
+            user_prompt="optimize it",
+            rag_enabled=True,
         )
-        assert captured_kwargs[0]["num_parallel"] == 4
+        result = _build_postprocess_ctx(ctx)
+
+        assert result["output_dir"] == str(tmp_path)
+        assert result["repo_root"] == str(tmp_path)
+        assert result["harness_path"] == "/tmp/h.py"
+        assert result["gpu_ids"] == [0]
+        assert result["kernel_path"] == "/tmp/k.py"
+        assert result["baseline_metrics"] == {"latency": 10.0}
+        assert result["starting_patch"] == ""
+        assert result["_best_global_speedup"] == 0
+        assert result["user_instructions"] == "optimize it"
+        assert result["rag_enabled"] is True
+
+    def test_preprocess_ctx_keys_merged(self, tmp_path: Path):
+        ctx = _make_ctx(
+            tmp_path,
+            preprocess_ctx={"kernel_path": "/tmp/k.py", "extra_key": "value"},
+        )
+        result = _build_postprocess_ctx(ctx)
+        assert result["extra_key"] == "value"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# _resolve_task_file_meta
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestResolveTaskFileMeta:
+    def test_existing_files_resolved(self, tmp_path: Path):
+        (tmp_path / "COMMANDMENT.md").write_text("cmd")
+        (tmp_path / "baseline_metrics.json").write_text("{}")
+
+        meta = _resolve_task_file_meta(
+            tmp_path, "/tmp/k.py", "/tmp/repo", "/tmp/h.py", "pytest"
+        )
+        assert meta["commandment"] == str(tmp_path / "COMMANDMENT.md")
+        assert meta["baseline_metrics"] == str(tmp_path / "baseline_metrics.json")
+        assert meta["harness_path"] == "/tmp/h.py"
+        assert meta["kernel_path"] == "/tmp/k.py"
+        assert meta["repo_root"] == "/tmp/repo"
+        assert meta["test_command"] == "pytest"
+
+    def test_missing_files_are_none(self, tmp_path: Path):
+        meta = _resolve_task_file_meta(tmp_path, "", "", "", None)
+        assert meta["commandment"] is None
+        assert meta["baseline_metrics"] is None
+        assert meta["profiling"] is None
+        assert meta["harness_path"] is None
+        assert meta["kernel_path"] is None
+        assert meta["test_command"] is None

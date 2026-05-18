@@ -61,6 +61,43 @@ def parse_google_benchmark_ms(output: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
+def parse_labeled_latencies_ms(output: str) -> dict[str, float]:
+    """Extract per-entry latencies from labeled benchmark output.
+
+    Matches lines like::
+
+        Perf: 0.0122 ms (shape_0_forward)
+        Latency: 0.0342 ms (config_name)
+        Time: 1.234 ms
+
+    Returns ``{label: latency_ms}`` where *label* comes from the
+    parenthesized suffix or a generated index when absent.
+    """
+    results: dict[str, float] = {}
+    idx = 0
+    for m in re.finditer(
+        r"^\s*\w[\w\s]*:\s*([\d.]+(?:e[+-]?\d+)?)\s*ms\s*(?:\(([^)]+)\))?\s*$",
+        output,
+        re.MULTILINE,
+    ):
+        val = float(m.group(1))
+        label = m.group(2) or f"entry_{idx}"
+        if 0.0001 < val < 1e6:
+            results[label] = val
+        idx += 1
+    return results
+
+
+def _labeled_latencies_geomean_ms(output: str) -> float | None:
+    """Geometric mean of labeled latency lines, or ``None`` if none found."""
+    entries = parse_labeled_latencies_ms(output)
+    if not entries:
+        return None
+    import math
+    vals = list(entries.values())
+    return math.exp(sum(math.log(v) for v in vals) / len(vals))
+
+
 def parse_shape_count(output: str) -> int | None:
     """Extract shape count from harness benchmark output."""
     m = re.search(r"(\d+)\s+shapes", output, re.IGNORECASE)
@@ -70,13 +107,16 @@ def parse_shape_count(output: str) -> int | None:
 def parse_shape_latencies_ms(output: str) -> dict[str, float]:
     """Extract per-shape latencies from harness benchmark output.
 
-    Expected format:
-        ``(32,4096): 0.0503 ms``
+    Supports two formats:
+        ``(32,4096): 0.0503 ms``  (Triton harness)
+        ``Perf: 0.0122 ms (shape_0_forward)``  (labeled, e.g. HIP task_runner)
     """
     shape_latencies: dict[str, float] = {}
     for m in re.finditer(r"^\s*(\([^)]*\)):\s*([\d.]+(?:e[+-]?\d+)?)\s*ms\s*$", output, re.MULTILINE):
         shape_latencies[m.group(1)] = float(m.group(2))
-    return shape_latencies
+    if shape_latencies:
+        return shape_latencies
+    return parse_labeled_latencies_ms(output)
 
 
 def extract_benchmark_config_lines(output: str) -> list[str] | None:
@@ -166,6 +206,9 @@ def _extract_latency(text: str) -> float | None:
     if val is not None:
         return val
     val = parse_google_benchmark_ms(text)
+    if val is not None:
+        return val
+    val = _labeled_latencies_geomean_ms(text)
     if val is not None:
         return val
 

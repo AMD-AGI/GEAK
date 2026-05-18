@@ -12,7 +12,7 @@ Each dataclass is serialized to a JSON manifest on disk:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 
@@ -108,6 +108,32 @@ class FullBenchmarkResult:
 
 
 @dataclass
+class PerTaskOutcome:
+    """Per-task outcome within a round, for dispatcher feedback."""
+
+    label: str = ""
+    agent_name: str = ""
+    kind: str = "planned"
+    speedup: float | None = None
+    status: str = "ok"
+
+    def to_dict(self) -> dict[str, Any]:
+        return _strip_none({f.name: getattr(self, f.name) for f in fields(self)})
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PerTaskOutcome:
+        if not isinstance(d, dict):
+            return cls()
+        return cls(
+            label=str(d.get("label", "")),
+            agent_name=str(d.get("agent_name", "")),
+            kind=str(d.get("kind", "planned")),
+            speedup=d.get("speedup"),
+            status=str(d.get("status", "ok")),
+        )
+
+
+@dataclass
 class RoundEvaluation:
     """Per-round evaluation result returned by postprocess.
 
@@ -119,6 +145,7 @@ class RoundEvaluation:
     best_task: str = ""
     benchmark_speedup: float = 1.0
     full_benchmark: FullBenchmarkResult | None = None
+    per_task: list[PerTaskOutcome] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {}
@@ -128,6 +155,10 @@ class RoundEvaluation:
                 continue
             if isinstance(val, FullBenchmarkResult):
                 d[f.name] = val.to_dict()
+            elif isinstance(val, list) and val and isinstance(val[0], PerTaskOutcome):
+                d[f.name] = [o.to_dict() for o in val]
+            elif isinstance(val, list) and not val:
+                continue
             else:
                 d[f.name] = val
         return d
@@ -138,12 +169,15 @@ class RoundEvaluation:
             return cls()
         fb_raw = d.get("full_benchmark")
         fb = FullBenchmarkResult.from_dict(fb_raw) if isinstance(fb_raw, dict) else None
+        pt_raw = d.get("per_task")
+        pt = [PerTaskOutcome.from_dict(o) for o in pt_raw] if isinstance(pt_raw, list) else []
         return cls(
             round=int(d.get("round", 0)),
             best_patch=str(d.get("best_patch", "")),
             best_task=str(d.get("best_task", "")),
             benchmark_speedup=float(d.get("benchmark_speedup", 1.0)),
             full_benchmark=fb,
+            per_task=pt,
         )
 
 
