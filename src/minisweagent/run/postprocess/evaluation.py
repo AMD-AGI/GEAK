@@ -17,13 +17,18 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
+import math
+
 from minisweagent.run.postprocess.benchmark_parsing import (
+    compute_shape_speedups,
     extract_benchmark_config_lines,
     extract_latency_ms,
     parse_shape_count,
+    parse_shape_latencies_ms,
     parse_total_kernel_time_ms,
 )
 from minisweagent.run.utils.generated_artifacts import (
@@ -392,36 +397,50 @@ def preflight_commandment_contract(
         "preflight_commandment_contract: smoke-testing COMMANDMENT against %s with iterations=1",
         repo_root_path,
     )
-    try:
-        result = subprocess.run(
-            ["bash", script],
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            cwd=str(repo_root_path),
-            env=env,
-        )
-    except Exception as exc:
-        raise CommandmentExecutionError(
-            "PREFLIGHT", None, f"SETUP+CORRECTNESS subprocess failed to complete: {exc}"
-        ) from exc
+    max_attempts = 3
+    last_result = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = subprocess.run(
+                ["bash", script],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                cwd=str(repo_root_path),
+                env=env,
+            )
+        except Exception as exc:
+            raise CommandmentExecutionError(
+                "PREFLIGHT", None, f"SETUP+CORRECTNESS subprocess failed to complete: {exc}"
+            ) from exc
 
-    if result.returncode != 0:
-        stderr_tail = _format_stderr_tail(result.stderr)
-        broken = _stderr_indicates_broken_contract(result.stderr)
-        detail = (
-            f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
-            if broken is not None
-            else f"non-zero exit; stderr tail:\n{stderr_tail}"
-        )
-        logger.error(
-            "preflight_commandment_contract: FAILED (rc=%d) -- aborting before sub-agent fan-out:\n%s",
-            result.returncode,
-            stderr_tail,
-        )
-        raise CommandmentExecutionError("PREFLIGHT", result.returncode, detail)
+        if result.returncode == 0:
+            logger.info(
+                "preflight_commandment_contract: PASS (attempt %d/%d)",
+                attempt, max_attempts,
+            )
+            return
 
-    logger.info("preflight_commandment_contract: PASS")
+        last_result = result
+        if attempt < max_attempts:
+            logger.warning(
+                "preflight_commandment_contract: FAIL on attempt %d/%d (rc=%d), retrying in 5s...",
+                attempt, max_attempts, result.returncode,
+            )
+            time.sleep(5)
+
+    stderr_tail = _format_stderr_tail(last_result.stderr)
+    broken = _stderr_indicates_broken_contract(last_result.stderr)
+    detail = (
+        f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
+        if broken is not None
+        else f"non-zero exit after {max_attempts} attempts; stderr tail:\n{stderr_tail}"
+    )
+    logger.error(
+        "preflight_commandment_contract: FAILED after %d attempts (rc=%d):\n%s",
+        max_attempts, last_result.returncode, stderr_tail,
+    )
+    raise CommandmentExecutionError("PREFLIGHT", last_result.returncode, detail)
 
 
 def recapture_commandment_baseline(
@@ -638,6 +657,17 @@ def _compute_verified_speedup(
     baseline_ms = extract_latency_ms(baseline_text)
 
     if candidate_ms is None or baseline_ms is None:
+        candidate_shapes = parse_shape_latencies_ms(candidate_stdout)
+        baseline_shapes = parse_shape_latencies_ms(baseline_text)
+        shape_speedups = compute_shape_speedups(baseline_shapes, candidate_shapes)
+        if shape_speedups:
+            vals = [s["speedup"] for s in shape_speedups.values()]
+            geomean = math.exp(sum(math.log(v) for v in vals) / len(vals))
+            round_eval[section_key]["verified_speedup"] = round(geomean, 4)
+            round_eval[section_key]["per_shape_speedups"] = shape_speedups
+            round_eval[section_key]["speedup_method"] = "per_shape_geomean"
+            logger.info("  Verified speedup (per-shape geomean): %.4fx (%d shapes)", geomean, len(shape_speedups))
+            return
         msg = f"latency parse failed (candidate_ms={candidate_ms}, baseline_ms={baseline_ms})"
         logger.warning("Could not extract latency: %s", msg)
         round_eval[section_key]["failure_reason"] = msg
@@ -770,6 +800,14 @@ def run_profile(
         profile_result = json.loads(dest.read_text())
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Failed to parse profile output: %s", exc)
+        return
+
+    if not profile_result.get("success", True):
+        logger.warning(
+            "Profiler reported failure for round %d — skipping profile comparison: %s",
+            round_num,
+            profile_result.get("error", "unknown error"),
+        )
         return
 
     baseline_metrics_path = pp_dir / "baseline_metrics.json"

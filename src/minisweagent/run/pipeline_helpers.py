@@ -49,6 +49,9 @@ DEFAULT_HETEROGENEOUS = False
 RUN_MODES: tuple[str, ...] = ("quick", "full")
 DEFAULT_RUN_MODE: str = "full"
 
+PIPELINE_MODES: tuple[str, ...] = ("fixed", "planned", "mixed")
+DEFAULT_PIPELINE_MODE: str = "mixed"
+
 
 def apply_mode_presets(config: dict, mode: str) -> dict:
     """Deep-merge ``config["run"]["presets"][mode]`` into *config*.
