@@ -524,13 +524,20 @@ def _schema_render_commandment() -> dict[str, Any]:
                 "kernel_path": {"type": "string", "description": "Absolute path to the kernel."},
                 "harness_path": {"type": "string", "description": "Absolute path to the verified harness."},
                 "repo_root": {"type": "string", "description": "Repository root."},
-                "out_path": {"type": "string", "description": "Where to write COMMANDMENT.md."},
+                "out_path": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Where to write COMMANDMENT.md. When omitted, the tool "
+                        "defaults to ``<output_dir>/COMMANDMENT.md`` using the orchestrator's "
+                        "run-time ``output_dir``."
+                    ),
+                },
                 "baseline_metrics": {
                     "type": "object",
                     "description": "Optional baseline metrics dict (median_ms, samples_ms, etc.).",
                 },
             },
-            "required": ["kernel_path", "harness_path", "repo_root", "out_path"],
+            "required": ["kernel_path", "harness_path", "repo_root"],
         },
     }
 
@@ -792,9 +799,30 @@ def _make_tool_render_commandment(
         kernel_path: str,
         harness_path: str,
         repo_root: str,
-        out_path: str,
+        out_path: str | None = None,
         baseline_metrics: dict | None = None,
+        **_extra_ignored: Any,
     ) -> dict[str, Any]:
+        if _extra_ignored:
+            logger.debug("render_commandment ignored extra kwargs: %s", list(_extra_ignored))
+
+        # ``out_path`` used to be required positionally. When the LLM
+        # forgets it (observed in the field), fall back to
+        # ``<output_dir>/COMMANDMENT.md`` if the orchestrator's run
+        # context carries an ``output_dir``. This is a graceful default,
+        # not silent guessing: every Path-B orchestrator run sets
+        # ``output_dir`` explicitly in :meth:`PreprocessOrchestratorAgent.run`.
+        if not out_path:
+            output_dir = (
+                agent._extra_template_vars.get("output_dir") if hasattr(agent, "_extra_template_vars") else None
+            )
+            if not output_dir:
+                raise ValueError(
+                    "render_commandment: out_path was not provided and no output_dir "
+                    "is available on the orchestrator. Pass out_path explicitly."
+                )
+            out_path = str(Path(output_dir) / "COMMANDMENT.md")
+
         ctx = CommandmentContext(
             kernel_path=Path(kernel_path),
             harness_path=Path(harness_path),

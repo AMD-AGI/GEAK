@@ -29,7 +29,9 @@ from minisweagent.run.preprocess_v3.tools import (
     _make_tool_collect_baseline,
     _make_tool_collect_profile,
     _make_tool_commandment_from_user_command,
+    _make_tool_render_commandment,
     _schema_commandment_from_user_command,
+    _schema_render_commandment,
     register_default_tools,
     validate_call_against_schema,
 )
@@ -554,3 +556,83 @@ def test_collect_profile_no_extras_still_works(monkeypatch, tmp_path: Path) -> N
 
     assert result["ok"] is True
     assert result["command"] == "<stub>"
+
+
+# ---------------------------------------------------------------------------
+# render_commandment defaults out_path from output_dir (B2)
+# ---------------------------------------------------------------------------
+
+
+def _stub_render_commandment(_lang, _ctx, *, out_path):
+    """Stub ``render_commandment`` — writes a tiny marker file + returns its text."""
+    text = "# Commandment\n(stubbed)\n"
+    if out_path is not None:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text(text)
+    return text
+
+
+def test_render_commandment_defaults_out_path_from_output_dir(monkeypatch, tmp_path: Path) -> None:
+    """When ``out_path`` is omitted, the tool writes to ``<output_dir>/COMMANDMENT.md``."""
+    monkeypatch.setattr(_tools_mod, "render_commandment", _stub_render_commandment)
+    output_dir = tmp_path / "outputs"
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    agent._extra_template_vars = {"output_dir": str(output_dir)}
+    tool = _make_tool_render_commandment(agent, _LANG)
+
+    result = tool(
+        kernel_path=str(tmp_path / "k.py"),
+        harness_path=str(tmp_path / "h.py"),
+        repo_root=str(tmp_path),
+    )
+
+    expected = output_dir / "COMMANDMENT.md"
+    assert result["ok"] is True
+    assert result["out_path"] == str(expected)
+    assert expected.exists()
+    assert agent._collected["commandment_path"] == str(expected)
+
+
+def test_render_commandment_explicit_out_path_preserved(monkeypatch, tmp_path: Path) -> None:
+    """When ``out_path`` is explicit, it is used verbatim (existing behaviour)."""
+    monkeypatch.setattr(_tools_mod, "render_commandment", _stub_render_commandment)
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    agent._extra_template_vars = {"output_dir": str(tmp_path / "ignored")}
+    tool = _make_tool_render_commandment(agent, _LANG)
+
+    explicit_path = tmp_path / "custom" / "C.md"
+    result = tool(
+        kernel_path=str(tmp_path / "k.py"),
+        harness_path=str(tmp_path / "h.py"),
+        repo_root=str(tmp_path),
+        out_path=str(explicit_path),
+    )
+
+    assert result["out_path"] == str(explicit_path)
+    assert explicit_path.exists()
+    assert not (tmp_path / "ignored" / "COMMANDMENT.md").exists()
+
+
+def test_render_commandment_missing_out_path_and_output_dir_raises(monkeypatch, tmp_path: Path) -> None:
+    """No ``out_path`` and no ``output_dir`` on the agent is a hard error."""
+    monkeypatch.setattr(_tools_mod, "render_commandment", _stub_render_commandment)
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    agent._extra_template_vars = {}
+    tool = _make_tool_render_commandment(agent, _LANG)
+
+    with pytest.raises(ValueError, match="out_path"):
+        tool(
+            kernel_path=str(tmp_path / "k.py"),
+            harness_path=str(tmp_path / "h.py"),
+            repo_root=str(tmp_path),
+        )
+
+
+def test_render_commandment_schema_out_path_no_longer_required() -> None:
+    """The schema declares ``out_path`` as optional so the LLM can omit it."""
+    schema = _schema_render_commandment()
+    required = schema["parameters"]["required"]
+    assert "out_path" not in required
+    assert set(required) == {"kernel_path", "harness_path", "repo_root"}
+    out_path_desc = schema["parameters"]["properties"]["out_path"]["description"]
+    assert "Optional" in out_path_desc
