@@ -10,7 +10,7 @@ The runner has TWO process modes:
 
 * **Parent mode** (default, when ``--plan ...`` is supplied) — iterates
   the test plan, spawns a child Python process per scenario via
-  ``subprocess.run(..., timeout=1800)``. The child process isolation
+  ``subprocess.run(..., timeout=600)``. The child process isolation
   gives us:
 
   - hard wall-clock cap per invocation (no signal handling required);
@@ -95,7 +95,16 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from preprocess_v3_oracle import load_oracle_for_kernel, shape_signature  # noqa: E402
 
-DEFAULT_PER_RUN_TIMEOUT_S = 1800
+# Per-scenario wall-clock cap. Tightened from 1800s to 600s alongside the
+# ``--preprocess-only`` CLI flag work: this runner already short-circuits
+# at PreprocessResult (the child process runs the v3 orchestrator
+# in-process and exits BEFORE any round loop), so a healthy run completes
+# in 1-5 minutes wall-clock and a 600s budget surfaces hangs / runaway
+# LLM loops without burning 30 minutes per scenario. Note: this runner
+# does NOT spawn a ``geak`` subprocess (see module docstring); the
+# ``--preprocess-only`` flag is therefore not threaded through here, the
+# in-process invocation already has the same effect.
+DEFAULT_PER_RUN_TIMEOUT_S = 600
 DEFAULT_DETERMINISM_RUNS = 3
 
 HIP_CANONICAL_PHRASES = ("hipLaunchKernelGGL", "__global__", "hip/hip_runtime", "hipMalloc")
