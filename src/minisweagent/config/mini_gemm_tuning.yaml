@@ -168,7 +168,7 @@ env:
 
 model:
   model_class: litellm
-  base_url: None
+  base_url: null
   # claude-opus-4.6, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
   model_name: claude-opus-4-6
   api_key: ""
