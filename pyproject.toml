@@ -94,6 +94,7 @@ Repository = "https://github.com/SWE-agent/mini-SWE-agent"
 [project.scripts]
 geak = "minisweagent.run.mini:app"
 geak-preprocess = "minisweagent.run.preprocess.preprocessor:main"
+geak-gemm-tuning = "minisweagent.run.gemm_tuning:app"
 kernel-profile = "minisweagent.run.preprocess.kernel_profile:main"
 commandment = "minisweagent.run.preprocess.commandment:main"
 validate-commandment = "minisweagent.tools.validate_commandment:main"
