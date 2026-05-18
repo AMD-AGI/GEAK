@@ -301,8 +301,27 @@ class PreprocessSubagentDispatcher:
         }
 
     @staticmethod
-    def _format_context_preamble(context: dict[str, Any]) -> str:
-        """Render an optional context dict as a Markdown preamble."""
+    def _format_context_preamble(context: Any) -> str:
+        """Render an optional context value as a Markdown preamble.
+
+        Defensive: the orchestrator LLM has been observed to pass a bare
+        string (or, more rarely, ``None`` / another scalar) for the
+        ``context`` argument of ``dispatch_subagent`` despite the schema
+        declaring it as an object. Coerce before the ``.items()`` call so
+        the preamble assembly never raises ``AttributeError``.
+        """
+        if context is None:
+            return ""
+        if isinstance(context, str):
+            context = {"context": context}
+        elif not isinstance(context, dict):
+            logger.warning(
+                "dispatch_subagent context expected dict, got %s; coercing",
+                type(context).__name__,
+            )
+            context = {"context": str(context)}
+        if not context:
+            return ""
         lines = ["## Context"]
         for key, value in context.items():
             lines.append(f"- **{key}**: {value}")

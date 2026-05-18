@@ -25,6 +25,7 @@ from minisweagent.run.preprocess_v3.orchestrator import PreprocessOrchestratorAg
 from minisweagent.run.preprocess_v3.registry import SubagentRegistry
 from minisweagent.run.preprocess_v3.tools import (
     PATH_A_MODES,
+    PreprocessSubagentDispatcher,
     RunInstructions,
     _make_tool_collect_baseline,
     _make_tool_collect_profile,
@@ -636,3 +637,100 @@ def test_render_commandment_schema_out_path_no_longer_required() -> None:
     assert set(required) == {"kernel_path", "harness_path", "repo_root"}
     out_path_desc = schema["parameters"]["properties"]["out_path"]["description"]
     assert "Optional" in out_path_desc
+
+
+# ---------------------------------------------------------------------------
+# _format_context_preamble robust to non-dict input (B3)
+# ---------------------------------------------------------------------------
+
+
+def test_format_context_preamble_with_dict_keeps_existing_behaviour() -> None:
+    """A dict input renders the canonical Markdown preamble — existing contract."""
+    text = PreprocessSubagentDispatcher._format_context_preamble({"a": 1, "b": "two"})
+    assert "## Context" in text
+    assert "- **a**: 1" in text
+    assert "- **b**: two" in text
+
+
+def test_format_context_preamble_with_string_coerces_to_context_key() -> None:
+    """A bare string is wrapped into ``{"context": <str>}`` so the preamble renders."""
+    text = PreprocessSubagentDispatcher._format_context_preamble("some loose string")
+    assert "## Context" in text
+    assert "some loose string" in text
+    assert "- **context**: some loose string" in text
+
+
+def test_format_context_preamble_with_none_returns_empty_string() -> None:
+    """``None`` produces an empty preamble (no crash, no junk lines)."""
+    assert PreprocessSubagentDispatcher._format_context_preamble(None) == ""
+
+
+def test_format_context_preamble_with_unknown_type_coerces_via_str(caplog) -> None:
+    """Non-(dict|str|None) types coerce via ``str(...)`` with a warning log."""
+    import logging as _logging
+
+    records: list[_logging.LogRecord] = []
+
+    class _Capture(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture(level=_logging.WARNING)
+    logger = _tools_mod.logger
+    logger.addHandler(handler)
+    try:
+        text = PreprocessSubagentDispatcher._format_context_preamble([1, 2, 3])
+    finally:
+        logger.removeHandler(handler)
+
+    assert "## Context" in text
+    assert "[1, 2, 3]" in text
+    assert any("expected dict" in r.getMessage() for r in records if r.levelno == _logging.WARNING)
+
+
+def test_dispatcher_string_context_does_not_crash(tmp_path: Path) -> None:
+    """End-to-end: dispatcher called with a string ``context`` does NOT raise.
+
+    Regression for the field-observed crash
+    ``AttributeError: 'str' object has no attribute 'items'`` in
+    matrix_multiplication/path_b_determinism/run1.
+    """
+
+    captured_tasks: list[str] = []
+
+    class _StubChildAgent:
+        def __init__(self, **_):
+            pass
+
+        def run(self, task: str):
+            captured_tasks.append(task)
+            return ("Submitted", "ok")
+
+    from minisweagent.run.preprocess_v3.registry import SubagentSpec
+
+    registry = SubagentRegistry(root=tmp_path / "_empty_registry")
+    registry._cache = {  # type: ignore[attr-defined]
+        "harness-generator": SubagentSpec(
+            name="harness-generator",
+            description="t",
+            model="m",
+            tools=["bash"],
+            max_steps=1,
+            system_prompt="sys",
+        ),
+    }
+    dispatcher = PreprocessSubagentDispatcher(registry, agent_factory=_StubChildAgent)
+
+    result = dispatcher(
+        name="harness-generator",
+        task="hello",
+        model=_StubModel(),
+        context="i am a stringy context",
+    )
+
+    assert result["success"] is True
+    assert len(captured_tasks) == 1
+    rendered = captured_tasks[0]
+    assert "## Context" in rendered
+    assert "i am a stringy context" in rendered
+    assert "hello" in rendered
