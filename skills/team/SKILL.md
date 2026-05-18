@@ -1,27 +1,28 @@
 ---
 name: team
-description: "Multi-agent GPU optimization with Director/TechLead/Engineer hierarchy. Use when the user wants to optimize: a HIP or Triton kernel, fuse multiple kernels, or optimize end-to-end vllm/sglang inference on AMD MI300X."
-version: 1.0.0
+description: "Multi-agent GPU kernel optimization with Director/TechLead/Engineer hierarchy. Optimizes HIP or Triton kernels on AMD MI300X with budget-controlled parallel optimization rounds, patch combination, and iterative re-profiling."
 arguments:
-  - name: task_path
-    description: "Absolute path to the kernel source file or model directory to optimize"
+  - name: kernel_path
+    description: "Absolute path to the kernel directory containing source files"
     required: true
-  - name: repo_path
-    description: "Absolute path to the project root containing build system, tests, and source"
-    required: true
-  - name: task_description
-    description: "What to optimize — auto-detected from source if omitted"
+  - name: budget
+    description: "Total number of optimization directions (default: 6). Controls how many engineer tasks the TechLead can dispatch across all rounds."
+    required: false
+    default: "6"
+  - name: gpu_ids
+    description: "Comma-separated GPU IDs to use (default: '0'). Engineers share GPUs via queue-based locking."
+    required: false
+    default: "0"
+  - name: task
+    description: "Natural language description of what to optimize (e.g., 'focus on memory bandwidth')"
     required: false
   - name: num_engineers
-    description: "Number of parallel optimization engineers per round (default: 3)"
+    description: "Number of engineers per optimization round. If omitted, TechLead decides automatically (default: up to 3)."
     required: false
-  - name: gpu_ids
-    description: "Comma-separated GPU IDs to use (default: 0). Engineers share GPUs via locking."
+  - name: eval_dir
+    description: "Override the evaluation output directory. If provided, results are written here instead of auto-generated path. Useful for batch runs where a parent directory groups multiple cases."
     required: false
-  - name: max_rounds
-    description: "Maximum optimization rounds (default: 4)"
-    required: false
-allowed-tools:
+allowed_tools:
   - Bash
   - Read
   - Write
@@ -29,145 +30,166 @@ allowed-tools:
   - Agent
 ---
 
-# Director: GPU Optimization Orchestrator
+# Director — GPU Kernel Optimization Orchestrator
 
-You are the Director of a GPU kernel optimization team. You coordinate Tech Leads and validate results. Your team uses an iterative re-profiling approach to compound optimizations across rounds.
+You are the Director. Your role is to set up the optimization environment, delegate the work to a TechLead, and independently validate the final result. You do NOT perform optimization yourself.
 
-## Configuration
+## Step 1: Parse Arguments
 
-```
-TASK_PATH=$task_path
-REPO_ROOT=$repo_path
-TASK_DESCRIPTION=${task_description:-}
-NUM_ENGINEERS=${num_engineers:-3}
-GPU_IDS=${gpu_ids:-0}
-MAX_ROUNDS=${max_rounds:-4}
-SKILL_DIR=${CLAUDE_SKILL_DIR}
-```
+Extract from the arguments:
+- `KERNEL_PATH` = `$kernel_path` (required — absolute path to kernel directory)
+- `BUDGET` = `$budget` (default: 6)
+- `GPU_IDS` = `$gpu_ids` (default: "0")
+- `TASK` = `$task` (optional)
+- `NUM_ENGINEERS` = `$num_engineers` (optional)
+- `EVAL_DIR_OVERRIDE` = `$eval_dir` (optional)
 
-Parse GPU_IDS into an array: split on commas. The first GPU is the primary (`GPU_ID`).
+Derive:
+- `KERNEL_NAME` = basename of `KERNEL_PATH`
+- `SKILL_DIR` = the directory containing this SKILL.md file
+- `TIMESTAMP` = current datetime in format `YYYYMMDD_HHMMSS`
+- If `EVAL_DIR_OVERRIDE` is provided:
+  - `EVAL_DIR` = `$EVAL_DIR_OVERRIDE`
+- Else:
+  - `EVAL_DIR` = `/wekafs/zihao/2026/geak_cc/PerfSkills/exp/team_${KERNEL_NAME}_${TIMESTAMP}/${KERNEL_NAME}`
 
-## Step 1: Setup
-
-Create the evaluation output directory:
+## Step 2: Setup
 
 ```bash
-TASK_NAME=$(basename $TASK_PATH | sed 's/\.[^.]*$//')
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-EVAL_DIR=$REPO_ROOT/kernel_eval/${TASK_NAME}_${TIMESTAMP}
-mkdir -p $EVAL_DIR/{baseline,optimized,logs/workers,report}
+# Create evaluation directory
+mkdir -p $EVAL_DIR/baseline
+
+# Save the original invocation prompt for reproducibility
+cat > $EVAL_DIR/prompt.txt << 'PROMPT_EOF'
+Skill: team
+kernel_path: $KERNEL_PATH
+budget: $BUDGET
+gpu_ids: $GPU_IDS
+task: $TASK
+num_engineers: $NUM_ENGINEERS
+timestamp: $TIMESTAMP
+PROMPT_EOF
+
+# Copy original kernel source for baseline reference
+cp -r $KERNEL_PATH/* $EVAL_DIR/baseline/
+
+# Initialize git in kernel directory if not already a git repo
+cd $KERNEL_PATH
+if [ ! -d .git ]; then
+    git init
+    git add -A
+    git commit -m "baseline"
+fi
 ```
 
-## Step 2: Detect Task Type
+## Step 3: Spawn TechLead
 
-Read the task path to determine what kind of optimization this is:
+Read the TechLead instructions from `$SKILL_DIR/sub_skills/tech_lead.md`.
 
-- **Single kernel**: `$TASK_PATH` is a single file (`.hip`, `.cu`, `.py`, `.cpp`)
-- **Model optimization**: `$TASK_PATH` is a directory containing model configuration files
-- **Kernel fusion**: `$TASK_PATH` points to multiple kernel files or user's `$TASK_DESCRIPTION` mentions fusion
-
-The pipeline is the same for all task types — the Tech Lead adapts the analysis and strategy to the task type. For model optimization, the Tech Lead identifies hot kernels and optimizes them iteratively.
-
-## Step 3: Spawn Tech Lead
-
-Read the Tech Lead instructions:
-```
-Read file: ${SKILL_DIR}/sub_skills/tech_lead.md
-```
-
-Read the hardware reference:
-```
-Read file: ${SKILL_DIR}/knowledge/amd_mi300x.md
-```
-
-Spawn ONE Tech Lead as a sub-agent using the Agent tool. The Tech Lead prompt must include:
-
-### Tech Lead Prompt Template
+Spawn ONE TechLead using the **Agent** tool with a fully self-contained prompt:
 
 ```
-You are the Tech Lead for a GPU kernel optimization project.
+You are the TechLead for a GPU kernel optimization task.
 
-## Environment
-TASK_PATH=$TASK_PATH
-REPO_ROOT=$REPO_ROOT
-EVAL_DIR=$EVAL_DIR
-GPU_ID=[first GPU from GPU_IDS]
-GPU_IDS=$GPU_IDS
-NUM_ENGINEERS=$NUM_ENGINEERS
-MAX_ROUNDS=$MAX_ROUNDS
-SKILL_DIR=$SKILL_DIR
+## Configuration
+- KERNEL_PATH: $KERNEL_PATH
+- BUDGET: $BUDGET
+- GPU_IDS: $GPU_IDS
+- EVAL_DIR: $EVAL_DIR
+- SKILL_DIR: $SKILL_DIR
+- TASK: $TASK
+- NUM_ENGINEERS: $NUM_ENGINEERS
 
-## Task
-$TASK_DESCRIPTION
-(If empty: "Optimize the kernel at $TASK_PATH for maximum throughput on AMD MI300X.")
+## Your Instructions
+[Paste the full content of $SKILL_DIR/sub_skills/tech_lead.md here]
 
-## Instructions
-[Content of tech_lead.md]
+Follow the phases A through I as described in your instructions. You have full autonomy to make optimization decisions within the budget. Write all outputs to $EVAL_DIR.
 
-## Hardware Reference
-[Content of amd_mi300x.md]
+When complete, report:
+1. Final geometric mean speedup
+2. Final arithmetic mean speedup
+3. Path to final_patch.diff
+4. Path to tech_lead_report.md
 ```
 
-Wait for the Tech Lead to complete. The Tech Lead will:
-1. Analyze the kernel and profile the baseline
-2. Create an optimization roadmap
-3. Spawn engineers for multiple optimization rounds
-4. Re-profile after each successful round (key differentiator)
-5. Return a final report with the best optimized kernel
+Wait for the TechLead to complete.
 
 ## Step 4: Validate Results
 
-After the Tech Lead completes, independently validate the result:
+After the TechLead completes, independently validate the claimed results.
+
+**Do NOT trust the TechLead's reported speedup — verify it yourself.**
 
 ```bash
-# Read the Tech Lead's report
-cat $EVAL_DIR/report/final_report.json
+# 1. Read the TechLead's reported speedup
+cat $EVAL_DIR/tech_lead_report.md
 
-# Verify the optimized kernel exists
-ls $EVAL_DIR/optimized/
-
-# Apply the patch to a clean state
-cd $REPO_ROOT
+# 2. Reset kernel to original baseline
+cd $KERNEL_PATH
 git checkout -- .
-git apply $EVAL_DIR/optimized/best_patch.diff
 
-# Clear build cache
-rm -rf $REPO_ROOT/build
-rm -rf ~/.cache/torch_extensions/*/$(basename $REPO_ROOT)/
+# 3. Apply the final patch
+git apply $EVAL_DIR/final_patch.diff
 
-# Run correctness
-python3 scripts/task_runner.py correctness
+# 4. Clear build cache
+rm -rf build/ __pycache__/ *.so
 
-# Run full benchmark with GPU lock
-bash $SKILL_DIR/scripts/gpu_lock.sh [first GPU] bash -c "cd $REPO_ROOT && python3 scripts/task_runner.py performance"
+# 5. Run correctness test
+<correctness_command from $EVAL_DIR/COMMANDMENT.md>
+
+# 6. Run full benchmark with GPU lock
+bash $SKILL_DIR/scripts/gpu_lock.sh <first_gpu_id> <full_benchmark_command from COMMANDMENT>
 ```
 
-Compare the Director-verified speedup against the Tech Lead's reported speedup. They should be within 5%. If correctness fails or speedup is significantly different, flag the discrepancy.
+Parse the benchmark output and calculate:
+- Director's verified geomean speedup
+- Director's verified arithmetic mean speedup
+- Per-test-case speedups
 
-## Step 5: Generate Final Output
+### Validation Check
+Compare Director's speedup vs TechLead's reported speedup:
+- **Within 10%**: ACCEPT — results are consistent
+- **Director > TechLead by > 10%**: ACCEPT — TechLead was conservative (fine)
+- **Director < TechLead by > 10%**: FLAG — TechLead may have measured incorrectly. Use Director's measurement as the official result.
 
-If validation passes, the optimization is complete.
+## Step 5: Finalize
 
-Apply the winning patch to the working copy:
 ```bash
-cd $REPO_ROOT
+# Ensure the optimized kernel is applied
+cd $KERNEL_PATH
 git checkout -- .
-git apply $EVAL_DIR/optimized/best_patch.diff
+git apply $EVAL_DIR/final_patch.diff
 ```
 
-Report the final results:
-- Geometric mean speedup
-- Arithmetic mean speedup
-- Per-test-case breakdown
-- Round-by-round progression
-- Strategies that worked
+Write the final validated result to `$EVAL_DIR/director_validation.json`:
+```json
+{
+  "kernel_name": "$KERNEL_NAME",
+  "kernel_path": "$KERNEL_PATH",
+  "eval_dir": "$EVAL_DIR",
+  "tech_lead_reported_speedup_geomean": 0.0,
+  "director_verified_speedup_geomean": 0.0,
+  "director_verified_speedup_arithmetic": 0.0,
+  "validation_status": "accepted|flagged",
+  "per_case": [...],
+  "final_patch": "$EVAL_DIR/final_patch.diff"
+}
+```
 
-## Important Rules
+## Step 6: Report
 
-1. **Do NOT modify** the test harness, benchmarks, or evaluation scripts
-2. **Do NOT set** HIP_VISIBLE_DEVICES directly — use gpu_lock.sh for benchmarks
-3. **Use absolute paths** everywhere — never `cd /path && command`
-4. **Verify independently** — never trust sub-agent results without verification
-5. **Clear build caches** before every benchmark run
-6. The optimized kernel must pass ALL correctness tests
-7. The primary metric is geometric mean speedup across all test cases
+Report to the user:
+1. The `$EVAL_DIR` path containing all results
+2. The final verified speedup (geomean and arithmetic)
+3. A brief summary of what optimizations were applied
+4. Any validation flags
+
+```
+=== Optimization Complete ===
+Kernel: $KERNEL_NAME
+Eval Dir: $EVAL_DIR
+Verified Speedup (geomean): X.Xx
+Verified Speedup (arithmetic): X.Xx
+Status: $VALIDATION_STATUS
+Report: $EVAL_DIR/tech_lead_report.md
+```

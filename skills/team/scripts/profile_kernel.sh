@@ -1,30 +1,37 @@
 #!/bin/bash
-# profile_kernel.sh — Profile a kernel with exclusive GPU access.
-# Uses gpu_lock.sh to ensure the profiler has uncontested GPU access.
-#
-# Usage: profile_kernel.sh <harness_command> <output_dir> <gpu_id> [num_warmup]
-# Example: profile_kernel.sh "python3 scripts/task_runner.py performance" ./profile_out 0 3
+# Kernel profiling wrapper with warmup and fallback chain
+# Usage: bash profile_kernel.sh <gpu_id> <benchmark_cmd> <output_dir>
+# Profiles the kernel using rocprof-compute (preferred) with fallbacks
 
 set -euo pipefail
 
-HARNESS_CMD="$1"
-OUTPUT_DIR="$2"
-GPU_ID="${3:-0}"
-NUM_WARMUP="${4:-3}"
+GPU_ID="${1:?Usage: profile_kernel.sh <gpu_id> <benchmark_cmd> <output_dir>}"
+BENCHMARK_CMD="${2:?Missing benchmark command}"
+OUTPUT_DIR="${3:?Missing output directory}"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GPU_LOCK="$SCRIPT_DIR/gpu_lock.sh"
 
 mkdir -p "$OUTPUT_DIR"
 
-echo "[profile] Warming up ($NUM_WARMUP runs)..."
-for i in $(seq 1 "$NUM_WARMUP"); do
-    bash "$GPU_LOCK" "$GPU_ID" bash -c "$HARNESS_CMD" > /dev/null 2>&1 || true
+echo "=== Profiling Setup ==="
+echo "GPU: $GPU_ID"
+echo "Command: $BENCHMARK_CMD"
+echo "Output: $OUTPUT_DIR"
+
+# Step 1: Warmup runs to stabilize GPU clocks
+echo ""
+echo "=== Warmup (3 runs) ==="
+for i in 1 2 3; do
+    echo "Warmup run $i/3..."
+    bash "$GPU_LOCK" "$GPU_ID" bash -c "$BENCHMARK_CMD" > /dev/null 2>&1 || true
 done
 
-echo "[profile] Profiling..."
-
+# Step 2: Try profilers in order of preference
 PROFILER=""
+PROFILE_SUCCESS=false
+
+# Try rocprof-compute (formerly omniperf)
 if command -v rocprof-compute &> /dev/null; then
     PROFILER="rocprof-compute"
 elif command -v omniperf &> /dev/null; then
@@ -32,34 +39,73 @@ elif command -v omniperf &> /dev/null; then
 fi
 
 if [ -n "$PROFILER" ]; then
-    WORKLOAD_BASE="/tmp/workloads"
-    rm -rf "$WORKLOAD_BASE" 2>/dev/null || true
+    echo ""
+    echo "=== Profiling with $PROFILER ==="
 
+    WORKLOAD_DIR="/tmp/team_v2_workloads/profile_$(date +%s)"
+    mkdir -p "$(dirname "$WORKLOAD_DIR")"
+
+    # Profile (with GPU lock)
     bash "$GPU_LOCK" "$GPU_ID" \
-        "$PROFILER" profile --no-roof -- $HARNESS_CMD \
-        > "$OUTPUT_DIR/profile_raw.txt" 2>&1 || true
+        $PROFILER profile --no-roof -n "$WORKLOAD_DIR" -- bash -c "$BENCHMARK_CMD" \
+        > "$OUTPUT_DIR/profile_raw.log" 2>&1
 
-    WORKLOAD_DIR=$(ls -td "$WORKLOAD_BASE"/*/ 2>/dev/null | head -1)
-    if [ -n "$WORKLOAD_DIR" ]; then
-        echo "[profile] Analyzing..."
-        "$PROFILER" analyze -p "$WORKLOAD_DIR" -o "$OUTPUT_DIR/analysis/" \
-            > "$OUTPUT_DIR/analysis_output.txt" 2>&1 || true
+    if [ $? -eq 0 ] && [ -d "$WORKLOAD_DIR" ]; then
+        echo "Profile data collected at $WORKLOAD_DIR"
 
-        if [ -f "$OUTPUT_DIR/analysis/log.txt" ]; then
-            cp "$OUTPUT_DIR/analysis/log.txt" "$OUTPUT_DIR/profile_report.txt"
+        # Analyze
+        echo ""
+        echo "=== Analyzing profile data ==="
+        $PROFILER analyze -p "$WORKLOAD_DIR" \
+            > "$OUTPUT_DIR/profile_report.txt" 2>&1 || true
+
+        if [ -f "$OUTPUT_DIR/profile_report.txt" ] && [ -s "$OUTPUT_DIR/profile_report.txt" ]; then
+            PROFILE_SUCCESS=true
+            echo "Profile report saved to $OUTPUT_DIR/profile_report.txt"
+
+            # Extract key sections
+            echo ""
+            echo "=== Key Metrics ==="
+            grep -A 50 "System Speed-of-Light" "$OUTPUT_DIR/profile_report.txt" 2>/dev/null | head -60 || true
+            echo "---"
+            grep -A 30 "Wavefront" "$OUTPUT_DIR/profile_report.txt" 2>/dev/null | head -40 || true
         fi
-    else
-        echo "[profile] WARNING: No workload directory found in $WORKLOAD_BASE" >&2
+
+        # Cleanup workload directory
+        rm -rf "$WORKLOAD_DIR" 2>/dev/null || true
     fi
-elif command -v rocprof &> /dev/null; then
-    echo "[profile] Falling back to rocprof --stats"
-    bash "$GPU_LOCK" "$GPU_ID" \
-        rocprof --stats $HARNESS_CMD \
-        > "$OUTPUT_DIR/profile_raw.txt" 2>&1 || true
-else
-    echo "[profile] WARNING: No profiling tool found. Running benchmark only." >&2
-    bash "$GPU_LOCK" "$GPU_ID" bash -c "$HARNESS_CMD" \
-        > "$OUTPUT_DIR/benchmark_only.txt" 2>&1
 fi
 
-echo "[profile] Done. Output in $OUTPUT_DIR/"
+# Fallback: rocprof --stats
+if [ "$PROFILE_SUCCESS" = false ] && command -v rocprof &> /dev/null; then
+    echo ""
+    echo "=== Fallback: rocprof --stats ==="
+    PROFILER="rocprof"
+
+    bash "$GPU_LOCK" "$GPU_ID" \
+        rocprof --stats bash -c "$BENCHMARK_CMD" \
+        > "$OUTPUT_DIR/profile_report.txt" 2>&1 || true
+
+    if [ -f "$OUTPUT_DIR/profile_report.txt" ] && [ -s "$OUTPUT_DIR/profile_report.txt" ]; then
+        PROFILE_SUCCESS=true
+        echo "rocprof stats saved"
+    fi
+fi
+
+# Final fallback: benchmark-only
+if [ "$PROFILE_SUCCESS" = false ]; then
+    echo ""
+    echo "=== Fallback: benchmark-only (no profiler available) ==="
+    PROFILER="benchmark-only"
+
+    bash "$GPU_LOCK" "$GPU_ID" bash -c "$BENCHMARK_CMD" \
+        > "$OUTPUT_DIR/profile_report.txt" 2>&1
+
+    echo "Benchmark output saved (no profiler data)"
+fi
+
+echo ""
+echo "=== Profiling Complete ==="
+echo "Profiler used: $PROFILER"
+echo "Report: $OUTPUT_DIR/profile_report.txt"
+echo "Success: $PROFILE_SUCCESS"

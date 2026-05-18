@@ -1,98 +1,107 @@
-# Phase: Kernel Analysis
+# Phase A: Kernel Analysis
 
-Analyze the target kernel to understand its algorithm, dependencies, and hardware context.
+## Objective
+Understand the kernel being optimized: its type, structure, dependencies, and hardware environment.
 
 ## Steps
 
-### 1. Read and Understand the Kernel Source
+### A1: Detect Kernel Type
 
-Read the kernel source file at `$TASK_PATH`. Identify:
-- **Kernel type**: Check file extension and content patterns:
-  - `.hip` / `.cu` / `.cpp` with `__global__` → HIP kernel
-  - `.py` with `@triton.jit` or `tl.` → Triton kernel
-  - `.hpp` with Composable Kernel templates → CK kernel
-- **Algorithm**: What does the kernel compute? What is the mathematical operation?
-- **Data flow**: Input tensors (shapes, dtypes) → computation → output tensors
-- **Memory access patterns**: Sequential, strided, random? Read-heavy or write-heavy?
-- **Hot loops**: Innermost loops with the most iterations — these are the optimization targets
-- **Data structures**: Arrays, heaps, trees, etc. in the kernel
-- **Fixed-size allocations**: Any hardcoded array sizes (e.g., `float data[100]`) — optimization opportunity
+Read all source files in the kernel directory. Classify using this pattern table:
 
-### 2. Build Dependency Tree
+| Pattern | Kernel Type |
+|---------|-------------|
+| `.py` file with `@triton.jit` or `tl.` imports | **triton** |
+| `.hip` file with `__global__` | **hip** |
+| `.cu` file with `__global__` | **cuda** (treat as hip on AMD) |
+| `.cpp` file with `__global__` and HIP includes | **hip** |
+| `.hpp` with CK templates (`ck::tensor_operation`) | **composable_kernel** |
 
-Starting from the kernel source, trace all includes/imports:
+Record: `kernel_type`, `kernel_file` (the primary source file containing the kernel), `kernel_language`.
 
+### A2: Analyze Kernel Structure
+
+Read the kernel source thoroughly. Document:
+1. **Entry point**: The `__global__` function (HIP) or `@triton.jit` function (Triton)
+2. **Algorithm**: What does the kernel compute? (e.g., KNN search, matrix multiply, softmax)
+3. **Complexity**: What is the algorithmic complexity? (e.g., O(N*M) per query point)
+4. **Data structures**: What local data structures are used? (arrays, heaps, accumulators)
+5. **Memory access pattern**: How is global memory accessed? (sequential, strided, random)
+6. **Launch configuration**: Block size, grid dimensions, shared memory usage
+7. **Potential bottlenecks**: Initial assessment based on code structure
+
+### A3: Map Dependencies
+
+Scan all files in the kernel directory to build a dependency tree:
 ```bash
-# For HIP kernels
-grep -rn '#include' $TASK_PATH
-# Find all source files in the repo
-find $REPO_ROOT/src -name '*.hip' -o -name '*.cu' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp'
+# Find all source files
+find $KERNEL_PATH -type f \( -name "*.py" -o -name "*.hip" -o -name "*.cu" -o -name "*.cpp" -o -name "*.hpp" -o -name "*.h" \)
 ```
 
-Classify each dependency as:
-- **In-repo (modifiable)**: Source files in the project that can be optimized
-- **External (not modifiable)**: System headers, library includes (torch, hip, etc.)
+For each file, identify imports/includes and classify:
+- **In-repo (modifiable)**: Files within the kernel directory that can be edited. **IMPORTANT**: Always include the Python wrapper file AND the C++ binding file (`.cpp` with `PYBIND11_MODULE`) as modifiable, not just the kernel source (`.hip`/`.cu`). Wrapper optimization is a critical optimization category.
+- **External (read-only)**: System libraries, framework imports (torch, triton, etc.)
 
-### 3. Check for Existing Infrastructure
-
-Look for existing build/test infrastructure:
+### A4: Query Hardware
 
 ```bash
-# Config file
-cat $REPO_ROOT/config.yaml 2>/dev/null
+# GPU info
+rocminfo 2>/dev/null | grep -A 5 "Name:" | head -20
+rocm-smi --showid --showproductname 2>/dev/null | head -10
 
-# Task runner
-ls $REPO_ROOT/scripts/task_runner.py 2>/dev/null
-
-# Makefile
-ls $REPO_ROOT/Makefile 2>/dev/null
-
-# Kernel loader (PyTorch JIT)
-cat $REPO_ROOT/kernel_loader.py 2>/dev/null
-
-# Python wrapper
-find $REPO_ROOT -name '*wrapper*' -o -name '*_ext*' | head -5
+# Available GPUs
+rocm-smi --showid 2>/dev/null || echo "rocm-smi not available"
 ```
 
-If `config.yaml` exists, read it for: `source_file_path`, `compile_command`, `correctness_command`, `performance_command`.
+### A5: Detect Existing Test Infrastructure
 
-### 4. Query GPU Hardware
+Search for existing test/benchmark files:
+```bash
+find $KERNEL_PATH -type f -name "*.py" | xargs grep -l "benchmark\|correctness\|test\|perf" 2>/dev/null
+find $KERNEL_PATH -type f -name "task_runner.py" -o -name "test_*.py" -o -name "*_test.py" -o -name "bench*.py"
+```
+
+Check for config files:
+```bash
+find $KERNEL_PATH -name "config.yaml" -o -name "config.json" -o -name "*.cfg"
+```
+
+### A6: Save Baseline
 
 ```bash
-rocminfo 2>/dev/null | grep -A5 "Name:\s*gfx"
-rocm-smi --showproductname 2>/dev/null | head -5
+# Copy original kernel source to eval directory
+mkdir -p $EVAL_DIR/baseline
+cp -r $KERNEL_PATH/* $EVAL_DIR/baseline/
 ```
 
-Record the GPU architecture (e.g., gfx942 for MI300X).
+### A7: Output
 
-### 5. Snapshot Baseline
-
-Copy the original kernel source to the baseline directory:
-
-```bash
-cp $TASK_PATH $EVAL_DIR/baseline/
-```
-
-### 6. Output
-
-Write `$EVAL_DIR/logs/analysis.json`:
-
+Write `$EVAL_DIR/analysis.json`:
 ```json
 {
-  "kernel_type": "hip|triton|ck",
-  "task_path": "/absolute/path/to/kernel.hip",
-  "source_files": ["src/kernel.hip", "src/kernel.cpp"],
-  "algorithm_summary": "Brief description of what the kernel computes",
-  "hot_loops": "Description of the innermost computation loops",
-  "memory_patterns": "Description of memory access patterns",
-  "optimization_opportunities": ["opportunity 1", "opportunity 2"],
-  "gpu_arch": "gfx942",
-  "has_task_runner": true,
-  "has_config": true,
-  "compile_command": "python3 scripts/task_runner.py compile",
-  "correctness_command": "python3 scripts/task_runner.py correctness",
-  "performance_command": "python3 scripts/task_runner.py performance"
+  "kernel_name": "<name>",
+  "kernel_type": "<triton|hip|cuda>",
+  "kernel_file": "<primary source file path>",
+  "kernel_language": "<python|cpp|hip>",
+  "algorithm": "<description>",
+  "complexity": "<big-O>",
+  "entry_point": "<function name>",
+  "launch_config": {
+    "block_size": "<value>",
+    "grid": "<expression>"
+  },
+  "dependencies": {
+    "modifiable": ["<file1>", "<file2>"],
+    "external": ["<lib1>", "<lib2>"]
+  },
+  "hardware": {
+    "gpu_name": "<name>",
+    "gpu_arch": "<arch>",
+    "num_gpus": "<count>"
+  },
+  "existing_tests": ["<file1>", "<file2>"],
+  "initial_bottleneck_guess": "<memory|compute|latency|unknown>"
 }
 ```
 
-Write `$EVAL_DIR/logs/codebase_context.md` — human-readable summary of the kernel, its dependencies, and the repo structure. Include file paths and key code locations that engineers will need.
+Write `$EVAL_DIR/codebase_context.md` — human-readable summary of the above analysis. Include the full kernel source code for easy reference by engineers.

@@ -1,26 +1,19 @@
 #!/bin/bash
-# gpu_lock.sh — Execute a command with exclusive GPU access via flock.
-# Ensures only one benchmark/profile runs on a given GPU at a time,
-# so multiple engineers can share GPUs without timing interference.
-#
-# Usage: gpu_lock.sh <gpu_id> <command...>
-# Example: gpu_lock.sh 0 python3 scripts/task_runner.py performance
-#          gpu_lock.sh 2 rocprof-compute profile --no-roof -- python3 harness.py --profile
+# GPU lock script - ensures exclusive GPU access for benchmarking
+# Usage: bash gpu_lock.sh <gpu_id> <command...>
+# Uses flock for exclusive access - multiple engineers can share GPUs safely
 
 set -euo pipefail
 
-if [ $# -lt 2 ]; then
-    echo "Usage: $0 <gpu_id> <command...>" >&2
-    exit 1
-fi
+GPU_ID="${1:?Usage: gpu_lock.sh <gpu_id> <command...>}"
+shift
 
-GPU_ID="$1"; shift
-LOCK_DIR="/tmp/team_gpu_locks"
+LOCK_DIR="/tmp/team_v2_gpu_locks"
 mkdir -p "$LOCK_DIR"
 LOCK_FILE="${LOCK_DIR}/gpu_${GPU_ID}.lock"
 
 (
-    flock -x 200
+    flock -x -w 600 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 600s"; exit 1; }
     export HIP_VISIBLE_DEVICES="$GPU_ID"
     "$@"
 ) 200>"$LOCK_FILE"

@@ -1,110 +1,115 @@
-# Profiling Interpretation Guide (rocprof-compute / omniperf)
+# Profiling Analysis Guide
 
-## Key Sections to Analyze
+## rocprof-compute (formerly omniperf) Output Interpretation
 
 ### Section 2: System Speed-of-Light (SoL)
-The most important section. Shows utilization as percentage of peak for each pipeline.
 
-| Metric | What It Tells You |
-|--------|-------------------|
-| VALU Utilization | Vector ALU usage (FP/INT compute) |
-| VMEM Utilization | Vector memory pipeline (global loads/stores) |
-| MFMA Utilization | Matrix instructions (GEMMs, matmuls) |
-| LDS Utilization | Local data share usage |
-| HBM Bandwidth | Memory bandwidth achieved vs peak (~5.3 TB/s) |
+The most important section. Shows overall utilization as percentage of peak.
 
-**How to read:** >60% = saturated (bottleneck). 20-60% = moderate. <20% = underutilized.
+| Metric | What it means | Threshold |
+|--------|--------------|-----------|
+| VALU Utilization | Vector ALU usage | > 60% = compute-bound |
+| MFMA Utilization | Matrix unit usage | > 40% = MFMA-active workload |
+| VMEM Utilization | Vector memory pipe | > 60% = memory-bound |
+| LDS Utilization | Local data share | > 50% = LDS-heavy |
+| Bandwidth (GB/s) | Effective HBM BW | Compare to peak 5300 GB/s |
 
-### Section 7.2: Wavefront Runtime Statistics
-Breaks down what wavefronts spend time doing.
+**Classification from SoL:**
+- VALU > 60% AND VMEM < 40% → **compute-bound**
+- VMEM > 60% AND VALU < 40% → **memory-bound**
+- Both < 40% → **latency-bound**
+- LDS > 50% → **lds-bound** (check bank conflicts)
+- Both 40-60% → **balanced**
 
-| Metric | Meaning |
-|--------|---------|
-| Active Cycles | Useful compute work |
-| Dependency Wait Cycles | Stalled waiting for memory → **memory-bound signal** |
-| Issue Wait Cycles | Stalled waiting for execution slots → **compute-bound signal** |
-| Barrier Wait Cycles | Waiting at `__syncthreads()` → **load imbalance signal** |
+### Section 7.2: Wavefront Runtime Stats
 
-**Key ratio:** Dependency Wait / Active Cycles
-- \> 3x → strongly memory-bound
-- 1-3x → moderately memory-bound
-- < 1x → compute-bound or latency-bound
+Shows how wavefronts spend their time.
+
+| Metric | What it means |
+|--------|--------------|
+| Active Cycles | Cycles actually computing |
+| Dependency Wait | Stalled waiting for data |
+| Issue Wait | Stalled on instruction issue |
+| Total Wave Cycles | Total cycles alive |
+
+**Key ratios:**
+- `Active / Total` = Kernel efficiency (< 20% = CRITICAL inefficiency)
+- `Dependency Wait / Total` = Memory stall fraction
+- `Issue Wait / Total` = Instruction scheduling stall
+
+**Diagnosis:**
+- High Dependency Wait → memory-bound or cache miss
+- High Issue Wait → instruction-level parallelism needed
+- Low Active + Low Wait → occupancy too low
 
 ### Section 11: Compute Pipeline
-CU utilization, instruction throughput, and pipeline breakdown.
+
+| Metric | What it means |
+|--------|--------------|
+| VALU Active Threads | Average active threads per VALU instruction |
+| VALU Utilization % | How much of peak VALU is used |
+| Branch Divergence | Fraction of divergent branches |
+
+**Key checks:**
+- Active Threads < 64 → wavefront divergence (threads disabled by branches)
+- Branch Divergence > 10% → significant divergence penalty
+- VALU Util close to SoL → compute is the bottleneck
 
 ### Sections 13-16: Cache Hierarchy
 
-| Level | Good Hit Rate | Poor Hit Rate |
-|-------|--------------|---------------|
-| L1 | >60% | <40% (random/strided access) |
-| L2 | >50% | <30% (streaming/working set too large) |
+#### Section 13: L1 Cache (vL1D)
+| Metric | What it means | Threshold |
+|--------|--------------|-----------|
+| Hit Rate | L1 cache hit % | < 60% = likely memory-bound |
+| Bandwidth | L1 effective BW | Compare to peak |
+| Coalescing | Memory coalescing efficiency | < 50% = fix access patterns |
 
-**HBM bandwidth vs peak:** <20% means most data comes from cache (compute-bound) or kernel is too small (latency-bound).
+#### Section 14: L2 Cache
+| Metric | What it means | Threshold |
+|--------|--------------|-----------|
+| Hit Rate | L2 cache hit % | < 50% = heavy HBM traffic |
+| Read/Write BW | L2 bandwidth used | |
 
-## Bottleneck Classification
+#### Section 16: HBM
+| Metric | What it means |
+|--------|--------------|
+| Read BW | HBM read bandwidth achieved |
+| Write BW | HBM write bandwidth achieved |
+| Total BW | Should be < 5300 GB/s peak |
 
-### memory-bound
-**Evidence:** Dependency Wait >> Active Cycles (>3x), high HBM bandwidth utilization, low cache hit rates.
-**Root causes:** Strided access, large working set, no data reuse.
-**Optimization directions:**
-- Coalesced access patterns
-- LDS tiling for data reuse
-- Vectorized loads (float4)
-- Reduce data movement (algorithmic changes)
-- Operation fusion to avoid intermediate buffers
+## Bottleneck Classification Decision Tree
 
-### compute-bound
-**Evidence:** High VALU/MFMA utilization (>60%), Issue Wait Cycles significant, low VMEM utilization.
-**Root causes:** Too many instructions per element, suboptimal algorithm.
-**Optimization directions:**
-- Algorithmic rewrites (reduce instruction count)
-- Strength reduction (replace expensive ops)
-- MFMA utilization (matrix ops)
-- Loop unrolling and instruction-level parallelism
-- Template parameterization (compile-time constants)
+```
+1. Check SoL VALU vs VMEM utilization
+   ├─ VALU > 60%, VMEM < 40% → COMPUTE-BOUND
+   ├─ VMEM > 60%, VALU < 40% → MEMORY-BOUND
+   ├─ Both > 50% → BALANCED
+   ├─ Both < 40% → go to step 2
+   └─ LDS > 50% → LDS-BOUND
 
-### latency-bound
-**Evidence:** Very short kernel duration (<100μs), low utilization everywhere (<20%), few wavefronts.
-**Root causes:** Not enough work to fill GPU, kernel launch overhead dominates.
-**Optimization directions:**
-- Increase work per kernel (fuse operations)
-- Persistent kernels
-- Batch multiple calls into one kernel
-- Increase block size
+2. Check Wavefront stats (Active / Total ratio)
+   ├─ < 20% → LATENCY-BOUND (critical inefficiency)
+   ├─ 20-50% → check Dependency vs Issue wait
+   │   ├─ Dependency dominant → MEMORY-BOUND (cache miss stalls)
+   │   └─ Issue dominant → LATENCY-BOUND (ILP needed)
+   └─ > 50% → check cache hit rates
+       ├─ L1 < 60% → MEMORY-BOUND (poor locality)
+       └─ L1 > 60% → BALANCED (likely small kernel, launch overhead)
+```
 
-### lds-bound
-**Evidence:** High LDS contention, bank conflict metrics elevated, high Barrier Wait Cycles.
-**Root causes:** Bank conflicts from stride patterns, LDS capacity exceeded.
-**Optimization directions:**
-- Padding to avoid bank conflicts (+1 per row)
-- Reorganize LDS layout
-- Reduce LDS usage per workgroup
-- Split computation to use less LDS
+## Bottleneck Shift Analysis (for re-profiling after optimization)
 
-### balanced
-**Evidence:** All metrics 20-60% of peak, no single bottleneck dominates.
-**Optimization directions:**
-- Algorithmic changes that reduce both compute and memory
-- Better instruction scheduling
-- Compound optimizations
+After each optimization round, compare before/after metrics:
 
-## Profiling Summary Format
+1. **What changed**: Which metrics improved/degraded?
+2. **New bottleneck**: Did the bottleneck shift? (e.g., compute-bound → memory-bound)
+3. **Why**: What optimization caused the shift? (e.g., "Template params freed registers, now memory latency is exposed")
+4. **Next action**: What strategy should target the new bottleneck?
 
-After analyzing profiling data, produce a summary with:
-
-1. **PRIMARY BOTTLENECK**: Classification + 2-3 sentences with quantitative evidence.
-   - Severity: CRITICAL (dominant, >3x gap) / MODERATE (significant) / MILD (addressable)
-2. **KEY METRICS**: List of CAUSE → EFFECT → IMPACT chains.
-   - Example: "Strided global reads (stride-3) → 52% L1 hit rate → 40% of peak HBM bandwidth wasted on cache misses"
-3. **OPTIMIZATION OPPORTUNITIES**: Ranked by expected impact.
-   - HIGH (>20% improvement expected)
-   - MEDIUM (5-20%)
-   - LOW (<5%)
-
-## Metrics to Ignore
-
-- Values showing 0.0, nan, or empty — missing counter data
-- "Parallel execution" info — not relevant for single-kernel optimization
-- Device assignment details
-- Profiler overhead warnings
+Format the analysis as:
+```
+BEFORE: [bottleneck type] - [key metric value]
+AFTER:  [bottleneck type] - [key metric value]
+SHIFT:  [old] → [new] because [reason]
+NEXT:   Target [new bottleneck] with [strategy]
+```

@@ -1,145 +1,136 @@
-# Phase: Evaluation
+# Phase G: Evaluation & Ranking
 
-Collect engineer results, verify the best candidate, and produce a structured report.
+## Objective
+Collect engineer results, rank by performance, verify top candidates in a clean environment, and select the round winner.
 
 ## Steps
 
-### 1. Collect Results
+### G1: Collect Results
 
 Read `worker_result.json` from each engineer's output directory:
-```bash
-find $EVAL_DIR/logs/workers/ -name "worker_result.json" -exec cat {} \;
+```
+$EVAL_DIR/round_N/engineer_0/worker_result.json
+$EVAL_DIR/round_N/engineer_1/worker_result.json
+...
 ```
 
-Each result contains:
+Expected format:
 ```json
 {
-  "worker_id": 0,
-  "status": "success|failed",
-  "best_speedup_geo": 4.5,
-  "best_speedup_arith": 6.2,
-  "best_latency_ms": 0.12,
-  "baseline_latency_ms": 0.54,
-  "strategy": "Description of what was done",
-  "patch_file": "best_patch.diff",
-  "per_test_case": [
-    {"test_case_id": "shape_0", "baseline_ms": 0.05, "optimized_ms": 0.04, "speedup": 1.25}
+  "engineer_id": 0,
+  "task": "description of assigned task",
+  "strategy": "what was actually implemented",
+  "speedup_geomean": 1.5,
+  "speedup_arithmetic": 1.6,
+  "per_case": [
+    {"name": "case_0", "baseline_ms": 0.5, "optimized_ms": 0.3, "speedup": 1.67}
   ],
-  "iterations_tried": 5
+  "status": "success|partial|failed",
+  "patch_file": "best_patch.diff",
+  "strategies_tried": ["P0-ALG: template", "P2-MEM: vectorized loads"],
+  "notes": "optional notes"
 }
 ```
 
-### 2. Rank Candidates
+### G2: Rank Engineers
 
-Sort successful results by geometric mean speedup (highest first). If tied, use arithmetic mean as tiebreaker.
+Sort by geometric mean speedup (descending). Use arithmetic mean as tiebreaker.
 
-Skip results where:
-- `status` is `failed`
-- `best_speedup_geo` ≤ 1.0
-- No patch file exists
-
-### 3. Verify Top Candidates
-
-For the top 2 candidates (or all if fewer than 2):
-
-```bash
-# Start from clean state
-cd $REPO_ROOT
-git checkout -- .
-
-# Apply the candidate's patch
-git apply $EVAL_DIR/logs/workers/worker_N/best_patch.diff
-
-# Clear build cache
-rm -rf $REPO_ROOT/build
-rm -rf ~/.cache/torch_extensions/*/$(basename $REPO_ROOT)/
-
-# Run correctness
-python3 scripts/task_runner.py correctness
-
-# Run full benchmark with GPU lock
-bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID python3 scripts/task_runner.py performance
+```
+Ranking:
+1. Engineer 2: 3.5x geomean (3.8x arithmetic) — template parameterization
+2. Engineer 0: 2.1x geomean (2.3x arithmetic) — LDS tiling
+3. Engineer 1: 1.0x geomean (1.0x arithmetic) — FAILED (correctness issue)
 ```
 
-Parse benchmark results. The VERIFIED speedup is authoritative — worker-reported speedups are provisional.
+Filter out:
+- `status == "failed"` — no valid result
+- `speedup_geomean < 1.0` — regression
+- Missing `patch_file`
+
+### G3: Verify Top Candidates
+
+For the top 2-3 candidates (or all candidates with speedup > 1.0x), independently verify:
+
+For each candidate:
+```bash
+# 1. Reset to clean state (current best, or baseline for round 1)
+cd $KERNEL_PATH
+git checkout -- .  # Reset all kernel files
+# If not round 1, apply the current-best patch first
+git apply $EVAL_DIR/current_best.diff 2>/dev/null || true
+
+# 2. Apply this candidate's patch
+git checkout -- .  # Clean slate
+git apply $EVAL_DIR/round_N/engineer_X/best_patch.diff
+
+# 3. Clear build cache
+rm -rf build/ __pycache__/ *.so
+
+# 4. Run correctness test
+<correctness_command>
+
+# 5. Run FULL benchmark (authoritative) with gpu_lock
+bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <full_benchmark_command>
+```
 
 **Rejection criteria:**
-- Correctness test fails
-- Patch doesn't apply cleanly
-- Verified speedup < 1.0x (regression)
-- Patch modifies test harness, benchmark scripts, or evaluation infrastructure
+- Correctness test fails → REJECT
+- Patch fails to apply → REJECT
+- Verified speedup < 1.0x → REJECT (regression)
+- Patch modifies test harness or COMMANDMENT → REJECT
 
-### 4. Select Best
+Record verified speedups. These override engineer-reported speedups.
 
-Choose the verified candidate with the highest geometric mean speedup.
+### G4: Select Round Winner
 
-### 5. Save Results
+The candidate with the highest **verified** geometric mean speedup wins the round.
 
-Copy the winning kernel:
+Save the winning patch as `$EVAL_DIR/current_best.diff`:
 ```bash
-cp $TASK_PATH $EVAL_DIR/optimized/$(basename $TASK_PATH)
-cp $EVAL_DIR/logs/workers/worker_N/best_patch.diff $EVAL_DIR/optimized/best_patch.diff
+# Apply winning patch
+cd $KERNEL_PATH
+git checkout -- .
+git apply $EVAL_DIR/round_N/engineer_X/best_patch.diff
+
+# Save as current best
+git diff > $EVAL_DIR/current_best.diff
 ```
 
-### 6. Generate Round Report
+### G5: Output
 
-Write per-round results to `$EVAL_DIR/logs/round_N_results.json`:
-
+Write `$EVAL_DIR/round_N/round_result.json`:
 ```json
 {
   "round": 1,
   "num_engineers": 3,
-  "best_speedup_geo": 4.5,
-  "best_speedup_arith": 6.2,
-  "winning_worker": 0,
-  "winning_strategy": "Template parameterization + warp-cooperative search",
-  "workers": [
-    {"worker_id": 0, "speedup_geo": 4.5, "status": "success"},
-    {"worker_id": 1, "speedup_geo": 2.1, "status": "success"},
-    {"worker_id": 2, "speedup_geo": 0.0, "status": "failed"}
-  ],
-  "verified_speedup_geo": 4.3,
-  "verified_speedup_arith": 6.0,
-  "per_test_case": [...]
-}
-```
-
-### 7. Generate Final Report (after all rounds)
-
-Write `$EVAL_DIR/report/final_report.json`:
-
-```json
-{
-  "status": "success",
-  "kernel_name": "knn_kernel",
-  "kernel_type": "hip",
-  "total_rounds": 3,
-  "test_cases": [
+  "rankings": [
     {
-      "test_case_id": "shape_0_standard",
-      "baseline_ms": 0.0491,
-      "optimized_ms": 0.0050,
-      "speedup": 9.82
+      "rank": 1,
+      "engineer_id": 2,
+      "strategy": "template parameterization",
+      "reported_speedup": 3.5,
+      "verified_speedup": 3.4,
+      "status": "verified"
     }
   ],
-  "speedup_summary": {
-    "geometric_mean": 8.5,
-    "arithmetic_mean": 10.2,
-    "best_case": 19.0,
-    "worst_case": 1.02,
-    "num_test_cases": 15
+  "round_winner": {
+    "engineer_id": 2,
+    "verified_speedup_geomean": 3.4,
+    "verified_speedup_arithmetic": 3.7,
+    "patch_file": "current_best.diff",
+    "per_case": [...]
   },
-  "round_progression": [
-    {"round": 1, "speedup_geo": 4.5, "strategy": "..."},
-    {"round": 2, "speedup_geo": 7.2, "strategy": "..."},
-    {"round": 3, "speedup_geo": 8.5, "strategy": "..."}
-  ],
-  "optimizations_applied": "Description of all optimizations in the final kernel"
+  "merge_result": {
+    "attempted": true,
+    "merged_speedup": 4.1,
+    "patches_merged": [2, 0],
+    "status": "improved|no_improvement|skipped"
+  },
+  "cumulative_speedup_geomean": 3.4,
+  "budget_used": 3,
+  "budget_remaining": 3
 }
 ```
 
-Write `$EVAL_DIR/report/summary.md` with:
-- Per-test-case speedup table
-- Round progression table
-- Strategy descriptions
-- Before/after comparison
+Write a human-readable round summary to `$EVAL_DIR/round_N/summary.md`.

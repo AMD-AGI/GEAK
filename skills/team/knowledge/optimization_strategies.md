@@ -1,98 +1,116 @@
 # Optimization Strategy Catalog
 
-## Priority Scheme
+## Priority Hierarchy
+
+Priority determines which strategies to try first. Lower number = higher priority = try first.
 
 | Priority | Category | Description |
 |----------|----------|-------------|
-| 0 | Algorithmic | Novel kernel rewrites: different data structures, different algorithms, work decomposition |
-| 1 | Data Reuse | LDS tiling, multi-query workgroups, register blocking, loop tiling |
-| 2 | Fusion | Fuse multiple kernels or operations into one |
-| 3 | Memory | Coalescing, vectorized loads, layout transformation, prefetching |
-| 4 | Compute | Strength reduction, FMA, branchless, unrolling, MFMA |
-| 5 | Parallelism | Block sizing, occupancy, persistent kernels, grid-stride loops |
-| 6 | Shape-adaptive | Size-specialized variants, template dispatch |
-| 8 | Autotuning | Parameter sweeps, compiler flag search |
-| 15 | Wrapper/dispatch | Python-side changes, launch config, dtype routing |
+| P0 | Algorithm Restructuring | Novel algorithmic rewrites: template params, warp-cooperative, complexity reduction |
+| P1 | Data Reuse | Shared memory tiling, register blocking, cache optimization |
+| P2 | Memory Access | Coalescing, vectorized loads, SoA layouts, non-temporal hints |
+| P3 | Compute | Branchless patterns, ILP, FMA, loop unrolling |
+| P4 | Launch Config | Block size, grid size, occupancy tuning, launch bounds |
+| P5 | Autotuning | Parameter search, multi-config dispatch |
 
-**CRITICAL DIRECTIVE:** Kernel algorithmic improvement is the PRIMARY goal. Wrapper/dispatch changes are LOW priority. Even if the kernel appears well-optimized, always attempt algorithmic improvements first. Generate at least 3 genuinely different algorithmic approaches per kernel.
+| PW | Wrapper/Binding | Python wrapper overhead: autograd bypass, output format, allocation reduction |
 
-## Per-Bottleneck Strategy Selection
+**Rule**: At least 2/3 of engineer tasks per round MUST be P0-P2 (kernel algorithmic work). At most 1 task can be P4-P5 (tuning) or PW (wrapper). Exception: when overhead detection triggers (all cases at similar latency), PW becomes mandatory.
 
-### memory-bound
-1. **LDS tiling** (P1): Cache repeatedly-accessed data in LDS. Share across threads/queries.
-2. **Vectorized loads** (P3): float4/float2 loads to maximize bandwidth utilization.
-3. **Coalesced access** (P3): Ensure consecutive threads access consecutive addresses.
-4. **Operation fusion** (P2): Eliminate intermediate memory traffic between stages.
-5. **Algorithmic reduction** (P0): Change algorithm to need less data (e.g., spatial indexing, sampling).
-6. **Layout transformation** (P3): AoS → SoA or vice versa for access pattern.
+## Critical Pattern Detection
 
-### compute-bound
-1. **Algorithmic rewrite** (P0): Reduce instruction count via better algorithm.
-2. **Template parameterization** (P0/P6): Compile-time constants for sizes → unrolling, register optimization.
-3. **Warp-cooperative** (P0): Distribute work across wavefront threads.
-4. **Strength reduction** (P4): Replace expensive operations (div → mul, pow → exp+log).
-5. **MFMA utilization** (P4): Convert to matrix operations where applicable.
-6. **Loop unrolling** (P4): `#pragma unroll` for tight inner loops.
+Before bottleneck-driven selection, check for these high-impact patterns:
 
-### latency-bound
-1. **Kernel fusion** (P2): Combine multiple small kernels.
-2. **Increase work per thread** (P5): Process multiple elements per thread.
-3. **Persistent kernels** (P5): Single launch, loop over all work items.
-4. **Batch operations** (P0): Restructure to process batches in one kernel call.
+**Search/Scan Pattern**: If the kernel has 1 thread iterating over N elements (brute-force search, KNN, nearest neighbor, argmin, top-K):
+→ **ALWAYS assign warp-cooperative as the #1 priority task in Round 1.** This pattern gives 5-30x speedup. See `hip_optimization.md` → "Warp-Cooperative Algorithms" for the complete implementation pattern with shared-memory merge.
 
-### lds-bound
-1. **Reduce LDS usage** (P1): Use registers instead where possible.
-2. **Padding** (P1): Add padding bytes to avoid bank conflicts.
-3. **Layout reorganization** (P1): Change LDS access pattern to minimize conflicts.
-4. **Split workgroups** (P5): Smaller workgroups that each use less LDS.
+**Oversized Arrays**: If the kernel declares arrays with hardcoded large sizes (e.g., `float arr[100]`) but actual sizes are much smaller at runtime:
+→ **ALWAYS assign template parameterization as a top priority task.** This eliminates register spill.
 
-### balanced (no single bottleneck)
-1. **Algorithmic changes** (P0): Fundamental restructuring that improves both compute and memory.
-2. **Data reuse + compute reduction** (P0+P1): Combined approaches.
-3. **Better instruction scheduling** (P4): Interleave memory and compute.
+These two patterns often compose well together (template + warp-cooperative = excellent). Assign them to different engineers in the same round for potential merge.
 
-## Compound Optimization Strategies
+## Bottleneck-Driven Strategy Selection
 
-These combine multiple techniques for larger gains. Use in later optimization rounds:
+### Memory-Bound (HBM bandwidth > 60% utilized, compute < 40%)
+1. P1: LDS/shared memory tiling to reduce global memory traffic
+2. P2: Coalesced access patterns (SoA layout)
+3. P2: Vectorized loads (float4)
+4. P0: Algorithmic data reuse (e.g., tiled matrix multiply)
+5. P2: Non-temporal hints for streaming data
+6. P3: Mixed precision (fp16 loads → fp32 compute)
 
-1. **Template + Warp-cooperative**: Compile-time K enables optimal register allocation for warp-cooperative merge. (P0+P0)
+### Compute-Bound (ALU utilization > 60%, memory < 40%)
+1. P0: Algorithmic complexity reduction (O(N²) → O(N log N))
+2. P3: Instruction-level parallelism (interleave independent ops)
+3. P3: FMA usage (fmaf instead of mul+add)
+4. P0: Warp-cooperative work distribution
+5. P3: Branchless computation (eliminate divergence)
+6. P5: Mixed precision compute (fp16 ALU has 2x throughput)
 
-2. **Tiled + Multi-query**: LDS tile reference data AND process multiple queries per workgroup. Multiplied bandwidth savings. (P1+P1)
+### Latency-Bound (Low utilization on both memory and compute)
+1. P0: Increase parallelism (more work per thread, more threads)
+2. P4: Launch configuration tuning (more blocks, better occupancy)
+3. P1: Prefetching / software pipelining
+4. P0: Warp-cooperative to increase work per wavefront
+5. P3: Reduce instruction dependencies (break dependency chains)
+6. P4: Persistent threads for small workloads
 
-3. **Template + Tiled + Vectorized**: Compile-time sizes enable perfect unrolling of tiled loops with vectorized loads. (P0+P1+P3)
+### LDS-Bound (High LDS utilization, bank conflicts)
+1. P1: Padding to avoid bank conflicts (+1 padding)
+2. P1: Restructure LDS access patterns
+3. P1: Reduce LDS usage (split into multiple passes)
+4. P2: Use registers instead of LDS where possible
+5. P4: Reduce block size to increase LDS per thread
 
-4. **Fusion + Split-K**: Fuse operations AND split work across more workgroups. (P2+P0)
-
-5. **Algorithmic + Layout**: New algorithm designed around the optimal memory layout. (P0+P3)
-
-## Wrapper and Interface Optimizations (Priority 15 — but HIGH IMPACT)
-
-Despite low priority number, these can yield 2-3x improvement by reducing per-call overhead:
-
-1. **Handle data layout variants in kernel**: If the Python wrapper transposes inputs before calling the kernel, move the transposed addressing into the kernel itself. GPU transpose kernels (`.transpose().contiguous()`) cost 10-20μs each. For small problem sizes this dominates total time.
-
-2. **Direct output layout**: If the consumer expects output in format (B,K,M) but the kernel writes (B,M,K) and Python transposes after, change the kernel to write in the consumer's format directly. Saves a GPU memcpy kernel per call.
-
-3. **Eliminate unnecessary outputs**: If a kernel writes both `idx` and `dist2` but only `idx` is used downstream, remove the `dist2` parameter and writes. Saves tensor allocation + global memory bandwidth.
-
-4. **Use `torch.empty` over `new_zeros`**: When the kernel writes every output element, zero-initialization is wasted work. `torch.empty()` skips the GPU memset.
-
-5. **Minimize tensor allocations in hot path**: Each `torch.zeros/empty` call has fixed overhead (~5μs). Reuse pre-allocated buffers when possible.
-
-**When to apply**: These are HIGH VALUE in Round 1 when test shapes include small/medium problems where per-call overhead is significant relative to kernel compute time. For large problems (>100ms kernel time), kernel algorithmic improvements dominate.
+### Balanced (No single dominant bottleneck)
+1. P0: Template parameterization (reduce register spill, improve everything)
+2. P0: Warp-cooperative algorithms (improve both compute and memory efficiency)
+3. P1: Tiled data loading (improve memory, free up compute)
+4. P2: Vectorized + coalesced access
+5. P3: Loop unrolling + register blocking
+6. P4: Launch configuration tuning
 
 ## Task Generation Guidelines
 
-When generating tasks for engineers:
-- Each task should target a **different priority level** or **different bottleneck aspect**
-- At least 2 tasks must be Priority 0-1 (algorithmic/data-reuse)
-- Maximum 1 task can be Priority 6+ (tuning/dispatch)
-- Each task must include:
-  - Specific optimization focus and expected impact
-  - Key code locations to modify
-  - How to verify correctness
-  - Expected metric changes (e.g., "should reduce Dependency Wait Cycles by >50%")
-- Tasks must NOT include:
-  - Instructions to modify test harness or benchmarks
-  - GPU device selection (handled by framework)
-  - Build cache clearing (handled by engineer workflow)
+When creating engineer tasks for a round:
+
+1. **Diversity**: Each task must target a DIFFERENT strategy category. No two tasks in the same round should use the same P-level approach.
+
+2. **Independence**: Tasks should modify different parts of the kernel or use completely different approaches so patches can potentially be merged.
+
+3. **Specificity**: Each task prompt must include:
+   - The specific optimization technique to apply
+   - Which part of the kernel to modify
+   - Why this approach is expected to help (based on profiling data)
+   - Quantitative target (e.g., "target 2x reduction in global memory loads")
+
+4. **Adaptation**: After each round, the bottleneck likely shifts. Re-profile and generate new tasks targeting the NEW bottleneck, not the old one.
+
+### Overhead-Bound (All test cases at similar latency regardless of problem size)
+
+This indicates the bottleneck is Python/C++ wrapper overhead, NOT kernel compute. The kernel GPU time is negligible compared to framework overhead.
+
+1. PW: Replace `torch.autograd.Function.apply()` with `@torch.no_grad()` direct function (3-5us saved)
+2. PW: Use `torch.empty()` instead of `torch.zeros()` / `new_zeros()` (1-3us per allocation)
+3. PW: Modify kernel to output in expected format — avoid `.transpose().contiguous()` (3-20us)
+4. PW: Remove unnecessary output buffer allocations (e.g., dist2 if unused by callers) (2-5us)
+5. PW: Add specialized dispatch paths for template-supported parameters
+6. PW: Skip `CHECK_CONTIGUOUS` in C++ binding (caller ensures contiguous)
+
+See `wrapper_optimization.md` for complete patterns. **This is the ONLY category that requires modifying Python wrapper and C++ binding files** — all other categories modify only the kernel source.
+
+## Compound Strategies
+
+Some optimizations compose multiplicatively. When planning multiple rounds, consider these powerful combinations:
+
+**Round 1 → Round 2 compounding:**
+- Template parameterization → then LDS tiling (fewer registers = more LDS available)
+- Warp-cooperative → then vectorized loads (fewer threads = wider loads per thread)
+- Coalesced access → then prefetching (coalesced loads benefit more from prefetch)
+
+**Within-round compatibility (for merge engineer):**
+- Template + Launch bounds → compatible (both reduce register usage)
+- LDS tiling + Coalesced access → compatible (tiling enables coalescing)
+- Branchless + Loop unrolling → compatible (independent transforms)
+- Two different tiling schemes → INCOMPATIBLE (LDS conflict)
+- Two different warp-cooperative approaches → INCOMPATIBLE

@@ -1,99 +1,140 @@
-# Phase: Profiling
+# Phase C/H: Kernel Profiling & Bottleneck Analysis
 
-Profile the kernel to establish baseline metrics and classify the performance bottleneck.
+## Objective
+Profile the kernel to identify performance bottlenecks. Used both for initial baseline (Phase C) and re-profiling after optimization rounds (Phase H).
 
 ## Steps
 
-### 1. Establish Baseline Performance
+### Step 1: Run Baseline Benchmark
 
-Run the benchmark command with GPU locking to get accurate timing:
-
-```bash
-bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID python3 scripts/task_runner.py performance
-```
-
-Or for Makefile-based projects:
-```bash
-bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID ./<binary> --mode bench
-```
-
-Parse the output. Look for:
-- `GEAK_RESULT_LATENCY_MS=<float>` — canonical format
-- `performance_report.json` — structured per-test-case results
-- `Perf: <float> ms` — fallback format
-
-Record per-test-case baseline latencies.
-
-### 2. Profile with rocprof-compute
-
-Use the profiling script with GPU locking:
+Establish the performance baseline using COMMANDMENT commands:
 
 ```bash
-bash $SKILL_DIR/scripts/profile_kernel.sh \
-    "python3 scripts/task_runner.py performance" \
-    $EVAL_DIR/logs/profiling \
-    $GPU_ID \
-    3
+# Setup (clear cache)
+cd $KERNEL_PATH && rm -rf build/ __pycache__/ *.so
+
+# Run benchmark with GPU lock
+bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <benchmark_command>
 ```
 
-If `profile_kernel.sh` cannot find a profiling tool, proceed with benchmark-only data plus source code analysis.
+Parse output and record per-test-case latencies.
 
-### 3. Analyze Profiling Output
+### Step 2: Profile the Kernel
 
-Read `$SKILL_DIR/knowledge/profiling_guide.md` for interpretation guidance.
+Run the profiling script:
 
-Read the profiling report at `$EVAL_DIR/logs/profiling/profile_report.txt`. Focus on:
-- **Section 2 (System Speed-of-Light)**: Utilization of each pipeline as % of peak
-- **Section 7.2 (Wavefront Runtime Stats)**: Time breakdown (Active, Dependency Wait, Issue Wait, Barrier Wait)
-- **Section 11 (Compute Pipeline)**: CU utilization and throughput
-- **Sections 13-16 (Cache)**: L1/L2 hit rates, HBM bandwidth achieved
+```bash
+bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<profile_command>" $EVAL_DIR/profile_output
+```
 
-### 4. Classify Bottleneck
+This will:
+1. Run 3 warmup iterations
+2. Profile with best available profiler (rocprof-compute → omniperf → rocprof → benchmark-only)
+3. Save the profile report
 
-Based on profiling data, classify as ONE of:
-- **memory-bound**: Dependency Wait >> Active Cycles, high HBM bandwidth
-- **compute-bound**: High VALU/MFMA utilization, Issue Wait significant
-- **latency-bound**: Very short kernel (<100μs), low utilization everywhere
-- **lds-bound**: High LDS contention, bank conflicts
-- **balanced**: No single bottleneck dominates
+### Step 3: Analyze Profile Data
 
-### 5. Identify Specific Optimization Opportunities
+Read the profile report at `$EVAL_DIR/profile_output/profile_report.txt`.
 
-Go beyond bottleneck classification. Identify concrete opportunities:
-- What specific memory access patterns are inefficient? (strided reads, uncoalesced, etc.)
-- What data could be cached in LDS? How much bandwidth would that save?
-- What loops could benefit from unrolling or algorithmic changes?
-- Are there oversized data structures wasting registers?
-- Is the kernel under-utilizing the GPU (low occupancy, few wavefronts)?
+Following the profiling_guide.md knowledge file, extract these key metrics:
 
-Frame each opportunity as: **CAUSE** (what's happening) → **EFFECT** (why it's slow) → **OPPORTUNITY** (what to change) → **EXPECTED IMPACT** (HIGH/MEDIUM/LOW)
+**System Speed-of-Light:**
+- VALU Utilization %
+- VMEM Utilization %
+- LDS Utilization %
+- Effective HBM Bandwidth (GB/s vs 5300 GB/s peak)
 
-### 6. Output
+**Wavefront Runtime:**
+- Active Cycles / Total Cycles ratio
+- Dependency Wait / Total Cycles ratio
+- Issue Wait / Total Cycles ratio
 
-Write `$EVAL_DIR/logs/baseline_metrics.json`:
+**Cache Hierarchy:**
+- L1 Hit Rate %
+- L2 Hit Rate %
+- Memory Coalescing Efficiency %
 
+**Compute:**
+- Branch Divergence %
+- Active Threads per instruction (vs 64 ideal)
+
+### Step 4: Classify Bottleneck
+
+Apply the decision tree from profiling_guide.md:
+
+```
+1. SoL: VALU vs VMEM utilization
+   ├─ VALU > 60%, VMEM < 40% → COMPUTE-BOUND
+   ├─ VMEM > 60%, VALU < 40% → MEMORY-BOUND
+   ├─ Both > 50% → BALANCED
+   ├─ Both < 40% → check wavefront stats → LATENCY-BOUND
+   └─ LDS > 50% → LDS-BOUND
+
+2. Secondary indicators:
+   - Low L1 hit rate → memory locality issue
+   - Low coalescing → access pattern issue
+   - High divergence → branching issue
+```
+
+### Step 5: Output
+
+Write `$EVAL_DIR/baseline_metrics.json` (or `$EVAL_DIR/round_N_metrics.json` for re-profiling):
 ```json
 {
-  "baseline_latency_ms": 0.5,
-  "bottleneck": "compute-bound",
-  "per_test_case": [
-    {"test_case_id": "shape_0", "execution_time_ms": 0.05},
-    {"test_case_id": "shape_1", "execution_time_ms": 0.20}
-  ],
-  "key_metrics": {
-    "valu_utilization_pct": 45.0,
-    "vmem_utilization_pct": 12.0,
-    "hbm_bandwidth_pct": 8.0,
-    "l1_hit_rate_pct": 52.0,
-    "l2_hit_rate_pct": 99.0,
-    "dependency_wait_to_active_ratio": 0.5
+  "bottleneck": "<memory-bound|compute-bound|latency-bound|lds-bound|balanced>",
+  "metrics": {
+    "valu_utilization_pct": 0.0,
+    "vmem_utilization_pct": 0.0,
+    "lds_utilization_pct": 0.0,
+    "hbm_bandwidth_gbps": 0.0,
+    "active_cycle_ratio": 0.0,
+    "dependency_wait_ratio": 0.0,
+    "l1_hit_rate_pct": 0.0,
+    "l2_hit_rate_pct": 0.0,
+    "coalescing_efficiency_pct": 0.0,
+    "branch_divergence_pct": 0.0
   },
-  "top_kernel": "knn_kernel",
-  "top_kernel_pct": 97.8
+  "profiler_used": "<rocprof-compute|omniperf|rocprof|benchmark-only>",
+  "baseline_latency_ms": {
+    "per_case": [{"name": "...", "latency_ms": 0.0}],
+    "geomean_ms": 0.0
+  }
 }
 ```
 
-Write `$EVAL_DIR/logs/profiling_summary.md` — human-readable summary with:
-1. PRIMARY BOTTLENECK with quantitative evidence
-2. KEY METRICS with CAUSE → EFFECT → IMPACT chains
-3. OPTIMIZATION OPPORTUNITIES ranked by expected impact
+Write `$EVAL_DIR/profiling_summary.md` — human-readable analysis including:
+1. Raw metric values with interpretation
+2. Bottleneck classification with evidence
+3. Top 3 optimization opportunities identified
+
+## Phase H: Re-Profiling (After Optimization Round)
+
+When called after an optimization round, ALSO produce a bottleneck shift analysis:
+
+### Shift Analysis
+
+Compare the new metrics against the previous round's metrics:
+
+```markdown
+## Bottleneck Shift Analysis — Round N
+
+BEFORE (Round N-1): [bottleneck] — [key metric value]
+AFTER  (Round N):   [bottleneck] — [key metric value]
+
+### What Changed
+- VALU util: X% → Y% ([+/-]Z%)
+- VMEM util: X% → Y%
+- L1 hit rate: X% → Y%
+- Coalescing: X% → Y%
+
+### Shift Explanation
+[Why the bottleneck shifted. E.g., "Template parameterization reduced register spill, 
+freeing compute resources. Now memory bandwidth is the limiting factor."]
+
+### Recommended Next Strategies
+1. [Strategy targeting the new bottleneck]
+2. [Alternative strategy]
+3. [Complementary strategy]
+```
+
+Save to `$EVAL_DIR/round_N_shift_analysis.md`.
