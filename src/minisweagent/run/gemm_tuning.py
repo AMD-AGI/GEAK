@@ -27,14 +27,15 @@ _MODEL_OVERLAY_KEYS = ("model_class", "base_url", "model_name", "api_key")
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 
-def _load_gemm_tuning_config(overlay_spec: str | None) -> tuple[dict, dict]:
+def _load_gemm_tuning_config(overlay_spec: str | None) -> tuple[dict, dict, dict]:
     """Load ``mini_gemm_tuning`` for agent/env; optionally overlay model keys from ``-c`` YAML."""
     full = load_config(_GEMM_BASE_CONFIG)
     agent_kw = dict(full.get("agent") or {})
     model_kw = dict(full.get("model") or {})
+    env_kw = dict(full.get("env") or {})
 
     if not overlay_spec:
-        return agent_kw, model_kw
+        return agent_kw, model_kw, env_kw
 
     try:
         overlay = load_config(overlay_spec)
@@ -44,14 +45,14 @@ def _load_gemm_tuning_config(overlay_spec: str | None) -> tuple[dict, dict]:
             overlay_spec,
             _GEMM_BASE_CONFIG,
         )
-        return agent_kw, model_kw
+        return agent_kw, model_kw, env_kw
 
     overlay_model = overlay.get("model") or {}
     for key in _MODEL_OVERLAY_KEYS:
         if key in overlay_model and overlay_model[key] is not None:
             model_kw[key] = overlay_model[key]
 
-    return agent_kw, model_kw
+    return agent_kw, model_kw, env_kw
 
 
 @app.command()
@@ -113,13 +114,11 @@ def run(
         f"Trajectory: {effective_log_dir / 'traj.json'}"
     )
 
-    agent_kw, model_kw = _load_gemm_tuning_config(config)
+    agent_kw, model_kw, env_section = _load_gemm_tuning_config(config)
     if model_name:
         model_kw["model_name"] = model_name
 
     model = get_model(config=model_kw)
-
-    env_section = dict(full.get("env") or {})
     status, msg = run_gemm_tuning_agent(
         model=model,
         cwd=workspace,
