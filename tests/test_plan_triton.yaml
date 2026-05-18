@@ -74,10 +74,10 @@ kernels:
       # Path-A scenarios short-circuit before the import via
       # ``commandment_from_user_command``, so those stay enabled.
       - kind: path_b_determinism
-        enabled: false
+        enabled: true
         runs: 3
       - kind: task_override
-        enabled: false
+        enabled: true
         # Picked from rope-test parametrize row[2] = (1, 128, 2048, 512, 64, 64);
         # folded signature is (1, 128, 2048, 576).
         expect_shape: [1, 128, 2048, 576]
@@ -122,10 +122,10 @@ kernels:
       # ImportError fires, which it cannot in this env. Re-enable
       # when aiter is importable again.
       - kind: path_b_determinism
-        enabled: false
+        enabled: true
         runs: 3
       - kind: task_override
-        enabled: false
+        enabled: true
         # Picked: (batch_size=8, hiddensize=128256, topk=8) per the test plan
         # TASK OVERRIDE section.
         expect_shape: [8, 128256, 8]
