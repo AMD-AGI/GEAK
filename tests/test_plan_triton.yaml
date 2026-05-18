@@ -1,0 +1,170 @@
+# GEAK v3 preprocessing test plan — Triton sweep (3 kernels, 5 scenarios + escalation).
+#
+# Loaded by ``scripts/preprocess_v3_triton_runner.py``. Mirrors the HIP plan
+# (``tests/test_plan.yaml``) in shape but targets Triton kernels and pulls
+# ground-truth shapes from a different source per kernel:
+#
+# * ``aiter_topk``       — pytest parametrize stack on ``test_topk``.
+# * ``aiter_mla_decode`` — pytest parametrize on ``test_op_fwd_rope_integration``
+#                          (indirect; the rope test exercises mla_decode as the
+#                          reference oracle, so its parametrize tuples are the
+#                          shape source for plain mla_decode too).
+# * ``aka_gemm_a16wfp4`` — ``ALL_SHAPES`` constant in test_kernel_harness.py.
+#
+# Ground-truth shapes are extracted by ``preprocess_v3_triton_oracle.py``
+# (AST-only, no exec). See that module for the extraction policy.
+#
+# Cross-language assertion is INVERTED from the HIP plan: the runner asserts
+# Triton-canonical markers (``@triton.jit``, ``tl.program_id``, ...) present
+# in the transcript and HIP markers (``hipLaunchKernelGGL``, ``__global__``,
+# ...) absent.
+#
+# Verifier escalation is wired ONLY on ``aiter_topk`` because its entry kernel
+# function (``_topk_kernel``) is the cleanest symbol to rename in a throwaway
+# fixture (the AKA gemm kernel has multiple entry kernels that are all
+# referenced by the harness; aiter_mla_decode is too plumbing-heavy to
+# safely fixture without touching aiter's package layout).
+#
+# Coordination with the HIP worker:
+# * Output root: validation_runs/triton/<kernel>/<scenario>/run<i>
+# * GPU set:     4,5 (HIP worker uses 0,1)
+# * Plan file:   tests/test_plan_triton.yaml (HIP worker owns test_plan.yaml)
+
+kernels:
+  # =========================================================================
+  # aiter_mla_decode — pilot kernel; plain (no-rope) MLA decode attention.
+  # Indirect shape source: rope-test parametrize tuples folded to dim signature
+  # (B, H, S, kv_lora_rank + qk_rope_head_dim). rotary_dim is dropped (rope-only).
+  # Why pilot: mla_decode.py is self-contained (no aiter chain dispatch),
+  # smallest test surface, and the rope-test parametrize stack is well-formed.
+  # =========================================================================
+  - name: aiter_mla_decode
+    enabled: true
+    source: aiter
+    repo_path: /home/upandey/aiter
+    kernel_path: /home/upandey/aiter/aiter/ops/triton/attention/mla_decode.py
+    test_file: /home/upandey/aiter/op_tests/triton_tests/attention/test_mla_decode_rope.py
+    test_filter: test_op_fwd_rope_integration
+    test_filter_partial: "test_op_fwd_rope_integration and 1-128-2-512"
+    ground_truth_extractor: aiter_parametrize
+    shape_source: /home/upandey/aiter/op_tests/triton_tests/attention/test_mla_decode_rope.py
+    shape_function: test_op_fwd_rope_integration
+    shape_renderer: mla_decode
+    scenarios:
+      - kind: path_a
+        enabled: true
+        # The runner builds the task body from the kernel's repo_path; we
+        # only declare the substring we expect in the rendered COMMANDMENT.md
+        # so the assertion stays decoupled from any minor task-string drift.
+        expect_command_substring: "pytest /home/upandey/aiter/op_tests/triton_tests/attention/test_mla_decode_rope.py"
+      - kind: path_a_partial
+        enabled: true
+        # The Triton AKA convention exposes four modes (correctness,
+        # benchmark, full_benchmark, profile); aiter pytest exposes only
+        # the pytest -k filter. We assert all four mode markers — the
+        # preprocess agent should flag every uncovered mode regardless of
+        # which language convention the kernel belongs to.
+        expect_partial_modes: ["correctness", "full_benchmark", "profile"]
+      - kind: path_b_determinism
+        enabled: true
+        runs: 3
+      - kind: task_override
+        enabled: true
+        # Picked from rope-test parametrize row[2] = (1, 128, 2048, 512, 64, 64);
+        # folded signature is (1, 128, 2048, 576).
+        expect_shape: [1, 128, 2048, 576]
+      - kind: verifier_escalation
+        # PILOT-DUMMY: we run a verifier-escalation scenario as part of the
+        # pilot to exercise the runner's verifier-escalation plumbing
+        # against mla_decode, but we don't have a renamed-entry-point
+        # fixture for mla_decode itself (the rename target lives only on
+        # aiter_topk per the plan). So this pilot scenario points at the
+        # SAME kernel/repo as the rest and is expected to PASS (path A or
+        # B), which the assertion handles gracefully — the real
+        # verifier-escalation test is on aiter_topk below.
+        # We disable this scenario by default (no kernel/repo override = no
+        # fixture). When the runner is invoked with
+        # ``--only-kernels aiter_mla_decode``, we still exercise the other
+        # five scenarios; this entry exists so the YAML schema is uniform
+        # across the three kernels.
+        enabled: false
+        min_verifier_rejections: 1
+
+  # =========================================================================
+  # aiter_topk — direct test; FlagGems-derived 1-stage + 2-stage topk.
+  # Shape source: full cross-product of pytest parametrize (BATCH_SIZES x
+  # DIM2 x K x FLOAT_DTYPES) projected to (batch_size, hiddensize, topk).
+  # Verifier escalation lands here: ``_topk_kernel`` is the cleanest rename
+  # target (single entry function, no chain dispatch).
+  # =========================================================================
+  - name: aiter_topk
+    enabled: false  # flip to true after pilot passes
+    source: aiter
+    repo_path: /home/upandey/aiter
+    kernel_path: /home/upandey/aiter/aiter/ops/triton/_triton_kernels/topk.py
+    test_file: /home/upandey/aiter/op_tests/triton_tests/test_topk.py
+    test_filter: test_topk
+    test_filter_partial: "test_topk and 1-16"
+    ground_truth_extractor: aiter_parametrize
+    shape_source: /home/upandey/aiter/op_tests/triton_tests/test_topk.py
+    shape_function: test_topk
+    shape_renderer: topk
+    scenarios:
+      - kind: path_a
+        enabled: true
+        expect_command_substring: "pytest /home/upandey/aiter/op_tests/triton_tests/test_topk.py"
+      - kind: path_a_partial
+        enabled: true
+        expect_partial_modes: ["correctness", "full_benchmark", "profile"]
+      - kind: path_b_determinism
+        enabled: true
+        runs: 3
+      - kind: task_override
+        enabled: true
+        # Picked: (batch_size=8, hiddensize=128256, topk=8) per the test plan
+        # TASK OVERRIDE section.
+        expect_shape: [8, 128256, 8]
+      - kind: verifier_escalation
+        enabled: true
+        # Throwaway copy of aiter/ops/triton/_triton_kernels/topk.py with
+        # ``_topk_kernel`` renamed to ``_topk_kernel_renamed_for_test`` so
+        # the harness-generator can't import it. The fixture lives under
+        # validation_runs/ (gitignored) and is built by ``setup_escalation_fixture``
+        # below before the verifier-escalation scenario runs.
+        # Per the brief: NEVER modify any file under /home/upandey/aiter/;
+        # work is on the copy only.
+        kernel_path_override: /home/upandey/unification/GEAK/validation_runs/triton/escalation_fixture/topk/topk.py
+        repo_path_override: /home/upandey/unification/GEAK/validation_runs/triton/escalation_fixture/topk
+        min_verifier_rejections: 1
+
+  # =========================================================================
+  # aka_gemm_a16wfp4 — AKA Triton L3 kernel; mixed-precision FP4 GEMM.
+  # FP4 arch requirement satisfied on MI355X (gfx950). Shape source:
+  # ``ALL_SHAPES`` constant in test_kernel_harness.py (55 unique (M,N,K) tuples).
+  # =========================================================================
+  - name: aka_gemm_a16wfp4
+    enabled: false  # flip to true after pilot passes
+    source: aka_triton
+    repo_path: /home/upandey/AKA_triton/tasks/triton2triton/geak_eval/L3/gemm_a16wfp4
+    kernel_path: /home/upandey/AKA_triton/tasks/triton2triton/geak_eval/L3/gemm_a16wfp4/kernel.py
+    harness_path: /home/upandey/AKA_triton/tasks/triton2triton/geak_eval/L3/gemm_a16wfp4/test_kernel_harness.py
+    ground_truth_extractor: aka_module_constant
+    shape_source: /home/upandey/AKA_triton/tasks/triton2triton/geak_eval/L3/gemm_a16wfp4/test_kernel_harness.py
+    shape_list_name: ALL_SHAPES
+    shape_renderer: aka_gemm
+    scenarios:
+      - kind: path_a
+        enabled: true
+        # AKA-style path_a phrasing per setup_instructions §3 template;
+        # the runner builds the task body with the verbatim AKA wording.
+        expect_command_substring: "test_kernel_harness.py"
+      - kind: path_a_partial
+        enabled: true
+        expect_partial_modes: ["correctness", "full_benchmark", "profile"]
+      - kind: path_b_determinism
+        enabled: true
+        runs: 3
+      - kind: task_override
+        enabled: true
+        # Picked: (4096, 4096, 4096) — present in ALL_SHAPES (row 45).
+        expect_shape: [4096, 4096, 4096]
