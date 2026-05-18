@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 
 from minisweagent.kernel_languages.base import KernelLanguage
+from minisweagent.run.preprocess_v3 import tools as _tools_mod
+from minisweagent.run.preprocess_v3.baseline import BaselineMetrics, ProfileResult
 from minisweagent.run.preprocess_v3.commandment import (
     COMMANDMENT_SECTION_KEYS,
     render_commandment_from_sections,
@@ -24,6 +26,8 @@ from minisweagent.run.preprocess_v3.registry import SubagentRegistry
 from minisweagent.run.preprocess_v3.tools import (
     PATH_A_MODES,
     RunInstructions,
+    _make_tool_collect_baseline,
+    _make_tool_collect_profile,
     _make_tool_commandment_from_user_command,
     _schema_commandment_from_user_command,
     register_default_tools,
@@ -417,3 +421,136 @@ def test_register_default_tools_now_has_eight_tools(tmp_path: Path) -> None:
             "finish_preprocess",
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# collect_baseline / collect_profile tolerance of LLM-invented kwargs (B1)
+# ---------------------------------------------------------------------------
+
+
+def _stub_baseline(harness_path: Path, **_: object) -> BaselineMetrics:
+    """Return a deterministic ``BaselineMetrics`` without running the harness."""
+    return BaselineMetrics(
+        harness_path=Path(harness_path),
+        median_ms=1.25,
+        samples_ms=[1.2, 1.25, 1.3],
+        stdev_ms=0.05,
+        repeats=3,
+        command="<stub>",
+    )
+
+
+def _stub_profile(harness_path: Path, **kwargs: object) -> ProfileResult:
+    """Return a deterministic ``ProfileResult`` without running the profiler."""
+    out_path = kwargs.get("out_path")
+    return ProfileResult(
+        harness_path=Path(harness_path),
+        command="<stub>",
+        profile={"success": True, "stub": True},
+        profile_path=Path(out_path) if out_path else None,
+        backend="stub",
+    )
+
+
+def test_collect_baseline_tolerates_out_path_kwarg(monkeypatch, tmp_path: Path) -> None:
+    """LLM-invented ``out_path=`` no longer aborts the tool with a TypeError."""
+    monkeypatch.setattr(_tools_mod, "collect_baseline_metrics", _stub_baseline)
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    tool = _make_tool_collect_baseline(agent)
+
+    result = tool(harness_path=str(tmp_path / "h.py"), out_path=str(tmp_path / "baseline.json"))
+
+    assert result["ok"] is True
+    assert result["median_ms"] == 1.25
+    assert result["repeats"] == 3
+
+
+def test_collect_baseline_tolerates_repo_root_and_output_dir_kwargs(monkeypatch, tmp_path: Path) -> None:
+    """LLM-invented ``repo_root=`` / ``output_dir=`` are silently ignored."""
+    monkeypatch.setattr(_tools_mod, "collect_baseline_metrics", _stub_baseline)
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    tool = _make_tool_collect_baseline(agent)
+
+    result = tool(
+        harness_path=str(tmp_path / "h.py"),
+        repo_root="/some/repo",
+        output_dir=str(tmp_path / "out"),
+    )
+
+    assert result["ok"] is True
+    assert result["median_ms"] == 1.25
+
+
+def test_collect_baseline_logs_extra_kwargs_at_debug(monkeypatch, tmp_path: Path) -> None:
+    """Unexpected kwargs are recorded at DEBUG so the LLM behaviour is auditable.
+
+    We bypass ``caplog`` and attach a local handler — caplog's interaction
+    with pytest's log capture in this repo's test config doesn't reliably
+    surface the records (the message goes to stdout via the streamhandler
+    set up by other tests instead).
+    """
+    import logging as _logging
+
+    monkeypatch.setattr(_tools_mod, "collect_baseline_metrics", _stub_baseline)
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    tool = _make_tool_collect_baseline(agent)
+
+    records: list[_logging.LogRecord] = []
+
+    class _Capture(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture(level=_logging.DEBUG)
+    logger = _tools_mod.logger
+    prev_level = logger.level
+    logger.setLevel(_logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        tool(harness_path=str(tmp_path / "h.py"), repo_root="/repo", out_path="/tmp/x.json")
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prev_level)
+
+    msgs = [r.getMessage() for r in records if r.levelno == _logging.DEBUG]
+    assert any("collect_baseline ignored extra kwargs" in m for m in msgs)
+
+
+def test_collect_baseline_no_extras_still_works(monkeypatch, tmp_path: Path) -> None:
+    """The original call shape (no extras) returns the same dict it always did."""
+    monkeypatch.setattr(_tools_mod, "collect_baseline_metrics", _stub_baseline)
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    tool = _make_tool_collect_baseline(agent)
+
+    result = tool(harness_path=str(tmp_path / "h.py"), repeats=3, gpu_id=0)
+
+    assert set(result.keys()) == {"ok", "median_ms", "samples_ms", "stdev_ms", "repeats", "command"}
+    assert agent._collected["baseline"].median_ms == 1.25
+
+
+def test_collect_profile_tolerates_repo_root_and_output_dir_kwargs(monkeypatch, tmp_path: Path) -> None:
+    """``collect_profile`` mirrors the same kwarg-tolerance contract as baseline."""
+    monkeypatch.setattr(_tools_mod, "collect_profile", _stub_profile)
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    tool = _make_tool_collect_profile(agent)
+
+    result = tool(
+        harness_path=str(tmp_path / "h.py"),
+        repo_root="/some/repo",
+        output_dir=str(tmp_path / "out"),
+    )
+
+    assert result["ok"] is True
+    assert result["backend"] == "stub"
+
+
+def test_collect_profile_no_extras_still_works(monkeypatch, tmp_path: Path) -> None:
+    """Calling without extras still works (existing contract preserved)."""
+    monkeypatch.setattr(_tools_mod, "collect_profile", _stub_profile)
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    tool = _make_tool_collect_profile(agent)
+
+    result = tool(harness_path=str(tmp_path / "h.py"))
+
+    assert result["ok"] is True
+    assert result["command"] == "<stub>"

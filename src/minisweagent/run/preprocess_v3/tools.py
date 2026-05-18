@@ -725,7 +725,15 @@ def _make_tool_collect_baseline(
         repeats: int = 5,
         work_dir: str | None = None,
         gpu_id: int | None = None,
+        **_extra_ignored: Any,
     ) -> dict[str, Any]:
+        # Defensive: the orchestrator LLM occasionally invents kwargs the
+        # schema does not declare (observed in the field: ``out_path``,
+        # ``repo_root``, ``output_dir``). Drop them with a debug-log
+        # breadcrumb instead of raising ``TypeError``, which would
+        # otherwise abort the whole baseline step.
+        if _extra_ignored:
+            logger.debug("collect_baseline ignored extra kwargs: %s", list(_extra_ignored))
         baseline: BaselineMetrics = collect_baseline_metrics(
             Path(harness_path),
             repeats=repeats,
@@ -753,7 +761,12 @@ def _make_tool_collect_profile(
         work_dir: str | None = None,
         gpu_id: int | None = None,
         out_path: str | None = None,
+        **_extra_ignored: Any,
     ) -> dict[str, Any]:
+        # See ``_make_tool_collect_baseline._impl`` — same defensive
+        # accept-and-log policy for LLM-invented kwargs.
+        if _extra_ignored:
+            logger.debug("collect_profile ignored extra kwargs: %s", list(_extra_ignored))
         profile: ProfileResult = collect_profile(
             Path(harness_path),
             work_dir=Path(work_dir) if work_dir else None,
