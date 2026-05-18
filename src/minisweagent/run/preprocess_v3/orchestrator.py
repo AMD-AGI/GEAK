@@ -470,7 +470,19 @@ class PreprocessResult:
             Wall-clock seconds spent inside ``run()``.
         errors:
             Cumulative error strings collected across all steps. Empty
-            on a clean success.
+            on a clean success. On Path A, ``collect_baseline`` /
+            ``collect_profile`` failures are NOT included here (they
+            land on :attr:`warnings` instead — see ``_finalize_success``
+            for the rationale).
+        warnings:
+            Non-fatal issues that should not invalidate ``success`` but
+            are worth surfacing to the operator. Populated on Path A
+            when the orchestrator LLM reported a ``collect_baseline`` /
+            ``collect_profile`` failure: the harness on Path A is the
+            user's own command, so baseline / profile failures are
+            informational rather than disqualifying. Always empty on
+            Path B (Path B keeps the strict legacy criteria — any error
+            invalidates ``success``).
     """
 
     success: bool
@@ -487,6 +499,7 @@ class PreprocessResult:
     path_taken: Literal["A", "B"] = "B"
     elapsed_s: float = 0.0
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -830,9 +843,10 @@ class PreprocessOrchestratorAgent:
         baseline = collected.get("baseline")
         commandment_path = _coerce_path(collected.get("commandment_path"))
         path_taken = _derive_path_taken(self._tool_calls)
+        real_errors, warnings = self._partition_errors_by_path(merged_errors, path_taken)
         success = self._finalize_success(
             finish_payload=finish_payload,
-            errors=merged_errors,
+            errors=real_errors,
             harness_path=harness_path,
             baseline=baseline,
             path_taken=path_taken,
@@ -853,8 +867,51 @@ class PreprocessOrchestratorAgent:
             tool_calls=list(self._tool_calls),
             path_taken=path_taken,
             elapsed_s=elapsed_s,
-            errors=merged_errors,
+            errors=real_errors,
+            warnings=warnings,
         )
+
+    @staticmethod
+    def _partition_errors_by_path(
+        errors: list[str],
+        path_taken: Literal["A", "B"],
+    ) -> tuple[list[str], list[str]]:
+        """Split error strings into ``(errors, warnings)`` for the given path.
+
+        On **Path A**, baseline / profile failures are inevitable: the
+        harness IS the user's run command, not a file the orchestrator
+        owns, so ``collect_baseline`` / ``collect_profile`` will fail in
+        the standard "no harness file present" way and that does NOT
+        mean preprocessing failed. Any error string starting with
+        ``"collect_baseline"`` or ``"collect_profile"`` is downgraded to
+        a warning; everything else stays in the errors list and
+        invalidates ``success`` as usual.
+
+        On **Path B**, nothing is downgraded — the legacy strict
+        criteria are preserved (any error invalidates ``success``). The
+        returned ``warnings`` list is always empty on Path B.
+
+        Args:
+            errors: Cumulative error strings (loop + finish-payload).
+            path_taken: ``"A"`` or ``"B"``.
+
+        Returns:
+            ``(real_errors, warnings)`` — the partition. The two lists
+            together contain exactly the same strings as ``errors``,
+            preserving order within each bucket.
+        """
+        if path_taken != "A":
+            return list(errors), []
+        real_errors: list[str] = []
+        warnings: list[str] = []
+        for err in errors:
+            text = err if isinstance(err, str) else str(err)
+            stripped = text.lstrip()
+            if stripped.startswith("collect_baseline") or stripped.startswith("collect_profile"):
+                warnings.append(text)
+            else:
+                real_errors.append(text)
+        return real_errors, warnings
 
     @staticmethod
     def _finalize_success(
@@ -871,7 +928,9 @@ class PreprocessOrchestratorAgent:
         Universal preconditions (both paths):
 
         * ``finish_preprocess`` was actually called (so we have a payload).
-        * No accumulated ``errors`` (loop-level or finish-payload-level).
+        * No accumulated ``errors`` (loop-level or finish-payload-level)
+          AFTER :meth:`_partition_errors_by_path` has stripped out
+          Path-A's baseline / profile warnings.
 
         Path-specific criteria:
 
@@ -880,7 +939,10 @@ class PreprocessOrchestratorAgent:
           artifact is ``commandment_path`` (the rendered COMMANDMENT.md
           that captures the user's command). ``baseline`` is helpful but
           not required (the LLM may opt to skip it on a Path-A run if
-          the user only asked for a one-shot command).
+          the user only asked for a one-shot command). Baseline /
+          profile failures are downgraded to warnings by
+          :meth:`_partition_errors_by_path` before they reach this
+          function.
         * **Path B** — existing strict criteria preserved from commit
           set 5a: ``harness_path`` AND ``baseline`` must both be
           populated. Missing either downgrades the run to

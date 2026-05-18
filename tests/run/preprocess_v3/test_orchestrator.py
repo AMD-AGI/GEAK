@@ -576,6 +576,220 @@ def test_finalize_success_path_b_without_baseline_returns_false() -> None:
     assert success is False
 
 
+# ---------------------------------------------------------------------------
+# _partition_errors_by_path — Path-A downgrade of baseline/profile errors
+# ---------------------------------------------------------------------------
+
+
+def test_partition_errors_path_a_downgrades_collect_baseline_to_warning() -> None:
+    """Path A: ``collect_baseline …`` error strings become warnings."""
+    real_errors, warnings = PreprocessOrchestratorAgent._partition_errors_by_path(
+        [
+            "collect_baseline failed: harness not found",
+            "some other thing went wrong",
+        ],
+        path_taken="A",
+    )
+    assert warnings == ["collect_baseline failed: harness not found"]
+    assert real_errors == ["some other thing went wrong"]
+
+
+def test_partition_errors_path_a_downgrades_collect_profile_to_warning() -> None:
+    """Path A: ``collect_profile …`` error strings become warnings."""
+    real_errors, warnings = PreprocessOrchestratorAgent._partition_errors_by_path(
+        ["collect_profile: profiler-mcp unavailable"],
+        path_taken="A",
+    )
+    assert warnings == ["collect_profile: profiler-mcp unavailable"]
+    assert real_errors == []
+
+
+def test_partition_errors_path_a_preserves_other_errors() -> None:
+    """Path A: non-baseline/profile errors remain as errors."""
+    real_errors, warnings = PreprocessOrchestratorAgent._partition_errors_by_path(
+        ["LimitsExceeded: step limit hit", "render_commandment crashed"],
+        path_taken="A",
+    )
+    assert warnings == []
+    assert real_errors == ["LimitsExceeded: step limit hit", "render_commandment crashed"]
+
+
+def test_partition_errors_path_b_does_not_downgrade_anything() -> None:
+    """Path B: nothing is downgraded — strict legacy criteria preserved."""
+    real_errors, warnings = PreprocessOrchestratorAgent._partition_errors_by_path(
+        [
+            "collect_baseline failed",
+            "collect_profile: missing harness",
+            "other",
+        ],
+        path_taken="B",
+    )
+    assert warnings == []
+    assert real_errors == [
+        "collect_baseline failed",
+        "collect_profile: missing harness",
+        "other",
+    ]
+
+
+def test_partition_errors_handles_leading_whitespace() -> None:
+    """Leading whitespace on Path-A error strings does not defeat the match."""
+    real_errors, warnings = PreprocessOrchestratorAgent._partition_errors_by_path(
+        ["   collect_baseline returned ok=False"],
+        path_taken="A",
+    )
+    assert warnings == ["   collect_baseline returned ok=False"]
+    assert real_errors == []
+
+
+def test_partition_errors_coerces_non_string_entries() -> None:
+    """Non-string entries are str()-coerced before the prefix check."""
+    real_errors, warnings = PreprocessOrchestratorAgent._partition_errors_by_path(
+        [Exception("collect_baseline boom")],  # type: ignore[list-item]
+        path_taken="A",
+    )
+    assert warnings == ["collect_baseline boom"]
+    assert real_errors == []
+
+
+def test_partition_errors_empty_list_is_pair_of_empty_lists() -> None:
+    """``[] -> ([], [])`` for both paths."""
+    assert PreprocessOrchestratorAgent._partition_errors_by_path([], "A") == ([], [])
+    assert PreprocessOrchestratorAgent._partition_errors_by_path([], "B") == ([], [])
+
+
+# ---------------------------------------------------------------------------
+# _build_result wires _partition_errors_by_path + writes warnings on Path A
+# ---------------------------------------------------------------------------
+
+
+def test_build_result_path_a_success_when_only_baseline_profile_failed(tmp_path: Path) -> None:
+    """Path A + COMMANDMENT + only baseline/profile errors → success=True, warnings set."""
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    agent._collected = {"commandment_path": tmp_path / "COMMANDMENT.md"}
+    agent._tool_calls = [{"name": "commandment_from_user_command", "args": {}}]
+    agent._subagent_runs = []
+
+    result = agent._build_result(
+        context={"kernel_language": _LANG, "kernel_path": tmp_path / "k.py"},
+        finish_payload={
+            "errors": [
+                "collect_baseline failed: harness not found",
+                "collect_profile failed: harness not found",
+            ],
+            "summary": "Path A complete",
+        },
+        errors=[],
+        elapsed_s=1.0,
+    )
+
+    assert result.path_taken == "A"
+    assert result.success is True
+    assert result.errors == []
+    assert sorted(result.warnings) == sorted(
+        [
+            "collect_baseline failed: harness not found",
+            "collect_profile failed: harness not found",
+        ]
+    )
+
+
+def test_build_result_path_a_failure_when_no_commandment(tmp_path: Path) -> None:
+    """Path A + no COMMANDMENT path → success=False (warnings still populated)."""
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    agent._collected = {}
+    agent._tool_calls = [{"name": "commandment_from_user_command", "args": {}}]
+    agent._subagent_runs = []
+
+    result = agent._build_result(
+        context={"kernel_language": _LANG, "kernel_path": tmp_path / "k.py"},
+        finish_payload={"errors": ["collect_baseline failed"], "summary": "no commandment"},
+        errors=[],
+        elapsed_s=1.0,
+    )
+
+    assert result.path_taken == "A"
+    assert result.success is False
+    assert result.warnings == ["collect_baseline failed"]
+
+
+def test_build_result_path_a_failure_when_real_error_present(tmp_path: Path) -> None:
+    """Path A + non-baseline/profile error → success=False, error preserved."""
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    agent._collected = {"commandment_path": tmp_path / "COMMANDMENT.md"}
+    agent._tool_calls = [{"name": "commandment_from_user_command", "args": {}}]
+    agent._subagent_runs = []
+
+    result = agent._build_result(
+        context={"kernel_language": _LANG, "kernel_path": tmp_path / "k.py"},
+        finish_payload={"errors": ["render_commandment crashed"], "summary": "fail"},
+        errors=[],
+        elapsed_s=1.0,
+    )
+
+    assert result.path_taken == "A"
+    assert result.success is False
+    assert result.errors == ["render_commandment crashed"]
+    assert result.warnings == []
+
+
+def test_build_result_path_b_clean_run_unchanged_behaviour(tmp_path: Path) -> None:
+    """Path B + clean run → success=True (existing contract preserved)."""
+
+    class _Baseline:
+        pass
+
+    baseline = _Baseline()
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    agent._collected = {
+        "harness_path": tmp_path / "h.py",
+        "baseline": baseline,
+    }
+    agent._tool_calls = []  # No Path-A tool → Path B
+    agent._subagent_runs = []
+
+    result = agent._build_result(
+        context={"kernel_language": _LANG, "kernel_path": tmp_path / "k.py"},
+        finish_payload={"errors": [], "summary": "clean"},
+        errors=[],
+        elapsed_s=1.0,
+    )
+
+    assert result.path_taken == "B"
+    assert result.success is True
+    assert result.warnings == []
+
+
+def test_build_result_path_b_any_error_invalidates_success(tmp_path: Path) -> None:
+    """Path B + any error string → success=False, warnings always empty."""
+    agent = PreprocessOrchestratorAgent(model=_StubModel())
+    agent._collected = {"harness_path": tmp_path / "h.py", "baseline": object()}
+    agent._tool_calls = []
+    agent._subagent_runs = []
+
+    result = agent._build_result(
+        context={"kernel_language": _LANG, "kernel_path": tmp_path / "k.py"},
+        finish_payload={"errors": ["collect_baseline failed"], "summary": "fail"},
+        errors=[],
+        elapsed_s=1.0,
+    )
+
+    assert result.path_taken == "B"
+    assert result.success is False
+    assert result.errors == ["collect_baseline failed"]
+    assert result.warnings == []
+
+
+def test_preprocess_result_has_warnings_field() -> None:
+    """The new ``warnings`` field defaults to an empty list."""
+    result = PreprocessResult(
+        success=True,
+        kernel_language=_LANG,
+        kernel_path=Path("/tmp/k.py"),
+    )
+    assert result.warnings == []
+
+
 def test_dispatch_loop_records_tool_calls_in_audit_log() -> None:
     """Every dispatched tool call appears in ``agent._tool_calls``."""
     model = _StubModel(
