@@ -66,6 +66,7 @@ from minisweagent.run.preprocess_v3.commandment import (
     render_commandment,
     render_commandment_from_sections,
 )
+from minisweagent.run.preprocess_v3.discovery import DiscoveryContext, run_legacy_discovery
 from minisweagent.run.preprocess_v3.explore import CodebaseContext, explore_codebase
 from minisweagent.run.preprocess_v3.harness_kb import load_harness_kb
 from minisweagent.run.preprocess_v3.orchestrator import (
@@ -288,7 +289,12 @@ class PreprocessSubagentDispatcher:
             }
         elapsed_s = round(time.monotonic() - t0, 3)
 
-        success = exit_status in {"Submitted", "FinishedSuccessfully"} or "VERIFIED=true" in message
+        if name == "harness-verifier":
+            success = "HARNESS_VERIFIED=true" in message
+        elif name == "harness-generator":
+            success = exit_status in {"Submitted", "FinishedSuccessfully"} and "HARNESS_PATH:" in message
+        else:
+            success = exit_status in {"Submitted", "FinishedSuccessfully"}
         return {
             "name": name,
             "success": success,
@@ -324,6 +330,18 @@ class PreprocessSubagentDispatcher:
         lines = ["## Context"]
         for key, value in context.items():
             lines.append(f"- **{key}**: {value}")
+            if key in {"codebase_context_path", "discovery_context_path"} and value:
+                path = Path(str(value))
+                if path.is_file():
+                    try:
+                        content = path.read_text(encoding="utf-8")
+                    except Exception as exc:  # noqa: BLE001
+                        lines.append(f"  (failed to read {path}: {exc})")
+                    else:
+                        lines.append("")
+                        lines.append(f"### Contents of `{path}`")
+                        lines.append("")
+                        lines.append(content)
         return "\n".join(lines)
 
     def _resolve_extra_template_vars(self, spec: SubagentSpec) -> dict[str, Any]:
@@ -431,6 +449,31 @@ def _schema_codebase_explore() -> dict[str, Any]:
     }
 
 
+def _schema_run_discovery() -> dict[str, Any]:
+    return {
+        "name": "run_discovery",
+        "type": "function",
+        "description": (
+            "Step 1 — deterministic legacy discovery front half. Reuses legacy "
+            "DiscoveryPhase semantics: resolve kernel/repo, write CODEBASE_CONTEXT.md, "
+            "run automated-test-discovery, write discovery.json and DISCOVERY_CONTEXT.md. "
+            "Call this before dispatching harness-generator on Path B."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo_root": {"type": "string", "description": "Absolute path to the repository root."},
+                "kernel_path": {"type": "string", "description": "Absolute path to the target kernel."},
+                "output_dir": {
+                    "type": "string",
+                    "description": "Directory where CODEBASE_CONTEXT.md, discovery.json, and DISCOVERY_CONTEXT.md are written.",
+                },
+            },
+            "required": ["repo_root", "kernel_path", "output_dir"],
+        },
+    }
+
+
 def _schema_translate_to_flydsl() -> dict[str, Any]:
     return {
         "name": "translate_to_flydsl",
@@ -459,9 +502,10 @@ def _schema_dispatch_subagent() -> dict[str, Any]:
             "Step 3a / 3b — dispatch one of the two v3 preprocess subagents "
             "(harness-generator, harness-verifier) with a focused task string. "
             "Use them in alternation during step 3 (max 3 generator attempts). "
-            "On step 3b (verifier), pass the four COMMANDMENT_<MODE> commands "
-            "from harness-generator's output as ``commandment_commands`` in the "
-            "context so the verifier runs the declared commands verbatim."
+            "The harness-generator emits a single ``HARNESS_PATH:`` line — the "
+            "dispatcher auto-populates ``harness_path`` on the orchestrator from "
+            "it. On step 3b (verifier), the only context the verifier needs is "
+            "``harness_path``."
         ),
         "parameters": {
             "type": "object",
@@ -658,6 +702,55 @@ def _schema_commandment_from_user_command() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _make_tool_run_discovery(
+    agent: PreprocessOrchestratorAgent,
+    kernel_language: KernelLanguage,
+) -> Callable[..., dict[str, Any]]:
+    """Bind ``run_discovery`` to the legacy deterministic discovery front half."""
+
+    def _impl(
+        repo_root: str,
+        kernel_path: str,
+        output_dir: str,
+    ) -> dict[str, Any]:
+        ctx: DiscoveryContext = run_legacy_discovery(
+            kernel_path=Path(kernel_path),
+            repo_root=Path(repo_root),
+            output_dir=Path(output_dir),
+            kernel_language=kernel_language,
+        )
+        # Preserve the PreprocessResult surface: codebase_context remains
+        # the codebase briefing artifact, while discovery artifacts are
+        # kept separately for subagent context / audit.
+        codebase_ctx = CodebaseContext(
+            text=ctx.codebase_context_text,
+            files=[],
+            out_path=ctx.codebase_context_path,
+            kernel_language=kernel_language,
+        )
+        agent._collected["codebase_context"] = codebase_ctx
+        agent._collected["discovery"] = ctx.discovery
+        agent._collected["discovery_path"] = str(ctx.discovery_path) if ctx.discovery_path else None
+        agent._collected["discovery_context_text"] = ctx.discovery_context_text
+        discovery_context_path = Path(output_dir) / "DISCOVERY_CONTEXT.md"
+        agent._collected["discovery_context_path"] = (
+            str(discovery_context_path) if discovery_context_path.is_file() else None
+        )
+        return {
+            "ok": True,
+            "kernel_path": str(ctx.kernel_path),
+            "repo_root": str(ctx.repo_root),
+            "codebase_context_path": str(ctx.codebase_context_path) if ctx.codebase_context_path else None,
+            "discovery_path": str(ctx.discovery_path) if ctx.discovery_path else None,
+            "discovery_context_path": agent._collected.get("discovery_context_path"),
+            "tests_found": len((ctx.discovery or {}).get("tests") or []),
+            "benchmarks_found": len((ctx.discovery or {}).get("benchmarks") or []),
+            "focused_test": bool((ctx.discovery or {}).get("focused_test")),
+        }
+
+    return _impl
+
+
 def _make_tool_codebase_explore(
     agent: PreprocessOrchestratorAgent,
     kernel_language: KernelLanguage,
@@ -723,21 +816,35 @@ def _make_tool_dispatch_subagent(
     dispatcher: PreprocessSubagentDispatcher,
 ) -> Callable[..., dict[str, Any]]:
     def _impl(name: str, task: str, context: dict | None = None) -> dict[str, Any]:
+        context = dict(context or {})
+        codebase_ctx = agent._collected.get("codebase_context")
+        if codebase_ctx is not None and getattr(codebase_ctx, "out_path", None) and "codebase_context_path" not in context:
+            context["codebase_context_path"] = str(codebase_ctx.out_path)
+        if agent._collected.get("discovery_path") and "discovery_path" not in context:
+            context["discovery_path"] = agent._collected["discovery_path"]
+        if agent._collected.get("discovery_context_path") and "discovery_context_path" not in context:
+            context["discovery_context_path"] = agent._collected["discovery_context_path"]
+        if agent._collected.get("discovery") and "discovery" not in context:
+            discovery = agent._collected["discovery"]
+            context["discovery_summary"] = {
+                "tests_found": len((discovery or {}).get("tests") or []),
+                "benchmarks_found": len((discovery or {}).get("benchmarks") or []),
+                "focused_test": bool((discovery or {}).get("focused_test")),
+            }
         result = dispatcher(name=name, task=task, model=agent.model, context=context)
         agent._subagent_runs.append(result)
-        # Populate orchestrator state from the subagent output where
-        # possible — the LLM still needs to call later tools, but we
-        # surface the parsed harness path / verifier verdict so it
-        # doesn't have to re-derive them.
+        # Auto-populate orchestrator state from the subagent's output so
+        # the LLM doesn't have to extract structured fields by regex.
+        # Legacy parity: the harness-generator emits exactly one
+        # structured line (``HARNESS_PATH: <path>``); the harness-verifier
+        # echoes ``HARNESS_PATH=<path>`` on its success block.
         output = result.get("output", "") or ""
-        if name == "harness-generator":
-            for line in output.splitlines():
-                if line.startswith("TEST_COMMAND:"):
-                    agent._collected.setdefault("test_command", line.split(":", 1)[1].strip())
-        if name == "harness-verifier":
-            for line in output.splitlines():
-                if line.startswith("HARNESS_PATH="):
-                    agent._collected["harness_path"] = line.split("=", 1)[1].strip()
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("HARNESS_PATH:"):
+                agent._collected["harness_path"] = stripped.split(":", 1)[1].strip()
+            elif stripped.startswith("HARNESS_PATH="):
+                agent._collected["harness_path"] = stripped.split("=", 1)[1].strip()
         return result
 
     return _impl
@@ -1002,21 +1109,131 @@ def _make_tool_finish_preprocess(
         commandment_path: str | None = None,
         errors: list | None = None,
         summary: str = "",
+        **_extra_ignored: Any,
     ) -> dict[str, Any]:
+        # Defensive: the orchestrator LLM has been observed to invent
+        # kwargs the schema does not declare (``artifacts``,
+        # ``codebase_context_path``, ``path_taken``, ``kernel_path``,
+        # ``output_dir``). Drop them with a debug breadcrumb so the
+        # completion sentinel never fails on TypeError. The new prompt
+        # contract instructs the LLM to call ``finish_preprocess()`` with
+        # no arguments — the kwargs above are accepted for backwards
+        # compatibility but their values are ignored (all artifacts are
+        # already on ``agent._collected`` from prior tool calls).
+        if _extra_ignored:
+            logger.debug("finish_preprocess ignored extra kwargs: %s", list(_extra_ignored))
+
+        # Path-A invariant: on the Path-A short-circuit the orchestrator
+        # did NOT run the harness-generator subagent, so
+        # ``PreprocessResult.harness_path`` must be ``None`` — the user's
+        # command line IS the run instruction, not a harness file we
+        # produced. Some LLM completions still pass the user's test file
+        # path as ``harness_path`` (it superficially looks like a
+        # harness); drop it so the result type stays honest and the
+        # downstream consumer reads the user command from
+        # ``commandment_path`` instead. Path A is detected via
+        # ``run_instructions`` (set ONLY by
+        # ``commandment_from_user_command``).
+        on_path_a = agent._collected.get("run_instructions") is not None
+        if on_path_a:
+            harness_path = None
+
         if harness_path:
             agent._collected["harness_path"] = harness_path
         if commandment_path:
             agent._collected["commandment_path"] = commandment_path
+
+        # Harness-path derivation fallback (Path B only): when the LLM
+        # forgot to thread ``harness_path`` AND the dispatcher didn't
+        # already populate it (e.g. the subagent omitted its
+        # ``HARNESS_PATH:`` line), scan ``output_dir`` for a likely
+        # harness file before downgrading the run to ``success=False``.
+        # Mirrors legacy ``extract_harness_path`` + the discovery fallback
+        # Layer 7. Skipped on Path A so we don't accidentally pick up a
+        # stale file from a prior run.
+        if not on_path_a and not agent._collected.get("harness_path"):
+            output_dir = agent._extra_template_vars.get("output_dir") if hasattr(agent, "_extra_template_vars") else None
+            if output_dir:
+                for candidate_name in ("test_harness.py", "harness.py", "_geak_auto_harness.py", "harness.hip"):
+                    candidate = Path(output_dir) / candidate_name
+                    if candidate.is_file():
+                        agent._collected["harness_path"] = str(candidate)
+                        logger.info("finish_preprocess derived harness_path from output_dir: %s", candidate)
+                        break
+
         payload = {
-            "harness_path": harness_path,
-            "commandment_path": commandment_path,
+            "harness_path": agent._collected.get("harness_path"),
+            "commandment_path": agent._collected.get("commandment_path"),
             "errors": list(errors or []),
             "summary": summary,
         }
+        blockers = _finish_blockers(agent=agent, on_path_a=on_path_a, payload=payload)
+        if blockers:
+            return {
+                "ok": False,
+                "error": "finish_preprocess blocked: unresolved preprocess invariants",
+                "blockers": blockers,
+                "next_action": (
+                    "Do not call finish_preprocess again yet. Fix the listed blockers by "
+                    "rerunning the failed deterministic tool or redispatching the relevant "
+                    "subagent, then call finish_preprocess only after all blockers are gone."
+                ),
+            }
         agent._finish_payload = payload
         raise FinishedSuccessfully(payload)
 
     return _impl
+
+
+def _finish_blockers(
+    *,
+    agent: PreprocessOrchestratorAgent,
+    on_path_a: bool,
+    payload: dict[str, Any],
+) -> list[str]:
+    """Return final-state blockers that should keep the LLM iterating.
+
+    ``finish_preprocess`` is a completion sentinel, not a validation bypass.
+    Path A is allowed to finish once the user-command COMMANDMENT exists.
+    Path B must have the generated harness verified and all deterministic
+    artifacts collected successfully before the sentinel can terminate the
+    orchestrator loop.
+    """
+    blockers: list[str] = []
+
+    if on_path_a:
+        if not payload.get("commandment_path"):
+            blockers.append("Path A missing commandment_path")
+        return blockers
+
+    if payload.get("errors"):
+        blockers.append(f"finish_preprocess called with errors={payload['errors']!r}")
+
+    if not agent._collected.get("harness_path"):
+        blockers.append("Path B missing harness_path")
+
+    verifier_runs = [r for r in agent._subagent_runs if r.get("name") == "harness-verifier"]
+    if not verifier_runs:
+        blockers.append("Path B never dispatched harness-verifier")
+    elif not any(r.get("success") is True for r in verifier_runs):
+        blockers.append("Path B has no successful harness-verifier run")
+
+    baseline = agent._collected.get("baseline")
+    if baseline is None:
+        blockers.append("Path B missing baseline metrics")
+    elif getattr(baseline, "success", True) is False:
+        blockers.append("Path B baseline collection failed")
+
+    profile = agent._collected.get("profile")
+    if profile is None:
+        blockers.append("Path B missing profile result")
+    elif getattr(profile, "success", True) is False:
+        blockers.append("Path B profile collection failed")
+
+    if not agent._collected.get("commandment_path"):
+        blockers.append("Path B missing COMMANDMENT.md")
+
+    return blockers
 
 
 # ---------------------------------------------------------------------------
@@ -1031,7 +1248,7 @@ def register_default_tools(
     registry: SubagentRegistry | None = None,
     dispatcher: PreprocessSubagentDispatcher | None = None,
 ) -> None:
-    """Register all 7 v3 preprocess tools on ``agent``.
+    """Register all v3 preprocess tools on ``agent``.
 
     Args:
         agent:
@@ -1054,6 +1271,11 @@ def register_default_tools(
     registry = registry or SubagentRegistry()
     dispatcher = dispatcher or PreprocessSubagentDispatcher(registry, kernel_language=kernel_language)
 
+    agent.register_tool(
+        "run_discovery",
+        _schema_run_discovery(),
+        _make_tool_run_discovery(agent, kernel_language),
+    )
     agent.register_tool(
         "codebase_explore",
         _schema_codebase_explore(),

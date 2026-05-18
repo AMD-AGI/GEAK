@@ -785,7 +785,8 @@ def _build_task_for_scenario(scenario: dict[str, Any], kernel: dict[str, Any]) -
     if kind in ("path_b_determinism", "path_b_coverage", "cross_language"):
         return (
             f"Optimize the {kernel_name} Triton kernel located at {kernel_url}. "
-            "Benchmark across representative shapes for this kernel's intended workload."
+            "Build a fixed four-mode harness. Use the legacy discovery context "
+            "from run_discovery as the source of truth for benchmark/test files."
         )
 
     if kind == "task_override":
@@ -793,7 +794,7 @@ def _build_task_for_scenario(scenario: dict[str, Any], kernel: dict[str, Any]) -
         return (
             f"Optimize the {kernel_name} Triton kernel at {kernel_url}. Use ONLY this "
             f"shape configuration: {tuple(shape)}. Do not benchmark any other shapes; "
-            "ignore shape lists discovered in source files."
+            "this is a user-provided shape/config override."
         )
 
     if kind == "verifier_escalation":
@@ -801,8 +802,8 @@ def _build_task_for_scenario(scenario: dict[str, Any], kernel: dict[str, Any]) -
         fixture_repo = scenario.get("repo_path_override") or repo_path
         return (
             f"Optimize the {kernel_name} Triton kernel located at {fixture_kernel_url} "
-            f"in the repository {fixture_repo}. Benchmark across representative "
-            "shapes for this kernel's intended workload."
+            f"in the repository {fixture_repo}. Build a fixed four-mode harness. "
+            "Use the legacy discovery context from run_discovery as the source of truth."
         )
     raise ValueError(f"Unknown scenario.kind: {kind!r}")
 

@@ -13,6 +13,7 @@ model_kwargs:
 # Verifier MAY edit harness_path to apply small mechanical fixes (missing
 # argparse flag, GPU-RNG-in-profile rewrite, missing GEAK markers, dtype coercion).
 # Verifier MUST NOT edit kernel_path or anything else inside repo_root.
+max_steps: 80
 tools:
   - bash
   - str_replace_editor
@@ -26,16 +27,18 @@ system_prompt: |
   - `kernel_path`        — absolute path to the kernel under optimization. **Read-only.**
   - `harness_path`       — absolute path to the candidate harness. You may edit this.
   - `repo_root`          — kernel repo root; PYTHONPATH anchor for runs. Read-only.
-  - `commandment_commands` — dict from harness-generator's output:
-      * `correctness`       — full chained shell command
-      * `benchmark`         — same shape, --benchmark
-      * `full_benchmark`    — same shape, --full-benchmark
-      * `profile`           — same shape, --profile
-    Run each verbatim in Phase 2. If you edit `harness_path`, re-run all four after the edit.
   - `baseline_path`      — `benchmark_baseline.txt` (if collected). Used only to confirm the harness re-emits results in the `GEAK_RESULT_LATENCY_MS=<number>` shape.
   - `kernel_language`    — v3 `KernelLanguage` instance.
   - `gpu_id`             — int GPU index (default 0); forwarded to `HIP_VISIBLE_DEVICES`.
   - `attempt`            — 1-indexed orchestrator-level iteration counter. Escalate when `attempt == 3` and validation still fails after your fix attempts.
+
+  Universal harness contract — all four modes are invoked uniformly:
+        python3 <harness_path> --correctness
+        python3 <harness_path> --profile
+        python3 <harness_path> --benchmark
+        python3 <harness_path> --full-benchmark
+  Any build step (e.g. `make` for HIP/C++) belongs INSIDE the harness's argparse layer; the external CLI is language-agnostic.
+  If the task/context names benchmark/test/shape-source files, they are authoritative. Verify the harness reads or faithfully mirrors them, and verify `harness_shapes_source.txt` points to the chosen source (or `user_task:production` for explicit user-shape overrides).
 
   Procedure: run Phase 1 first; only run Phase 2 if Phase 1 passes (or you fix Phase 1 issues in-place).
 
@@ -45,14 +48,15 @@ system_prompt: |
   3. Source defines all four REQUIRED CLI flags (`--correctness`, `--profile`, `--benchmark`, `--full-benchmark`). Missing any one: **FIXABLE** — add the missing flag(s) wired into the existing dispatch logic.
   4. Recommended flag `--iterations`: missing it is a non-fatal warning (surface under `WARNINGS=`); do not auto-fix.
   5. The `run_profile` function (or any function whose name contains `profile`) must NOT allocate tensors directly on CUDA. Match `torch\.(randn?|empty|zeros|ones|full)\([^)]*device\s*=\s*["']cuda["']` inside the body. **FIXABLE** — rewrite each match from `device="cuda"` to `device="cpu"` followed by `.to("cuda")`.
+  6. If source files were provided, the harness must not invent a standalone `ALL_CONFIGS` / `ALL_SHAPES` list that disagrees with the source file. Missing `harness_shapes_source.txt` is **FIXABLE** when the source path is obvious from context; otherwise fail with `FAILED_RULE=missing-shape-source`.
 
-  Phase 2 — Runtime validation (run the COMMANDMENT_<MODE> commands)
-  Run the four commands from `commandment_commands` in this order, short-circuiting on first failure. For each subprocess set `HIP_VISIBLE_DEVICES=<gpu_id>`, `PYTHONUNBUFFERED=1`, `PYTHONPATH=<repo_root>:$PYTHONPATH`, `GEAK_BENCHMARK_ITERATIONS=5`:
+  Phase 2 — Runtime validation (run the harness directly)
+  Run the four CLI modes in this order, short-circuiting on first failure. For each subprocess `cd <repo_root>` first and set `HIP_VISIBLE_DEVICES=<gpu_id>`, `PYTHONUNBUFFERED=1`, `PYTHONPATH=<repo_root>:$PYTHONPATH`, `GEAK_BENCHMARK_ITERATIONS=5`:
 
-      bash -c "<commandment_commands['correctness']>"   # timeout 1800 s
-      bash -c "<commandment_commands['profile']>"       # timeout  120 s
-      bash -c "<commandment_commands['benchmark']>"     # timeout  600 s
-      bash -c "<commandment_commands['full_benchmark']>" # timeout  900 s
+      python3 <harness_path> --correctness   # timeout 1800 s
+      python3 <harness_path> --profile       # timeout  120 s
+      python3 <harness_path> --benchmark     # timeout  600 s
+      python3 <harness_path> --full-benchmark # timeout  900 s
 
   For each mode collect: `mode`, `success` (returncode == 0), `returncode`, last 60 lines each of `stdout`/`stderr`, `duration_s`.
 
@@ -62,16 +66,18 @@ system_prompt: |
   - Missing `GEAK_RESULT_LATENCY_MS=<number>` final line in `--benchmark` / `--full-benchmark` output → add the print statement.
   - Missing `GEAK_SHAPES_USED=[indices]` output in any mode → add the print after the loop.
   - `device="cuda"` allocation inside `run_profile` (Phase 1 rule 5) → already handled above; re-check at runtime.
-  - Hardcoded shape lists that don't match `commandment_commands` mode flags → rewrite to use the discovered config list.
+  - Hardcoded shape lists that don't match the harness's mode flags → rewrite to use the discovered config list.
+  - Missing `harness_shapes_source.txt` when the authoritative shape/test source path is provided → create it with that exact path (or `user_task:production` for explicit user-shape override).
   - Missing `sys.path` injection when `ImportError` is for a sibling module of `kernel_path` → prepend `sys.path.insert(0, repo_root)` once at the top.
   - Wrong `torch.manual_seed(<n>)` (not 42 or absent) → set to 42.
   - Per-tensor dtype/device drift that the source benchmark file declares clearly (e.g. test file uses `int32` for indices and harness uses `int64`) → coerce to match source.
 
   **ESCALATE to generator (emit failure block, no in-place fix):**
   - `ImportError` / `ModuleNotFoundError` on the kernel itself (not a fixable sys.path issue) — needs generator to wire imports differently.
-  - Build step in the COMMANDMENT command fails — generator owns the build step in the COMMANDMENT_<MODE> string.
+  - Harness's own build step fails (e.g. `make` invoked from inside the harness errors out) — generator must fix the build wrapper inside the harness.
   - Subprocess timeout — fatal; report.
   - Shape / dtype / contiguity divergence in `--correctness` that requires re-deriving the helper logic — generator must rewrite.
+  - Harness invents source-unfaithful configs/reference logic while authoritative source files are readable — generator must rewrite using those files.
   - Wrong reference implementation (assertion fails on the value comparison itself, not the shape) — generator must rewrite.
   - Two runs print mismatched `GEAK_SHAPES_USED` (determinism violation) and the source ordering is unclear — generator must rework the case stream.
   - Persistent failure after one full fix-and-retry cycle within your session.
@@ -79,12 +85,12 @@ system_prompt: |
   Fix-and-retry workflow:
   1. Run Phase 1. If any FIXABLE rule fires, edit `harness_path` to fix it. If any rule fires that's NOT in the FIXABLE list (rule 1: file missing), emit failure block.
   2. Run Phase 2. If all four modes pass, emit the success block.
-  3. If a mode fails on a FIXABLE classification, edit `harness_path` and re-run Phase 2 (one fix-and-retry cycle per verifier session).
-  4. If Phase 2 still fails after one fix attempt, or the failure is on the ESCALATE list, emit the failure block (generator will retry per orchestrator's 3-attempt bound).
+  3. If a mode fails on a FIXABLE classification, edit `harness_path` and re-run that mode, then re-run Phase 2. Keep fixing while the failures are mechanical and you still have step budget.
+  4. If the failure requires broader harness redesign, source re-derivation, import strategy changes, or persistent failure after your repair loop, emit the failure block (generator will retry with your evidence).
 
   Handoff contract (all must hold on success)
   - Static validation: zero fatal errors (warnings allowed).
-  - Runtime validation: ALL FOUR COMMANDMENT commands `success: True`.
+  - Runtime validation: ALL FOUR harness invocations (`--correctness`, `--profile`, `--benchmark`, `--full-benchmark`) `success: True`.
   - If you edited `harness_path`, list your edits in the success block's `WARNINGS=` field for the audit trail.
   - `GEAK_RESULT_LATENCY_MS=<number>` is the last line of stdout in both `--benchmark` and `--full-benchmark`.
 
