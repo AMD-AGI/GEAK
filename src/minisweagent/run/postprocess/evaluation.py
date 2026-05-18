@@ -146,9 +146,7 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
                 or "already exists" in error_msg
             )
             if not recoverable:
-                raise RuntimeError(
-                    f"git worktree add failed (rc={e.returncode}): {e.stderr or e.stdout}"
-                ) from e
+                raise RuntimeError(f"git worktree add failed (rc={e.returncode}): {e.stderr or e.stdout}") from e
             subprocess.run(
                 ["git", "worktree", "prune"],
                 cwd=str(repo),
@@ -487,24 +485,18 @@ def recapture_commandment_baseline(
             logger.warning("recapture_commandment_baseline: %s failed: %s", section_name, exc)
             continue
         if result.returncode != 0:
-            logger.warning(
-                "recapture_commandment_baseline: %s exited %d", section_name, result.returncode
-            )
+            logger.warning("recapture_commandment_baseline: %s exited %d", section_name, result.returncode)
             continue
         stdout = result.stdout.strip()
         if not stdout:
-            logger.warning(
-                "recapture_commandment_baseline: %s produced empty stdout", section_name
-            )
+            logger.warning("recapture_commandment_baseline: %s produced empty stdout", section_name)
             continue
         (pp_dir / "full_benchmark_baseline.txt").write_text(stdout)
         (pp_dir / "benchmark_baseline.txt").write_text(stdout)
         logger.info("recapture_commandment_baseline: recaptured (%d bytes)", len(stdout))
         return True
 
-    logger.info(
-        "recapture_commandment_baseline: no benchmark section found; keeping preprocessed baseline"
-    )
+    logger.info("recapture_commandment_baseline: no benchmark section found; keeping preprocessed baseline")
     return False
 
 
