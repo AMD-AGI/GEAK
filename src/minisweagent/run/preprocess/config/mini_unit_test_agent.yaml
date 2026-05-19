@@ -187,11 +187,41 @@ agent:
        - ITERATIONS resolved from `--iterations` then `GEAK_BENCHMARK_ITERATIONS`
          (default 200), per the rule above.
 
-    Timing:
-       - GPU event-based ONLY: `torch.cuda.Event(enable_timing=True)`
-         or `triton.testing.do_bench` or `hipEventElapsedTime`.
-         NEVER `time.time()` or wall-clock.
-       - Run WARMUP, then ITERATIONS, report MEDIAN per shape.
+    Timing (DUAL-SIGNAL — required for Triton/CUDA/HIP kernels):
+       NEVER use `time.time()`, `time.perf_counter`, or any host wall-clock for the
+       benchmark loop itself. Use the dual-signal pattern below so the agent sees
+       BOTH wall-clock (dispatch + GPU) and kernel-only (GPU) latencies, and the
+       optimizer scores against the one selected by the SCORING TARGET in the task.
+
+       Pass 1 — wall-clock (end-to-end, includes dispatch):
+         `triton.testing.do_bench(fn, warmup=WARMUP, rep=ITERATIONS)` for Triton.
+         For HIP/CUDA: `torch.cuda.Event(enable_timing=True)` paired with synchronize.
+         IMPORTANT: do NOT call `perf_counter` inside a `torch.profiler` context —
+         the profiler instrumentation inflates host-measured latency ~3x on
+         dispatch-bound kernels (verified empirically). Use do_bench for wall.
+
+       Pass 2 — kernel-only (GPU work only, excludes dispatch):
+         For each iter, wrap the call in
+         `with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:`
+         then sum `evt.device_time_total` over `prof.key_averages()` and divide by 1000
+         to get ms. Take the MEDIAN across ITERATIONS.
+
+       Cache flush between iters (both passes) so timings are cold-L2:
+         `cache = triton.runtime.driver.active.get_empty_cache_for_benchmark()`
+         then `triton.runtime.driver.active.clear_cache(cache)` per iter.
+
+       Output (REQUIRED markers — emit ALL THREE in --benchmark and --full-benchmark):
+         GEAK_RESULT_WALL_MS=<wall_geomean_ms>          # do_bench / cuda.Event
+         GEAK_RESULT_KERNEL_MS=<kernel_geomean_ms>      # torch.profiler CUDA events
+         GEAK_RESULT_DISPATCH_MS=<wall - kernel>        # informational
+         GEAK_RESULT_DISPATCH_FRACTION=<dispatch/wall>  # informational
+         GEAK_RESULT_LATENCY_MS=<wall_geomean OR kernel_geomean per scoring target>
+       The task prompt declares which value (wall_ms or kernel_ms) GEAK_RESULT_LATENCY_MS
+       must equal — that is the signal the optimizer scores against. The other signals
+       are still printed so the agent can see the full latency decomposition.
+
+       Run WARMUP, then ITERATIONS, report MEDIAN per shape; aggregate per-shape medians
+       via geometric mean for the GEAK_RESULT_*_MS lines.
 
     GEAK_SHAPES_USED (for determinism validation):
        - In ALL modes, after the loop, print:

@@ -1413,6 +1413,7 @@ def create_validated_harness(
     max_retries: int = MAX_HARNESS_RETRIES,
     gpu_id: int = 0,
     user_task: str | None = None,
+    scoring_target: str = "wall",
 ) -> tuple[str, list[dict]]:
     """Run UnitTestAgent with static + runtime validation and retry loop.
 
@@ -1459,6 +1460,7 @@ def create_validated_harness(
             kernel_path=kernel_path,
             discovery_context=ctx,
             user_task=user_task,
+            scoring_target=scoring_target,
         )
         logger.info("UnitTestAgent test_command (attempt %d): %s", attempt, test_command)
 

@@ -196,6 +196,18 @@ def main(
         "--total-budget-s",
         help="Override the mode's total wall-clock budget (seconds). Escape hatch for testing.",
     ),
+    scoring_target: str = typer.Option(
+        "wall",
+        "--target",
+        help=(
+            "Which signal the harness reports as GEAK_RESULT_LATENCY_MS (the scoring metric "
+            "the agent optimizes against). 'wall' = end-to-end host latency via "
+            "triton.testing.do_bench (includes Python/dispatch overhead). 'kernel' = GPU-only "
+            "kernel time via torch.profiler CUDA events (excludes dispatch). The dual-signal "
+            "harness always reports BOTH (GEAK_RESULT_WALL_MS + GEAK_RESULT_KERNEL_MS) for "
+            "agent visibility; --target only chooses which becomes the scoring signal."
+        ),
+    ),
 ):
     # fmt: on
     del visual
@@ -521,6 +533,14 @@ def main(
             logger.info("[bold cyan]Promoted test command to validated harness: %s[/bold cyan]", promoted)
 
     _target_language = "flydsl" if kernel_type in {"pytorch2flydsl", "flydsl"} else None
+    scoring_target_norm = (scoring_target or "wall").strip().lower()
+    if scoring_target_norm not in {"wall", "kernel"}:
+        logger.warning(
+            "Unknown --target=%s, falling back to 'wall'. Valid: wall|kernel.",
+            scoring_target,
+        )
+        scoring_target_norm = "wall"
+    logger.info("Scoring target: %s (GEAK_RESULT_LATENCY_MS = %s_ms)", scoring_target_norm, scoring_target_norm)
 
     # ── Build RunBudget from mode + CLI overrides ────────────────────
     _budget_cfg = (config.get("run") or {}).get("budgets", {}).get(resolved_mode) or {}
@@ -554,12 +574,6 @@ def main(
             budget.soft_stop.set()
         else:
             logger.error("Second SIGINT received -- terminating tracked subprocesses and exiting.")
-            # Restore the original SIGINT handler *before* calling
-            # ``terminate_all`` so a third Ctrl-C lands on the default handler
-            # (KeyboardInterrupt) instead of recursing back into this handler
-            # mid-escalation. ``terminate_all`` waits up to ``escalate_after_s``
-            # seconds for SIGTERM->SIGKILL escalation; without this swap the
-            # third SIGINT would re-enter and recurse.
             signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
             try:
                 state.registry.terminate_all()
@@ -579,9 +593,8 @@ def main(
         target_language=_target_language,
         budget=budget,
         state=state,
-        # Forward the user's -t task to the preprocess sub-agents (UTA + ShapeFixer)
-        # so a USER TASK CONTEXT block can override op-test default shapes.
         user_task=task_content,
+        scoring_target=scoring_target_norm,
     )
     logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
 
