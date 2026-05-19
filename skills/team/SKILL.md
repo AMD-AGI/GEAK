@@ -51,7 +51,7 @@ Derive:
 - If `EVAL_DIR_OVERRIDE` is provided:
   - `EVAL_DIR` = `$EVAL_DIR_OVERRIDE`
 - Else:
-  - `EVAL_DIR` = `/wekafs/zihao/2026/geak_cc/PerfSkills/exp/team_${KERNEL_NAME}_${TIMESTAMP}/${KERNEL_NAME}`
+  - `EVAL_DIR` = `$SKILL_DIR/../../exp/team_${KERNEL_NAME}_${TIMESTAMP}/${KERNEL_NAME}`
 
 ## Step 2: Setup
 

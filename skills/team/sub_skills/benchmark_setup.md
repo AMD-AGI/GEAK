@@ -48,7 +48,7 @@ GEAK_RESULT_LATENCY_MS=<float_value>
 - Small inputs (edge case, launch overhead dominated)
 - Medium inputs (typical use case)
 - Large inputs (memory/compute dominated)
-- Different parameter variations (e.g., different K values for KNN)
+- Different parameter variations
 
 **Correctness**: Compare against a known-correct reference (PyTorch CPU, naive implementation, etc.). Use `torch.allclose()` or equivalent with appropriate tolerance.
 
@@ -120,13 +120,18 @@ bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <exact full benchmark command>
 bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<benchmark_cmd>" $EVAL_DIR/profile_output
 ```
 
+## MODIFIABLE FILES
+Only files under `$KERNEL_PATH` may be modified (kernel source, wrapper, C++ bindings).
+NEVER modify files outside `$KERNEL_PATH`.
+
 ## RULES
 1. NEVER modify this file
 2. NEVER modify the test harness or task_runner
-3. ALWAYS clear build cache before benchmarking (SETUP)
-4. ALWAYS run CORRECTNESS before BENCHMARK
-5. ALWAYS use gpu_lock.sh for BENCHMARK and FULL_BENCHMARK
-6. The BENCHMARK output is the source of truth for speedup claims
+3. NEVER modify files outside $KERNEL_PATH
+4. ALWAYS clear build cache before benchmarking (SETUP)
+5. ALWAYS run CORRECTNESS before BENCHMARK
+6. ALWAYS use gpu_lock.sh for BENCHMARK and FULL_BENCHMARK
+7. The BENCHMARK output is the source of truth for speedup claims
 ```
 
 Adapt the commands based on what test infrastructure exists (task_runner.py vs test_harness.py).
