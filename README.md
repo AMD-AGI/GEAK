@@ -4,22 +4,37 @@ GPU kernel optimization skills for LLM-based coding agents. Target: AMD MI300X (
 
 ## Skills
 
-| Skill | Architecture | Iteration | Key Idea |
-|-------|-------------|-----------|----------|
-| [GEAK](skills/geak/SKILL.md) | Orchestrator + parallel workers | Single round | One agent plans, N workers execute in parallel |
+
+| Skill                        | Architecture                    | Iteration                     | Key Idea                                                                         |
+| ---------------------------- | ------------------------------- | ----------------------------- | -------------------------------------------------------------------------------- |
+| [GEAK](skills/geak/SKILL.md) | Orchestrator + parallel workers | Single round                  | One agent plans, N workers execute in parallel                                   |
 | [Team](skills/team/SKILL.md) | Director → TechLead → Engineers | Multi-round with re-profiling | Hierarchical delegation, budget-controlled iteration, wrapper overhead detection |
+
 
 ### Design Comparison
 
-**GEAK** is a flat pipeline: analyze → profile → plan → spawn N workers → evaluate. Each worker independently optimizes the kernel, and the best result wins. Simple and effective for kernels where a single optimization direction suffices.
 
-**Team** adds depth: a Director validates results independently, a TechLead iterates across rounds (re-profiling after each to detect bottleneck shifts), and Engineers execute diverse strategies that a Merge Engineer can combine. It also detects when Python/C++ wrapper overhead dominates kernel compute and redirects optimization accordingly. Better for complex kernels where compounding optimizations across rounds matters.
+|                        | GEAK                                       | Team                                                      |
+| ---------------------- | ------------------------------------------ | --------------------------------------------------------- |
+| **Origin**             | Refactored from GEAK_v3, reuses its logic  | Ground-up redesign                                        |
+| **Architecture**       | Flat: Orchestrator + parallel workers      | Hierarchical: Director → TechLead → Engineers → Merge     |
+| **Iteration**          | Single round                               | Multi-round, budget-controlled                            |
+| **Re-profiling**       | No                                         | Yes, with bottleneck shift analysis                       |
+| **Patch combination**  | Best-of-N                                  | Merge Engineer combines top patches per round             |
+| **Wrapper detection**  | No                                         | Auto-detects host overhead, redirects optimization        |
+| **Validation**         | Orchestrator verifies                      | Director independently re-benchmarks                      |
+| **Best for**           | Single optimization direction suffices     | Complex kernels needing compounded multi-round gains      |
+
+
+**GEAK** is a flat pipeline: analyze → profile → plan → spawn N workers → evaluate. Each worker independently optimizes the kernel, and the best result wins.
+
+**Team** adds depth: a Director validates results independently, a TechLead iterates across rounds (re-profiling after each to detect bottleneck shifts), and Engineers execute diverse strategies that a Merge Engineer can combine. It also detects when Python/C++ wrapper overhead dominates kernel compute and redirects optimization accordingly.
 
 ## Quick Start
 
 ```
-/wekafs/zihao/2026/geak_cc/PerfSkills/skills/team/SKILL.md \
-  kernel_path=/wekafs/zihao/2026/geak_cc/PerfSkills/examples/tasks/knn/ \
+skills/team/SKILL.md \
+  kernel_path=examples/tasks/knn/ \
   budget=6 \
   gpu_ids=0 \
   task="Optimize this kernel for maximum throughput on AMD MI300X"
@@ -29,10 +44,12 @@ GPU kernel optimization skills for LLM-based coding agents. Target: AMD MI300X (
 
 12 HIP kernels on AMD MI300X (arithmetic mean speedup):
 
-| Method | Mean Speedup | Best Kernel |
-|--------|-------------|-------------|
-| GEAK | 5.26x | ball_query 12.64x |
-| Team | **9.19x** | knn 25.50x |
+
+| Method | Mean Speedup | Best Kernel       |
+| ------ | ------------ | ----------------- |
+| GEAK   | 5.26x        | ball_query 12.64x |
+| Team   | **9.19x**    | knn 25.50x        |
+
 
 Per-kernel breakdown: [examples/result/hip2hip_comparison.md](examples/result/hip2hip_comparison.md)
 
