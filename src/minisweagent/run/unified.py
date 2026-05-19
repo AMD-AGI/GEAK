@@ -94,6 +94,7 @@ class PipelineContext:
     # optimization round loop cost per kernel-scenario.
     preprocess_only: bool = False
     gpu_manager: Any = None
+    llm_semaphore: Any = None
 
 
 # ── Tool resolution ───────────────────────────────────────────────────
@@ -606,6 +607,7 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
             registry=ctx.registry,
             gpu_manager=ctx.gpu_manager,
             num_parallel=n_workers,
+            llm_semaphore=ctx.llm_semaphore,
         )
 
         # 5. EVALUATE — FULL_BENCHMARK verification (all modes)

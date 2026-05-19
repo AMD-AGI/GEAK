@@ -405,7 +405,14 @@ class DefaultAgent:
             if _wm_text and not any("[Working Memory" in m.get("content", "") for m in self.messages[-3:]):
                 self.messages.append({"role": "user", "content": f"[Working Memory Update]\n{_wm_text}"})
 
-        response = self.model.query(self.messages)
+        _sem = getattr(self, "_llm_semaphore", None)
+        if _sem is not None:
+            _sem.acquire()
+        try:
+            response = self.model.query(self.messages)
+        finally:
+            if _sem is not None:
+                _sem.release()
         output = response["content"]
         # Include tool_calls in assistant message when the model requests a tool call
         # and there is no bash block (bash takes priority in parse_action).

@@ -347,6 +347,7 @@ def run_task_batch(
     registry=None,
     gpu_manager=None,
     num_parallel: int | None = None,
+    llm_semaphore=None,
 ) -> dict[str, Any]:
     """Run a batch of task files via ParallelAgent pool mode.
 
@@ -477,6 +478,7 @@ def run_task_batch(
             soft_stop=soft_stop,
             registry=registry,
             gpu_manager=gpu_manager,
+            llm_semaphore=llm_semaphore,
         )
     except Exception as exc:
         logger.error("Task batch execution failed: %s", exc, exc_info=True)
@@ -625,6 +627,7 @@ def run_staged_task_batch(
     registry=None,
     gpu_manager=None,
     num_parallel: int | None = None,
+    llm_semaphore=None,
 ) -> dict[str, Any]:
     """Priority-staged dispatch with early exit on improvement.
 
@@ -660,6 +663,7 @@ def run_staged_task_batch(
             registry=registry,
             gpu_manager=gpu_manager,
             num_parallel=num_parallel,
+            llm_semaphore=llm_semaphore,
         )
         all_results.append(
             {

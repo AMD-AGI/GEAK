@@ -529,6 +529,7 @@ def run_pool(
     soft_stop=None,
     registry=None,
     gpu_manager=None,
+    llm_semaphore=None,
 ) -> list[tuple[int, Any, Any, Any]]:
     """Run M tasks across N GPU slots with overflow queuing.
 
@@ -710,6 +711,8 @@ def run_pool(
                 agent._gpu_manager = gpu_manager
                 if hasattr(agent, "_setup_save_and_test_context"):
                     agent._setup_save_and_test_context()
+            if llm_semaphore is not None:
+                agent._llm_semaphore = llm_semaphore
 
             try:
                 from minisweagent.memory.integration import (  # pylint: disable=import-error,no-name-in-module

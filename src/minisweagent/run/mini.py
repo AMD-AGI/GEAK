@@ -627,6 +627,14 @@ def main(
         registry=state.registry,
         stats_log_interval_s=float(_gpu_mgr_cfg.get("stats_log_interval_s", 30.0)),
     )
+
+    _parallel_cfg = config.get("parallel") or {}
+    _max_llm = _parallel_cfg.get("max_concurrent_llm")
+    _llm_cap = int(_max_llm) if _max_llm is not None else (num_parallel or len(parsed_gpu_ids))
+    llm_semaphore: threading.Semaphore | None = threading.Semaphore(_llm_cap) if _llm_cap > 0 else None
+    if llm_semaphore is not None:
+        logger.info("LLM concurrency cap: %d", _llm_cap)
+
     _sigint_count = {"n": 0}
     _orig_sigint = signal.getsignal(signal.SIGINT)
 
@@ -993,6 +1001,7 @@ def main(
                 registry=state.registry,
                 preprocess_only=preprocess_only,
                 gpu_manager=gpu_manager,
+                llm_semaphore=llm_semaphore,
             ),
             mode=pipeline_mode,
         )
