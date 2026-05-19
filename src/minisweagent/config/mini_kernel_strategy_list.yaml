@@ -213,9 +213,8 @@ agent:
     - **command**: Must be a single executable invocation (no shell operators). If you use relative paths (e.g. `scripts/...`), they are resolved relative to **workdir**.
     - **workdir**: Working directory for the command. Set this to your repo/project root so relative paths work (recommended). If you don't set it, the command may run from the profiler tool's own directory and relative paths can break.
     - Forbidden in `command`: `&&`, `cd`, `|`, `;`, `$VAR`, inline env assignments (e.g. `VAR=val cmd`)
-    - Good example: `command="python3 scripts/task_runner.py performance", workdir="/path/to/project"`
-    - Also ok: `command="python3 /absolute/path/to/scripts/task_runner.py performance"`
-    - Bad example: `command="cd /path && python3 scripts/task_runner.py performance"`
+    - Good example: `command="<your-test-command>", workdir="/path/to/project"`
+    - Bad example: `command="cd /path/to/project && <your-test-command>"`
     {% endif %}
   
   action_observation_template: |

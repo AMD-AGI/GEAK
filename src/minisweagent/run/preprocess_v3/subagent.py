@@ -494,6 +494,7 @@ class PreprocessSubagent:
         """
         self._state = _SubagentMessageState()
         self.extra_template_vars |= {"task": task, **template_kwargs}
+        self.extra_template_vars.setdefault("tool_names", set(self._tool_table.keys()))
 
         self._inject_tools_into_model()
 
