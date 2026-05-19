@@ -89,6 +89,7 @@ def run_preprocess_v3(
     budget: Any = None,
     state: Any = None,
     user_task: str | None = None,
+    scoring_target: str = "wall",
 ) -> dict[str, Any]:
     """Drop-in shim for ``run_preprocessor_via_orchestrator`` using v3.
 
@@ -142,6 +143,7 @@ def run_preprocess_v3(
         target_language=target_lang_name,
         output_dir=output_dir,
         gpu_id=gpu_id,
+        scoring_target=scoring_target,
     )
     elapsed = time.monotonic() - t0
     logger.info(

@@ -841,7 +841,11 @@ def _make_tool_dispatch_subagent(
         else:
             context = dict(context)
         codebase_ctx = agent._collected.get("codebase_context")
-        if codebase_ctx is not None and getattr(codebase_ctx, "out_path", None) and "codebase_context_path" not in context:
+        if (
+            codebase_ctx is not None
+            and getattr(codebase_ctx, "out_path", None)
+            and "codebase_context_path" not in context
+        ):
             context["codebase_context_path"] = str(codebase_ctx.out_path)
         if agent._collected.get("discovery_path") and "discovery_path" not in context:
             context["discovery_path"] = agent._collected["discovery_path"]
@@ -854,6 +858,9 @@ def _make_tool_dispatch_subagent(
                 "benchmarks_found": len((discovery or {}).get("benchmarks") or []),
                 "focused_test": bool((discovery or {}).get("focused_test")),
             }
+        _scoring = agent._extra_template_vars.get("scoring_target")
+        if _scoring and "scoring_target" not in context:
+            context["scoring_target"] = _scoring
         result = dispatcher(name=name, task=task, model=agent.model, context=context)
         agent._subagent_runs.append(result)
         # Auto-populate orchestrator state from the subagent's output so
@@ -1175,7 +1182,9 @@ def _make_tool_finish_preprocess(
         # Layer 7. Skipped on Path A so we don't accidentally pick up a
         # stale file from a prior run.
         if not on_path_a and not agent._collected.get("harness_path"):
-            output_dir = agent._extra_template_vars.get("output_dir") if hasattr(agent, "_extra_template_vars") else None
+            output_dir = (
+                agent._extra_template_vars.get("output_dir") if hasattr(agent, "_extra_template_vars") else None
+            )
             if output_dir:
                 for candidate_name in ("test_harness.py", "harness.py", "_geak_auto_harness.py", "harness.hip"):
                     candidate = Path(output_dir) / candidate_name

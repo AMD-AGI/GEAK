@@ -51,8 +51,8 @@ system_prompt: |
   - You may edit the new harness file you create to fix errors. Do NOT modify existing test scripts or kernel code.
 
   Harness shape (the four CLI modes)
-  - `--full-benchmark`: runs ALL configs from the shape source file. Per-shape latency + last line `GEAK_RESULT_LATENCY_MS=<geomean>`.
-  - `--benchmark`: runs `_pick(configs, 25)`. Same output. Last line `GEAK_RESULT_LATENCY_MS=<n>`.
+  - `--full-benchmark`: runs ALL configs from the shape source file. Per-shape latency + dual-signal output markers (see below).
+  - `--benchmark`: runs `_pick(configs, 25)`. Same output format.
   - `--correctness`: runs correctness check on `_pick(configs, 25)`. Non-zero exit on failure.
   - `--profile`: runs `_pick(configs, 5)`. No correctness.
 
@@ -60,10 +60,41 @@ system_prompt: |
   - `WARMUP = 50`
   - `ITERATIONS = int(os.environ.get("GEAK_BENCHMARK_ITERATIONS", "200"))`
 
-  Timing
-  - GPU event-based ONLY: `torch.cuda.Event(enable_timing=True)`, `triton.testing.do_bench`, or `hipEventElapsedTime`.
-  - Never `time.time()` or wall-clock.
-  - WARMUP, then ITERATIONS, report MEDIAN per shape.
+  Dual-signal timing (--benchmark and --full-benchmark)
+  The harness MUST perform two timing passes per shape and emit ALL output markers.
+
+  Pass 1 — wall-clock (end-to-end host latency, includes Python/dispatch overhead):
+    Use `triton.testing.do_bench(fn, warmup=WARMUP, rep=ITERATIONS)` which returns
+    median ms directly. Alternatively use `torch.cuda.Event(enable_timing=True)` pairs
+    around the kernel call. This measures total host→device→host round-trip.
+
+  Pass 2 — kernel-only (GPU work only, excludes dispatch):
+    For each iter, wrap the call in
+    `with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:`
+    then sum `evt.device_time_total` over `prof.key_averages()` and divide by 1000
+    to get ms. Take the MEDIAN across ITERATIONS.
+
+  Cache flush between iters (both passes) so timings are cold-L2:
+    `cache = triton.runtime.driver.active.get_empty_cache_for_benchmark()`
+    then `triton.runtime.driver.active.clear_cache(cache)` per iter.
+
+  WARMUP, then ITERATIONS, report MEDIAN per shape; aggregate per-shape medians
+  via geometric mean for the GEAK_RESULT_*_MS lines.
+
+  Required output markers (emit ALL FIVE in --benchmark and --full-benchmark):
+    GEAK_RESULT_WALL_MS=<wall_geomean_ms>
+    GEAK_RESULT_KERNEL_MS=<kernel_geomean_ms>
+    GEAK_RESULT_DISPATCH_MS=<wall - kernel>
+    GEAK_RESULT_DISPATCH_FRACTION=<dispatch/wall>
+    GEAK_RESULT_LATENCY_MS=<wall_geomean OR kernel_geomean per scoring target>
+
+  Scoring target
+  The task context includes a `scoring_target` field ("wall" or "kernel").
+  - When scoring_target is "wall": set GEAK_RESULT_LATENCY_MS = GEAK_RESULT_WALL_MS value
+  - When scoring_target is "kernel": set GEAK_RESULT_LATENCY_MS = GEAK_RESULT_KERNEL_MS value
+  - If scoring_target is not specified, default to "wall".
+  GEAK_RESULT_LATENCY_MS is the signal the optimizer scores against. The other signals
+  are always printed so the agent can see the full latency decomposition.
 
   GEAK_SHAPES_USED (determinism check)
   - Every mode prints `GEAK_SHAPES_USED=<list of 0-based config indices>` after the loop.
