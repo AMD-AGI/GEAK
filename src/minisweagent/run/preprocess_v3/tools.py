@@ -767,8 +767,16 @@ def _make_tool_codebase_explore(
     def _impl(
         repo_root: str,
         kernel_path: str,
-        out_path: str,
+        out_path: str | None = None,
+        output_dir: str | None = None,
+        **_extra_ignored: Any,
     ) -> dict[str, Any]:
+        if _extra_ignored:
+            logger.debug("codebase_explore ignored extra kwargs: %s", list(_extra_ignored))
+        if not out_path:
+            if not output_dir:
+                raise ValueError("codebase_explore requires out_path or output_dir")
+            out_path = str(Path(output_dir) / "CODEBASE_CONTEXT.md")
         ctx: CodebaseContext = explore_codebase(
             Path(repo_root),
             Path(kernel_path),
@@ -816,8 +824,22 @@ def _make_tool_dispatch_subagent(
     agent: PreprocessOrchestratorAgent,
     dispatcher: PreprocessSubagentDispatcher,
 ) -> Callable[..., dict[str, Any]]:
-    def _impl(name: str, task: str, context: dict | None = None) -> dict[str, Any]:
-        context = dict(context or {})
+    def _impl(name: str, task: str, context: Any = None) -> dict[str, Any]:
+        if context is None:
+            context = {}
+        elif isinstance(context, str):
+            # The orchestrator LLM sometimes passes a JSON-ish or free-form
+            # string despite the schema declaring an object. Preserve it as
+            # text rather than raising and spinning in the tool loop.
+            try:
+                parsed = json.loads(context)
+            except json.JSONDecodeError:
+                parsed = {"context": context}
+            context = parsed if isinstance(parsed, dict) else {"context": context}
+        elif not isinstance(context, dict):
+            context = {"context": str(context)}
+        else:
+            context = dict(context)
         codebase_ctx = agent._collected.get("codebase_context")
         if codebase_ctx is not None and getattr(codebase_ctx, "out_path", None) and "codebase_context_path" not in context:
             context["codebase_context_path"] = str(codebase_ctx.out_path)
