@@ -93,6 +93,8 @@ while [[ $# -gt 0 ]]; do
             echo "  geak <github_url>                      Full optimization pipeline"
             echo ""
             echo "Requires: AMD_LLM_API_KEY environment variable"
+            echo "Optional: BASE_IMAGE to override the Docker base image"
+            echo "          (e.g. BASE_IMAGE=lmsysorg/sglang:v0.5.11-rocm720-mi30x for MI300X/MI325X)"
             echo ""
             echo "USER and GEAK_USER are forwarded from the host so the AMD LLM gateway"
             echo "can attribute requests; existing containers must be rebuilt with"
@@ -119,7 +121,9 @@ if [ "$REBUILD" = true ]; then
         docker rm ${CONTAINER_NAME}
     fi
     echo "Rebuilding image ${IMAGE_NAME} (--no-cache)..."
-    docker build --network=host --no-cache -t ${IMAGE_NAME} .
+    BUILD_ARGS=()
+    [ -n "$BASE_IMAGE" ] && BUILD_ARGS+=(--build-arg "BASE_IMAGE=${BASE_IMAGE}")
+    docker build --network=host --no-cache "${BUILD_ARGS[@]}" -t ${IMAGE_NAME} .
     echo ""
 fi
 
@@ -185,7 +189,9 @@ echo ""
 # Check if image exists, build if not (unless we already rebuilt)
 if [[ "$(docker images -q ${IMAGE_NAME} 2> /dev/null)" == "" ]]; then
     echo "Image ${IMAGE_NAME} not found. Building..."
-    docker build --network=host -t ${IMAGE_NAME} .
+    BUILD_ARGS=()
+    [ -n "$BASE_IMAGE" ] && BUILD_ARGS+=(--build-arg "BASE_IMAGE=${BASE_IMAGE}")
+    docker build --network=host "${BUILD_ARGS[@]}" -t ${IMAGE_NAME} .
 elif [ "$REBUILD" != true ]; then
     echo "Using existing image ${IMAGE_NAME}"
     echo "To rebuild from scratch, run: $0 --rebuild"
