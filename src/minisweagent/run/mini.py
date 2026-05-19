@@ -602,14 +602,6 @@ def main(
             logger.info("[bold cyan]Promoted test command to validated harness: %s[/bold cyan]", promoted)
 
     _target_language = "flydsl" if kernel_type in {"pytorch2flydsl", "flydsl"} else None
-    scoring_target_norm = (scoring_target or "wall").strip().lower()
-    if scoring_target_norm not in {"wall", "kernel"}:
-        logger.warning(
-            "Unknown --target=%s, falling back to 'wall'. Valid: wall|kernel.",
-            scoring_target,
-        )
-        scoring_target_norm = "wall"
-    logger.info("Scoring target: %s (GEAK_RESULT_LATENCY_MS = %s_ms)", scoring_target_norm, scoring_target_norm)
 
     # ── Build RunBudget from mode + CLI overrides ────────────────────
     _budget_cfg = (config.get("run") or {}).get("budgets", {}).get(resolved_mode) or {}
@@ -672,7 +664,6 @@ def main(
             budget=budget,
             state=state,
             user_task=task_content,
-            scoring_target=scoring_target_norm,
         )
         logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
 
