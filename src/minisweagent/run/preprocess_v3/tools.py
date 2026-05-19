@@ -49,6 +49,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -1048,24 +1049,37 @@ def _make_tool_commandment_from_user_command(
             )
 
         cmd = run_command.strip()
+        # Rewrite hardcoded repo-root paths to ${GEAK_WORK_DIR} so the
+        # COMMANDMENT references the agent's worktree at runtime.
+        repo_root = os.environ.get("GEAK_REPO_ROOT", "")
+        if repo_root and repo_root in cmd:
+            cmd = cmd.replace(repo_root, "${GEAK_WORK_DIR}")
         modes_covered_tup = _normalise_modes(modes_covered)
         inferred_modes_tup = _normalise_modes(inferred_modes)
         source_mode = modes_covered_tup[0] if modes_covered_tup else None
 
+        setup_body = (
+            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+            "export HIP_VISIBLE_DEVICES=%s\\n"
+            'exec "$@"\\n\' '
+            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
+            "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
+        )
         sections: dict[str, str] = {
-            "setup": ("# Path-A: user-provided run command assumes the environment is ready.\ntrue"),
+            "setup": setup_body,
         }
         warnings: list[str] = []
         modes_emitted: list[str] = []
 
+        wrapped_cmd = f"cd ${{GEAK_WORK_DIR}} && {cmd}"
         for mode in PATH_A_MODES:
             if mode in modes_covered_tup:
-                sections[mode] = cmd
+                sections[mode] = wrapped_cmd
                 modes_emitted.append(mode)
             elif mode in inferred_modes_tup:
                 src = source_mode or "<unspecified>"
                 marker_line = f"# PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}"
-                sections[mode] = f"{marker_line}\n{cmd}"
+                sections[mode] = f"{marker_line}\n{wrapped_cmd}"
                 warnings.append(f"PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}")
                 modes_emitted.append(mode)
             else:
