@@ -1,7 +1,6 @@
-FROM lmsysorg/sglang:v0.5.9-rocm700-mi35x
+FROM lmsysorg/sglang:v0.5.11-rocm720-mi35x
 
-RUN rm -f /etc/apt/sources.list.d/rocm.list && \
-    apt-get update && apt-get install -y git make && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git make && rm -rf /var/lib/apt/lists/*
 
 # Copy installable sources first (cache-friendly — changes here rebuild pip install)
 WORKDIR /workspace
