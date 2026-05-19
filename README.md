@@ -35,8 +35,11 @@ GEAK is an agent-driven framework for end-to-end GPU kernel optimization in real
 ```bash
 git clone https://github.com/AMD-AGI/GEAK
 cd GEAK
-# Docker-based
+# Docker-based (default base image targets MI355X / gfx950)
 AMD_LLM_API_KEY=<YOUR_KEY> bash scripts/run-docker.sh
+
+# For MI300X/MI325X (gfx942), override the base image:
+# docker build --build-arg BASE_IMAGE=lmsysorg/sglang:v0.5.11-rocm720-mi30x -t geak-agent:latest .
 
 # Local install (recommended)
 make install              # core + MCP tools (same as Docker)
