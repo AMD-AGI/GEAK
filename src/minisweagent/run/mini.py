@@ -899,7 +899,8 @@ def main(
         # consistency with the het branch is cheap).
         _run_succeeded = True
         logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
-        return _final_report_to_bestpatchresult(pipeline_result)
+        result = _final_report_to_bestpatchresult(pipeline_result)
+        return result  # noqa: RET504 – result read by finally block
     finally:
         # Ordering matters:
         # 1. Cancel timers FIRST so the hard-kill watchdog can't race the
