@@ -89,12 +89,18 @@ def _normalize_kernel_type(value: Any) -> str:
     return "other"
 
 
-def _derive_output_dir(output: Path | None, kernel_name: str | None) -> Path:
+def _derive_output_dir(output: Path | None, kernel_name: str | None) -> tuple[Path, bool]:
     """Derive the output directory from ``-o``/``--output``.
 
-    - If output is a file path: output_dir = output.parent
-    - If output is a directory: output_dir = output
+    Returns ``(path, auto)``. ``auto`` is True iff ``output`` was ``None`` and
+    geak generated the path under ``<cwd>/optimization_logs/``. The
+    ``--keep-runs`` retention policy is gated on ``auto`` so it only ever
+    touches directories geak owns.
+
+    - If output is a file path: output_dir = output.parent (auto=False)
+    - If output is a directory: output_dir = output (auto=False)
     - If output is not provided: use ./optimization_logs/<kernel_name>_<timestamp>
+      (auto=True)
 
     The returned path is always absolute. Several preprocess helpers
     (notably ``_resolve_deterministic_harness`` and the merged-file split
@@ -111,12 +117,12 @@ def _derive_output_dir(output: Path | None, kernel_name: str | None) -> Path:
     if output is None:
         from minisweagent.run.utils.task_parser import generate_patch_output_dir
 
-        return (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve()
+        return (Path.cwd() / Path(generate_patch_output_dir(kernel_name))).resolve(), True
 
     if output.suffix:
-        return output.parent.resolve()
+        return output.parent.resolve(), False
 
-    return output.resolve()
+    return output.resolve(), False
 
 
 def _final_report_to_bestpatchresult(report: Any) -> BestPatchResult | None:
@@ -169,6 +175,20 @@ There are two different user interfaces:
 
 [bold green]mini[/bold green] Simple REPL-style interface
 [bold green]mini -v[/bold green] Pager-style interface (Textual)
+
+After a run completes, two independent post-processing steps run by default:
+
+- [bold green]--apply-best-patch[/bold green] applies the winning patch to
+  [bold]--repo[/bold] on the current branch and commits it. Requires the run
+  to have completed without raising.
+- [bold green]--cleanup[/bold green] runs on every cooperative exit -- success,
+  exception during preprocess or run, and the Ctrl-C escalation path -- and
+  prunes per-run artifacts to [bold]final_report.json[/bold], the winning
+  [bold].diff[/bold], [bold]geak_agent.log[/bold], and [bold]COMMANDMENT.md[/bold].
+
+Hard-kill (wall-clock timeout) leaves artifacts in place for forensic analysis
+regardless of [bold]--cleanup[/bold]. Disable either step independently with
+[bold]--no-apply-best-patch[/bold] / [bold]--no-cleanup[/bold].
 [/not dim]
 """
 
@@ -205,6 +225,44 @@ def main(
         None,
         "--pipeline-mode",
         help="Dispatch mode: fixed | planned | mixed. Overrides GEAK_PIPELINE_MODE env.",
+    ),
+    scoring_target: str = typer.Option(
+        "wall",
+        "--target",
+        help=(
+            "Which signal the harness reports as GEAK_RESULT_LATENCY_MS (the scoring metric "
+            "the agent optimizes against). 'wall' = end-to-end host latency via "
+            "triton.testing.do_bench (includes Python/dispatch overhead). 'kernel' = GPU-only "
+            "kernel time via torch.profiler CUDA events (excludes dispatch). The dual-signal "
+            "harness always reports BOTH (GEAK_RESULT_WALL_MS + GEAK_RESULT_KERNEL_MS) for "
+            "agent visibility; --target only chooses which becomes the scoring signal."
+        ),
+    ),
+    apply_best_patch: bool = typer.Option(
+        True,
+        "--apply-best-patch/--no-apply-best-patch",
+        help=(
+            "After the run, apply the winning patch to --repo on the current branch "
+            "and commit it. Default: on."
+        ),
+    ),
+    cleanup: bool = typer.Option(
+        True,
+        "--cleanup/--no-cleanup",
+        help=(
+            "After the run, prune per-run artifacts under the output dir (keeping "
+            "final_report.json, the winning diff, geak_agent.log, COMMANDMENT.md). "
+            "Independent of --apply-best-patch. Default: on."
+        ),
+    ),
+    keep_runs: int | None = typer.Option(
+        None,
+        "--keep-runs",
+        help=(
+            "After this run completes, retain only the N most recent auto-generated "
+            "run dirs under output_dir's parent. Default: unlimited. Ignored when "
+            "--output is set explicitly. Env: GEAK_KEEP_RUNS."
+        ),
     ),
 ):
     # fmt: on
@@ -475,9 +533,30 @@ def main(
         kernel_name_for_output = Path(kernel_target).stem
     logger.info("Using kernel_name_for_output: %s", kernel_name_for_output)
 
-    preprocess_output_dir = _derive_output_dir(output, kernel_name_for_output)
+    preprocess_output_dir, output_dir_auto = _derive_output_dir(output, kernel_name_for_output)
     preprocess_output_dir.mkdir(parents=True, exist_ok=True)
     add_file_handler(preprocess_output_dir / DEFAULT_LOG_FILENAME)
+
+    # Resolve --keep-runs precedence: CLI > GEAK_KEEP_RUNS env > unset.
+    # When the user supplied --output, retention is a no-op (we never prune
+    # a user-owned parent dir). Surface the no-op as a warning so a
+    # misconfigured flag doesn't silently disappear.
+    if keep_runs is None:
+        _env_keep_runs = os.environ.get("GEAK_KEEP_RUNS")
+        if _env_keep_runs:
+            try:
+                keep_runs = int(_env_keep_runs)
+            except ValueError:
+                logger.warning(
+                    "[geak --keep-runs] GEAK_KEEP_RUNS=%r is not an integer; ignored.",
+                    _env_keep_runs,
+                )
+                keep_runs = None
+    if keep_runs is not None and keep_runs > 0 and not output_dir_auto:
+        logger.warning(
+            "[geak --keep-runs] ignored: --output was set explicitly; "
+            "retention only applies to auto-generated dirs."
+        )
     _run_t0 = time.monotonic()
     config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
     logger.info(
@@ -523,6 +602,14 @@ def main(
             logger.info("[bold cyan]Promoted test command to validated harness: %s[/bold cyan]", promoted)
 
     _target_language = "flydsl" if kernel_type in {"pytorch2flydsl", "flydsl"} else None
+    scoring_target_norm = (scoring_target or "wall").strip().lower()
+    if scoring_target_norm not in {"wall", "kernel"}:
+        logger.warning(
+            "Unknown --target=%s, falling back to 'wall'. Valid: wall|kernel.",
+            scoring_target,
+        )
+        scoring_target_norm = "wall"
+    logger.info("Scoring target: %s (GEAK_RESULT_LATENCY_MS = %s_ms)", scoring_target_norm, scoring_target_norm)
 
     # ── Build RunBudget from mode + CLI overrides ────────────────────
     _budget_cfg = (config.get("run") or {}).get("budgets", {}).get(resolved_mode) or {}
@@ -556,12 +643,6 @@ def main(
             budget.soft_stop.set()
         else:
             logger.error("Second SIGINT received -- terminating tracked subprocesses and exiting.")
-            # Restore the original SIGINT handler *before* calling
-            # ``terminate_all`` so a third Ctrl-C lands on the default handler
-            # (KeyboardInterrupt) instead of recursing back into this handler
-            # mid-escalation. ``terminate_all`` waits up to ``escalate_after_s``
-            # seconds for SIGTERM->SIGKILL escalation; without this swap the
-            # third SIGINT would re-enter and recurse.
             signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
             try:
                 state.registry.terminate_all()
@@ -571,39 +652,46 @@ def main(
 
     signal.signal(signal.SIGINT, _sigint_handler)
 
-    _preprocess_kwargs = dict(
-        kernel_url=kernel_target,
-        repo=repo,
-        output_dir=preprocess_output_dir,
-        gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
-        model_factory=lambda: get_model(model_name, config.get("model", {})),
-        console=console,
-        target_language=_target_language,
-        budget=budget,
-        state=state,
-        # Forward the user's -t task to the preprocess sub-agents (UTA + ShapeFixer)
-        # so a USER TASK CONTEXT block can override op-test default shapes.
-        user_task=task_content,
-    )
-    logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
-
-    # Schedule preprocess watchdogs that reach into ``state`` to apply the
-    # stage-aware soft/hard policy. Cancelled in the finally block.
-    budget.schedule_preprocess_watchdogs(
-        on_soft=lambda: preprocess_soft_stop_handler(
-            state,
-            soft_cap_s=budget.spec.preprocess_soft_cap_s,
-            hard_cap_s=budget.spec.preprocess_hard_cap_s,
-            console=console,
-        ),
-        on_hard=lambda: preprocess_hard_stop_handler(
-            state,
-            hard_cap_s=budget.spec.preprocess_hard_cap_s,
-            console=console,
-        ),
-    )
+    # State the outer ``finally`` will read. Declare here so the finally
+    # can't NameError on partial failure between this point and the first
+    # branch assignment.
+    result: BestPatchResult | None = None
+    repo_path: Path | None = None
+    effective_repo: Path | None = repo
+    _run_succeeded = False
 
     try:
+        _preprocess_kwargs = dict(
+            kernel_url=kernel_target,
+            repo=repo,
+            output_dir=preprocess_output_dir,
+            gpu_id=parsed_gpu_ids[0] if parsed_gpu_ids else 0,
+            model_factory=lambda: get_model(model_name, config.get("model", {})),
+            console=console,
+            target_language=_target_language,
+            budget=budget,
+            state=state,
+            user_task=task_content,
+            scoring_target=scoring_target_norm,
+        )
+        logger.debug("Preprocess kwargs: %s", _preprocess_kwargs)
+
+        # Schedule preprocess watchdogs that reach into ``state`` to apply the
+        # stage-aware soft/hard policy. Cancelled in the finally block.
+        budget.schedule_preprocess_watchdogs(
+            on_soft=lambda: preprocess_soft_stop_handler(
+                state,
+                soft_cap_s=budget.spec.preprocess_soft_cap_s,
+                hard_cap_s=budget.spec.preprocess_hard_cap_s,
+                console=console,
+            ),
+            on_hard=lambda: preprocess_hard_stop_handler(
+                state,
+                hard_cap_s=budget.spec.preprocess_hard_cap_s,
+                console=console,
+            ),
+        )
+
         if harness_spec:
             try:
                 preprocess_ctx = run_preprocessor(**_preprocess_kwargs, harness=harness_spec)
@@ -642,12 +730,15 @@ def main(
 
         # Hard-kill backstop: if cooperative shutdown stalls (e.g. a sub-agent
         # is mid-subprocess.run with no internal soft_stop poll), forcibly
-        # terminate the registry and ``os._exit`` after kill_buffer_s past
-        # the deadline. This is the only thing that guarantees the run exits
-        # within budget regardless of where the stall is.
+        # terminate the registry and ``os._exit`` at ``started_at + total_s``
+        # (the absolute wall-clock cap). This is the only thing that
+        # guarantees the run exits within budget regardless of where the
+        # stall is. Cleanup is intentionally NOT invoked here: the
+        # per-run dir is preserved for forensic analysis of WHY the
+        # watchdog fired.
         def _hard_kill_handler() -> None:
             logger.error(
-                "[budget] HARD KILL: opt_deadline + kill_buffer_s reached; terminating registry and exiting",
+                "[budget] HARD KILL: started_at + total_s reached; terminating registry and exiting",
             )
             # Best-effort stub final report so the operator has *something*
             # to point at when the run hits hard kill (the regular finalize
@@ -663,7 +754,7 @@ def main(
                                 "status": "hard_kill",
                                 "exit_code": 124,
                                 "elapsed_s": round(budget.elapsed(), 3),
-                                "reason": "opt_deadline + kill_buffer_s reached",
+                                "reason": "started_at + total_s reached",
                             },
                             indent=2,
                         )
@@ -674,6 +765,22 @@ def main(
                 state.registry.terminate_all(escalate_after_s=5.0)
             except Exception:
                 logger.exception("hard-kill: registry.terminate_all() failed")
+
+            # Loud user-facing warning identifying the artifact path and the
+            # fact that cleanup did NOT run. Operators reading a CI tail or
+            # subprocess.run capture can't miss it.
+            _msg = (
+                f"[geak HARD-KILL] Wall-clock budget exceeded "
+                f"(elapsed={budget.elapsed():.0f}s, budget={budget.spec.total_s:.0f}s). "
+                f"Per-run artifacts at {preprocess_output_dir} were PRESERVED for forensics. "
+                f"Cleanup did NOT run; inspect and prune manually when done."
+            )
+            logger.warning(_msg)
+            try:
+                console.print(f"[bold red]{_msg}[/bold red]")
+            except Exception:
+                pass  # never block os._exit on a console-render error
+
             # 124 is the conventional exit code for a wall-clock timeout
             # (matches GNU ``timeout``). Use ``os._exit`` (not sys.exit) to
             # bypass any atexit/cleanup that might block.
@@ -682,44 +789,35 @@ def main(
         budget.schedule_optimization_hard_kill_watchdog(_hard_kill_handler)
 
         logger.info(
-            "[budget] preprocess finished at +%.0fs; opt_deadline @+%.0fs (softstop_at @+%.0fs, hard_kill @+%.0fs)",
+            "[budget] preprocess finished at +%.0fs; opt_deadline @+%.0fs "
+            "(softstop_at @+%.0fs, hard_kill @+%.0fs)",
             _T_pp_end_elapsed,
             _T_pp_end_elapsed + opt_deadline.remaining(),
             _T_pp_end_elapsed + max(0.0, opt_deadline.remaining() - budget.spec.finalize_grace_s),
-            _T_pp_end_elapsed + opt_deadline.remaining() + budget.spec.kill_buffer_s,
+            budget.spec.total_s,
         )
-    except Exception:
-        # On exception, ensure cleanup runs before the exception propagates.
-        budget.cancel_all_timers()
-        try:
-            state.registry.terminate_all()
-        except Exception:
-            logger.exception("registry.terminate_all() failed during preprocess error")
-        signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
-        raise
 
-    if preprocess_ctx.get("test_command") and not test_command:
-        test_command = preprocess_ctx["test_command"]
-    if preprocess_ctx.get("repo_root") and repo is None:
-        repo = Path(preprocess_ctx["repo_root"])
+        if preprocess_ctx.get("test_command") and not test_command:
+            test_command = preprocess_ctx["test_command"]
+        if preprocess_ctx.get("repo_root") and repo is None:
+            repo = Path(preprocess_ctx["repo_root"])
 
-    # Resolve max_rounds via the documented precedence chain:
-    # CLI --max-rounds (if any future flag added) > config (mode preset) >
-    # GEAK_MAX_ROUNDS env > default. ``max_rounds`` from task parsing acts as
-    # an additional override (parsed via parse_pipeline_params at the top of
-    # main()), so we honor it when set.
-    _resolved_max_rounds, _max_rounds_source = resolve_max_rounds(
-        cli_max_rounds=max_rounds,
-        config=config,
-    )
-    logger.info(
-        "[budget] max_rounds=%d (source=%s; mode=%s)",
-        _resolved_max_rounds,
-        _max_rounds_source,
-        resolved_mode,
-    )
+        # Resolve max_rounds via the documented precedence chain:
+        # CLI --max-rounds (if any future flag added) > config (mode preset) >
+        # GEAK_MAX_ROUNDS env > default. ``max_rounds`` from task parsing acts as
+        # an additional override (parsed via parse_pipeline_params at the top of
+        # main()), so we honor it when set.
+        _resolved_max_rounds, _max_rounds_source = resolve_max_rounds(
+            cli_max_rounds=max_rounds,
+            config=config,
+        )
+        logger.info(
+            "[budget] max_rounds=%d (source=%s; mode=%s)",
+            _resolved_max_rounds,
+            _max_rounds_source,
+            resolved_mode,
+        )
 
-    try:
         preprocess_ctx["user_instructions"] = task_content
         preprocess_ctx["rag_enabled"] = rag_enabled
 
@@ -753,6 +851,7 @@ def main(
                     p = resolved
             repo_path = p.resolve()
         logger.info("Resolved repo path: %s", repo_path)
+        effective_repo = repo_path
 
         from minisweagent.run.unified import PipelineContext, run_pipeline
 
@@ -795,9 +894,22 @@ def main(
             ),
             mode=pipeline_mode,
         )
+        # Flip success flag immediately after the agent returns, before the
+        # time.monotonic() log line (which can't realistically raise, but
+        # consistency with the het branch is cheap).
+        _run_succeeded = True
         logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
         return _final_report_to_bestpatchresult(pipeline_result)
     finally:
+        # Ordering matters:
+        # 1. Cancel timers FIRST so the hard-kill watchdog can't race the
+        #    rest of the finally with an os._exit mid-rmtree.
+        # 2. Terminate the registry next so any tracked subprocess is dead
+        #    before we touch its working directory.
+        # 3. Restore SIGINT before cleanup so a Ctrl-C during prune lands
+        #    on the default handler (clean KeyboardInterrupt out).
+        # 4. Then run finalize + retention. Both are broad-except wrapped
+        #    so a hook failure can't mask the original exception.
         budget.cancel_all_timers()
         try:
             state.registry.terminate_all()
@@ -807,6 +919,52 @@ def main(
             signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
         except Exception:
             logger.exception("restoring SIGINT handler failed")
+
+        logger.info("[geak --cleanup] starting")
+        outcome: dict | None = None
+        try:
+            from minisweagent.run.postprocess.finalize_apply import finalize_apply_and_cleanup
+
+            outcome = finalize_apply_and_cleanup(
+                result,
+                effective_repo,
+                preprocess_output_dir,
+                apply_best_patch=apply_best_patch and _run_succeeded,
+                cleanup=cleanup,
+            )
+        except Exception:
+            logger.exception("finalize_apply_and_cleanup raised (non-fatal)")
+        logger.info(
+            "[geak --cleanup] completed: %s",
+            (outcome or {}).get("cleanup_status", "unknown"),
+        )
+
+        if outcome:
+            _apply_status = outcome.get("apply_status")
+            if _apply_status == "skipped_dirty":
+                console.print(
+                    "[bold yellow][geak apply] Skipped: --repo has uncommitted tracked changes. "
+                    "Commit/stash and re-run apply manually.[/bold yellow]"
+                )
+            elif _apply_status in {"apply_failed", "commit_failed"}:
+                console.print(
+                    f"[bold yellow][geak apply] {_apply_status}: "
+                    f"{outcome.get('reason', '')}[/bold yellow]"
+                )
+
+        if keep_runs and keep_runs > 0 and output_dir_auto:
+            try:
+                from minisweagent.run.postprocess.finalize_apply import prune_old_runs
+
+                _removed = prune_old_runs(
+                    preprocess_output_dir.parent,
+                    keep=keep_runs,
+                    exclude=preprocess_output_dir,
+                )
+                if _removed:
+                    logger.info("[geak --keep-runs] Pruned %d old run dir(s).", _removed)
+            except Exception:
+                logger.exception("prune_old_runs raised (non-fatal)")
 
 
 if __name__ == "__main__":

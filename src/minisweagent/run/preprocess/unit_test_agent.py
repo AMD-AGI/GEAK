@@ -47,7 +47,14 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "This is a Triton kernel (JIT-compiled Python). No build step needed.\n"
         "- Import the kernel via its Python package path (do NOT use importlib.util).\n"
         "- Use `torch.testing.assert_close` for correctness validation.\n"
-        "- Use `triton.testing.do_bench` or `torch.cuda.Event` for benchmarking.\n"
+        "- Dual-signal timing (REQUIRED for --benchmark / --full-benchmark):\n"
+        "    * Wall-clock: `triton.testing.do_bench(fn, warmup=WARMUP, rep=ITERATIONS)`\n"
+        "      (do NOT use perf_counter inside a torch.profiler context — inflates ~3x).\n"
+        "    * Kernel-only: per-iter `torch.profiler.profile(activities=[ProfilerActivity.CUDA])`,\n"
+        "      sum `device_time_total` per call, take the median across ITERATIONS.\n"
+        "    * Run the two passes back-to-back with L2 cache flush between iters.\n"
+        "    * Print BOTH GEAK_RESULT_WALL_MS=<wall_geomean> and GEAK_RESULT_KERNEL_MS=<kernel_geomean>;\n"
+        "      set GEAK_RESULT_LATENCY_MS to whichever the SCORING TARGET in the task asks for.\n"
         "- Set `PYTHONPATH` before the process starts if the package is not installed.\n"
         "- Use fixed random seed (`torch.manual_seed(42)`) and fixed tensor sizes."
     ),
@@ -211,6 +218,7 @@ def run_unit_test_agent(
     kernel_path: Path | None = None,
     discovery_context: str = "",
     user_task: str | None = None,
+    scoring_target: str = "wall",
 ) -> str:
     """Run UnitTestAgent in ``repo`` and return the extracted test command string.
 
@@ -261,6 +269,20 @@ def run_unit_test_agent(
         )
         if rel_kernel_dir is not None:
             task += f"\nKernel repo-relative directory: {rel_kernel_dir.as_posix()}"
+    target = (scoring_target or "wall").strip().lower()
+    if target not in {"wall", "kernel"}:
+        target = "wall"
+    task += (
+        "\n\nSCORING TARGET (chosen by --target CLI flag): "
+        f"GEAK_RESULT_LATENCY_MS = {target}_ms\n"
+        "The harness MUST emit dual timing signals from --benchmark and --full-benchmark "
+        "(see the 'Dual-signal timing' section in the system prompt):\n"
+        "  - GEAK_RESULT_WALL_MS    : end-to-end host latency (triton.testing.do_bench)\n"
+        "  - GEAK_RESULT_KERNEL_MS  : GPU kernel-only time (torch.profiler CUDA events)\n"
+        "  - GEAK_RESULT_DISPATCH_MS, GEAK_RESULT_DISPATCH_FRACTION (informational)\n"
+        f"Set GEAK_RESULT_LATENCY_MS = {target}_ms (this is the value the optimizer scores against). "
+        "Always print all three GEAK_RESULT_* lines so the agent can see both signals in its output."
+    )
     if discovery_context:
         task += f"\n\n{discovery_context}"
 
