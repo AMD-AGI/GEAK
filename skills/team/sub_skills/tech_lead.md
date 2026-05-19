@@ -279,14 +279,17 @@ Write `$EVAL_DIR/tech_lead_report.md`:
 ## Round-by-Round Summary
 
 ### Round 1
-- Engineers: $N
-- Strategies: [list]
-- Results: [per-engineer speedup]
-- Merge: [result]
-- Round winner: Engineer $ID ($Xx)
+- Engineers dispatched: $N
+- Per-engineer results (MUST list ALL engineers individually):
+  - Engineer 0: [strategy name] — [speedup]x ([success/fail], [brief reason])
+  - Engineer 1: [strategy name] — [speedup]x ([success/fail], [brief reason])
+  - Engineer 2: [strategy name] — [speedup]x ([success/fail], [brief reason])
+- Merge result: [merged speedup]x from combining Engineer $A + $B ([success/fail])
+- Round winner: [Engineer $ID or Merged] ($Xx)
 - Bottleneck shift: [old] → [new]
 
 ### Round 2
+(Same format — list every engineer and merge result individually)
 ...
 
 ## Final Per-Test-Case Results
