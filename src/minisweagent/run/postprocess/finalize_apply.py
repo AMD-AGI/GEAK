@@ -31,7 +31,10 @@ import subprocess
 from pathlib import Path
 
 from minisweagent.agents.parallel_agent import BestPatchResult
-from minisweagent.run.utils.generated_artifacts import apply_patch_with_generated_helper_fallback
+from minisweagent.run.utils.generated_artifacts import (
+    apply_patch_with_generated_helper_fallback,
+    strip_generated_helper_sections,
+)
 from minisweagent.run.utils.git_safe_env import get_git_safe_env
 
 logger = logging.getLogger(__name__)
@@ -451,6 +454,33 @@ def _apply_patch_to_repo(patch_path: Path, repo: Path) -> tuple[bool, str | None
     return False, reason
 
 
+def _extract_patch_file_paths(result: BestPatchResult) -> list[str]:
+    """Return the list of file paths touched by the patch (after artifact stripping).
+
+    Parses ``diff --git a/... b/...`` headers from the sanitized patch to
+    get exactly which files the patch modifies or creates.  This lets
+    ``_commit_applied_patch`` stage only those files instead of ``git add -A``
+    which would accidentally include untracked runtime artifacts (``run.sh``,
+    JIT caches, ``flydsl_cache/``, etc.).
+    """
+    if not result or not result.best_patch_file:
+        return []
+    try:
+        patch_text = Path(result.best_patch_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    sanitized, _ = strip_generated_helper_sections(patch_text)
+    paths: list[str] = []
+    for line in sanitized.splitlines():
+        if line.startswith("diff --git a/"):
+            remainder = line[len("diff --git a/") :]
+            if " b/" in remainder:
+                b_path = remainder.split(" b/", 1)[1]
+                if b_path and b_path not in paths:
+                    paths.append(b_path)
+    return paths
+
+
 def _commit_applied_patch(
     result: BestPatchResult,
     repo: Path,
@@ -475,7 +505,7 @@ def _commit_applied_patch(
         )
     else:
         add = subprocess.run(
-            ["git", "add", "-A"],
+            ["git", "add", "-u"],
             cwd=str(repo),
             capture_output=True,
             text=True,
