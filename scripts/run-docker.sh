@@ -45,6 +45,27 @@ EDITABLE=false
 EXEC_CMD=()  # Command to run inside the container (empty = bash)
 
 #######################################
+# Auto-resolve BASE_IMAGE from host GPU arch (override with BASE_IMAGE env var)
+#######################################
+SGLANG_VERSION="v0.5.11"
+ROCM_TAG="rocm720"
+
+if [ -z "$BASE_IMAGE" ]; then
+    _gfx_arch=$(rocminfo 2>/dev/null | grep -oP 'gfx\d+' | head -1)
+    case "$_gfx_arch" in
+        gfx942) _gpu_suffix="mi30x" ;;
+        gfx950) _gpu_suffix="mi35x" ;;
+        *)      _gpu_suffix="mi35x" ;;
+    esac
+    BASE_IMAGE="lmsysorg/sglang:${SGLANG_VERSION}-${ROCM_TAG}-${_gpu_suffix}"
+    if [ -n "$_gfx_arch" ]; then
+        echo "Detected GPU arch: ${_gfx_arch} → BASE_IMAGE=${BASE_IMAGE}"
+    else
+        echo "Could not detect GPU arch, using default: BASE_IMAGE=${BASE_IMAGE}"
+    fi
+fi
+
+#######################################
 # Parse options
 #######################################
 while [[ $# -gt 0 ]]; do
@@ -118,8 +139,8 @@ if [ "$REBUILD" = true ]; then
         echo "Removing container ${CONTAINER_NAME}..."
         docker rm ${CONTAINER_NAME}
     fi
-    echo "Rebuilding image ${IMAGE_NAME} (--no-cache)..."
-    docker build --network=host --no-cache -t ${IMAGE_NAME} .
+    echo "Rebuilding image ${IMAGE_NAME} (--no-cache, BASE_IMAGE=${BASE_IMAGE})..."
+    docker build --network=host --no-cache --build-arg "BASE_IMAGE=${BASE_IMAGE}" -t ${IMAGE_NAME} .
     echo ""
 fi
 
@@ -184,8 +205,8 @@ echo ""
 
 # Check if image exists, build if not (unless we already rebuilt)
 if [[ "$(docker images -q ${IMAGE_NAME} 2> /dev/null)" == "" ]]; then
-    echo "Image ${IMAGE_NAME} not found. Building..."
-    docker build --network=host -t ${IMAGE_NAME} .
+    echo "Image ${IMAGE_NAME} not found. Building (BASE_IMAGE=${BASE_IMAGE})..."
+    docker build --network=host --build-arg "BASE_IMAGE=${BASE_IMAGE}" -t ${IMAGE_NAME} .
 elif [ "$REBUILD" != true ]; then
     echo "Using existing image ${IMAGE_NAME}"
     echo "To rebuild from scratch, run: $0 --rebuild"
