@@ -32,6 +32,7 @@ Design notes
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -84,16 +85,25 @@ UNLIMITED_MAX_STEPS: int = -1
 def _default_root() -> Path:
     """Resolve the default discovery root to ``<repo>/subagents/preprocess``.
 
-    The repository root is inferred by walking up from this file until
-    we find one with a ``pyproject.toml`` next to a ``subagents/`` dir.
-    Falls back to four-levels-up if that lookup fails — matches the
-    on-disk layout of GEAK (``src/minisweagent/run/preprocess_v3/registry.py``
-    is exactly 4 ``parent``s deep from the repo root).
+    Search order:
+    1. ``GEAK_SUBAGENTS_ROOT`` env var (explicit override for containers).
+    2. Walk up from this file looking for ``pyproject.toml`` + ``subagents/``
+       (works when running from a source checkout).
+    3. ``/workspace/subagents/preprocess`` (Docker convention).
+    4. Four-levels-up fallback (matches the on-disk layout when this file
+       is at ``src/minisweagent/run/preprocess_v3/registry.py``).
     """
+    env_root = os.environ.get("GEAK_SUBAGENTS_ROOT")
+    if env_root:
+        return Path(env_root)
     here = Path(__file__).resolve()
     for candidate in here.parents:
         if (candidate / "pyproject.toml").exists() and (candidate / "subagents").is_dir():
             return candidate / "subagents" / "preprocess"
+    # Docker container: subagents/ copied to /workspace/
+    workspace = Path("/workspace/subagents/preprocess")
+    if workspace.is_dir():
+        return workspace
     return here.parents[4] / "subagents" / "preprocess"
 
 
@@ -214,7 +224,7 @@ def _validate_and_build(name_hint: str, data: dict[str, Any], source: Path) -> S
 
     # Fall back to geak.yaml defaults for model and model_kwargs
     default_model, default_model_kwargs = _load_geak_model_defaults()
-    resolved_model = (str(data["model"]).strip() if data.get("model") else default_model)
+    resolved_model = str(data["model"]).strip() if data.get("model") else default_model
     resolved_model_kwargs = {**default_model_kwargs, **model_kwargs_raw}
 
     extras = {k: v for k, v in data.items() if k not in _KNOWN_FIELDS}
