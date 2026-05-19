@@ -9,20 +9,20 @@ When the GPU kernel itself is already fast (< 10us), the Python/C++ wrapper beco
 **`torch.empty()` instead of `torch.zeros()` / `new_zeros()`**
 ```python
 # BAD: zeros() calls memset on GPU — wastes ~2us per allocation
-idx = xyz.new_zeros((B, npoint, k), dtype=torch.int32)
+out = input.new_zeros((B, M, K), dtype=torch.int32)
 
 # GOOD: empty() skips initialization — output will be fully written by kernel
-idx = torch.empty((B, k, npoint), dtype=torch.int32, device=xyz.device)
+out = torch.empty((B, M, K), dtype=torch.int32, device=input.device)
 ```
 
 **Remove unnecessary output buffers**: If callers don't need an intermediate result, don't allocate it.
 ```python
-# BAD: Allocates dist2 buffer that nobody uses
-dist2 = torch.empty((B, npoint, k), dtype=torch.float32, device=xyz.device)
-kernel_launch(xyz, center_xyz, idx, dist2)
+# BAD: Allocates a scratch buffer that nobody uses downstream
+scratch = torch.empty((B, M, K), dtype=torch.float32, device=input.device)
+my_ext.kernel(input, query, output, scratch)
 
-# GOOD: Kernel only writes idx, no dist2 allocation needed
-kernel_launch(xyz, center_xyz, idx)  # Requires modifying C++ binding too
+# GOOD: Kernel only writes output, no scratch allocation needed
+my_ext.kernel(input, query, output)  # Requires modifying C++ binding too
 ```
 
 ### W1: Eliminate Post-Kernel Copies
@@ -32,12 +32,12 @@ kernel_launch(xyz, center_xyz, idx)  # Requires modifying C++ binding too
 Solution: modify the kernel to write directly in the expected output format:
 ```cpp
 // Write in (B, K, M) format directly — no Python transpose needed
-idx[bs * K * m + j * m + query] = result;  // (B, K, M) layout
+out[bs * K * M + j * M + query] = result;  // (B, K, M) layout
 // Instead of:
-idx[bs * m * K + query * K + j] = result;  // (B, M, K) layout → needs transpose
+out[bs * M * K + query * K + j] = result;  // (B, M, K) layout → needs transpose
 ```
 
-The Python wrapper then returns `idx` directly without any post-processing.
+The Python wrapper then returns `out` directly without any post-processing.
 
 ### W2: Bypass `torch.autograd.Function` Overhead
 
@@ -45,21 +45,21 @@ The Python wrapper then returns `idx` directly without any post-processing.
 
 ```python
 # BAD: autograd Function overhead (~3-5us per call)
-class KNN(torch.autograd.Function):
+class MyKernel(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, k, xyz, center_xyz):
-        idx = xyz.new_zeros(...)
-        knn_ext.knn_wrapper(B, N, npoint, k, xyz, center_xyz, idx, dist2)
-        return idx.transpose(2, 1).contiguous()
+    def forward(ctx, input, query):
+        out = input.new_zeros(...)
+        my_ext.kernel(input, query, out)
+        return out.transpose(2, 1).contiguous()
 
-result = KNN.apply(k, xyz, center_xyz)
+result = MyKernel.apply(input, query)
 
 # GOOD: Direct function call (~0us overhead)
 @torch.no_grad()
-def knn(k, xyz, center_xyz):
-    idx = torch.empty(...)
-    knn_ext.knn_wrapper_opt(B, N, npoint, k, xyz.contiguous(), center_xyz.contiguous(), idx)
-    return idx
+def my_kernel(input, query):
+    out = torch.empty(...)
+    my_ext.kernel_opt(input.contiguous(), query.contiguous(), out)
+    return out
 ```
 
 **When NOT to do this**: If the kernel has a backward pass (gradient computation), you must keep `torch.autograd.Function`.
@@ -70,7 +70,7 @@ def knn(k, xyz, center_xyz):
 
 ```python
 # Acceptable: .contiguous() on inputs that might not be contiguous
-knn_ext.kernel(xyz.contiguous(), center_xyz.contiguous(), idx)
+my_ext.kernel(input.contiguous(), query.contiguous(), out)
 
 # Better: CHECK_CONTIGUOUS in C++ binding, require contiguous inputs
 # Then in Python: just pass tensors without .contiguous()
@@ -78,15 +78,14 @@ knn_ext.kernel(xyz.contiguous(), center_xyz.contiguous(), idx)
 
 ### W4: Add Optimized Dispatch Paths
 
-When the kernel has template-specialized variants (e.g., K=3,5,10), add explicit dispatch in the Python wrapper:
+When the kernel has template-specialized variants, add explicit dispatch in the Python wrapper:
 
 ```python
-if k in (3, 5, 10):
-    # Fast path: specialized kernel, no dist2, direct output format
-    idx = torch.empty((B, k, npoint), dtype=torch.int32, device=xyz.device)
-    knn_ext.knn_wrapper_opt(B, N, npoint, k, transposed,
-                            xyz.contiguous(), center_xyz.contiguous(), idx)
-    return idx
+if param in SPECIALIZED_VALUES:
+    # Fast path: specialized kernel, direct output format
+    out = torch.empty((...), dtype=torch.int32, device=input.device)
+    my_ext.kernel_opt(B, N, M, param, input.contiguous(), query.contiguous(), out)
+    return out
 else:
     # Fallback: generic kernel
     ...
@@ -94,36 +93,35 @@ else:
 
 ### W5: Native Data Layout Support
 
-If callers sometimes pass transposed data (e.g., (B,3,N) instead of (B,N,3)), write a kernel variant that reads the transposed layout directly instead of forcing a Python-side transpose:
+If callers sometimes pass transposed data (e.g., (B,D,N) instead of (B,N,D)), write a kernel variant that reads the transposed layout directly instead of forcing a Python-side transpose:
 
 ```python
 # BAD: Python transposes before kernel call (~20us for large tensors)
 if transposed:
-    xyz = xyz.transpose(2, 1).contiguous()
+    input = input.transpose(2, 1).contiguous()
 
 # GOOD: Kernel handles both layouts via template parameter
 if transposed:
-    knn_ext.kernel_transposed(B, N, M, k, xyz, center_xyz, idx)
+    my_ext.kernel_transposed(B, N, M, input, query, out)
 else:
-    knn_ext.kernel_standard(B, N, M, k, xyz, center_xyz, idx)
+    my_ext.kernel_standard(B, N, M, input, query, out)
 ```
 
 ## C++ Binding Optimizations
 
 ### Reduce Binding Overhead
 ```cpp
-// Fast path: skip CHECK_CONTIGUOUS if kernel handles non-contiguous
+// Fast path: skip CHECK_CONTIGUOUS if Python caller already ensures .contiguous()
 // Only CHECK_CUDA is strictly necessary
-void knn_wrapper_opt(int b, int n, int m, int nsample, bool transposed,
-    at::Tensor xyz_tensor, at::Tensor new_xyz_tensor, at::Tensor idx_tensor) {
-    CHECK_CUDA(xyz_tensor);
-    CHECK_CUDA(new_xyz_tensor);
-    // Skip CHECK_CONTIGUOUS — Python caller already ensures .contiguous()
-    const float *new_xyz = new_xyz_tensor.data_ptr<float>();
-    const float *xyz = xyz_tensor.data_ptr<float>();
-    int *idx = idx_tensor.data_ptr<int>();
+void kernel_opt(int b, int n, int m, int param, bool transposed,
+    at::Tensor input_tensor, at::Tensor query_tensor, at::Tensor out_tensor) {
+    CHECK_CUDA(input_tensor);
+    CHECK_CUDA(query_tensor);
+    const float *input = input_tensor.data_ptr<float>();
+    const float *query = query_tensor.data_ptr<float>();
+    int *out = out_tensor.data_ptr<int>();
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    knn_kernel_launcher_opt(b, n, m, nsample, transposed, xyz, new_xyz, idx, stream);
+    kernel_launcher_opt(b, n, m, param, transposed, input, query, out, stream);
 }
 ```
 

@@ -21,8 +21,8 @@ Priority determines which strategies to try first. Lower number = higher priorit
 
 Before bottleneck-driven selection, check for these high-impact patterns:
 
-**Search/Scan Pattern**: If the kernel has 1 thread iterating over N elements (brute-force search, KNN, nearest neighbor, argmin, top-K):
-→ **ALWAYS assign warp-cooperative as the #1 priority task in Round 1.** This pattern gives 5-30x speedup. See `hip_optimization.md` → "Warp-Cooperative Algorithms" for the complete implementation pattern with shared-memory merge.
+**Search/Scan Pattern**: If the kernel has 1 thread iterating over N elements (brute-force search, argmin/argmax, top-K selection, reduction over large arrays):
+→ **ALWAYS assign warp-cooperative as the #1 priority task in Round 1.** This pattern gives 5-30x speedup. See `hip_optimization.md` → "Warp-Cooperative Algorithms" for the pattern with shared-memory merge.
 
 **Oversized Arrays**: If the kernel declares arrays with hardcoded large sizes (e.g., `float arr[100]`) but actual sizes are much smaller at runtime:
 → **ALWAYS assign template parameterization as a top priority task.** This eliminates register spill.
@@ -93,7 +93,7 @@ This indicates the bottleneck is Python/C++ wrapper overhead, NOT kernel compute
 1. PW: Replace `torch.autograd.Function.apply()` with `@torch.no_grad()` direct function (3-5us saved)
 2. PW: Use `torch.empty()` instead of `torch.zeros()` / `new_zeros()` (1-3us per allocation)
 3. PW: Modify kernel to output in expected format — avoid `.transpose().contiguous()` (3-20us)
-4. PW: Remove unnecessary output buffer allocations (e.g., dist2 if unused by callers) (2-5us)
+4. PW: Remove unnecessary output buffer allocations (e.g., scratch buffers unused by callers) (2-5us)
 5. PW: Add specialized dispatch paths for template-supported parameters
 6. PW: Skip `CHECK_CONTIGUOUS` in C++ binding (caller ensures contiguous)
 
