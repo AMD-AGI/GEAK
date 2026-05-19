@@ -183,6 +183,11 @@ def _resolve_kernel_and_repo(
     ``resolve_kernel_url`` (which clones if necessary).
     """
     kernel_path_obj = Path(kernel_url).expanduser()
+    # Resolve repo-relative kernel paths before falling back to the URL resolver.
+    if not kernel_path_obj.is_absolute() and repo is not None:
+        candidate = Path(repo).expanduser().resolve() / kernel_path_obj
+        if candidate.is_file():
+            kernel_path_obj = candidate
     if kernel_path_obj.is_file():
         repo_root = str(Path(repo).expanduser().resolve()) if repo is not None else _infer_repo_root(kernel_path_obj)
         return kernel_path_obj.resolve(), repo_root
@@ -191,7 +196,7 @@ def _resolve_kernel_and_repo(
     # run/preprocess/; inline once that package is dismantled.
     from minisweagent.run.preprocess.resolve_kernel_url import resolve_kernel_url as _legacy_resolve
 
-    resolved = _legacy_resolve(kernel_url)
+    resolved = _legacy_resolve(kernel_url, repo=str(repo) if repo is not None else None)
     if resolved.get("error"):
         raise RuntimeError(f"v3 preprocess: resolve-kernel-url failed: {resolved['error']}")
     kp = Path(str(resolved["kernel_path"])).resolve()
