@@ -54,10 +54,3 @@ agent:
   step_limit: 200
   use_skills: true
 
-model:
-  model_class: amd_llm
-  model_name: claude-opus-4.6
-  api_key: null
-  model_kwargs:
-    temperature: 0.0
-    max_tokens: 16000

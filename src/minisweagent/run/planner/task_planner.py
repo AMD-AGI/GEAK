@@ -88,7 +88,7 @@ class TaskPlanner:
             rag_enabled=rag_enabled,
         )
 
-        candidates: list[CandidateTask] = [canonical_fixed]
+        candidates: list[CandidateTask] = []
         for task in planned_tasks:
             candidates.append(
                 CandidateTask(
@@ -102,12 +102,27 @@ class TaskPlanner:
                 )
             )
 
-        logger.info(
-            "TaskPlanner: round %d pool has %d candidates (%d planned, 1 fixed)",
-            round_num,
-            len(candidates),
-            len(planned_tasks),
-        )
+        # Only inject fixed-canonical when planned tasks don't fill all GPU slots
+        planned_gpu_total = sum(c.num_gpus for c in candidates)
+        if planned_gpu_total < num_gpus:
+            candidates.append(canonical_fixed)
+            logger.info(
+                "TaskPlanner: round %d pool has %d candidates (%d planned, 1 fixed fallback; planned %d/%d GPUs)",
+                round_num,
+                len(candidates),
+                len(planned_tasks),
+                planned_gpu_total,
+                num_gpus,
+            )
+        else:
+            logger.info(
+                "TaskPlanner: round %d pool has %d candidates (%d planned, no fixed needed; planned %d/%d GPUs)",
+                round_num,
+                len(candidates),
+                len(planned_tasks),
+                planned_gpu_total,
+                num_gpus,
+            )
         return CandidatePool(round_num=round_num, items=tuple(candidates))
 
     def _call_llm_planner(

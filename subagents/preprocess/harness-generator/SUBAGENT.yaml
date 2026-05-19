@@ -5,9 +5,6 @@
 #   - model_kwargs.temperature: 0.0 (determinism pin; no seed available on Claude)
 name: harness-generator
 description: Create a fixed test harness for a GPU kernel with four CLI modes (--correctness, --profile, --benchmark, --full-benchmark). The harness path is the ONLY artifact returned; deterministic Python renders COMMANDMENT.md from it.
-model: claude-opus-4.6
-model_kwargs:
-  temperature: 0.0
 knowledge_base_template: from_kernel_language
 # Harness generation can take many rounds (inspect discovery, adapt or build harness,
 # iterate against harness-verifier feedback). The orchestrator gates retries via the

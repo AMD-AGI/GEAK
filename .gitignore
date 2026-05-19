@@ -210,3 +210,4 @@ mcp_tools/profiler-mcp/.rocprofv3/
 runs/
 dummy_run*.py
 validation_runs/
+test_scripts/

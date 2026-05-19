@@ -120,58 +120,17 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
         raise PatchApplyError(f"Patch file is empty: {patch_file}")
 
     eval_dir = (output_dir / "_eval_worktree").resolve()
-    if eval_dir.exists():
-        logger.warning("Removing existing evaluation worktree: %s", eval_dir)
-        shutil.rmtree(eval_dir, ignore_errors=True)
-
     repo = Path(repo_root).resolve()
     is_git = (repo / ".git").exists()
 
-    git_env = get_git_safe_env(output_dir)
     if is_git:
-        try:
-            subprocess.run(
-                ["git", "worktree", "add", "--detach", str(eval_dir)],
-                cwd=str(repo),
-                capture_output=True,
-                text=True,
-                check=True,
-                env=git_env,
-            )
-        except subprocess.CalledProcessError as e:
-            error_msg = (e.stderr or e.stdout or str(e)).lower()
-            recoverable = (
-                "missing but already registered worktree" in error_msg
-                or "already used by worktree" in error_msg
-                or "already exists" in error_msg
-            )
-            if not recoverable:
-                raise RuntimeError(f"git worktree add failed (rc={e.returncode}): {e.stderr or e.stdout}") from e
-            subprocess.run(
-                ["git", "worktree", "prune"],
-                cwd=str(repo),
-                check=False,
-                capture_output=True,
-                text=True,
-                env=git_env,
-            )
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", str(eval_dir)],
-                cwd=str(repo),
-                check=False,
-                capture_output=True,
-                text=True,
-                env=git_env,
-            )
-            subprocess.run(
-                ["git", "worktree", "add", "--detach", "-f", str(eval_dir)],
-                cwd=str(repo),
-                capture_output=True,
-                text=True,
-                check=True,
-                env=git_env,
-            )
+        from minisweagent.run.task_file import create_worktree
+
+        create_worktree(repo, eval_dir)
     else:
+        if eval_dir.exists():
+            shutil.rmtree(eval_dir, ignore_errors=True)
+        git_env = get_git_safe_env(output_dir)
         shutil.copytree(str(repo), str(eval_dir), dirs_exist_ok=True)
         subprocess.run(["git", "init"], cwd=str(eval_dir), capture_output=True, text=True, check=True, env=git_env)
         subprocess.run(["git", "add", "."], cwd=str(eval_dir), capture_output=True, text=True, check=True, env=git_env)
@@ -185,6 +144,7 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
         )
         logger.warning("Initialised temporary git repo in non-git eval worktree: %s", eval_dir)
 
+    git_env = get_git_safe_env(output_dir)
     patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     # errors="replace" is the Unicode error handling mode for str.decode()
 
@@ -514,7 +474,10 @@ def run_correctness_and_benchmark(
     If correctness fails, the benchmark is skipped.
     Falls back to BENCHMARK if FULL_BENCHMARK baseline is not found.
     """
+    from minisweagent.run.dispatch import _read_commandment_section
+
     correctness_script = build_eval_script(str(commandment_path), ["SETUP", "CORRECTNESS"])
+    _correctness_stdout = None
     if correctness_script:
         logger.info("Running CORRECTNESS on best kernel from round %d...", round_num)
         try:
@@ -561,6 +524,7 @@ def run_correctness_and_benchmark(
             round_eval["status"] = "correctness_failed"
             return
         logger.info("CORRECTNESS: PASS")
+        _correctness_stdout = correctness_result.stdout
     else:
         logger.warning("No CORRECTNESS commands found in COMMANDMENT")
 
@@ -575,54 +539,65 @@ def run_correctness_and_benchmark(
         baseline_text = baseline_path.read_text().strip()
         logger.info("%s baseline found: %s", section_key, baseline_path)
 
-        benchmark_script = build_eval_script(str(commandment_path), ["SETUP", baseline_section_name])
-        if not benchmark_script:
-            logger.warning("No %s commands found in COMMANDMENT", baseline_section_name)
-            continue
-
-        logger.info("Running %s on best kernel from round %d...", section_key, round_num)
-        try:
-            candidate_result = subprocess.run(
-                ["bash", benchmark_script],
-                capture_output=True,
-                text=True,
-                timeout=1800,
-                cwd=str(eval_worktree),
-                env=eval_env,
-            )
-        except Exception as exc:
-            round_eval[section_key] = {"error": str(exc)}
-            round_eval["status"] = "commandment_execution_failed"
-            raise CommandmentExecutionError(
-                baseline_section_name, None, f"subprocess failed to complete: {exc}"
-            ) from exc
-
-        if candidate_result.returncode != 0:
-            stderr_tail = _format_stderr_tail(candidate_result.stderr)
-            round_eval[section_key] = {
-                "error": candidate_result.stderr,
-                "returncode": candidate_result.returncode,
-            }
-            round_eval["status"] = "commandment_execution_failed"
-            broken = _stderr_indicates_broken_contract(candidate_result.stderr)
-            detail = (
-                f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
-                if broken is not None
-                else f"non-zero exit; stderr tail:\n{stderr_tail}"
-            )
-            logger.error(
-                "%s execution failed (rc=%d) -- treating as COMMANDMENT failure:\n%s",
+        # Path-A dedup: reuse CORRECTNESS output when sections are identical
+        _corr_body = _read_commandment_section(str(commandment_path), "CORRECTNESS") if _correctness_stdout is not None else None
+        _bench_body = _read_commandment_section(str(commandment_path), baseline_section_name)
+        if _corr_body and _bench_body and _corr_body.strip() == _bench_body.strip():
+            logger.info(
+                "%s section identical to CORRECTNESS; reusing output (Path-A dedup)",
                 baseline_section_name,
-                candidate_result.returncode,
-                stderr_tail,
             )
-            raise CommandmentExecutionError(baseline_section_name, candidate_result.returncode, detail)
+            candidate_stdout = _correctness_stdout
+        else:
+            benchmark_script = build_eval_script(str(commandment_path), ["SETUP", baseline_section_name])
+            if not benchmark_script:
+                logger.warning("No %s commands found in COMMANDMENT", baseline_section_name)
+                continue
 
-        candidate_stdout = candidate_result.stdout
+            logger.info("Running %s on best kernel from round %d...", section_key, round_num)
+            try:
+                candidate_result = subprocess.run(
+                    ["bash", benchmark_script],
+                    capture_output=True,
+                    text=True,
+                    timeout=1800,
+                    cwd=str(eval_worktree),
+                    env=eval_env,
+                )
+            except Exception as exc:
+                round_eval[section_key] = {"error": str(exc)}
+                round_eval["status"] = "commandment_execution_failed"
+                raise CommandmentExecutionError(
+                    baseline_section_name, None, f"subprocess failed to complete: {exc}"
+                ) from exc
+
+            if candidate_result.returncode != 0:
+                stderr_tail = _format_stderr_tail(candidate_result.stderr)
+                round_eval[section_key] = {
+                    "error": candidate_result.stderr,
+                    "returncode": candidate_result.returncode,
+                }
+                round_eval["status"] = "commandment_execution_failed"
+                broken = _stderr_indicates_broken_contract(candidate_result.stderr)
+                detail = (
+                    f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
+                    if broken is not None
+                    else f"non-zero exit; stderr tail:\n{stderr_tail}"
+                )
+                logger.error(
+                    "%s execution failed (rc=%d) -- treating as COMMANDMENT failure:\n%s",
+                    baseline_section_name,
+                    candidate_result.returncode,
+                    stderr_tail,
+                )
+                raise CommandmentExecutionError(baseline_section_name, candidate_result.returncode, detail)
+
+            candidate_stdout = candidate_result.stdout
+
         round_eval[section_key] = {
             "stdout": candidate_stdout,
-            "returncode": candidate_result.returncode,
-            "success": candidate_result.returncode == 0,
+            "returncode": 0,
+            "success": True,
             "baseline": baseline_text,
         }
 
@@ -746,6 +721,16 @@ def run_profile(
     and builds a comparison against ``baseline_metrics.json``.
     Mutates ``round_eval["profile_comparison"]`` in place.
     """
+    # Path-A dedup: skip PROFILE if identical to CORRECTNESS (opaque commands
+    # won't produce profile.json anyway)
+    from minisweagent.run.dispatch import _read_commandment_section
+
+    _profile_body = _read_commandment_section(str(commandment_path), "PROFILE")
+    _corr_body = _read_commandment_section(str(commandment_path), "CORRECTNESS")
+    if _profile_body and _corr_body and _profile_body.strip() == _corr_body.strip():
+        logger.info("PROFILE section identical to CORRECTNESS; skipping redundant run (Path-A dedup)")
+        return
+
     profile_script = build_eval_script(str(commandment_path), ["SETUP", "PROFILE"])
     if not profile_script:
         logger.warning("No PROFILE commands found in COMMANDMENT")
@@ -1042,6 +1027,17 @@ def evaluate_round_best(
         round_eval["baseline_shape_latency_ms"] = best["baseline_shape_latency_ms"]
     if best.get("candidate_shape_latency_ms"):
         round_eval["candidate_shape_latency_ms"] = best["candidate_shape_latency_ms"]
+
+    # --- GEAK_AGENT_SELECT_PATCH: trust agent-reported speedup, skip eval ---
+    if os.environ.get("GEAK_AGENT_SELECT_PATCH", "").strip() == "1":
+        logger.info(
+            "GEAK_AGENT_SELECT_PATCH=1: trusting agent-selected patch for round %d "
+            "(skipping CORRECTNESS, FULL_BENCHMARK, PROFILE).",
+            round_num,
+        )
+        round_eval["status"] = "agent_selected"
+        round_eval["speedup_source"] = "agent-reported (GEAK_AGENT_SELECT_PATCH=1)"
+        return write_eval_results(round_eval, output_dir, round_num)
 
     # --- Validate required context ---
     commandment_path = pp_dir / "COMMANDMENT.md"

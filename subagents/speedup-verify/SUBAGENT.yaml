@@ -36,14 +36,3 @@ agent:
   step_limit: 30
   cost_limit: 0.0
 
-env:
-  env:
-    PAGER: cat
-    MANPAGER: cat
-    LESS: -R
-  timeout: 300
-
-model:
-  model_class: amd_llm
-  model_name: claude-opus-4.6
-  api_key: null

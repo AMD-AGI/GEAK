@@ -293,25 +293,3 @@ agent:
   step_limit: 0.
   cost_limit: 0.
   mode: confirm
-env:
-  env:
-    PAGER: cat
-    MANPAGER: cat
-    LESS: -R
-    PIP_PROGRESS_BAR: 'off'
-    TQDM_DISABLE: '1'
-  timeout: 3600
-model:
-  model_class: amd_llm
-  model_name: claude-opus-4.5
-  api_key: null
-  model_kwargs:
-    temperature: 0.0
-    max_tokens: 16000
-    reasoning:
-      effort: high
-    text:
-      verbosity: low
-tools:
-  profiling: false
-  rag: false

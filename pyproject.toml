@@ -102,6 +102,7 @@ baseline-metrics = "minisweagent.run.preprocess.baseline:main"
 codebase-context = "minisweagent.run.preprocess.codebase_context:main"
 resolve-kernel-url = "minisweagent.run.preprocess.resolve_kernel_url:main"
 task-generator = "minisweagent.agents.heterogeneous.task_generator:main"
+geak-gemm-tuning = "minisweagent.run.gemm_tuning:app"
 
 [tool.setuptools]
 include-package-data = true
