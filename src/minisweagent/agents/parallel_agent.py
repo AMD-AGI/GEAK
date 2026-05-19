@@ -404,6 +404,7 @@ class ParallelAgent(DefaultAgent):
         deadline=None,
         soft_stop=None,
         registry=None,
+        gpu_manager=None,
     ) -> list[tuple[int, Any, Any, Any]]:
         """Run multiple parallel agents and return their results.
 
@@ -437,6 +438,7 @@ class ParallelAgent(DefaultAgent):
                 deadline=deadline,
                 soft_stop=soft_stop,
                 registry=registry,
+                gpu_manager=gpu_manager,
             )
 
         # Heterogeneous mode: use agent_specs if provided (legacy)

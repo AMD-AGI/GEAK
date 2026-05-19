@@ -43,7 +43,16 @@ def parse_edit_command(command: str) -> tuple[str | None, Any]:
     value = value.strip()
 
     # Validate field name
-    valid_fields = {"kernel_name", "repo", "test_command", "metric", "num_parallel", "gpu_ids"}
+    valid_fields = {
+        "kernel_name",
+        "repo",
+        "test_command",
+        "metric",
+        "num_parallel",
+        "gpu_ids",
+        "gpu_oversubscribe",
+        "max_concurrent_llm",
+    }
 
     if field_name not in valid_fields:
         return None, None

@@ -93,6 +93,7 @@ class PipelineContext:
     # test sweep to validate preprocessing without paying the 30-90 minute
     # optimization round loop cost per kernel-scenario.
     preprocess_only: bool = False
+    gpu_manager: Any = None
 
 
 # ── Tool resolution ───────────────────────────────────────────────────
@@ -185,6 +186,7 @@ def _build_postprocess_ctx(pipeline_ctx: PipelineContext) -> dict[str, Any]:
         "registry": pipeline_ctx.registry,
         "user_instructions": pipeline_ctx.user_prompt,
         "rag_enabled": pipeline_ctx.rag_enabled,
+        "gpu_manager": pipeline_ctx.gpu_manager,
     }
 
 
@@ -602,6 +604,8 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
             deadline=ctx.deadline,
             soft_stop=ctx.soft_stop,
             registry=ctx.registry,
+            gpu_manager=ctx.gpu_manager,
+            num_parallel=n_workers,
         )
 
         # 5. EVALUATE — FULL_BENCHMARK verification (all modes)

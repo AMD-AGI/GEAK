@@ -21,6 +21,7 @@ Two non-obvious requirements:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import multiprocessing as mp
 import os
@@ -29,7 +30,7 @@ import signal
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from minisweagent.run.state import PreprocessState
+    from minisweagent.run.state import PreprocessState, ProcessRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,7 @@ def _profile_in_subproc(
 
 
 def run_profiler_with_handle(
-    state: PreprocessState,
+    state: PreprocessState | None = None,
     *,
     perf_cmd: str,
     backend: str = "metrix",
@@ -115,16 +116,16 @@ def run_profiler_with_handle(
     num_replays: int = 3,
     quick: bool = False,
     timeout_s: float | None = None,
+    registry: ProcessRegistry | None = None,
 ) -> dict | None:
     """Run profile_kernel in a child process; return its result or ``None``.
 
-    ``state.registry`` tracks the process so the watchdog or SIGINT handler
-    can ``terminate_all()`` it. The function returns ``None`` if the profile
-    was terminated, raised, or produced no result.
+    The process is tracked via *registry* (or ``state.registry``) so the
+    watchdog / SIGINT handler can ``terminate_all()`` it. Returns ``None``
+    if the profile was terminated, raised, or produced no result.
     """
-    # Use the spawn context to avoid inheriting the parent's CUDA/HIP state,
-    # threadpools, and import side effects -- a forked child can deadlock
-    # CUDA's runtime, and several profiler backends are sensitive to that.
+    _registry = registry or (state.registry if state else None)
+
     ctx = mp.get_context("spawn")
     q: mp.Queue = ctx.Queue()
     proc = ctx.Process(
@@ -134,7 +135,8 @@ def run_profiler_with_handle(
         daemon=False,
     )
 
-    with state.registry.track_mp(proc):
+    _ctx_mgr = _registry.track_mp(proc) if _registry else contextlib.nullcontext()
+    with _ctx_mgr:
         proc.start()
         try:
             proc.join(timeout=timeout_s)

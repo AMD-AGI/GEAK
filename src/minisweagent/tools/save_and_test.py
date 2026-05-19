@@ -132,6 +132,7 @@ class SaveAndTestContext:
     # Without this, a 30-min benchmark started here would run past the
     # ``--mode quick`` budget because nothing else in the call stack tracks it.
     registry: "ProcessRegistry | None" = None
+    gpu_manager: Any = None
 
 
 def _tracked_subprocess_run(
@@ -597,6 +598,72 @@ class SaveAndTestTool:
         profile_env: dict[str, str],
         gpu_devices: str,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        ctx = self.context
+        if ctx and ctx.gpu_manager is not None:
+            raw_result = self._run_patch_profile_via_manager(
+                harness_path=harness_path,
+                gpu_devices=gpu_devices,
+                workdir=ctx.cwd if ctx else None,
+            )
+        else:
+            raw_result = self._run_patch_profile_direct(
+                harness_path=harness_path,
+                profile_env=profile_env,
+                gpu_devices=gpu_devices,
+            )
+
+        metrics: dict[str, Any] = {}
+        if raw_result:
+            try:
+                from minisweagent.run.preprocess.baseline import build_baseline_metrics
+
+                metrics = build_baseline_metrics(raw_result, include_all=True)
+            except Exception:
+                logger.debug("build_baseline_metrics failed; using empty metrics", exc_info=True)
+                metrics = {}
+        return raw_result, metrics
+
+    def _run_patch_profile_via_manager(
+        self,
+        *,
+        harness_path: Path,
+        gpu_devices: str,
+        workdir: str | None,
+    ) -> dict[str, Any] | None:
+        """Profile via GPUManager — runs in a clean subprocess, no os.environ mutation."""
+        from minisweagent.run.preprocess.profiler_runner import run_profiler_with_handle
+        from minisweagent.run.utils.gpu_manager import GpuJob
+
+        ctx = self.context
+
+        def _gpu_job(gpus: list[int], env_overrides: dict[str, str]) -> dict[str, Any] | None:
+            return run_profiler_with_handle(
+                perf_cmd=f"python {harness_path} --profile",
+                backend="metrix",
+                gpu_id=gpus[0],
+                workdir=workdir,
+                num_replays=3,
+                quick=True,
+                registry=ctx.registry if ctx else None,
+            )
+
+        return ctx.gpu_manager.run(
+            GpuJob(
+                fn=_gpu_job,
+                num_gpus=1,
+                timeout=float(ctx.timeout) if ctx else None,
+                label=f"profile:{Path(harness_path).stem}",
+            )
+        )
+
+    def _run_patch_profile_direct(
+        self,
+        *,
+        harness_path: Path,
+        profile_env: dict[str, str],
+        gpu_devices: str,
+    ) -> dict[str, Any] | None:
+        """Legacy in-process profile path (no gpu_manager available)."""
         from minisweagent.run.pipeline_helpers import _ensure_mcp_importable
 
         _ensure_mcp_importable()
@@ -614,17 +681,7 @@ class SaveAndTestTool:
             )
         finally:
             self._restore_process_env(previous, newly_added)
-
-        metrics: dict[str, Any] = {}
-        if raw_result:
-            try:
-                from minisweagent.run.preprocess.baseline import build_baseline_metrics
-
-                metrics = build_baseline_metrics(raw_result, include_all=True)
-            except Exception:
-                logger.debug("build_baseline_metrics failed; using empty metrics", exc_info=True)
-                metrics = {}
-        return raw_result, metrics
+        return raw_result
 
     def _save_profile_output(self, patch_name: str, profile_payload: dict[str, Any]) -> str | None:
         ctx = self.context
@@ -1101,17 +1158,42 @@ class SaveAndTestTool:
         test_command = self._ensure_test_script_exists(test_command)
         self._log(f"[SaveAndTest] Running: {test_command}")
 
+        if ctx.gpu_manager is not None:
+            return self._run_test_via_gpu_manager(test_command, test_env)
+        return self._run_test_direct(test_command, test_env)
+
+    def _run_test_via_gpu_manager(self, test_command: str, test_env: dict[str, str]) -> tuple[str, bool, int]:
+        """Run test through GPUManager — GPU acquired only for subprocess duration."""
+        from minisweagent.run.utils.gpu_manager import GpuJob
+
+        ctx = self.context
+
+        def _gpu_job(gpus: list[int], env_overrides: dict[str, str]) -> tuple[str, bool, int]:
+            merged_env = {**test_env, **env_overrides}
+            return self._run_test_subprocess(test_command, merged_env)
+
+        return ctx.gpu_manager.run(
+            GpuJob(
+                fn=_gpu_job,
+                num_gpus=1,
+                timeout=ctx.timeout,
+                label=f"save_and_test:{Path(ctx.cwd).name}",
+            ),
+        )
+
+    def _run_test_direct(self, test_command: str, test_env: dict[str, str]) -> tuple[str, bool, int]:
+        """Run test directly (legacy path when no GPUManager is available)."""
+        return self._run_test_subprocess(test_command, test_env)
+
+    def _run_test_subprocess(self, test_command: str, test_env: dict[str, str]) -> tuple[str, bool, int]:
+        """Execute test command as a subprocess and return (output, passed, returncode)."""
+        ctx = self.context
+
         with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".txt") as tmp:
             tmp_file = tmp.name
 
         try:
             wrapped_cmd = f"({test_command}) > {tmp_file} 2>&1; echo $? > {tmp_file}.exitcode"
-            # The test command is the long-running one (benchmarks routinely
-            # take 5-30 minutes). Track its Popen with the run-level registry
-            # so the budget watchdog can ``os.killpg`` it (and its GPU
-            # grandchildren) on a wall-clock timeout. Falls back to a plain
-            # ``subprocess.run``-equivalent when no registry is wired (tests,
-            # ad-hoc invocations).
             _tracked_subprocess_run(
                 wrapped_cmd,
                 registry=ctx.registry,

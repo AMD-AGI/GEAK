@@ -528,6 +528,7 @@ def run_pool(
     deadline=None,
     soft_stop=None,
     registry=None,
+    gpu_manager=None,
 ) -> list[tuple[int, Any, Any, Any]]:
     """Run M tasks across N GPU slots with overflow queuing.
 
@@ -703,6 +704,10 @@ def run_pool(
             # Run-level ProcessRegistry -> save_and_test inner subprocess.run.
             if registry is not None:
                 agent._registry = registry
+                if hasattr(agent, "_setup_save_and_test_context"):
+                    agent._setup_save_and_test_context()
+            if gpu_manager is not None:
+                agent._gpu_manager = gpu_manager
                 if hasattr(agent, "_setup_save_and_test_context"):
                     agent._setup_save_and_test_context()
 

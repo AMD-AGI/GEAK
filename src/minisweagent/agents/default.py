@@ -244,6 +244,7 @@ class DefaultAgent:
             # when those wire ``registry`` through. Lets the budget watchdog
             # SIGTERM/SIGKILL long-running test/benchmark subprocesses.
             registry=getattr(self, "_registry", None),
+            gpu_manager=getattr(self, "_gpu_manager", None),
         )
 
         save_and_test_tool = self.toolruntime._tool_table.get("save_and_test")

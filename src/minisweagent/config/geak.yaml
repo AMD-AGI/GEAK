@@ -56,3 +56,12 @@ run:
     full:
       orchestrator:
         max_rounds: 5
+parallel:
+  num_parallel: null              # null -> ceil(len(gpu_ids) * gpu_oversubscribe)
+  gpu_oversubscribe: 1.0          # bump to 2.0 once stats validate headroom
+  max_concurrent_llm: null        # null -> num_parallel
+gpu_manager:
+  job_timeout_default_s: 900
+  stats_log_interval_s: 30        # 0 disables periodic stats logging
+pipeline:
+  mode: mixed

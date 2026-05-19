@@ -424,6 +424,7 @@ class OptimizationAgent:
             log_fn=self._log_message,
             patch_counter=self.patch_counter,
             source_file_paths=source_file_paths,
+            gpu_manager=getattr(self, "_gpu_manager", None),
         )
 
         save_and_test_tool = self.toolruntime._tool_table.get("save_and_test")

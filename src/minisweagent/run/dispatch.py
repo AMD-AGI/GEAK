@@ -345,6 +345,8 @@ def run_task_batch(
     deadline=None,
     soft_stop=None,
     registry=None,
+    gpu_manager=None,
+    num_parallel: int | None = None,
 ) -> dict[str, Any]:
     """Run a batch of task files via ParallelAgent pool mode.
 
@@ -458,7 +460,7 @@ def run_task_batch(
 
     try:
         raw_results = ParallelAgent.run_parallel(
-            num_parallel=len(gpu_ids),
+            num_parallel=num_parallel or len(gpu_ids),
             repo_path=repo_path,
             is_git_repo=is_git,
             task_content="",
@@ -474,6 +476,7 @@ def run_task_batch(
             deadline=deadline,
             soft_stop=soft_stop,
             registry=registry,
+            gpu_manager=gpu_manager,
         )
     except Exception as exc:
         logger.error("Task batch execution failed: %s", exc, exc_info=True)
@@ -620,6 +623,8 @@ def run_staged_task_batch(
     deadline=None,
     soft_stop=None,
     registry=None,
+    gpu_manager=None,
+    num_parallel: int | None = None,
 ) -> dict[str, Any]:
     """Priority-staged dispatch with early exit on improvement.
 
@@ -653,6 +658,8 @@ def run_staged_task_batch(
             deadline=deadline,
             soft_stop=soft_stop,
             registry=registry,
+            gpu_manager=gpu_manager,
+            num_parallel=num_parallel,
         )
         all_results.append(
             {

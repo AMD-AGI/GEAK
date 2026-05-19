@@ -40,6 +40,7 @@ from minisweagent.run.state import (
     preprocess_hard_stop_handler,
     preprocess_soft_stop_handler,
 )
+from minisweagent.run.utils.gpu_manager import GPUManager
 from minisweagent.run.utils.task_parser import (
     _resolve_path_case,
     display_parsed_config,
@@ -519,8 +520,17 @@ def main(
     if num_parallel is None:
         num_parallel = _as_int(parsed_config.get("num_parallel"))
     if num_parallel is None and parsed_gpu_ids:
-        num_parallel = len(parsed_gpu_ids)
-        logger.info("Auto-setting num_parallel=%s from gpu_ids.", num_parallel)
+        from math import ceil
+
+        _oversubscribe = float(
+            (config.get("parallel") or {}).get("gpu_oversubscribe", 1.0)
+        )
+        num_parallel = max(1, ceil(len(parsed_gpu_ids) * _oversubscribe))
+        logger.info(
+            "Auto-setting num_parallel=%s from gpu_ids (oversubscribe=%.1f).",
+            num_parallel,
+            _oversubscribe,
+        )
 
     kernel_name_for_output = parsed_config.get("kernel_name")
     if not kernel_name_for_output and kernel_url:
@@ -611,6 +621,12 @@ def main(
     # ── SIGINT handler: first Ctrl-C -> SoftStop; second Ctrl-C -> ──
     # ── force-terminate registry and re-raise.                     ──
     state = PreprocessState(output_dir=preprocess_output_dir)
+    _gpu_mgr_cfg = config.get("gpu_manager") or {}
+    gpu_manager = GPUManager(
+        parsed_gpu_ids,
+        registry=state.registry,
+        stats_log_interval_s=float(_gpu_mgr_cfg.get("stats_log_interval_s", 30.0)),
+    )
     _sigint_count = {"n": 0}
     _orig_sigint = signal.getsignal(signal.SIGINT)
 
@@ -976,6 +992,7 @@ def main(
                 soft_stop=budget.soft_stop,
                 registry=state.registry,
                 preprocess_only=preprocess_only,
+                gpu_manager=gpu_manager,
             ),
             mode=pipeline_mode,
         )
@@ -997,6 +1014,10 @@ def main(
         # 4. Then run finalize + retention. Both are broad-except wrapped
         #    so a hook failure can't mask the original exception.
         budget.cancel_all_timers()
+        try:
+            gpu_manager.shutdown(cancel_pending=True)
+        except Exception:
+            logger.exception("gpu_manager.shutdown() failed during run cleanup")
         try:
             state.registry.terminate_all()
         except Exception:
