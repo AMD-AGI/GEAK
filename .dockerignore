@@ -10,6 +10,7 @@
 !src/
 !mcp_tools/
 !scripts/
+!subagents/
 !skills/
 !docs/
 !knowledge-base/

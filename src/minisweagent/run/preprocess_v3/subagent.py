@@ -289,10 +289,16 @@ class PreprocessSubagent:
             self._tool_table[name] = callable_
             self._tool_schemas.append(schema)
 
+        tool_env = self.extra_template_vars.get("_tool_env")
+        if not isinstance(tool_env, dict):
+            tool_env = {}
         if self.cwd:
             bash = self._tool_table.get("bash")
             if bash is not None and hasattr(bash, "_cwd"):
                 bash._cwd = self.cwd
+        for tool in self._tool_table.values():
+            if hasattr(tool, "_env_override"):
+                tool._env_override.update({str(k): str(v) for k, v in tool_env.items()})
 
     @property
     def tool_names(self) -> list[str]:
