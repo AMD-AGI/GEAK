@@ -7,9 +7,6 @@
 # additive enrichment: model_kwargs.temperature: 0.0 (determinism pin).
 name: harness-verifier
 description: Verify a harness produced by harness-generator against the v3 static + runtime contract; fix mechanical issues in-place; emit HARNESS_VERIFIED=true once clean, or a structured correction directive when only the generator can fix it.
-model: claude-opus-4.6
-model_kwargs:
-  temperature: 0.0
 # Verifier MAY edit harness_path to apply small mechanical fixes (missing
 # argparse flag, GPU-RNG-in-profile rewrite, missing GEAK markers, dtype coercion).
 # Verifier MUST NOT edit kernel_path or anything else inside repo_root.

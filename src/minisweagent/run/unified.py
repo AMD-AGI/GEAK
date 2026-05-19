@@ -379,7 +379,7 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
     harness_path = str(ctx.preprocess_ctx.get("harness_path", ""))
     gpu_id = ctx.gpu_ids[0] if ctx.gpu_ids else 0
 
-    if repo_root and harness_path and commandment_path.exists():
+    if repo_root and commandment_path.exists():
         try:
             preflight_commandment_contract(
                 commandment_path, repo_root, harness_path, gpu_id,

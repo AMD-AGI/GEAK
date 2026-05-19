@@ -1,0 +1,166 @@
+name: gemm-tuning
+description: >-
+  GEMM tuning agent: improves end-to-end workload performance by tuning how
+  GEMMs are selected, configured, and executed (flags, env, kernel tables,
+  vendor tuners, and related code paths). Supports FP8 block-scaled GEMM
+  tuning via SGLang + aiter/CK workflows. Use for any task involving GEMM
+  kernel tuning, dispatch optimization, or kernel table generation on AMD GPUs.
+
+execution_mode: inprocess
+
+parameters:
+  - name: task
+    type: string
+    description: >-
+      Free-form task description for the GEMM tuning goal. Should include
+      the benchmark script path, optimization goals, and any specific
+      constraints (model, TP size, etc.).
+    required: true
+
+# ── Agent configuration ──
+
+agent:
+  system_template_file: SYSTEM_PROMPT.md
+  instance_template: |
+    Tune GEMMs for the following goal so the full workload improves end-to-end: {{task}}
+
+    You can run shell commands and edit files as needed.
+
+    ## Workflow of Gemm Tuning
+
+    This workflows should be done step-by-step.
+
+    1. Map the repository and identify how the workload reaches GEMM execution. Determine the framework/runtime, dispatch path, kernel backend, operator stack, GEMM callsites, tensor shapes, layouts, dtypes, batching behavior, and any relevant runtime/configuration knobs. Record the exact benchmark entrypoints, model configs, environment variables, and execution flags that influence GEMM behavior or kernel selection.
+    2. A run workspace directory is created for you at launch (see the path at the end of the task above); the shell cwd is that directory. Store everything needed to review, rerun, or reproduce the tuning workflow there. This includes benchmark scripts, commands used, environment snapshots, profiler outputs, dumped shapes, tuner inputs/outputs, generated CSVs, kernel tables, logs, intermediate generated files, compiled artifacts, and copies of all tuned files or modified configs. Any artifact generated during profiling or tuning that may be needed later for validation or review should be kept in this workspace.
+    3. Load and inspect available GEAK skills and determine whether any are applicable to the discovered stack and runtime. Prefer verified skills when available (for example fp8-blockscale-gemm-sglang-aiter) and follow their documented workflow, environment setup, tuning flow, and kernel table handling as closely as possible. If no relevant skill exists, follow a minimal and verifiable fallback workflow: dump representative GEMM shapes, tune using the project's native tooling or documented methodology, and compare tuned results against baseline using reproducible measurements.
+    4. Establish a baseline by running the provided benchmark or evaluation workflow exactly as intended by the project before making tuning changes. Record all relevant metrics and outputs that will later be used for comparison, including throughput, latency, kernel selection behavior, and any profiler or runtime statistics relevant to GEMM execution.
+    5. Perform tuning using the most appropriate validated workflow for the discovered stack. When a matching GEAK skill exists, prioritize staying within that workflow since the skills are validated for tuner flow, required environment variables, kernel tables, and runtime integration. Otherwise, apply minimal, verifiable tuning changes aligned with the discovered framework and dispatch stack. Preserve all generated tuning artifacts, logs, CSVs, and intermediate outputs inside the workspace directory.
+    6. Write a final report at final_report.json in the workspace directory (the path given in the task above), using the following format:
+
+       {
+         "status": "complete",
+         "tuned_file": "<tuned file to load or use>",
+         "best_speedup": <e2e speedup>,
+         "summary": "<summary>",
+         "tuned_file_usage": "<Flags to add before/after the tuned file or the commands to copy tuned file to a specific location, compile cmd (if needed for enable the tuned file) etc.>",
+       }
+    7. Submit your changes and finish your work by issuing the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+       Do not combine it with any other command. <important>After this command, you cannot continue working on this task.</important>
+
+    ## Important Rules
+
+    1. Every response must contain exactly one action
+    2. The action must be enclosed in triple backticks
+    3. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+       However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+    4. DO NOT tend to change the datatype or datashape or related parameters/global env setup in the benchmark script, except for adding/modifying gemm tuning related flags/varaibles/env/. Do not try to simplify the benchmark script.
+    5. For tuning tools/scripts provided, you must read and understand its usage and parameters, since it could be different from the one in skill.
+    6. When doing benchmark, you should turn off the logging and profiling to avoid the speed impact from them.
+    7. If skill is provided, you should follow the skill's workflow and environment setup step by step, do not skip or modify any step.
+    8. DO NOT attempt to create short benchmark or subsitude benchmark for gemm shape dumping, it will not help you to tune the gemm due to shape difference between the actual given benchmark and your created short benchmark.
+    9. For final speed comparison, must compare the speed of the given benchmark/test script, instead of any of the helper benchmark scripts/tests you created.
+
+    <system_information>
+    {{system}} {{release}} {{version}} {{machine}}
+    </system_information>
+
+    ## Formatting your response
+
+    Here is an example of a correct response:
+
+    <example_response>
+    THOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.
+
+    ```bash
+    ls -la
+    ```
+    </example_response>
+
+    ## Useful command examples
+
+    ### Create a new file:
+
+    ```bash
+    cat <<'EOF' > newfile.py
+    import numpy as np
+    hello = "world"
+    print(hello)
+    EOF
+    ```
+
+    ### Edit files with sed:
+
+    {%- if system == "Darwin" -%}
+    <important>
+    You are on MacOS. For all the below examples, you need to use `sed -i ''` instead of `sed -i`.
+    </important>
+    {%- endif -%}
+
+    ```bash
+    # Replace all occurrences
+    sed -i 's/old_string/new_string/g' filename.py
+
+    # Replace only first occurrence
+    sed -i 's/old_string/new_string/' filename.py
+
+    # Replace first occurrence on line 1
+    sed -i '1s/old_string/new_string/' filename.py
+
+    # Replace all occurrences in lines 1-10
+    sed -i '1,10s/old_string/new_string/g' filename.py
+    ```
+
+    ### View file content:
+
+    ```bash
+    # View specific lines with numbers
+    nl -ba filename.py | sed -n '10,20p'
+    ```
+
+    ### Any other command you want to run
+
+    ```bash
+    anything
+    ```
+  action_observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 20000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 20000 -%}
+    <output>
+    {{ output.output[:20000] }}
+    </output>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    {%- endif -%}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+    If you want to end the task, please issue the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+    without any other command.
+    Else, please format your response exactly as follows:
+
+    <response_example>
+    Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    Note: In rare cases, if you need to reference a similar format in your command, you might have
+    to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
+  step_limit: 0
+  cost_limit: 0
+  use_skills: true
+  tool_profile: swe

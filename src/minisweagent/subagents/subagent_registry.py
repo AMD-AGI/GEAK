@@ -21,8 +21,24 @@ from typing import Any
 import yaml
 
 from minisweagent import get_repo_root
+from minisweagent.config import load_config
 
 logger = logging.getLogger(__name__)
+
+
+def _load_geak_defaults() -> dict[str, Any]:
+    """Load model/env/tools defaults from geak.yaml (cached)."""
+    if not hasattr(_load_geak_defaults, "_cache"):
+        try:
+            cfg = load_config("geak")
+        except FileNotFoundError:
+            cfg = {}
+        _load_geak_defaults._cache = {
+            "model": cfg.get("model", {}),
+            "env": cfg.get("env", {}),
+            "tools": cfg.get("tools", {}),
+        }
+    return _load_geak_defaults._cache
 
 
 @dataclass
@@ -101,7 +117,12 @@ class SubAgentRegistry:
 
     @staticmethod
     def _parse_yaml(yaml_path: Path, folder: Path) -> SubAgentDescriptor:
-        """Parse a single SUBAGENT.yaml into a descriptor."""
+        """Parse a single SUBAGENT.yaml into a descriptor.
+
+        Runtime sections (``model``, ``env``, ``tools``) default to
+        ``geak.yaml`` and are only overridden when the per-subagent YAML
+        explicitly provides them.
+        """
         raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
 
         name = raw.get("name")
@@ -120,6 +141,21 @@ class SubAgentRegistry:
                 )
             )
 
+        defaults = _load_geak_defaults()
+
+        def _merge(base: dict, override: dict) -> dict:
+            merged = dict(base)
+            for k, v in override.items():
+                if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                    merged[k] = _merge(merged[k], v)
+                else:
+                    merged[k] = v
+            return merged
+
+        model_config = _merge(defaults["model"], dict(raw.get("model") or {}))
+        env_config = _merge(defaults["env"], dict(raw.get("env") or {}))
+        tools_config = _merge(defaults["tools"], dict(raw.get("tools") or {}))
+
         return SubAgentDescriptor(
             name=name,
             description=str(description).strip(),
@@ -130,9 +166,9 @@ class SubAgentRegistry:
             parameters=params,
             path=folder,
             agent_config=dict(raw.get("agent") or {}),
-            model_config=dict(raw.get("model") or {}),
-            env_config=dict(raw.get("env") or {}),
-            tools_config=dict(raw.get("tools") or {}),
+            model_config=model_config,
+            env_config=env_config,
+            tools_config=tools_config,
         )
 
     # ------------------------------------------------------------------
@@ -178,6 +214,17 @@ class SubAgentRegistry:
                 )
             )
 
+        defaults = _load_geak_defaults()
+
+        def _merge(base: dict, override: dict) -> dict:
+            merged = dict(base)
+            for k, v in override.items():
+                if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                    merged[k] = _merge(merged[k], v)
+                else:
+                    merged[k] = v
+            return merged
+
         desc = SubAgentDescriptor(
             name=name,
             description=str(definition["description"]).strip(),
@@ -188,9 +235,9 @@ class SubAgentRegistry:
             parameters=params,
             path=Path("."),
             agent_config=dict(definition.get("agent") or {}),
-            model_config=dict(definition.get("model") or {}),
-            env_config=dict(definition.get("env") or {}),
-            tools_config=dict(definition.get("tools") or {}),
+            model_config=_merge(defaults["model"], dict(definition.get("model") or {})),
+            env_config=_merge(defaults["env"], dict(definition.get("env") or {})),
+            tools_config=_merge(defaults["tools"], dict(definition.get("tools") or {})),
         )
         self.subagents[name] = desc
         logger.info("Programmatically registered subagent: %s", name)

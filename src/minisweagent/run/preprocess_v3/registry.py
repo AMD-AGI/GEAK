@@ -38,7 +38,24 @@ from typing import Any
 
 import yaml
 
+from minisweagent.config import load_config
+
 logger = logging.getLogger(__name__)
+
+
+def _load_geak_model_defaults() -> tuple[str | None, dict[str, Any]]:
+    """Return ``(model, model_kwargs)`` from geak.yaml (cached)."""
+    if not hasattr(_load_geak_model_defaults, "_cache"):
+        try:
+            cfg = load_config("geak")
+        except FileNotFoundError:
+            cfg = {}
+        model_sec = cfg.get("model", {})
+        _load_geak_model_defaults._cache = (
+            model_sec.get("model_name"),
+            dict(model_sec.get("model_kwargs", {})),
+        )
+    return _load_geak_model_defaults._cache
 
 
 _REQUIRED_FIELDS = ("name", "description", "system_prompt")
@@ -195,17 +212,22 @@ def _validate_and_build(name_hint: str, data: dict[str, Any], source: Path) -> S
     if not isinstance(model_kwargs_raw, dict):
         raise SubagentSpecError(f"{source}: 'model_kwargs' must be a mapping (got {type(model_kwargs_raw).__name__})")
 
+    # Fall back to geak.yaml defaults for model and model_kwargs
+    default_model, default_model_kwargs = _load_geak_model_defaults()
+    resolved_model = (str(data["model"]).strip() if data.get("model") else default_model)
+    resolved_model_kwargs = {**default_model_kwargs, **model_kwargs_raw}
+
     extras = {k: v for k, v in data.items() if k not in _KNOWN_FIELDS}
 
     return SubagentSpec(
         name=name,
         description=str(data["description"]).strip(),
         system_prompt=str(data["system_prompt"]),
-        model=(str(data["model"]).strip() if data.get("model") else None),
+        model=resolved_model,
         tools=[str(t) for t in tools],
         max_steps=max_steps,
         knowledge_base_template=kb_template,
-        model_kwargs=dict(model_kwargs_raw),
+        model_kwargs=resolved_model_kwargs,
         extras=extras,
     )
 

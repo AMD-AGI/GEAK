@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -318,12 +319,22 @@ def post_round_evaluate(
         return None
 
     ctx[f"round_{round_num}_eval"] = round_eval
+    _trust_agent = os.environ.get("GEAK_AGENT_SELECT_PATCH", "").strip() == "1"
     if round_eval.best_patch:
         fb = round_eval.full_benchmark
         # Only count rounds with an independently verified FULL_BENCHMARK result.
         # Falling back to the agent's self-reported benchmark_speedup risks
         # promoting a hallucinated or inflated speedup as the global best.
         current = fb.verified_speedup if fb and fb.verified_speedup is not None else None
+        if current is None and _trust_agent:
+            # GEAK_AGENT_SELECT_PATCH=1: trust the agent-reported speedup
+            # for global best-patch tracking (no FULL_BENCHMARK was run).
+            current = round_eval.benchmark_speedup
+            logger.info(
+                "Round %d: GEAK_AGENT_SELECT_PATCH=1, using agent-reported speedup %.4fx for global best selection.",
+                round_num,
+                current,
+            )
         if current is None:
             agent_speedup = round_eval.benchmark_speedup
             note = (

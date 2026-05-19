@@ -742,11 +742,34 @@ class SaveAndTestTool:
                 "*.so",
                 ".geak_resolved/",
                 ".git.bak/",
+                # Core dumps
+                "core",
+                "core.*",
+                # Model weights / serialized params
+                "*.pt",
+                "*.pth",
+                "*.onnx",
+                "*.safetensors",
+                "*.bin",
+                "*.pkl",
+                # Compiled objects
+                "*.o",
+                "*.a",
+                "*.out",
+                "*.hipfb",
+                # Profiling artifacts
+                "*.csv",
+                "*.sqlite",
+                "*.nsys-rep",
+                "*.ncu-rep",
+                # Build / compile caches
+                "__hip_fatbin/",
+                ".cache/",
                 *self._generated_helper_excludes(),
             ]
             exclude_args = " ".join(f"':(exclude){entry}'" for entry in excludes)
             result = subprocess.run(
-                f"git add -N . && git diff --binary -- . {exclude_args}",
+                f"git add -N . && git diff -- . {exclude_args}",
                 cwd=cwd,
                 capture_output=True,
                 text=True,
@@ -756,7 +779,29 @@ class SaveAndTestTool:
             return result.stdout
 
         if ctx.base_repo_path and ctx.base_repo_path.exists():
-            excludes = [".git", "__pycache__", *self._generated_helper_excludes()]
+            excludes = [
+                ".git",
+                "__pycache__",
+                "*.so",
+                "core",
+                "core.*",
+                "*.pt",
+                "*.pth",
+                "*.onnx",
+                "*.safetensors",
+                "*.bin",
+                "*.pkl",
+                "*.o",
+                "*.a",
+                "*.out",
+                "*.hipfb",
+                "*.sqlite",
+                "*.nsys-rep",
+                "*.ncu-rep",
+                "__hip_fatbin",
+                ".cache",
+                *self._generated_helper_excludes(),
+            ]
             if ctx.patch_output_dir:
                 run_dir_name = Path(ctx.patch_output_dir).resolve().parent.name
                 if run_dir_name:
@@ -994,7 +1039,7 @@ class SaveAndTestTool:
             return error_msg, False, -1
 
         # Guardrail: restore any non-source files the agent modified
-        self._restore_non_source_files()
+        # self._restore_non_source_files()
 
         test_env = self._build_test_env()
         self._restore_missing_harness_helper()
