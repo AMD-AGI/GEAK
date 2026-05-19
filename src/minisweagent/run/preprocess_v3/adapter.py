@@ -163,6 +163,10 @@ def run_preprocess_v3(
         repo_root=repo_root,
         output_dir=output_dir,
         kernel_path_input=kernel_path,
+        harness=harness,
+        eval_command=eval_command,
+        correctness_command=correctness_command,
+        performance_command=performance_command,
     )
 
 
@@ -199,7 +203,7 @@ def _resolve_kernel_and_repo(
     resolved = _legacy_resolve(kernel_url, repo=str(repo) if repo is not None else None)
     if resolved.get("error"):
         raise RuntimeError(f"v3 preprocess: resolve-kernel-url failed: {resolved['error']}")
-    kp = Path(str(resolved["kernel_path"])).resolve()
+    kp = Path(str(resolved["local_file_path"])).resolve()
     rr = str(Path(resolved.get("repo_root") or _infer_repo_root(kp)).resolve())
     return kp, rr
 
@@ -293,6 +297,10 @@ def _preprocess_result_to_legacy_context(
     repo_root: str,
     output_dir: Path,
     kernel_path_input: Path,
+    harness: str | None = None,
+    eval_command: str | None = None,
+    correctness_command: str | list[str] | None = None,
+    performance_command: str | list[str] | None = None,
 ) -> dict[str, Any]:
     """Project a :class:`PreprocessResult` into the legacy ``preprocess_ctx`` dict.
 
@@ -333,7 +341,18 @@ def _preprocess_result_to_legacy_context(
     if result.codebase_context is not None and result.codebase_context.out_path is not None:
         codebase_context_path = str(result.codebase_context.out_path)
 
-    test_command = _extract_test_command(result)
+    test_command = _extract_test_command(result) or _join_legacy_command(
+        eval_command=eval_command,
+        correctness_command=correctness_command,
+        performance_command=performance_command,
+    )
+    harness_path = _recover_harness_path(
+        result=result,
+        harness=harness,
+        test_command=test_command,
+        repo_root=repo_root,
+    )
+    benchmark_baseline = _write_benchmark_baseline(result, output_dir)
 
     profiling = None
     if result.profile is not None:
@@ -365,15 +384,15 @@ def _preprocess_result_to_legacy_context(
         },
         "codebase_context_path": codebase_context_path,
         "discovery": discovery,
-        "harness_path": str(result.harness_path) if result.harness_path else "",
+        "harness_path": harness_path,
         "test_command": test_command,
         "harness_results": None,
         "testcase_selection": None,
         "profiling": profiling,
         "baseline_metrics": baseline_metrics or None,
         "baseline_metrics_path": baseline_metrics_path,
-        "benchmark_baseline": None,
-        "full_benchmark_baseline": None,
+        "benchmark_baseline": benchmark_baseline,
+        "full_benchmark_baseline": benchmark_baseline,
         "correctness": None,
         "commandment": commandment_text,
         "commandment_path": commandment_path_str,
@@ -381,6 +400,8 @@ def _preprocess_result_to_legacy_context(
         "evaluation_contract": None,
         "v3_subagent_runs": list(result.subagent_runs),
         "v3_elapsed_s": result.elapsed_s,
+        "v3_path_taken": result.path_taken,
+        "path_taken": result.path_taken,
     }
     if result.translation is not None:
         legacy_ctx["v3_translation"] = asdict(result.translation)
@@ -410,6 +431,77 @@ def _project_baseline(result: PreprocessResult) -> dict[str, Any]:
     if baseline.median_ms is not None:
         out["duration_us"] = baseline.median_ms * 1000.0
     return out
+
+
+def _join_legacy_command(
+    *,
+    eval_command: str | None,
+    correctness_command: str | list[str] | None,
+    performance_command: str | list[str] | None,
+) -> str | None:
+    """Recover the legacy ``test_command`` surface from v3 call-site kwargs."""
+
+    if eval_command and eval_command.strip():
+        return eval_command.strip()
+
+    parts: list[str] = []
+    for cmd in (correctness_command, performance_command):
+        if cmd is None:
+            continue
+        if isinstance(cmd, list):
+            parts.extend(c.strip() for c in cmd if c and c.strip())
+        elif cmd.strip():
+            parts.append(cmd.strip())
+    return " && ".join(parts) if parts else None
+
+
+def _recover_harness_path(
+    *,
+    result: PreprocessResult,
+    harness: str | None,
+    test_command: str | None,
+    repo_root: str,
+) -> str:
+    """Recover legacy ``harness_path`` for postprocess consumers.
+
+    Path-A commandment rendering can legitimately leave
+    ``PreprocessResult.harness_path`` empty, but promoted harness commands
+    still need a harness path in ``preprocess_ctx`` so postprocess can build
+    ``GEAK_HARNESS`` and profile correctly. This mirrors the legacy
+    preprocessor's ``extract_harness_path(test_command)`` fallback.
+    """
+
+    if result.harness_path:
+        return str(result.harness_path)
+
+    candidate = harness or test_command
+    if not candidate:
+        return ""
+    try:
+        from minisweagent.run.preprocess.harness_utils import extract_harness_path
+
+        harness_path = Path(extract_harness_path(candidate)).expanduser()
+    except Exception:
+        return ""
+
+    if not harness_path.is_absolute():
+        harness_path = Path(repo_root).expanduser().resolve() / harness_path
+    return str(harness_path.resolve())
+
+
+def _write_benchmark_baseline(result: PreprocessResult, output_dir: Path) -> str | None:
+    """Persist the raw v3 benchmark baseline text in legacy artifact files."""
+
+    baseline = result.baseline
+    if baseline is None:
+        return None
+    for raw in baseline.raw_outputs:
+        if raw.get("returncode") == 0 and str(raw.get("stdout") or "").strip():
+            text = str(raw["stdout"])
+            (output_dir / "benchmark_baseline.txt").write_text(text, encoding="utf-8")
+            (output_dir / "full_benchmark_baseline.txt").write_text(text, encoding="utf-8")
+            return text
+    return None
 
 
 def _extract_test_command(result: PreprocessResult) -> str | None:

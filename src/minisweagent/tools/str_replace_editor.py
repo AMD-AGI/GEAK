@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 class str_replace_editor:
     def __init__(self) -> None:
         self.tool_py = Path(__file__).parent / "editor_tool.py"
+        self._env_override: dict[str, str] = {}
 
-    @staticmethod
-    def _sandbox_path(path: str) -> str:
+    def _sandbox_path(self, path: str) -> str:
         """Rewrite paths that point into the original repo to the agent's worktree.
 
         Agents running in worktrees should never write to the original repo
@@ -24,8 +24,9 @@ class str_replace_editor:
         original repo, silently redirect it to the equivalent path inside
         ``GEAK_WORK_DIR`` so the original stays pristine.
         """
-        repo_root = os.environ.get("GEAK_REPO_ROOT", "")
-        work_dir = os.environ.get("GEAK_WORK_DIR", "")
+        env = os.environ | self._env_override if self._env_override else os.environ
+        repo_root = env.get("GEAK_REPO_ROOT", "")
+        work_dir = env.get("GEAK_WORK_DIR", "")
         if not repo_root or not work_dir or repo_root == work_dir:
             return path
         if path.startswith(repo_root + "/") or path == repo_root:
@@ -78,6 +79,7 @@ class str_replace_editor:
         # Child imports minisweagent (via editor_tool → registry); package __init__
         # prints a startup banner to stdout unless silenced.
         subprocess_env = os.environ.copy()
+        subprocess_env.update(self._env_override)
         subprocess_env["MSWEA_SILENT_STARTUP"] = "1"
 
         try:
