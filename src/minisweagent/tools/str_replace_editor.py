@@ -35,6 +35,25 @@ class str_replace_editor:
             return rewritten
         return path
 
+    @staticmethod
+    def _sandbox_path(path: str) -> str:
+        """Rewrite paths that point into the original repo to the agent's worktree.
+
+        Agents running in worktrees should never write to the original repo
+        (``GEAK_REPO_ROOT``). If the LLM passes an absolute path inside the
+        original repo, silently redirect it to the equivalent path inside
+        ``GEAK_WORK_DIR`` so the original stays pristine.
+        """
+        repo_root = os.environ.get("GEAK_REPO_ROOT", "")
+        work_dir = os.environ.get("GEAK_WORK_DIR", "")
+        if not repo_root or not work_dir or repo_root == work_dir:
+            return path
+        if path.startswith(repo_root + "/") or path == repo_root:
+            rewritten = work_dir + path[len(repo_root) :]
+            logger.debug("str_replace_editor: redirected %s -> %s", path, rewritten)
+            return rewritten
+        return path
+
     def __call__(
         self,
         *,
