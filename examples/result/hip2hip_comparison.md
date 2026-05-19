@@ -20,7 +20,7 @@
 
 | #   | Kernel                | GEAK_v3    | GEAK Skill  | Team Skill    | Best       |
 | --- | --------------------- | ---------- | ----------- | ------------- | ---------- |
-| 1   | knn                   | FAIL       | 6.56x       | **25.50x**    | Team       |
+| 1   | knn                   | FAIL       | 6.56x       | **22.68x**    | Team       |
 | 2   | roipoint_pool3d       | 16.82x     | 14.60x      | **24.76x**    | Team       |
 | 3   | roiaware_pool3d       | 10.24x     | 9.91x       | **23.30x**    | Team       |
 | 4   | three_nn              | 1.43x      | 8.82x       | **11.50x**    | Team       |
@@ -39,7 +39,7 @@
 
 | Metric                 | GEAK_v3 | GEAK Skill | Team Skill |
 | ---------------------- | ------- | ---------- | ---------- |
-| **Arith Mean Speedup** | 4.30x   | 5.26x      | **9.19x**  |
+| **Arith Mean Speedup** | 4.30x   | 5.26x      | **8.95x**  |
 | Wins (best of 3)       | 0       | 3          | **9**      |
 | Failures               | 2       | 0          | 0          |
 
@@ -52,8 +52,8 @@
 
 1. **GEAK_v3 → GEAK Skill (+22%)**: Running GEAK as a Claude Code skill improved reliability (0 failures vs 2) and overall speedup (4.30x → 5.26x). Key gains came from three_nn (1.43x → 8.82x) and knn (FAIL → 6.56x), where the skill's better error recovery and knowledge base enabled deeper algorithmic rewrites.
 
-2. **GEAK Skill → Team Skill (+75%)**: The Team skill's multi-round iteration with structured knowledge base and wrapper overhead detection pushed overall speedup from 5.26x to 9.19x. Key improvements:
-   - **knn**: 6.56x → 25.50x — Warp-cooperative search with shared-memory merge, template parameterization, wrapper optimization
+2. **GEAK Skill → Team Skill (+70%)**: The Team skill's multi-round iteration with structured knowledge base and wrapper overhead detection pushed overall speedup from 5.26x to 8.95x. Key improvements:
+   - **knn**: 6.56x → 22.68x — Warp-cooperative search with shared-memory merge, template parameterization, wrapper optimization
    - **roipoint_pool3d**: 14.60x → 24.76x — Multi-round compounding with re-profiling after each round
    - **roiaware_pool3d**: 9.91x → 23.30x — Kernel re-parallelization + wrapper overhead detection
    - **three_nn**: 8.82x → 11.50x — Warp-cooperative search pattern + sqrt fusion

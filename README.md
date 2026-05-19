@@ -48,7 +48,7 @@ skills/team/SKILL.md \
 | ------ | ---------- | ---- |
 | GEAK_v3 | 4.30x | 0 |
 | GEAK Skill | 5.26x | 3 |
-| Team Skill | **9.19x** | **9** |
+| Team Skill | **8.95x** | **9** |
 
 
 Per-kernel breakdown: [examples/result/hip2hip_comparison.md](examples/result/hip2hip_comparison.md)
