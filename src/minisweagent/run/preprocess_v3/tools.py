@@ -1051,7 +1051,9 @@ def _make_tool_commandment_from_user_command(
         cmd = run_command.strip()
         # Rewrite hardcoded repo-root paths to ${GEAK_WORK_DIR} so the
         # COMMANDMENT references the agent's worktree at runtime.
-        repo_root = os.environ.get("GEAK_REPO_ROOT", "")
+        # Use the orchestrator's config.repo (available at preprocess time)
+        # rather than GEAK_REPO_ROOT (only set later for agent subprocesses).
+        repo_root = str(agent.config.repo) if agent.config.repo else os.environ.get("GEAK_REPO_ROOT", "")
         if repo_root and repo_root in cmd:
             cmd = cmd.replace(repo_root, "${GEAK_WORK_DIR}")
         modes_covered_tup = _normalise_modes(modes_covered)
