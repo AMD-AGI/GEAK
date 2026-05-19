@@ -93,6 +93,31 @@ class BashCommand:
             "rm -rf /",
         ]
 
+    @staticmethod
+    def _sandbox_command(command: str) -> str:
+        """Rewrite absolute paths in the command that target the original repo.
+
+        Agents in worktrees must never write to the original repo
+        (``GEAK_REPO_ROOT``).  Replace occurrences of the repo root with
+        the agent's worktree (``GEAK_WORK_DIR``) so that ``cat >``,
+        ``cp``, ``cd``, and similar commands land in the worktree.
+
+        Safe because every legitimate repo-root reference in agent bash
+        commands (``cd``, ``python -c``, ``cp``) works identically with
+        the worktree path. The PYTHONPATH and COMMANDMENT ``run.sh``
+        scripts read ``$GEAK_REPO_ROOT`` at shell-expansion time, not
+        from the command string, so they are unaffected.
+        """
+        repo_root = os.environ.get("GEAK_REPO_ROOT", "")
+        work_dir = os.environ.get("GEAK_WORK_DIR", "")
+        if not repo_root or not work_dir or repo_root == work_dir:
+            return command
+        if repo_root in command:
+            rewritten = command.replace(repo_root, work_dir)
+            logger.debug("bash_command: rewrote repo_root paths in command")
+            return rewritten
+        return command
+
     def __call__(
         self,
         *,
@@ -110,6 +135,7 @@ class BashCommand:
                 "returncode": 1,
             }
         else:
+            command = self._sandbox_command(command)
             env = os.environ | self._env_override if self._env_override else None
             cwd = self._cwd if self._cwd and Path(self._cwd).is_dir() else None
             result = subprocess.run(
