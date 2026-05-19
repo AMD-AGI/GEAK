@@ -42,13 +42,13 @@ skills/team/SKILL.md \
 
 ## Results
 
-12 HIP kernels on AMD MI300X (arithmetic mean speedup):
+12 HIP kernels on AMD MI300X:
 
-
-| Method | Mean Speedup | Best Kernel       |
-| ------ | ------------ | ----------------- |
-| GEAK   | 5.26x        | ball_query 12.64x |
-| Team   | **9.19x**    | knn 25.50x        |
+| Method | Arith Mean | Wins |
+| ------ | ---------- | ---- |
+| GEAK_v3 | 4.30x | 0 |
+| GEAK Skill | 5.26x | 3 |
+| Team Skill | **9.19x** | **9** |
 
 
 Per-kernel breakdown: [examples/result/hip2hip_comparison.md](examples/result/hip2hip_comparison.md)
