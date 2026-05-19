@@ -59,16 +59,10 @@ Derive:
 # Create evaluation directory
 mkdir -p $EVAL_DIR/baseline
 
-# Save the original invocation prompt for reproducibility
-cat > $EVAL_DIR/prompt.txt << 'PROMPT_EOF'
-Skill: team
-kernel_path: $KERNEL_PATH
-budget: $BUDGET
-gpu_ids: $GPU_IDS
-task: $TASK
-num_engineers: $NUM_ENGINEERS
-timestamp: $TIMESTAMP
-PROMPT_EOF
+# Save the skill invocation command for reproducibility
+# Write the one-line /team command with all resolved argument values to this file.
+Write to $EVAL_DIR/invocation_prompt.md a single line:
+$SKILL_DIR/SKILL.md kernel_path=$KERNEL_PATH budget=$BUDGET gpu_ids=$GPU_IDS task="$TASK" eval_dir=$EVAL_DIR
 
 # Copy original kernel source for baseline reference
 cp -r $KERNEL_PATH/* $EVAL_DIR/baseline/
