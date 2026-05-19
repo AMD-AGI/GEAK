@@ -1053,12 +1053,18 @@ def _make_tool_commandment_from_user_command(
 
         for mode in PATH_A_MODES:
             if mode in modes_covered_tup:
-                sections[mode] = cmd
+                if "correctness" in sections and mode != "correctness" and sections["correctness"] == cmd:
+                    sections[mode] = f"# PATH_A: {mode} covered by correctness (same command)"
+                else:
+                    sections[mode] = cmd
                 modes_emitted.append(mode)
             elif mode in inferred_modes_tup:
                 src = source_mode or "<unspecified>"
                 marker_line = f"# PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}"
-                sections[mode] = f"{marker_line}\n{cmd}"
+                if "correctness" in sections and sections["correctness"] == cmd:
+                    sections[mode] = f"{marker_line}\n# covered by correctness (same command)"
+                else:
+                    sections[mode] = f"{marker_line}\n{cmd}"
                 warnings.append(f"PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}")
                 modes_emitted.append(mode)
             else:
