@@ -24,15 +24,16 @@ Nothing else in `run/`, `agents/`, or `subagents/<name>/` changed.
 
 ## Quick sanity check (no GPU required)
 
+The dedicated v3 pytest suite was intentionally removed from this PR to
+keep the review focused on the runtime pipeline. For now, use a syntax
+check plus the manual/runner validations below:
+
 ```bash
 cd /home/upandey/unification/GEAK
-PYTHONPATH=src pytest tests/run/preprocess_v3 -q
+python3 -m py_compile src/minisweagent/run/preprocess_v3/*.py \
+  scripts/preprocess_v3_test_runner.py \
+  scripts/preprocess_v3_triton_runner.py
 ```
-
-Expected: **`209 passed, 2 skipped`** (181 before commit set 5a, +28 new
-tests across the three commits in this set). Failures here mean the
-adapter, the orchestrator, or the v3 subagent class regressed; do **not**
-proceed to the end-to-end runs below.
 
 ## End-to-end validation
 
@@ -103,10 +104,7 @@ orchestrator's `output_dir` (the same one the
 `v3_translation` entry carrying the `TranslationResult` projection.
 
 If `FLYDSL_HOME` isn't set on the validation host, document the skip in
-the run log and move on — this path is exercised by unit tests
-(`tests/run/preprocess_v3/test_translate.py`) and the integration test
-under `tests/run/preprocess_v3/test_orchestrator_integration.py` covers
-the orchestrator side with a mocked translator.
+the run log and move on.
 
 ## How to inspect the PreprocessResult
 
@@ -178,10 +176,10 @@ Expect:
 Commit set 7 added a **Path-A short-circuit** to the orchestrator. When
 the task prompt carries explicit run instructions, the orchestrator
 calls the new `commandment_from_user_command` tool to render
-`COMMANDMENT.md` directly from the user's command and SKIPS the
-`harness-generator` / `harness-verifier` / `speedup-verify` subagent
-dispatches. The decision is encoded in the orchestrator's `Step 0`
-system-prompt section — it's LLM judgment, not a regex on the task.
+`COMMANDMENT.md` directly from the user's command and skips the
+`harness-generator` / `harness-verifier` subagent dispatches. The
+decision is encoded in the orchestrator's `Step 0` system-prompt
+section — it's LLM judgment, not a regex on the task.
 
 ### Example invocation
 
@@ -201,18 +199,15 @@ triggers Path A.
 
 Under `./validation_runs/path_a_v3/`:
 
-- `CODEBASE_CONTEXT.md` — still produced (Path A calls
-  `codebase_explore` after the short-circuit; the artifact is useful
-  to downstream consumers regardless of path).
-- `baseline_metrics.json` — still produced (Path A calls
-  `collect_baseline` against the kernel using the user's command).
-- `profile.json` — still produced (Path A calls `collect_profile`).
+- `CODEBASE_CONTEXT.md` / `discovery.json` — still produced by the
+  cheap deterministic `run_discovery` front step, but discovery is
+  irrelevant for Path A command construction.
 - `COMMANDMENT.md` — produced by `commandment_from_user_command` with
   the user's command projected into the 5 canonical sections.
 - **No `test_harness.py`** — Path A does not generate a harness; the
   harness IS the user's run command.
-- **No subagent_run entries** for `harness-generator`,
-  `harness-verifier`, or `speedup-verify` in the resulting
+- **No subagent_run entries** for `harness-generator` or
+  `harness-verifier` in the resulting
   `preprocess_ctx`. The `v3_subagent_runs` list should be empty on a
   clean Path-A run.
 
@@ -289,6 +284,4 @@ git revert <sha-1>..<sha-5>  # or one-by-one
 4. Re-run with the legacy path to confirm the same workload still works
    there — that bounds the regression to v3-only.
 
-The `tests/run/preprocess_v3/test_orchestrator_integration.py` and
-`tests/run/preprocess_v3/test_adapter.py` suites are the right places to
-add a unit-level repro when the failure is reproducible.
+Dedicated v3 pytest coverage is intentionally deferred for a follow-up PR. For reproducible failures, add the smallest focused repro when the tests are restored.

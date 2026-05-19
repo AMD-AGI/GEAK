@@ -285,7 +285,7 @@ class PreprocessOrchestratorConfig:
         "- gpu_id: {{gpu_id}}\n\n"
         "## Task\n"
         "{{task}}\n\n"
-        "Execute the 6 steps in order. Begin with codebase_explore."
+        "Classify the task into Case A, B, or C, then begin with run_discovery."
     )
 
 

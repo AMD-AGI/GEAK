@@ -19,10 +19,7 @@ Two-track rendering, matching the legacy ``ExplorePhase`` semantics:
 
 Both paths produce a string. Output writing is the caller's choice
 (via ``out_path``); we deliberately do NOT validate the rendered
-output here — the dedicated contract validators in
-:mod:`minisweagent.kernel_languages.contract` and
-:mod:`minisweagent.run.preprocess_v3.contracts` (lands later in this
-commit set) own that concern.
+output here — validation belongs to the downstream commandment consumer.
 
 Strict: no LLM calls, no network access. Pure templating.
 """

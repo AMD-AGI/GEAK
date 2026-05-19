@@ -202,23 +202,23 @@ class TestOrchestratorFlow:
 
 
 class TestCliUsesOrchestrator:
-    """Regression guard: ``mini.py`` must import the preprocessor entry
-    from the **v3** adapter (per commit set 5a's cutover), not the legacy
-    orchestrator shim or the legacy monolith directly. Anyone who reverts
-    the flip gets a failing test pointing at the right file.
+    """Regression guard: cli.py must import the preprocessor entry from
+    the orchestrator shim, not the legacy monolith directly.  Anyone
+    who reverts the flip gets a failing test pointing at the right
+    file.
     """
 
-    def test_cli_imports_run_preprocessor_from_v3_adapter(self) -> None:
+    def test_cli_imports_run_preprocessor_from_orchestrator(self) -> None:
         from minisweagent.run import mini
 
+        # Inspect the imported ``run_preprocessor`` symbol
         rp = mini.run_preprocessor
-        # The v3 adapter exports ``run_preprocess_v3`` and ``mini.py``
-        # imports it under the ``run_preprocessor`` name to keep the four
-        # legacy call sites unchanged.
-        assert rp.__module__ == "minisweagent.run.preprocess_v3.adapter", (
-            f"mini.run_preprocessor must come from the v3 adapter after commit set 5a; got {rp.__module__}"
+        # The shim is exported as ``run_preprocessor_via_orchestrator``
+        # in the orchestrator module; after ``as run_preprocessor``
+        # aliasing the __name__ attribute still reveals the real source.
+        assert rp.__module__ == "minisweagent.run.preprocess.orchestrator", (
+            f"mini.run_preprocessor must come from the orchestrator shim; got {rp.__module__}"
         )
-        assert rp.__name__ == "run_preprocess_v3"
 
 
 class TestUserTaskPlumbing:

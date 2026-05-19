@@ -4,29 +4,27 @@ This directory holds the **v3 preprocess subagent definitions** consumed by
 `minisweagent.run.preprocess_v3.registry.SubagentRegistry` and dispatched
 by `minisweagent.run.preprocess_v3.tools.PreprocessSubagentDispatcher`.
 
-## Locked design — 3 always-on subagents
+## Locked design — 2 preprocess subagents
 
-The v3 orchestrator (`PreprocessOrchestratorAgent`) calls these three
-subagents via `dispatch_subagent`; everything else in the 6-step flow is a
-deterministic tool call.
+The v3 orchestrator (`PreprocessOrchestratorAgent`) calls these two subagents
+via `dispatch_subagent`; everything else is a deterministic tool call.
 
 > **Note on the Path-A short-circuit (commit set 7).** When the user's
 > task prompt already carries explicit run instructions (e.g. `run via
 > python my_kernel.py --benchmark`), the orchestrator's `Step 0` system
 > prompt section instructs the LLM to call the
 > `commandment_from_user_command` tool instead of dispatching
-> `harness-generator`. That short-circuit skips all three of the
+> `harness-generator`. That short-circuit skips both of the
 > subagents listed below. The subagents themselves are unchanged — Path
 > A is purely an orchestrator-side bypass. See the orchestrator's `Step
-> 0 — Path A vs Path B decision` section
+> 0 — classify the user's task` section
 > (`src/minisweagent/run/preprocess_v3/orchestrator.py`) for the
 > selection logic.
 
 | Subagent           | Pipeline step                      | `max_steps`  | `tools`                                  |
 |--------------------|------------------------------------|--------------|------------------------------------------|
 | `harness-generator`| Step 3a — build the test harness    | `-1` (unlimited) | `bash`, `str_replace_editor`, `save_and_test` |
-| `harness-verifier` | Step 3b — verify the harness        | `30`         | `bash`, `str_replace_editor`             |
-| `speedup-verify`   | Step 5 — write `compute_speedup.py` | `30`         | `bash`, `str_replace_editor`             |
+| `harness-verifier` | Step 3b — verify/fix the harness    | `80`         | `bash`, `str_replace_editor`             |
 
 `max_steps: -1` is the `UNLIMITED_MAX_STEPS` sentinel from
 `preprocess_v3.registry`; only `harness-generator` uses it because legitimate
@@ -75,7 +73,7 @@ remains forward-compatible.
 ## Relationship to the top-level `subagents/` directory
 
 The repository's existing top-level `subagents/<name>/SUBAGENT.yaml`
-definitions (`harness-generator`, `speedup-verify`, `pytorch-to-flydsl`, …)
+definitions (`harness-generator`, `pytorch-to-flydsl`, …)
 follow the mini-swe-agent schema (`agent.system_template_file`, `env`,
 `model`, …). Those entries remain the canonical definitions for the legacy
 flat heterogeneous-orchestrator dispatch path and are **not** modified by

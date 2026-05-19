@@ -4,8 +4,9 @@ Each tool here is the LLM-callable bridge between an
 ``OpenAI/LiteLLM``-style tool call and one of the v3 preprocess modules.
 Tools come in two flavours:
 
-* **Deterministic tools** (``codebase_explore``, ``translate_to_flydsl``,
-  ``collect_baseline``, ``collect_profile``, ``render_commandment``) —
+* **Deterministic tools** (``run_discovery``, ``codebase_explore``,
+  ``translate_to_flydsl``, ``collect_baseline``, ``collect_profile``,
+  ``render_commandment``) —
   call directly into the v3 module with no LLM step of their own.
 
 * **LLM-dispatch tool** (``dispatch_subagent``) — looks up the named
@@ -1257,7 +1258,7 @@ def register_default_tools(
             :class:`PreprocessResult` carries every artifact.
         kernel_language:
             Language resolved by step 0b. Threaded into
-            ``codebase_explore`` and ``render_commandment``.
+            discovery/context and ``render_commandment``.
         registry:
             v3 :class:`SubagentRegistry`. Defaults to a fresh
             registry that points at the in-repo

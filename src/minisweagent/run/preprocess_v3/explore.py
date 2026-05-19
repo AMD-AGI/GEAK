@@ -95,9 +95,7 @@ def explore_codebase(
 
     Args:
         repo_root:
-            Root directory of the cloned repository (typically the
-            ``baseline/`` tree produced by
-            :func:`minisweagent.run.preprocess_v3.clone.split_repo_for_baseline_and_eval`).
+            Root directory of the repository.
         kernel_path:
             Path to the target kernel file. Must live inside
             ``repo_root``; the legacy generator falls back to absolute
