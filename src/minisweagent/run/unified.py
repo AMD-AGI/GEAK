@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -87,6 +88,11 @@ class PipelineContext:
     deadline: Any = None
     soft_stop: Any = None
     registry: Any = None
+    # When True, ``_run_unified_loop`` writes a stub ``final_report.json``
+    # right before the round loop and returns. Used by the v3 preprocess
+    # test sweep to validate preprocessing without paying the 30-90 minute
+    # optimization round loop cost per kernel-scenario.
+    preprocess_only: bool = False
 
 
 # ── Tool resolution ───────────────────────────────────────────────────
@@ -270,6 +276,67 @@ def _save_incremental_report(
         logger.debug("incremental report save failed (non-fatal)", exc_info=True)
 
 
+# ── --preprocess-only stub report ────────────────────────────────────
+
+
+# Canonical preprocess artifact filenames the v3 pipeline writes into
+# the run output dir. Listed here so the stub report enumerates every
+# file the round loop would have consumed — making the smoke test
+# assertion ``len(artifacts) > 0`` meaningful.
+_PREPROCESS_ARTIFACT_FILENAMES: tuple[str, ...] = (
+    "COMMANDMENT.md",
+    "CODEBASE_CONTEXT.md",
+    "baseline_metrics.json",
+    "profile.json",
+    "benchmark_baseline.txt",
+    "preprocess_context.json",
+    "resolved.json",
+)
+
+
+def _build_preprocess_only_report(
+    ctx: PipelineContext,
+    pp_dir: Path,
+    loop_start_t: float,
+) -> dict[str, Any]:
+    """Build the stub final_report.json payload for ``--preprocess-only``.
+
+    Mirrors the canonical ``final_report.json`` shape (status, summary,
+    best_speedup, best_patch) so existing parsers do not break, plus
+    three preprocess-specific fields:
+
+    * ``preprocess_artifacts`` — list of absolute paths to every known
+      preprocess artifact present on disk (skips missing ones rather
+      than failing).
+    * ``path_taken`` — ``"A"`` / ``"B"`` / ``None`` from
+      ``ctx.preprocess_ctx``. The v3 orchestrator records this; the
+      legacy preprocessor does not, so ``None`` is expected for legacy
+      runs.
+    * ``round_results`` — always empty for preprocess-only.
+    * ``elapsed_s`` — time spent in ``_run_unified_loop`` so far.
+    """
+    artifacts = [
+        str((pp_dir / name).resolve())
+        for name in _PREPROCESS_ARTIFACT_FILENAMES
+        if (pp_dir / name).exists()
+    ]
+    return {
+        "status": "preprocess_only",
+        "summary": (
+            "Preprocessing artifacts written; round loop skipped "
+            "(--preprocess-only)."
+        ),
+        "preprocess_artifacts": artifacts,
+        "path_taken": ctx.preprocess_ctx.get("path_taken"),
+        "round_results": [],
+        "elapsed_s": round(time.monotonic() - loop_start_t, 3),
+        "best_speedup": None,
+        "best_patch": None,
+        "best_round": None,
+        "best_task": None,
+    }
+
+
 # ── Unified round loop ───────────────────────────────────────────────
 
 
@@ -292,6 +359,8 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
     )
     from minisweagent.run.postprocess.results import finalize_run, post_round_evaluate
     from minisweagent.subagents import SubAgentRegistry
+
+    _loop_start_t = time.monotonic()
 
     output_dir = Path(ctx.output_dir)
     pp_dir = output_dir
@@ -337,6 +406,25 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
     )
 
     round_evals: list[dict[str, Any]] = []
+
+    # ── --preprocess-only short-circuit ──────────────────────────
+    # When the CLI requested preprocess-only validation, write a stub
+    # final_report.json that mirrors the canonical shape (so downstream
+    # tooling can still parse it) but skips the round loop entirely.
+    # The test sweep relies on this to avoid paying the 30-90 minute
+    # optimization cost per kernel-scenario.
+    if ctx.preprocess_only:
+        report = _build_preprocess_only_report(ctx, pp_dir, _loop_start_t)
+        report_path = output_dir / "final_report.json"
+        report_path.write_text(json.dumps(report, indent=2, default=str))
+        logger.info(
+            "--preprocess-only set: skipping round loop; wrote stub final_report.json "
+            "(%d artifacts, path_taken=%s, elapsed=%.1fs)",
+            len(report["preprocess_artifacts"]),
+            report["path_taken"],
+            report["elapsed_s"],
+        )
+        return report
 
     # ── Round loop ───────────────────────────────────────────────
     for round_num in range(1, max_rounds + 1):
@@ -426,4 +514,4 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
     return report
 
 
-__all__ = ["PipelineContext", "run_pipeline"]
+__all__ = ["PipelineContext", "_build_preprocess_only_report", "run_pipeline"]
