@@ -246,7 +246,7 @@ class GPUManager:
                 pct = int(100 * busy / uptime) if uptime > 0 else 0
                 parts.append(f"{g}:{pct}%")
             util_str = ",".join(parts)
-            logger.info(
+            logger.debug(
                 "gpu_manager.stats: util={%s} queue=%d in_flight=%d jobs=%d/%d uptime=%.0fs",
                 util_str,
                 s["queue_depth"],
