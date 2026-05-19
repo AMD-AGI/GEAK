@@ -23,7 +23,7 @@ Record: `kernel_type`, `kernel_file` (the primary source file containing the ker
 
 Read the kernel source thoroughly. Document:
 1. **Entry point**: The `__global__` function (HIP) or `@triton.jit` function (Triton)
-2. **Algorithm**: What does the kernel compute? (e.g., KNN search, matrix multiply, softmax)
+2. **Algorithm**: What does the kernel compute? (e.g., search, matrix multiply, reduction, softmax)
 3. **Complexity**: What is the algorithmic complexity? (e.g., O(N*M) per query point)
 4. **Data structures**: What local data structures are used? (arrays, heaps, accumulators)
 5. **Memory access pattern**: How is global memory accessed? (sequential, strided, random)

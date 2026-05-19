@@ -247,8 +247,8 @@ When detected:
    - Replace `torch.zeros()` / `new_zeros()` with `torch.empty()` for output buffers
    - Replace `torch.autograd.Function.apply()` with `@torch.no_grad()` direct function
    - Modify kernel output format to avoid post-kernel `.transpose().contiguous()`
-   - Remove unnecessary intermediate allocations (e.g., dist2 buffers)
-   - Add specialized dispatch paths for template-supported K values
+   - Remove unnecessary intermediate allocations (e.g., scratch buffers unused by callers)
+   - Add specialized dispatch paths for template-supported parameter values
 3. This engineer's "modifiable files" MUST include the Python wrapper AND C++ binding files, not just the kernel `.hip`/`.cu` file
 
 **Critical**: Wrapper optimization typically provides 2-5x additional speedup when the kernel is already fast. Do NOT stop optimizing just because the kernel GPU time is minimal — the wrapper overhead is the new bottleneck.
