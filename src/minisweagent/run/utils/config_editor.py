@@ -58,9 +58,14 @@ def parse_edit_command(command: str) -> tuple[str | None, Any]:
         return None, None
 
     # Parse value based on field type
-    if field_name == "num_parallel":
+    if field_name in ("num_parallel", "max_concurrent_llm"):
         try:
             value = int(value)
+        except ValueError:
+            return None, None
+    elif field_name == "gpu_oversubscribe":
+        try:
+            value = float(value)
         except ValueError:
             return None, None
     elif value.lower() in ("none", "null", ""):
@@ -79,7 +84,9 @@ def display_edit_help() -> str:
   --metric=DESCRIPTION     - Set metric description
   --num_parallel=NUMBER    - Set number of parallel agents
   --gpu_ids=IDS            - Set GPU IDs (e.g., "0,1,2,3")
-  
+  --gpu_oversubscribe=FLOAT - Agent-to-GPU multiplier (e.g., 2.0)
+  --max_concurrent_llm=NUM - Cap concurrent LLM requests
+
 [bold green]Other Commands:[/bold green]
   y or Enter               - Proceed with current configuration
   q                        - Abort
@@ -119,6 +126,8 @@ def display_config_with_sources(merged_config: dict, console):
         ("metric", merged_config.get("metric") or "Auto-extract from test output"),
         ("num_parallel", str(merged_config.get("num_parallel") or "1 (default)")),
         ("gpu_ids", merged_config.get("gpu_ids") or "0 (default)"),
+        ("gpu_oversubscribe", str(merged_config.get("gpu_oversubscribe") or "1.0 (default)")),
+        ("max_concurrent_llm", str(merged_config.get("max_concurrent_llm") or "num_parallel (default)")),
         ("patch_output_dir", merged_config.get("_patch_output_dir", "optimization_logs")),
     ]
 
@@ -368,6 +377,8 @@ def load_and_merge_configs(
         "num_parallel": {},
         "gpu_ids": {},
         "patch_output": {},
+        "gpu_oversubscribe": {},
+        "max_concurrent_llm": {},
     }
 
     # Step 1: Collect values from all sources
@@ -406,6 +417,13 @@ def load_and_merge_configs(
             config_sources["gpu_ids"]["yaml"] = str(gpu_ids_value)
     if parallel_config.get("patch_output_dir"):
         config_sources["patch_output"]["yaml"] = Path(parallel_config["patch_output_dir"])
+
+    # gpu_oversubscribe and max_concurrent_llm live under config["parallel"]
+    _parallel_section = config.get("parallel") or {}
+    if _parallel_section.get("gpu_oversubscribe") is not None:
+        config_sources["gpu_oversubscribe"]["yaml"] = float(_parallel_section["gpu_oversubscribe"])
+    if _parallel_section.get("max_concurrent_llm") is not None:
+        config_sources["max_concurrent_llm"]["yaml"] = int(_parallel_section["max_concurrent_llm"])
 
     # Step 2: Auto-detect from task content (highest priority if present)
     parsed_config = None
@@ -446,6 +464,10 @@ def load_and_merge_configs(
                 config_sources["gpu_ids"]["prompt"] = parsed_config["gpu_ids"]
             if parsed_config.get("kernel_name"):
                 kernel_name = parsed_config["kernel_name"]
+            if parsed_config.get("gpu_oversubscribe") is not None:
+                config_sources["gpu_oversubscribe"]["prompt"] = parsed_config["gpu_oversubscribe"]
+            if parsed_config.get("max_concurrent_llm") is not None:
+                config_sources["max_concurrent_llm"]["prompt"] = parsed_config["max_concurrent_llm"]
 
     # Step 3: Merge configurations with priority: prompt > cli > yaml
     # Apply highest priority source for each field
@@ -480,6 +502,8 @@ def load_and_merge_configs(
     num_parallel_value, num_parallel_source = get_highest_priority(config_sources["num_parallel"])
     gpu_ids_value, gpu_ids_source = get_highest_priority(config_sources["gpu_ids"])
     patch_output_value, patch_output_source = get_highest_priority(config_sources["patch_output"])
+    gpu_oversubscribe_value, gpu_oversubscribe_source = get_highest_priority(config_sources["gpu_oversubscribe"])
+    max_concurrent_llm_value, max_concurrent_llm_source = get_highest_priority(config_sources["max_concurrent_llm"])
 
     # Generate patch output directory if not provided
     if not patch_output_value:
@@ -494,6 +518,8 @@ def load_and_merge_configs(
         "metric": metric_value,
         "num_parallel": num_parallel_value,
         "gpu_ids": gpu_ids_value,
+        "gpu_oversubscribe": gpu_oversubscribe_value,
+        "max_concurrent_llm": max_concurrent_llm_value,
         "_patch_output_dir": str(patch_output_value),
         "_sources": {
             "repo": repo_source,
@@ -502,6 +528,8 @@ def load_and_merge_configs(
             "num_parallel": num_parallel_source,
             "gpu_ids": gpu_ids_source,
             "patch_output": patch_output_source,
+            "gpu_oversubscribe": gpu_oversubscribe_source,
+            "max_concurrent_llm": max_concurrent_llm_source,
         },
         "_conflicts": conflicts,
     }

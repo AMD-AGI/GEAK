@@ -32,6 +32,8 @@ Extract the following information (return null if not found):
 9. output_dir: Directory path where output logs and artifacts should be saved (e.g., "outputs/topk_run", "/workspace/results")
 10. model: Model name or identifier to use (e.g., "claude-sonnet-4-20250514", "gpt-4o")
 11. config: Path to a YAML configuration file (e.g., "configs/my_setup.yaml", "/path/to/config.yaml")
+12. gpu_oversubscribe: GPU oversubscription multiplier (float, e.g. 2.0 means run 2x as many agents as GPUs). Only set if the user explicitly mentions oversubscription, agent-to-GPU ratio, or similar.
+13. max_concurrent_llm: Maximum concurrent LLM requests (integer). Only set if the user explicitly mentions limiting or capping LLM concurrency.
 
 Return ONLY a valid JSON object with these keys. Example:
 {{
@@ -45,7 +47,9 @@ Return ONLY a valid JSON object with these keys. Example:
   "gpu_ids": "0,1,2,3",
   "output_dir": "outputs/matmul_run",
   "model": null,
-  "config": null
+  "config": null,
+  "gpu_oversubscribe": null,
+  "max_concurrent_llm": null
 }}
 
 If any field cannot be determined from the task, set it to null.

@@ -523,7 +523,8 @@ def main(
         from math import ceil
 
         _oversubscribe = float(
-            (config.get("parallel") or {}).get("gpu_oversubscribe", 1.0)
+            parsed_config.get("gpu_oversubscribe")
+            or (config.get("parallel") or {}).get("gpu_oversubscribe", 1.0)
         )
         num_parallel = max(1, ceil(len(parsed_gpu_ids) * _oversubscribe))
         logger.info(
@@ -629,7 +630,7 @@ def main(
     )
 
     _parallel_cfg = config.get("parallel") or {}
-    _max_llm = _parallel_cfg.get("max_concurrent_llm")
+    _max_llm = parsed_config.get("max_concurrent_llm") or _parallel_cfg.get("max_concurrent_llm")
     _llm_cap = int(_max_llm) if _max_llm is not None else (num_parallel or len(parsed_gpu_ids))
     llm_semaphore: threading.Semaphore | None = threading.Semaphore(_llm_cap) if _llm_cap > 0 else None
     if llm_semaphore is not None:

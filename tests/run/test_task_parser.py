@@ -597,3 +597,98 @@ class TestDisplayParsedConfig:
         assert "/tmp/out" in text
         assert "triton" in text
         assert "Resolved Configuration" in text
+
+
+class TestGpuOversubscribeAndMaxConcurrentLlm:
+    """Tests for gpu_oversubscribe and max_concurrent_llm extraction."""
+
+    class _Model:
+        def __init__(self, content: str) -> None:
+            self._content = content
+
+        def query(self, messages: list) -> dict:
+            return {"content": self._content}
+
+    def test_extracts_gpu_oversubscribe(self) -> None:
+        payload = {
+            "kernel_name": "k",
+            "kernel_url": None,
+            "kernel_type": "hip",
+            "repo": None,
+            "test_command": None,
+            "metric": None,
+            "num_parallel": None,
+            "gpu_ids": None,
+            "output_dir": None,
+            "model": None,
+            "config": None,
+            "gpu_oversubscribe": 2.0,
+            "max_concurrent_llm": None,
+        }
+        out = tp.parse_task_info("task", self._Model(json.dumps(payload)))
+        assert out["gpu_oversubscribe"] == 2.0
+        assert out["max_concurrent_llm"] is None
+
+    def test_extracts_max_concurrent_llm(self) -> None:
+        payload = {
+            "kernel_name": "k",
+            "kernel_url": None,
+            "kernel_type": "hip",
+            "repo": None,
+            "test_command": None,
+            "metric": None,
+            "num_parallel": None,
+            "gpu_ids": None,
+            "output_dir": None,
+            "model": None,
+            "config": None,
+            "gpu_oversubscribe": None,
+            "max_concurrent_llm": 8,
+        }
+        out = tp.parse_task_info("task", self._Model(json.dumps(payload)))
+        assert out["max_concurrent_llm"] == 8
+        assert out["gpu_oversubscribe"] is None
+
+    def test_null_values_preserved(self) -> None:
+        payload = {
+            "kernel_name": "k",
+            "kernel_url": None,
+            "kernel_type": "hip",
+            "repo": None,
+            "test_command": None,
+            "metric": None,
+            "num_parallel": None,
+            "gpu_ids": None,
+            "output_dir": None,
+            "model": None,
+            "config": None,
+            "gpu_oversubscribe": None,
+            "max_concurrent_llm": None,
+        }
+        out = tp.parse_task_info("task", self._Model(json.dumps(payload)))
+        assert out["gpu_oversubscribe"] is None
+        assert out["max_concurrent_llm"] is None
+
+    def test_invalid_values_cleared(self) -> None:
+        payload = {
+            "kernel_name": "k",
+            "kernel_url": None,
+            "kernel_type": "hip",
+            "repo": None,
+            "test_command": None,
+            "metric": None,
+            "num_parallel": None,
+            "gpu_ids": None,
+            "output_dir": None,
+            "model": None,
+            "config": None,
+            "gpu_oversubscribe": "not_a_number",
+            "max_concurrent_llm": -5,
+        }
+        out = tp.parse_task_info("task", self._Model(json.dumps(payload)))
+        assert out["gpu_oversubscribe"] is None
+        assert out["max_concurrent_llm"] is None
+
+    def test_empty_template_has_new_fields(self) -> None:
+        assert "gpu_oversubscribe" in tp._EMPTY_TASK_INFO
+        assert "max_concurrent_llm" in tp._EMPTY_TASK_INFO

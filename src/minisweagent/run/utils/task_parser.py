@@ -28,6 +28,8 @@ _EMPTY_TASK_INFO: dict = {
     "output_dir": None,
     "model": None,
     "config": None,
+    "gpu_oversubscribe": None,
+    "max_concurrent_llm": None,
 }
 
 _EMPTY_PIPELINE_PARAMS: dict = {
@@ -341,6 +343,8 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
         "output_dir": parsed.get("output_dir"),
         "model": parsed.get("model"),
         "config": parsed.get("config"),
+        "gpu_oversubscribe": None,
+        "max_concurrent_llm": None,
     }
 
     # Normalize repo path and preserve filesystem case (LLM often returns lowercase)
@@ -383,6 +387,18 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
         result["output_dir"] = _normalize_path(result["output_dir"])
     if result["config"]:
         result["config"] = _normalize_path(result["config"])
+
+    for field, coerce in (("gpu_oversubscribe", float), ("max_concurrent_llm", int)):
+        raw = parsed.get(field)
+        if raw is not None:
+            try:
+                val = coerce(raw)
+                if val > 0:
+                    result[field] = val
+                else:
+                    logger.debug("parse_task_info: %s=%r not positive; clearing.", field, raw)
+            except (ValueError, TypeError):
+                logger.debug("parse_task_info: invalid %s value %r; clearing.", field, raw)
 
     populated = sorted(k for k, v in result.items() if v is not None and v != "")
     logger.debug("parse_task_info: extracted non-empty fields: %s", populated)
