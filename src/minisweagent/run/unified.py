@@ -492,7 +492,6 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
     from minisweagent.run.planner.task_planner import TaskPlanner
     from minisweagent.run.postprocess.evaluation import (
         preflight_commandment_contract,
-        recapture_commandment_baseline,
     )
     from minisweagent.run.postprocess.results import finalize_run, post_round_evaluate
     from minisweagent.subagents import SubAgentRegistry
@@ -519,10 +518,11 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
     if repo_root and commandment_path.exists():
         try:
             preflight_commandment_contract(
-                commandment_path, repo_root, harness_path, gpu_id,
-            )
-            recapture_commandment_baseline(
-                commandment_path, repo_root, harness_path, gpu_id, pp_dir,
+                commandment_path,
+                repo_root,
+                harness_path,
+                gpu_id,
+                output_dir=output_dir,
             )
         except Exception as exc:
             logger.error("Preflight contract failed: %s", exc)

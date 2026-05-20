@@ -308,6 +308,7 @@ def preflight_commandment_contract(
     harness_path: str,
     gpu_id: int,
     *,
+    output_dir: Path | None = None,
     timeout_s: int = 600,
 ) -> None:
     """Smoke-test SETUP + CORRECTNESS once before fanning out sub-agents.
@@ -316,6 +317,9 @@ def preflight_commandment_contract(
     ``--iterations 1`` so a broken contract (e.g. a harness that rejects
     ``--iterations``) is surfaced as a single ``CommandmentExecutionError``
     instead of being burned into every sub-agent's iteration loop.
+
+    For git repos, the smoke test runs in a temporary worktree so that
+    side effects (``run.sh``, JIT caches) never dirty the original repo.
 
     Skipped silently when ``GEAK_SKIP_COMMANDMENT_PREFLIGHT=1`` is set.
 
@@ -343,64 +347,82 @@ def preflight_commandment_contract(
     from minisweagent.run.preprocess.harness_utils import harness_supports_iterations
 
     repo_root_path = Path(repo_root).resolve()
-    env = build_eval_env(repo_root_path, str(repo_root_path), harness_path, gpu_id)
-    env["GEAK_BENCHMARK_ITERATIONS"] = "1"
-    if harness_supports_iterations(harness_path):
-        env["GEAK_BENCHMARK_EXTRA_ARGS"] = "--iterations 1"
+    is_git = (repo_root_path / ".git").exists()
+
+    # For git repos, run in a temporary worktree so side effects (run.sh,
+    # JIT caches, profile artifacts) never dirty the original repo.
+    if is_git and output_dir is not None:
+        from minisweagent.run.task_file import create_worktree
+
+        preflight_dir = (Path(output_dir) / "_preflight_worktree").resolve()
+        create_worktree(repo_root_path, preflight_dir)
     else:
-        # See ``build_eval_env`` for the reasoning. Drop any ``--iterations``
-        # tokens the upstream env-builder may have emitted so we don't pass
-        # them on the harness CLI.
-        env.pop("GEAK_BENCHMARK_EXTRA_ARGS", None)
+        preflight_dir = repo_root_path
 
-    logger.info(
-        "preflight_commandment_contract: smoke-testing COMMANDMENT against %s with iterations=1",
-        repo_root_path,
-    )
-    max_attempts = 3
-    last_result = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            result = subprocess.run(
-                ["bash", script],
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-                cwd=str(repo_root_path),
-                env=env,
-            )
-        except Exception as exc:
-            raise CommandmentExecutionError(
-                "PREFLIGHT", None, f"SETUP+CORRECTNESS subprocess failed to complete: {exc}"
-            ) from exc
+    try:
+        env = build_eval_env(preflight_dir, str(repo_root_path), harness_path, gpu_id)
+        env["GEAK_BENCHMARK_ITERATIONS"] = "1"
+        if harness_supports_iterations(harness_path):
+            env["GEAK_BENCHMARK_EXTRA_ARGS"] = "--iterations 1"
+        else:
+            env.pop("GEAK_BENCHMARK_EXTRA_ARGS", None)
 
-        if result.returncode == 0:
-            logger.info(
-                "preflight_commandment_contract: PASS (attempt %d/%d)",
-                attempt, max_attempts,
-            )
-            return
+        logger.info(
+            "preflight_commandment_contract: smoke-testing COMMANDMENT against %s with iterations=1",
+            preflight_dir,
+        )
+        max_attempts = 3
+        last_result = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = subprocess.run(
+                    ["bash", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_s,
+                    cwd=str(preflight_dir),
+                    env=env,
+                )
+            except Exception as exc:
+                raise CommandmentExecutionError(
+                    "PREFLIGHT", None, f"SETUP+CORRECTNESS subprocess failed to complete: {exc}"
+                ) from exc
 
-        last_result = result
-        if attempt < max_attempts:
-            logger.warning(
-                "preflight_commandment_contract: FAIL on attempt %d/%d (rc=%d), retrying in 5s...",
-                attempt, max_attempts, result.returncode,
-            )
-            time.sleep(5)
+            if result.returncode == 0:
+                logger.info(
+                    "preflight_commandment_contract: PASS (attempt %d/%d)",
+                    attempt,
+                    max_attempts,
+                )
+                return
 
-    stderr_tail = _format_stderr_tail(last_result.stderr)
-    broken = _stderr_indicates_broken_contract(last_result.stderr)
-    detail = (
-        f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
-        if broken is not None
-        else f"non-zero exit after {max_attempts} attempts; stderr tail:\n{stderr_tail}"
-    )
-    logger.error(
-        "preflight_commandment_contract: FAILED after %d attempts (rc=%d):\n%s",
-        max_attempts, last_result.returncode, stderr_tail,
-    )
-    raise CommandmentExecutionError("PREFLIGHT", last_result.returncode, detail)
+            last_result = result
+            if attempt < max_attempts:
+                logger.warning(
+                    "preflight_commandment_contract: FAIL on attempt %d/%d (rc=%d), retrying in 5s...",
+                    attempt,
+                    max_attempts,
+                    result.returncode,
+                )
+                time.sleep(5)
+
+        stderr_tail = _format_stderr_tail(last_result.stderr)
+        broken = _stderr_indicates_broken_contract(last_result.stderr)
+        detail = (
+            f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
+            if broken is not None
+            else f"non-zero exit after {max_attempts} attempts; stderr tail:\n{stderr_tail}"
+        )
+        logger.error(
+            "preflight_commandment_contract: FAILED after %d attempts (rc=%d):\n%s",
+            max_attempts,
+            last_result.returncode,
+            stderr_tail,
+        )
+        raise CommandmentExecutionError("PREFLIGHT", last_result.returncode, detail)
+    finally:
+        if preflight_dir != repo_root_path:
+            cleanup_eval_worktree(repo_root, preflight_dir)
 
 
 def recapture_commandment_baseline(
@@ -540,7 +562,9 @@ def run_correctness_and_benchmark(
         logger.info("%s baseline found: %s", section_key, baseline_path)
 
         # Path-A dedup: reuse CORRECTNESS output when sections are identical
-        _corr_body = _read_commandment_section(str(commandment_path), "CORRECTNESS") if _correctness_stdout is not None else None
+        _corr_body = (
+            _read_commandment_section(str(commandment_path), "CORRECTNESS") if _correctness_stdout is not None else None
+        )
         _bench_body = _read_commandment_section(str(commandment_path), baseline_section_name)
         if _corr_body and _bench_body and _corr_body.strip() == _bench_body.strip():
             logger.info(
