@@ -1,4 +1,4 @@
-"""Post-run hooks: apply best patch + commit, and clean up run artifacts.
+"""Post-run hooks: apply best patch + commit, and clean up worktrees.
 
 Exposes two independent operations and a coordinator:
 
@@ -9,13 +9,8 @@ Exposes two independent operations and a coordinator:
   at the run's ``final_report.json``. Returns the commit SHA or None
   (back-compat). Sibling ``apply_and_commit_best_patch_detailed`` returns
   a structured outcome dict for callers that want to render UX from it.
-- ``cleanup_run_artifacts(result, output_dir)`` -- iterates ``output_dir``
-  and deletes every top-level entry not in the keep-set
-  (``final_report.json``, the agent log, ``COMMANDMENT.md``, and the
-  winning ``.diff`` when present). Preserves the ``output_dir`` inode so
-  the live ``FileHandler`` on the agent log keeps writing through cleanup
-  and any later traceback. Returns a ``cleanup_status`` string:
-  ``"ran"`` / ``"failed"`` / ``"skipped_empty"`` / ``"skipped_disabled"``.
+- ``cleanup_run_artifacts(result, output_dir)`` -- removes lingering git
+  worktrees under ``output_dir``. All other run artifacts are preserved.
 - ``finalize_apply_and_cleanup(result, repo, output_dir, *, apply_best_patch, cleanup)``
   -- CLI-level entry point that runs either/both according to the boolean
   flags. Returns ``{apply_status, cleanup_status, commit_sha, reason}``.
@@ -25,61 +20,24 @@ Failure semantics:
 - Apply fails  -> no commit. Cleanup still runs if requested.
 - Commit fails -> apply stays in the working tree. Cleanup still runs if
   requested.
-- Cleanup per-entry failure -> logged and counted; the loop continues;
-  ``cleanup_status`` lands on ``"failed"``. The keep-set is still on disk.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
-import shutil
 import subprocess
-import time
 from pathlib import Path
 
 from minisweagent.agents.parallel_agent import BestPatchResult
 from minisweagent.run.utils.generated_artifacts import apply_patch_with_generated_helper_fallback
 from minisweagent.run.utils.git_safe_env import get_git_safe_env
-from minisweagent.utils.log import DEFAULT_LOG_FILENAME
 
 logger = logging.getLogger(__name__)
 
 
 _FINAL_REPORT_NAME = "final_report.json"
-_COMMANDMENT_NAME = "COMMANDMENT.md"
-
-# Files at the top level of output_dir that ``cleanup_run_artifacts`` always
-# preserves. The per-call effective keep-set adds the winning patch basename
-# when ``result.best_patch_file`` exists. ``DEFAULT_LOG_FILENAME`` is imported
-# from minisweagent.utils.log so a rename there cannot silently desync.
-_PRESERVED_FILES: tuple[str, ...] = (
-    _FINAL_REPORT_NAME,
-    DEFAULT_LOG_FILENAME,
-    _COMMANDMENT_NAME,
-)
-
-# Maximum string length that ``_rewrite_kept_report`` will attempt to
-# normalize as a path. No legitimate filesystem path is anywhere near 4 KiB;
-# this guards against rewriting accidentally large fields that slipped past
-# the key allow-list.
-_PATH_REWRITE_MAX_LEN = 4096
-
-# Scalar keys in ``final_report.json`` whose value is a single path string.
-# These are the only fields ``_rewrite_kept_report`` will normalize besides
-# any key whose name ends in ``_path`` / ``_dir`` / ``_file`` / ``_patch``.
-_SCALAR_PATH_KEYS: frozenset[str] = frozenset({"best_patch", "kernel_path", "repo_root"})
-
-# Keys whose values are LLM-authored documents (free-text). Anything nested
-# under these is skipped entirely by ``_rewrite_kept_report``, even if a
-# nested key would otherwise match the path-key heuristic.
-_DOCUMENT_KEYS: frozenset[str] = frozenset(
-    {"summary", "agent_summary", "verification_note", "round_evaluation", "round_summaries"}
-)
-
-_PATH_KEY_SUFFIXES: tuple[str, ...] = ("_path", "_dir", "_file", "_patch")
 
 # Defaults used when the container / host has no configured git identity.
 # Override via the ``GEAK_GIT_AUTHOR_NAME`` / ``GEAK_GIT_AUTHOR_EMAIL`` env
@@ -87,10 +45,6 @@ _PATH_KEY_SUFFIXES: tuple[str, ...] = ("_path", "_dir", "_file", "_patch")
 _DEFAULT_GIT_AUTHOR_NAME = "GEAK Agent"
 _DEFAULT_GIT_AUTHOR_EMAIL = "geak@amd.com"
 
-# Auto-generated run dir name pattern emitted by ``generate_patch_output_dir``.
-# Anchored only on the ``_YYYYmmdd_HHMMSS`` suffix so real kernel names
-# (which may contain ``.``, ``-``, uppercase) all match.
-_AUTO_RUN_DIR_RE = re.compile(r"^.+_\d{8}_\d{6}$")
 
 
 def apply_and_commit_best_patch(
@@ -118,7 +72,7 @@ def apply_and_commit_best_patch_detailed(
 
     .. code-block:: python
 
-        {"status": "committed" | "skipped_dirty" | "skipped_precondition"
+        {"status": "committed" | "skipped_precondition"
                   | "apply_failed" | "commit_failed",
          "commit_sha": str | None,
          "reason": str | None}
@@ -133,16 +87,12 @@ def apply_and_commit_best_patch_detailed(
     repo = Path(repo).resolve()
     patch_path = Path(result.best_patch_file).resolve()  # type: ignore[arg-type]
 
-    if not _repo_is_clean(repo):
-        reason = f"repo {repo} has uncommitted tracked changes. Commit or stash them first, then re-run apply manually."
-        logger.warning("[geak apply] Skipping: %s", reason)
-        return {"status": "skipped_dirty", "commit_sha": None, "reason": reason}
-
     applied, apply_reason = _apply_patch_to_repo(patch_path, repo)
     if not applied:
         return {"status": "apply_failed", "commit_sha": None, "reason": apply_reason}
 
-    commit_sha, commit_reason = _commit_applied_patch(result, repo)
+    patch_files = _extract_patch_files(patch_path)
+    commit_sha, commit_reason = _commit_applied_patch(result, repo, patch_files)
     if commit_sha is None:
         logger.warning(
             "[geak apply] Commit failed; leaving applied changes in the working tree of %s.",
@@ -158,37 +108,31 @@ def cleanup_run_artifacts(
     result: BestPatchResult | None,
     output_dir: Path | None,
 ) -> str:
-    """Prune ``output_dir`` to the keep-set in place.
+    """Remove lingering git worktrees under ``output_dir``.
 
-    Top-level entries surviving cleanup: ``final_report.json``,
-    ``geak_agent.log`` (canonical agent log), ``COMMANDMENT.md``, and the
-    winning ``.diff`` when present. Independent of apply: safe to call whether
-    or not the patch was applied/committed.
-
-    Iterates over ``output_dir.iterdir()`` and deletes top-level entries not
-    in the keep-set. The directory's own inode is never unlinked, so the
-    ``FileHandler`` already writing to ``output_dir / DEFAULT_LOG_FILENAME``
-    keeps its FD live through cleanup, the post-cleanup log line, and any
-    later traceback.
+    All other run artifacts (logs, patches, intermediate files) are kept
+    intact so the full run directory remains available for inspection.
 
     Returns one of:
 
-    - ``"ran"`` -- the iterate-and-delete loop finished with zero per-entry
-      exceptions.
-    - ``"failed"`` -- the loop completed but at least one entry's deletion
-      raised and was logged. The keep-set is still on disk.
-    - ``"skipped_empty"`` -- precondition check failed. Two sub-cases: (a)
-      ``output_dir`` is missing/not a dir; (b) neither ``final_report.json``
-      nor a winning patch file exists. Nothing is touched.
+    - ``"ran"`` -- worktree cleanup completed successfully.
+    - ``"skipped_empty"`` -- ``output_dir`` is None, missing, or not a
+      directory.
     """
-    if not _validate_cleanup_preconditions(result, output_dir):
+    if output_dir is None:
+        logger.warning("[geak --cleanup] Skipping: no output_dir provided.")
+        return "skipped_empty"
+    output_dir = Path(output_dir).resolve()
+    if not output_dir.is_dir():
+        logger.warning(
+            "[geak --cleanup] Skipping: output_dir does not exist or is not a dir: %s",
+            output_dir,
+        )
         return "skipped_empty"
 
-    assert output_dir is not None  # for type narrowing
-    output_dir = Path(output_dir).resolve()
-    patch_path = Path(result.best_patch_file).resolve() if (result is not None and result.best_patch_file) else None
-
-    return _cleanup_artifacts(output_dir, patch_path)
+    _prune_worktrees_under(output_dir)
+    logger.info("[geak --cleanup] Pruned worktrees under %s.", output_dir)
+    return "ran"
 
 
 def finalize_apply_and_cleanup(
@@ -269,46 +213,6 @@ def _validate_apply_preconditions(  # pylint: disable=too-many-return-statements
     return True
 
 
-def _validate_cleanup_preconditions(
-    result: BestPatchResult | None,
-    output_dir: Path | None,
-) -> bool:
-    """Return True iff there's a non-empty run worth pruning.
-
-    False in two cases (both map to ``cleanup_status="skipped_empty"`` in
-    :func:`cleanup_run_artifacts`):
-
-    1. ``output_dir`` is None / missing / not a directory.
-    2. ``output_dir`` exists but neither ``final_report.json`` nor a
-       readable winning patch file at ``result.best_patch_file`` is there.
-       Without either of those there's nothing the cleanup would preserve,
-       so we leave whatever's on disk untouched for post-mortem.
-    """
-    if output_dir is None:
-        logger.warning("[geak --cleanup] Skipping: no output_dir provided.")
-        return False
-    output_dir_path = Path(output_dir)
-    if not output_dir_path.is_dir():
-        logger.warning(
-            "[geak --cleanup] Skipping: output_dir does not exist or is not a dir: %s",
-            output_dir,
-        )
-        return False
-
-    has_report = (output_dir_path / _FINAL_REPORT_NAME).is_file()
-    has_patch = bool(result is not None and result.best_patch_file and Path(result.best_patch_file).is_file())
-    if not (has_report or has_patch):
-        logger.warning(
-            "[geak --cleanup] Skipping: %s has neither %s nor a winning patch; "
-            "leaving the directory intact for post-mortem.",
-            output_dir_path,
-            _FINAL_REPORT_NAME,
-        )
-        return False
-
-    return True
-
-
 def _has_git_identity(repo: Path, env: dict[str, str]) -> bool:
     """Return True if ``user.name`` AND ``user.email`` are resolvable for ``repo``.
 
@@ -364,7 +268,7 @@ def _ensure_git_identity(repo: Path, env: dict[str, str]) -> dict[str, str]:
     commit_env.setdefault("GIT_COMMITTER_EMAIL", email)
 
     logger.info(
-        "[geak --cleanup] No git identity configured; committing as %s <%s> "
+        "[geak apply] No git identity configured; committing as %s <%s> "
         "(override via GEAK_GIT_AUTHOR_NAME / GEAK_GIT_AUTHOR_EMAIL).",
         name,
         email,
@@ -372,32 +276,130 @@ def _ensure_git_identity(repo: Path, env: dict[str, str]) -> dict[str, str]:
     return commit_env
 
 
-def _repo_is_clean(repo: Path) -> bool:
-    """Return True if the tracked working tree + index are clean."""
-    env = get_git_safe_env(repo)
-    result = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=no"],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
-    if result.returncode != 0:
-        logger.warning(
-            "[geak --cleanup] git status failed (rc=%s): %s",
-            result.returncode,
-            result.stderr.strip(),
+_DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
+
+
+def _extract_patch_files(patch_path: Path) -> list[str]:
+    """Parse ``diff --git a/... b/...`` headers to get the list of files touched by the patch."""
+    files: list[str] = []
+    header_re = _DIFF_GIT_HEADER_RE
+    for line in patch_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = header_re.match(line)
+        if m:
+            files.append(m.group(2))
+    return files
+
+
+def _filter_patch_to_existing_files(patch_text: str, repo: Path) -> str | None:
+    """Keep only diff sections whose target file already exists in *repo*.
+
+    Returns the filtered patch text, or ``None`` if nothing remains.
+    """
+    lines = patch_text.splitlines(keepends=True)
+    preamble: list[str] = []
+    sections: list[list[str]] = []
+    current: list[str] | None = None
+
+    for line in lines:
+        if line.startswith("diff --git "):
+            if current is not None:
+                sections.append(current)
+            current = [line]
+        elif current is None:
+            preamble.append(line)
+        else:
+            current.append(line)
+    if current is not None:
+        sections.append(current)
+
+    if not sections:
+        return None
+
+    kept: list[str] = list(preamble)
+    skipped: list[str] = []
+    for section in sections:
+        m = _DIFF_GIT_HEADER_RE.match(section[0].rstrip("\n"))
+        if m is None:
+            kept.extend(section)
+            continue
+        b_path = m.group(2)
+        if (repo / b_path).exists():
+            kept.extend(section)
+        else:
+            skipped.append(b_path)
+
+    if skipped:
+        logger.info(
+            "[geak apply] Filtered out %d patch section(s) for files not in repo: %s",
+            len(skipped),
+            ", ".join(skipped),
         )
-        return False
-    return not result.stdout.strip()
+
+    result = "".join(kept)
+    return result if result.strip() else None
+
+
+def _try_stash_apply_pop(
+    patch_text: str,
+    repo: Path,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str] | None:
+    """Stash dirty changes, apply the patch, then pop the stash.
+
+    Returns the successful ``CompletedProcess`` from ``git apply``, or
+    ``None`` if any step fails (stash state is restored on failure).
+    """
+    # Check if there is anything to stash
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=str(repo), capture_output=True, text=True, check=False, env=env,
+    )
+    if status.returncode != 0 or not status.stdout.strip():
+        # Nothing to stash or git status failed — skip this strategy
+        return None
+
+    stash = subprocess.run(
+        ["git", "stash", "--quiet"],
+        cwd=str(repo), capture_output=True, text=True, check=False, env=env,
+    )
+    if stash.returncode != 0:
+        logger.debug("[geak apply] git stash failed (rc=%s): %s", stash.returncode, stash.stderr.strip())
+        return None
+
+    apply_result, _ = apply_patch_with_generated_helper_fallback(
+        patch_text=patch_text, cwd=repo, env=env,
+    )
+
+    # Always pop the stash regardless of apply outcome
+    pop = subprocess.run(
+        ["git", "stash", "pop", "--quiet"],
+        cwd=str(repo), capture_output=True, text=True, check=False, env=env,
+    )
+    if pop.returncode != 0:
+        logger.warning(
+            "[geak apply] git stash pop failed (rc=%s): %s. "
+            "Run 'git stash list' in %s to recover.",
+            pop.returncode, pop.stderr.strip(), repo,
+        )
+
+    if apply_result.returncode == 0:
+        return apply_result
+    return None
 
 
 def _apply_patch_to_repo(patch_path: Path, repo: Path) -> tuple[bool, str | None]:
-    """Apply ``patch_path`` to ``repo``. Return (success, reason-on-failure)."""
+    """Apply ``patch_path`` to ``repo`` with a 3-step fallback chain.
+
+    1. Direct ``git apply`` (works even on dirty repos if no conflicts).
+    2. ``git stash`` -> apply -> ``git stash pop`` (isolates dirty changes).
+    3. Filter patch to only files existing in repo, then apply.
+
+    Returns ``(success, reason-on-failure)``.
+    """
     patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     env = get_git_safe_env(repo)
 
+    # --- Attempt 1: direct apply ---
     apply_result, removed_paths = apply_patch_with_generated_helper_fallback(
         patch_text=patch_text,
         cwd=repo,
@@ -405,46 +407,85 @@ def _apply_patch_to_repo(patch_path: Path, repo: Path) -> tuple[bool, str | None
     )
     if removed_paths:
         logger.info(
-            "[geak --cleanup] Stripped generated helper artifacts during apply: %s",
+            "[geak apply] Stripped generated helper artifacts: %s",
             ", ".join(removed_paths),
         )
-    if apply_result.returncode != 0:
-        stderr_tail = apply_result.stderr.strip()[:1000]
-        logger.warning(
-            "[geak --cleanup] git apply failed (rc=%s); leaving repo and artifacts untouched.\nstderr: %s",
-            apply_result.returncode,
-            stderr_tail,
-        )
-        reason = (
-            f"git apply rc={apply_result.returncode}: {stderr_tail}"
-            if stderr_tail
-            else f"git apply rc={apply_result.returncode}"
-        )
-        return False, reason
+    if apply_result.returncode == 0:
+        logger.info("[geak apply] Applied %s to %s", patch_path.name, repo)
+        return True, None
 
-    logger.info("[geak --cleanup] Applied %s to %s", patch_path, repo)
-    return True, None
+    first_stderr = apply_result.stderr.strip()[:1000]
+    logger.info("[geak apply] Direct apply failed; trying stash fallback...")
+
+    # --- Attempt 2: stash → apply → pop ---
+    stash_result = _try_stash_apply_pop(patch_text, repo, env)
+    if stash_result is not None:
+        logger.info("[geak apply] Applied %s to %s (after stash/pop)", patch_path.name, repo)
+        return True, None
+
+    logger.info("[geak apply] Stash fallback failed; trying existing-files-only filter...")
+
+    # --- Attempt 3: filter to existing files only ---
+    filtered = _filter_patch_to_existing_files(patch_text, repo)
+    if filtered and filtered != patch_text:
+        filtered_result, _ = apply_patch_with_generated_helper_fallback(
+            patch_text=filtered, cwd=repo, env=env,
+        )
+        if filtered_result.returncode == 0:
+            logger.info(
+                "[geak apply] Applied %s to %s (existing-files-only filter)",
+                patch_path.name, repo,
+            )
+            return True, None
+
+    # --- All attempts failed ---
+    logger.warning(
+        "[geak apply] All apply strategies failed for %s.\nFirst stderr: %s",
+        patch_path.name, first_stderr,
+    )
+    reason = (
+        f"git apply rc={apply_result.returncode}: {first_stderr}"
+        if first_stderr
+        else f"git apply rc={apply_result.returncode}"
+    )
+    return False, reason
 
 
 def _commit_applied_patch(
     result: BestPatchResult,
     repo: Path,
+    patch_files: list[str] | None = None,
 ) -> tuple[str | None, str | None]:
-    """Stage + commit the applied changes. Return (commit SHA, reason-on-failure)."""
+    """Stage + commit the applied changes. Return (commit SHA, reason-on-failure).
+
+    When *patch_files* is provided, only those paths are staged so that
+    pre-existing dirty tracked changes in the repo are left untouched.
+    Falls back to ``git add -A`` when *patch_files* is empty/None.
+    """
     env = get_git_safe_env(repo)
 
-    add = subprocess.run(
-        ["git", "add", "-A"],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
+    if patch_files:
+        add = subprocess.run(
+            ["git", "add", "--"] + patch_files,
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+    else:
+        add = subprocess.run(
+            ["git", "add", "-A"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
     if add.returncode != 0:
         stderr = add.stderr.strip()
-        logger.warning("[geak apply] git add -A failed (rc=%s): %s", add.returncode, stderr)
-        return None, f"git add -A rc={add.returncode}: {stderr}" if stderr else f"git add -A rc={add.returncode}"
+        logger.warning("[geak apply] git add failed (rc=%s): %s", add.returncode, stderr)
+        return None, f"git add rc={add.returncode}: {stderr}" if stderr else f"git add rc={add.returncode}"
 
     staged = subprocess.run(
         ["git", "diff", "--cached", "--name-only"],
@@ -502,294 +543,6 @@ def _build_commit_message(result: BestPatchResult) -> str:
         body_lines.append(summary[:1000])
 
     return title + "\n\n" + "\n".join(body_lines) + "\n"
-
-
-def _cleanup_artifacts(
-    output_dir: Path,
-    patch_path: Path | None,
-) -> str:
-    """Iterate-and-delete cleanup. Returns "ran" or "failed".
-
-    Approach: move the winning patch (if nested) up to ``output_dir`` root,
-    prune lingering ``git worktree`` admin entries, then loop over
-    ``output_dir.iterdir()`` and delete every entry whose name is not in
-    the effective keep-set. The ``output_dir`` inode is never unlinked, so
-    the agent log's open ``FileHandler`` FD survives.
-
-    Per-entry exceptions are caught, logged, and counted. The loop never
-    aborts: if a worktree slot is locked or an NFS mount glitches, we still
-    finish removing everything else. The return value flips from ``"ran"``
-    to ``"failed"`` if any entry raised.
-    """
-    _prune_worktrees_under(output_dir)
-
-    # Move the winning patch up to output_dir root so the keep-set check
-    # operates uniformly on top-level entries.
-    kept_patch_name: str | None = None
-    if patch_path is not None and patch_path.is_file():
-        kept_patch_name = patch_path.name
-        target = output_dir / kept_patch_name
-        if patch_path != target:
-            try:
-                shutil.copy2(patch_path, target)
-            except OSError as exc:
-                logger.warning(
-                    "[geak --cleanup] Failed to copy winning patch %s to %s: %s",
-                    patch_path,
-                    target,
-                    exc,
-                )
-                kept_patch_name = None
-
-    keep_set: set[str] = set(_PRESERVED_FILES)
-    if kept_patch_name is not None:
-        keep_set.add(kept_patch_name)
-
-    failed = 0
-    for entry in list(output_dir.iterdir()):
-        if entry.name in keep_set:
-            continue
-        try:
-            if entry.is_symlink():
-                # Never recurse through a symlink-to-dir: rmtree would error
-                # or worse, follow into the target. unlink() removes just
-                # the symlink itself.
-                entry.unlink()
-            elif entry.is_dir():
-                shutil.rmtree(entry, ignore_errors=False)
-            else:
-                entry.unlink()
-        except OSError as exc:
-            failed += 1
-            logger.warning(
-                "[geak --cleanup] Failed to remove %s: %s (continuing).",
-                entry,
-                exc,
-            )
-
-    _rewrite_kept_report(
-        output_dir,
-        (output_dir / kept_patch_name) if kept_patch_name is not None else None,
-    )
-
-    if failed:
-        logger.warning(
-            "[geak --cleanup] Completed with %d per-entry failure(s); kept %s.",
-            failed,
-            ", ".join(sorted(keep_set)),
-        )
-        return "failed"
-
-    logger.info(
-        "[geak --cleanup] Pruned %s; kept %s.",
-        output_dir,
-        ", ".join(sorted(keep_set)),
-    )
-    return "ran"
-
-
-def _rewrite_kept_report(output_dir: Path, kept_patch_path: Path | None) -> None:
-    """Rewrite paths in the kept ``final_report.json`` to match post-cleanup reality.
-
-    Uses a KEY ALLOW-LIST rather than a value-shape walk. ``final_report.json``
-    contains LLM-authored fields (``summary``, ``agent_summary``, etc.) that
-    routinely paste paths into free-text prose; a value-walk would mangle
-    them and break downstream consumers (e.g. ``record_optimization_outcome``
-    reads ``summary[:100]`` as a strategy name).
-
-    Rewrites:
-
-    - ``best_patch``: absolute path of the surviving file, or ``None`` when
-      no patch survived. Key is always present after this function returns.
-    - Other scalar keys in ``_SCALAR_PATH_KEYS`` and any key whose name ends
-      in ``_path`` / ``_dir`` / ``_file`` / ``_patch``: if the value resolves
-      under ``output_dir`` and the path no longer exists, replace with
-      ``{"path": <original>, "pruned": True}``.
-
-    Hard-skips ``_DOCUMENT_KEYS`` (and anything nested under them).
-    """
-    report_path = output_dir / _FINAL_REPORT_NAME
-    if not report_path.is_file():
-        return
-
-    try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        logger.warning("[geak --cleanup] Could not read %s for normalization: %s", report_path, exc)
-        return
-
-    if not isinstance(report, dict):
-        return
-
-    if kept_patch_path is not None:
-        report["best_patch"] = str(kept_patch_path.resolve())
-    else:
-        report["best_patch"] = None
-
-    output_dir_resolved = output_dir.resolve()
-
-    def _is_path_key(name: str) -> bool:
-        return name in _SCALAR_PATH_KEYS or name.endswith(_PATH_KEY_SUFFIXES)
-
-    def _rewrite_string(value: str) -> object:
-        if len(value) > _PATH_REWRITE_MAX_LEN:
-            return value
-        try:
-            resolved = Path(value).resolve()
-        except (OSError, ValueError):
-            return value
-        try:
-            resolved.relative_to(output_dir_resolved)
-        except ValueError:
-            # Outside output_dir -- external paths stay untouched.
-            return value
-        if resolved.exists():
-            return value
-        return {"path": value, "pruned": True}
-
-    def _walk(node: object, key_name: str | None) -> object:
-        # Hard-skip document keys: do not descend into them.
-        if key_name in _DOCUMENT_KEYS:
-            return node
-        if isinstance(node, dict):
-            return {k: _walk(v, k) for k, v in node.items()}
-        if isinstance(node, list):
-            # Lists inherit eligibility from the enclosing key. Only walk
-            # them if the key name itself looks like a path key (so e.g.
-            # `kernel_paths` would be walked, but `agent_summaries` would
-            # not). Practically every list-of-paths in final_report.json
-            # lives behind such a key.
-            if key_name is not None and _is_path_key(key_name):
-                return [_walk(item, key_name) for item in node]
-            return node
-        if isinstance(node, str) and key_name is not None and _is_path_key(key_name):
-            # Skip best_patch -- already set above by direct assignment.
-            if key_name == "best_patch":
-                return node
-            return _rewrite_string(node)
-        return node
-
-    rewritten = _walk(report, None)
-    assert isinstance(rewritten, dict)
-
-    try:
-        report_path.write_text(json.dumps(rewritten, indent=2), encoding="utf-8")
-    except OSError as exc:
-        logger.warning("[geak --cleanup] Could not write normalized %s: %s", report_path, exc)
-
-
-def prune_old_runs(
-    parent: Path,
-    keep: int,
-    *,
-    exclude: Path | None = None,
-    stale_after_s: float = 600.0,
-) -> int:
-    """Keep the N most recent auto-generated run dirs under ``parent``.
-
-    Returns the number of directories actually removed.
-
-    Behavior:
-
-    - Returns 0 cleanly when ``parent`` is missing or not a directory.
-    - Only touches directories whose name matches ``^.+_\\d{8}_\\d{6}$``
-      (the suffix ``generate_patch_output_dir`` emits). Anything else under
-      ``parent`` -- notes, unrelated dirs, files -- is left alone regardless
-      of mtime.
-    - Skips ``exclude`` even if it would otherwise be a delete candidate.
-    - Skips any dir whose effective freshness is within the last
-      ``stale_after_s`` seconds. Freshness key, first hit wins:
-
-      1. ``(dir / DEFAULT_LOG_FILENAME).stat().st_mtime`` if the log exists
-         (a long-running but actively-logging sibling looks fresh because
-         ``FileHandler`` bumps this on every line).
-      2. ``max(child.stat().st_mtime for child in dir.iterdir())`` if any
-         children remain.
-      3. ``dir.stat().st_mtime`` as a last-resort fallback (only bumped on
-         child create/rename/unlink in the dir, not on appends).
-
-    Never raises; per-dir failures are logged and counted as not-removed.
-    """
-    if keep < 0:
-        keep = 0
-    parent = Path(parent)
-    if not parent.is_dir():
-        return 0
-
-    exclude_resolved: Path | None = None
-    if exclude is not None:
-        try:
-            exclude_resolved = Path(exclude).resolve()
-        except (OSError, ValueError):
-            exclude_resolved = None
-
-    now = time.time()
-
-    candidates: list[tuple[float, Path]] = []
-    for entry in parent.iterdir():
-        if not entry.is_dir():
-            continue
-        if not _AUTO_RUN_DIR_RE.match(entry.name):
-            continue
-        if exclude_resolved is not None:
-            try:
-                if entry.resolve() == exclude_resolved:
-                    continue
-            except (OSError, ValueError):
-                pass
-        freshness = _freshness_mtime(entry)
-        if freshness is None:
-            # Unreadable dir; skip rather than risk deletion.
-            continue
-        if (now - freshness) < stale_after_s:
-            # Actively-fresh: protect against concurrent runs sharing
-            # ``parent``. The most-common case is another geak invocation
-            # currently writing to ``geak_agent.log``.
-            continue
-        candidates.append((freshness, entry))
-
-    if len(candidates) <= keep:
-        return 0
-
-    # Newest first; the tail past `keep` is the delete-list.
-    candidates.sort(key=lambda pair: pair[0], reverse=True)
-    to_delete = [path for _, path in candidates[keep:]]
-
-    removed = 0
-    for path in to_delete:
-        try:
-            shutil.rmtree(path)
-            removed += 1
-        except OSError as exc:
-            logger.warning("[geak --keep-runs] Failed to remove %s: %s", path, exc)
-    return removed
-
-
-def _freshness_mtime(run_dir: Path) -> float | None:
-    """Best-effort 'how recently was this dir touched' for the stale filter."""
-    log_path = run_dir / DEFAULT_LOG_FILENAME
-    try:
-        if log_path.is_file():
-            return log_path.stat().st_mtime
-    except OSError:
-        pass
-
-    try:
-        child_mtimes = []
-        for child in run_dir.iterdir():
-            try:
-                child_mtimes.append(child.stat().st_mtime)
-            except OSError:
-                continue
-        if child_mtimes:
-            return max(child_mtimes)
-    except OSError:
-        pass
-
-    try:
-        return run_dir.stat().st_mtime
-    except OSError:
-        return None
 
 
 def _iter_worktree_slots(output_dir: Path) -> list[Path]:

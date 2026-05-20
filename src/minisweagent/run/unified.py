@@ -276,6 +276,143 @@ def _save_incremental_report(
         logger.debug("incremental report save failed (non-fatal)", exc_info=True)
 
 
+# ── Budget-timeout select_patch ───────────────────────────────────────
+
+
+def _run_timeout_select_patch(
+    ctx: "PipelineContext",
+    output_dir: Path,
+    postprocess_ctx: dict[str, Any],
+) -> None:
+    """Best-effort LLM select_patch across all rounds on budget timeout.
+
+    Runs the ``SelectPatchAgent`` against ``output_dir/results/`` so it can
+    scan ``round_*/`` for patches and test outputs across every completed
+    round.  The agent writes ``best_results.json`` at the ``results/``
+    level; this function then merges the result into
+    ``output_dir/final_report.json`` (overwriting the deterministic
+    ``auto_finalize`` report written by ``finalize_run``).
+
+    Fully wrapped in try/except — failure is non-fatal because
+    ``finalize_run`` has already written a valid ``final_report.json``.
+    """
+    try:
+        from minisweagent.agents.select_patch_agent import SelectPatchAgent
+        from minisweagent.config import load_agent_config
+        from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
+
+        results_dir = output_dir / "results"
+        if not results_dir.is_dir():
+            logger.warning("timeout select_patch: no results/ dir; skipping")
+            return
+
+        # Task dirs vary in naming (task_*, fixed-canonical, parallel_*, etc.).
+        # Discover them by looking for directories that contain results.
+        task_dirs = sorted({
+            p.parent for p in results_dir.glob("round_*/*/best_results.json")
+        })
+        if not task_dirs:
+            # Fallback: any sub-directory under round_* that isn't "worktrees"
+            task_dirs = sorted({
+                d for d in results_dir.glob("round_*/*")
+                if d.is_dir() and d.name != "worktrees"
+            })
+        if not task_dirs:
+            logger.warning("timeout select_patch: no task dirs found; skipping")
+            return
+
+        metric = postprocess_ctx.get("metric") or (
+            ctx.config.get("patch", {}).get("metric")
+            if isinstance(ctx.config, dict)
+            else None
+        )
+        model = ctx.model_factory()
+        agent_config, _ = load_agent_config("mini_select_patch")
+
+        env_config = LocalEnvironmentConfig(cwd=str(results_dir))
+        env = LocalEnvironment(**env_config.__dict__)
+
+        agent = SelectPatchAgent(model, env, **agent_config)
+        agent.log_file = results_dir / "timeout_select_agent.log"
+        agent.patch_dir = results_dir
+
+        metric_section = metric if metric else "None"
+        # List discovered directories so the agent knows exactly where to look.
+        dir_listing = "\n".join(f"  - {d}" for d in task_dirs)
+        task = (
+            f"\n## User-provided metric\n{metric_section}\n\n"
+            f"## Inputs\n"
+            f"- Work directory (absolute): {results_dir}\n"
+            f"- This is a TIMEOUT selection: the run was interrupted by budget.\n"
+            f"- Results are organized under round_*/ subdirectories.\n"
+            f"  Each subdirectory may contain:\n"
+            f"  - patch_*.patch files\n"
+            f"  - patch_*_test.txt test output logs\n"
+            f"  - best_results.json (per-task selection by previous agents)\n"
+            f"- You should scan ALL directories below to find the "
+            f"best patch across all rounds.\n"
+            f"- Use patch_0_test.txt from any directory as baseline "
+            f"(patch_0 = original unmodified kernel).\n"
+            f"- Found {len(task_dirs)} task directories:\n{dir_listing}\n"
+        )
+
+        logger.info(
+            "Budget timeout: running select_patch on %d task dirs in %s",
+            len(task_dirs),
+            results_dir,
+        )
+        agent.run(task)
+        best_patch_id = agent.extract_final_result()
+
+        if not best_patch_id:
+            logger.warning(
+                "Budget timeout: select_patch did not produce a result"
+            )
+            return
+
+        logger.info("Budget timeout: select_patch chose %s", best_patch_id)
+
+        # ── Merge into final_report.json ────────────────────────
+        best_results_path = results_dir / "best_results.json"
+        if not best_results_path.is_file():
+            logger.warning(
+                "Budget timeout: best_results.json not written by agent"
+            )
+            return
+
+        best_results = json.loads(best_results_path.read_text())
+        report_path = output_dir / "final_report.json"
+
+        # Read existing report (written by finalize_run) and update it.
+        existing: dict[str, Any] = {}
+        if report_path.is_file():
+            try:
+                existing = json.loads(report_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        existing["status"] = "timeout_select_patch"
+        existing["best_patch"] = best_results.get("best_patch_file")
+        existing["best_speedup"] = best_results.get("best_patch_speedup")
+        existing["best_patch_id"] = best_results.get("best_patch_id")
+        existing["best_patch_test_output"] = best_results.get(
+            "best_patch_test_output"
+        )
+        existing["summary"] = best_results.get("llm_selection_analysis", "")
+
+        report_path.write_text(json.dumps(existing, indent=2, default=str))
+        logger.info(
+            "Budget timeout: updated final_report.json with select_patch result "
+            "(best_patch_id=%s, speedup=%s)",
+            best_results.get("best_patch_id"),
+            best_results.get("best_patch_speedup"),
+        )
+    except Exception:
+        logger.exception(
+            "Budget timeout: select_patch failed (non-fatal; finalize_run report preserved)"
+        )
+
+
 # ── --preprocess-only stub report ────────────────────────────────────
 
 
@@ -427,11 +564,13 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
         return report
 
     # ── Round loop ───────────────────────────────────────────────
+    _budget_stopped = False
     for round_num in range(1, max_rounds + 1):
         if _should_stop_before_round(ctx):
             logger.warning(
                 "Budget reached before round %d; finalizing.", round_num,
             )
+            _budget_stopped = True
             break
 
         is_last = round_num == max_rounds
@@ -511,6 +650,12 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
 
     # ── Finalize ─────────────────────────────────────────────────
     report = finalize_run(postprocess_ctx, output_dir)
+
+    # ── Budget-triggered select_patch (runs AFTER finalize so it
+    #    can overwrite final_report.json with the LLM result) ────
+    if _budget_stopped:
+        _run_timeout_select_patch(ctx, output_dir, postprocess_ctx)
+
     return report
 
 

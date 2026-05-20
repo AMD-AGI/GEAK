@@ -93,9 +93,7 @@ def _derive_output_dir(output: Path | None, kernel_name: str | None) -> tuple[Pa
     """Derive the output directory from ``-o``/``--output``.
 
     Returns ``(path, auto)``. ``auto`` is True iff ``output`` was ``None`` and
-    geak generated the path under ``<cwd>/optimization_logs/``. The
-    ``--keep-runs`` retention policy is gated on ``auto`` so it only ever
-    touches directories geak owns.
+    geak generated the path under ``<cwd>/optimization_logs/``.
 
     - If output is a file path: output_dir = output.parent (auto=False)
     - If output is a directory: output_dir = output (auto=False)
@@ -176,19 +174,17 @@ There are two different user interfaces:
 [bold green]mini[/bold green] Simple REPL-style interface
 [bold green]mini -v[/bold green] Pager-style interface (Textual)
 
-After a run completes, two independent post-processing steps run by default:
+After a run completes, two post-processing steps run by default (disabled
+when [bold green]--debug[/bold green] is set):
 
-- [bold green]--apply-best-patch[/bold green] applies the winning patch to
-  [bold]--repo[/bold] on the current branch and commits it. Requires the run
-  to have completed without raising.
-- [bold green]--cleanup[/bold green] runs on every cooperative exit -- success,
-  exception during preprocess or run, and the Ctrl-C escalation path -- and
-  prunes per-run artifacts to [bold]final_report.json[/bold], the winning
-  [bold].diff[/bold], [bold]geak_agent.log[/bold], and [bold]COMMANDMENT.md[/bold].
+- Patch apply: applies the winning patch to [bold]--repo[/bold] on the
+  current branch and commits it.
+- Cleanup: prunes per-run artifacts to [bold]final_report.json[/bold], the
+  winning [bold].diff[/bold], [bold]geak_agent.log[/bold], and
+  [bold]COMMANDMENT.md[/bold].
 
 Hard-kill (wall-clock timeout) leaves artifacts in place for forensic analysis
-regardless of [bold]--cleanup[/bold]. Disable either step independently with
-[bold]--no-apply-best-patch[/bold] / [bold]--no-cleanup[/bold].
+regardless of debug mode.
 [/not dim]
 """
 
@@ -238,35 +234,21 @@ def main(
             "agent visibility; --target only chooses which becomes the scoring signal."
         ),
     ),
-    apply_best_patch: bool = typer.Option(
-        True,
-        "--apply-best-patch/--no-apply-best-patch",
+    debug: bool = typer.Option(
+        False,
+        "--debug/--no-debug",
         help=(
-            "After the run, apply the winning patch to --repo on the current branch "
-            "and commit it. Default: on."
-        ),
-    ),
-    cleanup: bool = typer.Option(
-        True,
-        "--cleanup/--no-cleanup",
-        help=(
-            "After the run, prune per-run artifacts under the output dir (keeping "
-            "final_report.json, the winning diff, geak_agent.log, COMMANDMENT.md). "
-            "Independent of --apply-best-patch. Default: on."
-        ),
-    ),
-    keep_runs: int | None = typer.Option(
-        None,
-        "--keep-runs",
-        help=(
-            "After this run completes, retain only the N most recent auto-generated "
-            "run dirs under output_dir's parent. Default: unlimited. Ignored when "
-            "--output is set explicitly. Env: GEAK_KEEP_RUNS."
+            "Debug mode: disables post-run patch apply and artifact cleanup so the "
+            "full run directory is preserved for inspection. Default: off."
         ),
     ),
 ):
     # fmt: on
     del visual
+
+    # --debug disables post-run patch apply and artifact cleanup
+    apply_best_patch = not debug
+    cleanup = not debug
 
     # Only run interactive first-time setup when stdin is a tty. Without the
     # guard, a CI / scripted run without ``MSWEA_CONFIGURED`` or any API key
@@ -382,6 +364,12 @@ def main(
     if disabled_tools:
         config.setdefault("agent", {}).setdefault("disabled_tools", [])
         config["agent"]["disabled_tools"] = list(set(config["agent"]["disabled_tools"]) | set(disabled_tools))
+        os.environ["GEAK_DISABLED_TOOLS"] = ",".join(config["agent"]["disabled_tools"])
+
+    # Propagate use_skills to subagents via environment variable
+    if config.get("agent", {}).get("use_skills"):
+        os.environ["GEAK_USE_SKILLS"] = "1"
+
     logger.debug("config: %s", config)
 
     model = get_model(model_name, config.get("model", {}))
@@ -511,9 +499,10 @@ def main(
         logger.info("Using output_dir from task content: %s", output)
 
     kernel_target = kernel_url or parsed_config.get("kernel_url") or parsed_config.get("kernel_name")
-    if not kernel_target:
+
+    if not kernel_target and repo is None:
         logger.error(
-            "[red]Error: missing kernel target. Provide --kernel-url or include kernel info in task.[/red]"
+            "[red]Error: missing kernel target. Provide --kernel-url, --repo, or include kernel info in task.[/red]"
         )
         raise typer.Exit(1)
 
@@ -531,32 +520,14 @@ def main(
         kernel_name_for_output = Path(kernel_url).stem
     if not kernel_name_for_output and isinstance(kernel_target, str):
         kernel_name_for_output = Path(kernel_target).stem
+    if not kernel_name_for_output:
+        kernel_name_for_output = "kernel_auto"
     logger.info("Using kernel_name_for_output: %s", kernel_name_for_output)
 
-    preprocess_output_dir, output_dir_auto = _derive_output_dir(output, kernel_name_for_output)
+    preprocess_output_dir, _output_dir_auto = _derive_output_dir(output, kernel_name_for_output)
     preprocess_output_dir.mkdir(parents=True, exist_ok=True)
     add_file_handler(preprocess_output_dir / DEFAULT_LOG_FILENAME)
 
-    # Resolve --keep-runs precedence: CLI > GEAK_KEEP_RUNS env > unset.
-    # When the user supplied --output, retention is a no-op (we never prune
-    # a user-owned parent dir). Surface the no-op as a warning so a
-    # misconfigured flag doesn't silently disappear.
-    if keep_runs is None:
-        _env_keep_runs = os.environ.get("GEAK_KEEP_RUNS")
-        if _env_keep_runs:
-            try:
-                keep_runs = int(_env_keep_runs)
-            except ValueError:
-                logger.warning(
-                    "[geak --keep-runs] GEAK_KEEP_RUNS=%r is not an integer; ignored.",
-                    _env_keep_runs,
-                )
-                keep_runs = None
-    if keep_runs is not None and keep_runs > 0 and not output_dir_auto:
-        logger.warning(
-            "[geak --keep-runs] ignored: --output was set explicitly; "
-            "retention only applies to auto-generated dirs."
-        )
     _run_t0 = time.monotonic()
     config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
     logger.info(
@@ -942,30 +913,11 @@ def main(
 
         if outcome:
             _apply_status = outcome.get("apply_status")
-            if _apply_status == "skipped_dirty":
-                console.print(
-                    "[bold yellow][geak apply] Skipped: --repo has uncommitted tracked changes. "
-                    "Commit/stash and re-run apply manually.[/bold yellow]"
-                )
-            elif _apply_status in {"apply_failed", "commit_failed"}:
+            if _apply_status in {"apply_failed", "commit_failed"}:
                 console.print(
                     f"[bold yellow][geak apply] {_apply_status}: "
                     f"{outcome.get('reason', '')}[/bold yellow]"
                 )
-
-        if keep_runs and keep_runs > 0 and output_dir_auto:
-            try:
-                from minisweagent.run.postprocess.finalize_apply import prune_old_runs
-
-                _removed = prune_old_runs(
-                    preprocess_output_dir.parent,
-                    keep=keep_runs,
-                    exclude=preprocess_output_dir,
-                )
-                if _removed:
-                    logger.info("[geak --keep-runs] Pruned %d old run dir(s).", _removed)
-            except Exception:
-                logger.exception("prune_old_runs raised (non-fatal)")
 
 
 if __name__ == "__main__":

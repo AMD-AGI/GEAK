@@ -71,8 +71,8 @@ logger = logging.getLogger(__name__)
 
 
 def run_preprocess_v3(
-    kernel_url: str,
-    output_dir: Path,
+    kernel_url: str | None = None,
+    output_dir: Path = Path("."),
     gpu_id: int = 0,
     *,
     model: Any = None,
@@ -98,14 +98,22 @@ def run_preprocess_v3(
     folded into the orchestrator's initial task body; the v3 orchestrator
     drives the harness generation itself, so those become *hints* rather
     than authoritative commands.
+
+    When ``kernel_url`` is ``None`` and ``repo`` is provided, the
+    codebase-explore subagent is launched to auto-discover the kernel.
     """
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    kernel_path, repo_root = _resolve_kernel_and_repo(kernel_url, repo, console)
-
+    # Resolve model BEFORE kernel resolution (codebase-explore needs it).
     if model is None and model_factory is not None:
         model = model_factory()
+
+    kernel_path, repo_root = _resolve_kernel_and_repo(
+        kernel_url, repo, console,
+        user_task=user_task, output_dir=output_dir,
+    )
+
     if model is None:
         raise RuntimeError(
             "run_preprocess_v3: neither ``model`` nor ``model_factory`` was supplied; "
@@ -171,21 +179,156 @@ def run_preprocess_v3(
 
 
 # ---------------------------------------------------------------------------
+# Codebase-explore kernel discovery
+# ---------------------------------------------------------------------------
+
+
+def _find_codebase_explore_prompt() -> Path:
+    """Locate ``subagents/codebase-explore/SYSTEM_PROMPT.md``."""
+    here = Path(__file__).resolve().parent
+    for candidate in here.parents:
+        p = candidate / "subagents" / "codebase-explore" / "SYSTEM_PROMPT.md"
+        if p.is_file():
+            return p
+    workspace = Path("/workspace/subagents/codebase-explore/SYSTEM_PROMPT.md")
+    if workspace.is_file():
+        return workspace
+    raise FileNotFoundError("Could not find subagents/codebase-explore/SYSTEM_PROMPT.md")
+
+
+def _parse_explore_result(message: str) -> dict[str, Any] | None:
+    """Parse ``CODEBASE_EXPLORE_RESULT: {...}`` JSON from subagent output."""
+    for line in message.splitlines():
+        if "CODEBASE_EXPLORE_RESULT:" in line:
+            json_str = line.split("CODEBASE_EXPLORE_RESULT:", 1)[1].strip()
+            try:
+                result = json.loads(json_str)
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse CODEBASE_EXPLORE_RESULT JSON: %s", json_str[:200])
+                return None
+            kp = result.get("kernel_path")
+            if kp and Path(kp).is_file():
+                return result
+            logger.warning("Explored kernel_path %r does not exist on disk", kp)
+            return None
+    return None
+
+
+def _load_codebase_explore_model() -> Any:
+    """Create a model instance for the codebase-explore subagent.
+
+    Reads model name + kwargs from ``subagents/codebase-explore/SUBAGENT.yaml``
+    (falling back to geak.yaml defaults), matching the pattern used by
+    :class:`SubagentRegistry` / :class:`PreprocessSubagentDispatcher`.
+    """
+    import yaml as _yaml
+
+    from minisweagent.config import load_config
+    from minisweagent.models import get_model
+
+    # Load geak.yaml defaults
+    try:
+        geak_cfg = load_config("geak")
+    except FileNotFoundError:
+        geak_cfg = {}
+    model_sec = geak_cfg.get("model", {})
+    default_model = model_sec.get("model_name")
+    default_model_class = model_sec.get("model_class", "")
+    default_model_kwargs = dict(model_sec.get("model_kwargs", {}))
+
+    # Load per-subagent overrides from SUBAGENT.yaml
+    prompt_dir = _find_codebase_explore_prompt().parent
+    subagent_yaml = prompt_dir / "SUBAGENT.yaml"
+    spec_model: str | None = None
+    spec_model_kwargs: dict[str, Any] = {}
+    if subagent_yaml.is_file():
+        data = _yaml.safe_load(subagent_yaml.read_text(encoding="utf-8")) or {}
+        spec_model = data.get("model") or None
+        spec_model_kwargs = data.get("model_kwargs") or {}
+
+    resolved_name = spec_model or default_model
+    resolved_kwargs = {**default_model_kwargs, **spec_model_kwargs}
+
+    return get_model(resolved_name, {"model_class": default_model_class, "model_kwargs": resolved_kwargs})
+
+
+def _run_codebase_explore(
+    repo: Path,
+    user_task: str | None = None,
+    output_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    """Run the codebase-explore subagent to discover kernel files.
+
+    Returns the parsed ``CODEBASE_EXPLORE_RESULT`` dict or ``None`` on failure.
+    The model is loaded from geak.yaml / SUBAGENT.yaml automatically.
+    """
+    from minisweagent.run.preprocess_v3.subagent import PreprocessSubagent
+
+    model = _load_codebase_explore_model()
+    prompt_path = _find_codebase_explore_prompt()
+    system_prompt = prompt_path.read_text(encoding="utf-8")
+
+    agent = PreprocessSubagent(
+        model=model,
+        system_prompt=system_prompt,
+        tools=["bash"],
+        step_limit=50,
+        cwd=str(repo),
+    )
+
+    task = f"Explore the repository at {repo}"
+    if output_dir:
+        task += f"\nWrite CODEBASE_CONTEXT.md to {output_dir}"
+    if user_task:
+        task += f"\nUser's optimization task: {user_task}"
+
+    logger.info("Starting codebase-explore subagent (step_limit=50, cwd=%s)", repo)
+    exit_status, message = agent.run(task)
+    logger.info("Codebase-explore finished with status: %s", exit_status)
+
+    return _parse_explore_result(message)
+
+
+# ---------------------------------------------------------------------------
 # Input resolution
 # ---------------------------------------------------------------------------
 
 
 def _resolve_kernel_and_repo(
-    kernel_url: str,
+    kernel_url: str | None,
     repo: str | Path | None,
     console: Any,
+    *,
+    user_task: str | None = None,
+    output_dir: Path | None = None,
 ) -> tuple[Path, str]:
     """Resolve ``kernel_url`` + ``repo`` into ``(kernel_path, repo_root_str)``.
+
+    When ``kernel_url`` is ``None`` and ``repo`` is provided, runs the
+    codebase-explore subagent to auto-discover the kernel file.
 
     Local-path fast path: if ``kernel_url`` is an existing file on disk we
     skip URL resolution entirely. Otherwise fall back to the legacy
     ``resolve_kernel_url`` (which clones if necessary).
     """
+    if not kernel_url:
+        if repo is None:
+            raise RuntimeError(
+                "v3 preprocess: kernel_url not provided and no --repo for auto-discovery"
+            )
+        logger.info("No kernel_url provided; running codebase-explore on %s", repo)
+        result = _run_codebase_explore(
+            Path(repo).resolve(),
+            user_task=user_task,
+            output_dir=output_dir,
+        )
+        if result is None or not result.get("kernel_path"):
+            raise RuntimeError(
+                "v3 preprocess: codebase-explore failed to discover a kernel in " + str(repo)
+            )
+        kernel_url = result["kernel_path"]
+        logger.info("Codebase-explore discovered kernel: %s", kernel_url)
+
     kernel_path_obj = Path(kernel_url).expanduser()
     # Resolve repo-relative kernel paths before falling back to the URL resolver.
     if not kernel_path_obj.is_absolute() and repo is not None:

@@ -67,27 +67,26 @@ export AMD_LLM_API_KEY="YOUR_KEY"
 
 ### Usage
 
-#### Basic (single-agent) GPU kernel optimization
+#### Basic GPU kernel optimization
 
 ```bash
 # Typical kernel optimization using natural language input
 geak -t "Optimize the kernel from /path/to/aiter, specifically aiter/ops/triton/topk.py. Use the harness at /path/to/test_topk_harness.py. Use four GPUs with IDs 0-3 simultaneously."
 
-# Typical kernel optimization (single agent)
-geak --kernel-url /path/to/kernel/file \
-  --repo /path/to/kernel/repo \
+# Typical kernel optimization
+geak --repo /path/to/kernel/repo \
   --task "Optimize the block_reduce kernel"
 ```
 
-#### Parallel optimization (multiple agents)
+#### Parallel optimization
 
-- Each agent works in an isolated git workspace
-- Patches and test results are saved separately
-- After all runs finish, GEAK automatically selects the best patch based on the specified metric
+- GEAK preprocesses the target once, then runs a shared optimization loop
+- Each worker runs in an isolated git workspace
+- Patches and test results are saved separately per round
+- After each round, GEAK verifies the best candidate and carries the best patch forward
 
 ```bash
 geak --repo /path/to/kernel/repo \
-  --kernel-url /path/to/kernel/file \
   --task "Optimize the block_reduce kernel. Kernel path: xxx. Metric: bandwidth in GB/s (higher is better)." \
   --num-parallel 4 \
   --gpu-ids 0,1,2,3
@@ -96,46 +95,16 @@ geak --repo /path/to/kernel/repo \
 **Notes:**
 
 - `--repo`: required; the target repository path
-- `--kernel-url`: required; path to the target kernel file (local path or URL)
-- `--num-parallel`: number of optimization agents
-- `--gpu-ids`: comma-separated GPU IDs for agents
-- `--apply-best-patch` / `--no-apply-best-patch` (default: on): after the run completes
-  *without raising*, apply the winning patch to `--repo` on the current branch and commit
-  it with a message pointing at `final_report.json`. Requires a clean working tree on
-  `--repo`. A dirty tree is skipped in the log AND printed in yellow on the console so
-  the no-op isn't easy to miss. When the repo has no configured git identity (typical
-  inside the GEAK container), the commit falls back to `GEAK Agent <geak@amd.com>`;
-  override via the `GEAK_GIT_AUTHOR_NAME` / `GEAK_GIT_AUTHOR_EMAIL` environment variables
-  (passed through by `entrypoint.sh`).
-- `--cleanup` / `--no-cleanup` (default: on): runs at every cooperative exit — success,
-  exception during preprocess or run, and the Ctrl-C escalation path — and prunes
-  per-run artifacts to the **keep-set**: `final_report.json`, the winning `.diff`,
-  `geak_agent.log`, and `COMMANDMENT.md`. A Ctrl-C *during* cleanup leaves it partial
-  (cleanup wraps in `try/except Exception` and `KeyboardInterrupt` is a `BaseException`,
-  not an `Exception`). Hard-kill (wall-clock timeout) leaves the per-run dir alone for
-  forensic analysis regardless of `--cleanup`, and prints a loud red console line
-  naming the artifact path. Independent of `--apply-best-patch`.
-- `--keep-runs N` / `GEAK_KEEP_RUNS=N` (default: unlimited): after this run completes,
-  retain only the N most-recent auto-generated run dirs under output_dir's parent.
-  **Scope is `<cwd>/optimization_logs/`** — runs from other working directories are not
-  visible. Ignored under `--output` (a warning is logged). Concurrent runs in the same
-  parent are protected by a stale-only filter that prefers the agent log's mtime, but
-  the safest mode is one `geak` invocation at a time.
-- **Budget semantics.** `--mode quick` and `--mode full` are **absolute wall-clock caps**
+- `--kernel-url`: optional; path to the target kernel file (local path or URL)
+- `--num-parallel`: optional; number of optimization agents
+- `--gpu-ids`: optional; comma-separated GPU IDs for agents
+- `--debug`
+- `--mode quick` and `--mode full` are **absolute wall-clock caps**
   of 60 min and 120 min respectively. The hard-kill watchdog `os._exit(124)`s at
-  `started_at + total_s` exactly — this anchor enforces the cap. Internally the
-  cooperative budget reserves ~60 s for finalize headroom; this is invisible to the
-  user and is not load-bearing for the cap promise.
-- **Operator log surface.** Every cooperative exit logs `[geak --cleanup] starting` and
-  `[geak --cleanup] completed: <status>`. If the completed line is missing, cleanup was
-  interrupted mid-flight (Ctrl-C during cleanup, or a rare race with hard-kill).
-- **Persistent caches not affected by `--cleanup`.** `~/.cache/amd-ai-devtool/semantic-index`
-  (the RAG FAISS index) and the auto-installed `rag-mcp` package. Both are intentional
-  caches reused across runs.
-- **Cooperative shutdown coverage** is tracked separately: the wall-clock cap is
-  enforced absolutely by the hard-kill watchdog, but reaching it should be rare. The
-  `subprocess.run` / LLM-client timeouts in the run path should all clamp via
-  `deadline.cap(...)`; a focused audit of those call sites is a follow-up.
+  `started_at + total_s` exactly — this anchor enforces the cap. Internally, the
+  cooperative budget reserves finalize and kill-buffer headroom; this is invisible to
+  the user and is not load-bearing for the cap promise.
+- `total_budget_s`
 
 ### Runnable examples
 
@@ -148,7 +117,6 @@ These are **examples** you can test in `examples/`. Replace paths, GPU IDs, and 
 REPO="/path/to/GEAK/examples/knn"
 
 geak --repo "$REPO" \
-  --kernel-url "$REPO/knn_wrapper.py" \
   --test-command "python scripts/task_runner.py compile && python scripts/task_runner.py correctness && python scripts/task_runner.py performance" \
   --task "Optimize the knn kernel. Metric: latency (lower is better)." 
 ```
@@ -159,7 +127,6 @@ geak --repo "$REPO" \
 REPO="/path/to/GEAK/examples/mla_decode"
 
 geak --repo "$REPO" \
-  --kernel-url "$REPO/kernel.py" \
   --test-command "python3 -c \"import ast; ast.parse(open('kernel.py').read())\" && python3 'test_kernel_harness.py' --correctness && python3 'test_kernel_harness.py' --full-benchmark" \
   --task "Optimize the MLA decode Triton kernel." 
 ```
@@ -171,7 +138,6 @@ geak --repo "$REPO" \
 REPO="/path/to/FlyDSL"
 
 geak --repo "$REPO" \
-  --kernel-url "$REPO/kernels/preshuffle_gemm.py" \
   --task "Optimize the preshuffle GEMM kernel." \
   --yolo --exit-immediately
 ```
@@ -185,10 +151,10 @@ For more options and examples, see **[Quick start](docs/quick_start.md)**.
 
 `geak` loads configuration in layers:
 
-1. base config: `src/minisweagent/config/geak.yaml`
-2. template: `src/minisweagent/config/mini_kernel_strategy_list.yaml` (default)
-3. user override: `--config xxx.yaml`
-4. CLI override: CLI args (final override)
+1. strategy template: `src/minisweagent/config/mini_kernel_strategy_list.yaml`
+2. run config: `src/minisweagent/config/geak.yaml`, or the file passed with `--config`
+3. environment overrides for supported options, such as `GEAK_PIPELINE_MODE`
+4. CLI overrides, such as `--mode`, `--gpu-ids`, and `--num-parallel`
 
 For more options and examples, see [Configuration](docs/configuration.md).
 
@@ -204,12 +170,18 @@ Typical structure (parallel run):
 
 ```bash
 optimization_logs/<kernel>_<timestamp>/
-├── results/round_1/<kernel>-<strategy_0>/
+├── CODEBASE_CONTEXT.md
+├── COMMANDMENT.md
+├── baseline_metrics.json
+├── profile.json
+├── tasks/round_1/
+│   ├── 05_-canonical.md
+│   └── 10_planned-strategy.md
+├── results/round_1/<worker>/
 │   ├── patch_0.patch
 │   ├── patch_0_test.txt
 │   └── task_0.log
-├── tasks/round_1/<kernel>-<strategy_1>/
-│   └── ...
+├── round_1_evaluation.json
 ├── final_report.json
 └── geak_agent.log
 ```
@@ -220,14 +192,14 @@ optimization_logs/<kernel>_<timestamp>/
 
 ---
 
-### Unit Test Discovery
+### Preprocess and Harness Setup
 
 If `--test-command` is not provided, GEAK will:
 
 - Discover existing tests, or
-- Create a validated harness via UnitTestAgent
+- Create and verify a harness for the target kernel
 
-The resulting test command is fixed for the entire run, ensuring consistent evaluation.
+The resulting `COMMANDMENT.md` is  for the optimization run, ensuring consistent correctness and benchmark evaluation.
 
 ---
 
@@ -249,17 +221,17 @@ Run multiple agents with:
 
 - Isolated git worktrees per agent
 - Optional GPU pinning via `--gpu-ids`
-- Improves exploration and reduces LLM variance
+- Improves exploration while keeping evaluation consistent across workers
 
 ---
 
 ### Best Patch Selection
 
-Automatically selects the best result across runs:
+Automatically selects the best result across rounds:
 
-- Reads all patch logs under `optimization_logs/`
-- Applies user-defined metric
-- Outputs `best_results.json`
+- Verifies candidate patches with the run's benchmark contract
+- Writes `round_N_evaluation.json` after each round
+- Outputs the best verified result in `final_report.json`
 
 ---
 

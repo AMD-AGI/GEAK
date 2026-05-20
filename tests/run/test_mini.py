@@ -69,8 +69,7 @@ class TestDeriveOutputDir:
             out_dir, auto = mini_module._derive_output_dir(None, "my_kernel")
 
         assert out_dir == (tmp_path / "optimization_logs" / "kernel_fixed_ts").resolve()
-        # output=None -> geak generated the path. ``--keep-runs`` retention
-        # only ever acts on auto dirs.
+        # output=None -> geak generated the path.
         assert auto is True
 
     def test_file_path_uses_parent_for_dir(self, tmp_path: Path) -> None:

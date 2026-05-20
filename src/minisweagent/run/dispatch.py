@@ -211,6 +211,16 @@ def task_file_to_agent_task(task_file: Path):
         "mode": "yolo",
         "use_strategy_manager": True,
     }
+
+    # Propagate tools disabled by the top-level agent (set in mini.py)
+    _disabled_env = os.environ.get("GEAK_DISABLED_TOOLS", "").strip()
+    if _disabled_env:
+        cfg["disabled_tools"] = [t.strip() for t in _disabled_env.split(",") if t.strip()]
+
+    # Propagate use_skills from top-level agent (set in mini.py)
+    if os.environ.get("GEAK_USE_SKILLS", "").strip() == "1":
+        cfg["use_skills"] = True
+
     if agent_name:
         cfg["agent_name"] = agent_name
         try:
