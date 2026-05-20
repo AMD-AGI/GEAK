@@ -70,6 +70,7 @@ class TaskPlanner:
             label="fixed-canonical",
             body=composed_body,
             kind="fixed",
+            agent_name="general-kernel-optimization",
             priority=5,
             kernel_language=kernel_language,
         )
