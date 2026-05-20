@@ -2,7 +2,7 @@ agent:
   step_limit: 0.
   cost_limit: 0.
   mode: confirm
-  use_skills: False
+  use_skills: True
 env:
   env:
     PAGER: cat

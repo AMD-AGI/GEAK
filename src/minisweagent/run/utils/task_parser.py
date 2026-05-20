@@ -369,6 +369,16 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
             kernel_type=kernel_type,
         )
 
+    # Clear hallucinated local paths that don't exist on disk.
+    if result["kernel_url"] and not result["kernel_url"].startswith(("http://", "https://")):
+        p = Path(result["kernel_url"])
+        if not p.exists():
+            logger.warning(
+                "parse_task_info: kernel_url %r does not exist on disk; clearing.",
+                result["kernel_url"],
+            )
+            result["kernel_url"] = None
+
     if result["output_dir"]:
         result["output_dir"] = _normalize_path(result["output_dir"])
     if result["config"]:
@@ -396,6 +406,16 @@ def _normalize_pipeline_params_from_parsed(parsed: dict) -> dict:
         result["kernel_url"] = _normalize_path(result["kernel_url"])
     if result["preprocess_dir"]:
         result["preprocess_dir"] = _normalize_path(result["preprocess_dir"])
+
+    # Clear hallucinated local paths that don't exist on disk.
+    if result["kernel_url"] and not result["kernel_url"].startswith(("http://", "https://")):
+        p = Path(result["kernel_url"])
+        if not p.exists():
+            logger.warning(
+                "parse_pipeline_params: kernel_url %r does not exist on disk; clearing.",
+                result["kernel_url"],
+            )
+            result["kernel_url"] = None
 
     for field in ("max_rounds", "start_round"):
         if result[field] is not None:
