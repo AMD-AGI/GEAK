@@ -10,17 +10,25 @@ then reserves them atomically and hands the job to a worker.  Workers
 return GPUs via a done-callback.  This avoids the deadlock a fixed-size
 worker pool would create when a multi-GPU job sits in the queue while
 every worker holds zero GPUs.
+
+GPU ownership is tracked via leases.  Each lease records which GPUs are
+held, when they were acquired, and an optional execution deadline.  A
+background reaper thread reclaims GPUs from expired leases and kills the
+associated subprocess.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import queue
+import signal
 import threading
 import time
+import uuid
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -35,11 +43,34 @@ class GpuJob(Generic[T]):
     fn: Callable[[list[int], dict[str, str]], T]
     num_gpus: int = 1
     timeout: float | None = None
+    queue_timeout: float | None = None
     label: str = ""
 
 
+@dataclass(frozen=True)
+class GpuLease:
+    """Immutable record of a GPU assignment."""
+
+    lease_id: str
+    job_label: str
+    gpu_ids: tuple[int, ...]
+    acquired_at: float
+    deadline: float | None
+
+
+@dataclass
+class LeaseState:
+    """Mutable tracking wrapper around a lease."""
+
+    lease: GpuLease
+    popen_pid: int | None = None
+    released: bool = False
+    released_at: float | None = None
+    release_reason: str | None = None
+
+
 class GPUManager:
-    """Centralized GPU pool with FIFO scheduling.
+    """Centralized GPU pool with FIFO scheduling and lease-based ownership.
 
     Parameters
     ----------
@@ -49,6 +80,11 @@ class GPUManager:
         A ``ProcessRegistry`` instance for SIGINT cleanup of futures.
     stats_log_interval_s:
         Seconds between periodic INFO log lines.  ``0`` disables.
+    cpu_pressure_threshold:
+        Max 1-minute load average before the dispatcher pauses.
+        Defaults to ``0.8 * os.cpu_count()``.
+    reaper_interval_s:
+        Seconds between lease-reaper sweeps.  ``0`` disables.
     """
 
     def __init__(
@@ -57,6 +93,8 @@ class GPUManager:
         registry: Any = None,
         *,
         stats_log_interval_s: float = 30.0,
+        cpu_pressure_threshold: float | None = None,
+        reaper_interval_s: float = 30.0,
     ) -> None:
         if not gpu_ids:
             raise ValueError("gpu_ids must be non-empty")
@@ -64,6 +102,12 @@ class GPUManager:
         self._gpu_ids = list(gpu_ids)
         self._registry = registry
         self._stats_log_interval_s = stats_log_interval_s
+        self._cpu_pressure_threshold = (
+            cpu_pressure_threshold
+            if cpu_pressure_threshold is not None
+            else 0.8 * os.cpu_count()
+        )
+        self._reaper_interval_s = reaper_interval_s
 
         self._free: set[int] = set(gpu_ids)
         self._cond = threading.Condition(threading.Lock())
@@ -81,12 +125,25 @@ class GPUManager:
         self._queue_depth = 0
         self._max_queue_depth = 0
 
-        self._dispatcher = threading.Thread(target=self._dispatch_loop, name="gpu-manager-dispatch", daemon=True)
+        self._active_leases: dict[str, LeaseState] = {}
+        self._leases_lock = threading.Lock()
+
+        self._dispatcher = threading.Thread(
+            target=self._dispatch_loop, name="gpu-manager-dispatch", daemon=True,
+        )
         self._dispatcher.start()
 
         if stats_log_interval_s > 0:
-            self._stats_logger = threading.Thread(target=self._stats_log_loop, name="gpu-manager-stats", daemon=True)
+            self._stats_logger = threading.Thread(
+                target=self._stats_log_loop, name="gpu-manager-stats", daemon=True,
+            )
             self._stats_logger.start()
+
+        if reaper_interval_s > 0:
+            self._reaper = threading.Thread(
+                target=self._reaper_loop, name="gpu-lease-reaper", daemon=True,
+            )
+            self._reaper.start()
 
     def submit(self, job: GpuJob) -> Future:
         """Enqueue a job and return a ``Future`` for its result."""
@@ -107,7 +164,7 @@ class GPUManager:
 
     def run(self, job: GpuJob) -> Any:
         """Submit a job and block until it completes."""
-        return self.submit(job).result(timeout=job.timeout)
+        return self.submit(job).result(timeout=job.queue_timeout)
 
     def shutdown(self, *, cancel_pending: bool = False) -> None:
         """Stop accepting jobs and drain the dispatcher."""
@@ -156,62 +213,135 @@ class GPUManager:
     # ------------------------------------------------------------------
 
     def _dispatch_loop(self) -> None:
-        while True:
-            item = self._job_queue.get()
-            if item is None:
-                return
-            job, fut = item
+        try:
+            while True:
+                item = self._job_queue.get()
+                if item is None:
+                    return
+                job, fut = item
 
-            if fut.cancelled():
+                if fut.cancelled():
+                    with self._stats_lock:
+                        self._queue_depth = max(0, self._queue_depth - 1)
+                    continue
+
+                # CPU pressure gate — wait before acquiring GPUs
+                try:
+                    while os.getloadavg()[0] > self._cpu_pressure_threshold:
+                        if self._closed:
+                            fut.cancel()
+                            return
+                        time.sleep(1.0)
+                except OSError:
+                    pass
+
+                with self._cond:
+                    while len(self._free) < job.num_gpus:
+                        if self._closed:
+                            fut.cancel()
+                            with self._stats_lock:
+                                self._queue_depth = max(0, self._queue_depth - 1)
+                            return
+                        self._cond.wait(timeout=1.0)
+
+                    assigned = [self._free.pop() for _ in range(job.num_gpus)]
+
+                now = time.monotonic()
+                deadline = (now + job.timeout) if job.timeout else None
+                lease = GpuLease(
+                    lease_id=str(uuid.uuid4()),
+                    job_label=job.label,
+                    gpu_ids=tuple(assigned),
+                    acquired_at=now,
+                    deadline=deadline,
+                )
+                state = LeaseState(lease=lease)
+                with self._leases_lock:
+                    self._active_leases[lease.lease_id] = state
+
                 with self._stats_lock:
                     self._queue_depth = max(0, self._queue_depth - 1)
-                continue
+                    self._in_flight += 1
+                    for g in assigned:
+                        self._busy_start[g] = now
 
-            with self._cond:
-                while len(self._free) < job.num_gpus:
-                    if self._closed:
-                        fut.cancel()
+                env_overrides = self._build_env_overrides(assigned)
+
+                worker_fut = self._executor.submit(
+                    self._run_job, job, lease, state, env_overrides, fut,
+                )
+                if self._registry is not None:
+                    try:
+                        with self._registry.lock:
+                            self._registry.register_future(worker_fut)
+                    except Exception:
+                        logger.debug("Failed to register worker future with registry", exc_info=True)
+        finally:
+            # B9 fix: drain remaining jobs on ANY exit path
+            while True:
+                try:
+                    item = self._job_queue.get_nowait()
+                    if item is not None:
+                        item[1].cancel()
                         with self._stats_lock:
                             self._queue_depth = max(0, self._queue_depth - 1)
-                        return
-                    self._cond.wait(timeout=1.0)
-
-                assigned = []
-                for _ in range(job.num_gpus):
-                    assigned.append(self._free.pop())
-
-            now = time.monotonic()
-            with self._stats_lock:
-                self._queue_depth = max(0, self._queue_depth - 1)
-                self._in_flight += 1
-                for g in assigned:
-                    self._busy_start[g] = now
-
-            env_overrides = self._build_env_overrides(assigned)
-
-            worker_fut = self._executor.submit(self._run_job, job, assigned, env_overrides, fut)
-            if self._registry is not None:
-                try:
-                    with self._registry.lock:
-                        self._registry.register_future(worker_fut)
-                except Exception:
-                    logger.debug("Failed to register worker future with registry", exc_info=True)
+                except queue.Empty:
+                    break
 
     def _run_job(
         self,
         job: GpuJob,
-        assigned: list[int],
+        lease: GpuLease,
+        state: LeaseState,
         env_overrides: dict[str, str],
         fut: Future,
     ) -> None:
+        reason = "completed"
         try:
-            result = job.fn(assigned, env_overrides)
-            fut.set_result(result)
+            if fut.cancelled():
+                logger.info("Job %s: cancelled before execution, skipping", job.label)
+                reason = "cancelled"
+                return
+            result = job.fn(list(lease.gpu_ids), env_overrides)
+            try:
+                fut.set_result(result)
+            except InvalidStateError:
+                logger.warning("Job %s: future already cancelled, discarding result", job.label)
+                reason = "cancelled"
         except Exception as exc:
-            fut.set_exception(exc)
+            reason = "failed"
+            try:
+                fut.set_exception(exc)
+            except InvalidStateError:
+                logger.warning("Job %s: future already cancelled, discarding exception", job.label)
+                reason = "cancelled"
         finally:
-            self._release_gpus(assigned)
+            self._release_lease(lease.lease_id, reason=reason)
 
+    def _release_lease(self, lease_id: str, reason: str) -> None:
+        with self._leases_lock:
+            state = self._active_leases.get(lease_id)
+            if state is None or state.released:
+                logger.warning("Lease %s: already released or unknown, skipping", lease_id)
+                return
+            state.released = True
+            state.released_at = time.monotonic()
+            state.release_reason = reason
+            gpus = list(state.lease.gpu_ids)
+
+        now = time.monotonic()
+        with self._stats_lock:
+            self._in_flight = max(0, self._in_flight - 1)
+            self._total_completed += 1
+            for g in gpus:
+                if g in self._busy_start:
+                    self._busy_total[g] += now - self._busy_start.pop(g)
+
+        with self._cond:
+            self._free.update(gpus)
+            self._cond.notify_all()
+
+    # kept for backward compat with tests that call it directly
     def _release_gpus(self, gpus: list[int]) -> None:
         now = time.monotonic()
         with self._stats_lock:
@@ -223,6 +353,89 @@ class GPUManager:
         with self._cond:
             self._free.update(gpus)
             self._cond.notify_all()
+
+    # ------------------------------------------------------------------
+    # Lease reaper
+    # ------------------------------------------------------------------
+
+    def _reaper_loop(self) -> None:
+        while not self._closed:
+            time.sleep(self._reaper_interval_s)
+            if self._closed:
+                return
+            now = time.monotonic()
+
+            with self._leases_lock:
+                expired = [
+                    (lid, s) for lid, s in self._active_leases.items()
+                    if not s.released and s.lease.deadline is not None and now > s.lease.deadline
+                ]
+
+            for lease_id, state in expired:
+                logger.warning(
+                    "Lease %s expired (job: %s, ran %.0fs, limit was %.0fs). "
+                    "Killing subprocess and releasing GPUs %s.",
+                    lease_id,
+                    state.lease.job_label,
+                    now - state.lease.acquired_at,
+                    state.lease.deadline - state.lease.acquired_at,
+                    list(state.lease.gpu_ids),
+                )
+                self._kill_lease_subprocess(state)
+                self._release_lease(lease_id, reason="reaped")
+
+            # Prune old completed leases to bound memory
+            with self._leases_lock:
+                cutoff = time.monotonic() - 300
+                self._active_leases = {
+                    k: v for k, v in self._active_leases.items()
+                    if not v.released or (v.released_at is not None and v.released_at > cutoff)
+                }
+
+    def _reaper_loop_once_for_test(self) -> None:
+        """Run a single reaper iteration (for testing)."""
+        now = time.monotonic()
+        with self._leases_lock:
+            expired = [
+                (lid, s) for lid, s in self._active_leases.items()
+                if not s.released and s.lease.deadline is not None and now > s.lease.deadline
+            ]
+        for lease_id, state in expired:
+            self._kill_lease_subprocess(state)
+            self._release_lease(lease_id, reason="reaped")
+        with self._leases_lock:
+            cutoff = time.monotonic() - 300
+            self._active_leases = {
+                k: v for k, v in self._active_leases.items()
+                if not v.released or (v.released_at is not None and v.released_at > cutoff)
+            }
+
+    def _kill_lease_subprocess(self, state: LeaseState) -> None:
+        if state.popen_pid is None:
+            return
+        try:
+            pgid = os.getpgid(state.popen_pid)
+        except (ProcessLookupError, OSError):
+            return
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            return
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(state.popen_pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.2)
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _build_env_overrides(assigned: list[int]) -> dict[str, str]:

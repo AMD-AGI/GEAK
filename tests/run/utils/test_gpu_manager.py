@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from minisweagent.run.utils.gpu_manager import GpuJob, GPUManager
+from minisweagent.run.utils.gpu_manager import GpuJob, GpuLease, GPUManager, LeaseState
 
 
 @pytest.fixture
 def manager_2gpu():
-    mgr = GPUManager([0, 1], stats_log_interval_s=0)
+    mgr = GPUManager([0, 1], stats_log_interval_s=0, reaper_interval_s=0)
     yield mgr
     mgr.shutdown()
 
 
 @pytest.fixture
 def manager_4gpu():
-    mgr = GPUManager([0, 1, 2, 3], stats_log_interval_s=0)
+    mgr = GPUManager([0, 1, 2, 3], stats_log_interval_s=0, reaper_interval_s=0)
     yield mgr
     mgr.shutdown()
 
@@ -192,3 +193,196 @@ class TestEmptyOrInvalid:
     def test_empty_gpu_ids_raises(self):
         with pytest.raises(ValueError, match="non-empty"):
             GPUManager([])
+
+
+class TestCancelledFuture:
+    """B1: _run_job skips execution when future is already cancelled."""
+
+    def test_cancelled_future_skips_job_fn(self):
+        mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+        executed = threading.Event()
+
+        def _fn(gpus, env):
+            executed.set()
+            return "ran"
+
+        blocker = threading.Event()
+        mgr.submit(GpuJob(fn=lambda g, e: blocker.wait(timeout=5), label="blocker"))
+        time.sleep(0.05)
+
+        fut = mgr.submit(GpuJob(fn=_fn, label="to-cancel"))
+        time.sleep(0.05)
+        fut.cancel()
+        blocker.set()
+        time.sleep(0.3)
+
+        assert not executed.is_set(), "Job ran despite future being cancelled"
+        mgr.shutdown()
+
+
+class TestDispatcherDrain:
+    """B9: dispatcher drains remaining jobs on every exit path."""
+
+    def test_closed_return_drains_queue(self):
+        mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+        blocker = threading.Event()
+
+        mgr.submit(GpuJob(fn=lambda g, e: blocker.wait(timeout=5), label="blocker"))
+        time.sleep(0.05)
+
+        pending_futs = [
+            mgr.submit(GpuJob(fn=lambda g, e: "should-not-run", label=f"p{i}"))
+            for i in range(3)
+        ]
+
+        blocker.set()
+        mgr.shutdown(cancel_pending=True)
+
+        for fut in pending_futs:
+            assert fut.cancelled() or fut.done()
+
+
+class TestSplitTimeout:
+    """B2: queue_timeout is used for Future.result(), timeout sets lease deadline."""
+
+    def test_queue_timeout_none_waits_forever(self):
+        mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+        blocker = threading.Event()
+
+        mgr.submit(GpuJob(fn=lambda g, e: blocker.wait(timeout=5), label="blocker"))
+        time.sleep(0.05)
+
+        result_holder = []
+
+        def _run_in_thread():
+            try:
+                r = mgr.run(GpuJob(
+                    fn=lambda g, e: "queued-result",
+                    timeout=5.0,
+                    queue_timeout=None,
+                    label="waiter",
+                ))
+                result_holder.append(r)
+            except Exception as exc:
+                result_holder.append(exc)
+
+        t = threading.Thread(target=_run_in_thread)
+        t.start()
+        time.sleep(0.2)
+        blocker.set()
+        t.join(timeout=10)
+        mgr.shutdown()
+
+        assert result_holder and result_holder[0] == "queued-result"
+
+    def test_execution_timeout_sets_lease_deadline(self):
+        mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+        mgr.run(GpuJob(fn=lambda g, e: "ok", timeout=60.0, label="with-deadline"))
+
+        with mgr._leases_lock:
+            leases = list(mgr._active_leases.values())
+        assert len(leases) == 1
+        assert leases[0].lease.deadline is not None
+        assert leases[0].release_reason == "completed"
+        mgr.shutdown()
+
+
+class TestLeaseRelease:
+    """B3: double release is detected and rejected."""
+
+    def test_double_release_rejected(self):
+        mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+        mgr.run(GpuJob(fn=lambda g, e: "ok", label="lease-test"))
+
+        with mgr._leases_lock:
+            lease_id = list(mgr._active_leases.keys())[0]
+
+        stats_before = mgr.stats
+        mgr._release_lease(lease_id, reason="spurious")
+        stats_after = mgr.stats
+
+        assert stats_before["total_jobs_completed"] == stats_after["total_jobs_completed"]
+        assert stats_before["in_flight"] == stats_after["in_flight"]
+        mgr.shutdown()
+
+
+class TestLeaseReaper:
+    """B2/B8: reaper releases GPUs from expired leases."""
+
+    def test_reaper_releases_expired_lease(self):
+        mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=1)
+        started = threading.Event()
+
+        def _slow(gpus, env):
+            started.set()
+            time.sleep(30)
+            return "should-be-reaped"
+
+        fut = mgr.submit(GpuJob(fn=_slow, timeout=0.5, label="slow-job"))
+        started.wait(timeout=5)
+        time.sleep(3)
+
+        assert 0 in mgr._free, "GPU should be returned to pool after reaping"
+        mgr.shutdown()
+
+    def test_lease_cleanup_removes_old_entries(self):
+        mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+
+        for i in range(5):
+            mgr.run(GpuJob(fn=lambda g, e: "ok", label=f"j{i}"))
+
+        with mgr._leases_lock:
+            assert len(mgr._active_leases) == 5
+            for s in mgr._active_leases.values():
+                s.released_at = time.monotonic() - 400
+
+        mgr._reaper_loop_once_for_test()
+
+        with mgr._leases_lock:
+            assert len(mgr._active_leases) == 0
+        mgr.shutdown()
+
+
+class TestCPUPressureGate:
+    """B7: dispatcher waits when CPU load is high."""
+
+    def test_high_cpu_load_delays_dispatch(self):
+        import types
+        import minisweagent.run.utils.gpu_manager as gm_mod
+
+        call_count = 0
+        real_os = gm_mod.os
+
+        def mock_getloadavg():
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                return (9999.0, 9999.0, 9999.0)
+            return (0.1, 0.1, 0.1)
+
+        fake_os = types.SimpleNamespace(
+            getloadavg=mock_getloadavg,
+            cpu_count=os.cpu_count,
+            getpgid=os.getpgid,
+            kill=os.kill,
+            killpg=os.killpg,
+        )
+        gm_mod.os = fake_os
+        try:
+            mgr = GPUManager(
+                [0], stats_log_interval_s=0, reaper_interval_s=0,
+                cpu_pressure_threshold=1.0,
+            )
+            result = mgr.run(GpuJob(fn=lambda g, e: "dispatched", label="cpu-gate"))
+            assert result == "dispatched"
+            assert call_count >= 3
+            mgr.shutdown()
+        finally:
+            gm_mod.os = real_os
+
+    def test_getloadavg_oserror_skipped(self):
+        with patch("minisweagent.run.utils.gpu_manager.os.getloadavg", side_effect=OSError):
+            mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+            result = mgr.run(GpuJob(fn=lambda g, e: "ok", label="no-loadavg"))
+            assert result == "ok"
+            mgr.shutdown()
