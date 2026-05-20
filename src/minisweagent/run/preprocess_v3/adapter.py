@@ -335,6 +335,34 @@ def _resolve_kernel_and_repo(
         candidate = Path(repo).expanduser().resolve() / kernel_path_obj
         if candidate.is_file():
             kernel_path_obj = candidate
+        elif candidate.suffix == "":
+            # LLM extractors (parse_task_info) sometimes drop the extension
+            # ("silu" instead of "silu.hip"). When the bare-name candidate
+            # doesn't resolve, probe each known kernel-type extension under
+            # the repo and promote if exactly one matches.
+            from minisweagent.run.utils.task_parser import _KERNEL_TYPE_TO_EXT
+
+            ext_candidates: set[str] = {
+                ext for exts in _KERNEL_TYPE_TO_EXT.values() for ext in exts
+            }
+            matches = [
+                candidate.with_suffix(ext)
+                for ext in ext_candidates
+                if candidate.with_suffix(ext).is_file()
+            ]
+            if len(matches) == 1:
+                kernel_path_obj = matches[0]
+                logger.info(
+                    "_resolve_kernel_and_repo: bare-name kernel_url %r promoted to %s by extension probe",
+                    kernel_url,
+                    kernel_path_obj,
+                )
+            elif len(matches) > 1:
+                logger.warning(
+                    "_resolve_kernel_and_repo: bare-name kernel_url %r matched multiple files (%s); refusing to guess",
+                    kernel_url,
+                    [str(m.name) for m in matches],
+                )
     if kernel_path_obj.is_file():
         repo_root = str(Path(repo).expanduser().resolve()) if repo is not None else _infer_repo_root(kernel_path_obj)
         return kernel_path_obj.resolve(), repo_root
