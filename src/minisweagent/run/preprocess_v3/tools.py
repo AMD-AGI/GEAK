@@ -70,6 +70,13 @@ from minisweagent.run.preprocess_v3.commandment import (
     render_commandment,
     render_commandment_from_sections,
 )
+from minisweagent.run.section_builders import (
+    build_benchmark_body,
+    build_correctness_body,
+    build_full_benchmark_body,
+    build_profile_body,
+    strip_mode_flags,
+)
 from minisweagent.run.preprocess_v3.discovery import DiscoveryContext, run_legacy_discovery
 from minisweagent.run.preprocess_v3.explore import CodebaseContext, explore_codebase
 from minisweagent.run.preprocess_v3.harness_kb import load_harness_kb
@@ -106,45 +113,6 @@ _MODE_TO_FLAG: dict[str, str] = {
     "benchmark": "--benchmark",
     "full_benchmark": "--full-benchmark",
 }
-
-
-def _substitute_mode_flag(cmd: str, target_mode: str) -> str:
-    """Ensure *cmd* contains *target_mode*'s harness flag.
-
-    Three cases:
-    1. *cmd* already has the right flag → return unchanged.
-    2. *cmd* has a different known flag → replace it.
-    3. *cmd* has no known flag at all → return unchanged (safe fallback).
-    """
-    dst_flag = _MODE_TO_FLAG.get(target_mode)
-    if not dst_flag:
-        return cmd
-    if dst_flag in cmd:
-        return cmd
-    for other_mode, other_flag in _MODE_TO_FLAG.items():
-        if other_mode != target_mode and other_flag in cmd:
-            return cmd.replace(other_flag, dst_flag)
-    return cmd
-
-
-_DEFAULT_PROFILE_REPLAYS = 5
-
-
-def _build_profile_section(profile_cmd: str) -> str:
-    """Wrap a ``--profile`` harness invocation with warmup + ``kernel-profile``.
-
-    Matches the PROFILE section that Path B's ``render_commandment`` produces:
-    one warmup pass (suppressed stdout), then ``kernel-profile`` wrapping the
-    same command to capture hardware counters and write ``profile.json``.
-    """
-    warmup = f"{profile_cmd} > /dev/null 2>&1 || true"
-    kernel_profile = (
-        f'kernel-profile "{profile_cmd}"'
-        f" --gpu-devices ${{GEAK_GPU_DEVICE}}"
-        f" --replays {_DEFAULT_PROFILE_REPLAYS}"
-        f" --json -o ${{GEAK_WORK_DIR}}/profile.json"
-    )
-    return f"{warmup}\n{kernel_profile}"
 
 
 def _extract_harness_from_command(cmd: str) -> str | None:
@@ -1472,25 +1440,31 @@ def _make_tool_commandment_from_user_command(
         warnings: list[str] = []
         modes_emitted: list[str] = []
 
-        # Invoke through run.sh so every Path-A section uses the same
-        # PYTHONPATH/HIP_VISIBLE_DEVICES/worktree contract as legacy
-        # COMMANDMENT generation while still supporting compound shell
-        # commands such as "compile && correctness && performance".
-        wrapped_cmd = f"${{GEAK_WORK_DIR}}/run.sh {shlex.quote(cmd)}"
+        harness_from_cmd = _extract_harness_from_command(cmd)
+        use_run_sh = harness_from_cmd is not None
+
+        if use_run_sh:
+            base_cmd = f"${{GEAK_WORK_DIR}}/run.sh {harness_from_cmd}"
+        elif cmd.startswith("cd ${GEAK_WORK_DIR}"):
+            base_cmd = strip_mode_flags(cmd)
+        else:
+            base_cmd = strip_mode_flags(f"cd ${{GEAK_WORK_DIR}} && {cmd}")
+
+        section_builders: dict[str, Callable[[str], str]] = {
+            "correctness": build_correctness_body,
+            "profile": build_profile_body,
+            "benchmark": build_benchmark_body,
+            "full_benchmark": build_full_benchmark_body,
+        }
         for mode in PATH_A_MODES:
+            body = section_builders[mode](base_cmd)
             if mode in modes_covered_tup:
-                mode_cmd = _substitute_mode_flag(wrapped_cmd, mode)
-                if mode == "profile":
-                    mode_cmd = _build_profile_section(mode_cmd)
-                sections[mode] = mode_cmd
+                sections[mode] = body
                 modes_emitted.append(mode)
             elif mode in inferred_modes_tup:
                 src = source_mode or "<unspecified>"
-                inferred_cmd = _substitute_mode_flag(wrapped_cmd, mode)
-                if mode == "profile":
-                    inferred_cmd = _build_profile_section(inferred_cmd)
                 marker_line = f"# PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}"
-                sections[mode] = f"{marker_line}\n{inferred_cmd}"
+                sections[mode] = f"{marker_line}\n{body}"
                 warnings.append(f"PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}")
                 modes_emitted.append(mode)
             else:

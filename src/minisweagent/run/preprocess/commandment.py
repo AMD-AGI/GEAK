@@ -48,6 +48,13 @@ from minisweagent.run.preprocess.validate_commandment import (
     format_validation_message,
     validate_commandment,
 )
+from minisweagent.run.section_builders import (
+    build_benchmark_body,
+    build_correctness_body,
+    build_full_benchmark_body,
+    build_profile_body,
+    warmup_block,
+)
 
 _MAX_FIX_RETRIES = 3
 
@@ -127,19 +134,6 @@ def generate_commandment(
     return _validate_and_fix(content, harness_path=str(harness_path))
 
 
-def _warmup_block(command: str, warmup_runs: int) -> str:
-    """Build the warmup section for the PROFILE block.
-
-    Returns a single command for 1 run, or a bash for-loop for multiple runs
-    (avoids emitting duplicate identical lines).
-    """
-    if warmup_runs <= 0:
-        return ""
-    if warmup_runs == 1:
-        return command
-    return f"for _i in $(seq 1 {warmup_runs}); do {command}; done"
-
-
 def _detect_build_command(repo_root: Path) -> str:
     """Return the appropriate build command for a C++ repo."""
     if (repo_root / "setup.py").exists() or (repo_root / "pyproject.toml").exists():
@@ -169,10 +163,7 @@ def _generate_simple(
       * ``GEAK_GPU_DEVICE`` -- GPU device ID
     """
     harness_abs = str(harness_path.resolve())
-    warmup_block = _warmup_block(
-        f"${{GEAK_WORK_DIR}}/run.sh {harness_abs} --profile > /dev/null 2>&1 || true",
-        warmup_runs,
-    )
+    base_cmd = f"${{GEAK_WORK_DIR}}/run.sh {harness_abs}"
 
     if kernel_language in ("cpp", "hip"):
         build_cmd = _detect_build_command(repo_root)
@@ -199,17 +190,16 @@ def _generate_simple(
 {setup_section}
 
 ## CORRECTNESS
-${{GEAK_WORK_DIR}}/run.sh {harness_abs} --correctness
+{build_correctness_body(base_cmd)}
 
 ## PROFILE
-{warmup_block}
-kernel-profile "${{GEAK_WORK_DIR}}/run.sh {harness_abs} --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json
+{build_profile_body(base_cmd, warmup_runs=warmup_runs, profile_replays=profile_replays)}
 
 ## BENCHMARK
-${{GEAK_WORK_DIR}}/run.sh {harness_abs} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+{build_benchmark_body(base_cmd)}
 
 ## FULL_BENCHMARK
-${{GEAK_WORK_DIR}}/run.sh {harness_abs} --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+{build_full_benchmark_body(base_cmd)}
 """
 
 
@@ -244,11 +234,6 @@ def _generate_inner_kernel(
     # Copy candidate to the correct import path
     copy_cmd = f"cp ${{GEAK_WORK_DIR}}/{kernel_path.name} ${{GEAK_WORK_DIR}}/{rel_dir}/{basename}"
 
-    warmup_block = _warmup_block(
-        "${GEAK_WORK_DIR}/run_harness.sh --profile > /dev/null 2>&1 || true",  # harness path is baked into run_harness.sh
-        warmup_runs,
-    )
-
     setup_lines = [
         f"mkdir -p {mkdir_path}",
         copy_cmd,
@@ -265,23 +250,23 @@ def _generate_inner_kernel(
     )
 
     setup_block = "\n".join(setup_lines)
+    base_cmd = "${GEAK_WORK_DIR}/run_harness.sh"
 
     return f"""\
 ## SETUP
 {setup_block}
 
 ## CORRECTNESS
-${{GEAK_WORK_DIR}}/run_harness.sh --correctness
+{build_correctness_body(base_cmd)}
 
 ## PROFILE
-{warmup_block}
-kernel-profile "${{GEAK_WORK_DIR}}/run_harness.sh --profile" --gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays} --json -o ${{GEAK_WORK_DIR}}/profile.json
+{build_profile_body(base_cmd, warmup_runs=warmup_runs, profile_replays=profile_replays)}
 
 ## BENCHMARK
-${{GEAK_WORK_DIR}}/run_harness.sh --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+{build_benchmark_body(base_cmd)}
 
 ## FULL_BENCHMARK
-${{GEAK_WORK_DIR}}/run_harness.sh --full-benchmark ${{GEAK_BENCHMARK_EXTRA_ARGS:-}}
+{build_full_benchmark_body(base_cmd)}
 """
 
 
@@ -399,12 +384,12 @@ def generate_commandment_from_commands(
 
     # PROFILE: use correctness command for profiling if no separate profile command
     profile_target = correctness_cmd or performance_cmd or "echo 'no profile target'"
-    warmup_block = _warmup_block(
+    warmup_blk = warmup_block(
         f"cd ${{GEAK_WORK_DIR}} && {profile_target} > /dev/null 2>&1 || true",
         warmup_runs,
     )
     profile_section = (
-        f"{warmup_block}\n"
+        f"{warmup_blk}\n"
         f'kernel-profile "cd ${{GEAK_WORK_DIR}} && {profile_target}" '
         f"--gpu-devices ${{GEAK_GPU_DEVICE}} --replays {profile_replays} "
         f"--json -o ${{GEAK_WORK_DIR}}/profile.json"
