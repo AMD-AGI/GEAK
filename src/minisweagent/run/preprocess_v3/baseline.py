@@ -186,14 +186,41 @@ def _build_env(
     return env
 
 
-def _benchmark_command(harness_path: Path) -> list[str]:
-    """Build the harness ``--benchmark`` argv (interpreter + path + flag).
+def _benchmark_command(harness_path: Path, flag: str = "--benchmark") -> list[str]:
+    """Build the harness benchmark argv (interpreter + path + flag).
 
     Wraps with ``bash -lc`` so login-shell profile fragments are
     sourced — matches ``run/preprocess/run_harness._run_single``.
     """
-    inner = " ".join(shlex.quote(c) for c in [sys.executable, str(harness_path), "--benchmark"])
+    inner = " ".join(shlex.quote(c) for c in [sys.executable, str(harness_path), flag])
     return ["bash", "-lc", inner]
+
+
+def capture_full_benchmark_stdout(
+    harness_path: Path,
+    *,
+    work_dir: Path | None = None,
+    gpu_id: int = 0,
+) -> str | None:
+    """Run the harness once in ``--full-benchmark`` mode and return stdout.
+
+    Reuses :func:`_run_benchmark_once` with a ``--full-benchmark`` flag.
+    Returns ``None`` on failure (non-zero exit, timeout, or empty output).
+    """
+    harness_path = Path(harness_path)
+    if not harness_path.is_file():
+        return None
+    result = _run_benchmark_once(
+        harness_path,
+        work_dir=work_dir,
+        gpu_id=gpu_id,
+        timeout_s=_BENCHMARK_TIMEOUT_S,
+        flag="--full-benchmark",
+    )
+    stdout = (result.get("stdout") or "").strip()
+    if result["returncode"] != 0 or not stdout:
+        return None
+    return stdout
 
 
 def _profile_command(harness_path: Path) -> str:
@@ -213,8 +240,9 @@ def _run_benchmark_once(
     work_dir: Path | None,
     gpu_id: int,
     timeout_s: int,
+    flag: str = "--benchmark",
 ) -> dict[str, Any]:
-    """Run the harness in ``--benchmark`` mode once and capture output.
+    """Run the harness once in the given benchmark mode and capture output.
 
     Returns:
         ``{returncode, stdout, stderr, duration_s, latency_ms}`` —
@@ -225,7 +253,7 @@ def _run_benchmark_once(
     """
     import time as _time
 
-    cmd = _benchmark_command(harness_path)
+    cmd = _benchmark_command(harness_path, flag=flag)
     env = _build_env(work_dir, gpu_id=gpu_id)
     cwd = str(work_dir) if work_dir is not None else None
 

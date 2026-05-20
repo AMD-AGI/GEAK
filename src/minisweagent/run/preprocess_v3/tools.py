@@ -1042,13 +1042,26 @@ def _make_tool_collect_baseline(
         # otherwise abort the whole baseline step.
         if _extra_ignored:
             logger.debug("collect_baseline ignored extra kwargs: %s", list(_extra_ignored))
+        resolved_gpu = gpu_id if gpu_id is not None else agent.config.gpu_id
+        resolved_work_dir = Path(work_dir) if work_dir else None
         baseline: BaselineMetrics = collect_baseline_metrics(
             Path(harness_path),
             repeats=repeats,
-            work_dir=Path(work_dir) if work_dir else None,
-            gpu_id=gpu_id if gpu_id is not None else agent.config.gpu_id,
+            work_dir=resolved_work_dir,
+            gpu_id=resolved_gpu,
         )
         agent._collected["baseline"] = baseline
+
+        from minisweagent.run.preprocess_v3.baseline import capture_full_benchmark_stdout
+
+        fb_stdout = capture_full_benchmark_stdout(
+            Path(harness_path),
+            work_dir=resolved_work_dir,
+            gpu_id=resolved_gpu,
+        )
+        if fb_stdout:
+            agent._collected["full_benchmark_stdout"] = fb_stdout
+
         return {
             "ok": baseline.success,
             "median_ms": baseline.median_ms,
@@ -1193,6 +1206,12 @@ def _make_tool_commandment_from_user_command(
             )
 
         cmd = run_command.strip()
+        # Extract the harness path from the original command (before
+        # ${GEAK_WORK_DIR} substitution) so collect_baseline/collect_profile
+        # can use the real filesystem path.
+        original_harness_path = _extract_harness_from_command(cmd)
+        if original_harness_path:
+            agent._collected["harness_path"] = original_harness_path
         # Rewrite hardcoded repo-root paths to ${GEAK_WORK_DIR} so the
         # COMMANDMENT references the agent's worktree at runtime.
         # Use the orchestrator's config.repo (available at preprocess time)
@@ -1263,6 +1282,7 @@ def _make_tool_commandment_from_user_command(
         return {
             "ok": True,
             "commandment_path": str(out_path_obj),
+            "harness_path": original_harness_path,
             "modes_emitted": modes_emitted,
             "warnings": warnings,
             "text_length": len(text),
@@ -1379,6 +1399,22 @@ def _make_tool_finish_preprocess(
     return _impl
 
 
+def _path_a_deterministic_blockers(
+    agent: PreprocessOrchestratorAgent,
+    harness_path: str,
+) -> list[str]:
+    """Check whether Path A still needs to call collect_baseline / collect_profile."""
+    blockers: list[str] = []
+    for tool_name in ("collect_baseline", "collect_profile"):
+        attempted = any(tc.get("name") == tool_name for tc in agent._tool_calls)
+        if agent._collected.get(tool_name.split("_", 1)[1]) is None and not attempted:
+            blockers.append(
+                f"Path A has harness_path but {tool_name} was not called. "
+                f"Call {tool_name}(harness_path='{harness_path}') before finishing."
+            )
+    return blockers
+
+
 def _finish_blockers(
     *,
     agent: PreprocessOrchestratorAgent,
@@ -1388,7 +1424,8 @@ def _finish_blockers(
     """Return final-state blockers that should keep the LLM iterating.
 
     ``finish_preprocess`` is a completion sentinel, not a validation bypass.
-    Path A is allowed to finish once the user-command COMMANDMENT exists.
+    Path A is allowed to finish once the user-command COMMANDMENT exists
+    and baseline/profile have been attempted (when a harness is available).
     Path B must have the generated harness verified and all deterministic
     artifacts collected successfully before the sentinel can terminate the
     orchestrator loop.
@@ -1398,6 +1435,9 @@ def _finish_blockers(
     if on_path_a:
         if not payload.get("commandment_path"):
             blockers.append("Path A missing commandment_path")
+        harness_path = agent._collected.get("harness_path")
+        if harness_path:
+            blockers.extend(_path_a_deterministic_blockers(agent, str(harness_path)))
         return blockers
 
     if payload.get("errors"):

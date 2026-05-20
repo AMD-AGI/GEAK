@@ -117,9 +117,11 @@ Before any other action, read the task prompt and classify it into exactly ONE o
 **Case A — user provided explicit run instructions / commands.**
 Indicators: a literal command-line invocation (``python <script>``, ``pytest ... -k ...``, ``make ...``, shell script, existing custom harness command). The command is opaque: it may NOT support GEAK's four harness flags.
 
-Action: run ``run_discovery`` because it is the standard cheap deterministic front step, then call ``commandment_from_user_command`` with the extracted user command and finish. Discovery/ATD is IRRELEVANT for this case: do not inspect it to alter the user command, and do not generate a harness.
+Action: run ``run_discovery`` because it is the standard cheap deterministic front step, then call ``commandment_from_user_command`` with the extracted user command. Discovery/ATD is IRRELEVANT for this case: do not inspect it to alter the user command, and do not generate a harness.
 
 **Important exception**: if the "Hints from the call site" section says the harness is **pre-validated** and supports the four standard modes (``--correctness``, ``--benchmark``, ``--full-benchmark``, ``--profile``), you MUST list all four modes in ``modes_covered`` when calling ``commandment_from_user_command``. The tool will substitute the correct flag for each COMMANDMENT section automatically. Do NOT put all modes in ``inferred_modes`` — use ``modes_covered``.
+
+**After ``commandment_from_user_command`` succeeds**: if the return value includes a ``harness_path`` (i.e. the command references a standard harness file), call ``collect_baseline(harness_path=<path>)`` and ``collect_profile(harness_path=<path>)`` before calling ``finish_preprocess``. These are fast deterministic subprocess calls (~30-60s total) and their output is required for downstream verified-speedup evaluation. If either call fails, proceed anyway — record the failure and call ``finish_preprocess``.
 
 **Case B — user provided explicit shapes/configs but no runnable command.**
 Indicators: the task names exact shapes, dims, dtype/config tuples, model-production configs, or says "use only this shape/config". The user's shapes/configs are authoritative.
@@ -206,8 +208,8 @@ After ``finish_preprocess`` returns, the orchestrator loop terminates.
 2. ``codebase_explore`` — deterministic legacy codebase context only; compatibility fallback if ``run_discovery`` fails before writing context.
 3. ``translate_to_flydsl`` — deterministic; step 2 (conditional, Path B only).
 4. ``dispatch_subagent`` — LLM dispatch. ``name`` argument must be ``harness-generator`` or ``harness-verifier``. Path B steps 3a and 3b only.
-5. ``collect_baseline`` — deterministic; Path B step 4.
-6. ``collect_profile`` — deterministic; Path B step 4.
+5. ``collect_baseline`` — deterministic; step 4 (Path A when harness is available, and Path B).
+6. ``collect_profile`` — deterministic; step 4 (Path A when harness is available, and Path B).
 7. ``render_commandment`` — deterministic; Path B step 5.
 8. ``commandment_from_user_command`` — Path A short-circuit. Mutually exclusive with ``dispatch_subagent("harness-generator", ...)``.
 9. ``finish_preprocess`` — completion sentinel; terminates the loop only when final invariants pass.
@@ -372,6 +374,7 @@ class PreprocessResult:
     kernel_path: Path
     harness_path: Path | None = None
     baseline: BaselineMetrics | None = None
+    full_benchmark_stdout: str | None = None
     profile: ProfileResult | None = None
     codebase_context: CodebaseContext | None = None
     commandment_path: Path | None = None
@@ -741,6 +744,7 @@ class PreprocessOrchestratorAgent:
             kernel_path=translated_path or kernel_path,
             harness_path=harness_path,
             baseline=baseline,
+            full_benchmark_stdout=collected.get("full_benchmark_stdout"),
             profile=collected.get("profile"),
             codebase_context=collected.get("codebase_context"),
             commandment_path=commandment_path,

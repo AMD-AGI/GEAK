@@ -479,6 +479,20 @@ def _preprocess_result_to_legacy_context(
         target.write_text(json.dumps(baseline_metrics, indent=2, default=str), encoding="utf-8")
         baseline_metrics_path = str(target)
 
+    benchmark_baseline_path: str | None = None
+    full_benchmark_baseline_path: str | None = None
+    if result.baseline is not None and result.baseline.success:
+        representative_stdout = _pick_representative_stdout(result.baseline)
+        if representative_stdout:
+            bb = output_dir / "benchmark_baseline.txt"
+            bb.write_text(representative_stdout, encoding="utf-8")
+            benchmark_baseline_path = str(bb)
+        full_bench_stdout = result.full_benchmark_stdout or representative_stdout
+        if full_bench_stdout:
+            fbb = output_dir / "full_benchmark_baseline.txt"
+            fbb.write_text(full_bench_stdout, encoding="utf-8")
+            full_benchmark_baseline_path = str(fbb)
+
     commandment_text: str | None = None
     commandment_path_str: str | None = None
     if result.commandment_path is not None:
@@ -503,7 +517,6 @@ def _preprocess_result_to_legacy_context(
         test_command=test_command,
         repo_root=repo_root,
     )
-    benchmark_baseline = _write_benchmark_baseline(result, output_dir)
 
     profiling = None
     if result.profile is not None:
@@ -542,8 +555,8 @@ def _preprocess_result_to_legacy_context(
         "profiling": profiling,
         "baseline_metrics": baseline_metrics or None,
         "baseline_metrics_path": baseline_metrics_path,
-        "benchmark_baseline": benchmark_baseline,
-        "full_benchmark_baseline": benchmark_baseline,
+        "benchmark_baseline": benchmark_baseline_path,
+        "full_benchmark_baseline": full_benchmark_baseline_path,
         "correctness": None,
         "commandment": commandment_text,
         "commandment_path": commandment_path_str,
@@ -558,6 +571,24 @@ def _preprocess_result_to_legacy_context(
         legacy_ctx["v3_translation"] = asdict(result.translation)
 
     return legacy_ctx
+
+
+def _pick_representative_stdout(baseline: Any) -> str | None:
+    """Return stdout from the baseline run whose latency is closest to the median."""
+    if not baseline.raw_outputs or baseline.median_ms is None:
+        return None
+    best_output: str | None = None
+    best_distance = float("inf")
+    for run in baseline.raw_outputs:
+        lat = run.get("latency_ms")
+        stdout = run.get("stdout") or ""
+        if lat is None or not stdout.strip():
+            continue
+        distance = abs(lat - baseline.median_ms)
+        if distance < best_distance:
+            best_distance = distance
+            best_output = stdout
+    return best_output
 
 
 def _project_baseline(result: PreprocessResult) -> dict[str, Any]:
