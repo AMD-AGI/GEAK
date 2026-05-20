@@ -100,6 +100,57 @@ ALLOWED_SUBAGENT_NAMES: tuple[str, ...] = (
 #: ``COMMANDMENT.md``.
 PATH_A_MODES: tuple[str, ...] = ("correctness", "profile", "benchmark", "full_benchmark")
 
+_MODE_TO_FLAG: dict[str, str] = {
+    "correctness": "--correctness",
+    "profile": "--profile",
+    "benchmark": "--benchmark",
+    "full_benchmark": "--full-benchmark",
+}
+
+
+def _substitute_mode_flag(cmd: str, target_mode: str) -> str:
+    """Replace any known harness mode flag in *cmd* with *target_mode*'s flag.
+
+    Ensures that when the Benchmark section's command still contains
+    ``--correctness`` (because the LLM put all modes in ``modes_covered``
+    instead of ``inferred_modes``), the flag is deterministically corrected.
+    Returns *cmd* unchanged when no substitution is possible.
+    """
+    dst_flag = _MODE_TO_FLAG.get(target_mode)
+    if not dst_flag:
+        return cmd
+    if dst_flag in cmd:
+        return cmd
+    for other_mode, other_flag in _MODE_TO_FLAG.items():
+        if other_mode != target_mode and other_flag in cmd:
+            return cmd.replace(other_flag, dst_flag)
+    return cmd
+
+
+def _extract_harness_from_command(cmd: str) -> str | None:
+    """Extract a harness file path from a shell command if it looks like a standard harness.
+
+    Scans for ``python[3] <path>`` and returns the path when the command
+    also contains a known harness flag (``--correctness``, ``--benchmark``,
+    etc.), indicating the file supports the standard four-mode CLI contract.
+    Returns ``None`` when the command is opaque (no flag or no python invocation).
+    """
+    has_harness_flag = any(flag in cmd for flag in _MODE_TO_FLAG.values())
+    if not has_harness_flag:
+        return None
+    import shlex
+
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return None
+    for i, tok in enumerate(tokens):
+        if tok in ("python", "python3") and i + 1 < len(tokens):
+            candidate = tokens[i + 1]
+            if not candidate.startswith("-"):
+                return candidate
+    return None
+
 
 def _copy_repo_sandbox(repo_root: Path, sandbox_root: Path, output_dir: Path) -> None:
     """Copy a non-git repo into a preprocess subagent sandbox."""
@@ -1174,12 +1225,13 @@ def _make_tool_commandment_from_user_command(
         wrapped_cmd = f"${{GEAK_WORK_DIR}}/run.sh {shlex.quote(cmd)}"
         for mode in PATH_A_MODES:
             if mode in modes_covered_tup:
-                sections[mode] = wrapped_cmd
+                sections[mode] = _substitute_mode_flag(wrapped_cmd, mode)
                 modes_emitted.append(mode)
             elif mode in inferred_modes_tup:
                 src = source_mode or "<unspecified>"
+                inferred_cmd = _substitute_mode_flag(wrapped_cmd, mode)
                 marker_line = f"# PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}"
-                sections[mode] = f"{marker_line}\n{wrapped_cmd}"
+                sections[mode] = f"{marker_line}\n{inferred_cmd}"
                 warnings.append(f"PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}")
                 modes_emitted.append(mode)
             else:
@@ -1267,20 +1319,16 @@ def _make_tool_finish_preprocess(
         if _extra_ignored:
             logger.debug("finish_preprocess ignored extra kwargs: %s", list(_extra_ignored))
 
-        # Path-A invariant: on the Path-A short-circuit the orchestrator
-        # did NOT run the harness-generator subagent, so
-        # ``PreprocessResult.harness_path`` must be ``None`` — the user's
-        # command line IS the run instruction, not a harness file we
-        # produced. Some LLM completions still pass the user's test file
-        # path as ``harness_path`` (it superficially looks like a
-        # harness); drop it so the result type stays honest and the
-        # downstream consumer reads the user command from
-        # ``commandment_path`` instead. Path A is detected via
-        # ``run_instructions`` (set ONLY by
-        # ``commandment_from_user_command``).
+        # Path-A: the orchestrator skipped the harness-generator subagent.
+        # If the user's command references a standard harness file (has a
+        # known flag like --correctness), extract and preserve the path so
+        # downstream evaluation can run Metrix profiling. Otherwise clear
+        # harness_path — the command is opaque and the evaluation reads it
+        # from COMMANDMENT.md via commandment_path.
         on_path_a = agent._collected.get("run_instructions") is not None
         if on_path_a:
-            harness_path = None
+            instructions = agent._collected["run_instructions"]
+            harness_path = _extract_harness_from_command(instructions.raw_command)
 
         if harness_path:
             agent._collected["harness_path"] = harness_path
