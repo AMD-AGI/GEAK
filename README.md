@@ -99,19 +99,37 @@ geak --repo /path/to/kernel/repo \
 - `--kernel-url`: required; path to the target kernel file (local path or URL)
 - `--num-parallel`: number of optimization agents
 - `--gpu-ids`: comma-separated GPU IDs for agents
-- `--debug` / `--no-debug` (default: off): debug mode disables both post-run patch
-  apply and artifact cleanup, preserving the full run directory for inspection. When
-  debug is off (default), the winning patch is applied to `--repo` on the current branch
-  and committed, and per-run artifacts are pruned to the **keep-set**: `final_report.json`,
-  the winning `.diff`, `geak_agent.log`, and `COMMANDMENT.md`. Hard-kill (wall-clock
-  timeout) always leaves artifacts in place regardless.
-- `--total-budget-s` (default: 7200): total wall-clock budget in seconds. The hard-kill watchdog
-  `os._exit(124)`s at `started_at + budget` exactly — this anchor enforces the cap.
-- `--max-rounds` (default: 5): maximum number of optimization rounds. Env: `GEAK_MAX_ROUNDS`.
-- **Operator log surface.** Every cooperative exit logs `[geak cleanup] starting` and
-  `[geak cleanup] completed: <status>`. If the completed line is missing, cleanup was
+- `--apply-best-patch` / `--no-apply-best-patch` (default: on): after the run completes
+  *without raising*, apply the winning patch to `--repo` on the current branch and commit
+  it with a message pointing at `final_report.json`. Requires a clean working tree on
+  `--repo`. A dirty tree is skipped in the log AND printed in yellow on the console so
+  the no-op isn't easy to miss. When the repo has no configured git identity (typical
+  inside the GEAK container), the commit falls back to `GEAK Agent <geak@amd.com>`;
+  override via the `GEAK_GIT_AUTHOR_NAME` / `GEAK_GIT_AUTHOR_EMAIL` environment variables
+  (passed through by `entrypoint.sh`).
+- `--cleanup` / `--no-cleanup` (default: on): runs at every cooperative exit — success,
+  exception during preprocess or run, and the Ctrl-C escalation path — and prunes
+  per-run artifacts to the **keep-set**: `final_report.json`, the winning `.diff`,
+  `geak_agent.log`, and `COMMANDMENT.md`. A Ctrl-C *during* cleanup leaves it partial
+  (cleanup wraps in `try/except Exception` and `KeyboardInterrupt` is a `BaseException`,
+  not an `Exception`). Hard-kill (wall-clock timeout) leaves the per-run dir alone for
+  forensic analysis regardless of `--cleanup`, and prints a loud red console line
+  naming the artifact path. Independent of `--apply-best-patch`.
+- `--keep-runs N` / `GEAK_KEEP_RUNS=N` (default: unlimited): after this run completes,
+  retain only the N most-recent auto-generated run dirs under output_dir's parent.
+  **Scope is `<cwd>/optimization_logs/`** — runs from other working directories are not
+  visible. Ignored under `--output` (a warning is logged). Concurrent runs in the same
+  parent are protected by a stale-only filter that prefers the agent log's mtime, but
+  the safest mode is one `geak` invocation at a time.
+- **Budget semantics.** `--mode quick` and `--mode full` are **absolute wall-clock caps**
+  of 60 min and 120 min respectively. The hard-kill watchdog `os._exit(124)`s at
+  `started_at + total_s` exactly — this anchor enforces the cap. Internally the
+  cooperative budget reserves ~60 s for finalize headroom; this is invisible to the
+  user and is not load-bearing for the cap promise.
+- **Operator log surface.** Every cooperative exit logs `[geak --cleanup] starting` and
+  `[geak --cleanup] completed: <status>`. If the completed line is missing, cleanup was
   interrupted mid-flight (Ctrl-C during cleanup, or a rare race with hard-kill).
-- **Persistent caches not affected by cleanup.** `~/.cache/amd-ai-devtool/semantic-index`
+- **Persistent caches not affected by `--cleanup`.** `~/.cache/amd-ai-devtool/semantic-index`
   (the RAG FAISS index) and the auto-installed `rag-mcp` package. Both are intentional
   caches reused across runs.
 - **Cooperative shutdown coverage** is tracked separately: the wall-clock cap is

@@ -365,7 +365,7 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
     output_dir = Path(ctx.output_dir)
     pp_dir = output_dir
     postprocess_ctx = _build_postprocess_ctx(ctx)
-    max_rounds = max(1, int(ctx.max_rounds or 3))
+    max_rounds = max(1, int(ctx.max_rounds or 5))
     n_workers = ctx.num_parallel or len(ctx.gpu_ids) or 1
 
     # ── Extract kernel metadata ──────────────────────────────────

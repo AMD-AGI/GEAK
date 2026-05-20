@@ -517,6 +517,34 @@ def run_task_batch(
     }
 
 
+def run_from_task(
+    task_file: Path,
+    gpu_id: int = 0,
+    output_dir: Path | None = None,
+    model_factory=None,
+    *,
+    console=None,
+) -> dict[str, Any]:
+    """Run a single task file. Python-callable wrapper around geak --from-task.
+
+    Shares the same underlying code as the CLI ``--from-task`` path but
+    returns a results dict instead of printing to console.
+    """
+    # Default: tasks/round_N/00_label.md -> results/round_N/
+    if output_dir:
+        out = output_dir
+    else:
+        round_name = task_file.parent.name
+        out = task_file.parent.parent.parent / "results" / round_name
+    return run_task_batch(
+        task_files=[task_file],
+        gpu_ids=[gpu_id],
+        output_dir=out,
+        model_factory=model_factory,
+        console=console,
+    )
+
+
 # ── Staged dispatch (relocated from agents/heterogeneous/tools.py) ───
 
 

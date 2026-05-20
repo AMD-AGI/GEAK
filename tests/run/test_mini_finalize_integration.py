@@ -219,6 +219,7 @@ def test_hard_kill_handler_writes_stub_and_warns_without_running_cleanup(
     output_dir.mkdir(parents=True)
 
     spec = BudgetSpec(
+        mode="quick",
         total_s=2.0,
         preprocess_soft_cap_s=0.5,
         preprocess_hard_cap_fraction=0.5,

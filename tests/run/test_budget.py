@@ -23,7 +23,7 @@ def _spec(
     kill_buffer_s: float = 1.0,
 ) -> BudgetSpec:
     return BudgetSpec(
-
+        mode="quick",
         total_s=total_s,
         preprocess_soft_cap_s=soft_cap_s,
         preprocess_hard_cap_fraction=frac,
@@ -131,7 +131,7 @@ def test_commit_preprocess_transitions_phase_to_optimization():
 def test_optimization_watchdog_flips_soft_stop_on_schedule():
     """At softstop_at = opt_deadline - finalize_grace, soft_stop is set."""
     spec = BudgetSpec(
-
+        mode="quick",
         total_s=10.0,
         preprocess_soft_cap_s=2.0,
         preprocess_hard_cap_fraction=0.5,
@@ -222,7 +222,7 @@ def test_hard_kill_watchdog_fires_at_started_at_plus_total_s():
     polls ``soft_stop``. Use sub-second delays to keep the test fast.
     """
     spec = BudgetSpec(
-
+        mode="quick",
         total_s=0.5,
         preprocess_soft_cap_s=0.05,
         preprocess_hard_cap_fraction=0.5,
@@ -248,7 +248,7 @@ def test_hard_kill_watchdog_fires_at_started_at_plus_total_s():
 
 def test_hard_kill_watchdog_can_be_cancelled_before_firing():
     spec = BudgetSpec(
-
+        mode="quick",
         total_s=10.0,
         preprocess_soft_cap_s=2.0,
         preprocess_hard_cap_fraction=0.5,
@@ -273,7 +273,7 @@ def test_hard_kill_watchdog_logs_callback_exception():
     import logging
 
     spec = BudgetSpec(
-
+        mode="quick",
         total_s=0.2,
         preprocess_soft_cap_s=0.05,
         preprocess_hard_cap_fraction=0.5,
@@ -310,7 +310,7 @@ def test_hard_kill_watchdog_logs_callback_exception():
 def test_kill_buffer_default_is_60_seconds():
     """Belt-and-braces: confirm the documented default doesn't drift silently."""
     spec = BudgetSpec(
-
+        mode="quick",
         total_s=3600.0,
         preprocess_soft_cap_s=900.0,
         preprocess_hard_cap_fraction=0.5,

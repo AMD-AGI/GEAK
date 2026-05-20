@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -167,3 +168,31 @@ class AgentSpec:
         return len(self.gpu_ids)
 
 
+def detect_available_gpus() -> list[int]:
+    """Detect available AMD GPU device IDs via rocm-smi.
+
+    Returns a list of integer device IDs, or [0] as fallback.
+    """
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "--showid", "--csv"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return [0]
+
+        # Parse CSV output: header + rows with device IDs
+        gpu_ids = []
+        for line in result.stdout.strip().splitlines()[1:]:  # skip header
+            parts = line.split(",")
+            if parts:
+                try:
+                    gpu_ids.append(int(parts[0].strip()))
+                except ValueError:
+                    continue
+        return gpu_ids if gpu_ids else [0]
+
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return [0]

@@ -90,6 +90,8 @@ _geak_consume_iterations()
 # agent-time patch testing and final verification stay apples-to-apples.
 DEFAULT_EVAL_BENCHMARK_ITERATIONS = int(os.getenv("GEAK_EVAL_BENCHMARK_ITERATIONS", "30"))
 DEFAULT_AGENT_BENCHMARK_ITERATIONS = DEFAULT_EVAL_BENCHMARK_ITERATIONS
+DEFAULT_PIPELINE_OUTPUT_DIR = "geak_output"
+DEFAULT_HETEROGENEOUS = False
 
 
 # ── agent filtering ──────────────────────────────────────────────────
