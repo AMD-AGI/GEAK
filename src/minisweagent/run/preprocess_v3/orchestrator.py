@@ -117,7 +117,9 @@ Before any other action, read the task prompt and classify it into exactly ONE o
 **Case A — user provided explicit run instructions / commands.**
 Indicators: a literal command-line invocation (``python <script>``, ``pytest ... -k ...``, ``make ...``, shell script, existing custom harness command). The command is opaque: it may NOT support GEAK's four harness flags.
 
-Action: run ``run_discovery`` because it is the standard cheap deterministic front step, then call ``commandment_from_user_command`` with the extracted user command and finish. Discovery/ATD is IRRELEVANT for this case: do not inspect it to alter the user command, do not generate a harness, and do not require ``--correctness`` / ``--benchmark`` / ``--full-benchmark`` / ``--profile``.
+Action: run ``run_discovery`` because it is the standard cheap deterministic front step, then call ``commandment_from_user_command`` with the extracted user command and finish. Discovery/ATD is IRRELEVANT for this case: do not inspect it to alter the user command, and do not generate a harness.
+
+**Important exception**: if the "Hints from the call site" section says the harness is **pre-validated** and supports the four standard modes (``--correctness``, ``--benchmark``, ``--full-benchmark``, ``--profile``), you MUST list all four modes in ``modes_covered`` when calling ``commandment_from_user_command``. The tool will substitute the correct flag for each COMMANDMENT section automatically. Do NOT put all modes in ``inferred_modes`` — use ``modes_covered``.
 
 **Case B — user provided explicit shapes/configs but no runnable command.**
 Indicators: the task names exact shapes, dims, dtype/config tuples, model-production configs, or says "use only this shape/config". The user's shapes/configs are authoritative.

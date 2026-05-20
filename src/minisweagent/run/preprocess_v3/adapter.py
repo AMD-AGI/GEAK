@@ -407,7 +407,15 @@ def _build_orchestrator_task(
         lines.append(user_task.strip())
     hints: list[str] = []
     if harness:
-        hints.append(f"- A user-supplied harness candidate is at: {harness}")
+        hints.append(
+            f"- A user-supplied harness is at: `{harness}`.\n"
+            "  **This harness has been pre-validated** and supports all four standard CLI modes:\n"
+            "  `--correctness`, `--benchmark`, `--full-benchmark`, `--profile`.\n"
+            "  When calling `commandment_from_user_command`, pass the harness invocation\n"
+            f"  (e.g. `python {harness} --correctness`) as `run_command` and list ALL four\n"
+            "  modes in `modes_covered`: `['correctness', 'profile', 'benchmark', 'full_benchmark']`.\n"
+            "  The tool will substitute the correct flag for each COMMANDMENT section automatically."
+        )
     if eval_command:
         hints.append(f"- Legacy eval_command (use only as a fallback hint): {eval_command}")
     if correctness_command:

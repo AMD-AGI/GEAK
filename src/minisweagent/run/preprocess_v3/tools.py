@@ -109,12 +109,12 @@ _MODE_TO_FLAG: dict[str, str] = {
 
 
 def _substitute_mode_flag(cmd: str, target_mode: str) -> str:
-    """Replace any known harness mode flag in *cmd* with *target_mode*'s flag.
+    """Ensure *cmd* contains *target_mode*'s harness flag.
 
-    Ensures that when the Benchmark section's command still contains
-    ``--correctness`` (because the LLM put all modes in ``modes_covered``
-    instead of ``inferred_modes``), the flag is deterministically corrected.
-    Returns *cmd* unchanged when no substitution is possible.
+    Three cases:
+    1. *cmd* already has the right flag → return unchanged.
+    2. *cmd* has a different known flag → replace it.
+    3. *cmd* has no known flag at all → return unchanged (safe fallback).
     """
     dst_flag = _MODE_TO_FLAG.get(target_mode)
     if not dst_flag:
