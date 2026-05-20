@@ -127,6 +127,26 @@ def _substitute_mode_flag(cmd: str, target_mode: str) -> str:
     return cmd
 
 
+_DEFAULT_PROFILE_REPLAYS = 5
+
+
+def _build_profile_section(profile_cmd: str) -> str:
+    """Wrap a ``--profile`` harness invocation with warmup + ``kernel-profile``.
+
+    Matches the PROFILE section that Path B's ``render_commandment`` produces:
+    one warmup pass (suppressed stdout), then ``kernel-profile`` wrapping the
+    same command to capture hardware counters and write ``profile.json``.
+    """
+    warmup = f"{profile_cmd} > /dev/null 2>&1 || true"
+    kernel_profile = (
+        f'kernel-profile "{profile_cmd}"'
+        f" --gpu-devices ${{GEAK_GPU_DEVICE}}"
+        f" --replays {_DEFAULT_PROFILE_REPLAYS}"
+        f" --json -o ${{GEAK_WORK_DIR}}/profile.json"
+    )
+    return f"{warmup}\n{kernel_profile}"
+
+
 def _extract_harness_from_command(cmd: str) -> str | None:
     """Extract a harness file path from a shell command if it looks like a standard harness.
 
@@ -1244,11 +1264,16 @@ def _make_tool_commandment_from_user_command(
         wrapped_cmd = f"${{GEAK_WORK_DIR}}/run.sh {shlex.quote(cmd)}"
         for mode in PATH_A_MODES:
             if mode in modes_covered_tup:
-                sections[mode] = _substitute_mode_flag(wrapped_cmd, mode)
+                mode_cmd = _substitute_mode_flag(wrapped_cmd, mode)
+                if mode == "profile":
+                    mode_cmd = _build_profile_section(mode_cmd)
+                sections[mode] = mode_cmd
                 modes_emitted.append(mode)
             elif mode in inferred_modes_tup:
                 src = source_mode or "<unspecified>"
                 inferred_cmd = _substitute_mode_flag(wrapped_cmd, mode)
+                if mode == "profile":
+                    inferred_cmd = _build_profile_section(inferred_cmd)
                 marker_line = f"# PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}"
                 sections[mode] = f"{marker_line}\n{inferred_cmd}"
                 warnings.append(f"PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}")
