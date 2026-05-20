@@ -16,12 +16,7 @@ from minisweagent.run.preprocess.orchestrator import (
     PreprocessOrchestrator,
 )
 from minisweagent.run.preprocess.phases.base import Phase, PhaseContext
-from minisweagent.run.preprocess.phases.baseline import BaselinePhase
-from minisweagent.run.preprocess.phases.discovery import DiscoveryPhase
-from minisweagent.run.preprocess.phases.explore import ExplorePhase
-from minisweagent.run.preprocess.phases.harness import HarnessPhase
 from minisweagent.run.preprocess.phases.translation import TranslationPhase
-
 
 # ── Base contract ─────────────────────────────────────────────────────
 
@@ -213,11 +208,10 @@ class TestCliUsesOrchestrator:
 
         # Inspect the imported ``run_preprocessor`` symbol
         rp = mini.run_preprocessor
-        # The shim is exported as ``run_preprocessor_via_orchestrator``
-        # in the orchestrator module; after ``as run_preprocessor``
-        # aliasing the __name__ attribute still reveals the real source.
-        assert rp.__module__ == "minisweagent.run.preprocess.orchestrator", (
-            f"mini.run_preprocessor must come from the orchestrator shim; got {rp.__module__}"
+        # After preprocess-v3, ``run_preprocessor`` is aliased from
+        # ``run_preprocess_v3`` in the v3 adapter module.
+        assert rp.__module__ == "minisweagent.run.preprocess_v3.adapter", (
+            f"mini.run_preprocessor must come from the preprocess_v3 adapter; got {rp.__module__}"
         )
 
 

@@ -49,6 +49,9 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
+import shlex
+import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -96,6 +99,64 @@ ALLOWED_SUBAGENT_NAMES: tuple[str, ...] = (
 #: body assembly when projecting the user's command into a
 #: ``COMMANDMENT.md``.
 PATH_A_MODES: tuple[str, ...] = ("correctness", "profile", "benchmark", "full_benchmark")
+
+
+def _copy_repo_sandbox(repo_root: Path, sandbox_root: Path, output_dir: Path) -> None:
+    """Copy a non-git repo into a preprocess subagent sandbox."""
+
+    repo_root = repo_root.resolve()
+    output_dir = output_dir.resolve()
+
+    def _ignore(dir_path: str, names: list[str]) -> set[str]:
+        ignored = {"__pycache__", ".pytest_cache", ".ruff_cache"}
+        current = Path(dir_path).resolve()
+        for name in names:
+            child = current / name
+            try:
+                child_resolved = child.resolve()
+            except OSError:
+                continue
+            # Avoid recursively copying the active GEAK output directory
+            # when users place outputs under the target repo.
+            if child_resolved == output_dir or output_dir in child_resolved.parents:
+                ignored.add(name)
+        return ignored
+
+    shutil.copytree(repo_root, sandbox_root, symlinks=True, ignore=_ignore)
+
+
+def _ensure_preprocess_subagent_sandbox(agent: PreprocessOrchestratorAgent) -> tuple[Path | None, dict[str, str]]:
+    """Create a repo sandbox for preprocess subagents and return tool env."""
+
+    repo_raw = agent._extra_template_vars.get("repo_root") if hasattr(agent, "_extra_template_vars") else None
+    output_raw = agent._extra_template_vars.get("output_dir") if hasattr(agent, "_extra_template_vars") else None
+    gpu_raw = agent._extra_template_vars.get("gpu_id") if hasattr(agent, "_extra_template_vars") else None
+    if not repo_raw or not output_raw:
+        return None, {}
+
+    repo_root = Path(str(repo_raw)).expanduser().resolve()
+    output_dir = Path(str(output_raw)).expanduser().resolve()
+    if not repo_root.is_dir():
+        return None, {}
+
+    sandbox_root = output_dir / "_preprocess_subagent_worktree"
+    if not sandbox_root.exists():
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if (repo_root / ".git").exists():
+            from minisweagent.run.task_file import create_worktree
+
+            create_worktree(repo_root, sandbox_root)
+        else:
+            _copy_repo_sandbox(repo_root, sandbox_root, output_dir)
+
+    gpu_id = str(gpu_raw if gpu_raw is not None else 0)
+    env = {
+        "GEAK_REPO_ROOT": str(repo_root),
+        "GEAK_WORK_DIR": str(sandbox_root.resolve()),
+        "GEAK_GPU_DEVICE": gpu_id,
+        "HIP_VISIBLE_DEVICES": gpu_id,
+    }
+    return sandbox_root.resolve(), env
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +327,15 @@ class PreprocessSubagentDispatcher:
                 "elapsed_s": 0.0,
             }
 
+        tool_env = None
+        if isinstance(context, dict):
+            tool_env = context.pop("_tool_env", None)
+
         full_task = task if not context else self._format_context_preamble(context) + "\n\n" + task
 
         extra_template_vars = self._resolve_extra_template_vars(spec)
+        if isinstance(tool_env, dict):
+            extra_template_vars["_tool_env"] = tool_env
 
         t0 = time.monotonic()
         try:
@@ -840,8 +907,35 @@ def _make_tool_dispatch_subagent(
             context = {"context": str(context)}
         else:
             context = dict(context)
+        generator_attempts = int(agent._collected.get("_harness_generator_attempts", 0) or 0)
+        if name == "harness-generator":
+            if generator_attempts >= 3:
+                return {
+                    "name": name,
+                    "success": False,
+                    "error": "harness-generator retry budget exhausted after 3 attempts",
+                    "output": (
+                        "HARNESS_VERIFIED=false\n"
+                        "ESCALATE=true\n"
+                        "PHASE=runtime\n"
+                        "FAILED_RULE=generator-retry-budget-exhausted\n"
+                        "FAILED_MODE=n/a\n"
+                        "EVIDENCE=harness-generator was requested after 3 failed attempts\n"
+                    ),
+                    "elapsed_s": 0.0,
+                    "max_steps": None,
+                }
+            generator_attempts += 1
+            agent._collected["_harness_generator_attempts"] = generator_attempts
+            context.setdefault("attempt", generator_attempts)
+        elif name == "harness-verifier":
+            context.setdefault("attempt", max(generator_attempts, 1))
         codebase_ctx = agent._collected.get("codebase_context")
-        if codebase_ctx is not None and getattr(codebase_ctx, "out_path", None) and "codebase_context_path" not in context:
+        if (
+            codebase_ctx is not None
+            and getattr(codebase_ctx, "out_path", None)
+            and "codebase_context_path" not in context
+        ):
             context["codebase_context_path"] = str(codebase_ctx.out_path)
         if agent._collected.get("discovery_path") and "discovery_path" not in context:
             context["discovery_path"] = agent._collected["discovery_path"]
@@ -854,7 +948,14 @@ def _make_tool_dispatch_subagent(
                 "benchmarks_found": len((discovery or {}).get("benchmarks") or []),
                 "focused_test": bool((discovery or {}).get("focused_test")),
             }
-        result = dispatcher(name=name, task=task, model=agent.model, context=context)
+        _scoring = agent._extra_template_vars.get("scoring_target")
+        if _scoring and "scoring_target" not in context:
+            context["scoring_target"] = _scoring
+        sandbox_cwd, tool_env = _ensure_preprocess_subagent_sandbox(agent)
+        if sandbox_cwd is not None:
+            context.setdefault("sandbox_repo_root", str(sandbox_cwd))
+            context["_tool_env"] = tool_env
+        result = dispatcher(name=name, task=task, model=agent.model, cwd=str(sandbox_cwd) if sandbox_cwd else None, context=context)
         agent._subagent_runs.append(result)
         # Auto-populate orchestrator state from the subagent's output so
         # the LLM doesn't have to extract structured fields by regex.
@@ -1041,30 +1142,44 @@ def _make_tool_commandment_from_user_command(
             )
 
         cmd = run_command.strip()
+        # Rewrite hardcoded repo-root paths to ${GEAK_WORK_DIR} so the
+        # COMMANDMENT references the agent's worktree at runtime.
+        # Use the orchestrator's config.repo (available at preprocess time)
+        # rather than GEAK_REPO_ROOT (only set later for agent subprocesses).
+        repo_root = str(agent.config.repo) if agent.config.repo else os.environ.get("GEAK_REPO_ROOT", "")
+        if repo_root and repo_root in cmd:
+            cmd = cmd.replace(repo_root, "${GEAK_WORK_DIR}")
         modes_covered_tup = _normalise_modes(modes_covered)
         inferred_modes_tup = _normalise_modes(inferred_modes)
         source_mode = modes_covered_tup[0] if modes_covered_tup else None
 
+        setup_body = (
+            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+            "export HIP_VISIBLE_DEVICES=%s\\n"
+            'cd "%s" && exec bash -lc "$*"\\n\' '
+            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
+            '"${GEAK_WORK_DIR}" '
+            "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
+        )
         sections: dict[str, str] = {
-            "setup": ("# Path-A: user-provided run command assumes the environment is ready.\ntrue"),
+            "setup": setup_body,
         }
         warnings: list[str] = []
         modes_emitted: list[str] = []
 
+        # Invoke through run.sh so every Path-A section uses the same
+        # PYTHONPATH/HIP_VISIBLE_DEVICES/worktree contract as legacy
+        # COMMANDMENT generation while still supporting compound shell
+        # commands such as "compile && correctness && performance".
+        wrapped_cmd = f"${{GEAK_WORK_DIR}}/run.sh {shlex.quote(cmd)}"
         for mode in PATH_A_MODES:
             if mode in modes_covered_tup:
-                if "correctness" in sections and mode != "correctness" and sections["correctness"] == cmd:
-                    sections[mode] = f"# PATH_A: {mode} covered by correctness (same command)"
-                else:
-                    sections[mode] = cmd
+                sections[mode] = wrapped_cmd
                 modes_emitted.append(mode)
             elif mode in inferred_modes_tup:
                 src = source_mode or "<unspecified>"
                 marker_line = f"# PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}"
-                if "correctness" in sections and sections["correctness"] == cmd:
-                    sections[mode] = f"{marker_line}\n# covered by correctness (same command)"
-                else:
-                    sections[mode] = f"{marker_line}\n{cmd}"
+                sections[mode] = f"{marker_line}\n{wrapped_cmd}"
                 warnings.append(f"PATH_A_PARTIAL_COVERAGE: {mode} inferred from {src}")
                 modes_emitted.append(mode)
             else:
@@ -1181,7 +1296,9 @@ def _make_tool_finish_preprocess(
         # Layer 7. Skipped on Path A so we don't accidentally pick up a
         # stale file from a prior run.
         if not on_path_a and not agent._collected.get("harness_path"):
-            output_dir = agent._extra_template_vars.get("output_dir") if hasattr(agent, "_extra_template_vars") else None
+            output_dir = (
+                agent._extra_template_vars.get("output_dir") if hasattr(agent, "_extra_template_vars") else None
+            )
             if output_dir:
                 for candidate_name in ("test_harness.py", "harness.py", "_geak_auto_harness.py", "harness.hip"):
                     candidate = Path(output_dir) / candidate_name
@@ -1236,7 +1353,10 @@ def _finish_blockers(
         return blockers
 
     if payload.get("errors"):
-        blockers.append(f"finish_preprocess called with errors={payload['errors']!r}")
+        # A failed preprocess must be allowed to terminate. The final
+        # PreprocessResult will carry success=False; blocking here causes the
+        # orchestrator to spin until its global step limit.
+        return blockers
 
     if not agent._collected.get("harness_path"):
         blockers.append("Path B missing harness_path")

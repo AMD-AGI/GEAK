@@ -169,14 +169,16 @@ def _profile_with_rocprof(
     if os.environ.get("HIP_VISIBLE_DEVICES") == "":
         _hip_removed = os.environ.pop("HIP_VISIBLE_DEVICES")
 
-    analyzer = ProfilingAnalyzer(profiling_type=profiling_type)
+    # HIP env save/restore stays in this OUTER try/finally; the analyzer
+    # ``with`` block only owns analyzer lifecycle. The two concerns are
+    # independent and must not be collapsed.
     try:
-        raw = analyzer.profile_structured(
-            profiling_workdir=workdir or str(Path.cwd()),
-            profiling_cmd=command,
-        )
+        with ProfilingAnalyzer(profiling_type=profiling_type) as analyzer:
+            raw = analyzer.profile_structured(
+                profiling_workdir=workdir or str(Path.cwd()),
+                profiling_cmd=command,
+            )
     finally:
-        analyzer.cleanup()
         if _hip_removed is not None:
             os.environ["HIP_VISIBLE_DEVICES"] = _hip_removed
 

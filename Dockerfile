@@ -1,4 +1,5 @@
-FROM lmsysorg/sglang:v0.5.9-rocm700-mi35x
+ARG BASE_IMAGE=lmsysorg/sglang:v0.5.11-rocm720-mi35x
+FROM ${BASE_IMAGE}
 
 RUN apt-get update && apt-get install -y git make && rm -rf /var/lib/apt/lists/*
 
@@ -14,6 +15,7 @@ RUN make install
 RUN python3 -c "from profiler_mcp.server import profile_kernel; from metrix import Metrix; print('Core imports verified')"
 
 # Runtime assets (not needed for install; changes only rebuild cheap COPY layers)
+COPY subagents/ subagents/
 COPY skills/ skills/
 COPY docs/ docs/
 COPY scripts/ scripts/
