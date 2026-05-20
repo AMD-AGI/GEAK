@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -386,3 +387,84 @@ class TestCPUPressureGate:
             result = mgr.run(GpuJob(fn=lambda g, e: "ok", label="no-loadavg"))
             assert result == "ok"
             mgr.shutdown()
+
+
+class TestEventLogging:
+    """Phase 2: JSONL event logging and per-outcome counters."""
+
+    def test_lifecycle_events_written_to_file(self, tmp_path):
+        log_file = tmp_path / "events.jsonl"
+        mgr = GPUManager(
+            [0], stats_log_interval_s=0, reaper_interval_s=0,
+            event_log_path=str(log_file),
+        )
+        mgr.run(GpuJob(fn=lambda g, e: "ok", label="evt-test"))
+        mgr.shutdown()
+
+        lines = log_file.read_text().strip().splitlines()
+        events = [json.loads(line)["event"] for line in lines]
+        assert events == ["queued", "leased", "started", "completed", "released"]
+
+    def test_failed_job_emits_failed_event(self, tmp_path):
+        log_file = tmp_path / "events.jsonl"
+        mgr = GPUManager(
+            [0], stats_log_interval_s=0, reaper_interval_s=0,
+            event_log_path=str(log_file),
+        )
+        fut = mgr.submit(GpuJob(fn=lambda g, e: (_ for _ in ()).throw(ValueError("boom")), label="fail-evt"))
+        with pytest.raises(ValueError):
+            fut.result(timeout=5)
+        mgr.shutdown()
+
+        lines = log_file.read_text().strip().splitlines()
+        events = [json.loads(line)["event"] for line in lines]
+        assert "failed" in events
+        assert "released" in events
+
+    def test_per_outcome_counters(self):
+        mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+        mgr.run(GpuJob(fn=lambda g, e: "ok", label="s1"))
+        mgr.run(GpuJob(fn=lambda g, e: "ok", label="s2"))
+
+        def _fail(g, e):
+            raise RuntimeError("err")
+
+        fut = mgr.submit(GpuJob(fn=_fail, label="f1"))
+        with pytest.raises(RuntimeError):
+            fut.result(timeout=5)
+
+        s = mgr.stats
+        assert s["total_succeeded"] == 2
+        assert s["total_failed"] == 1
+        assert s["total_reaped"] == 0
+        assert s["total_cancelled"] == 0
+        assert s["total_jobs_completed"] == 3
+        mgr.shutdown()
+
+    def test_event_log_fields(self, tmp_path):
+        log_file = tmp_path / "events.jsonl"
+        mgr = GPUManager(
+            [0], stats_log_interval_s=0, reaper_interval_s=0,
+            event_log_path=str(log_file),
+        )
+        mgr.run(GpuJob(fn=lambda g, e: "ok", label="field-test"))
+        mgr.shutdown()
+
+        lines = log_file.read_text().strip().splitlines()
+        records = [json.loads(line) for line in lines]
+
+        leased = next(r for r in records if r["event"] == "leased")
+        assert "lease_id" in leased
+        assert "gpu_ids" in leased
+        assert leased["job_label"] == "field-test"
+
+        released = next(r for r in records if r["event"] == "released")
+        assert released["reason"] == "completed"
+        assert "t" in released
+
+    def test_no_event_log_file_still_works(self):
+        mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+        mgr.run(GpuJob(fn=lambda g, e: "ok", label="no-file"))
+        s = mgr.stats
+        assert s["total_succeeded"] == 1
+        mgr.shutdown()

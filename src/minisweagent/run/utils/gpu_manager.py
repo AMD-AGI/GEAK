@@ -19,6 +19,7 @@ associated subprocess.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -29,6 +30,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -85,6 +87,9 @@ class GPUManager:
         Defaults to ``0.8 * os.cpu_count()``.
     reaper_interval_s:
         Seconds between lease-reaper sweeps.  ``0`` disables.
+    event_log_path:
+        Path to a JSONL file for per-job lifecycle events.
+        ``None`` disables file logging (events still go to ``logger.debug``).
     """
 
     def __init__(
@@ -95,6 +100,7 @@ class GPUManager:
         stats_log_interval_s: float = 30.0,
         cpu_pressure_threshold: float | None = None,
         reaper_interval_s: float = 30.0,
+        event_log_path: str | Path | None = None,
     ) -> None:
         if not gpu_ids:
             raise ValueError("gpu_ids must be non-empty")
@@ -125,8 +131,18 @@ class GPUManager:
         self._queue_depth = 0
         self._max_queue_depth = 0
 
+        self._total_succeeded = 0
+        self._total_failed = 0
+        self._total_reaped = 0
+        self._total_cancelled = 0
+
         self._active_leases: dict[str, LeaseState] = {}
         self._leases_lock = threading.Lock()
+
+        self._event_log_file = (
+            open(event_log_path, "a", encoding="utf-8") if event_log_path else None
+        )
+        self._event_log_lock = threading.Lock()
 
         self._dispatcher = threading.Thread(
             target=self._dispatch_loop, name="gpu-manager-dispatch", daemon=True,
@@ -159,6 +175,7 @@ class GPUManager:
             self._total_submitted += 1
             self._queue_depth += 1
             self._max_queue_depth = max(self._max_queue_depth, self._queue_depth)
+        self._emit_event("queued", job_label=job.label, num_gpus=job.num_gpus)
         self._job_queue.put((job, fut))
         return fut
 
@@ -187,6 +204,9 @@ class GPUManager:
         self._dispatcher.join(timeout=10)
         self._executor.shutdown(wait=True)
         logger.info("GPUManager shut down. Final stats: %s", self.stats)
+        if self._event_log_file is not None:
+            self._event_log_file.close()
+            self._event_log_file = None
 
     @property
     def stats(self) -> dict[str, Any]:
@@ -205,6 +225,10 @@ class GPUManager:
                 "max_queue_depth": self._max_queue_depth,
                 "total_jobs_submitted": self._total_submitted,
                 "total_jobs_completed": self._total_completed,
+                "total_succeeded": self._total_succeeded,
+                "total_failed": self._total_failed,
+                "total_reaped": self._total_reaped,
+                "total_cancelled": self._total_cancelled,
                 "manager_uptime_s": round(now - self._start_time, 2),
             }
 
@@ -265,6 +289,10 @@ class GPUManager:
                     for g in assigned:
                         self._busy_start[g] = now
 
+                self._emit_event(
+                    "leased", lease_id=lease.lease_id, job_label=job.label,
+                    gpu_ids=list(assigned), deadline=deadline,
+                )
                 env_overrides = self._build_env_overrides(assigned)
 
                 worker_fut = self._executor.submit(
@@ -302,7 +330,9 @@ class GPUManager:
                 logger.info("Job %s: cancelled before execution, skipping", job.label)
                 reason = "cancelled"
                 return
+            self._emit_event("started", lease_id=lease.lease_id, job_label=job.label)
             result = job.fn(list(lease.gpu_ids), env_overrides)
+            self._emit_event("completed", lease_id=lease.lease_id, job_label=job.label)
             try:
                 fut.set_result(result)
             except InvalidStateError:
@@ -310,6 +340,8 @@ class GPUManager:
                 reason = "cancelled"
         except Exception as exc:
             reason = "failed"
+            self._emit_event("failed", lease_id=lease.lease_id, job_label=job.label,
+                             error=str(exc))
             try:
                 fut.set_exception(exc)
             except InvalidStateError:
@@ -333,6 +365,14 @@ class GPUManager:
         with self._stats_lock:
             self._in_flight = max(0, self._in_flight - 1)
             self._total_completed += 1
+            if reason == "completed":
+                self._total_succeeded += 1
+            elif reason == "failed":
+                self._total_failed += 1
+            elif reason == "reaped":
+                self._total_reaped += 1
+            elif reason == "cancelled":
+                self._total_cancelled += 1
             for g in gpus:
                 if g in self._busy_start:
                     self._busy_total[g] += now - self._busy_start.pop(g)
@@ -340,6 +380,8 @@ class GPUManager:
         with self._cond:
             self._free.update(gpus)
             self._cond.notify_all()
+
+        self._emit_event("released", lease_id=lease_id, reason=reason, gpu_ids=gpus)
 
     # kept for backward compat with tests that call it directly
     def _release_gpus(self, gpus: list[int]) -> None:
@@ -432,6 +474,20 @@ class GPUManager:
             os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, OSError):
             pass
+
+    # ------------------------------------------------------------------
+    # Event logging
+    # ------------------------------------------------------------------
+
+    def _emit_event(self, event: str, **fields: Any) -> None:
+        now = time.monotonic()
+        record = {"event": event, "t": round(now - self._start_time, 3), **fields}
+        logger.debug("gpu_event: %s", record)
+        if self._event_log_file is not None:
+            line = json.dumps(record, default=str)
+            with self._event_log_lock:
+                self._event_log_file.write(line + "\n")
+                self._event_log_file.flush()
 
     # ------------------------------------------------------------------
     # Helpers
