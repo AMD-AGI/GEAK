@@ -17,7 +17,6 @@ from minisweagent.run.budget import BudgetSpec, RunBudget
 
 def _spec(total_s: float = 10.0, kill_buffer_s: float = 2.0) -> BudgetSpec:
     return BudgetSpec(
-        mode="quick",
         total_s=total_s,
         preprocess_soft_cap_s=2.0,
         preprocess_hard_cap_fraction=0.5,

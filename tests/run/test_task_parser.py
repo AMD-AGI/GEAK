@@ -150,13 +150,11 @@ class TestParsePipelineParams:
         payload = {
             "kernel_url": "/tmp/a.hip",
             "preprocess_dir": None,
-            "heterogeneous": True,
             "max_rounds": 3,
             "start_round": 1,
             "pipeline_intent": True,
         }
         out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
-        assert out["heterogeneous"] is True
         assert out["max_rounds"] == 3
         assert out["start_round"] == 1
         assert out["pipeline_intent"] is True
@@ -165,7 +163,6 @@ class TestParsePipelineParams:
         payload = {
             "kernel_url": None,
             "preprocess_dir": None,
-            "heterogeneous": None,
             "max_rounds": "10",
             "start_round": "2",
             "pipeline_intent": False,
@@ -178,7 +175,6 @@ class TestParsePipelineParams:
         payload = {
             "kernel_url": None,
             "preprocess_dir": None,
-            "heterogeneous": None,
             "max_rounds": "nope",
             "start_round": None,
             "pipeline_intent": False,
@@ -194,166 +190,6 @@ class TestParsePipelineParams:
         out = tp.parse_pipeline_params("t", Bad())
         assert out["kernel_url"] is None
         assert out["pipeline_intent"] is False
-        assert out["mode"] is None  # fallback always includes mode key
-
-    def test_extracts_quick_mode(self) -> None:
-        payload = {
-            "kernel_url": None,
-            "preprocess_dir": None,
-            "heterogeneous": None,
-            "max_rounds": None,
-            "start_round": None,
-            "pipeline_intent": True,
-            "mode": "quick",
-        }
-        out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
-        assert out["mode"] == "quick"
-
-    def test_extracts_full_mode(self) -> None:
-        payload = {
-            "kernel_url": None,
-            "preprocess_dir": None,
-            "heterogeneous": None,
-            "max_rounds": None,
-            "start_round": None,
-            "pipeline_intent": True,
-            "mode": "full",
-        }
-        out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
-        assert out["mode"] == "full"
-
-    def test_normalizes_mode_case_and_whitespace(self) -> None:
-        payload = {
-            "kernel_url": None,
-            "preprocess_dir": None,
-            "heterogeneous": None,
-            "max_rounds": None,
-            "start_round": None,
-            "pipeline_intent": True,
-            "mode": "  Quick  ",
-        }
-        out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
-        assert out["mode"] == "quick"
-
-    def test_invalid_mode_value_clears_to_none(self) -> None:
-        # The LLM might hallucinate a value not in the supported set;
-        # we must clear it to None rather than propagate garbage.
-        for bad in ("blazing", "fast", "1h", "", 7):
-            payload = {
-                "kernel_url": None,
-                "preprocess_dir": None,
-                "heterogeneous": None,
-                "max_rounds": None,
-                "start_round": None,
-                "pipeline_intent": True,
-                "mode": bad,
-            }
-            out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
-            assert out["mode"] is None, f"bad value {bad!r} should normalize to None"
-
-    def test_missing_mode_key_returns_none(self) -> None:
-        # Backward-compat with old responses that don't include the field.
-        payload = {
-            "kernel_url": None,
-            "preprocess_dir": None,
-            "heterogeneous": None,
-            "max_rounds": None,
-            "start_round": None,
-            "pipeline_intent": True,
-        }
-        out = tp.parse_pipeline_params("t", self._Model(json.dumps(payload)))
-        assert out["mode"] is None
-
-
-class TestInferModeFromText:
-    """Regex backstop for mode extraction. Fires when LLM returns no mode."""
-
-    def test_quick_mode_phrase(self) -> None:
-        assert tp._infer_mode_from_text("Use quick mode for this run.") == "quick"
-
-    def test_in_quick_mode_phrase(self) -> None:
-        assert tp._infer_mode_from_text("Use GPUs 0-3 in quick mode.") == "quick"
-
-    def test_one_hour_phrase(self) -> None:
-        assert tp._infer_mode_from_text("Limit the run to 1 hour please.") == "quick"
-        assert tp._infer_mode_from_text("Run for one hour total.") == "quick"
-        assert tp._infer_mode_from_text("Cap it at 1h.") == "quick"
-
-    def test_full_mode_phrase(self) -> None:
-        assert tp._infer_mode_from_text("Use full mode and explore deeply.") == "full"
-
-    def test_two_hours_phrase(self) -> None:
-        assert tp._infer_mode_from_text("Run for 2 hours.") == "full"
-        assert tp._infer_mode_from_text("Run for two hours.") == "full"
-
-    def test_cli_style_flags(self) -> None:
-        assert tp._infer_mode_from_text("Run with --mode quick please.") == "quick"
-        assert tp._infer_mode_from_text("Use mode=full.") == "full"
-
-    def test_no_mode_returns_none(self) -> None:
-        # Reasonable task text without any mode reference.
-        assert tp._infer_mode_from_text("Optimize the silu kernel for me.") is None
-
-    def test_ambiguous_returns_none(self) -> None:
-        # If both quick and full are mentioned, abstain rather than guess.
-        text = "Try quick mode first, but if needed switch to full mode."
-        assert tp._infer_mode_from_text(text) is None
-
-    def test_empty_text(self) -> None:
-        assert tp._infer_mode_from_text("") is None
-        assert tp._infer_mode_from_text(None) is None  # type: ignore[arg-type]
-
-
-class TestParsePipelineParamsRegexFallback:
-    """When the LLM fails to produce JSON, the regex backstop should still
-    populate ``mode`` from obvious natural-language cues, so the budget
-    feature isn't silently downgraded to YAML's ``full`` default.
-    """
-
-    def _model_returning(self, content: str):
-        class _M:
-            def query(_self, _messages):
-                return {"content": content}
-
-        return _M()
-
-    def test_regex_fills_mode_when_llm_returns_prose(self) -> None:
-        # This is the exact failure mode we hit: LLM acknowledges and
-        # bails instead of producing JSON.
-        prose = "Looking at the task, I need to identify the kernel file. Let me first check the directory."
-        out = tp.parse_pipeline_params(
-            "Optimize the kernel from /some/dir. Use GPUs 0-3 in quick mode.",
-            self._model_returning(prose),
-        )
-        assert out["mode"] == "quick", "regex fallback must fire after JSON decode failure"
-
-    def test_regex_fills_mode_when_llm_returns_empty(self) -> None:
-        out = tp.parse_pipeline_params("Run with full mode for 2 hours.", self._model_returning(""))
-        assert out["mode"] == "full"
-
-    def test_regex_does_not_override_explicit_llm_mode(self) -> None:
-        # LLM returned "quick" -- the regex must not flip it even if the
-        # task text also contains a "full" phrase (it doesn't here, but
-        # this asserts the precedence rule).
-        payload = {
-            "kernel_url": None,
-            "preprocess_dir": None,
-            "heterogeneous": None,
-            "max_rounds": None,
-            "start_round": None,
-            "pipeline_intent": True,
-            "mode": "quick",
-        }
-        out = tp.parse_pipeline_params(
-            "Use full mode for thorough optimization.",
-            self._model_returning(json.dumps(payload)),
-        )
-        # LLM said "quick"; regex would have inferred "full"; LLM wins.
-        assert out["mode"] == "quick"
-
-    def test_no_regex_match_keeps_none(self) -> None:
-        out = tp.parse_pipeline_params("Optimize the kernel.", self._model_returning(""))
-        assert out["mode"] is None  # neither LLM nor regex found a mode
 
 
 class TestJsonDecodeFailureLogsRawResponse:
@@ -391,7 +227,7 @@ class TestJsonDecodeFailureLogsRawResponse:
         try:
             bad = "Sorry, I can't help with that. Here is some prose without any JSON. " + ("x" * 600)
             out = tp.parse_pipeline_params("t", self._model_returning(bad))
-            assert out["mode"] is None
+            assert out["kernel_url"] is None
             previews = [r.getMessage() for r in records if "model response was not valid JSON" in r.getMessage()]
             assert previews, "expected a warning naming 'model response was not valid JSON'"
             msg = previews[0]
@@ -404,7 +240,7 @@ class TestJsonDecodeFailureLogsRawResponse:
         records, logger, h = self._capture_warnings()
         try:
             out = tp.parse_pipeline_params("t", self._model_returning(""))
-            assert out["mode"] is None
+            assert out["kernel_url"] is None
             msgs = [r.getMessage() for r in records if "not valid JSON" in r.getMessage()]
             assert msgs and "<empty>" in msgs[0]
         finally:

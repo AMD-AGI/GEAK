@@ -1,8 +1,8 @@
-"""Run-level wall-clock budget for ``geak --mode quick|full``.
+"""Run-level wall-clock budget for ``geak --total-budget-s``.
 
 This module owns:
 
-- ``BudgetSpec``                   -- per-mode time knobs loaded from YAML.
+- ``BudgetSpec``                   -- time knobs for the run.
                                       ``total_s`` is the absolute wall-clock
                                       cap (inclusive of ``kill_buffer_s``).
 - ``RunBudget``                    -- monotonic clock, ``soft_stop`` event,
@@ -46,13 +46,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-Mode = Literal["quick", "full"]
 Phase = Literal["preprocess", "optimization", "finalize", "done"]
 
 
 @dataclass
 class BudgetSpec:
-    """Per-mode budget knobs (loaded from ``run.budgets.<mode>`` in geak.yaml).
+    """Budget knobs for a single run (set via ``--total-budget-s``).
 
     ``total_s`` is the **absolute wall-clock cap** for the run, inclusive of
     the internal ``kill_buffer_s`` margin. The hard-kill watchdog anchors on
@@ -77,7 +76,6 @@ class BudgetSpec:
     correctly enforcing the absolute cap with no remaining cooperative time.
     """
 
-    mode: Mode
     total_s: float
     preprocess_soft_cap_s: float
     preprocess_hard_cap_fraction: float
@@ -401,7 +399,7 @@ class RunBudget:
     def banner_lines(self) -> list[str]:
         """Human-readable banner showing the budget layout."""
         return [
-            f"[budget] mode={self.spec.mode}, total={self.spec.total_s:.0f}s "
+            f"[budget] total={self.spec.total_s:.0f}s "
             f"(absolute wall-clock cap), "
             f"preprocess_soft_cap={self.spec.preprocess_soft_cap_s:.0f}s, "
             f"preprocess_hard_cap={self.spec.preprocess_hard_cap_s:.0f}s, "

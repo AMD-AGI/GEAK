@@ -37,9 +37,9 @@ def _ensure_mcp_importable() -> None:
 
 
 from minisweagent.run.preprocess.benchmark_parsing import extract_latency_ms
+from minisweagent.run.pipeline_helpers import DEFAULT_PIPELINE_OUTPUT_DIR
 from minisweagent.run.preprocess.harness_utils import (
     DEFAULT_EVAL_BENCHMARK_ITERATIONS,
-    DEFAULT_PIPELINE_OUTPUT_DIR,
     _materialize_validated_harness,
     create_validated_harness,
     detect_and_split_kernel_from_harness,

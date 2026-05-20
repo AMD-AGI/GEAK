@@ -27,12 +27,7 @@ from minisweagent.environments import get_environment_class
 from minisweagent.models import get_model
 from minisweagent.run.budget import BudgetSpec, RunBudget
 from minisweagent.run.extra.config import configure_if_first_time
-from minisweagent.run.pipeline_helpers import (
-    DEFAULT_RUN_MODE,
-    RUN_MODES,
-    apply_mode_presets,
-    resolve_max_rounds,
-)
+from minisweagent.run.pipeline_helpers import resolve_max_rounds
 from minisweagent.run.preprocess_v3.adapter import run_preprocess_v3 as run_preprocessor
 from minisweagent.run.state import (
     PreprocessState,
@@ -93,9 +88,7 @@ def _derive_output_dir(output: Path | None, kernel_name: str | None) -> tuple[Pa
     """Derive the output directory from ``-o``/``--output``.
 
     Returns ``(path, auto)``. ``auto`` is True iff ``output`` was ``None`` and
-    geak generated the path under ``<cwd>/optimization_logs/``. The
-    ``--keep-runs`` retention policy is gated on ``auto`` so it only ever
-    touches directories geak owns.
+    geak generated the path under ``<cwd>/optimization_logs/``.
 
     - If output is a file path: output_dir = output.parent (auto=False)
     - If output is a directory: output_dir = output (auto=False)
@@ -176,19 +169,14 @@ There are two different user interfaces:
 [bold green]mini[/bold green] Simple REPL-style interface
 [bold green]mini -v[/bold green] Pager-style interface (Textual)
 
-After a run completes, two independent post-processing steps run by default:
+After a run completes, two post-processing steps run by default: the winning
+patch is applied and committed to [bold]--repo[/bold], and per-run artifacts are
+pruned to [bold]final_report.json[/bold], the winning [bold].diff[/bold],
+[bold]geak_agent.log[/bold], and [bold]COMMANDMENT.md[/bold].
 
-- [bold green]--apply-best-patch[/bold green] applies the winning patch to
-  [bold]--repo[/bold] on the current branch and commits it. Requires the run
-  to have completed without raising.
-- [bold green]--cleanup[/bold green] runs on every cooperative exit -- success,
-  exception during preprocess or run, and the Ctrl-C escalation path -- and
-  prunes per-run artifacts to [bold]final_report.json[/bold], the winning
-  [bold].diff[/bold], [bold]geak_agent.log[/bold], and [bold]COMMANDMENT.md[/bold].
-
-Hard-kill (wall-clock timeout) leaves artifacts in place for forensic analysis
-regardless of [bold]--cleanup[/bold]. Disable either step independently with
-[bold]--no-apply-best-patch[/bold] / [bold]--no-cleanup[/bold].
+Use [bold green]--debug[/bold green] to disable both steps (no patch apply, no
+artifact cleanup) so that the full run directory is preserved for inspection.
+Hard-kill (wall-clock timeout) always leaves artifacts in place regardless.
 [/not dim]
 """
 
@@ -211,15 +199,15 @@ def main(
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
     gpu_ids: str | None = typer.Option(None, "--gpu-ids", help="Comma-separated GPU IDs."),
     test_command: str | None = typer.Option(None, "--test_command", "--test-command", help="Test command"),
-    mode: str | None = typer.Option(
-        None,
-        "--mode",
-        help="Wall-clock budget profile: 'quick' (~1h) or 'full' (~2h). Default: from geak.yaml run.mode.",
-    ),
-    total_budget_s: float | None = typer.Option(
-        None,
+    total_budget_s: float = typer.Option(
+        7200,
         "--total-budget-s",
-        help="Override the mode's total wall-clock budget (seconds). Escape hatch for testing.",
+        help="Total wall-clock budget in seconds. Default: 7200 (2 hours).",
+    ),
+    max_rounds: int | None = typer.Option(
+        None,
+        "--max-rounds",
+        help="Maximum number of optimization rounds. Default: 3. Env: GEAK_MAX_ROUNDS.",
     ),
     pipeline_mode: str | None = typer.Option(
         None,
@@ -238,35 +226,21 @@ def main(
             "agent visibility; --target only chooses which becomes the scoring signal."
         ),
     ),
-    apply_best_patch: bool = typer.Option(
-        True,
-        "--apply-best-patch/--no-apply-best-patch",
+    debug: bool = typer.Option(
+        False,
+        "--debug/--no-debug",
         help=(
-            "After the run, apply the winning patch to --repo on the current branch "
-            "and commit it. Default: on."
-        ),
-    ),
-    cleanup: bool = typer.Option(
-        True,
-        "--cleanup/--no-cleanup",
-        help=(
-            "After the run, prune per-run artifacts under the output dir (keeping "
-            "final_report.json, the winning diff, geak_agent.log, COMMANDMENT.md). "
-            "Independent of --apply-best-patch. Default: on."
-        ),
-    ),
-    keep_runs: int | None = typer.Option(
-        None,
-        "--keep-runs",
-        help=(
-            "After this run completes, retain only the N most recent auto-generated "
-            "run dirs under output_dir's parent. Default: unlimited. Ignored when "
-            "--output is set explicitly. Env: GEAK_KEEP_RUNS."
+            "Debug mode: disables post-run patch apply and artifact cleanup so the "
+            "full run directory is preserved for inspection. Default: off."
         ),
     ),
 ):
     # fmt: on
     del visual
+
+    # Derive apply_best_patch / cleanup from --debug
+    apply_best_patch = not debug
+    cleanup = not debug
 
     # Only run interactive first-time setup when stdin is a tty. Without the
     # guard, a CI / scripted run without ``MSWEA_CONFIGURED`` or any API key
@@ -300,14 +274,6 @@ def main(
         )
 
     config = _deep_merge(config, user_config)
-
-    # Validate --mode early but defer the full precedence resolution + preset
-    # injection until AFTER parse_pipeline_params runs.
-    if mode is not None:
-        _normalized_cli_mode = mode.strip().lower()
-        if _normalized_cli_mode not in RUN_MODES:
-            raise typer.BadParameter(f"--mode must be one of {RUN_MODES}; got {mode!r}")
-        mode = _normalized_cli_mode
 
     if yolo:
         config.setdefault("agent", {})["mode"] = "yolo"
@@ -414,8 +380,7 @@ def main(
         logger.info("User task input (%d chars): %s", len(task_content), task_content[:500])
 
     # 2a) LLM-driven pipeline param extraction
-    max_rounds = None
-    task_extracted_mode: str | None = None
+    _task_max_rounds: int | None = None
     if task_content:
         from minisweagent.run.utils.task_parser import parse_pipeline_params
 
@@ -424,11 +389,8 @@ def main(
         logger.debug("pipeline_params: %s", pipeline_params)
 
         if pipeline_params.get("max_rounds") is not None:
-            max_rounds = pipeline_params["max_rounds"]
-            logger.info("Using max rounds: %s.", max_rounds)
-        if pipeline_params.get("mode") is not None:
-            task_extracted_mode = pipeline_params["mode"]
-            logger.info("Task-extracted run mode: %s.", task_extracted_mode)
+            _task_max_rounds = pipeline_params["max_rounds"]
+            logger.info("Task-extracted max rounds: %s.", _task_max_rounds)
 
         # Prompt for missing required params (kernel_url) — only if not already set
         if kernel_url is None:
@@ -443,18 +405,11 @@ def main(
                     kernel_url = pipeline_params["kernel_url"]
                     logger.info("Using kernel URL: %s.", kernel_url)
 
-    # Finalize mode precedence: CLI --mode > task-extracted mode > YAML
-    # run.mode > built-in default. Apply presets exactly once. We do this
-    # AFTER parse_pipeline_params so a "quick mode"/"1 hour" phrase in the
-    # natural-language task can drive the budget.
-    _run_cfg = config.get("run") or {}
-    resolved_mode = (mode or task_extracted_mode or _run_cfg.get("mode") or DEFAULT_RUN_MODE).strip().lower()
-    if resolved_mode not in RUN_MODES:
-        raise typer.BadParameter(f"--mode must be one of {RUN_MODES}; got {resolved_mode!r}")
-    _mode_source = "cli" if mode else "task" if task_extracted_mode else "yaml" if _run_cfg.get("mode") else "default"
-    logger.info("[bold cyan]Run mode: %s (source=%s)[/bold cyan]", resolved_mode, _mode_source)
-    config.setdefault("run", {})["mode"] = resolved_mode
-    apply_mode_presets(config, resolved_mode)
+    # Use task-extracted max_rounds as fallback when CLI --max-rounds not set
+    if max_rounds is None and _task_max_rounds is not None:
+        max_rounds = _task_max_rounds
+
+    logger.info("[bold cyan]Budget: %ds, max_rounds: %s[/bold cyan]", total_budget_s, max_rounds or 3)
 
     # 2b) Detect configs from task
     parsed_config = parse_task_info(task_content, model)
@@ -533,30 +488,10 @@ def main(
         kernel_name_for_output = Path(kernel_target).stem
     logger.info("Using kernel_name_for_output: %s", kernel_name_for_output)
 
-    preprocess_output_dir, output_dir_auto = _derive_output_dir(output, kernel_name_for_output)
+    preprocess_output_dir, _output_dir_auto = _derive_output_dir(output, kernel_name_for_output)
     preprocess_output_dir.mkdir(parents=True, exist_ok=True)
     add_file_handler(preprocess_output_dir / DEFAULT_LOG_FILENAME)
 
-    # Resolve --keep-runs precedence: CLI > GEAK_KEEP_RUNS env > unset.
-    # When the user supplied --output, retention is a no-op (we never prune
-    # a user-owned parent dir). Surface the no-op as a warning so a
-    # misconfigured flag doesn't silently disappear.
-    if keep_runs is None:
-        _env_keep_runs = os.environ.get("GEAK_KEEP_RUNS")
-        if _env_keep_runs:
-            try:
-                keep_runs = int(_env_keep_runs)
-            except ValueError:
-                logger.warning(
-                    "[geak --keep-runs] GEAK_KEEP_RUNS=%r is not an integer; ignored.",
-                    _env_keep_runs,
-                )
-                keep_runs = None
-    if keep_runs is not None and keep_runs > 0 and not output_dir_auto:
-        logger.warning(
-            "[geak --keep-runs] ignored: --output was set explicitly; "
-            "retention only applies to auto-generated dirs."
-        )
     _run_t0 = time.monotonic()
     config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
     logger.info(
@@ -612,21 +547,15 @@ def main(
     logger.info("Scoring target: %s (GEAK_RESULT_LATENCY_MS = %s_ms)", scoring_target_norm, scoring_target_norm)
 
     # ── Build RunBudget from mode + CLI overrides ────────────────────
-    _budget_cfg = (config.get("run") or {}).get("budgets", {}).get(resolved_mode) or {}
-    if not _budget_cfg:
-        raise typer.BadParameter(
-            f"No run.budgets.{resolved_mode} block in config; check geak.yaml"
-        )
     _spec = BudgetSpec(
-        mode=resolved_mode,  # type: ignore[arg-type]
-        total_s=float(total_budget_s if total_budget_s is not None else _budget_cfg["total_s"]),
-        preprocess_soft_cap_s=float(_budget_cfg["preprocess_soft_cap_s"]),
-        preprocess_hard_cap_fraction=float(_budget_cfg["preprocess_hard_cap_fraction"]),
-        finalize_grace_s=float(_budget_cfg["finalize_grace_s"]),
-        kill_buffer_s=float(_budget_cfg.get("kill_buffer_s", 60.0)),
+        total_s=float(total_budget_s),
+        preprocess_soft_cap_s=total_budget_s * 0.125,       # 12.5% (was 900/7200)
+        preprocess_hard_cap_fraction=0.5,                    # already a fraction
+        finalize_grace_s=total_budget_s * 0.042,             # ~4.2% (was 300/7200)
+        kill_buffer_s=total_budget_s * 0.05,                 # 5%   (was 360/7200)
     )
-    budget = RunBudget(spec=_spec)
-    for _line in budget.banner_lines():
+    budget_mgr = RunBudget(spec=_spec)
+    for _line in budget_mgr.banner_lines():
         console.print(f"[bold cyan]{_line}[/bold cyan]")
         logger.info(_line)
 
@@ -640,7 +569,7 @@ def main(
         _sigint_count["n"] += 1
         if _sigint_count["n"] == 1:
             logger.warning("SIGINT received -- flipping SoftStop (graceful finalize). Press Ctrl-C again to force.")
-            budget.soft_stop.set()
+            budget_mgr.soft_stop.set()
         else:
             logger.error("Second SIGINT received -- terminating tracked subprocesses and exiting.")
             signal.signal(signal.SIGINT, _orig_sigint or signal.SIG_DFL)
@@ -669,7 +598,7 @@ def main(
             model_factory=lambda: get_model(model_name, config.get("model", {})),
             console=console,
             target_language=_target_language,
-            budget=budget,
+            budget=budget_mgr,
             state=state,
             user_task=task_content,
             scoring_target=scoring_target_norm,
@@ -678,16 +607,16 @@ def main(
 
         # Schedule preprocess watchdogs that reach into ``state`` to apply the
         # stage-aware soft/hard policy. Cancelled in the finally block.
-        budget.schedule_preprocess_watchdogs(
+        budget_mgr.schedule_preprocess_watchdogs(
             on_soft=lambda: preprocess_soft_stop_handler(
                 state,
-                soft_cap_s=budget.spec.preprocess_soft_cap_s,
-                hard_cap_s=budget.spec.preprocess_hard_cap_s,
+                soft_cap_s=budget_mgr.spec.preprocess_soft_cap_s,
+                hard_cap_s=budget_mgr.spec.preprocess_hard_cap_s,
                 console=console,
             ),
             on_hard=lambda: preprocess_hard_stop_handler(
                 state,
-                hard_cap_s=budget.spec.preprocess_hard_cap_s,
+                hard_cap_s=budget_mgr.spec.preprocess_hard_cap_s,
                 console=console,
             ),
         )
@@ -723,10 +652,10 @@ def main(
         logger.debug("Preprocessor context: %s", preprocess_ctx)
 
         # Cancel preprocess watchdogs and transition phase before optimization.
-        budget.cancel_preprocess_watchdogs()
-        _T_pp_end_elapsed = budget.elapsed()
-        opt_deadline = budget.commit_preprocess(_T_pp_end_elapsed)
-        budget.schedule_optimization_watchdog()
+        budget_mgr.cancel_preprocess_watchdogs()
+        _T_pp_end_elapsed = budget_mgr.elapsed()
+        opt_deadline = budget_mgr.commit_preprocess(_T_pp_end_elapsed)
+        budget_mgr.schedule_optimization_watchdog()
 
         # Hard-kill backstop: if cooperative shutdown stalls (e.g. a sub-agent
         # is mid-subprocess.run with no internal soft_stop poll), forcibly
@@ -740,27 +669,36 @@ def main(
             logger.error(
                 "[budget] HARD KILL: started_at + total_s reached; terminating registry and exiting",
             )
-            # Best-effort stub final report so the operator has *something*
-            # to point at when the run hits hard kill (the regular finalize
-            # path won't get a chance to write one). Pure stdlib write, no
-            # LLM, takes microseconds; intentionally tolerates any failure
-            # because the next thing we do is ``os._exit``.
+            # Try auto_finalize to produce a real final_report from existing
+            # round results (pure I/O, no LLM, takes milliseconds). Fall back
+            # to a minimal stub if auto_finalize fails for any reason.
             try:
-                _stub_path = preprocess_output_dir / "final_report.json"
-                if not _stub_path.exists():
-                    _stub_path.write_text(
-                        json.dumps(
-                            {
-                                "status": "hard_kill",
-                                "exit_code": 124,
-                                "elapsed_s": round(budget.elapsed(), 3),
-                                "reason": "started_at + total_s reached",
-                            },
-                            indent=2,
-                        )
-                    )
+                from minisweagent.run.postprocess.results import auto_finalize
+                _ctx = {"output_dir": str(preprocess_output_dir)}
+                report = auto_finalize(_ctx)
+                report["status"] = "hard_kill"
+                report["exit_code"] = 124
+                report["elapsed_s"] = round(budget_mgr.elapsed(), 3)
+                (preprocess_output_dir / "final_report.json").write_text(
+                    json.dumps(report, indent=2, default=str))
             except Exception:
-                logger.exception("hard-kill: writing stub final_report.json failed (non-fatal)")
+                logger.exception("hard-kill: auto_finalize failed, writing stub")
+                try:
+                    _stub_path = preprocess_output_dir / "final_report.json"
+                    if not _stub_path.exists():
+                        _stub_path.write_text(
+                            json.dumps(
+                                {
+                                    "status": "hard_kill",
+                                    "exit_code": 124,
+                                    "elapsed_s": round(budget_mgr.elapsed(), 3),
+                                    "reason": "started_at + total_s reached",
+                                },
+                                indent=2,
+                            )
+                        )
+                except Exception:
+                    pass
             try:
                 state.registry.terminate_all(escalate_after_s=5.0)
             except Exception:
@@ -771,7 +709,7 @@ def main(
             # subprocess.run capture can't miss it.
             _msg = (
                 f"[geak HARD-KILL] Wall-clock budget exceeded "
-                f"(elapsed={budget.elapsed():.0f}s, budget={budget.spec.total_s:.0f}s). "
+                f"(elapsed={budget_mgr.elapsed():.0f}s, budget={budget_mgr.spec.total_s:.0f}s). "
                 f"Per-run artifacts at {preprocess_output_dir} were PRESERVED for forensics. "
                 f"Cleanup did NOT run; inspect and prune manually when done."
             )
@@ -786,15 +724,15 @@ def main(
             # bypass any atexit/cleanup that might block.
             os._exit(124)
 
-        budget.schedule_optimization_hard_kill_watchdog(_hard_kill_handler)
+        budget_mgr.schedule_optimization_hard_kill_watchdog(_hard_kill_handler)
 
         logger.info(
             "[budget] preprocess finished at +%.0fs; opt_deadline @+%.0fs "
             "(softstop_at @+%.0fs, hard_kill @+%.0fs)",
             _T_pp_end_elapsed,
             _T_pp_end_elapsed + opt_deadline.remaining(),
-            _T_pp_end_elapsed + max(0.0, opt_deadline.remaining() - budget.spec.finalize_grace_s),
-            budget.spec.total_s,
+            _T_pp_end_elapsed + max(0.0, opt_deadline.remaining() - budget_mgr.spec.finalize_grace_s),
+            budget_mgr.spec.total_s,
         )
 
         if preprocess_ctx.get("test_command") and not test_command:
@@ -812,10 +750,9 @@ def main(
             config=config,
         )
         logger.info(
-            "[budget] max_rounds=%d (source=%s; mode=%s)",
+            "[budget] max_rounds=%d (source=%s)",
             _resolved_max_rounds,
             _max_rounds_source,
-            resolved_mode,
         )
 
         preprocess_ctx["user_instructions"] = task_content
@@ -888,7 +825,7 @@ def main(
                 model_name=model_name,
                 console=console,
                 deadline=opt_deadline,
-                soft_stop=budget.soft_stop,
+                soft_stop=budget_mgr.soft_stop,
                 registry=state.registry,
                 preprocess_only=preprocess_only,
             ),
@@ -911,7 +848,7 @@ def main(
         #    on the default handler (clean KeyboardInterrupt out).
         # 4. Then run finalize + retention. Both are broad-except wrapped
         #    so a hook failure can't mask the original exception.
-        budget.cancel_all_timers()
+        budget_mgr.cancel_all_timers()
         try:
             state.registry.terminate_all()
         except Exception:
@@ -953,19 +890,6 @@ def main(
                     f"{outcome.get('reason', '')}[/bold yellow]"
                 )
 
-        if keep_runs and keep_runs > 0 and output_dir_auto:
-            try:
-                from minisweagent.run.postprocess.finalize_apply import prune_old_runs
-
-                _removed = prune_old_runs(
-                    preprocess_output_dir.parent,
-                    keep=keep_runs,
-                    exclude=preprocess_output_dir,
-                )
-                if _removed:
-                    logger.info("[geak --keep-runs] Pruned %d old run dir(s).", _removed)
-            except Exception:
-                logger.exception("prune_old_runs raised (non-fatal)")
 
 
 if __name__ == "__main__":

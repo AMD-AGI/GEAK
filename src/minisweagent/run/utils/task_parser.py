@@ -33,68 +33,10 @@ _EMPTY_TASK_INFO: dict = {
 _EMPTY_PIPELINE_PARAMS: dict = {
     "kernel_url": None,
     "preprocess_dir": None,
-    "heterogeneous": None,
     "max_rounds": None,
     "start_round": None,
     "pipeline_intent": False,
-    "mode": None,
 }
-
-# Run modes accepted from natural-language extraction. Keep in sync with
-# ``minisweagent.run.pipeline_helpers.RUN_MODES``.
-_VALID_RUN_MODES: frozenset[str] = frozenset({"quick", "full"})
-
-# Regex backstop for run-mode extraction. Fires when ``parse_pipeline_params``
-# returns a ``None`` mode -- typically because the LLM produced non-JSON
-# (apologized in prose, tried to "investigate" the filesystem, etc.). The
-# trigger phrases mirror the examples we list in the LLM prompt, so the
-# fallback's coverage is intentionally a subset of what the LLM would catch
-# on its happy path.
-_QUICK_PHRASES = (
-    r"\bquick\s+mode\b",
-    r"\bquick\s+run\b",
-    r"\bin\s+quick\s+mode\b",
-    r"\bfast\s+run\b",
-    r"\bquick\s+optimization\b",
-    r"\b1\s*hour\b",
-    r"\bone\s+hour\b",
-    r"\b1\s*h\b",
-    r"\b60\s*(?:m|min|minutes)\b",
-    r"--mode\s+quick\b",
-    r"\bmode\s*=\s*quick\b",
-)
-_FULL_PHRASES = (
-    r"\bfull\s+mode\b",
-    r"\bfull\s+run\b",
-    r"\bin\s+full\s+mode\b",
-    r"\bthorough\s+run\b",
-    r"\blong\s+run\b",
-    r"\b2\s*hours?\b",
-    r"\btwo\s+hours?\b",
-    r"\b2\s*h\b",
-    r"\bextended\s+run\b",
-    r"\bdeep\s+optimization\b",
-    r"--mode\s+full\b",
-    r"\bmode\s*=\s*full\b",
-)
-_QUICK_RE = re.compile("|".join(_QUICK_PHRASES), re.IGNORECASE)
-_FULL_RE = re.compile("|".join(_FULL_PHRASES), re.IGNORECASE)
-
-
-def _infer_mode_from_text(task_content: str) -> str | None:
-    """Deterministic regex-based mode extraction. Returns ``"quick"``,
-    ``"full"``, or ``None`` when neither pattern matches (or both do, in
-    which case we deliberately abstain rather than guess).
-    """
-    if not task_content:
-        return None
-    quick_hit = bool(_QUICK_RE.search(task_content))
-    full_hit = bool(_FULL_RE.search(task_content))
-    if quick_hit and not full_hit:
-        return "quick"
-    if full_hit and not quick_hit:
-        return "full"
-    return None
 
 
 def _resolve_path_case(path: Path) -> Path | None:
@@ -385,11 +327,9 @@ def _normalize_pipeline_params_from_parsed(parsed: dict) -> dict:
     result = {
         "kernel_url": parsed.get("kernel_url"),
         "preprocess_dir": parsed.get("preprocess_dir"),
-        "heterogeneous": parsed.get("heterogeneous"),
         "max_rounds": parsed.get("max_rounds"),
         "start_round": parsed.get("start_round"),
         "pipeline_intent": bool(parsed.get("pipeline_intent", False)),
-        "mode": parsed.get("mode"),
     }
 
     if result["kernel_url"]:
@@ -409,19 +349,6 @@ def _normalize_pipeline_params_from_parsed(parsed: dict) -> dict:
                     raw,
                 )
                 result[field] = None
-
-    if result["mode"] is not None:
-        raw = result["mode"]
-        normalized = str(raw).strip().lower() if isinstance(raw, str) else ""
-        if normalized in _VALID_RUN_MODES:
-            result["mode"] = normalized
-        else:
-            logger.warning(
-                "parse_pipeline_params: invalid mode %r (expected one of %s); clearing.",
-                raw,
-                sorted(_VALID_RUN_MODES),
-            )
-            result["mode"] = None
 
     populated = sorted(k for k, v in result.items() if v is not None)
     logger.debug("parse_pipeline_params: extracted non-null fields: %s", populated)
@@ -489,32 +416,15 @@ def parse_pipeline_params(task_content: str, model) -> dict:
     Extracts:
     - kernel_url: Path or URL to the specific kernel file to optimize
     - preprocess_dir: Path to existing preprocessing artifacts
-    - heterogeneous: Whether to use heterogeneous (diverse strategy) mode
     - max_rounds: Maximum optimization rounds
     - start_round: Round to resume from
     - pipeline_intent: Whether the task describes kernel optimization work
-    - mode: Wall-clock budget profile -- "quick" (~1h) or "full" (~2h),
-      extracted only when the user explicitly requests one.
 
     Returns dict with extracted values (None if not found).
     """
     prompt = PARSE_PIPELINE_PARAMS_USER_TEMPLATE.format(task_content=task_content)
 
     logger.debug("parse_pipeline_params: querying model (task_content length=%d chars)", len(task_content))
-
-    def _with_regex_mode_fallback(result: dict) -> dict:
-        """If LLM extraction left ``mode`` empty but the task text obviously
-        names a mode, fill it in deterministically. Cheaper and more reliable
-        than re-asking the LLM. Only fills the field; never overrides a
-        non-null LLM-provided value.
-        """
-        if result.get("mode") is None:
-            inferred = _infer_mode_from_text(task_content)
-            if inferred is not None:
-                logger.info("parse_pipeline_params: regex fallback inferred mode=%s from task text", inferred)
-                result = dict(result)
-                result["mode"] = inferred
-        return result
 
     try:
         response = model.query(
@@ -526,7 +436,7 @@ def parse_pipeline_params(task_content: str, model) -> dict:
         parsed = _load_json_object_from_model_response(response, log_prefix="parse_pipeline_params")
     except json.JSONDecodeError as e:
         logger.warning("parse_pipeline_params: model response JSON decode failed: %s", e)
-        return _with_regex_mode_fallback(_EMPTY_PIPELINE_PARAMS.copy())
+        return _EMPTY_PIPELINE_PARAMS.copy()
     except Exception as e:
         logger.warning(
             "parse_pipeline_params: unexpected error (%s): %s",
@@ -534,10 +444,10 @@ def parse_pipeline_params(task_content: str, model) -> dict:
             e,
             exc_info=logger.isEnabledFor(logging.DEBUG),
         )
-        return _with_regex_mode_fallback(_EMPTY_PIPELINE_PARAMS.copy())
+        return _EMPTY_PIPELINE_PARAMS.copy()
 
     try:
-        return _with_regex_mode_fallback(_normalize_pipeline_params_from_parsed(parsed))
+        return _normalize_pipeline_params_from_parsed(parsed)
     except Exception as e:
         logger.warning(
             "parse_pipeline_params: normalization failed after successful JSON parse (%s): %s",
@@ -545,7 +455,7 @@ def parse_pipeline_params(task_content: str, model) -> dict:
             e,
             exc_info=logger.isEnabledFor(logging.DEBUG),
         )
-        return _with_regex_mode_fallback(_EMPTY_PIPELINE_PARAMS.copy())
+        return _EMPTY_PIPELINE_PARAMS.copy()
 
 
 _EMPTY_USER_CONSTRAINTS: dict[str, list[str]] = {"constraints": [], "directives": []}

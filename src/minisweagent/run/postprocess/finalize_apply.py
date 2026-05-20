@@ -37,7 +37,6 @@ import os
 import re
 import shutil
 import subprocess
-import time
 from pathlib import Path
 
 from minisweagent.agents.parallel_agent import BestPatchResult
@@ -90,7 +89,6 @@ _DEFAULT_GIT_AUTHOR_EMAIL = "geak@amd.com"
 # Auto-generated run dir name pattern emitted by ``generate_patch_output_dir``.
 # Anchored only on the ``_YYYYmmdd_HHMMSS`` suffix so real kernel names
 # (which may contain ``.``, ``-``, uppercase) all match.
-_AUTO_RUN_DIR_RE = re.compile(r"^.+_\d{8}_\d{6}$")
 
 
 def apply_and_commit_best_patch(
@@ -678,118 +676,6 @@ def _rewrite_kept_report(output_dir: Path, kept_patch_path: Path | None) -> None
         logger.warning("[geak --cleanup] Could not write normalized %s: %s", report_path, exc)
 
 
-def prune_old_runs(
-    parent: Path,
-    keep: int,
-    *,
-    exclude: Path | None = None,
-    stale_after_s: float = 600.0,
-) -> int:
-    """Keep the N most recent auto-generated run dirs under ``parent``.
-
-    Returns the number of directories actually removed.
-
-    Behavior:
-
-    - Returns 0 cleanly when ``parent`` is missing or not a directory.
-    - Only touches directories whose name matches ``^.+_\\d{8}_\\d{6}$``
-      (the suffix ``generate_patch_output_dir`` emits). Anything else under
-      ``parent`` -- notes, unrelated dirs, files -- is left alone regardless
-      of mtime.
-    - Skips ``exclude`` even if it would otherwise be a delete candidate.
-    - Skips any dir whose effective freshness is within the last
-      ``stale_after_s`` seconds. Freshness key, first hit wins:
-
-      1. ``(dir / DEFAULT_LOG_FILENAME).stat().st_mtime`` if the log exists
-         (a long-running but actively-logging sibling looks fresh because
-         ``FileHandler`` bumps this on every line).
-      2. ``max(child.stat().st_mtime for child in dir.iterdir())`` if any
-         children remain.
-      3. ``dir.stat().st_mtime`` as a last-resort fallback (only bumped on
-         child create/rename/unlink in the dir, not on appends).
-
-    Never raises; per-dir failures are logged and counted as not-removed.
-    """
-    if keep < 0:
-        keep = 0
-    parent = Path(parent)
-    if not parent.is_dir():
-        return 0
-
-    exclude_resolved: Path | None = None
-    if exclude is not None:
-        try:
-            exclude_resolved = Path(exclude).resolve()
-        except (OSError, ValueError):
-            exclude_resolved = None
-
-    now = time.time()
-
-    candidates: list[tuple[float, Path]] = []
-    for entry in parent.iterdir():
-        if not entry.is_dir():
-            continue
-        if not _AUTO_RUN_DIR_RE.match(entry.name):
-            continue
-        if exclude_resolved is not None:
-            try:
-                if entry.resolve() == exclude_resolved:
-                    continue
-            except (OSError, ValueError):
-                pass
-        freshness = _freshness_mtime(entry)
-        if freshness is None:
-            # Unreadable dir; skip rather than risk deletion.
-            continue
-        if (now - freshness) < stale_after_s:
-            # Actively-fresh: protect against concurrent runs sharing
-            # ``parent``. The most-common case is another geak invocation
-            # currently writing to ``geak_agent.log``.
-            continue
-        candidates.append((freshness, entry))
-
-    if len(candidates) <= keep:
-        return 0
-
-    # Newest first; the tail past `keep` is the delete-list.
-    candidates.sort(key=lambda pair: pair[0], reverse=True)
-    to_delete = [path for _, path in candidates[keep:]]
-
-    removed = 0
-    for path in to_delete:
-        try:
-            shutil.rmtree(path)
-            removed += 1
-        except OSError as exc:
-            logger.warning("[geak --keep-runs] Failed to remove %s: %s", path, exc)
-    return removed
-
-
-def _freshness_mtime(run_dir: Path) -> float | None:
-    """Best-effort 'how recently was this dir touched' for the stale filter."""
-    log_path = run_dir / DEFAULT_LOG_FILENAME
-    try:
-        if log_path.is_file():
-            return log_path.stat().st_mtime
-    except OSError:
-        pass
-
-    try:
-        child_mtimes = []
-        for child in run_dir.iterdir():
-            try:
-                child_mtimes.append(child.stat().st_mtime)
-            except OSError:
-                continue
-        if child_mtimes:
-            return max(child_mtimes)
-    except OSError:
-        pass
-
-    try:
-        return run_dir.stat().st_mtime
-    except OSError:
-        return None
 
 
 def _iter_worktree_slots(output_dir: Path) -> list[Path]:

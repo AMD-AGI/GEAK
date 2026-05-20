@@ -205,7 +205,7 @@ def test_dirty_repo_refuses_apply_only(repo: Path, output_dir: Path) -> None:
 
 
 def test_dirty_repo_with_no_cleanup_preserves_everything(repo: Path, output_dir: Path) -> None:
-    """With --no-cleanup, a dirty repo leaves both the repo and the output_dir untouched."""
+    """With cleanup=False (--debug), a dirty repo leaves both the repo and the output_dir untouched."""
     (repo / "kernel.py").write_text("def run():\n    return 99\n")
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -262,7 +262,7 @@ def test_apply_failure_still_runs_cleanup_independently(repo: Path, output_dir: 
 
 
 def test_apply_failure_with_no_cleanup_preserves_artifacts(repo: Path, output_dir: Path) -> None:
-    """Passing --no-cleanup keeps the full artifact dir intact on apply failure (debug mode)."""
+    """With cleanup=False (--debug), the full artifact dir is kept intact on apply failure."""
     _write_bogus_patch(output_dir)
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -301,7 +301,7 @@ def _install_commit_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_commit_failure_preserves_apply_with_no_cleanup(
     repo: Path, output_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With --no-cleanup and a commit failure, apply stays in working tree and artifacts survive."""
+    """With cleanup=False and a commit failure, apply stays in working tree and artifacts survive."""
     _install_commit_failure(monkeypatch)
     result = _result_for(output_dir)
 
@@ -526,7 +526,7 @@ def test_non_git_repo_refuses_apply(tmp_path: Path, output_dir: Path) -> None:
 
 
 def test_apply_only_without_cleanup(repo: Path, output_dir: Path) -> None:
-    """--apply-best-patch --no-cleanup: commit happens, output_dir fully preserved."""
+    """apply_best_patch=True, cleanup=False: commit happens, output_dir fully preserved."""
     result = _result_for(output_dir)
 
     finalize_apply_and_cleanup(result, repo, output_dir, apply_best_patch=True, cleanup=False)
@@ -539,7 +539,7 @@ def test_apply_only_without_cleanup(repo: Path, output_dir: Path) -> None:
 
 
 def test_cleanup_only_without_apply(repo: Path, output_dir: Path) -> None:
-    """--no-apply-best-patch --cleanup: no commit, but artifacts pruned down to keep-set."""
+    """apply_best_patch=False, cleanup=True: no commit, but artifacts pruned down to keep-set."""
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
@@ -558,7 +558,7 @@ def test_cleanup_only_without_apply(repo: Path, output_dir: Path) -> None:
 
 
 def test_both_disabled_is_noop(repo: Path, output_dir: Path) -> None:
-    """--no-apply-best-patch --no-cleanup: nothing happens."""
+    """apply_best_patch=False, cleanup=False (--debug): nothing happens."""
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
@@ -609,10 +609,8 @@ def test_cli_flag_threaded() -> None:
     help_result = runner.invoke(mini_module.app, ["--help"])
     assert help_result.exit_code == 0
     plain = _strip_ansi(help_result.stdout)
-    assert "--cleanup" in plain
-    assert "--no-cleanup" in plain
-    assert "--apply-best-patch" in plain
-    assert "--no-apply-best-patch" in plain
+    assert "--debug" in plain
+    assert "--no-debug" in plain
 
 
 # ---------------------------------------------------------------------------

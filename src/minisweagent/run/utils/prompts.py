@@ -57,29 +57,17 @@ PARSE_PIPELINE_PARAMS_USER_TEMPLATE = """Analyze the following task and extract 
 Extract the following (return null if not found or not applicable):
 1. kernel_url: The path or URL to the SPECIFIC KERNEL FILE to optimize (e.g., "/path/to/silu.hip", "/workspace/kernels/matmul.py", "https://github.com/org/repo/blob/main/kernel.py"). This is the kernel source file itself, NOT the repository root directory.
 2. preprocess_dir: Path to a directory containing existing preprocessing artifacts (e.g., "/path/to/geak_output"). Only set if the user explicitly mentions reusing existing artifacts.
-3. heterogeneous: Whether to use heterogeneous mode (diverse optimization strategies across GPUs). Set true if the user mentions "heterogeneous", false if they mention "homogeneous", null if not mentioned.
-4. max_rounds: Maximum number of optimization rounds (integer). Only set if explicitly mentioned.
-5. start_round: Round number to resume from (integer, 1-based). Only set if explicitly mentioned.
-6. pipeline_intent: true if the task describes kernel optimization, performance improvement, GPU kernel work, or profiling. false if it describes general coding tasks like bug fixes, refactoring, or feature additions.
-7. mode: Wall-clock budget profile -- "quick" or "full". Only set if the user explicitly chooses one.
-   - "quick" -> ~1-hour total budget. Triggered by phrases like: "quick mode", "quick run",
-     "fast run", "quick optimization", "1 hour", "one hour", "1h", "shorter run", "tight budget",
-     "smoke test the optimization", "limit to 60 minutes", "--mode quick", "mode=quick".
-   - "full" -> ~2-hour total budget. Triggered by phrases like: "full mode", "full run",
-     "thorough run", "long run", "2 hours", "two hours", "2h", "extended run", "deep optimization",
-     "--mode full", "mode=full".
-   - null if neither is mentioned. Do NOT infer a mode from the kernel size or complexity --
-     only set when the user explicitly chooses one.
+3. max_rounds: Maximum number of optimization rounds (integer). Only set if explicitly mentioned.
+4. start_round: Round number to resume from (integer, 1-based). Only set if explicitly mentioned.
+5. pipeline_intent: true if the task describes kernel optimization, performance improvement, GPU kernel work, or profiling. false if it describes general coding tasks like bug fixes, refactoring, or feature additions.
 
 Return ONLY a valid JSON object. Example:
 {{{{
   "kernel_url": "/workspace/repo/kernels/silu.hip",
   "preprocess_dir": null,
-  "heterogeneous": null,
-  "max_rounds": 5,
+  "max_rounds": 3,
   "start_round": null,
-  "pipeline_intent": true,
-  "mode": "quick"
+  "pipeline_intent": true
 }}}}
 
 Here is the task content:
