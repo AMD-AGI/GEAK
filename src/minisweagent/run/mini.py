@@ -627,6 +627,11 @@ def main(
         parsed_gpu_ids,
         registry=state.registry,
         stats_log_interval_s=float(_gpu_mgr_cfg.get("stats_log_interval_s", 30.0)),
+        cpu_pressure_threshold=float(_gpu_mgr_cfg.get(
+            "cpu_pressure_threshold",
+            max(len(parsed_gpu_ids) * 4, 8),
+        )),
+        event_log_path=preprocess_output_dir / "gpu_events.jsonl",
     )
 
     _parallel_cfg = config.get("parallel") or {}
