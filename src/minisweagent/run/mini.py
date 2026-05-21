@@ -217,11 +217,6 @@ def main(
         "--total-budget-s",
         help="Override the mode's total wall-clock budget (seconds). Escape hatch for testing.",
     ),
-    pipeline_mode: str | None = typer.Option(
-        None,
-        "--pipeline-mode",
-        help="Dispatch mode: fixed | planned | mixed. Overrides GEAK_PIPELINE_MODE env.",
-    ),
     scoring_target: str = typer.Option(
         "wall",
         "--target",
@@ -826,16 +821,8 @@ def main(
 
         from minisweagent.run.unified import PipelineContext, run_pipeline
 
-        _valid_modes = {"fixed", "planned", "mixed"}
-        if pipeline_mode is not None and pipeline_mode in _valid_modes:
-            _mode_source = "cli"
-        elif (_env_mode := os.environ.get("GEAK_PIPELINE_MODE")) in _valid_modes:
-            pipeline_mode, _mode_source = _env_mode, "env"
-        elif (_yaml_mode := (config.get("pipeline") or {}).get("mode")) in _valid_modes:
-            pipeline_mode, _mode_source = _yaml_mode, "yaml"
-        else:
-            pipeline_mode, _mode_source = "mixed", "default"
-        logger.info("Running unified pipeline mode: %s (source=%s)", pipeline_mode, _mode_source)
+        pipeline_mode = "mixed"
+        logger.info("Running unified pipeline mode: %s", pipeline_mode)
         pipeline_result = run_pipeline(
             PipelineContext(
                 preprocess_ctx=preprocess_ctx,

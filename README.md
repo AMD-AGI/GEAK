@@ -1,6 +1,6 @@
 # GEAK
 
-GEAK is an agent-driven framework for end-to-end GPU kernel optimization in real codebases, producing reviewable patches backed by profiling, testing, and LLM-guided iteration.
+GEAK is an agent-driven framework for end-to-end GPU kernel optimization in real codebases, producing reviewable patches backed by profiling, testing, and LLM-guided iteration. Supports **HIP**, **Triton**, and **FlyDSL** kernels.
 
 ---
 
@@ -58,7 +58,7 @@ export MSWEA_MODEL_NAME="openai/gpt-5"
 export OPENAI_API_KEY="YOUR_KEY"
 
 # Anthropic example
-export MSWEA_MODEL_NAME="anthropic/claude-sonnet-4-5-20250929"
+export MSWEA_MODEL_NAME="anthropic/claude-opus-4-6"
 export ANTHROPIC_API_KEY="YOUR_KEY"
 
 # Option 2: If you use AMD LLM Gateway (model_class: amd_llm)
@@ -98,13 +98,14 @@ geak --repo /path/to/kernel/repo \
 - `--kernel-url`: optional; path to the target kernel file (local path or URL)
 - `--num-parallel`: optional; number of optimization agents
 - `--gpu-ids`: optional; comma-separated GPU IDs for agents
-- `--debug`
+- By default, after optimization completes GEAK **applies the best patch** to the repo (committed on the current branch) and **cleans up** intermediate artifacts, keeping only `final_report.json`, the winning `.diff`, `geak_agent.log`, and `COMMANDMENT.md`.
+- `--debug`: disables both post-run patch apply and artifact cleanup, preserving the full run directory for inspection
 - `--mode quick` and `--mode full` are **absolute wall-clock caps**
   of 60 min and 120 min respectively. The hard-kill watchdog `os._exit(124)`s at
   `started_at + total_s` exactly — this anchor enforces the cap. Internally, the
   cooperative budget reserves finalize and kill-buffer headroom; this is invisible to
   the user and is not load-bearing for the cap promise.
-- `total_budget_s`
+- `--total-budget-s`: optional; override the mode's total wall-clock budget in seconds (e.g. `--total-budget-s 18000` for a 300-min cap)
 
 ### Runnable examples
 
@@ -138,8 +139,16 @@ geak --repo "$REPO" \
 REPO="/path/to/FlyDSL"
 
 geak --repo "$REPO" \
-  --task "Optimize the preshuffle GEMM kernel." \
-  --yolo --exit-immediately
+  --task "Optimize the preshuffle GEMM kernel."
+```
+
+**Example: GEMM tuning for SGLang + AITer**
+
+```bash
+# Requires sglang + aiter in the environment
+cd examples/sglang_aiter_gemm_tuning
+
+geak-gemm-tuning -t "Optimize the E2E performance of the workload via GEMM tuning. The benchmark script is run_sglang_test.sh"
 ```
 
 For more options and examples, see **[Quick start](docs/quick_start.md)**.
@@ -152,9 +161,8 @@ For more options and examples, see **[Quick start](docs/quick_start.md)**.
 `geak` loads configuration in layers:
 
 1. strategy template: `src/minisweagent/config/mini_kernel_strategy_list.yaml`
-2. run config: `src/minisweagent/config/geak.yaml`, or the file passed with `--config`
-3. environment overrides for supported options, such as `GEAK_PIPELINE_MODE`
-4. CLI overrides, such as `--mode`, `--gpu-ids`, and `--num-parallel`
+2. run config: `src/minisweagent/config/geak.yaml` (model, env, tools, budgets), or the file passed with `--config`
+3. CLI overrides, such as `--mode`, `--gpu-ids`, and `--num-parallel`
 
 For more options and examples, see [Configuration](docs/configuration.md).
 
@@ -199,7 +207,7 @@ If `--test-command` is not provided, GEAK will:
 - Discover existing tests, or
 - Create and verify a harness for the target kernel
 
-The resulting `COMMANDMENT.md` is  for the optimization run, ensuring consistent correctness and benchmark evaluation.
+The resulting `COMMANDMENT.md` is the single source of truth for the optimization run, ensuring consistent correctness and benchmark evaluation.
 
 ---
 
@@ -232,6 +240,34 @@ Automatically selects the best result across rounds:
 - Verifies candidate patches with the run's benchmark contract
 - Writes `round_N_evaluation.json` after each round
 - Outputs the best verified result in `final_report.json`
+
+---
+
+### Skills & Subagents
+
+GEAK uses **skills** (domain knowledge bases) and **subagents** (delegated specialist agents) to handle different kernel types and optimization tasks.
+
+**Skills** (`skills/`):
+
+| Skill | When loaded |
+|-------|-------------|
+| `triton` | Harness generation for `@triton.jit` kernels |
+| `hip` | Harness generation for HIP / CUDA / CK / HSACO kernels |
+| `flydsl` | Writing, optimizing, and debugging `@flyc.kernel` FlyDSL kernels |
+| `pytorch2flydsl-translation` | Translating PyTorch GPU kernels to FlyDSL |
+| `fp8-gemm-tuning-sglang-aiter` | FP8 GEMM tuning for SGLang + AITer workloads |
+
+**Subagents** (`subagents/`):
+
+| Subagent | Purpose |
+|----------|---------|
+| `general-kernel-optimization` | Core optimizer — systematic strategy exploration for HIP, Triton, CK, FlyDSL |
+| `harness-generator` | Creates immutable test harnesses with `--correctness`, `--profile`, `--benchmark` modes |
+| `codebase-explore` | Discovers kernel files, dependencies, tests, and build systems |
+| `gemm-tuning` | GEMM selection and configuration tuning (flags, env, kernel tables) |
+| `speedup-verify` | Parses benchmark logs and computes speedup |
+| `reverse-knowledge` | Extracts optimization insights from git history |
+| `pytorch-to-flydsl` | PyTorch → FlyDSL kernel translation |
 
 ---
 
