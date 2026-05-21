@@ -70,6 +70,11 @@ _CORRECTNESS_GATE_TIMEOUT_S = int(
     )
 )
 
+#: Short timeout for the correctness gate that runs before baseline collection.
+#: Goal: fail in ~5 s on a broken kernel rather than spending ~5 min running
+#: the full benchmark loop. Override via ``GEAK_CORRECTNESS_GATE_TIMEOUT``.
+_CORRECTNESS_GATE_TIMEOUT_S = int(os.environ.get("GEAK_CORRECTNESS_GATE_TIMEOUT", "120"))
+
 
 @dataclass(frozen=True)
 class BaselineMetrics:
