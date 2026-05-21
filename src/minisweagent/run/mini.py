@@ -9,6 +9,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -21,21 +22,19 @@ from prompt_toolkit.shortcuts import PromptSession
 from rich.console import Console
 
 from minisweagent import global_config_dir
-from minisweagent.agents.homogeneous.homogeneous_agent import parse_gpu_ids, run_homogeneous_agent
 from minisweagent.agents.parallel_agent import BestPatchResult
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments import get_environment_class
 from minisweagent.models import get_model
 from minisweagent.run.budget import BudgetSpec, RunBudget
 from minisweagent.run.extra.config import configure_if_first_time
-from minisweagent.run.orchestrator import run_orchestrator
 from minisweagent.run.pipeline_helpers import (
     DEFAULT_RUN_MODE,
     RUN_MODES,
     apply_mode_presets,
     resolve_max_rounds,
 )
-from minisweagent.run.preprocess.preprocessor import run_preprocessor
+from minisweagent.run.preprocess_v3.adapter import run_preprocess_v3 as run_preprocessor
 from minisweagent.run.state import (
     PreprocessState,
     preprocess_hard_stop_handler,
@@ -53,6 +52,12 @@ logger = logging.getLogger(__name__)
 console = Console(highlight=False)
 app = typer.Typer(rich_markup_mode="rich")
 prompt_session = PromptSession(history=FileHistory(global_config_dir / "mini_task_history.txt"))
+
+
+def _parse_gpu_ids(gpu_ids_str: str | None) -> list[int]:
+    if not gpu_ids_str:
+        return [0]
+    return [int(x.strip()) for x in gpu_ids_str.split(",") if x.strip()]
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -89,9 +94,7 @@ def _derive_output_dir(output: Path | None, kernel_name: str | None) -> tuple[Pa
     """Derive the output directory from ``-o``/``--output``.
 
     Returns ``(path, auto)``. ``auto`` is True iff ``output`` was ``None`` and
-    geak generated the path under ``<cwd>/optimization_logs/``. The
-    ``--keep-runs`` retention policy is gated on ``auto`` so it only ever
-    touches directories geak owns.
+    geak generated the path under ``<cwd>/optimization_logs/``.
 
     - If output is a file path: output_dir = output.parent (auto=False)
     - If output is a directory: output_dir = output (auto=False)
@@ -172,19 +175,17 @@ There are two different user interfaces:
 [bold green]mini[/bold green] Simple REPL-style interface
 [bold green]mini -v[/bold green] Pager-style interface (Textual)
 
-After a run completes, two independent post-processing steps run by default:
+After a run completes, two post-processing steps run by default (disabled
+when [bold green]--debug[/bold green] is set):
 
-- [bold green]--apply-best-patch[/bold green] applies the winning patch to
-  [bold]--repo[/bold] on the current branch and commits it. Requires the run
-  to have completed without raising.
-- [bold green]--cleanup[/bold green] runs on every cooperative exit -- success,
-  exception during preprocess or run, and the Ctrl-C escalation path -- and
-  prunes per-run artifacts to [bold]final_report.json[/bold], the winning
-  [bold].diff[/bold], [bold]geak_agent.log[/bold], and [bold]COMMANDMENT.md[/bold].
+- Patch apply: applies the winning patch to [bold]--repo[/bold] on the
+  current branch and commits it.
+- Cleanup: prunes per-run artifacts to [bold]final_report.json[/bold], the
+  winning [bold].diff[/bold], [bold]geak_agent.log[/bold], and
+  [bold]COMMANDMENT.md[/bold].
 
 Hard-kill (wall-clock timeout) leaves artifacts in place for forensic analysis
-regardless of [bold]--cleanup[/bold]. Disable either step independently with
-[bold]--no-apply-best-patch[/bold] / [bold]--no-cleanup[/bold].
+regardless of debug mode.
 [/not dim]
 """
 
@@ -201,6 +202,7 @@ def main(
     config_spec: Path | None = typer.Option(None, "-c", "--config", help="Path to config file"),
     output: Path | None = typer.Option(None, "-o", "--output", help="Output trajectory file or directory"),
     exit_immediately: bool = typer.Option(False, "--exit-immediately", help="Exit immediately", rich_help_panel="Advanced"),
+    preprocess_only: bool = typer.Option(False, "--preprocess-only", help="Run preprocessing only; skip the optimization round loop and exit after preprocess artifacts are written.", rich_help_panel="Advanced"),
     repo: Path | None = typer.Option(None, "--repo", help="Target Repository path."),
     kernel_url: str | None = typer.Option(None, "--kernel-url", "--kernel-path", help="Target kernel source (path or URL)."),
     num_parallel: int | None = typer.Option(None, "--num-parallel", help="Number of parallel patch agents."),
@@ -228,35 +230,21 @@ def main(
             "agent visibility; --target only chooses which becomes the scoring signal."
         ),
     ),
-    apply_best_patch: bool = typer.Option(
-        True,
-        "--apply-best-patch/--no-apply-best-patch",
+    debug: bool = typer.Option(
+        False,
+        "--debug/--no-debug",
         help=(
-            "After the run, apply the winning patch to --repo on the current branch "
-            "and commit it. Default: on."
-        ),
-    ),
-    cleanup: bool = typer.Option(
-        True,
-        "--cleanup/--no-cleanup",
-        help=(
-            "After the run, prune per-run artifacts under the output dir (keeping "
-            "final_report.json, the winning diff, geak_agent.log, COMMANDMENT.md). "
-            "Independent of --apply-best-patch. Default: on."
-        ),
-    ),
-    keep_runs: int | None = typer.Option(
-        None,
-        "--keep-runs",
-        help=(
-            "After this run completes, retain only the N most recent auto-generated "
-            "run dirs under output_dir's parent. Default: unlimited. Ignored when "
-            "--output is set explicitly. Env: GEAK_KEEP_RUNS."
+            "Debug mode: disables post-run patch apply and artifact cleanup so the "
+            "full run directory is preserved for inspection. Default: off."
         ),
     ),
 ):
     # fmt: on
     del visual
+
+    # --debug disables post-run patch apply and artifact cleanup
+    apply_best_patch = not debug
+    cleanup = not debug
 
     # Only run interactive first-time setup when stdin is a tty. Without the
     # guard, a CI / scripted run without ``MSWEA_CONFIGURED`` or any API key
@@ -292,12 +280,7 @@ def main(
     config = _deep_merge(config, user_config)
 
     # Validate --mode early but defer the full precedence resolution + preset
-    # injection until AFTER parse_pipeline_params runs. The natural-language
-    # extractor can return ``mode`` from phrases like "quick mode" or "1 hour
-    # run", and we want CLI > task > YAML > default precedence to be applied
-    # in one place. apply_mode_presets only injects orchestrator.max_rounds,
-    # which is only consumed below when run_orchestrator is called, so
-    # deferring is safe.
+    # injection until AFTER parse_pipeline_params runs.
     if mode is not None:
         _normalized_cli_mode = mode.strip().lower()
         if _normalized_cli_mode not in RUN_MODES:
@@ -313,6 +296,8 @@ def main(
     if exit_immediately:
         config.setdefault("agent", {})["confirm_exit"] = False
         logger.info("Running in exit-immediately mode.")
+    if preprocess_only:
+        logger.info("Running in preprocess-only mode: round loop will be skipped.")
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
         logger.info("Using model class: %s.", model_class)
@@ -375,6 +360,12 @@ def main(
     if disabled_tools:
         config.setdefault("agent", {}).setdefault("disabled_tools", [])
         config["agent"]["disabled_tools"] = list(set(config["agent"]["disabled_tools"]) | set(disabled_tools))
+        os.environ["GEAK_DISABLED_TOOLS"] = ",".join(config["agent"]["disabled_tools"])
+
+    # Propagate use_skills to subagents via environment variable
+    if config.get("agent", {}).get("use_skills"):
+        os.environ["GEAK_USE_SKILLS"] = "1"
+
     logger.debug("config: %s", config)
 
     model = get_model(model_name, config.get("model", {}))
@@ -407,7 +398,6 @@ def main(
         logger.info("User task input (%d chars): %s", len(task_content), task_content[:500])
 
     # 2a) LLM-driven pipeline param extraction
-    heterogeneous = None
     max_rounds = None
     task_extracted_mode: str | None = None
     if task_content:
@@ -417,10 +407,6 @@ def main(
         pipeline_params = parse_pipeline_params(task_content, model)
         logger.debug("pipeline_params: %s", pipeline_params)
 
-        # Apply non-None extracted values (CLI flags still take priority)
-        if pipeline_params.get("heterogeneous") is not None and heterogeneous is None:
-            heterogeneous = pipeline_params["heterogeneous"]
-            logger.info("Using heterogeneous mode.")
         if pipeline_params.get("max_rounds") is not None:
             max_rounds = pipeline_params["max_rounds"]
             logger.info("Using max rounds: %s.", max_rounds)
@@ -509,13 +495,14 @@ def main(
         logger.info("Using output_dir from task content: %s", output)
 
     kernel_target = kernel_url or parsed_config.get("kernel_url") or parsed_config.get("kernel_name")
-    if not kernel_target:
+
+    if not kernel_target and repo is None:
         logger.error(
-            "[red]Error: missing kernel target. Provide --kernel-url or include kernel info in task.[/red]"
+            "[red]Error: missing kernel target. Provide --kernel-url, --repo, or include kernel info in task.[/red]"
         )
         raise typer.Exit(1)
 
-    parsed_gpu_ids = parse_gpu_ids(gpu_ids)
+    parsed_gpu_ids = _parse_gpu_ids(gpu_ids)
 
     # Auto-detect num_parallel from gpu_ids when not explicitly provided.
     if num_parallel is None:
@@ -529,32 +516,14 @@ def main(
         kernel_name_for_output = Path(kernel_url).stem
     if not kernel_name_for_output and isinstance(kernel_target, str):
         kernel_name_for_output = Path(kernel_target).stem
+    if not kernel_name_for_output:
+        kernel_name_for_output = "kernel_auto"
     logger.info("Using kernel_name_for_output: %s", kernel_name_for_output)
 
-    preprocess_output_dir, output_dir_auto = _derive_output_dir(output, kernel_name_for_output)
+    preprocess_output_dir, _output_dir_auto = _derive_output_dir(output, kernel_name_for_output)
     preprocess_output_dir.mkdir(parents=True, exist_ok=True)
     add_file_handler(preprocess_output_dir / DEFAULT_LOG_FILENAME)
 
-    # Resolve --keep-runs precedence: CLI > GEAK_KEEP_RUNS env > unset.
-    # When the user supplied --output, retention is a no-op (we never prune
-    # a user-owned parent dir). Surface the no-op as a warning so a
-    # misconfigured flag doesn't silently disappear.
-    if keep_runs is None:
-        _env_keep_runs = os.environ.get("GEAK_KEEP_RUNS")
-        if _env_keep_runs:
-            try:
-                keep_runs = int(_env_keep_runs)
-            except ValueError:
-                logger.warning(
-                    "[geak --keep-runs] GEAK_KEEP_RUNS=%r is not an integer; ignored.",
-                    _env_keep_runs,
-                )
-                keep_runs = None
-    if keep_runs is not None and keep_runs > 0 and not output_dir_auto:
-        logger.warning(
-            "[geak --keep-runs] ignored: --output was set explicitly; "
-            "retention only applies to auto-generated dirs."
-        )
     _run_t0 = time.monotonic()
     config.setdefault("patch", {})["patch_output_dir"] = str(preprocess_output_dir)
     logger.info(
@@ -734,19 +703,123 @@ def main(
         # stall is. Cleanup is intentionally NOT invoked here: the
         # per-run dir is preserved for forensic analysis of WHY the
         # watchdog fired.
+        _HARD_KILL_SELECT_PATCH_TIMEOUT_S = 300  # 5 minutes for select_patch before os._exit
+
+        def _hard_kill_select_patch(output_dir: Path) -> None:
+            """Best-effort select_patch + auto_finalize during hard-kill.
+
+            Runs in a daemon thread so the main hard-kill path can enforce a
+            wall-clock cap on it.  Two phases:
+
+            1. Run the LLM ``SelectPatchAgent`` to fill in any missing
+               per-task ``best_results.json`` files (non-fatal if it fails).
+            2. Call ``auto_finalize`` — the same canonical path used by
+               normal completion — to write a complete ``final_report.json``.
+            """
+            # Phase 1: best-effort LLM select_patch (non-fatal)
+            try:
+                from minisweagent.agents.select_patch_agent import SelectPatchAgent
+                from minisweagent.config import load_agent_config
+                from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
+
+                results_dir = output_dir / "results"
+                if not results_dir.is_dir():
+                    logger.warning("hard-kill select_patch: no results/ dir; skipping agent")
+                else:
+                    task_dirs = sorted({
+                        p.parent for p in results_dir.glob("round_*/*/best_results.json")
+                    })
+                    if not task_dirs:
+                        task_dirs = sorted({
+                            d for d in results_dir.glob("round_*/*")
+                            if d.is_dir() and d.name != "worktrees"
+                        })
+                    if not task_dirs:
+                        logger.warning("hard-kill select_patch: no task dirs found; skipping agent")
+                    else:
+                        metric = config.get("patch", {}).get("metric")
+                        model = get_model(model_name, config.get("model", {}))
+                        agent_config, _ = load_agent_config("mini_select_patch")
+
+                        env_config = LocalEnvironmentConfig(cwd=str(results_dir))
+                        env = LocalEnvironment(**env_config.__dict__)
+
+                        agent = SelectPatchAgent(model, env, **agent_config)
+                        agent.log_file = results_dir / "hard_kill_select_agent.log"
+                        agent.patch_dir = results_dir
+
+                        metric_section = metric if metric else "None"
+                        dir_listing = "\n".join(f"  - {d}" for d in task_dirs)
+                        task = (
+                            f"\n## User-provided metric\n{metric_section}\n\n"
+                            f"## Inputs\n"
+                            f"- Work directory (absolute): {results_dir}\n"
+                            f"- This is a HARD-KILL selection: the run hit the absolute wall-clock cap.\n"
+                            f"- Results are organized under round_*/ subdirectories.\n"
+                            f"  Each subdirectory may contain:\n"
+                            f"  - patch_*.patch files\n"
+                            f"  - patch_*_test.txt test output logs\n"
+                            f"  - best_results.json (per-task selection by previous agents)\n"
+                            f"- Scan ALL directories below to find the best patch across all rounds.\n"
+                            f"- Use patch_0_test.txt from any directory as baseline "
+                            f"(patch_0 = original unmodified kernel).\n"
+                            f"- Found {len(task_dirs)} task directories:\n{dir_listing}\n"
+                        )
+
+                        logger.info(
+                            "hard-kill select_patch: running on %d task dirs in %s",
+                            len(task_dirs), results_dir,
+                        )
+                        agent.run(task)
+                        best_patch_id = agent.extract_final_result()
+                        if best_patch_id:
+                            logger.info("hard-kill select_patch: chose %s", best_patch_id)
+                        else:
+                            logger.warning("hard-kill select_patch: agent did not produce a result")
+            except Exception:
+                logger.exception("hard-kill select_patch agent failed (non-fatal)")
+
+            # Phase 2: auto_finalize — same path as normal completion
+            try:
+                from minisweagent.run.postprocess.results import auto_finalize
+
+                _ctx = {"output_dir": str(output_dir)}
+                auto_finalize(_ctx)
+
+                # Stamp hard-kill metadata onto the report written by auto_finalize
+                report_path = output_dir / "final_report.json"
+                if report_path.is_file():
+                    final = json.loads(report_path.read_text())
+                    final["status"] = "hard_kill_auto_finalized"
+                    final["exit_code"] = 124
+                    final["elapsed_s"] = round(budget.elapsed(), 3)
+                    report_path.write_text(json.dumps(final, indent=2, default=str))
+                    logger.info(
+                        "hard-kill: wrote final_report.json via auto_finalize "
+                        "(best_speedup=%s)",
+                        final.get("best_speedup"),
+                    )
+            except Exception:
+                logger.exception("hard-kill auto_finalize failed (non-fatal)")
+
         def _hard_kill_handler() -> None:
             logger.error(
                 "[budget] HARD KILL: started_at + total_s reached; terminating registry and exiting",
             )
-            # Best-effort stub final report so the operator has *something*
-            # to point at when the run hits hard kill (the regular finalize
-            # path won't get a chance to write one). Pure stdlib write, no
-            # LLM, takes microseconds; intentionally tolerates any failure
-            # because the next thing we do is ``os._exit``.
+            # Terminate all tracked subprocesses first so GPU resources are freed.
             try:
-                _stub_path = preprocess_output_dir / "final_report.json"
-                if not _stub_path.exists():
-                    _stub_path.write_text(
+                state.registry.terminate_all(escalate_after_s=5.0)
+            except Exception:
+                logger.exception("hard-kill: registry.terminate_all() failed")
+
+            # Best-effort: run select_patch agent to find the best result
+            # across all completed rounds. Runs in a daemon thread with a
+            # 5-minute timeout so it cannot block os._exit indefinitely.
+            _report_path = preprocess_output_dir / "final_report.json"
+            if not _report_path.exists():
+                # Write a stub immediately so there's always *something*
+                try:
+                    _report_path.write_text(
                         json.dumps(
                             {
                                 "status": "hard_kill",
@@ -757,12 +830,23 @@ def main(
                             indent=2,
                         )
                     )
-            except Exception:
-                logger.exception("hard-kill: writing stub final_report.json failed (non-fatal)")
-            try:
-                state.registry.terminate_all(escalate_after_s=5.0)
-            except Exception:
-                logger.exception("hard-kill: registry.terminate_all() failed")
+                except Exception:
+                    logger.exception("hard-kill: writing stub final_report.json failed (non-fatal)")
+
+            select_thread = threading.Thread(
+                target=_hard_kill_select_patch,
+                args=(preprocess_output_dir,),
+                daemon=True,
+                name="geak-hard-kill-select-patch",
+            )
+            select_thread.start()
+            select_thread.join(timeout=_HARD_KILL_SELECT_PATCH_TIMEOUT_S)
+
+            if select_thread.is_alive():
+                logger.warning(
+                    "hard-kill select_patch timed out after %ds; proceeding with os._exit",
+                    _HARD_KILL_SELECT_PATCH_TIMEOUT_S,
+                )
 
             # Loud user-facing warning identifying the artifact path and the
             # fact that cleanup did NOT run. Operators reading a CI tail or
@@ -800,26 +884,6 @@ def main(
         if preprocess_ctx.get("repo_root") and repo is None:
             repo = Path(preprocess_ctx["repo_root"])
 
-        # kernel_type routing:
-        # - hip/flydsl/other -> homogeneous agent
-        # - triton -> heterogeneous orchestrator
-        # Auto-detect kernel type if heterogeneous flag was not set by LLM extraction or task parser
-        if heterogeneous is None:
-            _discovery = preprocess_ctx.get("discovery") or {}
-            _kernel_info = _discovery.get("kernel") or {}
-            _auto_kernel_type = _kernel_info.get("type")
-
-            if (not _auto_kernel_type or _auto_kernel_type == "unknown") and preprocess_ctx.get("kernel_path"):
-                from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
-                _auto_kernel_type = _infer_kernel_type(Path(preprocess_ctx["kernel_path"]))
-
-            if _auto_kernel_type == "triton":
-                heterogeneous = True
-                logger.info("Using heterogeneous mode based on discovery.")
-            else:
-                heterogeneous = False
-                logger.info("Using homogeneous mode based on discovery.")
-
         # Resolve max_rounds via the documented precedence chain:
         # CLI --max-rounds (if any future flag added) > config (mode preset) >
         # GEAK_MAX_ROUNDS env > default. ``max_rounds`` from task parsing acts as
@@ -836,110 +900,29 @@ def main(
             resolved_mode,
         )
 
-        if heterogeneous:
-            commandment = preprocess_ctx.get("commandment")
-            if not commandment:
-                error_message = "No commandment found in preprocessor context. Check preprocessor logs for failures."
-                logger.error(error_message)
-                raise RuntimeError(error_message)
+        preprocess_ctx["user_instructions"] = task_content
+        preprocess_ctx["rag_enabled"] = rag_enabled
 
-            preprocess_ctx["user_instructions"] = task_content
-
-            extracted = extract_user_constraints(task_content, model)
-            _addendum_parts: list[str] = []
-            if extracted["constraints"]:
-                _addendum_parts.append(
-                    "## USER-SPECIFIED CONSTRAINTS\n\nThese are mandatory. Violation means rejection.\n"
-                )
-                _addendum_parts.extend(f"- {c}" for c in extracted["constraints"])
-            if extracted["directives"]:
-                _addendum_parts.append(
-                    "\n## PRESCRIBED OPTIMIZATION DIRECTIVES\n\n"
-                    "These are the user's prescribed optimization strategies. Prioritize them, but\n"
-                    "also explore additional directions beyond these.\n"
-                    "NOTE: Any performance numbers in the original user request come from full-model\n"
-                    "profiling under different conditions. Use ONLY the GEAK-measured baseline metrics\n"
-                    "for before/after speedup comparisons.\n"
-                )
-                _addendum_parts.extend(f"- {d}" for d in extracted["directives"])
-            if _addendum_parts:
-                preprocess_ctx["commandment"] = commandment + "\n\n" + "\n".join(_addendum_parts)
-                _commandment_path = preprocess_output_dir / "COMMANDMENT.md"
-                _commandment_path.write_text(preprocess_ctx["commandment"], encoding="utf-8")
-                logger.info(
-                    "Enriched commandment with %d constraints and %d directives (written to %s).",
-                    len(extracted["constraints"]),
-                    len(extracted["directives"]),
-                    _commandment_path,
-                )
-
-            preprocess_ctx["rag_enabled"] = rag_enabled
-            # Bind effective_repo BEFORE run_orchestrator so an exception
-            # inside the orchestrator still leaves the finally with the
-            # correct repo for apply (which would also be gated False, but
-            # cleanup may still want it).
-            effective_repo = repo or (
-                Path(preprocess_ctx["repo_root"]) if preprocess_ctx.get("repo_root") else None
-            )
-            report = run_orchestrator(
-                preprocess_ctx=preprocess_ctx,
-                gpu_ids=parsed_gpu_ids,
-                model=model,
-                model_factory=lambda: get_model(model_name, config.get("model", {})),
-                output_dir=preprocess_output_dir,
-                max_rounds=_resolved_max_rounds,
-                heterogeneous=True,
-                deadline=opt_deadline,
-                soft_stop=budget.soft_stop,
-                registry=state.registry,
-            )
-            # Flip success flag BEFORE _final_report_to_bestpatchresult --
-            # it can raise on Path()/float() conversions, and we don't
-            # want a clean orchestrator return demoted by a post-processing
-            # error to a "run failed; do not apply" state.
-            _run_succeeded = True
-            logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
-            # Assignment + return looks redundant but the outer finally
-            # reads ``result`` from the function scope; ``return X`` alone
-            # would leave it at its initial ``None``.
-            result = _final_report_to_bestpatchresult(report)
-            return result  # noqa: RET504
+        extracted = extract_user_constraints(task_content, model)
+        extra_addenda: list[str] = []
+        if extracted["constraints"]:
+            block = ["## USER-SPECIFIED CONSTRAINTS\n\nThese are mandatory. Violation means rejection.\n"]
+            block.extend(f"- {c}" for c in extracted["constraints"])
+            extra_addenda.append("\n".join(block))
+        if extracted["directives"]:
+            block = [
+                "## PRESCRIBED OPTIMIZATION DIRECTIVES\n\n"
+                "These are the user's prescribed optimization strategies. Prioritize them, but\n"
+                "also explore additional directions beyond these.\n"
+                "NOTE: Any performance numbers in the original user request come from full-model\n"
+                "profiling under different conditions. Use ONLY the GEAK-measured baseline metrics\n"
+                "for before/after speedup comparisons.\n"
+            ]
+            block.extend(f"- {d}" for d in extracted["directives"])
+            extra_addenda.append("\n".join(block))
 
         metric = parsed_config.get("metric") or config.get("patch", {}).get("metric")
         logger.info("Using metric: %s", metric)
-
-        # Cross-session memory injection for homogeneous mode
-        _kernel_path = preprocess_ctx.get("kernel_path", "")
-        _bm = preprocess_ctx.get("baseline_metrics") or {}
-        if isinstance(_bm, str):
-            try:
-                _bm = json.loads(_bm)
-            except Exception:
-                _bm = {}
-        try:
-            from minisweagent.memory.integration import assemble_memory_context
-
-            _mem_ctx = assemble_memory_context(
-                kernel_path=_kernel_path,
-                bottleneck_type=_bm.get("bottleneck", ""),
-                profiling_metrics=_bm,
-            )
-            if _mem_ctx:
-                task_content = (
-                    task_content + "\n\n### Optimization Memory (from past kernel optimization runs)\n" + _mem_ctx
-                )
-                logger.info("Cross-session memory injected into homogeneous task (%d chars)", len(_mem_ctx))
-            else:
-                logger.info("Cross-session memory: no relevant experiences found")
-        except Exception as _mem_exc:
-            logger.warning("Cross-session memory unavailable: %s", _mem_exc)
-
-        agent_config = dict(config.get("agent", {}))
-        agent_config["save_patch"] = True
-        agent_config["test_command"] = test_command or config.get("patch", {}).get("test_command")
-        agent_config["metric"] = metric
-        agent_config["patch_output_dir"] = str(preprocess_output_dir)
-        logger.debug("Homogeneous agent_config: %s", agent_config)
 
         repo_path = repo or config.get("patch", {}).get("repo")
         if repo_path:
@@ -952,30 +935,46 @@ def main(
         logger.info("Resolved repo path: %s", repo_path)
         effective_repo = repo_path
 
-        result = run_homogeneous_agent(
-            config=config,
-            task_content=task_content,
-            model=model,
-            env=env,
-            env_class=env.__class__,
-            env_kwargs=_env_kwargs,
-            agent_config=agent_config,
-            repo=repo_path,
-            num_parallel=num_parallel,
-            gpu_ids=gpu_ids,
-            output_dir=preprocess_output_dir,
-            model_name=model_name,
-            console=console,
-            deadline=opt_deadline,
-            soft_stop=budget.soft_stop,
-            registry=state.registry,
+        from minisweagent.run.unified import PipelineContext, run_pipeline
+
+        pipeline_mode = "mixed"
+        logger.info("Running unified pipeline mode: %s", pipeline_mode)
+        pipeline_result = run_pipeline(
+            PipelineContext(
+                preprocess_ctx=preprocess_ctx,
+                user_prompt=task_content,
+                kernel_language=_normalize_kernel_type(preprocess_ctx.get("kernel_type")),
+                output_dir=preprocess_output_dir,
+                gpu_ids=parsed_gpu_ids,
+                model=model,
+                model_factory=lambda: get_model(model_name, config.get("model", {})),
+                config=config,
+                max_rounds=_resolved_max_rounds,
+                env=env,
+                env_class=env.__class__,
+                env_kwargs=_env_kwargs,
+                repo=repo_path,
+                test_command=test_command or config.get("patch", {}).get("test_command"),
+                metric=metric,
+                rag_enabled=rag_enabled,
+                extra_addenda=extra_addenda,
+                num_parallel=num_parallel,
+                model_name=model_name,
+                console=console,
+                deadline=opt_deadline,
+                soft_stop=budget.soft_stop,
+                registry=state.registry,
+                preprocess_only=preprocess_only,
+            ),
+            mode=pipeline_mode,
         )
         # Flip success flag immediately after the agent returns, before the
         # time.monotonic() log line (which can't realistically raise, but
         # consistency with the het branch is cheap).
         _run_succeeded = True
         logger.info("Run completed in %.0fs.", time.monotonic() - _run_t0)
-        return result
+        result = _final_report_to_bestpatchresult(pipeline_result)
+        return result  # noqa: RET504 – result read by finally block
     finally:
         # Ordering matters:
         # 1. Cancel timers FIRST so the hard-kill watchdog can't race the
@@ -1017,30 +1016,11 @@ def main(
 
         if outcome:
             _apply_status = outcome.get("apply_status")
-            if _apply_status == "skipped_dirty":
-                console.print(
-                    "[bold yellow][geak apply] Skipped: --repo has uncommitted tracked changes. "
-                    "Commit/stash and re-run apply manually.[/bold yellow]"
-                )
-            elif _apply_status in {"apply_failed", "commit_failed"}:
+            if _apply_status in {"apply_failed", "commit_failed"}:
                 console.print(
                     f"[bold yellow][geak apply] {_apply_status}: "
                     f"{outcome.get('reason', '')}[/bold yellow]"
                 )
-
-        if keep_runs and keep_runs > 0 and output_dir_auto:
-            try:
-                from minisweagent.run.postprocess.finalize_apply import prune_old_runs
-
-                _removed = prune_old_runs(
-                    preprocess_output_dir.parent,
-                    keep=keep_runs,
-                    exclude=preprocess_output_dir,
-                )
-                if _removed:
-                    logger.info("[geak --keep-runs] Pruned %d old run dir(s).", _removed)
-            except Exception:
-                logger.exception("prune_old_runs raised (non-fatal)")
 
 
 if __name__ == "__main__":

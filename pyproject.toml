@@ -117,6 +117,8 @@ include = ["minisweagent*"]
 [tool.setuptools.package-data]
 minisweagent = [
     "config/**/*",
+    "kernel_languages/**/*",
+    "pipeline_workers/**/*",
     "run/preprocess/config/**/*",
     "tools/*.json",
     "memory/cross_session/*.json",

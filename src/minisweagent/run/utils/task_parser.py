@@ -369,6 +369,16 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
             kernel_type=kernel_type,
         )
 
+    # Clear hallucinated local paths that don't exist on disk.
+    if result["kernel_url"] and not result["kernel_url"].startswith(("http://", "https://")):
+        p = Path(result["kernel_url"])
+        if not p.exists():
+            logger.warning(
+                "parse_task_info: kernel_url %r does not exist on disk; clearing.",
+                result["kernel_url"],
+            )
+            result["kernel_url"] = None
+
     if result["output_dir"]:
         result["output_dir"] = _normalize_path(result["output_dir"])
     if result["config"]:
@@ -396,6 +406,16 @@ def _normalize_pipeline_params_from_parsed(parsed: dict) -> dict:
         result["kernel_url"] = _normalize_path(result["kernel_url"])
     if result["preprocess_dir"]:
         result["preprocess_dir"] = _normalize_path(result["preprocess_dir"])
+
+    # Clear hallucinated local paths that don't exist on disk.
+    if result["kernel_url"] and not result["kernel_url"].startswith(("http://", "https://")):
+        p = Path(result["kernel_url"])
+        if not p.exists():
+            logger.warning(
+                "parse_pipeline_params: kernel_url %r does not exist on disk; clearing.",
+                result["kernel_url"],
+            )
+            result["kernel_url"] = None
 
     for field in ("max_rounds", "start_round"):
         if result[field] is not None:
@@ -601,7 +621,12 @@ def extract_user_constraints(task_content: str, model) -> dict[str, list[str]]:
 
 # Max length of the kernel-derived path segment (before ``_<YYYYMMDD>_<HHMMSS>``).
 # Long symbols (e.g. hipBLASLt ``Cijk_*``) are shortened to keep the leaf short.
-_MAX_KERNEL_DIR_STEM_LEN = 20
+#
+# 48 chars balances filesystem-friendly path length against the ergonomics of
+# scanning logs by eye: at 20 a Cijk-style kernel was reduced to ~11 chars +
+# hash and effectively unrecognisable; at 48 the human-meaningful prefix is
+# preserved before the disambiguating SHA-256 digest is appended.
+_MAX_KERNEL_DIR_STEM_LEN = 48
 
 
 def _sanitize_kernel_name_for_patch_dir(kernel_name: str) -> str:

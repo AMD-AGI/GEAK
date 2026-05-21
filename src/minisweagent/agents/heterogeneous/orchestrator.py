@@ -228,6 +228,7 @@ def run_heterogeneous_orchestrator(
     max_rounds: int,
     start_round: int,
     *,
+    task_generation: str = "planned",
     deadline=None,
     soft_stop=None,
     registry=None,
@@ -251,7 +252,6 @@ def run_heterogeneous_orchestrator(
             start_round,
         )
     from minisweagent.agents.heterogeneous.task_generator import _extract_kernel_meta
-    from minisweagent.agents.strategy_interactive import StrategyInteractiveAgent
     from minisweagent.run.postprocess.results import (
         finalize_run,
         post_round_evaluate,
@@ -279,6 +279,11 @@ def run_heterogeneous_orchestrator(
         except Exception as e:
             logger.warning("Failed to wrap RAG tools with RAG postprocessor: %s", e)
 
+    from minisweagent.agents.optimization_agent import OptimizationAgent
+    from minisweagent.subagents import SubAgentRegistry
+
+    subagent_registry = SubAgentRegistry()
+
     ctx: dict[str, Any] = {
         **preprocess_ctx,
         "kernel_meta": kernel_meta,
@@ -287,11 +292,13 @@ def run_heterogeneous_orchestrator(
         "gpu_ids": gpu_ids,
         "model": model,
         "model_factory": model_factory,
-        "agent_class": StrategyInteractiveAgent,
+        "agent_class": OptimizationAgent,
         "toolruntime": toolruntime,
+        "task_generation": task_generation,
         "deadline": deadline,
         "soft_stop": soft_stop,
         "registry": registry,
+        "subagent_registry": subagent_registry,
     }
 
     tools_schema = build_tools_schema(toolruntime)
@@ -353,7 +360,7 @@ def run_heterogeneous_orchestrator(
         )
 
         if is_working_memory_enabled():
-            from minisweagent.memory.cross_session_memory import (  # pylint: disable=import-error,no-name-in-module
+            from minisweagent.memory.cross_session import (  # pylint: disable=import-error,no-name-in-module
                 classify_kernel_category,
             )
             from minisweagent.memory.working_memory import (  # pylint: disable=import-error,no-name-in-module
@@ -436,6 +443,7 @@ def run_heterogeneous_orchestrator(
                 _preflight_repo_root,
                 _preflight_harness,
                 _preflight_gpu,
+                output_dir=output_dir,
             )
         else:
             logger.warning(

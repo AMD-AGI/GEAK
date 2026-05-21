@@ -37,6 +37,28 @@ logger.setLevel(logging.WARNING)
 
 CACHE_CONTROL_EPHEMERAL: dict[str, str] = {"type": "ephemeral"}
 
+# AMD LLM gateway hostname prefixes.  The ``"user"`` request header is only
+# meaningful (and only consumed for request attribution) when the call is
+# routed through one of these gateways; attaching the local OS username to
+# arbitrary third-party providers (e.g. OpenAI direct, Anthropic direct) would
+# leak the operator's identity over the wire for no benefit.
+_AMD_LLM_GATEWAY_API_BASE_PREFIXES: tuple[str, ...] = (
+    "https://llm-api.amd.com/",
+    "https://llm-gateway-dev.apps.amdcloud.com/",
+)
+
+
+def _is_amd_llm_gateway_api_base(api_base: Any) -> bool:
+    """Return True if *api_base* points at an AMD LLM gateway endpoint.
+
+    Used by :class:`LitellmModel` to gate the ``"user"`` request header so
+    only gateway-routed traffic carries the operator identity.
+    """
+    if not isinstance(api_base, str) or not api_base:
+        return False
+    return any(api_base.startswith(p) for p in _AMD_LLM_GATEWAY_API_BASE_PREFIXES)
+
+
 # Parameters forwarded to ``litellm.completion`` (extend when providers add flags).
 LITELLM_COMPLETION_PARAM_KEYS: frozenset[str] = frozenset(
     {
@@ -293,10 +315,19 @@ class LitellmModel:
             tool_cache_control=self.config.tool_cache_control,
         )
         existing_headers = filtered.get("extra_headers") or {}
-        filtered["extra_headers"] = {
-            **existing_headers,
-            "user": existing_headers.get("user") or get_amd_llm_user(),
-        }
+        if existing_headers.get("user"):
+            # Caller-provided override wins regardless of provider — keep as-is.
+            filtered["extra_headers"] = dict(existing_headers)
+        elif _is_amd_llm_gateway_api_base(filtered.get("api_base")):
+            filtered["extra_headers"] = {
+                **existing_headers,
+                "user": get_amd_llm_user(),
+            }
+        else:
+            # Non-AMD-gateway provider: do NOT attach the local OS username
+            # as a request header. Preserve any other caller-supplied
+            # ``extra_headers`` verbatim.
+            filtered["extra_headers"] = dict(existing_headers)
         try:
             return litellm.completion(
                 model=self.config.model_name,

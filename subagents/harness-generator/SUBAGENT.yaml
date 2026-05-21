@@ -1,0 +1,38 @@
+name: harness-generator
+description: >-
+  Create a fixed, immutable test harness for a GPU kernel with four CLI
+  modes: --correctness, --profile, --benchmark, and --full-benchmark.
+  Reads the kernel source and existing tests/benchmarks, generates or
+  adapts a harness script, validates it, and returns a TEST_COMMAND.
+  Use as the default agent for harness creation tasks.
+
+execution_mode: inprocess
+
+parameters:
+  - name: task
+    type: string
+    description: >-
+      Kernel name, repository path, and discovery context including
+      kernel analysis, discovered test/benchmark files, and any
+      language-specific guidance.
+    required: true
+
+agent:
+  system_template_file: SYSTEM_PROMPT.md
+  instance_template: |
+    Your task is: {{task}}
+  action_observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    <output>
+    {{ output.output -}}
+    </output>
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+
+    Format your response exactly as follows (no extra code blocks):
+    ```bash
+    <one shell command>
+    ```
+  step_limit: 0
+  cost_limit: 0.0
+

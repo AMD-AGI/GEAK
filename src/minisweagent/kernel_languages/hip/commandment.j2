@@ -1,0 +1,57 @@
+{#
+  HIP COMMANDMENT.md template.
+
+  Replaces the eval-command path of run/preprocess/commandment.py
+  (generate_commandment_from_commands).  Consumed by ExplorePhase;
+  output must still pass
+  kernel_languages.contract.validate_commandment().
+
+  Jinja vars:
+    - kernel_path            : absolute path to the HIP kernel
+    - repo_root              : absolute path to repo root
+    - compile_command        : optional; used by SETUP when present
+    - correctness_command    : command that validates numerical output
+    - performance_command    : command that prints latency / GEAK_RESULT_*
+    - profile_replays        : int (profiler replay count)
+#}
+# Commandment
+
+Evaluation contract for this HIP kernel. All five sections below are
+mandatory and enforced by kernel_languages/contract.py::validate_commandment.
+
+## Setup
+
+```bash
+export GEAK_WORK_DIR="${GEAK_WORK_DIR:-{{ repo_root }}}"
+export PYTHONPATH="${GEAK_WORK_DIR}:${GEAK_REPO_ROOT:-{{ repo_root }}}:${PYTHONPATH:-}"
+{% if compile_command -%}
+{{ compile_command }}
+{%- endif %}
+```
+
+## Correctness
+
+```bash
+cd "${GEAK_WORK_DIR}" && {{ correctness_command | default("python3 " + harness_path + " --correctness") }}
+```
+
+## Benchmark
+
+```bash
+cd "${GEAK_WORK_DIR}" && {{ performance_command | default("python3 " + harness_path + " --benchmark") }}
+```
+
+## Full Benchmark
+
+```bash
+cd "${GEAK_WORK_DIR}" && {{ performance_command | default("python3 " + harness_path + " --full-benchmark") }}
+```
+
+## Profile
+
+```bash
+kernel-profile "cd ${GEAK_WORK_DIR} && {{ performance_command | default("python3 " + harness_path + " --profile") }}" \
+  --gpu-devices ${GEAK_GPU_DEVICE:-0} \
+  --replays {{ profile_replays | default(3) }} \
+  --json -o ${GEAK_WORK_DIR}/profile.json
+```

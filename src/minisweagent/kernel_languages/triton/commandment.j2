@@ -1,0 +1,63 @@
+{#
+  Triton COMMANDMENT.md template.
+
+  Replaces run/preprocess/commandment.py for the Triton (harness-path)
+  case. Consumed by ExplorePhase; output must still pass
+  kernel_languages.contract.validate_commandment().
+
+  Jinja vars (per plan §13.2-E):
+    - kernel_path         : absolute path to kernel.py
+    - harness_path        : absolute path to harness.py
+    - repo_root           : absolute path to repo root (for PYTHONPATH)
+    - inner_kernel        : bool (True -> inner-kernel setup block)
+    - profile_replays     : int (profiler replay count; default 3)
+
+  For the eval-command (HIP) path, a separate commandment.j2 lives
+  under kernel_languages/hip/ with different SETUP / CORRECTNESS /
+  BENCHMARK / FULL_BENCHMARK / PROFILE bodies. Downstream
+  _validate_and_fix still runs on the rendered output to catch any
+  regressions.
+#}
+# Commandment
+
+Evaluation contract for this kernel. All five sections below are
+mandatory and enforced by kernel_languages/contract.py::validate_commandment.
+
+## Setup
+
+```bash
+export GEAK_WORK_DIR="${GEAK_WORK_DIR:-{{ repo_root }}}"
+printf '#!/bin/bash\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\nexport HIP_VISIBLE_DEVICES=%s\ncd "%s" && exec python3 "$@"\n' "${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT:-{{ repo_root }}}" "${GEAK_GPU_DEVICE:-0}" "${GEAK_WORK_DIR}" > ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh
+{% if inner_kernel -%}
+mkdir -p "${GEAK_WORK_DIR}/_work"
+cp "{{ kernel_path }}" "${GEAK_WORK_DIR}/_work/kernel.py"
+touch "${GEAK_WORK_DIR}/_work/__init__.py"
+{%- endif %}
+```
+
+## Correctness
+
+```bash
+${GEAK_WORK_DIR}/run.sh {{ harness_path }} --correctness
+```
+
+## Benchmark
+
+```bash
+${GEAK_WORK_DIR}/run.sh {{ harness_path }} --benchmark
+```
+
+## Full Benchmark
+
+```bash
+${GEAK_WORK_DIR}/run.sh {{ harness_path }} --full-benchmark
+```
+
+## Profile
+
+```bash
+kernel-profile "${GEAK_WORK_DIR}/run.sh {{ harness_path }} --profile" \
+  --gpu-devices ${GEAK_GPU_DEVICE:-0} \
+  --replays {{ profile_replays | default(3) }} \
+  --json -o ${GEAK_WORK_DIR}/profile.json
+```

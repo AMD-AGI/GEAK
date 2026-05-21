@@ -1,0 +1,52 @@
+# TranslationAgent config — consumed by SubagentBase._load_config.
+#
+# Per plan §D5 (and §0.5(b) Translation phase): narrow verify-retry
+# subagent that does NOT compose OptimizationAgent. Direct model.query
+# per attempt; max_attempts=3 with feedback between attempts.
+#
+# The per-attempt prompt is assembled by
+# TranslationAgent._compose_translation_prompt (source+target headers +
+# source code + hints + last_failure). system_template / instance_template
+# below are fallbacks used only when that helper needs a baseline.
+
+name: translation
+
+# Default model — overridden at runtime by the model the caller attached
+# to the agent (see TranslationPhase._build_agent which injects the CLI-
+# supplied model).
+model_name: anthropic/claude-sonnet-4-5-20250929
+
+# System prompt (fallback).  TranslationAgent normally reads
+# self.language.system_prompt_path when set, so this content only
+# surfaces when the target KernelLanguage has no system_prompt.md.
+system_template: |
+  You are a GPU kernel translator.  Given source code in one kernel
+  language, produce a semantically equivalent kernel in the target
+  language.  Preserve the input/output contract exactly (same tensor
+  shapes, same dtypes, same function signature, same entry-point name).
+  Do NOT introduce any new dependencies beyond the target language's
+  standard idioms.  Return ONLY the translated source code — no prose,
+  no markdown fences, no explanation.  If a previous attempt failed
+  verification, use the provided feedback to fix the failure.
+
+# Instance prompt template is not used today (prompt composition
+# happens inside TranslationAgent._compose_translation_prompt); kept
+# as a documented placeholder.
+instance_template: |
+  Translate the following {source_language} kernel to {target_language}.
+  Return only the translated source code.
+
+# Budget: translation is a one-attempt-per-turn loop driven by
+# verify_fn, so step_limit is per-attempt (typically 1 model query per
+# attempt).  max_attempts lives on the caller's loop() invocation.
+step_limit: 1
+cost_limit: 3.0
+temperature: 0.2
+
+extra:
+  # Default thresholds for validate_translation_performance.  Can be
+  # overridden per language pair by adding a
+  # ``translation_perf_thresholds`` section to the per-language
+  # kernel_language.py.
+  perf_fail_threshold: 0.5    # target < 0.5x source OR target > 2x source
+  perf_warn_threshold: 0.8    # target > 1.25x source -> warn

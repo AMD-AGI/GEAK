@@ -1,0 +1,38 @@
+name: speedup-verify
+description: >-
+  Read benchmark baseline output logs and write a standalone Python
+  script that computes speedup. The script accepts --baseline and
+  --candidate output files, parses per-shape latencies, computes
+  per-shape and geometric mean speedup, and outputs
+  GEAK_RESULT_GEOMEAN_SPEEDUP=<number>. Use after baseline collection
+  to generate the speedup verification script.
+
+execution_mode: inprocess
+
+parameters:
+  - name: task
+    type: string
+    description: >-
+      Benchmark baseline output text, harness file path, and output
+      directory where the speedup script should be written.
+    required: true
+
+agent:
+  system_template_file: SYSTEM_PROMPT.md
+  instance_template: |
+    Your task is: {{task}}
+  action_observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    <output>
+    {{ output.output -}}
+    </output>
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+
+    Format your response exactly as follows (no extra code blocks):
+    ```bash
+    <one shell command>
+    ```
+  step_limit: 30
+  cost_limit: 0.0
+

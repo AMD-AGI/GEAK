@@ -209,3 +209,5 @@ mcp_tools/profiler-mcp/.rocprofv3/
 .geak_resolved/
 runs/
 dummy_run*.py
+validation_runs/
+test_scripts/

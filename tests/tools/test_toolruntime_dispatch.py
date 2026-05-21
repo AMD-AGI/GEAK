@@ -123,10 +123,14 @@ class TestDispatch:
         assert isinstance(result, dict)
         assert result["returncode"] == 0
 
-    def test_dispatch_unknown_tool_raises(self):
+    def test_dispatch_unknown_tool_returns_error(self):
         rt = ToolRuntime()
-        with pytest.raises(ValueError, match="Unknown tool"):
-            rt.dispatch({"name": "nonexistent_tool_xyz", "arguments": {}})
+        result = rt.dispatch({"name": "nonexistent_tool_xyz", "arguments": {}})
+        assert isinstance(result, dict)
+        assert result["returncode"] == 1
+        assert "Unknown tool" in result["output"]
+        assert "nonexistent_tool_xyz" in result["output"]
+        assert "Available tools" in result["output"]
 
     def test_dispatch_baseline_metrics_bad_json(self):
         """baseline_metrics with bad JSON should return error, not crash."""

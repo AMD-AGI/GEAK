@@ -122,7 +122,7 @@ def _result_for(output_dir: Path, patch_name: str = "best_patch.diff") -> BestPa
 # ---------------------------------------------------------------------------
 
 
-def test_happy_path_applies_commits_and_cleans(repo: Path, output_dir: Path) -> None:
+def test_happy_path_applies_commits_and_preserves_artifacts(repo: Path, output_dir: Path) -> None:
     result = _result_for(output_dir)
 
     finalize_apply_and_cleanup(result, repo, output_dir)
@@ -146,19 +146,14 @@ def test_happy_path_applies_commits_and_cleans(repo: Path, output_dir: Path) -> 
     # Working tree reflects the applied change.
     assert (repo / "kernel.py").read_text() == "def run():\n    return 42\n"
 
-    # Keep-set retained, everything else pruned.
+    # Cleanup only removes worktrees; all other artifacts are preserved.
     assert output_dir.is_dir()
     assert (output_dir / "final_report.json").is_file()
     assert (output_dir / "best_patch.diff").is_file()
     assert (output_dir / "geak_agent.log").is_file()
     assert (output_dir / "COMMANDMENT.md").is_file()
-    remaining = {p.name for p in output_dir.iterdir()}
-    assert remaining == {
-        "final_report.json",
-        "best_patch.diff",
-        "geak_agent.log",
-        "COMMANDMENT.md",
-    }
+    assert (output_dir / "logs" / "run.log").is_file()
+    assert (output_dir / "results" / "round_1" / "best_results.json").is_file()
 
 
 def test_happy_path_commit_body_references_report(repo: Path, output_dir: Path) -> None:
@@ -178,12 +173,12 @@ def test_happy_path_commit_body_references_report(repo: Path, output_dir: Path) 
 
 
 # ---------------------------------------------------------------------------
-# Dirty repo refusal
+# Dirty repo tolerance
 # ---------------------------------------------------------------------------
 
 
-def test_dirty_repo_refuses_apply_only(repo: Path, output_dir: Path) -> None:
-    """Dirty repo must skip apply but must not block the independent cleanup step."""
+def test_dirty_repo_applies_patch_via_fallback(repo: Path, output_dir: Path) -> None:
+    """Dirty repo is tolerated: patch is applied via the fallback chain and committed."""
     (repo / "kernel.py").write_text("def run():\n    return 99\n")  # uncommitted change
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -191,30 +186,25 @@ def test_dirty_repo_refuses_apply_only(repo: Path, output_dir: Path) -> None:
     finalize_apply_and_cleanup(result, repo, output_dir)
 
     after_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    assert before_sha == after_sha, "No new commit should be made when repo is dirty"
-    # User's uncommitted change must remain untouched.
-    assert (repo / "kernel.py").read_text() == "def run():\n    return 99\n"
-    # Cleanup is independent and still runs: keep-set survives, noise pruned.
-    remaining = {p.name for p in output_dir.iterdir()}
-    assert remaining == {
-        "final_report.json",
-        "best_patch.diff",
-        "geak_agent.log",
-        "COMMANDMENT.md",
-    }
+    assert before_sha != after_sha, "Patch should be applied and committed on dirty repo"
+    # The patch wins: kernel.py reflects the patched content.
+    assert (repo / "kernel.py").read_text() == "def run():\n    return 42\n"
+    # Cleanup only prunes worktrees; all other artifacts preserved.
+    assert (output_dir / "final_report.json").is_file()
+    assert (output_dir / "logs" / "run.log").is_file()
 
 
-def test_dirty_repo_with_no_cleanup_preserves_everything(repo: Path, output_dir: Path) -> None:
-    """With --no-cleanup, a dirty repo leaves both the repo and the output_dir untouched."""
-    (repo / "kernel.py").write_text("def run():\n    return 99\n")
+def test_dirty_repo_unrelated_file_preserved(repo: Path, output_dir: Path) -> None:
+    """Dirty changes in files NOT touched by the patch are preserved after apply."""
+    (repo / "unrelated.txt").write_text("user work in progress\n")
     result = _result_for(output_dir)
-    before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
     finalize_apply_and_cleanup(result, repo, output_dir, cleanup=False)
 
-    after_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    assert before_sha == after_sha
-    assert (repo / "kernel.py").read_text() == "def run():\n    return 99\n"
+    # Patch applied and committed.
+    assert (repo / "kernel.py").read_text() == "def run():\n    return 42\n"
+    # Unrelated dirty file is still there (not staged or committed).
+    assert (repo / "unrelated.txt").read_text() == "user work in progress\n"
     assert (output_dir / "logs" / "run.log").is_file()
     assert (output_dir / "results" / "round_1" / "best_results.json").is_file()
 
@@ -251,14 +241,9 @@ def test_apply_failure_still_runs_cleanup_independently(repo: Path, output_dir: 
     after_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
     assert before_sha == after_sha
     assert (repo / "kernel.py").read_text() == "def run():\n    return 0\n"
-    # Cleanup still ran: keep-set survives, everything else pruned.
-    remaining = {p.name for p in output_dir.iterdir()}
-    assert remaining == {
-        "final_report.json",
-        "best_patch.diff",
-        "geak_agent.log",
-        "COMMANDMENT.md",
-    }
+    # Cleanup only prunes worktrees; all other artifacts preserved.
+    assert (output_dir / "final_report.json").is_file()
+    assert (output_dir / "logs" / "run.log").is_file()
 
 
 def test_apply_failure_with_no_cleanup_preserves_artifacts(repo: Path, output_dir: Path) -> None:
@@ -539,7 +524,7 @@ def test_apply_only_without_cleanup(repo: Path, output_dir: Path) -> None:
 
 
 def test_cleanup_only_without_apply(repo: Path, output_dir: Path) -> None:
-    """--no-apply-best-patch --cleanup: no commit, but artifacts pruned down to keep-set."""
+    """--no-apply-best-patch --cleanup: no commit, all artifacts preserved (cleanup only prunes worktrees)."""
     result = _result_for(output_dir)
     before_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
@@ -548,13 +533,9 @@ def test_cleanup_only_without_apply(repo: Path, output_dir: Path) -> None:
     after_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
     assert before_sha == after_sha
     assert (repo / "kernel.py").read_text() == "def run():\n    return 0\n"  # repo untouched
-    remaining = {p.name for p in output_dir.iterdir()}
-    assert remaining == {
-        "final_report.json",
-        "best_patch.diff",
-        "geak_agent.log",
-        "COMMANDMENT.md",
-    }
+    # Cleanup only prunes worktrees; all other artifacts preserved.
+    assert (output_dir / "final_report.json").is_file()
+    assert (output_dir / "logs" / "run.log").is_file()
 
 
 def test_both_disabled_is_noop(repo: Path, output_dir: Path) -> None:
@@ -582,7 +563,8 @@ def test_standalone_apply_api(repo: Path, output_dir: Path) -> None:
 
 
 def test_standalone_cleanup_api_without_patch_file(tmp_path: Path) -> None:
-    """cleanup_run_artifacts works even when the BestPatchResult has no patch file."""
+    """cleanup_run_artifacts works even when the BestPatchResult has no patch file.
+    Cleanup only prunes worktrees, so all other artifacts are preserved."""
     out = tmp_path / "empty_run"
     out.mkdir()
     (out / "final_report.json").write_text(json.dumps({"best_speedup": None}))
@@ -590,14 +572,16 @@ def test_standalone_cleanup_api_without_patch_file(tmp_path: Path) -> None:
     (out / "logs" / "run.log").write_text("logs")
     result = BestPatchResult(agent_id=0, patch_id="none", test_output="", best_patch_file=None)
 
-    cleanup_run_artifacts(result, out)
+    status = cleanup_run_artifacts(result, out)
 
-    remaining = {p.name for p in out.iterdir()}
-    assert remaining == {"final_report.json"}
+    assert status == "ran"
+    # All artifacts preserved (cleanup only prunes worktrees).
+    assert (out / "final_report.json").is_file()
+    assert (out / "logs" / "run.log").is_file()
 
 
 def test_cli_flag_threaded() -> None:
-    """Smoke-check that both independent flags are exposed on the geak CLI."""
+    """Smoke-check that --debug flag is exposed on the geak CLI."""
     from typer.testing import CliRunner
 
     from minisweagent.run import mini as mini_module
@@ -609,10 +593,8 @@ def test_cli_flag_threaded() -> None:
     help_result = runner.invoke(mini_module.app, ["--help"])
     assert help_result.exit_code == 0
     plain = _strip_ansi(help_result.stdout)
-    assert "--cleanup" in plain
-    assert "--no-cleanup" in plain
-    assert "--apply-best-patch" in plain
-    assert "--no-apply-best-patch" in plain
+    assert "--debug" in plain
+    assert "--no-debug" in plain
 
 
 # ---------------------------------------------------------------------------
@@ -635,13 +617,15 @@ def test_apply_and_commit_best_patch_detailed_returns_outcome_dict(
     # Reset working tree for the rest of the matrix.
     _git(repo, "reset", "--hard", "HEAD^")
 
-    # skipped_dirty
-    (repo / "kernel.py").write_text("def run():\n    return 99\n")
-    outcome = apply_and_commit_best_patch_detailed(result, repo)
-    assert outcome["status"] == "skipped_dirty"
-    assert outcome["commit_sha"] is None
-    assert outcome["reason"] and "uncommitted" in outcome["reason"]
-    _git(repo, "checkout", "--", "kernel.py")
+    # dirty repo: apply should still succeed (only patch files are committed)
+    (repo / "unrelated.txt").write_text("dirty\n")
+    result2 = _result_for(output_dir)
+    outcome = apply_and_commit_best_patch_detailed(result2, repo)
+    assert outcome["status"] == "committed"
+    assert outcome["commit_sha"] is not None
+    _git(repo, "reset", "--hard", "HEAD^")
+    # clean up the unrelated dirty file
+    (repo / "unrelated.txt").unlink(missing_ok=True)
 
     # skipped_precondition (no result)
     outcome = apply_and_commit_best_patch_detailed(None, repo)
@@ -688,8 +672,8 @@ def test_cleanup_returns_skipped_empty_when_output_dir_missing(repo: Path) -> No
     assert status == "skipped_empty"
 
 
-def test_cleanup_returns_skipped_empty_when_no_report_or_patch(tmp_path: Path) -> None:
-    """output_dir exists but holds only noise => skipped_empty; noise is untouched."""
+def test_cleanup_returns_ran_when_no_report_or_patch(tmp_path: Path) -> None:
+    """output_dir exists but holds only noise => cleanup runs (prunes worktrees only); noise is untouched."""
     out = tmp_path / "empty_run"
     out.mkdir()
     (out / "noise.txt").write_text("noise")
@@ -698,105 +682,12 @@ def test_cleanup_returns_skipped_empty_when_no_report_or_patch(tmp_path: Path) -
 
     status = cleanup_run_artifacts(result, out)
 
-    assert status == "skipped_empty"
-    # Nothing touched.
+    assert status == "ran"
+    # All artifacts preserved (cleanup only prunes worktrees).
     assert (out / "noise.txt").is_file()
     assert (out / "subdir").is_dir()
 
 
-def test_normalize_kept_report_handles_no_surviving_patch(repo: Path, output_dir: Path) -> None:
-    """When result.best_patch_file is None but final_report.json exists,
-    cleanup runs, best_patch key is present and null."""
-    # Drop best_patch.diff so result.best_patch_file resolves to a non-file,
-    # but keep final_report.json so the run isn't 'empty'.
-    (output_dir / "best_patch.diff").unlink()
-    result = BestPatchResult(agent_id=0, patch_id="x", test_output="", best_patch_file=None)
-    # Add a key the rewrite will set.
-    (output_dir / "final_report.json").write_text(json.dumps({"best_speedup": 1.0}))
-
-    status = cleanup_run_artifacts(result, output_dir)
-    assert status == "ran"
-
-    kept = json.loads((output_dir / "final_report.json").read_text())
-    assert "best_patch" in kept
-    assert kept["best_patch"] is None
-
-
-def test_normalize_kept_report_does_not_touch_summary_strings(repo: Path, output_dir: Path) -> None:
-    """LLM-authored documents (summary / agent_summary / etc.) must come back byte-identical
-    even if they paste paths under output_dir into free-text prose."""
-    embedded = str(output_dir / "results" / "round_3" / "patch_0.patch")
-    summary_text = f"We ran {embedded} and it crashed; see {output_dir}/results/round_1 for traces."
-    agent_summary_text = f"Final attempt at {embedded} ran out of time."
-    report = {
-        "best_speedup": 1.5,
-        "summary": summary_text,
-        "agent_summary": agent_summary_text,
-        "verification_note": f"Verified using {embedded}",
-        "round_summaries": [
-            {"round": 1, "summary": f"used {embedded}"},
-            {"round": 2, "summary": "no crash"},
-        ],
-    }
-    (output_dir / "final_report.json").write_text(json.dumps(report))
-
-    result = _result_for(output_dir)
-    cleanup_run_artifacts(result, output_dir)
-
-    kept = json.loads((output_dir / "final_report.json").read_text())
-    assert kept["summary"] == summary_text
-    assert kept["agent_summary"] == agent_summary_text
-    assert kept["verification_note"] == f"Verified using {embedded}"
-    # round_summaries entries must be untouched verbatim.
-    assert kept["round_summaries"][0]["summary"] == f"used {embedded}"
-
-
-def test_iterate_and_delete_handles_symlink_to_dir(repo: Path, output_dir: Path, tmp_path: Path) -> None:
-    """A non-keep symlink-to-dir is unlinked, not recursed into; status='ran'."""
-    target = tmp_path / "external_target"
-    target.mkdir()
-    (target / "sentinel.txt").write_text("must survive")
-    (output_dir / "sym").symlink_to(target)
-
-    result = _result_for(output_dir)
-    status = cleanup_run_artifacts(result, output_dir)
-
-    assert status == "ran"
-    # The symlink is gone.
-    assert not (output_dir / "sym").exists()
-    assert not (output_dir / "sym").is_symlink()
-    # The target survived; we never recursed into it.
-    assert target.is_dir()
-    assert (target / "sentinel.txt").read_text() == "must survive"
-
-
-def test_iterate_and_delete_failed_entry_reports_failed_status(
-    repo: Path, output_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A per-entry rmtree failure flips cleanup_status to 'failed' but keeps the loop running."""
-    real_rmtree = finalize_apply.shutil.rmtree
-    state = {"raised": False}
-
-    def fake_rmtree(path, *args, **kwargs):
-        # Make exactly the 'logs' subdir fail; everything else uses the real rmtree.
-        if str(path).endswith("/logs") and not state["raised"]:
-            state["raised"] = True
-            raise PermissionError("simulated permission denied")
-        return real_rmtree(path, *args, **kwargs)
-
-    monkeypatch.setattr(finalize_apply.shutil, "rmtree", fake_rmtree)
-
-    result = _result_for(output_dir)
-    status = cleanup_run_artifacts(result, output_dir)
-
-    assert status == "failed"
-    # Keep-set still on disk.
-    assert (output_dir / "final_report.json").is_file()
-    assert (output_dir / "best_patch.diff").is_file()
-    assert (output_dir / "geak_agent.log").is_file()
-    assert (output_dir / "COMMANDMENT.md").is_file()
-    # Sibling noise that we DID delete is gone.
-    assert not (output_dir / "results").exists()
 
 
 # Silence unused-import warning for `patch` (imported for symmetry with sibling tests).
