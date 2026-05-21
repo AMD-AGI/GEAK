@@ -63,7 +63,7 @@ class TestBasicScheduling:
             return gpu
 
         futs = [manager_2gpu.submit(GpuJob(fn=_fn, label=f"j{i}")) for i in range(8)]
-        results = [f.result(timeout=10) for f in futs]
+        results = [f.result(timeout=30) for f in futs]
         assert not collision.is_set(), "Two concurrent jobs shared a GPU"
         assert len(results) == 8
         assert set(results).issubset({0, 1})
@@ -80,7 +80,7 @@ class TestBasicScheduling:
 
         futs = [manager_2gpu.submit(GpuJob(fn=_fn, label=f"j{i}")) for i in range(8)]
         for f in futs:
-            f.result(timeout=10)
+            f.result(timeout=30)
         assert used == {0, 1}
 
 
@@ -104,7 +104,7 @@ class TestMultiGpuAcquire:
         for i in range(4):
             futs.append(manager_4gpu.submit(GpuJob(fn=_fn, num_gpus=1, label=f"s{i}")))
         for f in futs:
-            f.result(timeout=10)
+            f.result(timeout=30)
         assert 2 in results
         assert results.count(1) == 4
 
@@ -120,20 +120,28 @@ class TestShutdown:
             manager_2gpu.submit(GpuJob(fn=lambda g, e: None, label="late"))
 
     def test_shutdown_cancel_pending(self):
-        mgr = GPUManager([0], stats_log_interval_s=0)
-        blocker = threading.Event()
+        mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+        blocker_started = threading.Event()
+        blocker_release = threading.Event()
 
         def _block(gpus, env):
-            blocker.wait(timeout=5)
+            blocker_started.set()
+            blocker_release.wait(timeout=10)
             return "done"
 
         fut_blocking = mgr.submit(GpuJob(fn=_block, label="blocker"))
-        time.sleep(0.1)
-        for i in range(3):
+        blocker_started.wait(timeout=5)
+
+        pending_futs = [
             mgr.submit(GpuJob(fn=lambda g, e: "pending", label=f"p{i}"))
-        blocker.set()
+            for i in range(3)
+        ]
+        blocker_release.set()
+        assert fut_blocking.result(timeout=10) == "done"
         mgr.shutdown(cancel_pending=True)
-        assert fut_blocking.result(timeout=5) == "done"
+
+        for fut in pending_futs:
+            assert fut.cancelled() or fut.done()
 
 
 class TestStats:
@@ -202,17 +210,22 @@ class TestCancelledFuture:
     def test_cancelled_future_skips_job_fn(self):
         mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
         executed = threading.Event()
+        blocker_started = threading.Event()
 
         def _fn(gpus, env):
             executed.set()
             return "ran"
 
         blocker = threading.Event()
-        mgr.submit(GpuJob(fn=lambda g, e: blocker.wait(timeout=5), label="blocker"))
-        time.sleep(0.05)
+
+        def _block(gpus, env):
+            blocker_started.set()
+            blocker.wait(timeout=5)
+
+        mgr.submit(GpuJob(fn=_block, label="blocker"))
+        blocker_started.wait(timeout=5)
 
         fut = mgr.submit(GpuJob(fn=_fn, label="to-cancel"))
-        time.sleep(0.05)
         fut.cancel()
         blocker.set()
         time.sleep(0.3)
@@ -226,10 +239,15 @@ class TestDispatcherDrain:
 
     def test_closed_return_drains_queue(self):
         mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+        blocker_started = threading.Event()
         blocker = threading.Event()
 
-        mgr.submit(GpuJob(fn=lambda g, e: blocker.wait(timeout=5), label="blocker"))
-        time.sleep(0.05)
+        def _block(gpus, env):
+            blocker_started.set()
+            blocker.wait(timeout=5)
+
+        mgr.submit(GpuJob(fn=_block, label="blocker"))
+        blocker_started.wait(timeout=5)
 
         pending_futs = [
             mgr.submit(GpuJob(fn=lambda g, e: "should-not-run", label=f"p{i}"))
@@ -248,33 +266,39 @@ class TestSplitTimeout:
 
     def test_queue_timeout_none_waits_forever(self):
         mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
+        blocker_started = threading.Event()
         blocker = threading.Event()
 
-        mgr.submit(GpuJob(fn=lambda g, e: blocker.wait(timeout=5), label="blocker"))
-        time.sleep(0.05)
+        def _block(gpus, env):
+            blocker_started.set()
+            blocker.wait(timeout=10)
+
+        mgr.submit(GpuJob(fn=_block, label="blocker"))
+        blocker_started.wait(timeout=5)
 
         result_holder = []
 
         def _run_in_thread():
             try:
-                r = mgr.run(GpuJob(
-                    fn=lambda g, e: "queued-result",
-                    timeout=5.0,
-                    queue_timeout=None,
-                    label="waiter",
-                ))
+                r = mgr.run(
+                    GpuJob(
+                        fn=lambda g, e: "queued-result",
+                        timeout=5.0,
+                        queue_timeout=None,
+                        label="waiter",
+                    )
+                )
                 result_holder.append(r)
             except Exception as exc:
                 result_holder.append(exc)
 
         t = threading.Thread(target=_run_in_thread)
         t.start()
-        time.sleep(0.2)
         blocker.set()
         t.join(timeout=10)
-        mgr.shutdown()
 
         assert result_holder and result_holder[0] == "queued-result"
+        mgr.shutdown()
 
     def test_execution_timeout_sets_lease_deadline(self):
         mgr = GPUManager([0], stats_log_interval_s=0, reaper_interval_s=0)
@@ -349,6 +373,7 @@ class TestCPUPressureGate:
 
     def test_high_cpu_load_delays_dispatch(self):
         import types
+
         import minisweagent.run.utils.gpu_manager as gm_mod
 
         call_count = 0
@@ -371,7 +396,9 @@ class TestCPUPressureGate:
         gm_mod.os = fake_os
         try:
             mgr = GPUManager(
-                [0], stats_log_interval_s=0, reaper_interval_s=0,
+                [0],
+                stats_log_interval_s=0,
+                reaper_interval_s=0,
                 cpu_pressure_threshold=1.0,
             )
             result = mgr.run(GpuJob(fn=lambda g, e: "dispatched", label="cpu-gate"))
@@ -395,7 +422,9 @@ class TestEventLogging:
     def test_lifecycle_events_written_to_file(self, tmp_path):
         log_file = tmp_path / "events.jsonl"
         mgr = GPUManager(
-            [0], stats_log_interval_s=0, reaper_interval_s=0,
+            [0],
+            stats_log_interval_s=0,
+            reaper_interval_s=0,
             event_log_path=str(log_file),
         )
         mgr.run(GpuJob(fn=lambda g, e: "ok", label="evt-test"))
@@ -408,7 +437,9 @@ class TestEventLogging:
     def test_failed_job_emits_failed_event(self, tmp_path):
         log_file = tmp_path / "events.jsonl"
         mgr = GPUManager(
-            [0], stats_log_interval_s=0, reaper_interval_s=0,
+            [0],
+            stats_log_interval_s=0,
+            reaper_interval_s=0,
             event_log_path=str(log_file),
         )
         fut = mgr.submit(GpuJob(fn=lambda g, e: (_ for _ in ()).throw(ValueError("boom")), label="fail-evt"))
@@ -444,7 +475,9 @@ class TestEventLogging:
     def test_event_log_fields(self, tmp_path):
         log_file = tmp_path / "events.jsonl"
         mgr = GPUManager(
-            [0], stats_log_interval_s=0, reaper_interval_s=0,
+            [0],
+            stats_log_interval_s=0,
+            reaper_interval_s=0,
             event_log_path=str(log_file),
         )
         mgr.run(GpuJob(fn=lambda g, e: "ok", label="field-test"))

@@ -29,7 +29,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
@@ -109,9 +109,7 @@ class GPUManager:
         self._registry = registry
         self._stats_log_interval_s = stats_log_interval_s
         self._cpu_pressure_threshold = (
-            cpu_pressure_threshold
-            if cpu_pressure_threshold is not None
-            else 0.8 * os.cpu_count()
+            cpu_pressure_threshold if cpu_pressure_threshold is not None else 0.8 * os.cpu_count()
         )
         self._reaper_interval_s = reaper_interval_s
 
@@ -139,25 +137,29 @@ class GPUManager:
         self._active_leases: dict[str, LeaseState] = {}
         self._leases_lock = threading.Lock()
 
-        self._event_log_file = (
-            open(event_log_path, "a", encoding="utf-8") if event_log_path else None
-        )
+        self._event_log_file = open(event_log_path, "a", encoding="utf-8") if event_log_path else None
         self._event_log_lock = threading.Lock()
 
         self._dispatcher = threading.Thread(
-            target=self._dispatch_loop, name="gpu-manager-dispatch", daemon=True,
+            target=self._dispatch_loop,
+            name="gpu-manager-dispatch",
+            daemon=True,
         )
         self._dispatcher.start()
 
         if stats_log_interval_s > 0:
             self._stats_logger = threading.Thread(
-                target=self._stats_log_loop, name="gpu-manager-stats", daemon=True,
+                target=self._stats_log_loop,
+                name="gpu-manager-stats",
+                daemon=True,
             )
             self._stats_logger.start()
 
         if reaper_interval_s > 0:
             self._reaper = threading.Thread(
-                target=self._reaper_loop, name="gpu-lease-reaper", daemon=True,
+                target=self._reaper_loop,
+                name="gpu-lease-reaper",
+                daemon=True,
             )
             self._reaper.start()
 
@@ -290,13 +292,21 @@ class GPUManager:
                         self._busy_start[g] = now
 
                 self._emit_event(
-                    "leased", lease_id=lease.lease_id, job_label=job.label,
-                    gpu_ids=list(assigned), deadline=deadline,
+                    "leased",
+                    lease_id=lease.lease_id,
+                    job_label=job.label,
+                    gpu_ids=list(assigned),
+                    deadline=deadline,
                 )
                 env_overrides = self._build_env_overrides(assigned)
 
                 worker_fut = self._executor.submit(
-                    self._run_job, job, lease, state, env_overrides, fut,
+                    self._run_job,
+                    job,
+                    lease,
+                    state,
+                    env_overrides,
+                    fut,
                 )
                 if self._registry is not None:
                     try:
@@ -340,8 +350,7 @@ class GPUManager:
                 reason = "cancelled"
         except Exception as exc:
             reason = "failed"
-            self._emit_event("failed", lease_id=lease.lease_id, job_label=job.label,
-                             error=str(exc))
+            self._emit_event("failed", lease_id=lease.lease_id, job_label=job.label, error=str(exc))
             try:
                 fut.set_exception(exc)
             except InvalidStateError:
@@ -409,14 +418,14 @@ class GPUManager:
 
             with self._leases_lock:
                 expired = [
-                    (lid, s) for lid, s in self._active_leases.items()
+                    (lid, s)
+                    for lid, s in self._active_leases.items()
                     if not s.released and s.lease.deadline is not None and now > s.lease.deadline
                 ]
 
             for lease_id, state in expired:
                 logger.warning(
-                    "Lease %s expired (job: %s, ran %.0fs, limit was %.0fs). "
-                    "Killing subprocess and releasing GPUs %s.",
+                    "Lease %s expired (job: %s, ran %.0fs, limit was %.0fs). Killing subprocess and releasing GPUs %s.",
                     lease_id,
                     state.lease.job_label,
                     now - state.lease.acquired_at,
@@ -430,7 +439,8 @@ class GPUManager:
             with self._leases_lock:
                 cutoff = time.monotonic() - 300
                 self._active_leases = {
-                    k: v for k, v in self._active_leases.items()
+                    k: v
+                    for k, v in self._active_leases.items()
                     if not v.released or (v.released_at is not None and v.released_at > cutoff)
                 }
 
@@ -439,7 +449,8 @@ class GPUManager:
         now = time.monotonic()
         with self._leases_lock:
             expired = [
-                (lid, s) for lid, s in self._active_leases.items()
+                (lid, s)
+                for lid, s in self._active_leases.items()
                 if not s.released and s.lease.deadline is not None and now > s.lease.deadline
             ]
         for lease_id, state in expired:
@@ -448,7 +459,8 @@ class GPUManager:
         with self._leases_lock:
             cutoff = time.monotonic() - 300
             self._active_leases = {
-                k: v for k, v in self._active_leases.items()
+                k: v
+                for k, v in self._active_leases.items()
                 if not v.released or (v.released_at is not None and v.released_at > cutoff)
             }
 
