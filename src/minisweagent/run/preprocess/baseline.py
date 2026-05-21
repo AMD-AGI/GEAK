@@ -53,7 +53,9 @@ def list_kernels(profiler_result: dict, gpu_index: int = 0) -> list[dict]:
         raise ValueError(f"Profiler result missing 'results' list. Got top-level keys: {list(profiler_result.keys())}")
     if not results:
         err = profiler_result.get("error", "")
-        raise ValueError(f"Profiler returned empty 'results' list (success={profiler_result.get('success')}). Error: {err}")
+        raise ValueError(
+            f"Profiler returned empty 'results' list (success={profiler_result.get('success')}). Error: {err}"
+        )
     if gpu_index >= len(results):
         raise ValueError(f"gpu_index={gpu_index} but only {len(results)} GPU result(s) available.")
     return profiler_result["results"][gpu_index].get("kernels", [])

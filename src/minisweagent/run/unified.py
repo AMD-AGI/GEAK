@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from minisweagent.run.compose import ComposeInputs, Mode, compose_task_body
+from minisweagent.run.compose import Mode
 
 logger = logging.getLogger(__name__)
 
@@ -280,7 +280,7 @@ def _save_incremental_report(
 
 
 def _run_timeout_select_patch(
-    ctx: "PipelineContext",
+    ctx: PipelineContext,
     output_dir: Path,
     postprocess_ctx: dict[str, Any],
 ) -> None:
@@ -307,21 +307,14 @@ def _run_timeout_select_patch(
         if not results_dir.is_dir():
             logger.warning("timeout select_patch: no results/ dir; skipping agent")
         else:
-            task_dirs = sorted({
-                p.parent for p in results_dir.glob("round_*/*/best_results.json")
-            })
+            task_dirs = sorted({p.parent for p in results_dir.glob("round_*/*/best_results.json")})
             if not task_dirs:
-                task_dirs = sorted({
-                    d for d in results_dir.glob("round_*/*")
-                    if d.is_dir() and d.name != "worktrees"
-                })
+                task_dirs = sorted({d for d in results_dir.glob("round_*/*") if d.is_dir() and d.name != "worktrees"})
             if not task_dirs:
                 logger.warning("timeout select_patch: no task dirs found; skipping agent")
             else:
                 metric = postprocess_ctx.get("metric") or (
-                    ctx.config.get("patch", {}).get("metric")
-                    if isinstance(ctx.config, dict)
-                    else None
+                    ctx.config.get("patch", {}).get("metric") if isinstance(ctx.config, dict) else None
                 )
                 model = ctx.model_factory()
                 agent_config, _ = load_agent_config("mini_select_patch")
@@ -370,7 +363,7 @@ def _run_timeout_select_patch(
     try:
         from minisweagent.run.postprocess.results import auto_finalize
 
-        report = auto_finalize(postprocess_ctx)
+        auto_finalize(postprocess_ctx)
 
         # Stamp timeout metadata onto the report written by auto_finalize
         report_path = output_dir / "final_report.json"
@@ -379,14 +372,11 @@ def _run_timeout_select_patch(
             final["status"] = "timeout_auto_finalized"
             report_path.write_text(json.dumps(final, indent=2, default=str))
             logger.info(
-                "Budget timeout: wrote final_report.json via auto_finalize "
-                "(best_speedup=%s)",
+                "Budget timeout: wrote final_report.json via auto_finalize (best_speedup=%s)",
                 final.get("best_speedup"),
             )
     except Exception:
-        logger.exception(
-            "Budget timeout: auto_finalize failed (non-fatal; finalize_run report preserved)"
-        )
+        logger.exception("Budget timeout: auto_finalize failed (non-fatal; finalize_run report preserved)")
 
 
 # ── --preprocess-only stub report ────────────────────────────────────
@@ -428,17 +418,10 @@ def _build_preprocess_only_report(
     * ``round_results`` — always empty for preprocess-only.
     * ``elapsed_s`` — time spent in ``_run_unified_loop`` so far.
     """
-    artifacts = [
-        str((pp_dir / name).resolve())
-        for name in _PREPROCESS_ARTIFACT_FILENAMES
-        if (pp_dir / name).exists()
-    ]
+    artifacts = [str((pp_dir / name).resolve()) for name in _PREPROCESS_ARTIFACT_FILENAMES if (pp_dir / name).exists()]
     return {
         "status": "preprocess_only",
-        "summary": (
-            "Preprocessing artifacts written; round loop skipped "
-            "(--preprocess-only)."
-        ),
+        "summary": ("Preprocessing artifacts written; round loop skipped (--preprocess-only)."),
         "preprocess_artifacts": artifacts,
         "path_taken": ctx.preprocess_ctx.get("path_taken"),
         "round_results": [],
@@ -515,7 +498,11 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
 
     # ── Resolve metadata paths for task file writing ─────────────
     task_file_kwargs = _resolve_task_file_meta(
-        pp_dir, kernel_path, repo_root, harness_path, ctx.test_command,
+        pp_dir,
+        kernel_path,
+        repo_root,
+        harness_path,
+        ctx.test_command,
     )
 
     round_evals: list[dict[str, Any]] = []
@@ -544,7 +531,8 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
     for round_num in range(1, max_rounds + 1):
         if _should_stop_before_round(ctx):
             logger.warning(
-                "Budget reached before round %d; finalizing.", round_num,
+                "Budget reached before round %d; finalizing.",
+                round_num,
             )
             _budget_stopped = True
             break
@@ -570,7 +558,10 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
 
         # 1. PLAN — generate M candidate tasks
         user_prompt_for_round = _enrich_prompt_for_round(
-            ctx.user_prompt, mode, round_num, round_evals,
+            ctx.user_prompt,
+            mode,
+            round_num,
+            round_evals,
         )
         pool = planner.build_pool(
             round_num=round_num,
@@ -611,14 +602,12 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
 
         # 5. EVALUATE — FULL_BENCHMARK verification (all modes)
         round_eval = post_round_evaluate(
-            postprocess_ctx, round_num, output_dir,
+            postprocess_ctx,
+            round_num,
+            output_dir,
         )
         if round_eval is not None:
-            round_eval_dict = (
-                round_eval.to_dict()
-                if hasattr(round_eval, "to_dict")
-                else round_eval
-            )
+            round_eval_dict = round_eval.to_dict() if hasattr(round_eval, "to_dict") else round_eval
             round_evals.append(round_eval_dict)
 
         logger.info("Round %d complete.", round_num)

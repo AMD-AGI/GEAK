@@ -649,11 +649,13 @@ def run_staged_task_batch(
             soft_stop=soft_stop,
             registry=registry,
         )
-        all_results.append({
-            "stage": stage_name,
-            "tasks": len(stage_tasks),
-            "result": stage_result,
-        })
+        all_results.append(
+            {
+                "stage": stage_name,
+                "tasks": len(stage_tasks),
+                "result": stage_result,
+            }
+        )
 
         if _stage_found_improvement(output_dir, stage_tasks):
             logger.info(

@@ -110,8 +110,11 @@ def run_preprocess_v3(
         model = model_factory()
 
     kernel_path, repo_root = _resolve_kernel_and_repo(
-        kernel_url, repo, console,
-        user_task=user_task, output_dir=output_dir,
+        kernel_url,
+        repo,
+        console,
+        user_task=user_task,
+        output_dir=output_dir,
     )
 
     if model is None:
@@ -313,9 +316,7 @@ def _resolve_kernel_and_repo(
     """
     if not kernel_url:
         if repo is None:
-            raise RuntimeError(
-                "v3 preprocess: kernel_url not provided and no --repo for auto-discovery"
-            )
+            raise RuntimeError("v3 preprocess: kernel_url not provided and no --repo for auto-discovery")
         logger.info("No kernel_url provided; running codebase-explore on %s", repo)
         result = _run_codebase_explore(
             Path(repo).resolve(),
@@ -323,9 +324,7 @@ def _resolve_kernel_and_repo(
             output_dir=output_dir,
         )
         if result is None or not result.get("kernel_path"):
-            raise RuntimeError(
-                "v3 preprocess: codebase-explore failed to discover a kernel in " + str(repo)
-            )
+            raise RuntimeError("v3 preprocess: codebase-explore failed to discover a kernel in " + str(repo))
         kernel_url = result["kernel_path"]
         logger.info("Codebase-explore discovered kernel: %s", kernel_url)
 
@@ -342,14 +341,8 @@ def _resolve_kernel_and_repo(
             # the repo and promote if exactly one matches.
             from minisweagent.run.utils.task_parser import _KERNEL_TYPE_TO_EXT
 
-            ext_candidates: set[str] = {
-                ext for exts in _KERNEL_TYPE_TO_EXT.values() for ext in exts
-            }
-            matches = [
-                candidate.with_suffix(ext)
-                for ext in ext_candidates
-                if candidate.with_suffix(ext).is_file()
-            ]
+            ext_candidates: set[str] = {ext for exts in _KERNEL_TYPE_TO_EXT.values() for ext in exts}
+            matches = [candidate.with_suffix(ext) for ext in ext_candidates if candidate.with_suffix(ext).is_file()]
             if len(matches) == 1:
                 kernel_path_obj = matches[0]
                 logger.info(
@@ -663,7 +656,7 @@ def _project_baseline(result: PreprocessResult) -> dict[str, Any]:
                 "metrics",
                 "observations",
             ):
-                if key in metrics and metrics[key]:
+                if metrics.get(key):
                     out.setdefault(key, metrics[key])
     return out
 

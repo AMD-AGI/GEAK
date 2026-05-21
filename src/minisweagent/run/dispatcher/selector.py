@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import Any
 
 from minisweagent.run.dispatch_plan import DispatchPlan, DispatchPlanItem
 from minisweagent.run.planner.candidate_pool import CandidatePool, CandidateTask

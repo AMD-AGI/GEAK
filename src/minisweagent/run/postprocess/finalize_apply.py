@@ -49,7 +49,6 @@ _DEFAULT_GIT_AUTHOR_NAME = "GEAK Agent"
 _DEFAULT_GIT_AUTHOR_EMAIL = "geak@amd.com"
 
 
-
 def apply_and_commit_best_patch(
     result: BestPatchResult | None,
     repo: Path | None,
@@ -355,7 +354,11 @@ def _try_stash_apply_pop(
     # Check if there is anything to stash
     status = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=no"],
-        cwd=str(repo), capture_output=True, text=True, check=False, env=env,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
     )
     if status.returncode != 0 or not status.stdout.strip():
         # Nothing to stash or git status failed — skip this strategy
@@ -363,26 +366,37 @@ def _try_stash_apply_pop(
 
     stash = subprocess.run(
         ["git", "stash", "--quiet"],
-        cwd=str(repo), capture_output=True, text=True, check=False, env=env,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
     )
     if stash.returncode != 0:
         logger.debug("[geak apply] git stash failed (rc=%s): %s", stash.returncode, stash.stderr.strip())
         return None
 
     apply_result, _ = apply_patch_with_generated_helper_fallback(
-        patch_text=patch_text, cwd=repo, env=env,
+        patch_text=patch_text,
+        cwd=repo,
+        env=env,
     )
 
     # Always pop the stash regardless of apply outcome
     pop = subprocess.run(
         ["git", "stash", "pop", "--quiet"],
-        cwd=str(repo), capture_output=True, text=True, check=False, env=env,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
     )
     if pop.returncode != 0:
         logger.warning(
-            "[geak apply] git stash pop failed (rc=%s): %s. "
-            "Run 'git stash list' in %s to recover.",
-            pop.returncode, pop.stderr.strip(), repo,
+            "[geak apply] git stash pop failed (rc=%s): %s. Run 'git stash list' in %s to recover.",
+            pop.returncode,
+            pop.stderr.strip(),
+            repo,
         )
 
     if apply_result.returncode == 0:
@@ -432,19 +446,23 @@ def _apply_patch_to_repo(patch_path: Path, repo: Path) -> tuple[bool, str | None
     filtered = _filter_patch_to_existing_files(patch_text, repo)
     if filtered and filtered != patch_text:
         filtered_result, _ = apply_patch_with_generated_helper_fallback(
-            patch_text=filtered, cwd=repo, env=env,
+            patch_text=filtered,
+            cwd=repo,
+            env=env,
         )
         if filtered_result.returncode == 0:
             logger.info(
                 "[geak apply] Applied %s to %s (existing-files-only filter)",
-                patch_path.name, repo,
+                patch_path.name,
+                repo,
             )
             return True, None
 
     # --- All attempts failed ---
     logger.warning(
         "[geak apply] All apply strategies failed for %s.\nFirst stderr: %s",
-        patch_path.name, first_stderr,
+        patch_path.name,
+        first_stderr,
     )
     reason = (
         f"git apply rc={apply_result.returncode}: {first_stderr}"

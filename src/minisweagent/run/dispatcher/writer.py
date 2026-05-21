@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from minisweagent.run.dispatch_plan import DispatchPlan, DispatchPlanItem
+from minisweagent.run.dispatch_plan import DispatchPlan
 from minisweagent.run.task_file import write_task_file
 
 logger = logging.getLogger(__name__)

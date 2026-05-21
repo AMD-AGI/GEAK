@@ -238,8 +238,7 @@ def _try_synthesize_shell_contract_harness(
             performance_shell=performance_shell,
         )
         logger.info(
-            "commandment_from_user_command: synthesized shell-contract harness at %s "
-            "(correctness=%r, performance=%r)",
+            "commandment_from_user_command: synthesized shell-contract harness at %s (correctness=%r, performance=%r)",
             synthesized,
             correctness_shell,
             performance_shell,
@@ -1157,7 +1156,9 @@ def _make_tool_dispatch_subagent(
         if sandbox_cwd is not None:
             context.setdefault("sandbox_repo_root", str(sandbox_cwd))
             context["_tool_env"] = tool_env
-        result = dispatcher(name=name, task=task, model=agent.model, cwd=str(sandbox_cwd) if sandbox_cwd else None, context=context)
+        result = dispatcher(
+            name=name, task=task, model=agent.model, cwd=str(sandbox_cwd) if sandbox_cwd else None, context=context
+        )
         agent._subagent_runs.append(result)
         # Auto-populate orchestrator state from the subagent's output so
         # the LLM doesn't have to extract structured fields by regex.
@@ -1369,7 +1370,9 @@ def _make_tool_commandment_from_user_command(
         # have a real harness_path to point at.
         if not original_harness_path:
             synthesized = _try_synthesize_shell_contract_harness(
-                cmd, out_path=out_path, repo_root_str=repo_root,
+                cmd,
+                out_path=out_path,
+                repo_root_str=repo_root,
             )
             if synthesized:
                 original_harness_path = synthesized

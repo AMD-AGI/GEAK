@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
-
-import math
 
 from minisweagent.run.postprocess.benchmark_parsing import (
     compute_shape_speedups,

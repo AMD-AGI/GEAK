@@ -60,12 +60,14 @@ class TaskPlanner:
         from minisweagent.run.compose import ComposeInputs, compose_task_body
 
         kernel_language = str(self._kernel_meta.get("kernel_language") or "python")
-        composed_body = compose_task_body(ComposeInputs(
-            user_prompt=user_prompt,
-            mode="fixed",
-            preprocess_ctx=self._preprocess_ctx,
-            kernel_language=kernel_language,
-        ))
+        composed_body = compose_task_body(
+            ComposeInputs(
+                user_prompt=user_prompt,
+                mode="fixed",
+                preprocess_ctx=self._preprocess_ctx,
+                kernel_language=kernel_language,
+            )
+        )
         canonical_fixed = CandidateTask(
             label="fixed-canonical",
             body=composed_body,
@@ -76,7 +78,10 @@ class TaskPlanner:
         )
 
         if mode == "fixed" or num_gpus <= 1:
-            logger.info("TaskPlanner: %s — skipping LLM planner, single canonical entry", "fixed mode" if mode == "fixed" else f"single GPU (num_gpus={num_gpus})")
+            logger.info(
+                "TaskPlanner: %s — skipping LLM planner, single canonical entry",
+                "fixed mode" if mode == "fixed" else f"single GPU (num_gpus={num_gpus})",
+            )
             return CandidatePool(round_num=round_num, items=(canonical_fixed,))
 
         planned_tasks = self._call_llm_planner(

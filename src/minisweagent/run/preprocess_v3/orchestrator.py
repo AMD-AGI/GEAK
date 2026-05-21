@@ -622,9 +622,7 @@ class PreprocessOrchestratorAgent:
             # required vs accepted argument names.
             import traceback as _tb
 
-            tb_tail = "".join(
-                _tb.format_exception(type(exc), exc, exc.__traceback__)
-            )
+            tb_tail = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
             tb_lines = tb_tail.splitlines()[-12:]  # cap token bloat
             schema = self._tools[name].schema or {}
             params_schema = (schema.get("parameters") or {}).get("properties") or {}

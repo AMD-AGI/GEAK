@@ -94,6 +94,7 @@ def _labeled_latencies_geomean_ms(output: str) -> float | None:
     if not entries:
         return None
     import math
+
     vals = list(entries.values())
     return math.exp(sum(math.log(v) for v in vals) / len(vals))
 

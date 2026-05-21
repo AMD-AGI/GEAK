@@ -176,7 +176,16 @@ def test_legacy_context_recovers_harness_path_from_promoted_command(tmp_path: Pa
     harness.parent.mkdir(parents=True)
     kernel.parent.mkdir(parents=True)
     output_dir.mkdir()
-    harness.write_text("print('harness')\n")
+    harness.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--profile', action='store_true')\n"
+        "parser.add_argument('--correctness', action='store_true')\n"
+        "parser.add_argument('--benchmark', action='store_true')\n"
+        "parser.add_argument('--full-benchmark', action='store_true')\n"
+        "parser.add_argument('--iterations', type=int, default=1)\n"
+        "print('harness')\n"
+    )
     kernel.write_text("# kernel\n")
     commandment = output_dir / "COMMANDMENT.md"
     commandment.write_text("# Commandment\n")
@@ -186,10 +195,12 @@ def test_legacy_context_recovers_harness_path_from_promoted_command(tmp_path: Pa
         stdev_ms=0.1,
         repeats=2,
         command="python harness --benchmark",
+        success=True,
         raw_outputs=[
             {
                 "returncode": 0,
                 "stdout": "GEAK_RESULT_LATENCY_MS=1.25\n",
+                "latency_ms": 1.25,
             }
         ],
     )
@@ -197,6 +208,7 @@ def test_legacy_context_recovers_harness_path_from_promoted_command(tmp_path: Pa
         kernel_path=kernel,
         kernel_language=SimpleNamespace(name="triton"),
         baseline=baseline,
+        full_benchmark_stdout=None,
         profile=None,
         commandment_path=commandment,
         codebase_context=None,
@@ -217,7 +229,7 @@ def test_legacy_context_recovers_harness_path_from_promoted_command(tmp_path: Pa
 
     assert ctx["test_command"] == f"python {harness}"
     assert ctx["harness_path"] == str(harness.resolve())
-    assert ctx["benchmark_baseline"] == "GEAK_RESULT_LATENCY_MS=1.25\n"
-    assert ctx["full_benchmark_baseline"] == "GEAK_RESULT_LATENCY_MS=1.25\n"
+    assert ctx["benchmark_baseline"] == str(output_dir / "benchmark_baseline.txt")
+    assert ctx["full_benchmark_baseline"] == str(output_dir / "full_benchmark_baseline.txt")
     assert (output_dir / "benchmark_baseline.txt").read_text() == "GEAK_RESULT_LATENCY_MS=1.25\n"
     assert ctx["v3_path_taken"] == "A"
