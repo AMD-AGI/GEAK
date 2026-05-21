@@ -783,7 +783,17 @@ def _schema_commandment_from_user_command() -> dict[str, Any]:
             "harness-generator and harness-verifier subagent dispatches "
             "entirely. Mutually exclusive with calling "
             "dispatch_subagent('harness-generator', ...) — the orchestrator's "
-            "path is determined by which of these two tools is called first."
+            "path is determined by which of these two tools is called first.\n\n"
+            "STRICT ARGUMENT NAMING: this tool accepts EXACTLY these keyword "
+            "arguments — `run_command`, `out_path`, `modes_covered`, "
+            "`inferred_modes`, `notes`. Do NOT invent synonyms. In particular, "
+            "the user's shell invocation MUST be passed as `run_command` — "
+            "NOT as `command`, `cmd`, `user_command`, `raw_command`, "
+            "`harness_command`, or `kernel_path`. The COMMANDMENT.md output "
+            "path MUST be `out_path` — NOT `output`, `output_path`, `path`, "
+            "or `commandment_path`. Calls with any other argument names will "
+            "raise TypeError; the dispatcher will surface the expected schema "
+            "in its error reply so you can self-correct on the next turn."
         ),
         "parameters": {
             "type": "object",
@@ -792,12 +802,18 @@ def _schema_commandment_from_user_command() -> dict[str, Any]:
                     "type": "string",
                     "description": (
                         "The user-provided shell command, verbatim. Must be non-empty. "
+                        "The argument name MUST be exactly `run_command` (not `command`, "
+                        "`cmd`, `user_command`, `raw_command`, or `harness_command`). "
                         "Example: 'cd /repo && python my_kernel.py --benchmark --shape 4096'."
                     ),
                 },
                 "out_path": {
                     "type": "string",
-                    "description": "Where to write COMMANDMENT.md.",
+                    "description": (
+                        "Where to write COMMANDMENT.md. The argument name MUST be exactly "
+                        "`out_path` (not `output`, `output_path`, `path`, `commandment_path`, "
+                        "or `kernel_path`)."
+                    ),
                 },
                 "modes_covered": {
                     "type": "array",

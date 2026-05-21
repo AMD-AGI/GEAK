@@ -119,6 +119,18 @@ Indicators: a literal command-line invocation (``python <script>``, ``pytest ...
 
 Action: run ``run_discovery`` because it is the standard cheap deterministic front step, then call ``commandment_from_user_command`` with the extracted user command. Discovery/ATD is IRRELEVANT for this case: do not inspect it to alter the user command, and do not generate a harness.
 
+**STRICT keyword-argument names for ``commandment_from_user_command``** (do NOT use synonyms — the tool will TypeError):
+
+```
+commandment_from_user_command(
+    run_command="<user's verbatim shell command>",      # NOT command/cmd/user_command/raw_command/harness_command
+    out_path="<output_dir>/COMMANDMENT.md",             # NOT output/output_path/path/commandment_path
+    modes_covered=["correctness","profile","benchmark","full_benchmark"],
+    inferred_modes=[],
+    notes="<short audit note>"
+)
+```
+
 **Important exception**: if the "Hints from the call site" section says the harness is **pre-validated** and supports the four standard modes (``--correctness``, ``--benchmark``, ``--full-benchmark``, ``--profile``), you MUST list all four modes in ``modes_covered`` when calling ``commandment_from_user_command``. The tool will substitute the correct flag for each COMMANDMENT section automatically. Do NOT put all modes in ``inferred_modes`` — use ``modes_covered``.
 
 **After ``commandment_from_user_command`` succeeds**: if the return value includes a ``harness_path`` (i.e. the command references a standard harness file), call ``collect_baseline(harness_path=<path>)`` and ``collect_profile(harness_path=<path>)`` before calling ``finish_preprocess``. These are fast deterministic subprocess calls (~30-60s total) and their output is required for downstream verified-speedup evaluation. If either call fails, proceed anyway — record the failure and call ``finish_preprocess``.
@@ -601,7 +613,38 @@ class PreprocessOrchestratorAgent:
             raise
         except Exception as exc:
             logger.exception("Tool %r raised", name)
-            return {"error": f"{type(exc).__name__}: {exc}"}
+            # Surface a structured error so the LLM can self-correct on the
+            # next turn instead of guessing again. We attach (a) the tool's
+            # canonical schema, (b) the offending argument names the LLM
+            # actually passed, and (c) a tail of the Python traceback. For
+            # TypeError specifically (the most common LLM-induced failure —
+            # wrong keyword names) we add an explicit hint pointing at the
+            # required vs accepted argument names.
+            import traceback as _tb
+
+            tb_tail = "".join(
+                _tb.format_exception(type(exc), exc, exc.__traceback__)
+            )
+            tb_lines = tb_tail.splitlines()[-12:]  # cap token bloat
+            schema = self._tools[name].schema or {}
+            params_schema = (schema.get("parameters") or {}).get("properties") or {}
+            required_params = (schema.get("parameters") or {}).get("required") or []
+            err_payload: dict[str, Any] = {
+                "error": f"{type(exc).__name__}: {exc}",
+                "expected_arguments": list(params_schema.keys()),
+                "required_arguments": list(required_params),
+                "passed_argument_names": sorted(args.keys()),
+                "traceback_tail": "\n".join(tb_lines),
+            }
+            if isinstance(exc, TypeError):
+                err_payload["hint"] = (
+                    f"Tool {name!r} accepts ONLY the keyword arguments listed in "
+                    f"'expected_arguments'. Use those exact names — do NOT invent "
+                    f"synonyms (e.g. 'command'/'cmd'/'user_command' for 'run_command'). "
+                    f"Required arguments: {required_params}. Re-issue the call with "
+                    f"the correct keyword names; the schema is authoritative."
+                )
+            return err_payload
         if not isinstance(result, dict):
             return {"output": str(result)}
         return result
