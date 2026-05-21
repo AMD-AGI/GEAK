@@ -56,5 +56,3 @@ run:
     full:
       orchestrator:
         max_rounds: 5
-pipeline:
-  mode: mixed
