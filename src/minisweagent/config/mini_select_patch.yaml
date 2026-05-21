@@ -12,11 +12,21 @@ agent:
     ## Selecting the best patch
     - Prioritize the user-provided metric (if any). The user metric (shown in the task) is the SOURCE OF TRUTH for how to compute speedup.
     - Prefer patches that pass tests and improve the prioritized metric.
-    - You MUST compute and report the FINAL speedup by reading:
-      - the baseline test log, please use patch_0 in parallel_0 folders as baseline. If no data, use patch_0 in other parallel folders as baseline.
-      - the selected patch's test log (prefer the log inside the patch's own `parallel_*` folder).
+
+    ## Baseline selection (IMPORTANT)
+    The work directory may be structured in two ways:
+    - **Single-round**: work directory contains `parallel_*/` or `task_*/` subdirectories directly with patch files.
+    - **Multi-round**: work directory contains `round_*/` subdirectories, each with task/parallel subdirectories.
+    You MUST auto-detect which layout is present by inspecting the directory structure.
+
+    For computing speedup, select the baseline using this priority (use the FIRST one that exists):
+    1. `benchmark_baseline.txt` — search upward from the work directory (e.g. `../benchmark_baseline.txt`, `../../benchmark_baseline.txt`). This is the independently-measured full benchmark baseline and is the most reliable.
+    2. `full_benchmark_baseline.txt` — same search pattern as above.
+    3. Only if NEITHER file exists, fall back to `patch_0_test.txt` (in any task/parallel directory).
+
+    - You MUST compute and report the FINAL speedup by reading the baseline and the selected patch's test log.
     - You MUST only consider aligned points by benchmark entry (same benchmark line / same test name), and enforce equal counts:
-      - The number of extracted metric points MUST match between baseline and patch
+      - The number of extracted metric points MUST match between baseline and patch.
       - If the counts do not match, the patch's test is INVALID and MUST be excluded from consideration.
 
     ## Speedup definition
@@ -26,6 +36,7 @@ agent:
     - Only if the user does NOT provide a metric, fall back to:
       - latency/time: speedup = baseline_time / patch_time
       - throughput/bandwidth: speedup = patch_metric / baseline_metric
+    - ALWAYS use **geometric mean** across all aligned benchmark entries to compute the final speedup. Do NOT use arithmetic mean.
 
     ## Finishing the task (VERY IMPORTANT)
     - You MUST NOT output `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` from inside any script/heredoc.
@@ -69,9 +80,6 @@ agent:
     ## Inputs
     - Work directory (absolute): {{base_patch_dir}}
     - Expected parallel runs (hint): {{num_parallel}}
-    - Baseline test log (you must locate it): `{{base_patch_dir}}/parallel_*/patch_0_test.txt` or `{{base_patch_dir}}/patch_0_test.txt`
-    - Patch files: `{{base_patch_dir}}/parallel_*/patch_*.patch` or `{{base_patch_dir}}/patch_*.patch`
-    - Patch test logs: `{{base_patch_dir}}/parallel_*/patch_*_test.txt` or `{{base_patch_dir}}/patch_*_test.txt`
   
   format_error_template: |
     Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
