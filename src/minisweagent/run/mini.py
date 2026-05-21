@@ -9,6 +9,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -702,19 +703,123 @@ def main(
         # stall is. Cleanup is intentionally NOT invoked here: the
         # per-run dir is preserved for forensic analysis of WHY the
         # watchdog fired.
+        _HARD_KILL_SELECT_PATCH_TIMEOUT_S = 300  # 5 minutes for select_patch before os._exit
+
+        def _hard_kill_select_patch(output_dir: Path) -> None:
+            """Best-effort select_patch + auto_finalize during hard-kill.
+
+            Runs in a daemon thread so the main hard-kill path can enforce a
+            wall-clock cap on it.  Two phases:
+
+            1. Run the LLM ``SelectPatchAgent`` to fill in any missing
+               per-task ``best_results.json`` files (non-fatal if it fails).
+            2. Call ``auto_finalize`` — the same canonical path used by
+               normal completion — to write a complete ``final_report.json``.
+            """
+            # Phase 1: best-effort LLM select_patch (non-fatal)
+            try:
+                from minisweagent.agents.select_patch_agent import SelectPatchAgent
+                from minisweagent.config import load_agent_config
+                from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
+
+                results_dir = output_dir / "results"
+                if not results_dir.is_dir():
+                    logger.warning("hard-kill select_patch: no results/ dir; skipping agent")
+                else:
+                    task_dirs = sorted({
+                        p.parent for p in results_dir.glob("round_*/*/best_results.json")
+                    })
+                    if not task_dirs:
+                        task_dirs = sorted({
+                            d for d in results_dir.glob("round_*/*")
+                            if d.is_dir() and d.name != "worktrees"
+                        })
+                    if not task_dirs:
+                        logger.warning("hard-kill select_patch: no task dirs found; skipping agent")
+                    else:
+                        metric = config.get("patch", {}).get("metric")
+                        model = get_model(model_name, config.get("model", {}))
+                        agent_config, _ = load_agent_config("mini_select_patch")
+
+                        env_config = LocalEnvironmentConfig(cwd=str(results_dir))
+                        env = LocalEnvironment(**env_config.__dict__)
+
+                        agent = SelectPatchAgent(model, env, **agent_config)
+                        agent.log_file = results_dir / "hard_kill_select_agent.log"
+                        agent.patch_dir = results_dir
+
+                        metric_section = metric if metric else "None"
+                        dir_listing = "\n".join(f"  - {d}" for d in task_dirs)
+                        task = (
+                            f"\n## User-provided metric\n{metric_section}\n\n"
+                            f"## Inputs\n"
+                            f"- Work directory (absolute): {results_dir}\n"
+                            f"- This is a HARD-KILL selection: the run hit the absolute wall-clock cap.\n"
+                            f"- Results are organized under round_*/ subdirectories.\n"
+                            f"  Each subdirectory may contain:\n"
+                            f"  - patch_*.patch files\n"
+                            f"  - patch_*_test.txt test output logs\n"
+                            f"  - best_results.json (per-task selection by previous agents)\n"
+                            f"- Scan ALL directories below to find the best patch across all rounds.\n"
+                            f"- Use patch_0_test.txt from any directory as baseline "
+                            f"(patch_0 = original unmodified kernel).\n"
+                            f"- Found {len(task_dirs)} task directories:\n{dir_listing}\n"
+                        )
+
+                        logger.info(
+                            "hard-kill select_patch: running on %d task dirs in %s",
+                            len(task_dirs), results_dir,
+                        )
+                        agent.run(task)
+                        best_patch_id = agent.extract_final_result()
+                        if best_patch_id:
+                            logger.info("hard-kill select_patch: chose %s", best_patch_id)
+                        else:
+                            logger.warning("hard-kill select_patch: agent did not produce a result")
+            except Exception:
+                logger.exception("hard-kill select_patch agent failed (non-fatal)")
+
+            # Phase 2: auto_finalize — same path as normal completion
+            try:
+                from minisweagent.run.postprocess.results import auto_finalize
+
+                _ctx = {"output_dir": str(output_dir)}
+                auto_finalize(_ctx)
+
+                # Stamp hard-kill metadata onto the report written by auto_finalize
+                report_path = output_dir / "final_report.json"
+                if report_path.is_file():
+                    final = json.loads(report_path.read_text())
+                    final["status"] = "hard_kill_auto_finalized"
+                    final["exit_code"] = 124
+                    final["elapsed_s"] = round(budget.elapsed(), 3)
+                    report_path.write_text(json.dumps(final, indent=2, default=str))
+                    logger.info(
+                        "hard-kill: wrote final_report.json via auto_finalize "
+                        "(best_speedup=%s)",
+                        final.get("best_speedup"),
+                    )
+            except Exception:
+                logger.exception("hard-kill auto_finalize failed (non-fatal)")
+
         def _hard_kill_handler() -> None:
             logger.error(
                 "[budget] HARD KILL: started_at + total_s reached; terminating registry and exiting",
             )
-            # Best-effort stub final report so the operator has *something*
-            # to point at when the run hits hard kill (the regular finalize
-            # path won't get a chance to write one). Pure stdlib write, no
-            # LLM, takes microseconds; intentionally tolerates any failure
-            # because the next thing we do is ``os._exit``.
+            # Terminate all tracked subprocesses first so GPU resources are freed.
             try:
-                _stub_path = preprocess_output_dir / "final_report.json"
-                if not _stub_path.exists():
-                    _stub_path.write_text(
+                state.registry.terminate_all(escalate_after_s=5.0)
+            except Exception:
+                logger.exception("hard-kill: registry.terminate_all() failed")
+
+            # Best-effort: run select_patch agent to find the best result
+            # across all completed rounds. Runs in a daemon thread with a
+            # 5-minute timeout so it cannot block os._exit indefinitely.
+            _report_path = preprocess_output_dir / "final_report.json"
+            if not _report_path.exists():
+                # Write a stub immediately so there's always *something*
+                try:
+                    _report_path.write_text(
                         json.dumps(
                             {
                                 "status": "hard_kill",
@@ -725,12 +830,23 @@ def main(
                             indent=2,
                         )
                     )
-            except Exception:
-                logger.exception("hard-kill: writing stub final_report.json failed (non-fatal)")
-            try:
-                state.registry.terminate_all(escalate_after_s=5.0)
-            except Exception:
-                logger.exception("hard-kill: registry.terminate_all() failed")
+                except Exception:
+                    logger.exception("hard-kill: writing stub final_report.json failed (non-fatal)")
+
+            select_thread = threading.Thread(
+                target=_hard_kill_select_patch,
+                args=(preprocess_output_dir,),
+                daemon=True,
+                name="geak-hard-kill-select-patch",
+            )
+            select_thread.start()
+            select_thread.join(timeout=_HARD_KILL_SELECT_PATCH_TIMEOUT_S)
+
+            if select_thread.is_alive():
+                logger.warning(
+                    "hard-kill select_patch timed out after %ds; proceeding with os._exit",
+                    _HARD_KILL_SELECT_PATCH_TIMEOUT_S,
+                )
 
             # Loud user-facing warning identifying the artifact path and the
             # fact that cleanup did NOT run. Operators reading a CI tail or
