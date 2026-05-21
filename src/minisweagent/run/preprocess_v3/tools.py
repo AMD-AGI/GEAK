@@ -172,6 +172,121 @@ def _extract_harness_from_command(cmd: str) -> str | None:
     return None
 
 
+def _try_synthesize_shell_contract_harness(
+    cmd: str,
+    *,
+    out_path: str,
+    repo_root_str: str,
+) -> str | None:
+    """Wrap a compound shell ``eval_command`` into the 4-mode harness contract.
+
+    When the user's task description carries a runner-style compound command
+    (canonical AKA pattern: ``python3 scripts/task_runner.py compile && correctness
+    && performance``) without any GEAK harness flag, the legacy preprocess used
+    :func:`eval_contract_adapter.materialize_shell_contract_harness` to write a
+    Python wrapper exposing ``--correctness``/``--profile``/``--benchmark``/
+    ``--full-benchmark`` so v3's ``collect_baseline`` / ``collect_profile`` can
+    treat it as a normal harness.
+
+    This helper:
+
+    1. ``rsplit(\"&&\", 1)`` mirrors the legacy ``resolve_shell_eval_commands``
+       fallback — left half becomes the correctness/setup body, right half
+       becomes the performance body.
+    2. ``infer_compile_command_from_eval`` (also legacy) extracts the leading
+       compile/build prefix from the full command and re-prepends it to the
+       performance body so a standalone ``--benchmark`` invocation rebuilds
+       the binary if needed.
+    3. ``materialize_shell_contract_harness`` writes the wrapper into the
+       COMMANDMENT.md output directory and returns its path.
+
+    Returns ``None`` when no confident split exists, when the legacy module is
+    unavailable, or when the materialize call raises.
+    """
+    if "&&" not in cmd:
+        return None
+    if not repo_root_str:
+        return None
+    left, right = cmd.rsplit("&&", 1)
+    correctness_shell = left.strip()
+    performance_shell = right.strip()
+    if not correctness_shell or not performance_shell:
+        return None
+    try:
+        from minisweagent.run.preprocess.contract_normalize import (
+            infer_compile_command_from_eval,
+        )
+
+        compile_prefix = infer_compile_command_from_eval(cmd)
+        if compile_prefix and compile_prefix not in performance_shell:
+            performance_shell = f"{compile_prefix} && {performance_shell}"
+    except ImportError:
+        pass
+    try:
+        from minisweagent.run.preprocess.eval_contract_adapter import (
+            materialize_shell_contract_harness,
+        )
+    except ImportError:
+        return None
+    try:
+        output_dir = Path(out_path).parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        synthesized = materialize_shell_contract_harness(
+            output_dir=output_dir,
+            repo_root=repo_root_str,
+            correctness_shell=correctness_shell,
+            performance_shell=performance_shell,
+        )
+        logger.info(
+            "commandment_from_user_command: synthesized shell-contract harness at %s "
+            "(correctness=%r, performance=%r)",
+            synthesized,
+            correctness_shell,
+            performance_shell,
+        )
+        return str(synthesized)
+    except Exception as exc:
+        logger.warning(
+            "commandment_from_user_command: shell-contract harness synthesis failed: %s",
+            exc,
+        )
+        return None
+
+
+def _validate_harness_or_warn(harness_path: str) -> bool:
+    """Run legacy ``validate_harness`` on the candidate; log + return validity.
+
+    Static-analyses the harness for the four required GEAK CLI flags
+    (``--correctness``, ``--profile``, ``--benchmark``, ``--full-benchmark``)
+    and a recognised arg parser (argparse / click / typer). Returns ``True``
+    on validation success (with optional warnings logged) so callers can gate
+    accepting the path. Returns ``True`` (treated as valid) when the legacy
+    module is unavailable, mirroring the previous "no validation" behaviour.
+    """
+    try:
+        from minisweagent.run.preprocess.harness_utils import validate_harness
+    except ImportError:
+        return True
+    try:
+        valid, messages = validate_harness(harness_path)
+    except Exception as exc:
+        logger.debug("validate_harness raised on %s: %s", harness_path, exc)
+        return True
+    if not valid:
+        logger.warning(
+            "commandment_from_user_command: harness validation FAILED for %s: %s",
+            harness_path,
+            messages,
+        )
+    elif messages:
+        logger.info(
+            "commandment_from_user_command: harness validation passed with warnings for %s: %s",
+            harness_path,
+            messages,
+        )
+    return valid
+
+
 def _copy_repo_sandbox(repo_root: Path, sandbox_root: Path, output_dir: Path) -> None:
     """Copy a non-git repo into a preprocess subagent sandbox."""
 
@@ -1246,13 +1361,31 @@ def _make_tool_commandment_from_user_command(
         # ${GEAK_WORK_DIR} substitution) so collect_baseline/collect_profile
         # can use the real filesystem path.
         original_harness_path = _extract_harness_from_command(cmd)
+        repo_root = str(agent.config.repo) if agent.config.repo else os.environ.get("GEAK_REPO_ROOT", "")
+        # Fallback: if the user's command is a compound shell pipeline (e.g.
+        # ``task_runner.py compile && correctness && performance``) without any
+        # standard GEAK harness flag, synthesize a 4-mode wrapper harness using
+        # the legacy eval_contract_adapter so collect_baseline / collect_profile
+        # have a real harness_path to point at.
+        if not original_harness_path:
+            synthesized = _try_synthesize_shell_contract_harness(
+                cmd, out_path=out_path, repo_root_str=repo_root,
+            )
+            if synthesized:
+                original_harness_path = synthesized
+        # Static-validate the harness (whether user-supplied or synthesized) so
+        # a malformed file doesn't cause silent baseline/profile failures later.
+        # Failed validation clears the harness_path; the COMMANDMENT.md is still
+        # rendered from the user's command and finish_preprocess can fall back
+        # to extracting a path from the command body.
+        if original_harness_path and not _validate_harness_or_warn(original_harness_path):
+            original_harness_path = None
         if original_harness_path:
             agent._collected["harness_path"] = original_harness_path
         # Rewrite hardcoded repo-root paths to ${GEAK_WORK_DIR} so the
         # COMMANDMENT references the agent's worktree at runtime.
         # Use the orchestrator's config.repo (available at preprocess time)
         # rather than GEAK_REPO_ROOT (only set later for agent subprocesses).
-        repo_root = str(agent.config.repo) if agent.config.repo else os.environ.get("GEAK_REPO_ROOT", "")
         if repo_root and repo_root in cmd:
             cmd = cmd.replace(repo_root, "${GEAK_WORK_DIR}")
         modes_covered_tup = _normalise_modes(modes_covered)

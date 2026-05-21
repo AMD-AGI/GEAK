@@ -63,6 +63,11 @@ _DEFAULT_QUICK = False
 _BENCHMARK_TIMEOUT_S = 600
 _PROFILE_TIMEOUT_S = 120
 
+#: Short timeout for the correctness gate that runs before baseline collection.
+#: Goal: fail in ~5 s on a broken kernel rather than spending ~5 min running
+#: the full benchmark loop. Override via ``GEAK_CORRECTNESS_GATE_TIMEOUT``.
+_CORRECTNESS_GATE_TIMEOUT_S = int(os.environ.get("GEAK_CORRECTNESS_GATE_TIMEOUT", "120"))
+
 
 @dataclass(frozen=True)
 class BaselineMetrics:
@@ -340,6 +345,38 @@ def collect_baseline_metrics(
     repeats = max(1, int(repeats))
     cmd = _benchmark_command(harness_path)
     cmd_str = " ".join(shlex.quote(c) for c in cmd)
+
+    # Correctness gate: a quick ``--correctness`` invocation up front so that a
+    # broken kernel fails in ~5-30 s rather than after a full benchmark + profile
+    # cycle (~5+ min). Mirrors the legacy harness validation shape; can be
+    # disabled via ``GEAK_SKIP_CORRECTNESS_GATE=1`` when you explicitly want
+    # baseline numbers from a correctness-failing kernel.
+    if not os.environ.get("GEAK_SKIP_CORRECTNESS_GATE"):
+        gate = _run_benchmark_once(
+            harness_path,
+            work_dir=work_dir,
+            gpu_id=gpu_id,
+            timeout_s=_CORRECTNESS_GATE_TIMEOUT_S,
+            flag="--correctness",
+        )
+        if gate["returncode"] != 0:
+            logger.warning(
+                "collect_baseline_metrics: correctness gate FAILED for %s "
+                "(rc=%s, duration=%ss); skipping baseline benchmark to save time on a "
+                "broken kernel. Set GEAK_SKIP_CORRECTNESS_GATE=1 to bypass.",
+                harness_path,
+                gate["returncode"],
+                gate["duration_s"],
+            )
+            return BaselineMetrics(
+                harness_path=harness_path.resolve(),
+                median_ms=None,
+                samples_ms=[],
+                stdev_ms=None,
+                repeats=0,
+                command=cmd_str,
+                raw_outputs=[gate],
+            )
 
     raw_outputs: list[dict[str, Any]] = []
     samples_ms: list[float] = []

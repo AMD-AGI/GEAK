@@ -627,6 +627,13 @@ def _project_baseline(result: PreprocessResult) -> dict[str, Any]:
     routing) read fields like ``duration_us`` and ``median_ms``. We map
     what v3 produces; missing legacy fields stay absent rather than
     fabricated.
+
+    When a profile result is also available, enrich the dict with
+    ``bottleneck`` / ``top_kernels`` / ``kernel_name`` / ``metrics`` /
+    ``observations`` via legacy ``build_baseline_metrics``. Without this
+    enrichment, downstream consumers (``inject_pipeline_context``, the
+    planner) read empty values where the legacy pipeline used to surface
+    the dominant-kernel breakdown.
     """
     if result.baseline is None:
         return {}
@@ -640,6 +647,24 @@ def _project_baseline(result: PreprocessResult) -> dict[str, Any]:
     }
     if baseline.median_ms is not None:
         out["duration_us"] = baseline.median_ms * 1000.0
+    if result.profile is not None and result.profile.profile:
+        try:
+            from minisweagent.run.preprocess.baseline import build_baseline_metrics
+
+            metrics = build_baseline_metrics(result.profile.profile, include_all=True)
+        except Exception as exc:
+            logger.debug("_project_baseline: build_baseline_metrics fallback skipped: %s", exc)
+        else:
+            for key in (
+                "bottleneck",
+                "top_kernels",
+                "kernel_name",
+                "kernel_names",
+                "metrics",
+                "observations",
+            ):
+                if key in metrics and metrics[key]:
+                    out.setdefault(key, metrics[key])
     return out
 
 
@@ -696,7 +721,26 @@ def _recover_harness_path(
 
     if not harness_path.is_absolute():
         harness_path = Path(repo_root).expanduser().resolve() / harness_path
-    return str(harness_path.resolve())
+    resolved = harness_path.resolve()
+    # Static-validate the recovered path. ``extract_harness_path`` is greedy
+    # and will happily pick up things like ``scripts/task_runner.py`` that
+    # don't actually expose the GEAK 4-mode CLI; failing the gate here keeps
+    # us from threading a bogus harness_path into postprocess where it'd
+    # silently break profile / benchmark invocations.
+    try:
+        from minisweagent.run.preprocess.harness_utils import validate_harness
+
+        valid, messages = validate_harness(str(resolved))
+    except Exception:
+        valid, messages = True, []
+    if not valid:
+        logger.warning(
+            "_recover_harness_path: rejected %s (validate_harness failed: %s)",
+            resolved,
+            messages,
+        )
+        return ""
+    return str(resolved)
 
 
 def _write_benchmark_baseline(result: PreprocessResult, output_dir: Path) -> str | None:
