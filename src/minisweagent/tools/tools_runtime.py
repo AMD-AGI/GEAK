@@ -272,7 +272,11 @@ class ToolRuntime:
         args = tool_call.get("arguments", {})
 
         if name not in self._tool_table:
-            raise ValueError(f"Unknown tool: {name}")
+            available = ", ".join(sorted(self._tool_table.keys())) or "<none>"
+            return {
+                "output": f"Unknown tool: {name}. Available tools: {available}. Please choose a valid tool.",
+                "returncode": 1,
+            }
 
         if name == "bash" and "command" not in args:
             args = {**args, "command": ""}
