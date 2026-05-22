@@ -1,0 +1,20 @@
+task_type: tilelang_geak
+source_file_path:
+- kernel.py
+harness_path: test_tilelang_gemm_harness.py
+tilelang_benchmark_commit: 4272166e995442bb1fe273b6764845bdb7c42416
+compile_command:
+- python3 -m py_compile kernel.py official_reference_kernel.py test_tilelang_gemm_harness.py
+correctness_command:
+- python3 test_tilelang_gemm_harness.py --correctness
+performance_command:
+- python3 test_tilelang_gemm_harness.py --full-benchmark
+target_kernel_functions:
+- matmul_kernel
+- main
+prompt:
+  instructions: Optimize the controlled TileLang GEMM kernel for AMD MI300X GPU.
+    The kernel is derived from the official tilelang-benchmark CDNA GEMM benchmark.
+    The starting kernel intentionally worsens several official search-space constants
+    and adds an unnecessary shared-memory output staging path, so GEAK can recover
+    measurable performance through TileLang kernel-body and schedule optimizations.
