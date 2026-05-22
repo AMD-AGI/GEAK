@@ -208,32 +208,7 @@ def test_build_workload_guidance_for_triton_deprioritizes_dispatch():
     assert "Python dispatch, import-routing, or wrapper-only edits" in guidance
 
 
-def test_build_workload_guidance_for_tilelang_deprioritizes_wrapper_work():
-    kernel = {
-        "file_path": "/workspace/kernel.py",
-        "kernel_name": "flash_decode",
-        "kernel_type": "tilelang",
-    }
-    baseline_metrics = {
-        "kernel_name": "flash_decode_tilelang",
-        "bottleneck": "memory-bound",
-        "duration_us": 18.2,
-        "metrics": {
-            "memory.hbm_bandwidth_utilization": 66.0,
-            "memory.l2_hit_rate": 51.0,
-        },
-    }
-
-    guidance = _build_workload_guidance(kernel, baseline_metrics)
-
-    assert "TileLang backend detected." in guidance
-    assert "Prefer First:" in guidance
-    assert "TileLang kernel-body rewrites" in guidance
-    assert "T.Kernel grid/thread mapping" in guidance
-    assert "Python wrapper dispatch caches" in guidance
-
-
-def test_build_workload_guidance_for_tilelang_cites_primary_kernel_attribution():
+def test_build_workload_guidance_cites_primary_kernel_attribution_without_backend_classifier():
     kernel = {
         "file_path": "/workspace/kernel.py",
         "kernel_name": "fused_affine_relu",
@@ -255,9 +230,10 @@ def test_build_workload_guidance_for_tilelang_cites_primary_kernel_attribution()
 
     guidance = _build_workload_guidance(kernel, baseline_metrics)
 
+    assert "Backend-specific classifier unavailable" in guidance
     assert "Primary kernel: main_kernel" in guidance
     assert "Runtime/copy kernels in profile: 1" in guidance
-    assert "Increase useful work per T.Kernel launch" in guidance
+    assert "Autotune-only, launch-only, and dispatch-only work" in guidance
 
 
 def test_build_workload_guidance_empty_when_no_backend_and_no_metrics():
