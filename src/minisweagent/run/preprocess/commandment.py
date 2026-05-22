@@ -438,28 +438,39 @@ def generate_commandment_from_commands(
     correctness_cmd = _join_cmds(correctness_command)
     performance_cmd = _join_cmds(performance_command)
 
+    def _write_script(name: str, cmd: str) -> str:
+        return (
+            "printf '#!/bin/bash\\nset -euo pipefail\\n"
+            "export PYTHONPATH=%s:%s:${PYTHONPATH:-}\\n"
+            "export HIP_VISIBLE_DEVICES=%s\\n"
+            'cd "%s"\\n'
+            "%s\\n' "
+            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
+            f"{shlex.quote(cmd)} > ${{GEAK_WORK_DIR}}/{name} && chmod +x ${{GEAK_WORK_DIR}}/{name}"
+        )
+
     # SETUP: compile step (cd to workdir first)
     setup_parts = []
-    setup_parts.append(
-        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
-        "export HIP_VISIBLE_DEVICES=%s\\n"
-        'exec "$@"\\n\' '
-        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" '
-        "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
-    )
     if compile_cmd:
-        setup_parts.append(f"cd ${{GEAK_WORK_DIR}} && {compile_cmd}")
+        setup_parts.append(_write_script("geak_compile.sh", compile_cmd))
+        setup_parts.append('"${GEAK_WORK_DIR}/geak_compile.sh"')
+    if correctness_cmd:
+        setup_parts.append(_write_script("geak_correctness.sh", correctness_cmd))
+    profile_target = performance_cmd or correctness_cmd or "echo 'no profile target'"
+    setup_parts.append(_write_script("geak_profile_target.sh", profile_target))
+    if performance_cmd:
+        setup_parts.append(_write_script("geak_benchmark.sh", performance_cmd))
     setup_section = "\n".join(setup_parts)
 
     # CORRECTNESS
     if correctness_cmd:
-        correctness_section = f"cd ${{GEAK_WORK_DIR}} && {correctness_cmd}"
+        correctness_section = "./geak_correctness.sh"
     else:
         correctness_section = "echo 'No correctness command specified'"
 
-    # PROFILE: use correctness command for profiling if no separate profile command
-    profile_target = correctness_cmd or performance_cmd or "echo 'no profile target'"
-    profile_command = f'bash -c "cd ${{GEAK_WORK_DIR}} && {profile_target}"'
+    # PROFILE follows the performance workload when present; correctness is a
+    # fallback for command-only repositories that do not expose a benchmark.
+    profile_command = "./geak_profile_target.sh"
     profile_section = _profile_block(
         profile_command,
         profile_command,
@@ -470,7 +481,7 @@ def generate_commandment_from_commands(
 
     # BENCHMARK and FULL_BENCHMARK
     if performance_cmd:
-        benchmark_section = f"cd ${{GEAK_WORK_DIR}} && {performance_cmd}"
+        benchmark_section = "./geak_benchmark.sh"
     else:
         benchmark_section = correctness_section  # fallback to correctness
 

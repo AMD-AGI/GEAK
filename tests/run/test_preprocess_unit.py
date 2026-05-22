@@ -1836,3 +1836,49 @@ class TestCommandmentHardcodesHarness:
             assert content.count("test_harness.py") == content.count(harness_abs), (
                 "Harness filename appears without its full absolute prefix"
             )
+
+
+class TestCommandmentFromCommands:
+    """COMMANDMENT generation for explicit correctness/performance commands."""
+
+    @staticmethod
+    def _section(content: str, name: str) -> str:
+        marker = f"## {name}"
+        start = content.find(marker)
+        assert start != -1, f"Missing section {marker}"
+        body = content[start + len(marker):]
+        end = body.find("\n## ")
+        return body[:end] if end != -1 else body
+
+    def test_profile_uses_performance_command_without_nested_bash(self):
+        from minisweagent.run.preprocess.commandment import generate_commandment_from_commands
+        from minisweagent.run.preprocess.validate_commandment import validate_commandment
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kernel = tmp_path / "kernel.py"
+            kernel.write_text("# kernel")
+
+            content = generate_commandment_from_commands(
+                kernel_path=kernel,
+                correctness_command="python test_harness.py --correctness",
+                performance_command="python test_harness.py --full-benchmark --iterations 3 --warmup 2",
+                repo_root=tmp_path,
+                profile_backend="metrix",
+            )
+
+            profile = self._section(content, "PROFILE")
+            correctness = self._section(content, "CORRECTNESS")
+            benchmark = self._section(content, "BENCHMARK")
+
+            assert validate_commandment(content)["valid"]
+            assert "./geak_profile_target.sh" in profile
+            assert "geak_profile_target.sh" in content
+            assert "${PYTHONPATH:-}" in content
+            assert "python test_harness.py --full-benchmark --iterations 3 --warmup 2" in content
+            assert "--correctness" not in profile
+            assert "python test_harness.py --correctness" in content
+            assert correctness.strip() == "./geak_correctness.sh"
+            assert benchmark.strip() == "./geak_benchmark.sh"
+            assert 'bash -c "bash -c' not in content
+            assert "cd ${GEAK_WORK_DIR}" not in content
