@@ -104,7 +104,7 @@ def convert_openai_tools_to_litellm(
         function: dict[str, Any] = {
             "name": name,
             "description": func.get("description", ""),
-            "input_schema": func.get(
+            "parameters": func.get(
                 "parameters",
                 {
                     "type": "object",
@@ -344,9 +344,9 @@ class LitellmModel:
             raise
 
     def query(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
-        messages = normalize_messages_for_litellm_api(messages)
         if self.config.set_cache_control:
             messages = set_cache_control(messages, mode=self.config.set_cache_control)
+        messages = normalize_messages_for_litellm_api(messages)
 
         response = self._query(messages, **kwargs)
 
