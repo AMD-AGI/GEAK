@@ -44,9 +44,10 @@ class TestConvertOpenaiToolsToLitellm:
         assert result[0]["function"]["name"] == "bash"
         assert result[1]["function"]["name"] == "submit"
 
-    def test_input_schema_used(self):
+    def test_parameters_schema_used(self):
+        # LiteLLM consumes OpenAI-style tool schemas, where the JSON Schema lives under "parameters".
         result = convert_openai_tools_to_litellm(self.TOOLS)
-        assert result[0]["function"]["input_schema"]["properties"]["cmd"]["type"] == "string"
+        assert result[0]["function"]["parameters"]["properties"]["cmd"]["type"] == "string"
 
     def test_skips_tools_without_name(self):
         tools = [{"function": {"description": "no name"}}]
