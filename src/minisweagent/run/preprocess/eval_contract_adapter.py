@@ -308,7 +308,11 @@ def materialize_shell_contract_harness(
             group.add_argument("--benchmark", action="store_true")
             group.add_argument("--full-benchmark", action="store_true")
             args = parser.parse_args()
-            cwd = REPO_ROOT
+            # Honour GEAK_WORK_DIR when present so the wrapper runs inside the
+            # caller's worktree (preflight, agent worktree) rather than always
+            # the repo root baked at synthesis time. Falls back to REPO_ROOT
+            # when no work-dir override is set.
+            cwd = os.environ.get("GEAK_WORK_DIR") or REPO_ROOT
 
             if args.correctness:
                 rc, captured = _run_shell(CORRECTNESS_CMD, cwd)

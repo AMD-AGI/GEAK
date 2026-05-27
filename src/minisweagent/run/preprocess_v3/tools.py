@@ -1396,6 +1396,7 @@ def _make_tool_commandment_from_user_command(
         # standard GEAK harness flag, synthesize a 4-mode wrapper harness using
         # the legacy eval_contract_adapter so collect_baseline / collect_profile
         # have a real harness_path to point at.
+        synthesized: str | None = None
         if not original_harness_path:
             synthesized = _try_synthesize_shell_contract_harness(
                 cmd,
@@ -1440,8 +1441,20 @@ def _make_tool_commandment_from_user_command(
         warnings: list[str] = []
         modes_emitted: list[str] = []
 
-        harness_from_cmd = _extract_harness_from_command(cmd)
-        use_run_sh = harness_from_cmd is not None
+        # When we synthesized a shell-contract wrapper above, route the
+        # section bodies through IT — the wrapper accepts the 4-mode flags
+        # (--correctness, --benchmark, --full-benchmark, --profile) and
+        # internally dispatches the user's subcommand-style runner. Without
+        # this branch, `build_correctness_body` would bolt --correctness
+        # onto the user's opaque compound command (e.g. ending in
+        # `task_runner.py performance --correctness`), which the bare
+        # subcommand-style runner rejects with "unrecognized arguments".
+        if synthesized:
+            harness_from_cmd: str | None = synthesized
+            use_run_sh = True
+        else:
+            harness_from_cmd = _extract_harness_from_command(cmd)
+            use_run_sh = harness_from_cmd is not None
 
         if use_run_sh:
             # `_extract_harness_from_command` only matches `python|python3 <path>`
