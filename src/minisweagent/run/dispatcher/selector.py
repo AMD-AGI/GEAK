@@ -50,6 +50,15 @@ class Dispatcher:
                 n,
                 len(items),
             )
+            # Invariant (post-TaskPlanner refactor): when the planner has run,
+            # ``pool.fixed`` always contains the canonical fixed entry. We rely
+            # on it here so pad tasks dispatch the same body as fixed-mode would,
+            # never an empty string. A violation means TaskPlanner.build_pool
+            # stopped injecting canonical_fixed — fail loudly so we notice.
+            assert fixed, (
+                "selector pad branch reached with empty pool.fixed — "
+                "TaskPlanner.build_pool must always inject canonical_fixed"
+            )
             while len(items) < n:
                 idx = len(items)
                 base_fixed = fixed[0] if fixed else None

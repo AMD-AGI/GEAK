@@ -52,11 +52,16 @@ class TaskPlanner:
         num_parallel: int = 1,
         rag_enabled: bool = False,
     ) -> CandidatePool:
-        """Produce a ``CandidatePool`` of M tasks for the current round.
+        """Produce a ``CandidatePool`` for the current round.
 
-        - ``mode="fixed"``: skip LLM, return a single ``kind="fixed"`` entry
-        - ``mode="planned"`` or ``"mixed"``: call the LLM planner and include
-          a canonical fixed entry alongside the planned ones
+        ``num_parallel`` is the number of subagent slots to plan for —
+        which may exceed the physical GPU count under the gwiab-scheduler.
+        It is NOT ``len(gpu_ids)``.
+
+        - ``mode="fixed"``: skip LLM, return a single ``kind="fixed"`` entry.
+        - ``mode="planned"`` or ``"mixed"``: call the LLM planner and ALWAYS
+          include the canonical fixed entry alongside the planned ones, so
+          downstream fill/pad has a guaranteed source for the canonical body.
         """
         from minisweagent.run.compose import ComposeInputs, compose_task_body
 
@@ -92,7 +97,7 @@ class TaskPlanner:
             round_evals=round_evals,
             agent_class=agent_class,
             output_dir=output_dir,
-            num_gpus=num_gpus,
+            num_slots=num_slots,
             rag_enabled=rag_enabled,
         )
 
@@ -110,27 +115,19 @@ class TaskPlanner:
                 )
             )
 
-        # Only inject fixed-canonical when planned tasks don't fill all GPU slots
-        planned_gpu_total = sum(c.num_gpus for c in candidates)
-        if planned_gpu_total < num_gpus:
-            candidates.append(canonical_fixed)
-            logger.info(
-                "TaskPlanner: round %d pool has %d candidates (%d planned, 1 fixed fallback; planned %d/%d GPUs)",
-                round_num,
-                len(candidates),
-                len(planned_tasks),
-                planned_gpu_total,
-                num_gpus,
-            )
-        else:
-            logger.info(
-                "TaskPlanner: round %d pool has %d candidates (%d planned, no fixed needed; planned %d/%d GPUs)",
-                round_num,
-                len(candidates),
-                len(planned_tasks),
-                planned_gpu_total,
-                num_gpus,
-            )
+        # Always inject canonical_fixed so pool.fixed is never empty.
+        # The dispatcher's fill/pad paths rely on this body to top up
+        # subagent slots the planner did not produce a task for.
+        candidates.append(canonical_fixed)
+        planned_slot_total = sum(c.num_gpus for c in candidates if c.kind == "planned")
+        logger.info(
+            "TaskPlanner: round %d pool has %d candidates (%d planned + 1 canonical fixed; planned slots %d/%d)",
+            round_num,
+            len(candidates),
+            len(planned_tasks),
+            planned_slot_total,
+            num_slots,
+        )
         return CandidatePool(round_num=round_num, items=tuple(candidates))
 
     def _call_llm_planner(
@@ -141,7 +138,7 @@ class TaskPlanner:
         round_evals: list[dict[str, Any]],
         agent_class: type,
         output_dir: Path | None = None,
-        num_gpus: int = 1,
+        num_slots: int = 1,
         rag_enabled: bool = False,
     ) -> list[Any]:
         """Delegate to the existing ``task_generator.generate_tasks``."""
@@ -170,7 +167,7 @@ class TaskPlanner:
             previous_tasks_dir=Path(output_dir) / "tasks" if output_dir else None,
             round_evaluations=round_evals,
             current_round=round_num,
-            num_gpus=num_gpus,
+            num_gpus=num_slots,
             output_dir=Path(output_dir) / "tasks" / f"round_{round_num}" if output_dir else None,
             rag_enabled=rag_enabled,
             subagent_registry=self._subagent_registry,
