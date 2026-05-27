@@ -83,8 +83,10 @@ class GPUManager:
     stats_log_interval_s:
         Seconds between periodic INFO log lines.  ``0`` disables.
     cpu_pressure_threshold:
-        Max 1-minute load average before the dispatcher pauses.
-        Defaults to ``0.8 * os.cpu_count()``.
+        Max **per-core** load average (``loadavg / cpu_count``) before the
+        dispatcher pauses.  Defaults to ``0.8`` (i.e. ~80% saturated).
+        Internal knob — not surfaced through YAML config on purpose, since
+        raw loadavg thresholds are a footgun across heterogeneous hosts.
     reaper_interval_s:
         Seconds between lease-reaper sweeps.  ``0`` disables.
     event_log_path:
@@ -109,7 +111,7 @@ class GPUManager:
         self._registry = registry
         self._stats_log_interval_s = stats_log_interval_s
         self._cpu_pressure_threshold = (
-            cpu_pressure_threshold if cpu_pressure_threshold is not None else 0.8 * os.cpu_count()
+            cpu_pressure_threshold if cpu_pressure_threshold is not None else 0.8
         )
         self._reaper_interval_s = reaper_interval_s
 
@@ -251,9 +253,14 @@ class GPUManager:
                         self._queue_depth = max(0, self._queue_depth - 1)
                     continue
 
-                # CPU pressure gate — wait before acquiring GPUs
+                # CPU pressure gate — wait before acquiring GPUs.
+                # Compares **per-core** load (loadavg / cpu_count) against the
+                # threshold so the gate behaves the same on a 4-core dev box
+                # and a 256-core server. Raw loadavg is meaningless without
+                # normalizing by cpu_count.
                 try:
-                    while os.getloadavg()[0] > self._cpu_pressure_threshold:
+                    cpus = max(1, os.cpu_count() or 1)
+                    while (os.getloadavg()[0] / cpus) > self._cpu_pressure_threshold:
                         if self._closed:
                             fut.cancel()
                             return

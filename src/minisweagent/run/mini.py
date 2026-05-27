@@ -623,14 +623,16 @@ def main(
     # ── force-terminate registry and re-raise.                     ──
     state = PreprocessState(output_dir=preprocess_output_dir)
     _gpu_mgr_cfg = config.get("gpu_manager") or {}
+    if "cpu_pressure_threshold" in _gpu_mgr_cfg:
+        logger.warning(
+            "gpu_manager.cpu_pressure_threshold is no longer a YAML knob — "
+            "the dispatcher now uses normalized per-core load with a fixed "
+            "default. Ignoring the configured value."
+        )
     gpu_manager = GPUManager(
         parsed_gpu_ids,
         registry=state.registry,
         stats_log_interval_s=float(_gpu_mgr_cfg.get("stats_log_interval_s", 30.0)),
-        cpu_pressure_threshold=float(_gpu_mgr_cfg.get(
-            "cpu_pressure_threshold",
-            max(len(parsed_gpu_ids) * 4, 8),
-        )),
         event_log_path=preprocess_output_dir / "gpu_events.jsonl",
     )
 
