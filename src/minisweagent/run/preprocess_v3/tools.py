@@ -1444,7 +1444,11 @@ def _make_tool_commandment_from_user_command(
         use_run_sh = harness_from_cmd is not None
 
         if use_run_sh:
-            base_cmd = f"${{GEAK_WORK_DIR}}/run.sh {harness_from_cmd}"
+            # `_extract_harness_from_command` only matches `python|python3 <path>`
+            # invocations and returns just the path. The run.sh template execs
+            # its args via `bash -lc "$*"`, which would try to exec the .py
+            # directly (Permission denied, rc=126) without an interpreter prefix.
+            base_cmd = f"${{GEAK_WORK_DIR}}/run.sh python3 {harness_from_cmd}"
         elif cmd.startswith("cd ${GEAK_WORK_DIR}"):
             base_cmd = strip_mode_flags(cmd)
         else:
