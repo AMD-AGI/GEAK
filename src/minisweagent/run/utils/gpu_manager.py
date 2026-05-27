@@ -110,9 +110,7 @@ class GPUManager:
         self._gpu_ids = list(gpu_ids)
         self._registry = registry
         self._stats_log_interval_s = stats_log_interval_s
-        self._cpu_pressure_threshold = (
-            cpu_pressure_threshold if cpu_pressure_threshold is not None else 0.8
-        )
+        self._cpu_pressure_threshold = cpu_pressure_threshold if cpu_pressure_threshold is not None else 0.8
         self._reaper_interval_s = reaper_interval_s
 
         self._free: set[int] = set(gpu_ids)
