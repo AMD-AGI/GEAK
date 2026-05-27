@@ -202,8 +202,10 @@ them priority 15 behind kernel-body algorithmic work.
    dependency to identify what to optimize.
 3. Read the discovery file for kernel metadata (language, inner kernel, etc.).
 4. Read the knowledge base for applicable optimization strategies.
-5. Optionally read baseline metrics, COMMANDMENT.md, deep search findings,
-   or prior results if the paths are provided.
+5. Always read the COMMANDMENT.md when its path is provided -- it is the
+   inviolable contract for what the sub-agent may and may not do.
+   Optionally read baseline metrics, deep search findings, or prior results
+   if those paths are provided.
 6. Group related kernels (e.g., multiple Tensile GEMMs with different tile
    sizes are one target; CK GEMM variants are another).
 7. For each group, propose a specific optimization task naming:
@@ -267,13 +269,17 @@ compare its results against the baseline metrics provided in the task
 metadata. The sub-agent should report the specific metric improvement
 (e.g. duration reduction, bandwidth improvement) relative to baseline.
 
-**COMMANDMENT adherence**: Each task_prompt MUST instruct the sub-agent
-to read and follow the COMMANDMENT file. The COMMANDMENT defines the
-correctness criteria and constraints. Any changes that violate the
-COMMANDMENT must be rejected by the sub-agent itself.
+**COMMANDMENT adherence**: COMMANDMENT is the inviolable contract between
+the orchestrator and the sub-agent. Each task_prompt MUST instruct the
+sub-agent to read the COMMANDMENT file and obey every rule in it with
+ZERO exceptions. Any patch that violates any rule in COMMANDMENT MUST be
+reverted by the sub-agent before reporting results -- a violating patch
+is not a candidate, no matter its measured speedup.
 
 **Verification**: Each task_prompt MUST include instructions to:
-1. Read the COMMANDMENT and follow its constraints
+1. Read the COMMANDMENT and follow its constraints exactly -- any patch
+   that violates COMMANDMENT must be reverted and reported as a failed
+   attempt, regardless of measured performance
 2. Verify correctness after making changes (use the `save_and_test` tool)
 3. Profile the result to measure improvement (use the `profile_kernel` tool)
 4. Compare results against baseline metrics and report before/after numbers
