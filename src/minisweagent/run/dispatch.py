@@ -319,7 +319,11 @@ def task_file_to_agent_task(task_file: Path):
     if meta.get("starting_patch"):
         cfg["starting_patch"] = meta["starting_patch"]
 
-    for _passthrough_key in ("baseline_metrics", "benchmark_baseline", "kind"):
+    # kind is dispatcher scheduling metadata persisted to the task .md YAML by the
+    # writer and read back by _resolve_task_kind() in postprocess.evaluation. It is
+    # intentionally NOT passed to AgentConfig: agents behave identically regardless
+    # of how they were scheduled (planned vs fixed canonical fill).
+    for _passthrough_key in ("baseline_metrics", "benchmark_baseline"):
         if meta.get(_passthrough_key):
             cfg[_passthrough_key] = meta[_passthrough_key]
 
