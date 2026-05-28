@@ -466,3 +466,135 @@ class TestBlocklistDirection:
         assert result["returncode"] == 1
         assert "vim" in result["output"]
         assert "Blocked" in result["output"]
+
+
+# ---------------------------------------------------------------------------
+# extra_env override — parallel-agent slots inject ``GEAK_*`` via
+# ``BashCommand._env_override`` instead of ``os.environ`` (the latter
+# would race across threads).  These tests pin the contract.
+# ---------------------------------------------------------------------------
+
+
+class TestExtraEnvScopeCheck:
+    """``_check_command_scope(extra_env=...)`` must consult the dict
+    *before* falling back to ``os.environ``."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch, tmp_path):
+        # Wipe the globals so we can prove extra_env is doing the work.
+        monkeypatch.delenv("GEAK_REPO_ROOT", raising=False)
+        monkeypatch.delenv("GEAK_WORK_DIR", raising=False)
+        self.repo = tmp_path / "repo"
+        self.work = tmp_path / "wt"
+        self.repo.mkdir()
+        self.work.mkdir()
+        self.extra_env = {
+            "GEAK_REPO_ROOT": str(self.repo),
+            "GEAK_WORK_DIR": str(self.work),
+        }
+
+    def test_resolve_path_token_uses_extra_env(self):
+        resolved = _resolve_path_token("$GEAK_REPO_ROOT/sub", None, extra_env=self.extra_env)
+        assert resolved == str(self.repo / "sub")
+
+    def test_allowed_roots_uses_extra_env(self):
+        roots = _allowed_search_roots(None, extra_env=self.extra_env)
+        assert str(self.repo) in roots
+        assert str(self.work) in roots
+
+    def test_extra_env_takes_precedence_over_os_environ(self, monkeypatch, tmp_path):
+        # os.environ says one thing, extra_env another → extra_env wins.
+        other = tmp_path / "other"
+        other.mkdir()
+        monkeypatch.setenv("GEAK_REPO_ROOT", str(other))
+        roots = _allowed_search_roots(None, extra_env=self.extra_env)
+        assert str(self.repo) in roots
+        assert str(other) not in roots
+
+    def test_check_scope_passes_with_extra_env_only(self):
+        # The regression: command references $GEAK_REPO_ROOT, env var is
+        # absent from os.environ, present only in extra_env.  Must pass.
+        cmd = "find $GEAK_REPO_ROOT/sgl-kernel -maxdepth 5 -type f -name '*.py' | head -60"
+        assert _check_command_scope(cmd, cwd=None, extra_env=self.extra_env) is None
+
+    def test_check_scope_blocks_unrelated_path_even_with_extra_env(self):
+        # Sanity: extra_env does not magically allow scans rooted elsewhere.
+        err = _check_command_scope("find /wekafs -name foo", cwd=None, extra_env=self.extra_env)
+        assert err is not None
+        assert str(self.repo) in err  # error message reflects the override
+
+    def test_block_message_uses_extra_env_values(self):
+        # The user-facing rejection message must show the values the
+        # subprocess would actually see, not "<unset>" from os.environ.
+        err = _check_command_scope("find / -name foo", cwd=None, extra_env=self.extra_env)
+        assert err is not None
+        assert str(self.repo) in err
+        assert str(self.work) in err
+        assert "<unset>" not in err
+
+    def test_export_then_find_export_does_not_hide_scan(self):
+        # Newline-separated multi-segment command: the firewall must
+        # still see the ``find`` segment and reject it on its own merits.
+        cmd = "export FOO=bar\nfind /wekafs -name foo"
+        err = _check_command_scope(cmd, cwd=None, extra_env=self.extra_env)
+        assert err is not None
+
+
+class TestSplitShellSegmentsNewline:
+    """``_split_shell_segments`` must treat ``\\n`` as a separator so an
+    LLM can't hide a ``find /`` behind a leading ``export`` line."""
+
+    def test_newline_splits(self):
+        segs = _split_shell_segments("export FOO=bar\nfind / -name foo")
+        assert "export FOO=bar" in segs
+        assert "find / -name foo" in segs
+
+    def test_crlf_splits(self):
+        segs = _split_shell_segments("a\r\nb")
+        assert segs == ["a", "b"]
+
+
+class TestBashInstanceUsesEnvOverride:
+    """End-to-end: a parallel-agent slot wires ``_env_override`` and the
+    scope check then accepts ``$GEAK_REPO_ROOT``-rooted scans even when
+    those vars are absent from the global environment."""
+
+    def test_env_override_unblocks_scan(self, monkeypatch, tmp_path):
+        # Prove the bug: the global env is empty, so without
+        # _env_override the scan would be rejected.
+        monkeypatch.delenv("GEAK_REPO_ROOT", raising=False)
+        monkeypatch.delenv("GEAK_WORK_DIR", raising=False)
+        monkeypatch.setenv("GEAK_BASH_TIMEOUT_SEC", "10")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "marker.py").write_text("")
+
+        bash = BashCommand()
+        # 1) Without override: rejected (current behavior pre-fix).
+        rejected = bash(command="find $GEAK_REPO_ROOT -name '*.py'")
+        assert rejected["returncode"] == 1
+        assert "Blocked" in rejected["output"]
+
+        # 2) With override (mirrors what tools_runtime.py installs): runs.
+        bash._env_override = {"GEAK_REPO_ROOT": str(repo)}
+        ok = bash(command="find $GEAK_REPO_ROOT -name '*.py'")
+        assert ok["returncode"] == 0
+        assert "marker.py" in ok["output"]
+
+    def test_env_override_block_message_has_real_values(self, monkeypatch, tmp_path):
+        # Wipe os.environ so any leakage would show as "<unset>".
+        monkeypatch.delenv("GEAK_REPO_ROOT", raising=False)
+        monkeypatch.delenv("GEAK_WORK_DIR", raising=False)
+        repo = tmp_path / "repo"
+        work = tmp_path / "wt"
+        repo.mkdir()
+        work.mkdir()
+        bash = BashCommand()
+        bash._env_override = {"GEAK_REPO_ROOT": str(repo), "GEAK_WORK_DIR": str(work)}
+        result = bash(command="find /wekafs -name foo")
+        assert result["returncode"] == 1
+        # Both override values must appear; neither should fall back to <unset>.
+        head = result["output"].split("System dirs")[0]
+        assert str(repo) in head
+        assert str(work) in head
+        assert "<unset>" not in head

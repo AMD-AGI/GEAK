@@ -61,7 +61,54 @@ def _bash_timeout_sec() -> float:
         return float(_DEFAULT_BASH_TIMEOUT_SEC)
 
 
-def _allowed_search_roots(cwd: str | None) -> list[str]:
+# Pattern matching ``$VAR`` and ``${VAR}``.  Mirrors what
+# ``os.path.expandvars`` accepts on POSIX (alpha-or-underscore start, then
+# alnum/underscore).  Used by :func:`_expand_env_vars` so the scope check
+# can resolve variables from an *injected* env dict (the bash tool's
+# ``_env_override``) rather than only from ``os.environ``.
+_ENV_VAR_RE = re.compile(r"\$(\{)?([A-Za-z_][A-Za-z0-9_]*)(?(1)\})")
+
+
+def _lookup_env(name: str, extra_env: dict[str, str] | None) -> str | None:
+    """Return the value of env var *name*, preferring ``extra_env`` when
+    present (per-instance override) and falling back to ``os.environ``.
+
+    Returns ``None`` when the name is unset in both layers.  Empty-string
+    values are treated as "set but empty" and returned verbatim, matching
+    standard shell semantics.
+    """
+    if extra_env is not None and name in extra_env:
+        return extra_env[name]
+    return os.environ.get(name)
+
+
+def _expand_env_vars(tok: str, extra_env: dict[str, str] | None) -> str:
+    """Like :func:`os.path.expandvars` but resolves variables against
+    ``extra_env`` first, ``os.environ`` second.
+
+    Why we don't just call ``os.path.expandvars`` then patch up: the
+    bash tool runs in a multi-thread parallel-agent model where each
+    slot needs a *different* ``GEAK_WORK_DIR``.  Mutating ``os.environ``
+    would race; this helper keeps everything per-call.
+
+    Unset variables are left literal (``$FOO`` stays ``$FOO``), matching
+    ``os.path.expandvars``'s behavior so any downstream ancestry check
+    still rejects them rather than silently treating them as empty.
+    """
+    if "$" not in tok:
+        return tok
+
+    def _sub(match: re.Match[str]) -> str:
+        name = match.group(2)
+        value = _lookup_env(name, extra_env)
+        return value if value is not None else match.group(0)
+
+    return _ENV_VAR_RE.sub(_sub, tok)
+
+
+def _allowed_search_roots(
+    cwd: str | None, extra_env: dict[str, str] | None = None
+) -> list[str]:
     """Roots under which recursive filesystem scans are permitted.
 
     Order matters only for the diagnostic message; ancestry checks are
@@ -76,10 +123,14 @@ def _allowed_search_roots(cwd: str | None) -> list[str]:
     REPO_ROOT/WORK_DIR/system roots in the usual way.  This matches the
     documented contract "cwd is allowed *when it is inside a
     repo/worktree*".
+
+    ``extra_env`` (when provided) is consulted before ``os.environ`` so
+    parallel-agent slots can each have their own ``GEAK_REPO_ROOT`` /
+    ``GEAK_WORK_DIR`` without racing on the global environment.
     """
     roots: list[str] = []
     for env_var in ("GEAK_REPO_ROOT", "GEAK_WORK_DIR"):
-        v = os.environ.get(env_var, "").strip()
+        v = (_lookup_env(env_var, extra_env) or "").strip()
         if v:
             roots.append(os.path.normpath(v))
     roots.extend(_SYSTEM_ROOTS)
@@ -94,14 +145,22 @@ def _is_under_any(path: str, roots: list[str]) -> bool:
     return False
 
 
-def _resolve_path_token(tok: str, cwd: str | None) -> str:
+def _resolve_path_token(
+    tok: str, cwd: str | None, extra_env: dict[str, str] | None = None
+) -> str:
     """Resolve a path-like shell token to an absolute, normalized path.
 
     Handles ``~``, ``$VAR``, and relative paths.  Does *not* follow
     symlinks (``realpath``) because the caller only needs ancestry, and
     symlink resolution would be a syscall per check.
+
+    ``extra_env`` is consulted before ``os.environ`` for ``$VAR`` /
+    ``${VAR}`` substitutions.  ``~`` still uses ``os.environ['HOME']``
+    via :func:`os.path.expanduser`; we don't override that because the
+    parallel-agent flow doesn't differ on HOME and the bug we're fixing
+    is specifically about ``GEAK_*``.
     """
-    expanded = os.path.expandvars(os.path.expanduser(tok))
+    expanded = _expand_env_vars(os.path.expanduser(tok), extra_env)
     if not os.path.isabs(expanded):
         base = cwd or os.getcwd()
         expanded = os.path.join(base, expanded)
@@ -110,14 +169,20 @@ def _resolve_path_token(tok: str, cwd: str | None) -> str:
 
 # Shell control operators that separate commands.  ``shlex`` does not
 # split on these, so we pre-segment the command string before tokenizing.
-_SHELL_SEP_RE = re.compile(r"(?:&&|\|\||;|\|)")
+# ``\n`` is included so a multi-line command body
+# (``export FOO=bar\nfind $FOO -name x``) is also segmented; without
+# this an LLM trick that put ``export`` on the first line would hide
+# the ``find`` segment from the scope check entirely (the whole thing
+# would tokenize as starting with ``export``, which is not a scan
+# binary, so the firewall would no-op).
+_SHELL_SEP_RE = re.compile(r"(?:&&|\|\||;|\||\r?\n)")
 
 
 def _split_shell_segments(cmd: str) -> list[str]:
     """Split a command line on top-level shell separators (``;``, ``&&``,
-    ``||``, ``|``).  Not aware of quoting/heredocs; segments inside a
-    heredoc that contain a separator may be split incorrectly, but the
-    scope check is best-effort and L1 timeout is the safety net.
+    ``||``, ``|``, newline).  Not aware of quoting/heredocs; segments
+    inside a heredoc that contain a separator may be split incorrectly,
+    but the scope check is best-effort and L1 timeout is the safety net.
     """
     return [s.strip() for s in _SHELL_SEP_RE.split(cmd) if s.strip()]
 
@@ -199,10 +264,23 @@ def _extract_search_paths(tokens: list[str], cwd: str | None) -> list[str]:
     return []
 
 
-def _format_scope_block(bad_token: str, resolved: str, roots: list[str]) -> str:
-    """Build a helpful, machine-greppable rejection message for the LLM."""
-    repo = os.environ.get("GEAK_REPO_ROOT", "<unset>")
-    work = os.environ.get("GEAK_WORK_DIR", "<unset>")
+def _format_scope_block(
+    bad_token: str,
+    resolved: str,
+    roots: list[str],
+    extra_env: dict[str, str] | None = None,
+) -> str:
+    """Build a helpful, machine-greppable rejection message for the LLM.
+
+    Reads the GEAK roots from ``extra_env`` first (per-instance override)
+    so the rejection message reports the values the agent actually has,
+    not whatever happens to be (or not be) in the global ``os.environ``.
+    Reporting ``<unset>`` while the bash subprocess actually inherits
+    the variables would mislead the LLM into trying ineffective
+    workarounds (e.g. ``export`` on its own line).
+    """
+    repo = _lookup_env("GEAK_REPO_ROOT", extra_env) or "<unset>"
+    work = _lookup_env("GEAK_WORK_DIR", extra_env) or "<unset>"
     return (
         f"Blocked: unbounded filesystem scan rooted at {bad_token!r} "
         f"(resolved to {resolved!r}). Scans outside the project scope can "
@@ -219,13 +297,23 @@ def _format_scope_block(bad_token: str, resolved: str, roots: list[str]) -> str:
     )
 
 
-def _check_command_scope(cmd: str, cwd: str | None) -> str | None:
+def _check_command_scope(
+    cmd: str,
+    cwd: str | None,
+    extra_env: dict[str, str] | None = None,
+) -> str | None:
     """Return a rejection message if *cmd* contains a recursive filesystem
     scan rooted outside any allowed root; otherwise ``None``.
 
     Best-effort: complex shell constructs (heredocs, deeply nested
     ``$(...)``) may bypass this check, in which case the wall-clock
     timeout is the second line of defense.
+
+    ``extra_env`` (when provided) is consulted before ``os.environ`` for
+    every variable lookup performed by this function and its helpers,
+    so the parallel-agent caller can pass its own ``_env_override``
+    dict and avoid the thread-unsafe pattern of mutating
+    ``os.environ`` to publish per-slot ``GEAK_WORK_DIR``.
     """
     if not cmd:
         return None
@@ -241,11 +329,11 @@ def _check_command_scope(cmd: str, cwd: str | None) -> str | None:
         paths = _extract_search_paths(tokens, cwd)
         if not paths:
             continue
-        roots = _allowed_search_roots(cwd)
+        roots = _allowed_search_roots(cwd, extra_env=extra_env)
         for p in paths:
-            resolved = _resolve_path_token(p, cwd)
+            resolved = _resolve_path_token(p, cwd, extra_env=extra_env)
             if resolved == "/" or not _is_under_any(resolved, roots):
-                return _format_scope_block(p, resolved, roots)
+                return _format_scope_block(p, resolved, roots, extra_env=extra_env)
     return None
 
 
@@ -400,7 +488,13 @@ class BashCommand:
         env = os.environ | self._env_override if self._env_override else None
         cwd = self._cwd if self._cwd and Path(self._cwd).is_dir() else None
 
-        scope_err = _check_command_scope(command, cwd)
+        # Pass the per-instance env override into the scope check so it
+        # resolves $GEAK_REPO_ROOT / $GEAK_WORK_DIR from the same dict
+        # that the subprocess will see.  Without this, parallel-agent
+        # slots silently fail every recursive scan because each slot's
+        # GEAK_WORK_DIR lives only in the bash tool's _env_override
+        # (NOT in os.environ — that would race across threads).
+        scope_err = _check_command_scope(command, cwd, extra_env=self._env_override or None)
         if scope_err is not None:
             logger.info("bash_command: rejected unbounded scan: %s", command[:200])
             return {"output": scope_err, "returncode": 1}
