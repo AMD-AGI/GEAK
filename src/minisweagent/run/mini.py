@@ -1014,6 +1014,21 @@ def main(
             (outcome or {}).get("cleanup_status", "unknown"),
         )
 
+        # Restore the wheel-installed aiter / sglang / sgl-kernel that the
+        # harness-runtime editable-install hooks replaced with worktree
+        # egg-links.  Best-effort: failures are logged but never re-raised
+        # so they cannot mask the original return value / exception.
+        try:
+            from minisweagent.run.preprocess.worktree_install import restore_original_packages
+            _restore_outcome = restore_original_packages()
+            if _restore_outcome["restored"] or _restore_outcome["failed"]:
+                logger.info(
+                    "[geak --cleanup] worktree-install restore: restored=%s failed=%s",
+                    _restore_outcome["restored"], _restore_outcome["failed"],
+                )
+        except Exception:
+            logger.exception("worktree_install.restore_original_packages raised (non-fatal)")
+
         if outcome:
             _apply_status = outcome.get("apply_status")
             if _apply_status in {"apply_failed", "commit_failed"}:

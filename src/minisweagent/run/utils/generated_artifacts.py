@@ -52,16 +52,45 @@ _ROOT_GENERATED_GLOBS = (
     "*.baseline_*",
 )
 
+# Hipify / pip-install side-effect basename globs. These files are produced by
+# building the worktree (typically ``pip install -e .`` running hipify on the
+# CUDA sources), so they are NOT authored by the agent and MUST NOT be captured
+# in the patch. Without this, two failure modes appear during round eval:
+#   1. Patch files balloon to 6k+ lines of hipified C++ noise.
+#   2. ``git apply`` fails with ``... already exists in working directory`` /
+#      ``patch failed: pyproject.toml:1`` because the eval worktree's own
+#      install regenerates the same files first.
+# Patterns match against the path basename, so they apply at any depth.
+_INSTALL_SIDE_EFFECT_BASENAME_GLOBS = (
+    "*_hip.cuh",          # e.g. sgl-kernel/include/hip/hip_act_and_mul_hip.cuh
+    "*_hip.h",            # e.g. sgl-kernel/include/utils_hip.h
+    "*_hip.hpp",
+    "*.hip",              # e.g. sgl-kernel/csrc/elementwise/activation.hip
+    "pyproject.toml",     # rewritten by some pip install -e flows
+    "setup.py.bak",
+    "MANIFEST.in.bak",
+)
+
 
 def _normalize_rel_path(rel_path: str) -> str:
     return PurePosixPath(str(rel_path).lstrip("./")).as_posix()
 
 
+def _matches_install_side_effect(name: str) -> bool:
+    """Return True when *name* (a path basename) is a hipify / install artifact."""
+    return any(fnmatch(name, pattern) for pattern in _INSTALL_SIDE_EFFECT_BASENAME_GLOBS)
+
+
 def is_generated_helper_artifact(rel_path: str) -> bool:
     """Return True when *rel_path* looks like a GEAK-generated helper artifact.
 
-    Matching is intentionally conservative and targets root-level helper files
-    and helper build directories, not normal source files inside the repo tree.
+    Matching covers two categories:
+
+    1. Root-level helper files / dirs that GEAK itself materializes (harness
+       scripts, build dirs, profiling dumps).
+    2. Hipify / ``pip install -e .`` side-effect files (``*_hip.cuh``,
+       ``*.hip``, ``pyproject.toml`` rewrites, ...). These can appear at any
+       depth inside the worktree and must NEVER end up in a captured patch.
     """
 
     rel = _normalize_rel_path(rel_path)
@@ -76,6 +105,12 @@ def is_generated_helper_artifact(rel_path: str) -> bool:
     if parts[0] in _ROOT_GENERATED_DIRS:
         return True
 
+    # Install side-effects can appear anywhere in the tree (e.g. under
+    # ``sgl-kernel/csrc/.../activation.hip``), so check the basename
+    # regardless of depth.
+    if _matches_install_side_effect(parts[-1]):
+        return True
+
     if len(parts) != 1:
         return False
 
@@ -86,8 +121,39 @@ def is_generated_helper_artifact(rel_path: str) -> bool:
     return any(fnmatch(name, pattern) for pattern in _ROOT_GENERATED_GLOBS)
 
 
+def install_side_effect_git_pathspecs() -> list[str]:
+    """Return git pathspec strings (already prefixed with ``:(exclude,glob)``)
+    that exclude hipify / install side-effect files at any depth.
+
+    Each entry is ready to be passed as a single argv element to ``git diff``
+    (e.g. ``git diff -- . :(exclude,glob)**/*.hip``).
+    """
+
+    return [f":(exclude,glob)**/{pattern}" for pattern in _INSTALL_SIDE_EFFECT_BASENAME_GLOBS]
+
+
+def install_side_effect_diff_basenames() -> list[str]:
+    """Return basename globs suitable for ``diff --exclude=<glob>``.
+
+    GNU ``diff --exclude`` runs fnmatch against the basename of each candidate
+    file, so a pattern like ``*.hip`` matches at any depth automatically.
+    """
+
+    return list(_INSTALL_SIDE_EFFECT_BASENAME_GLOBS)
+
+
 def generated_helper_excludes(cwd: Path | None = None) -> list[str]:
-    """Return git/diff exclude patterns for generated helper artifacts."""
+    """Return basename-style exclude patterns for generated helper artifacts.
+
+    These are fed into both ``git diff -- . :(exclude)<entry>`` (which matches
+    against full path) and ``diff -ruN --exclude=<entry>`` (which matches
+    against basename). Hipify / install side-effects are intentionally NOT
+    returned here; callers should additionally consult
+    :func:`install_side_effect_git_pathspecs` /
+    :func:`install_side_effect_diff_basenames` because those need different
+    formatting per backend (``:(exclude,glob)`` for git, plain basename for
+    GNU diff).
+    """
 
     excludes = [
         "run.sh",

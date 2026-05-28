@@ -51,6 +51,52 @@ class ContractViolation(RuntimeError):
 REQUIRED_HARNESS_FLAGS = ("--correctness", "--benchmark", "--full-benchmark", "--profile")
 REQUIRED_HARNESS_MARKERS = ("GEAK_RESULT_LATENCY_MS", "GEAK_RESULT_SPEEDUP")
 
+# Hard cap on numeric tolerances in correctness checks.
+#
+# Why 2e-2?  bfloat16 has ~3 decimal digits of mantissa precision, so
+# operations like ``silu(x) * y`` on ``randn`` inputs produce typical
+# absolute error around 1e-2.  Setting the cap at 2e-2 leaves a comfort
+# factor for legitimate fp16/bf16 kernels while rejecting the
+# ``hip_act_and_mul_20260528`` failure mode where the LLM wrote
+# ``assert_close(..., atol=5e-2, rtol=5e-2)`` — that 5% relative slop
+# silently classifies broken kernels as correct.
+#
+# Override via ``GEAK_HARNESS_MAX_TOLERANCE`` for kernels whose numerics
+# genuinely require larger atol (fp8 quantization, accumulation-heavy
+# reductions, etc.).
+import os as _os
+
+_TOLERANCE_HARD_CAP = float(_os.environ.get("GEAK_HARNESS_MAX_TOLERANCE", "2e-2"))
+
+# Match ``atol=<float>`` / ``rtol=<float>`` in kwargs, capturing the
+# numeric literal.  Supports decimal and scientific notation.  Will
+# overmatch comments mentioning ``atol=`` but the values inside comments
+# are still part of the harness source, so a false positive there
+# would mean the LLM put a misleading tolerance in a comment — which
+# we'd want to know about anyway.
+_TOLERANCE_LITERAL_RE = re.compile(
+    r"\b(atol|rtol)\s*=\s*([+-]?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)"
+)
+
+
+def _scan_tolerances(text: str) -> list[tuple[str, float, int]]:
+    """Return ``(kind, value, lineno)`` for every atol=/rtol= literal in ``text``.
+
+    Lineno is 1-based so error messages can point the LLM at the
+    exact offending line in its harness retry.
+    """
+    findings: list[tuple[str, float, int]] = []
+    for m in _TOLERANCE_LITERAL_RE.finditer(text):
+        kind = m.group(1)
+        raw = m.group(2)
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        lineno = text.count("\n", 0, m.start()) + 1
+        findings.append((kind, value, lineno))
+    return findings
+
 
 def validate_harness(path: Path) -> None:
     """Verify a harness.py conforms to the universal contract.
@@ -77,6 +123,34 @@ def validate_harness(path: Path) -> None:
             raise ContractViolation(
                 f"harness {path} missing required flags {missing_flags} AND required markers {missing_markers}"
             )
+
+    # Tolerance gate: catch the ``atol=5e-2`` slop that lets broken
+    # kernels pass correctness checks.  We scan EVERY tolerance literal
+    # in the harness (not just the first), because LLMs sometimes set a
+    # tight default at the top of the file and override it with a wide
+    # one inside a specific shape loop.  Reports every offender on a
+    # single violation so the retry prompt can fix them all at once.
+    too_loose: list[tuple[str, float, int]] = [
+        (kind, value, lineno)
+        for kind, value, lineno in _scan_tolerances(text)
+        if value > _TOLERANCE_HARD_CAP
+    ]
+    if too_loose:
+        offenders = ", ".join(
+            f"{kind}={value:g} on line {lineno}" for kind, value, lineno in too_loose
+        )
+        raise ContractViolation(
+            f"harness {path} uses correctness tolerance(s) above the {_TOLERANCE_HARD_CAP:g} hard cap: "
+            f"{offenders}.\n"
+            "Tolerances this loose silently classify broken kernels as correct "
+            "(observed regression: hip_act_and_mul_20260528_0919 used atol=5e-2 "
+            "and let agent patches pass without actually matching the reference).\n"
+            "Use atol/rtol = 1e-3 for fp16/bf16 and 1e-4 for fp32 by default; "
+            "tighten further when the kernel is exact.  If your kernel's numerics "
+            "genuinely require larger atol (fp8 quantization, accumulation-heavy "
+            "reductions), override GEAK_HARNESS_MAX_TOLERANCE for this run only "
+            "and document the reason in the harness."
+        )
 
 
 # ---------------------------------------------------------------------------

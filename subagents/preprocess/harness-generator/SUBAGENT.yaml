@@ -118,7 +118,38 @@ system_prompt: |
   - The harness is a THIN WRAPPER around existing repo code. Do NOT reimplement what the repo already does — import and call its existing functions.
 
   Shape source priority
-  1. If the task has a `USER TASK CONTEXT` / explicit shape override: use that exactly. Read discovered files only for invocation/reference logic and write `user_task:production` to `harness_shapes_source.txt`.
+  1. AUTHORITATIVE — user_task production parameters. Apply this rule whenever ANY ONE of the following is present in the task / context (do NOT fall through to rule 2 if any is satisfied):
+       (a) A `USER TASK CONTEXT (authoritative)` markdown block.
+       (b) A `user_task_shapes` dict in the context.
+       (c) A fenced ```json block (``Kernel runtime metadata`` or similar) whose `kernel_params` has at least one non-null field — even when `input_shapes`/`Shapes`/`input_dtypes` are listed as `[]`.
+       (d) A kernel mangled name embedding a dtype token (`__hip_bfloat16`, `__nv_bfloat16`, `__half`, `__hip_fp8_e4m3_fnuz`, `__hip_fp8_e5m2`, literal `float` template arg).
+       (e) A `MODEL_CONFIG_PATH` field pointing at a real model `config.json`.
+       (f) A `## Workload-specific context` (or equivalent) section naming concrete batch / seq_len / dim / dtype / model-production params.
+
+     When rule 1 fires, mechanically derive ALL FOUR of dtype, batch, seq_len, dim — DO NOT consult the benchmark file's default sweep:
+
+       * dtype: parse the kernel mangled name. Map deterministically:
+           `__hip_bfloat16` / `__nv_bfloat16`     -> torch.bfloat16
+           `__half`                               -> torch.float16
+           `__hip_fp8_e4m3_fnuz`                  -> torch.float8_e4m3fnuz
+           `__hip_fp8_e5m2`                       -> torch.float8_e5m2
+           `float` / `f32`                        -> torch.float32
+         AUTHORITATIVE. Do NOT pick fp16 for a kernel whose mangled name says `__hip_bfloat16`.
+       * batch sweep: derive from `runtime_args.cuda_graph_max_bs` (or `max_batch_size`). Sample `[1, max//8, max//4, max//2, max]` clipped to `[1..max]` and de-duplicated. If neither field exists, default to `[1, 8, 16, 32, 64]`.
+       * seq_len: `[1]` when `runtime_flags.analysis_mode == "inference"` AND the Workload section says decode-heavy. Otherwise read from the benchmark file.
+       * dim / d / hidden — dispatch on kernel kind (substring match against the kernel name, lower-cased):
+           - FFN-style (`act_and_mul`, `gelu_and_mul`, `silu_and_mul`, `swiglu*`, `fused_mlp*`, `fused_ffn*`):
+               `d` is the FFN intermediate dim. Read `intermediate_size` from `MODEL_CONFIG_PATH`'s config.json. Do NOT use `HIDDEN_SIZE` here — act_and_mul's `d` is intermediate, not hidden.
+           - Norm-style (`rmsnorm`, `rms_norm`, `layernorm`):
+               `d` is `hidden_size` (read from `MODEL_CONFIG_PATH`) or `kernel_params.HIDDEN_SIZE`.
+           - Attention (`paged_attention`, `flash_attn`, `mha`, `gqa`):
+               use `HEAD_SIZE`, `NUM_ATTENTION_HEADS`, `NUM_KEY_VALUE_HEADS`, `BLOCK_SIZE` directly from `kernel_params`.
+       * correctness tolerance: bf16/fp8 -> `rtol=5e-2, atol=5e-2`; fp16 -> `rtol=1e-3, atol=1e-3`; fp32 -> `rtol=1e-5, atol=1e-5`.
+
+     Read discovered files (benchmark/test) ONLY for invocation pattern, reference impl, and helper semantics. Do NOT lift their shape sweeps. Write `user_task:production` to `harness_shapes_source.txt`.
+
+     CRITICAL: `"input_shapes": []` / `"Shapes": []` / `"input_dtypes": []` does NOT mean "no shapes/dtypes" when any of (a)-(f) above is satisfied. They mean the user expects you to DERIVE the grid from architectural params + workload context, not enumerate by hand.
+
   2. Else, if a `FILES YOU MUST READ` block names a benchmark/shape source: read it and use its ordered full case stream. Do NOT invent `ALL_CONFIGS` while that file is readable.
   3. Else, if a benchmark file exists FOR THIS KERNEL (imports or calls the same kernel function): use it. If discovery lists a benchmark file that's for a DIFFERENT kernel, ignore it.
   4. Else use the TEST file's shapes (parametrize, config lists, etc.).

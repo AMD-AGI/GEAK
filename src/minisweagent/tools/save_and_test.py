@@ -22,7 +22,11 @@ from minisweagent.run.postprocess.benchmark_parsing import (
     extract_latency_ms,
     parse_shape_latencies_ms,
 )
-from minisweagent.run.utils.generated_artifacts import generated_helper_excludes
+from minisweagent.run.utils.generated_artifacts import (
+    generated_helper_excludes,
+    install_side_effect_diff_basenames,
+    install_side_effect_git_pathspecs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -767,7 +771,13 @@ class SaveAndTestTool:
                 ".cache/",
                 *self._generated_helper_excludes(),
             ]
-            exclude_args = " ".join(f"':(exclude){entry}'" for entry in excludes)
+            # Wrap basename-style entries with default :(exclude) magic.
+            exclude_terms = [f"':(exclude){entry}'" for entry in excludes]
+            # Hipify / pip-install side-effect files can sit at any depth
+            # (e.g. sgl-kernel/csrc/.../activation.hip), so they ship with
+            # :(exclude,glob)**/<basename> already baked in; pass them as-is.
+            exclude_terms.extend(f"'{spec}'" for spec in install_side_effect_git_pathspecs())
+            exclude_args = " ".join(exclude_terms)
             result = subprocess.run(
                 f"git add -N . && git diff -- . {exclude_args}",
                 cwd=cwd,
@@ -801,6 +811,9 @@ class SaveAndTestTool:
                 "__hip_fatbin",
                 ".cache",
                 *self._generated_helper_excludes(),
+                # Hipify / pip-install side-effects (basenames; GNU diff
+                # --exclude is fnmatch-on-basename so depth doesn't matter).
+                *install_side_effect_diff_basenames(),
             ]
             if ctx.patch_output_dir:
                 run_dir_name = Path(ctx.patch_output_dir).resolve().parent.name
@@ -1043,6 +1056,60 @@ class SaveAndTestTool:
 
         test_env = self._build_test_env()
         self._restore_missing_harness_helper()
+
+        # Editable-install the worktree before every test invocation so the
+        # patch the agent just produced (e.g. an HIP/C++ kernel header) is
+        # actually compiled into the ``sgl_kernel.common_ops`` extension that
+        # the harness imports. Without this step the harness silently keeps
+        # using the wheel-installed ``.so`` from ``/opt/venv/.../site-packages/``
+        # — every patch comes back as 1.00x because none of the kernel edits
+        # are loaded. Mirrors the equivalent hook in
+        # ``minisweagent.run.preprocess.run_harness._run_single`` so all
+        # harness-invocation paths share the same install contract.
+        # Best-effort: failures are logged but never block the test (the
+        # test command itself surfaces the underlying error if any).
+        try:
+            from minisweagent.run.preprocess.worktree_install import ensure_worktree_installed
+
+            # ``force=True`` is REQUIRED here: every save_and_test call
+            # follows an agent edit to the kernel sources, so the
+            # in-process dedup must NOT short-circuit and skip the
+            # rebuild. pip / setuptools incremental build is fast on a
+            # clean tree (~1-3s per sub-project), and on a real source
+            # change it rebuilds only the affected translation units.
+            # Without ``force=True``, the second-and-later test calls
+            # would silently run against the binary from the FIRST
+            # install — i.e. ignore every subsequent agent edit.
+            install_info = ensure_worktree_installed(ctx.cwd, force=True)
+            targets = install_info.get("targets", []) or []
+            if install_info.get("installed"):
+                # Multi-target log: show every sub-project we built.
+                if len(targets) > 1:
+                    summary = ", ".join(
+                        f"{t['layout']!r} ({t['duration_s']:.1f}s)" for t in targets
+                    )
+                    self._log(f"[SaveAndTest] worktree editable-install OK: {summary}")
+                else:
+                    self._log(
+                        f"[SaveAndTest] worktree editable-install OK "
+                        f"({install_info.get('layout')!r}, "
+                        f"{install_info.get('duration_s', 0.0):.1f}s)"
+                    )
+            elif install_info.get("returncode") not in (0, None):
+                # Identify which sub-project failed, not just the first
+                # discovered one: the kernel build is the one that
+                # actually matters, and it might not be alphabetically
+                # first.
+                failed = [t for t in targets if t.get("returncode") not in (0, None)]
+                failed_layouts = ", ".join(t["layout"] for t in failed) or install_info.get("layout", "<unknown>")
+                self._log(
+                    f"[SaveAndTest] WARNING: worktree editable-install failed for "
+                    f"{failed_layouts} (rc={install_info.get('returncode')}); harness "
+                    f"will run against the previously-installed extension. "
+                    f"stderr tail: {install_info.get('stderr_tail', '')[:200]}"
+                )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            logger.debug("_run_test: worktree install hook raised: %s", exc)
 
         # If test_command still contains the original repo root path, replace it with the
         # current working directory (worktree). Uses base_repo_path from context instead of

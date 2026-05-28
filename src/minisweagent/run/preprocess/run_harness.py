@@ -70,6 +70,18 @@ def _build_env(
     if repo_root:
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{repo_root}:{existing}" if existing else repo_root
+        # ``GEAK_WORK_DIR`` is the worktree-awareness contract: harnesses
+        # and JIT loaders MUST consult this env var to find the patched
+        # source.  Forgetting to set it caused the
+        # ``hip_act_and_mul_20260528`` regression where the harness's
+        # ``os.environ.setdefault("GEAK_WORK_DIR", "/sgl-workspace/sglang")``
+        # silently fell back to the un-patched repo root, making every
+        # candidate patch evaluate the baseline kernel.  Set it
+        # unconditionally here so any harness that reads ``GEAK_WORK_DIR``
+        # gets the worktree, and any harness that uses ``setdefault`` as
+        # a fallback becomes a no-op (the env already has the right
+        # value when the subprocess starts).
+        env["GEAK_WORK_DIR"] = repo_root
 
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
     env["PYTHONUNBUFFERED"] = "1"
@@ -90,6 +102,18 @@ def _run_single(
 ) -> dict[str, Any]:
     """Run a single harness mode and return a structured result dict."""
     import shlex
+
+    # Editable-install the worktree so import-time C++/HIP rebuilds
+    # pick up the candidate patch.  Best-effort: install failures are
+    # logged but never block the harness call (the harness will surface
+    # the underlying error itself).  ``cwd`` is the worktree when the
+    # caller wired one in; otherwise the worktree falls back to the
+    # harness's parent dir, which is what the CLI does at line ~340.
+    try:
+        from minisweagent.run.preprocess.worktree_install import ensure_worktree_installed
+        ensure_worktree_installed(cwd or Path(harness_path).parent)
+    except Exception as _exc:  # noqa: BLE001 — defensive
+        logger.debug("_run_single: worktree install hook raised: %s", _exc)
 
     flag = MODE_TO_FLAG[mode]
     cmd = [sys.executable, harness_path, flag]

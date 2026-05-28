@@ -174,6 +174,11 @@ def _build_env(
     Adds:
       * ``PYTHONPATH`` — work_dir prepended (when supplied) to the
         existing value.
+      * ``GEAK_WORK_DIR`` — the worktree root, so harnesses + JIT
+        loaders that route file paths through this env var (the
+        worktree-awareness contract) get the patched copy of the
+        source.  Mirrors ``run/preprocess/run_harness._build_env``;
+        see the comment there for why this is unconditional.
       * ``HIP_VISIBLE_DEVICES`` — pinned to ``gpu_id``.
       * ``PYTHONUNBUFFERED=1`` — so streaming logs aren't lost.
 
@@ -184,6 +189,7 @@ def _build_env(
     if work_dir is not None:
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{work_dir}:{existing}" if existing else str(work_dir)
+        env["GEAK_WORK_DIR"] = str(work_dir)
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
     env["PYTHONUNBUFFERED"] = "1"
     if extra:
@@ -261,6 +267,17 @@ def _run_benchmark_once(
     cmd = _benchmark_command(harness_path, flag=flag)
     env = _build_env(work_dir, gpu_id=gpu_id)
     cwd = str(work_dir) if work_dir is not None else None
+
+    # Editable-install the worktree before every harness invocation so
+    # patches to C++/HIP sources land in the imported ``.so``.  Mirrors
+    # the hook in ``run_harness._run_single``; see
+    # ``preprocess.worktree_install`` for the snapshot/restore contract.
+    if work_dir is not None:
+        try:
+            from minisweagent.run.preprocess.worktree_install import ensure_worktree_installed
+            ensure_worktree_installed(work_dir)
+        except Exception as _exc:  # noqa: BLE001 — defensive
+            logger.debug("_run_benchmark_once: worktree install hook raised: %s", _exc)
 
     t0 = _time.monotonic()
     try:

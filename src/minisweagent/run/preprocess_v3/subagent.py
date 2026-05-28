@@ -106,14 +106,32 @@ def _factory_bash() -> tuple[Callable[..., dict[str, Any]], dict[str, Any]]:
         "type": "function",
         "description": (
             "Run a bash command in the subagent's working directory. Returns "
-            "the command's combined stdout/stderr and exit code."
+            "the command's combined stdout/stderr and exit code.\n\n"
+            "A wall-clock timeout (~10 min, override with "
+            "$GEAK_BASH_TIMEOUT_SEC) applies; on timeout the entire process "
+            "group is killed.\n\n"
+            "Filesystem search scope: `find`, `grep -r`, `rg`, `tree`, "
+            "`du -a`, `ls -R` MUST target one of these roots (or a "
+            "subdirectory thereof): $GEAK_REPO_ROOT (original repo), "
+            "$GEAK_WORK_DIR (current worktree), the current working "
+            "directory, /tmp, /var/tmp, or the system dirs /opt "
+            "(e.g. /opt/rocm), /usr, /etc, /var/lib. Scans rooted at /, "
+            "/wekafs (top), /home, /root, /proc, /sys, /mnt, /media, or "
+            "the repo's parent directory are auto-rejected. For /opt, "
+            "/usr and other system dirs prefer -maxdepth 3 to keep "
+            "latency low."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The bash command to execute.",
+                    "description": (
+                        "The bash command to execute. Scope `find`/"
+                        "`grep -r`/`rg` to $GEAK_REPO_ROOT or "
+                        "$GEAK_WORK_DIR; unbounded scans (e.g. "
+                        "`find /`, `find /wekafs`) are auto-rejected."
+                    ),
                 },
             },
             "required": ["command"],

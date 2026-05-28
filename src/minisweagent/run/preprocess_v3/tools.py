@@ -971,6 +971,52 @@ def _schema_commandment_from_user_command() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_runtime_arg(
+    agent: PreprocessOrchestratorAgent,
+    *,
+    tool_name: str,
+    arg_name: str,
+    provided: Any,
+) -> str:
+    """Recover a missing tool argument from the orchestrator's runtime kwargs.
+
+    Defensive fallback for the deterministic Path-B tools. The
+    orchestrator's :meth:`PreprocessOrchestratorAgent.run` always seeds
+    ``self._extra_template_vars`` from the caller's runtime kwargs (see
+    line ``self._extra_template_vars = {"task": task, **_stringify_paths(context)}``)
+    — so ``kernel_path``, ``repo_root``, ``output_dir`` etc. are
+    *guaranteed* to be present there. The LLM's tool call, by contrast,
+    can omit them: the schema declares them ``required`` but a noisy
+    completion (especially under cache pressure) sometimes drops one.
+
+    When that happens, raising ``TypeError: missing 1 required positional
+    argument`` aborts the whole orchestrator step and forces a costly
+    LLM retry. This helper instead falls back to the runtime kwarg with
+    an INFO-log breadcrumb, and only raises ``ValueError`` if BOTH the
+    LLM and the runtime-kwargs lookup come up empty.
+    """
+    if isinstance(provided, str) and provided.strip():
+        return provided
+    fallback = None
+    if hasattr(agent, "_extra_template_vars"):
+        fallback = agent._extra_template_vars.get(arg_name)
+    if isinstance(fallback, (str, Path)):
+        coerced = str(fallback).strip()
+        if coerced:
+            logger.info(
+                "%s: %s missing from tool call, recovered from orchestrator runtime kwargs (%s)",
+                tool_name,
+                arg_name,
+                coerced,
+            )
+            return coerced
+    raise ValueError(
+        f"{tool_name}: required argument {arg_name!r} was not supplied by the LLM "
+        f"and could not be recovered from orchestrator runtime kwargs. "
+        f"Pass {arg_name!r} explicitly in the tool call."
+    )
+
+
 def _make_tool_run_discovery(
     agent: PreprocessOrchestratorAgent,
     kernel_language: KernelLanguage,
@@ -978,10 +1024,22 @@ def _make_tool_run_discovery(
     """Bind ``run_discovery`` to the legacy deterministic discovery front half."""
 
     def _impl(
-        repo_root: str,
-        kernel_path: str,
-        output_dir: str,
+        repo_root: str | None = None,
+        kernel_path: str | None = None,
+        output_dir: str | None = None,
+        **_extra_ignored: Any,
     ) -> dict[str, Any]:
+        if _extra_ignored:
+            logger.debug("run_discovery ignored extra kwargs: %s", list(_extra_ignored))
+        repo_root = _resolve_runtime_arg(
+            agent, tool_name="run_discovery", arg_name="repo_root", provided=repo_root
+        )
+        kernel_path = _resolve_runtime_arg(
+            agent, tool_name="run_discovery", arg_name="kernel_path", provided=kernel_path
+        )
+        output_dir = _resolve_runtime_arg(
+            agent, tool_name="run_discovery", arg_name="output_dir", provided=output_dir
+        )
         ctx: DiscoveryContext = run_legacy_discovery(
             kernel_path=Path(kernel_path),
             repo_root=Path(repo_root),
@@ -1033,15 +1091,29 @@ def _make_tool_codebase_explore(
     """
 
     def _impl(
-        repo_root: str,
-        kernel_path: str,
+        repo_root: str | None = None,
+        kernel_path: str | None = None,
         out_path: str | None = None,
         output_dir: str | None = None,
         **_extra_ignored: Any,
     ) -> dict[str, Any]:
         if _extra_ignored:
             logger.debug("codebase_explore ignored extra kwargs: %s", list(_extra_ignored))
+        repo_root = _resolve_runtime_arg(
+            agent, tool_name="codebase_explore", arg_name="repo_root", provided=repo_root
+        )
+        kernel_path = _resolve_runtime_arg(
+            agent, tool_name="codebase_explore", arg_name="kernel_path", provided=kernel_path
+        )
         if not out_path:
+            # ``out_path`` is the LLM-facing knob; ``output_dir`` is the
+            # runtime kwarg the orchestrator always seeds. Try the explicit
+            # ``output_dir`` argument first, then fall back to the runtime
+            # kwargs so a flagless tool call still resolves.
+            if not output_dir and hasattr(agent, "_extra_template_vars"):
+                fallback_dir = agent._extra_template_vars.get("output_dir")
+                if isinstance(fallback_dir, (str, Path)):
+                    output_dir = str(fallback_dir)
             if not output_dir:
                 raise ValueError("codebase_explore requires out_path or output_dir")
             out_path = str(Path(output_dir) / "CODEBASE_CONTEXT.md")
@@ -1166,12 +1238,67 @@ def _make_tool_dispatch_subagent(
         # structured line (``HARNESS_PATH: <path>``); the harness-verifier
         # echoes ``HARNESS_PATH=<path>`` on its success block.
         output = result.get("output", "") or ""
+        verified_modes: tuple[str, ...] = ()
+        verified_block = False
         for line in output.splitlines():
             stripped = line.strip()
             if stripped.startswith("HARNESS_PATH:"):
                 agent._collected["harness_path"] = stripped.split(":", 1)[1].strip()
             elif stripped.startswith("HARNESS_PATH="):
                 agent._collected["harness_path"] = stripped.split("=", 1)[1].strip()
+            elif stripped == "HARNESS_VERIFIED=true":
+                verified_block = True
+            elif stripped.startswith("MODES_PASSED="):
+                raw = stripped.split("=", 1)[1].strip()
+                verified_modes = _parse_verified_modes(raw)
+        # When the harness-verifier emits a clean success block, persist
+        # the parsed evidence so a later orchestrator turn that hits the
+        # ``step_limit`` (or any other LimitsExceeded) can still recover
+        # the four modes when falling back to ``commandment_from_user_command``.
+        # Two persistence layers, both best-effort:
+        #   * In-memory: ``agent._collected['verified_modes_passed']`` —
+        #     consumed by the Path-A fallback in this same process.
+        #   * On-disk: ``<output_dir>/verification_result.txt`` — consumed
+        #     across re-runs (incremental ``rerun_failed`` / ``--mode hot``)
+        #     and as a hard audit trail.
+        if name == "harness-verifier" and verified_block and verified_modes:
+            agent._collected["verified_modes_passed"] = verified_modes
+            try:
+                output_dir_str = (
+                    agent._extra_template_vars.get("output_dir")
+                    if hasattr(agent, "_extra_template_vars")
+                    else None
+                )
+                if output_dir_str:
+                    out_dir = Path(str(output_dir_str))
+                    if out_dir.is_dir():
+                        verification_path = out_dir / "verification_result.txt"
+                        # The verifier subagent itself usually writes this
+                        # file; only overwrite when it's missing or stale,
+                        # to avoid clobbering richer evidence (FIXES_APPLIED,
+                        # WARNINGS) that the verifier may have included.
+                        if (
+                            not verification_path.exists()
+                            or "HARNESS_VERIFIED=true" not in verification_path.read_text()
+                        ):
+                            harness_path = agent._collected.get("harness_path", "")
+                            verification_path.write_text(
+                                "HARNESS_VERIFIED=true\n"
+                                f"HARNESS_PATH={harness_path}\n"
+                                f"MODES_PASSED={','.join(verified_modes)}\n"
+                                "FIXES_APPLIED=none\n"
+                                "WARNINGS=none\n",
+                                encoding="utf-8",
+                            )
+                            logger.debug(
+                                "dispatch_subagent: persisted verification_result.txt at %s",
+                                verification_path,
+                            )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                logger.debug(
+                    "dispatch_subagent: failed to persist verification_result.txt: %s",
+                    exc,
+                )
         return result
 
     return _impl
@@ -1376,6 +1503,22 @@ def _make_tool_commandment_from_user_command(
             )
             if synthesized:
                 original_harness_path = synthesized
+        # Recovery: when the LLM passes Path-A as a fallback for a verified
+        # but ``LimitsExceeded``-aborted Path B, the user-style ``run_command``
+        # is often a flagless ``python harness.py`` that ``_extract_harness_from_command``
+        # rejects. Cross-check ``agent._collected['harness_path']`` (already
+        # set by ``dispatch_subagent`` on a previous harness-generator /
+        # harness-verifier turn): if it's a real file, treat it as the harness
+        # to render four sections against.
+        if not original_harness_path:
+            inproc_path = agent._collected.get("harness_path") if hasattr(agent, "_collected") else None
+            if isinstance(inproc_path, str) and Path(inproc_path).is_file():
+                original_harness_path = inproc_path
+                logger.info(
+                    "commandment_from_user_command: recovered harness_path %s from "
+                    "orchestrator state (run_command lacks an explicit harness flag)",
+                    original_harness_path,
+                )
         # Static-validate the harness (whether user-supplied or synthesized) so
         # a malformed file doesn't cause silent baseline/profile failures later.
         # Failed validation clears the harness_path; the COMMANDMENT.md is still
@@ -1393,6 +1536,71 @@ def _make_tool_commandment_from_user_command(
             cmd = cmd.replace(repo_root, "${GEAK_WORK_DIR}")
         modes_covered_tup = _normalise_modes(modes_covered)
         inferred_modes_tup = _normalise_modes(inferred_modes)
+
+        # Auto-fill empty ``modes_covered`` from prior verifier evidence.
+        # The orchestrator's narrative for Path-A short-circuit only ever
+        # fires when the LLM is recovering from a Path-B failure (verifier
+        # ran out of step budget, generator retry-budget exhausted, etc.).
+        # In that flow the LLM has been observed to pass ``modes_covered=[]``
+        # which renders four ``# PATH_A_PARTIAL_COVERAGE: <mode> not covered``
+        # placeholder sections — the resulting ``_geak_test_cmd_*.sh`` exits
+        # 0 with empty stdout, every patch comes back ``[MICRO_SPEEDUP] 1.000x``,
+        # and the optimization rounds collapse. Recovery layers, in priority:
+        #   1. ``agent._collected['verified_modes_passed']`` — the verifier's
+        #      success block this run (see ``_make_tool_dispatch_subagent``).
+        #   2. ``<out_dir>/verification_result.txt`` — persisted across reruns.
+        #   3. The harness file's static contract: when
+        #      ``_validate_harness_or_warn`` accepted it, all four standard
+        #      flags exist, so all four modes are safe defaults.
+        if not modes_covered_tup:
+            recovered: tuple[str, ...] = ()
+            recovery_source = ""
+            inproc_modes = (
+                agent._collected.get("verified_modes_passed")
+                if hasattr(agent, "_collected")
+                else None
+            )
+            if isinstance(inproc_modes, tuple) and inproc_modes:
+                recovered = inproc_modes
+                recovery_source = "agent._collected['verified_modes_passed']"
+            else:
+                file_modes = _read_modes_from_verification_file(
+                    Path(out_path).parent / "verification_result.txt"
+                )
+                if file_modes:
+                    recovered = file_modes
+                    recovery_source = "verification_result.txt"
+                elif original_harness_path:
+                    # The harness has already passed ``_validate_harness_or_warn``
+                    # (which checks for all four GEAK CLI flags), so it's safe
+                    # to advertise full mode coverage. Without this fallback
+                    # the COMMANDMENT renders zero runnable sections and the
+                    # downstream optimization loop has nothing to test against.
+                    recovered = PATH_A_MODES
+                    recovery_source = "validated harness contract"
+            if recovered:
+                modes_covered_tup = recovered
+                logger.info(
+                    "commandment_from_user_command: auto-filled modes_covered=%s "
+                    "from %s (caller passed empty list)",
+                    list(recovered),
+                    recovery_source,
+                )
+
+        # When ``modes_covered`` was auto-filled from a verified harness but
+        # the user's ``run_command`` carries no per-mode flag, append a default
+        # so ``_substitute_mode_flag`` has something to swap out per section.
+        # Without this, every section emits the same flagless ``python harness.py``
+        # and only the harness's argparse default mode (or an error) actually runs.
+        if modes_covered_tup and not any(flag in cmd for flag in _MODE_TO_FLAG.values()):
+            default_flag = _MODE_TO_FLAG[modes_covered_tup[0]]
+            cmd = f"{cmd} {default_flag}"
+            logger.debug(
+                "commandment_from_user_command: appended %s to run_command "
+                "(no harness flag detected)",
+                default_flag,
+            )
+
         source_mode = modes_covered_tup[0] if modes_covered_tup else None
 
         setup_body = (
@@ -1492,6 +1700,65 @@ def _normalise_modes(value: Any) -> tuple[str, ...]:
         if stripped not in cleaned:
             cleaned.append(stripped)
     return tuple(cleaned)
+
+
+#: Maps the harness-verifier's spoken mode names (kebab-case, matching
+#: the CLI flags ``--correctness`` / ``--full-benchmark``) onto the
+#: canonical Path-A snake_case identifiers in :data:`PATH_A_MODES`.
+_VERIFIED_MODE_ALIASES: dict[str, str] = {
+    "correctness": "correctness",
+    "profile": "profile",
+    "benchmark": "benchmark",
+    "full-benchmark": "full_benchmark",
+    "full_benchmark": "full_benchmark",
+}
+
+
+def _parse_verified_modes(raw: str) -> tuple[str, ...]:
+    """Parse the harness-verifier's ``MODES_PASSED=`` value into Path-A modes.
+
+    The verifier emits a comma-separated list using kebab-case
+    (``correctness,profile,benchmark,full-benchmark``) per its
+    ``SUBAGENT.yaml`` success block. Path-A uses snake_case
+    (``full_benchmark``), so canonicalise on parse. Unknown tokens are
+    dropped with a debug log; whitespace and empty fragments are ignored.
+    """
+    if not isinstance(raw, str):
+        return ()
+    out: list[str] = []
+    for chunk in raw.split(","):
+        stripped = chunk.strip().lower()
+        if not stripped:
+            continue
+        canonical = _VERIFIED_MODE_ALIASES.get(stripped)
+        if canonical is None:
+            logger.debug("_parse_verified_modes: dropping unknown mode %r", stripped)
+            continue
+        if canonical not in out:
+            out.append(canonical)
+    return tuple(out)
+
+
+def _read_modes_from_verification_file(verification_path: Path) -> tuple[str, ...]:
+    """Read ``MODES_PASSED=`` from a persisted ``verification_result.txt``.
+
+    Returns the canonicalised Path-A modes when the file exists AND
+    contains a clean ``HARNESS_VERIFIED=true`` block. Returns ``()`` on
+    any read / parse error or when verification is absent / negative.
+    """
+    try:
+        if not verification_path.is_file():
+            return ()
+        text = verification_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ()
+    if "HARNESS_VERIFIED=true" not in text:
+        return ()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("MODES_PASSED="):
+            return _parse_verified_modes(stripped.split("=", 1)[1])
+    return ()
 
 
 def _make_tool_finish_preprocess(

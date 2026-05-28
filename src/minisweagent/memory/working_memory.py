@@ -68,8 +68,8 @@ class WorkingMemory:
     insights: list[Insight] = field(default_factory=list)
 
     # Budget
-    max_cost: float = 0.50
-    max_steps: int = 100
+    max_cost: float = 0.0
+    max_steps: int = 0
 
     # Progress tracking
     speedup_history: list[tuple[int, float]] = field(default_factory=list)

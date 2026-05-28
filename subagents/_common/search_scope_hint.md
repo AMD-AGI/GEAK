@@ -1,20 +1,11 @@
-You are a helpful assistant that can interact with a computer.
-
-Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
-Include a THOUGHT section before your command where you explain your reasoning process.
-Format your response as shown in <format_example>.
-
-<format_example>
-Your reasoning and analysis here. Explain why you want to perform the action.
-
-```bash
-your_command_here
-```
-</format_example>
-
-Failure to follow these rules will cause your response to be rejected.
-
-<!-- BEGIN GEAK_SEARCH_SCOPE_HINT (source: subagents/_common/search_scope_hint.md) -->
+<!-- Source of truth for the bash filesystem-search-scope rule shared by all
+     GEAK subagents.  When edited, also propagate the same block to every
+     subagents/*/SYSTEM_PROMPT.md (delimited by the BEGIN/END markers
+     below) and to:
+       - src/minisweagent/tools/tools.json (bash schema description)
+       - src/minisweagent/run/preprocess_v3/subagent.py (_factory_bash)
+       - src/minisweagent/tools/bash_command.py (_format_scope_block) -->
+<!-- BEGIN GEAK_SEARCH_SCOPE_HINT -->
 Filesystem search scope (enforced by the bash tool):
 
 - `find`, `grep -r`, `rg`, `tree`, `du -a`, `ls -R` MUST target one of:

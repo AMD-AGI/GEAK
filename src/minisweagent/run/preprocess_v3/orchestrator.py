@@ -135,10 +135,38 @@ commandment_from_user_command(
 
 **After ``commandment_from_user_command`` succeeds**: if the return value includes a ``harness_path`` (i.e. the command references a standard harness file), call ``collect_baseline(harness_path=<path>)`` and ``collect_profile(harness_path=<path>)`` before calling ``finish_preprocess``. These are fast deterministic subprocess calls (~30-60s total) and their output is required for downstream verified-speedup evaluation. If either call fails, proceed anyway — record the failure and call ``finish_preprocess``.
 
-**Case B — user provided explicit shapes/configs but no runnable command.**
-Indicators: the task names exact shapes, dims, dtype/config tuples, model-production configs, or says "use only this shape/config". The user's shapes/configs are authoritative.
+**Case B — user provided explicit shapes/configs OR a non-empty kernel_runtime_metadata block.**
 
-Action: run ``run_discovery`` because it is the standard cheap deterministic front step, but discovery/ATD is IRRELEVANT for this case. Dispatch ``harness-generator`` with the user-provided shapes/configs. Do not pass, inspect, or rely on ``DISCOVERY_CONTEXT.md``. The generated harness must use ONLY the user-provided shapes/configs while still satisfying the universal four-mode harness contract.
+DETERMINISTIC indicators (ANY ONE is sufficient — do NOT fall through to Case C if any is present):
+
+1. The task contains a fenced ```json block (``Kernel runtime metadata`` or similar) whose ``kernel_params`` has at least one non-null field (e.g. ``HIDDEN_SIZE``, ``HEAD_SIZE``, ``NUM_ATTENTION_HEADS``, ``NUM_KEY_VALUE_HEADS``, ``BLOCK_SIZE``).
+2. The task's ``runtime_args`` JSON has any of: ``cuda_graph_max_bs``, ``max_batch_size``, ``max_seq_len``, ``decode_batch_size``.
+3. The task contains a kernel mangled name embedding a dtype token: ``__hip_bfloat16``, ``__nv_bfloat16``, ``__half``, ``__hip_fp8_e4m3_fnuz``, ``__hip_fp8_e5m2``, ``float`` (literal in template arg).
+4. The task references a ``MODEL_CONFIG_PATH`` pointing at a real model ``config.json`` (read it for ``hidden_size`` / ``intermediate_size`` / ``num_attention_heads`` / ``num_key_value_heads``).
+5. The task has a ``## Workload-specific context`` (or similar) section naming concrete batch / seq_len / dim / dtype / model-production parameters.
+6. The task explicitly names exact tensor shapes, dims, or (dtype, shape) tuples.
+7. The task says "use only this shape/config" or equivalent.
+
+CRITICAL: ``"input_shapes": []``, ``"Shapes": []``, or ``"input_dtypes": []`` does NOT mean "no shapes/dtypes" when ANY of indicators 1-7 above is satisfied. Empty arrays mean the user did not enumerate every (B, S, D) tuple by hand and expects you to DERIVE the input grid from ``kernel_params`` + ``runtime_args`` + ``MODEL_CONFIG_PATH`` + the workload section. They are NOT a signal to fall through to Case C.
+
+Action: run ``run_discovery`` because it is the standard cheap deterministic front step, but discovery/ATD is IRRELEVANT for case-B shape/dtype selection. Dispatch ``harness-generator`` with a context block that EXPLICITLY enumerates the user's authoritative parameters. Build that block by mechanically extracting:
+
+- **dtype** — from the kernel mangled name, mapping deterministically:
+  ``__hip_bfloat16`` / ``__nv_bfloat16`` → ``torch.bfloat16``;
+  ``__half`` → ``torch.float16``;
+  ``__hip_fp8_e4m3_fnuz`` → ``torch.float8_e4m3fnuz``;
+  ``__hip_fp8_e5m2`` → ``torch.float8_e5m2``;
+  ``float`` → ``torch.float32``.
+  This dtype is AUTHORITATIVE. Never substitute fp16 for a kernel whose mangled name says ``__hip_bfloat16``.
+- **batch sweep** — from ``runtime_args.cuda_graph_max_bs`` (or ``max_batch_size``). Sample ``[1, max//8, max//4, max//2, max]`` clipped to ``[1..max]`` and de-duplicated.
+- **seq_len** — ``[1]`` if ``runtime_flags.analysis_mode == "inference"`` AND the workload section says decode-heavy; otherwise read from the benchmark file.
+- **dim / d / hidden** — kernel-kind dispatch:
+    * FFN-style (``act_and_mul``, ``gelu_and_mul``, ``silu_and_mul``, ``swiglu*``, ``fused_mlp*``, ``fused_ffn*``): ``d`` is the FFN intermediate dim. Read ``intermediate_size`` from ``MODEL_CONFIG_PATH``. Do NOT use ``HIDDEN_SIZE`` for the act_and_mul ``d``.
+    * Norm-style (``rmsnorm``, ``rms_norm``, ``layernorm``): ``d`` is ``hidden_size`` (read from ``MODEL_CONFIG_PATH``) or ``kernel_params.HIDDEN_SIZE``.
+    * Attention (``paged_attention``, ``flash_attn``, ``mha``, ``gqa``): use ``HEAD_SIZE``, ``NUM_ATTENTION_HEADS``, ``NUM_KEY_VALUE_HEADS``, ``BLOCK_SIZE`` directly.
+- **correctness tolerance** — derived from dtype: bf16/fp8 → ``rtol=5e-2, atol=5e-2``; fp16 → ``rtol=1e-3, atol=1e-3``; fp32 → ``rtol=1e-5, atol=1e-5``.
+
+Pass these as a structured ``user_task_shapes`` dict (or an inlined ``USER TASK CONTEXT (authoritative)`` markdown block) inside the ``context`` argument of ``dispatch_subagent`` so ``harness-generator``'s Shape source priority #1 fires. Do NOT pass ``discovery_context_path``. The generated harness must use ONLY these derived shapes/configs while still satisfying the universal four-mode harness contract.
 
 **Case C — normal descriptive task, no command and no explicit shapes/configs.**
 This is the default Path B. The user is asking to optimize a kernel but did not supply run commands or shape/config overrides.
@@ -283,7 +311,7 @@ class PreprocessOrchestratorConfig:
 
     model: str = "amd-llm-router"
     model_class: str = "amd_llm"
-    step_limit: int = 200
+    step_limit: int = 0
     cost_limit: float = 0.0
     gpu_id: int = 0
     repo: Path | None = None

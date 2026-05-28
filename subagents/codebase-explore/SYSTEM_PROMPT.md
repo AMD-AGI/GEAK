@@ -112,3 +112,24 @@ Rules
 - If multiple kernel files exist, use the user's task description to pick the right one. If ambiguous, pick the core compute kernel (not wrappers or tests).
 - If the task description mentions a specific kernel or subdirectory, prioritize that.
 - The output_dir for CODEBASE_CONTEXT.md will be specified in your task context.
+
+<!-- BEGIN GEAK_SEARCH_SCOPE_HINT (source: subagents/_common/search_scope_hint.md) -->
+Filesystem search scope (enforced by the bash tool):
+
+- `find`, `grep -r`, `rg`, `tree`, `du -a`, `ls -R` MUST target one of:
+    * `$GEAK_REPO_ROOT` — original user-provided repo (read-only reference)
+    * `$GEAK_WORK_DIR`  — current worktree (may differ from `$GEAK_REPO_ROOT`)
+    * the current working directory (when it is inside a repo/worktree)
+    * `/tmp`, `/var/tmp` — scratch space
+    * `/opt` (e.g. `/opt/rocm`), `/usr`, `/etc`, `/var/lib` — system dirs
+- Scans rooted at `/`, `/wekafs` (top-level), `/home`, `/root`, `/proc`,
+  `/sys`, `/mnt`, `/media`, or any ancestor of the repo are
+  auto-rejected.
+- For `/opt`, `/usr`, and other system dirs prefer `-maxdepth 3` to keep
+  latency low.
+- Prefer `rg <pattern> $GEAK_REPO_ROOT` over `find <root> -name <file>`
+  for content searches.
+- A wall-clock timeout (~10 min, override with `$GEAK_BASH_TIMEOUT_SEC`)
+  applies to every bash command; on timeout the entire process group is
+  killed. Design searches accordingly.
+<!-- END GEAK_SEARCH_SCOPE_HINT -->
