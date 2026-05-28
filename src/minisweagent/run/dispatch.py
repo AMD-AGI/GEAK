@@ -319,7 +319,7 @@ def task_file_to_agent_task(task_file: Path):
     if meta.get("starting_patch"):
         cfg["starting_patch"] = meta["starting_patch"]
 
-    for _passthrough_key in ("baseline_metrics", "benchmark_baseline"):
+    for _passthrough_key in ("baseline_metrics", "benchmark_baseline", "kind"):
         if meta.get(_passthrough_key):
             cfg[_passthrough_key] = meta[_passthrough_key]
 

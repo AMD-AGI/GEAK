@@ -84,6 +84,19 @@ _CONTRACT_BROKEN_PATTERNS: tuple[str, ...] = (
 )
 
 
+def _resolve_task_kind(task_files_dir: Path, label: str) -> str:
+    """Look up ``kind`` from the task file whose label matches *label*."""
+    if not task_files_dir.is_dir():
+        return "planned"
+    for tf in task_files_dir.iterdir():
+        if tf.suffix == ".md" and label in tf.stem:
+            from minisweagent.run.task_file import read_task_file
+
+            meta, _ = read_task_file(tf)
+            return meta.get("kind", "planned")
+    return "planned"
+
+
 def _stderr_indicates_broken_contract(stderr: str) -> str | None:
     """Return the first contract-broken signature found in *stderr*, or None."""
     if not stderr:
@@ -981,7 +994,7 @@ def write_eval_results(
         fb_output_path = output_dir / f"round_{round_num}_full_benchmark.txt"
         fb_output_path.write_text(fb_raw["stdout"])
 
-    from minisweagent.run.pipeline_types import FullBenchmarkResult, RoundEvaluation
+    from minisweagent.run.pipeline_types import FullBenchmarkResult, PerTaskOutcome, RoundEvaluation
 
     fb_typed = None
     if isinstance(fb_raw, dict):
@@ -993,10 +1006,6 @@ def write_eval_results(
         elif not fb_raw.get("success", True) and fb_raw.get("returncode", 0) != 0:
             failure = f"benchmark failed (exit code {fb_raw.get('returncode')})"
         elif fb_raw.get("failure_reason"):
-            # Set by ``_compute_verified_speedup`` when latency parsing failed
-            # despite a clean exit; without this propagation a return-code-0
-            # benchmark with unparseable output looked like "everything passed
-            # but no verified speedup" with no diagnostic.
             failure = str(fb_raw["failure_reason"])
         fb_typed = FullBenchmarkResult(
             verified_speedup=fb_raw.get("verified_speedup"),
@@ -1005,12 +1014,16 @@ def write_eval_results(
             failure_reason=failure,
         )
 
+    pt_raw = round_eval.get("per_task", [])
+    per_task = [PerTaskOutcome.from_dict(o) for o in pt_raw] if pt_raw else []
+
     return RoundEvaluation(
         round=round_num,
         best_patch=round_eval.get("best_patch", ""),
         best_task=round_eval.get("best_task", ""),
         benchmark_speedup=round_eval.get("benchmark_speedup", 1.0),
         full_benchmark=fb_typed,
+        per_task=per_task,
     )
 
 
@@ -1035,6 +1048,7 @@ def evaluate_round_best(
         return None
 
     # --- Collect candidates ---
+    task_files_dir = output_dir / "tasks" / f"round_{round_num}"
     candidates: list[dict[str, Any]] = []
     for task_dir in sorted(results_dir.iterdir()):
         if not task_dir.is_dir() or task_dir.name == "worktrees":
@@ -1076,6 +1090,7 @@ def evaluate_round_best(
                 "patch_file": patch_file,
                 "speedup": speedup,
                 "kernel_time_ms": kernel_time,
+                "kind": _resolve_task_kind(task_files_dir, task_dir.name),
                 "per_shape_speedups": br.get("per_shape_speedups") or {},
                 "baseline_shape_latency_ms": br.get("baseline_shape_latency_ms") or {},
                 "candidate_shape_latency_ms": br.get("candidate_shape_latency_ms") or {},
@@ -1159,6 +1174,11 @@ def evaluate_round_best(
         round_eval["baseline_shape_latency_ms"] = best["baseline_shape_latency_ms"]
     if best.get("candidate_shape_latency_ms"):
         round_eval["candidate_shape_latency_ms"] = best["candidate_shape_latency_ms"]
+
+    round_eval["per_task"] = [
+        {"label": c["task"], "kind": c.get("kind", "planned"), "speedup": c["speedup"]}
+        for c in candidates
+    ]
 
     # --- GEAK_AGENT_SELECT_PATCH: trust agent-reported speedup, skip eval ---
     if os.environ.get("GEAK_AGENT_SELECT_PATCH", "").strip() == "1":

@@ -2,14 +2,16 @@
 
 The dispatcher is the **only** component that knows about mode semantics.
 Its job is purely selection: from a pool of M candidates, pick N to run
-on the available parallel workers.  The selection rule is determined by
-``_k_for_mode``, the single seam that the adaptive future replaces.
+on the available parallel workers.  In mixed mode, K (the number of
+planned slots) is determined adaptively based on per-task outcomes from
+prior rounds.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from typing import Any
 
 from minisweagent.run.dispatch_plan import DispatchPlan, DispatchPlanItem
 from minisweagent.run.planner.candidate_pool import CandidatePool, CandidateTask
@@ -25,6 +27,7 @@ class Dispatcher:
         pool: CandidatePool,
         mode: str,
         n: int,
+        round_evals: list[dict[str, Any]] | None = None,
     ) -> DispatchPlan:
         """Pick exactly N items from *pool* according to *mode*.
 
@@ -33,7 +36,7 @@ class Dispatcher:
         if n < 1:
             n = 1
 
-        k = self._k_for_mode(mode, n)
+        k = self._k_for_mode(mode, n, round_evals)
         planned = sorted(pool.planned, key=lambda c: c.priority)
         fixed = pool.fixed
         registry = pool.registry
@@ -90,14 +93,48 @@ class Dispatcher:
         )
 
     @staticmethod
-    def _k_for_mode(mode: str, n: int) -> int:
-        """THE ONLY PLACE the mode-to-K mapping lives.
+    def _k_for_mode(
+        mode: str, n: int, round_evals: list[dict[str, Any]] | None = None
+    ) -> int:
+        """Adaptive K allocation for mixed mode.
 
-        Adaptive K replaces this function; signature stays the same.
-
-        Returns the number of slots to fill with planned candidates.
+        Fixed/planned modes are unchanged. Mixed mode allocates K
+        proportionally based on which source (planned vs fixed) produced
+        better speedups in prior rounds, with an exploration floor of 1
+        slot for each source.
         """
-        return {"fixed": 0, "planned": n, "mixed": n // 2}.get(mode, n // 2)
+        if mode == "fixed":
+            return 0
+        if mode == "planned":
+            return n
+        if not round_evals or n <= 2:
+            return max(1, n // 2)
+
+        planned_speeds: list[float] = []
+        fixed_speeds: list[float] = []
+        for rev in round_evals:
+            for pt in rev.get("per_task", []):
+                spd = pt.get("speedup")
+                if spd is None or spd <= 0:
+                    continue
+                if pt.get("kind") == "planned":
+                    planned_speeds.append(spd)
+                elif pt.get("kind") == "fixed":
+                    fixed_speeds.append(spd)
+
+        if not planned_speeds and not fixed_speeds:
+            return max(1, n // 2)
+
+        planned_avg = (
+            sum(planned_speeds) / len(planned_speeds) if planned_speeds else 1.0
+        )
+        fixed_avg = (
+            sum(fixed_speeds) / len(fixed_speeds) if fixed_speeds else 1.0
+        )
+
+        k = round(n * planned_avg / (planned_avg + fixed_avg))
+        k = max(1, min(k, n - 1))
+        return k
 
     @staticmethod
     def _fill(
