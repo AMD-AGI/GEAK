@@ -103,5 +103,5 @@ agent:
 
 model:
   model_class: amd_llm
-  model_name: claude-opus-4.6
+  model_name: claude-opus-4.7
   api_key: ""

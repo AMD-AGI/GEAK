@@ -76,7 +76,7 @@ def get_model_name(input_model_name: str | None = None, config: dict | None = No
         return from_env
     if from_env := os.getenv("MSWEA_MODEL_NAME"):
         return from_env
-    return "claude-opus-4.6"  # GEAK default
+    return "claude-opus-4.7"  # GEAK default
 
 
 _MODEL_CLASS_MAPPING = {

@@ -153,8 +153,8 @@ env:
   timeout: 3600
 model:
   model_class: amd_llm
-  # claude-opus-4.6, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
-  model_name: claude-opus-4.6
+  # claude-opus-4.7, claude-opus-4.6, claude-sonnet-4.5, gpt-5.1, gpt-5, gpt-5-codex
+  model_name: claude-opus-4.7
   # API key is read from AMD_LLM_API_KEY environment variable
   # Set it in .env file or: export AMD_LLM_API_KEY=your_key_here
   api_key: null

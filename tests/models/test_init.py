@@ -33,8 +33,8 @@ class TestGetModelName:
     def test_returns_default_when_no_model_configured(self):
         """Test that a hardcoded default is returned when no model is configured anywhere."""
         with patch.dict(os.environ, {}, clear=True):
-            assert get_model_name(None, {}) == "claude-opus-4.6"
-            assert get_model_name(None, None) == "claude-opus-4.6"
+            assert get_model_name(None, {}) == "claude-opus-4.7"
+            assert get_model_name(None, None) == "claude-opus-4.7"
 
 
 class TestGetModelClass:

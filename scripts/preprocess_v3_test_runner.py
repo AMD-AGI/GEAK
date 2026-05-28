@@ -189,12 +189,8 @@ def child_run_scenario(scenario_payload: dict[str, Any]) -> int:
     elapsed_s = round(time.monotonic() - t0, 3)
 
     result_dump = _serialise_result(result, error_payload, elapsed_s, kernel_path, detected_language)
-    (output_dir / "preprocess_result.json").write_text(
-        json.dumps(result_dump, indent=2, default=str), encoding="utf-8"
-    )
-    (output_dir / "agent_messages.json").write_text(
-        json.dumps(agent.messages, indent=2, default=str), encoding="utf-8"
-    )
+    (output_dir / "preprocess_result.json").write_text(json.dumps(result_dump, indent=2, default=str), encoding="utf-8")
+    (output_dir / "agent_messages.json").write_text(json.dumps(agent.messages, indent=2, default=str), encoding="utf-8")
     sys.stdout.write(f"CHILD_DONE elapsed_s={elapsed_s}\n")
     return 0
 
@@ -248,7 +244,9 @@ def _load_model_config() -> dict[str, Any]:
             merged[key] = value
     model_cfg = dict(merged.get("model") or {})
     model_cfg.setdefault("model_class", "amd_llm")
-    model_cfg.setdefault("model_name", "claude-opus-4.6")
+    from minisweagent.models import get_model_name
+
+    model_cfg.setdefault("model_name", get_model_name())
     return model_cfg
 
 
@@ -399,7 +397,8 @@ def _coerce_node(node: ast.AST) -> Any:
         return [_coerce_node(e) for e in node.elts]
     if isinstance(node, ast.Dict):
         return {
-            _coerce_node(k) if k is not None else None: _coerce_node(v) for k, v in zip(node.keys, node.values, strict=False)
+            _coerce_node(k) if k is not None else None: _coerce_node(v)
+            for k, v in zip(node.keys, node.values, strict=False)
         }
     if isinstance(node, ast.Call):
         return tuple(_coerce_node(a) for a in node.args)
@@ -538,41 +537,46 @@ def assert_path_a(scenario_cfg: dict[str, Any], artifacts: dict[str, Any], run_m
     checks: list[dict[str, Any]] = []
 
     path_taken = result.get("path_taken")
-    checks.append({
-        "name": "path_taken == A",
-        "ok": path_taken == "A",
-        "detail": f"observed path_taken={path_taken!r}",
-    })
+    checks.append(
+        {
+            "name": "path_taken == A",
+            "ok": path_taken == "A",
+            "detail": f"observed path_taken={path_taken!r}",
+        }
+    )
 
     commandment_path = result.get("commandment_path")
     text = artifacts.get("commandment_text") or ""
-    checks.append({
-        "name": "COMMANDMENT.md rendered to disk",
-        "ok": bool(commandment_path) and bool(text),
-        "detail": f"commandment_path={commandment_path!r}, text_len={len(text)}",
-    })
+    checks.append(
+        {
+            "name": "COMMANDMENT.md rendered to disk",
+            "ok": bool(commandment_path) and bool(text),
+            "detail": f"commandment_path={commandment_path!r}, text_len={len(text)}",
+        }
+    )
 
     harness_path = result.get("harness_path")
     kernel_path = result.get("kernel_path")
-    harness_ok = (
-        harness_path in (None, "")
-        or (kernel_path is not None and harness_path == kernel_path)
+    harness_ok = harness_path in (None, "") or (kernel_path is not None and harness_path == kernel_path)
+    checks.append(
+        {
+            "name": "harness_path None or == kernel_path",
+            "ok": harness_ok,
+            "detail": f"harness_path={harness_path!r}, kernel_path={kernel_path!r}",
+            "warn_only": True,
+        }
     )
-    checks.append({
-        "name": "harness_path None or == kernel_path",
-        "ok": harness_ok,
-        "detail": f"harness_path={harness_path!r}, kernel_path={kernel_path!r}",
-        "warn_only": True,
-    })
 
     expected_substring = scenario_cfg.get("expect_command_substring", "")
     if expected_substring:
         ok = expected_substring in text
-        checks.append({
-            "name": "COMMANDMENT contains user command substring",
-            "ok": ok,
-            "detail": f"substring={expected_substring!r} present={ok}",
-        })
+        checks.append(
+            {
+                "name": "COMMANDMENT contains user command substring",
+                "ok": ok,
+                "detail": f"substring={expected_substring!r} present={ok}",
+            }
+        )
     return _bundle_checks(checks, run_meta)
 
 
@@ -584,11 +588,13 @@ def assert_path_a_partial(
     checks: list[dict[str, Any]] = []
 
     path_taken = result.get("path_taken")
-    checks.append({
-        "name": "path_taken == A",
-        "ok": path_taken == "A",
-        "detail": f"observed path_taken={path_taken!r}",
-    })
+    checks.append(
+        {
+            "name": "path_taken == A",
+            "ok": path_taken == "A",
+            "detail": f"observed path_taken={path_taken!r}",
+        }
+    )
 
     text = artifacts.get("commandment_text") or ""
     expected_modes = scenario_cfg.get("expect_partial_modes", ["correctness", "full_benchmark", "profile"])
@@ -600,13 +606,13 @@ def assert_path_a_partial(
         )
         if not marker_present:
             missing_markers.append(mode)
-    checks.append({
-        "name": "PATH_A_PARTIAL_COVERAGE markers present for uncovered modes",
-        "ok": not missing_markers,
-        "detail": (
-            f"expected modes with marker: {expected_modes}; missing markers: {missing_markers}"
-        ),
-    })
+    checks.append(
+        {
+            "name": "PATH_A_PARTIAL_COVERAGE markers present for uncovered modes",
+            "ok": not missing_markers,
+            "detail": (f"expected modes with marker: {expected_modes}; missing markers: {missing_markers}"),
+        }
+    )
     return _bundle_checks(checks, run_meta)
 
 
@@ -621,11 +627,13 @@ def assert_path_b_coverage(
     checks: list[dict[str, Any]] = []
 
     path_taken = result.get("path_taken")
-    checks.append({
-        "name": "path_taken == B",
-        "ok": path_taken == "B",
-        "detail": f"observed path_taken={path_taken!r}",
-    })
+    checks.append(
+        {
+            "name": "path_taken == B",
+            "ok": path_taken == "B",
+            "detail": f"observed path_taken={path_taken!r}",
+        }
+    )
 
     harness_files = artifacts.get("harness_files") or []
     if not harness_files:
@@ -650,12 +658,14 @@ def assert_path_b_coverage(
     else:
         ok = True
         status = "harness signatures == oracle signatures"
-    checks.append({
-        "name": "harness signatures cover oracle",
-        "ok": ok,
-        "detail": f"{status}; oracle={sorted(oracle_sigs)}, parsed={sorted(parsed_sigs)}, missing={missing}, extras={extras}",
-        "warn_only": ok and bool(extras),
-    })
+    checks.append(
+        {
+            "name": "harness signatures cover oracle",
+            "ok": ok,
+            "detail": f"{status}; oracle={sorted(oracle_sigs)}, parsed={sorted(parsed_sigs)}, missing={missing}, extras={extras}",
+            "warn_only": ok and bool(extras),
+        }
+    )
     return _bundle_checks(checks, run_meta)
 
 
@@ -668,11 +678,13 @@ def assert_task_override(
 
     expected_shape = tuple(scenario_cfg["expect_shape"])
     path_taken = result.get("path_taken")
-    checks.append({
-        "name": "path_taken == B",
-        "ok": path_taken == "B",
-        "detail": f"observed path_taken={path_taken!r}",
-    })
+    checks.append(
+        {
+            "name": "path_taken == B",
+            "ok": path_taken == "B",
+            "detail": f"observed path_taken={path_taken!r}",
+        }
+    )
 
     harness_files = artifacts.get("harness_files") or []
     if not harness_files:
@@ -687,17 +699,21 @@ def assert_task_override(
     contains_expected = expected_sig in parsed_sigs
     extras = sorted(parsed_sigs - {expected_sig}, key=lambda t: (len(t), t))
 
-    checks.append({
-        "name": "harness contains user-specified shape",
-        "ok": contains_expected,
-        "detail": f"expected_sig={expected_sig}, parsed={sorted(parsed_sigs)}",
-    })
-    checks.append({
-        "name": "no shapes leaked from source discovery",
-        "ok": not extras,
-        "detail": f"extra signatures present: {extras}",
-        "warn_only": True,
-    })
+    checks.append(
+        {
+            "name": "harness contains user-specified shape",
+            "ok": contains_expected,
+            "detail": f"expected_sig={expected_sig}, parsed={sorted(parsed_sigs)}",
+        }
+    )
+    checks.append(
+        {
+            "name": "no shapes leaked from source discovery",
+            "ok": not extras,
+            "detail": f"extra signatures present: {extras}",
+            "warn_only": True,
+        }
+    )
     return _bundle_checks(checks, run_meta)
 
 
@@ -735,28 +751,34 @@ def assert_verifier_escalation(
     checks: list[dict[str, Any]] = []
 
     success = bool(result.get("success"))
-    checks.append({
-        "name": "result.success == False",
-        "ok": not success,
-        "detail": f"observed success={success}",
-    })
+    checks.append(
+        {
+            "name": "result.success == False",
+            "ok": not success,
+            "detail": f"observed success={success}",
+        }
+    )
 
     errors = result.get("errors") or []
-    checks.append({
-        "name": "result.errors populated",
-        "ok": bool(errors),
-        "detail": f"errors={errors}",
-    })
+    checks.append(
+        {
+            "name": "result.errors populated",
+            "ok": bool(errors),
+            "detail": f"errors={errors}",
+        }
+    )
 
     runs = result.get("subagent_runs") or []
     verifier_runs = [r for r in runs if isinstance(r, dict) and r.get("name") == "harness-verifier"]
     rejected = [r for r in verifier_runs if not r.get("success")]
     threshold = int(scenario_cfg.get("min_verifier_rejections", 1))
-    checks.append({
-        "name": f">= {threshold} verifier rejections recorded",
-        "ok": len(rejected) >= threshold,
-        "detail": f"verifier_runs={len(verifier_runs)}, rejected={len(rejected)}",
-    })
+    checks.append(
+        {
+            "name": f">= {threshold} verifier rejections recorded",
+            "ok": len(rejected) >= threshold,
+            "detail": f"verifier_runs={len(verifier_runs)}, rejected={len(rejected)}",
+        }
+    )
     return _bundle_checks(checks, run_meta)
 
 
@@ -811,10 +833,7 @@ def _build_task_for_scenario(scenario: dict[str, Any], kernel: dict[str, Any]) -
             "python3 scripts/task_runner.py performance"
         )
     if kind == "path_a_partial":
-        return (
-            f"Optimize the repository {repo_path}, test command is "
-            "python3 scripts/task_runner.py performance"
-        )
+        return f"Optimize the repository {repo_path}, test command is python3 scripts/task_runner.py performance"
     if kind == "path_b_determinism" or kind == "path_b_coverage" or kind == "cross_language":
         return (
             f"Optimize the {kernel_name} HIP kernel located at {kernel_url} "
@@ -956,9 +975,7 @@ def run_plan(
                     model=model,
                     log_file=log_file,
                 )
-                (run_dir / "run_meta.json").write_text(
-                    json.dumps(run_meta, indent=2), encoding="utf-8"
-                )
+                (run_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
                 artifacts = _load_run_artifacts(run_dir)
                 run_record = _apply_assertions(scenario, artifacts, run_meta, oracle)
                 run_record["run_dir"] = str(run_dir)
@@ -974,11 +991,13 @@ def run_plan(
             scenario_summary["task"] = run_results[0]["task"] if run_results else None
             summary_records.append(scenario_summary)
             if scenario["kind"] == "path_b_determinism":
-                determinism_records.append({
-                    "kernel": kernel["name"],
-                    "hashes": scenario_summary.get("determinism_hashes", []),
-                    "all_match": scenario_summary.get("all_hashes_match", False),
-                })
+                determinism_records.append(
+                    {
+                        "kernel": kernel["name"],
+                        "hashes": scenario_summary.get("determinism_hashes", []),
+                        "all_match": scenario_summary.get("all_hashes_match", False),
+                    }
+                )
                 # Piggyback assertions on run1 of the determinism scenario:
                 # both coverage (vs oracle) and cross-language (HIP markers)
                 # are properties of any clean Path-B run, so we extract them
@@ -996,9 +1015,12 @@ def run_plan(
                     summary_records.append(coverage_record)
 
                     crosslang_record = assert_cross_language(
-                        {"expected_phrases_present": list(HIP_CANONICAL_PHRASES),
-                         "expected_phrases_absent": list(TRITON_CANONICAL_PHRASES)},
-                        run1_artifacts, run1_meta,
+                        {
+                            "expected_phrases_present": list(HIP_CANONICAL_PHRASES),
+                            "expected_phrases_absent": list(TRITON_CANONICAL_PHRASES),
+                        },
+                        run1_artifacts,
+                        run1_meta,
                     )
                     crosslang_record["kernel"] = kernel["name"]
                     crosslang_record["scenario"] = "cross_language"
