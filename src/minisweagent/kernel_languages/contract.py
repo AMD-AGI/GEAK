@@ -98,6 +98,59 @@ def _scan_tolerances(text: str) -> list[tuple[str, float, int]]:
     return findings
 
 
+# Match ``sys.path.insert(<int>, "<absolute-path-literal>")`` where the
+# inserted path is a hardcoded POSIX-absolute string literal (starts with
+# ``/``).  Dynamic inserts such as ``sys.path.insert(0, os.environ[...])``
+# or ``sys.path.insert(0, os.path.dirname(__file__))`` do NOT match because
+# their second argument is not a quoted literal beginning with ``/``.
+#
+# Why this is a hard contract violation: a literal absolute path at the
+# front of ``sys.path`` (index 0) shadows BOTH the GEAK worktree that the
+# COMMANDMENT SETUP prepends to ``PYTHONPATH`` AND the editable install
+# GEAK re-points at the worktree.  The harness then imports the BASELINE
+# package regardless of the agent's edits, so every optimization round
+# measures baseline-vs-baseline (~1.00x) — a silent false-negative.
+# Observed in rotary_embedding_kernel_202605290819 where
+# ``sys.path.insert(0, "/sgl-workspace/sglang/python")`` pinned every run
+# to the baseline sglang checkout.
+_HARDCODED_SYSPATH_RE = re.compile(
+    r"""sys\.path\.insert\(\s*\d+\s*,\s*(['"])(?P<path>/[^'"]*)\1\s*\)"""
+)
+
+
+def find_hardcoded_syspath_inserts(text: str) -> list[tuple[int, str]]:
+    """Return ``(lineno, path)`` for every hardcoded-absolute ``sys.path.insert``.
+
+    ``lineno`` is 1-based.  Used by both harness validators to reject
+    harnesses that pin imports to a fixed (typically baseline) location
+    and thereby bypass the GEAK worktree.
+    """
+    findings: list[tuple[int, str]] = []
+    for m in _HARDCODED_SYSPATH_RE.finditer(text):
+        lineno = text.count("\n", 0, m.start()) + 1
+        findings.append((lineno, m.group("path")))
+    return findings
+
+
+def _hardcoded_syspath_violation_message(path: Path, offenders: list[tuple[int, str]]) -> str:
+    """Build the shared, actionable violation message for hardcoded inserts."""
+    listed = ", ".join(f"'{p}' on line {lineno}" for lineno, p in offenders)
+    return (
+        f"harness {path} hardcodes absolute path(s) via sys.path.insert: {listed}.\n"
+        "A literal absolute path at the front of sys.path shadows BOTH the GEAK "
+        "worktree (prepended to PYTHONPATH by the COMMANDMENT SETUP section) AND "
+        "the editable install GEAK re-points at the worktree. The harness then "
+        "imports the BASELINE package no matter what the agent edits, so every "
+        "speedup measures baseline-vs-baseline (~1.00x) — a silent false-negative "
+        "(observed in rotary_embedding_kernel_202605290819).\n"
+        "Fix: REMOVE the hardcoded sys.path.insert and import the kernel via the "
+        "package path, relying on the PYTHONPATH set by the COMMANDMENT SETUP "
+        "section and the editable install GEAK manages for the worktree. If you "
+        "genuinely must adjust sys.path at runtime, derive it from "
+        "os.environ['GEAK_WORK_DIR'] (NOT a literal path)."
+    )
+
+
 def validate_harness(path: Path) -> None:
     """Verify a harness.py conforms to the universal contract.
 
@@ -152,6 +205,13 @@ def validate_harness(path: Path) -> None:
             "and document the reason in the harness."
         )
 
+    # Worktree-bypass gate: reject hardcoded absolute paths in
+    # sys.path.insert, which shadow the GEAK worktree and make every
+    # speedup measure baseline-vs-baseline (~1.00x).
+    hardcoded = find_hardcoded_syspath_inserts(text)
+    if hardcoded:
+        raise ContractViolation(_hardcoded_syspath_violation_message(path, hardcoded))
+
 
 # ---------------------------------------------------------------------------
 # Commandment contract
@@ -189,6 +249,7 @@ __all__ = [
     "ContractViolation",
     "validate_harness",
     "validate_commandment",
+    "find_hardcoded_syspath_inserts",
     "REQUIRED_HARNESS_FLAGS",
     "REQUIRED_HARNESS_MARKERS",
     "REQUIRED_COMMANDMENT_SECTIONS",

@@ -86,6 +86,40 @@ def _build_env(
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
     env["PYTHONUNBUFFERED"] = "1"
 
+    # GEAK universal compile-mode bootstrap (mirrors save_and_test).  Forces
+    # JIT-managed kernel build systems (currently aiter) to rebuild from
+    # worktree source so agent edits to .cu kernels actually enter the
+    # runtime binary.  See minisweagent._compile_bootstrap.sitecustomize.
+    env.setdefault("AITER_REBUILD", "2")
+    try:
+        from minisweagent._compile_bootstrap import bootstrap_dir as _bootstrap_dir
+
+        existing_pp = env.get("PYTHONPATH", "")
+        prefix = _bootstrap_dir()
+        env["PYTHONPATH"] = f"{prefix}{os.pathsep}{existing_pp}" if existing_pp else prefix
+    except Exception:
+        pass  # Bootstrap is best-effort; harness still runs without it.
+
+    # Per-package runtime env (e.g. vLLM's VLLM_USE_PRECOMPILED) plus a
+    # PYTHONPATH prefix for shadow-tree profiles so ``import <pkg>``
+    # resolves to the worktree's edited copy.
+    if repo_root:
+        try:
+            from minisweagent.kernel_packages import detect_packages
+            from minisweagent.kernel_packages.shadow_worktree import is_shadow_worktree
+
+            wt = Path(repo_root)
+            for profile in detect_packages(wt):
+                for key, value in profile.runtime_env.items():
+                    env.setdefault(str(key), str(value))
+                if profile.skip_install and is_shadow_worktree(wt):
+                    existing_pp = env.get("PYTHONPATH", "")
+                    env["PYTHONPATH"] = (
+                        f"{wt}{os.pathsep}{existing_pp}" if existing_pp else str(wt)
+                    )
+        except Exception:
+            pass  # Profile injection is best-effort.
+
     if env_overrides:
         env.update(env_overrides)
 

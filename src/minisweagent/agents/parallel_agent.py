@@ -478,8 +478,28 @@ class ParallelAgent(DefaultAgent):
             task_path.write_text(f"---\nlabel: parallel_{i}\n---\n\n{task_content}\n")
         logger.debug("Wrote %d task files to %s", num_parallel, tasks_dir)
 
-        # Initialize non-git repos as git repos for unified worktree management
-        if not is_git_repo:
+        # Initialize non-git repos as git repos for unified worktree management,
+        # UNLESS a kernel-package profile claims this source path with a
+        # custom ``make_worktree`` builder (e.g. wheel-installed vLLM uses
+        # ``shadow_worktree``, which doesn't need the source dir to be a
+        # git repo and shouldn't pollute system site-packages with a .git/).
+        _profile_handles_worktree = False
+        try:
+            from minisweagent.kernel_packages import detect_packages
+
+            for _prof in detect_packages(repo_path_resolved):
+                if _prof.make_worktree is not None:
+                    _profile_handles_worktree = True
+                    logger.info(
+                        "Skipping git init for %s: profile %s handles worktree creation.",
+                        repo_path_resolved,
+                        _prof.name,
+                    )
+                    break
+        except Exception as _exc:  # noqa: BLE001 — defensive
+            logger.debug("parallel_agent: profile detection raised: %s", _exc)
+
+        if not is_git_repo and not _profile_handles_worktree:
             logger.info("Initializing non-git repo as git for worktree management...")
             cls._init_as_git_repo(repo_path_resolved)
             is_git_repo = True  # Now it's a git repo

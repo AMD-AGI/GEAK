@@ -56,6 +56,12 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "    * Print BOTH GEAK_RESULT_WALL_MS=<wall_geomean> and GEAK_RESULT_KERNEL_MS=<kernel_geomean>;\n"
         "      set GEAK_RESULT_LATENCY_MS to whichever the SCORING TARGET in the task asks for.\n"
         "- Set `PYTHONPATH` before the process starts if the package is not installed.\n"
+        "- NEVER use `sys.path.insert(0, '/absolute/path/...')` to locate the kernel. "
+        "A literal absolute path shadows the GEAK worktree on sys.path, so the harness "
+        "imports the BASELINE package regardless of edits and every speedup reads ~1.00x. "
+        "Rely on PYTHONPATH set by the COMMANDMENT SETUP section (and the editable install "
+        "GEAK manages for the worktree). If you must touch sys.path, derive it from "
+        "`os.environ['GEAK_WORK_DIR']`, never a literal path.\n"
         "- Use fixed random seed (`torch.manual_seed(42)`) and fixed tensor sizes."
     ),
     "hip": (
@@ -72,7 +78,9 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- A build step is REQUIRED before running tests.\n"
         "- Use the project's build system (CMake/Makefile) or compile with `nvcc` directly.\n"
         "- Use host-side validation (compare GPU output against CPU reference).\n"
-        "- Use `cudaEventElapsedTime` or `torch.cuda.Event` for benchmarking."
+        "- Use `cudaEventElapsedTime` or `torch.cuda.Event` for benchmarking.\n"
+        "- NEVER use `sys.path.insert(0, '/absolute/path/...')`. "
+        "Rely on PYTHONPATH set by the COMMANDMENT SETUP section."
     ),
     "ck": (
         "This is a Composable Kernel (CK) kernel (C++ compiled with hipcc + CK includes).\n"
@@ -88,12 +96,21 @@ _LANGUAGE_GUIDANCE: dict[str, str] = {
         "- The assembly binary CANNOT be modified or recompiled.\n"
         "- Test ONLY via the Python wrapper that loads and launches it.\n"
         "- Use `torch.testing.assert_close` for correctness against a torch reference.\n"
-        "- Benchmark the wrapper launch, not the assembly directly."
+        "- Benchmark the wrapper launch, not the assembly directly.\n"
+        "- NEVER use `sys.path.insert(0, '/absolute/path/...')`. A literal absolute path "
+        "shadows the GEAK worktree on sys.path so the harness imports the BASELINE wrapper "
+        "regardless of edits. Rely on PYTHONPATH set by the COMMANDMENT SETUP section; if you "
+        "must touch sys.path, derive it from `os.environ['GEAK_WORK_DIR']`."
     ),
     "unknown": (
         "Kernel type could not be determined automatically.\n"
         "- Inspect the source file to determine if it is Triton, HIP, CUDA, or CK.\n"
-        "- Apply the appropriate testing strategy based on your analysis."
+        "- Apply the appropriate testing strategy based on your analysis.\n"
+        "- NEVER use `sys.path.insert(0, '/absolute/path/...')`. A literal absolute path "
+        "shadows the GEAK worktree on sys.path so the harness imports the BASELINE package "
+        "regardless of edits and every speedup reads ~1.00x. Rely on PYTHONPATH set by the "
+        "COMMANDMENT SETUP section; if you must touch sys.path, derive it from "
+        "`os.environ['GEAK_WORK_DIR']`."
     ),
     "pytorch_translation": (
         "This is a PyTorch -> FlyDSL translation comparison harness.\n"

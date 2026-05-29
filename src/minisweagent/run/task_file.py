@@ -23,6 +23,8 @@ import yaml
 from minisweagent.run.utils.generated_artifacts import apply_patch_with_generated_helper_fallback
 from minisweagent.run.utils.git_safe_env import get_git_safe_env
 
+logger = logging.getLogger(__name__)
+
 # ============================================================================
 # Task file I/O
 # ============================================================================
@@ -322,17 +324,42 @@ def _apply_dirty_tracked_changes(repo_path: Path, worktree_path: Path, env: dict
 
 
 def create_worktree(repo_path: Path, worktree_path: Path) -> Path:
-    """Create a git worktree, cleaning up any existing one first.
+    """Create a worktree, dispatching by package profile when applicable.
 
     Extracted from ParallelAgent._create_worktree() for reuse by CLI tools.
 
+    Profile dispatch (e.g. wheel-installed vLLM → ``shadow_worktree``)
+    happens first; packages without a special-case profile fall through
+    to the default ``git worktree add`` path.  Source repos that aren't
+    git repos must already have been ``git init``'d by the caller —
+    that's a non-issue for shadow-tree profiles which bypass git
+    worktree entirely.
+
     Args:
-        repo_path: Path to the git repository.
+        repo_path: Path to the source repository.
         worktree_path: Desired path for the new worktree.
 
     Returns:
         The worktree path (same as input, for chaining).
     """
+    # Profile dispatch: packages with custom worktree semantics
+    # (currently: wheel-installed vLLM via shadow_worktree).
+    try:
+        from minisweagent.kernel_packages import detect_packages
+
+        for profile in detect_packages(repo_path.resolve()):
+            if profile.make_worktree is not None:
+                logger.info(
+                    "create_worktree: dispatching to profile %s for %s",
+                    profile.name,
+                    repo_path,
+                )
+                return profile.make_worktree(repo_path, worktree_path)
+    except Exception as exc:  # noqa: BLE001 — defensive, fall back to default
+        logger.warning(
+            "create_worktree: profile dispatch failed (%s); using git worktree", exc
+        )
+
     worktree_str = str(worktree_path.resolve())
     git_env = get_git_safe_env(worktree_path.parent)
 

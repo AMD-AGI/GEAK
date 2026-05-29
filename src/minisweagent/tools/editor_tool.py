@@ -669,9 +669,36 @@ class EditTool:
         return text
 
     def write_file(self, path: Path, file: str):
-        """Write the content of a file to a given path; raise a ToolError if an error occurs."""
+        """Write the content of a file to a given path atomically.
+
+        Uses ``temp file + os.replace`` so that:
+
+        * Hard-linked files (e.g. shadow worktrees layered on top of
+          a baseline install) get a NEW inode for the worktree path
+          while the baseline inode stays untouched.  ``Path.write_text``
+          alone uses ``O_TRUNC`` on the existing inode, which would
+          rewrite the shared data and silently corrupt the baseline.
+        * The file is never half-written: either the old content
+          remains visible at ``path`` or the new content is fully
+          present after the atomic ``rename(2)``.
+
+        Falls through to ``shutil.move`` when ``os.replace`` is not
+        available across filesystem boundaries (rare on POSIX; a
+        defensive belt-and-suspenders).
+        """
         try:
-            path.write_text(file, encoding=self._encoding or "utf-8")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.geak.{os.getpid()}.tmp")
+            try:
+                tmp.write_text(file, encoding=self._encoding or "utf-8")
+                os.replace(tmp, path)
+            except Exception:
+                # Best-effort cleanup of the temp file if we abort.
+                try:
+                    tmp.unlink()
+                except FileNotFoundError:
+                    pass
+                raise
         except Exception as e:
             print(f"Ran into {e} while trying to write to {path}")
             sys.exit(20)

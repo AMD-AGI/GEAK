@@ -16,7 +16,6 @@ from pathlib import Path, PurePosixPath
 _ROOT_GENERATED_DIRS = {
     "build",
     "build_harness",
-    ".aiter_jit",
     "_eval_worktree",
 }
 
@@ -160,7 +159,6 @@ def generated_helper_excludes(cwd: Path | None = None) -> list[str]:
         "run_harness.sh",
         "build",
         "build_harness",
-        ".aiter_jit",
         "_eval_worktree",
         "test_harness.py",
         "test_harness_*.py",

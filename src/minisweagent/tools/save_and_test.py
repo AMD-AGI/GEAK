@@ -514,7 +514,73 @@ class SaveAndTestTool:
                     continue
                 test_env[str(key)] = str(value)
         test_env["PYTHONUNBUFFERED"] = "1"
+        self._inject_compile_bootstrap(test_env)
+        # Per-package runtime env (e.g. vLLM's VLLM_USE_PRECOMPILED).
+        # Cheap filesystem detection on ctx.cwd; safe no-op when no
+        # profile matches.  ``setdefault`` so explicit user overrides
+        # in ctx.env_vars (already merged above) win.
+        if ctx and ctx.cwd:
+            self._inject_profile_runtime_env(test_env, Path(ctx.cwd))
         return test_env
+
+    @staticmethod
+    def _inject_compile_bootstrap(env: dict[str, str]) -> None:
+        """Inject GEAK's compile-mode bootstrap into a subprocess env.
+
+        Two effects:
+
+        * ``AITER_REBUILD=2`` — tells aiter's JIT compile path to
+          rebuild every module from worktree source on first access in
+          the subprocess (incremental ninja, ~10–30 s overhead).
+        * ``PYTHONPATH`` prefixed with the bootstrap dir so Python's
+          ``site`` machinery auto-loads ``sitecustomize.py``, which
+          installs an import-hook that clears aiter's
+          ``rebuilded_list`` allowlist (covers the ``module_aiter_core``
+          edge case that env alone can't reach).
+
+        ``setdefault`` semantics for AITER_REBUILD: callers that
+        explicitly set the env var via ``ctx.env_vars`` keep their
+        value (debug overrides win).  Safe no-op for runs that never
+        import aiter.
+        """
+        env.setdefault("AITER_REBUILD", "2")
+        try:
+            from minisweagent._compile_bootstrap import bootstrap_dir
+        except Exception:
+            return
+        env["PYTHONPATH"] = SaveAndTestTool._merged_pythonpath(
+            bootstrap_dir(),
+            env.get("PYTHONPATH"),
+        )
+
+    @staticmethod
+    def _inject_profile_runtime_env(env: dict[str, str], worktree: Path) -> None:
+        """Apply ``runtime_env`` from every PackageProfile matching ``worktree``.
+
+        Also extends ``PYTHONPATH`` with the worktree root for shadow-tree
+        profiles so ``import <pkg>`` resolves to the agent's edited copy
+        (e.g. for wheel-installed vllm: shadow at ``slot_X/`` containing
+        ``vllm/`` subdir; PYTHONPATH must include ``slot_X/`` itself).
+        """
+        try:
+            from minisweagent.kernel_packages import detect_packages
+            from minisweagent.kernel_packages.shadow_worktree import is_shadow_worktree
+        except Exception:
+            return
+        try:
+            profiles = detect_packages(worktree)
+        except Exception:
+            return
+        for profile in profiles:
+            for key, value in profile.runtime_env.items():
+                env.setdefault(str(key), str(value))
+            # Shadow-tree profiles need their root on PYTHONPATH so
+            # ``import <pkg>`` resolves to the shadow's edited .py files.
+            if profile.skip_install and is_shadow_worktree(worktree):
+                env["PYTHONPATH"] = SaveAndTestTool._merged_pythonpath(
+                    str(worktree),
+                    env.get("PYTHONPATH"),
+                )
 
     @staticmethod
     def _merged_pythonpath(*parts: str | Path | None) -> str:

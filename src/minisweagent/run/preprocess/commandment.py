@@ -140,17 +140,6 @@ def _warmup_block(command: str, warmup_runs: int) -> str:
     return f"for _i in $(seq 1 {warmup_runs}); do {command}; done"
 
 
-def _detect_build_command(repo_root: Path) -> str:
-    """Return the appropriate build command for a C++ repo."""
-    if (repo_root / "setup.py").exists() or (repo_root / "pyproject.toml").exists():
-        return "cd ${GEAK_WORK_DIR} && pip install -e . --no-deps --no-build-isolation 2>&1 | tail -5"
-    if (repo_root / "CMakeLists.txt").exists():
-        return "cd ${GEAK_WORK_DIR} && cmake --build build/ 2>&1 | tail -5"
-    if (repo_root / "Makefile").exists():
-        return "cd ${GEAK_WORK_DIR} && make 2>&1 | tail -5"
-    return "cd ${GEAK_WORK_DIR} && pip install -e . --no-deps --no-build-isolation 2>&1 | tail -5"
-
-
 def _generate_simple(
     kernel_path: Path,
     harness_path: Path,
@@ -174,25 +163,21 @@ def _generate_simple(
         warmup_runs,
     )
 
-    if kernel_language == "cpp":
-        build_cmd = _detect_build_command(repo_root)
-        setup_section = (
-            "rm -rf ${GEAK_WORK_DIR}/.aiter_jit\n" + build_cmd + "\n"
-            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
-            "export HIP_VISIBLE_DEVICES=%s\\n"
-            "export AITER_JIT_DIR=%s/.aiter_jit\\n"
-            'cd "%s" && exec python3 "$@"\\n\' '
-            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" "${GEAK_WORK_DIR}" '
-            "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
-        )
-    else:
-        setup_section = (
-            "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
-            "export HIP_VISIBLE_DEVICES=%s\\n"
-            'cd "%s" && exec python3 "$@"\\n\' '
-            '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
-            "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
-        )
+    # Single setup template for both C++ and Python kernels.  Native rebuild
+    # of the worktree (e.g. ``pip install -e .``) is now handled implicitly
+    # by ``ensure_worktree_installed`` before every harness call, and
+    # JIT-managed packages (aiter) rebuild from worktree source via the
+    # ``AITER_REBUILD=2`` env injected by ``save_and_test`` /
+    # ``run_harness``.  The earlier ``AITER_JIT_DIR`` override + ``.aiter_jit``
+    # scratch dir was a less reliable predecessor of that mechanism and has
+    # been removed.
+    setup_section = (
+        "printf '#!/bin/bash\\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\\n"
+        "export HIP_VISIBLE_DEVICES=%s\\n"
+        'cd "%s" && exec python3 "$@"\\n\' '
+        '"${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT}" "${GEAK_GPU_DEVICE}" "${GEAK_WORK_DIR}" '
+        "> ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh"
+    )
 
     return f"""\
 ## SETUP

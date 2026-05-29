@@ -155,7 +155,6 @@ _DISCOVERY_SKIP_DIR_NAMES: frozenset[str] = frozenset(
         # GEAK-generated helpers.
         "_eval_worktree",
         ".geak_resolved",
-        ".aiter_jit",
         # Test scaffolding (we install deliverable packages, not their tests).
         "tests",
         "test",
@@ -311,6 +310,26 @@ def ensure_worktree_installed(
     wt = Path(os.fspath(worktree))
     if not wt.is_dir():
         return result
+
+    # Profile-aware short-circuit: wheel-only packages (e.g. vLLM via
+    # ``shadow_worktree``) have no setup.py / pyproject.toml to
+    # ``pip install -e`` against — running the discovery+install loop
+    # would either no-op or surface confusing errors.  Skip cleanly.
+    try:
+        from minisweagent.kernel_packages import detect_packages
+
+        for profile in detect_packages(wt):
+            if profile.skip_install:
+                logger.info(
+                    "ensure_worktree_installed: skip_install profile %s active for %s; "
+                    "no editable-install needed (shadow worktree)",
+                    profile.name,
+                    wt,
+                )
+                result["skipped_for_profile"] = profile.name
+                return result
+    except Exception as _exc:  # noqa: BLE001 — defensive
+        logger.debug("ensure_worktree_installed: profile detection raised: %s", _exc)
 
     discovered = _discover_install_targets(wt)
     if not discovered:

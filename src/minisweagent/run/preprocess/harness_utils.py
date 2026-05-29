@@ -1279,6 +1279,30 @@ def validate_harness(harness_path: str) -> tuple[bool, list[str]]:
         if flag not in code_only_source:
             errors.append(f"Harness source does not define '{flag}' flag")
 
+    # Worktree-bypass gate: a hardcoded absolute path in sys.path.insert
+    # shadows the GEAK worktree (and the editable install GEAK manages),
+    # so the harness imports the BASELINE package regardless of agent edits
+    # and every speedup measures baseline-vs-baseline (~1.00x).  Scan the
+    # comment-stripped source so a commented-out example does not trip it.
+    try:
+        from minisweagent.kernel_languages.contract import (
+            find_hardcoded_syspath_inserts,
+        )
+
+        hardcoded = find_hardcoded_syspath_inserts(code_only_source)
+    except Exception:  # noqa: BLE001 — never let the detector break validation
+        hardcoded = []
+    for lineno, abspath in hardcoded:
+        errors.append(
+            f"Line {lineno}: hardcoded absolute path in sys.path.insert "
+            f"('{abspath}'). This shadows the GEAK worktree on sys.path, so the "
+            f"harness imports the BASELINE package no matter what the agent edits "
+            f"and every speedup measures baseline-vs-baseline (~1.00x). Remove the "
+            f"hardcoded insert and rely on the COMMANDMENT SETUP PYTHONPATH / the "
+            f"editable install GEAK manages for the worktree; if you must adjust "
+            f"sys.path, derive it from os.environ['GEAK_WORK_DIR']."
+        )
+
     for flag in RECOMMENDED_HARNESS_FLAGS:
         if flag not in code_only_source:
             msg = (
