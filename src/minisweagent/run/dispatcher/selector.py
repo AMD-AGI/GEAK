@@ -18,6 +18,11 @@ from minisweagent.run.planner.candidate_pool import CandidatePool, CandidateTask
 
 logger = logging.getLogger(__name__)
 
+# Speedups at or above this are treated as timing-saturation / measurement
+# garbage (e.g. a divide-by-near-zero "10000x" artifact) and are excluded from
+# adaptive-K scoring so they cannot hijack slot allocation.
+MAX_PLAUSIBLE_SPEEDUP = 100.0
+
 
 class Dispatcher:
     """Select N tasks from a CandidatePool based on mode."""
@@ -98,10 +103,21 @@ class Dispatcher:
     ) -> int:
         """Adaptive K allocation for mixed mode.
 
-        Fixed/planned modes are unchanged. Mixed mode allocates K
-        proportionally based on which source (planned vs fixed) produced
-        better speedups in prior rounds, with an exploration floor of 1
-        slot for each source.
+        Fixed/planned modes are unchanged. Mixed mode splits the N slots
+        between the planned and fixed sources using a **max-seeking** signal:
+        kernel optimization cares about the *best* result a source produced,
+        not its mean — a single strong planned candidate should attract slots
+        even if most planned attempts were mediocre, and mean-averaging
+        otherwise collapses both sources to parity. Each source's peak speedup
+        is:
+
+          * **clamped** to the plausible open range ``(0, MAX_PLAUSIBLE_SPEEDUP)``
+            so timing-saturation / garbage speedups can't hijack allocation, and
+          * **weighted by the source's success rate** (plausible results /
+            dispatched count) so failure-prone sources lose slots.
+
+        K is allocated proportionally to the two scores and clamped to
+        ``[1, n - 1]`` to keep an exploration floor of one slot per source.
         """
         if mode == "fixed":
             return 0
@@ -111,30 +127,44 @@ class Dispatcher:
             return max(1, n // 2)
 
         planned_speeds: list[float] = []
+        planned_total = 0
         fixed_speeds: list[float] = []
+        fixed_total = 0
         for rev in round_evals:
             for pt in rev.get("per_task", []):
-                spd = pt.get("speedup")
-                if spd is None or spd <= 0:
+                kind = pt.get("kind")
+                if kind == "planned":
+                    planned_total += 1
+                elif kind == "fixed":
+                    fixed_total += 1
+                else:
                     continue
-                if pt.get("kind") == "planned":
-                    planned_speeds.append(spd)
-                elif pt.get("kind") == "fixed":
-                    fixed_speeds.append(spd)
+                spd = pt.get("speedup")
+                # plausibility clamp: drop non-positive, None, and
+                # saturation/garbage artifacts at or above MAX_PLAUSIBLE_SPEEDUP
+                if spd is None or spd <= 0 or spd >= MAX_PLAUSIBLE_SPEEDUP:
+                    continue
+                (planned_speeds if kind == "planned" else fixed_speeds).append(spd)
 
         if not planned_speeds and not fixed_speeds:
             return max(1, n // 2)
 
-        planned_avg = (
-            sum(planned_speeds) / len(planned_speeds) if planned_speeds else 1.0
-        )
-        fixed_avg = (
-            sum(fixed_speeds) / len(fixed_speeds) if fixed_speeds else 1.0
-        )
+        def _source_score(speeds: list[float], total: int) -> float:
+            # max-seeking (optimization cares about the BEST result a source
+            # produced), discounted by the source's success rate (failure
+            # penalty). A source with no plausible result scores a neutral 1.0.
+            if not speeds:
+                return 1.0
+            best = max(speeds)
+            success_rate = len(speeds) / max(1, total)
+            return best * success_rate
 
-        k = round(n * planned_avg / (planned_avg + fixed_avg))
-        k = max(1, min(k, n - 1))
-        return k
+        planned_score = _source_score(planned_speeds, planned_total)
+        fixed_score = _source_score(fixed_speeds, fixed_total)
+        if planned_score + fixed_score <= 0:
+            return max(1, n // 2)
+        k = round(n * planned_score / (planned_score + fixed_score))
+        return max(1, min(k, n - 1))
 
     @staticmethod
     def _fill(
