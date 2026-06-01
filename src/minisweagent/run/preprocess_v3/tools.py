@@ -50,7 +50,6 @@ import inspect
 import json
 import logging
 import os
-import shlex
 import shutil
 import time
 from collections.abc import Callable
@@ -70,13 +69,6 @@ from minisweagent.run.preprocess_v3.commandment import (
     render_commandment,
     render_commandment_from_sections,
 )
-from minisweagent.run.section_builders import (
-    build_benchmark_body,
-    build_correctness_body,
-    build_full_benchmark_body,
-    build_profile_body,
-    strip_mode_flags,
-)
 from minisweagent.run.preprocess_v3.discovery import DiscoveryContext, run_legacy_discovery
 from minisweagent.run.preprocess_v3.explore import CodebaseContext, explore_codebase
 from minisweagent.run.preprocess_v3.harness_kb import load_harness_kb
@@ -86,6 +78,13 @@ from minisweagent.run.preprocess_v3.orchestrator import (
 )
 from minisweagent.run.preprocess_v3.registry import SubagentRegistry, SubagentSpec
 from minisweagent.run.preprocess_v3.translate import TranslationResult, translate_to_flydsl
+from minisweagent.run.section_builders import (
+    build_benchmark_body,
+    build_correctness_body,
+    build_full_benchmark_body,
+    build_profile_body,
+    strip_mode_flags,
+)
 
 logger = logging.getLogger(__name__)
 

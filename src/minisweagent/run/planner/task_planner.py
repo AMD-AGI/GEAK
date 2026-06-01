@@ -97,7 +97,7 @@ class TaskPlanner:
             round_evals=round_evals,
             agent_class=agent_class,
             output_dir=output_dir,
-            num_slots=num_slots,
+            num_slots=num_parallel,
             rag_enabled=rag_enabled,
         )
 
@@ -126,7 +126,7 @@ class TaskPlanner:
             len(candidates),
             len(planned_tasks),
             planned_slot_total,
-            num_slots,
+            num_parallel,
         )
         return CandidatePool(round_num=round_num, items=tuple(candidates))
 
