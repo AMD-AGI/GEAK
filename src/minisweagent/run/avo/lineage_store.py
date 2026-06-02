@@ -45,6 +45,9 @@ class LineageNode:
     speedup: float
     latency_ms: float | None
     committed_at: str
+    # Per-shape verified speedups for this version (#2: per-config signal that the
+    # agent can compare across prior implementations). Empty when single-shape.
+    per_shape: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -53,13 +56,19 @@ class LineageNode:
             "patch": self.patch,
             "git_ref": self.git_ref,
             "strategy": self.strategy,
-            "score": {"speedup": self.speedup, "latency_ms": self.latency_ms, "verified": True},
+            "score": {
+                "speedup": self.speedup,
+                "latency_ms": self.latency_ms,
+                "verified": True,
+                "per_shape": self.per_shape,
+            },
             "committed_at": self.committed_at,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> LineageNode:
         score = d.get("score", {}) or {}
+        per_shape = score.get("per_shape") or {}
         return cls(
             id=d["id"],
             parent_id=d.get("parent_id"),
@@ -69,6 +78,7 @@ class LineageNode:
             speedup=float(score.get("speedup", 1.0)),
             latency_ms=score.get("latency_ms"),
             committed_at=d.get("committed_at", ""),
+            per_shape={str(k): float(v) for k, v in per_shape.items()} if isinstance(per_shape, dict) else {},
         )
 
 
@@ -90,6 +100,11 @@ class LineageStore:
     # disables it (preserves single-number behavior); set e.g. 0.95 to forbid
     # commits that regress any shape by >5%.
     min_per_shape_speedup: float = 0.0
+    # Measurement-significance margin (B1): to count as a genuine new best, a
+    # candidate must exceed ``best * (1 + significance_margin)`` — a noise floor
+    # *above* the current best, so a within-noise "tie" is not committed. Default
+    # 0.0 reverts to the epsilon-tolerant "matches-or-improves" behavior.
+    significance_margin: float = 0.0
     committed: list[LineageNode] = field(default_factory=list)
     # Explicit "tip" pointer. When set, ``best_node`` returns this node instead
     # of the global max-speedup node. Used by supervisor backtracking (P2) so a
@@ -161,6 +176,21 @@ class LineageStore:
 
     def _next_version_id(self) -> str:
         return f"v{len(self.committed)}"
+
+    def top_k(self, k: int, *, exclude_baseline: bool = True, exclude_id: str | None = None) -> list[LineageNode]:
+        """Return up to ``k`` committed versions by descending speedup.
+
+        Used to inject multiple prior implementations into a step prompt (#2).
+        Skips the baseline (v0, no patch) and an optional id (e.g. the current
+        best already shown as the exemplar).
+        """
+        pool = [
+            n
+            for n in self.committed
+            if (not exclude_baseline or n.patch)
+            and n.id != exclude_id
+        ]
+        return sorted(pool, key=lambda n: n.speedup, reverse=True)[: max(0, k)]
 
     def summary(self, last_n: int = 5) -> str:
         """Compact lineage summary for prompt injection / supervisor bundles."""
@@ -288,14 +318,18 @@ class LineageStore:
             )
             return False
 
-        threshold = self.best_speedup * (1.0 - self.epsilon)
+        # Threshold vs current best: the epsilon tolerance permits near-ties,
+        # while the B1 significance margin (when set) requires the candidate to
+        # clear best by a noise floor. Take the stricter of the two.
+        threshold = self.best_speedup * max(1.0 - self.epsilon, 1.0 + self.significance_margin)
         if candidate_speedup < threshold:
             logger.info(
-                "commit gate: step %d speedup %.4fx below threshold %.4fx (best=%.4fx); not committed.",
+                "commit gate: step %d speedup %.4fx below threshold %.4fx (best=%.4fx, margin=%.3f); not committed.",
                 result.step_index,
                 candidate_speedup,
                 threshold,
                 self.best_speedup,
+                self.significance_margin,
             )
             return False
 
@@ -328,6 +362,7 @@ class LineageStore:
             speedup=candidate_speedup,
             latency_ms=None,
             committed_at=_now_iso(),
+            per_shape=dict(result.per_shape_speedups or {}),
         )
         self.committed.append(node)
         self.active_best_id = version_id  # advance the tip to the new commit

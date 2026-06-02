@@ -46,6 +46,11 @@ _DEFAULTS: dict = {
     "consecutive_no_improvement": 8,
     "patch_hash_repeat": 3,
     "supervisor_cycles_without_commit": 3,
+    # Trend awareness: a non-committing step whose verified speedup sets a new
+    # intra-direction high (vs the recent window) is "still climbing" and does
+    # NOT count toward the no-improvement stall — this rescues slow-but-real
+    # directions from premature redirect. 0 disables trend awareness.
+    "trend_window": 3,
 }
 
 
@@ -62,6 +67,7 @@ class StagnationDetector:
     consecutive_no_improvement: int = 0
     supervisor_cycles_without_commit: int = 0
     _recent_hashes: deque = field(default_factory=lambda: deque(maxlen=16))
+    _recent_speedups: deque = field(default_factory=lambda: deque(maxlen=8))
 
     def __post_init__(self) -> None:
         merged = dict(_DEFAULTS)
@@ -94,14 +100,32 @@ class StagnationDetector:
             self.consecutive_correctness_failures = 0
 
         improved = result.best_speedup is not None and result.best_speedup > 1.001
-        if not improved:
-            self.consecutive_no_improvement += 1
-        else:
+        climbing = self._is_climbing(result.best_speedup)
+        if improved or climbing:
+            # Either a real improvement, or a rising trend toward the best
+            # (slow-but-real direction) — do not penalize as a stall.
             self.consecutive_no_improvement = 0
+        else:
+            self.consecutive_no_improvement += 1
 
         repeat_hits = self._update_patch_cycle(result)
 
         return self._classify(repeat_hits)
+
+    def _is_climbing(self, speedup: float | None) -> bool:
+        """True if this step's verified speedup sets a new high vs the recent
+        window — a positive trend even when still below the lineage best (B-trend).
+        """
+        window = int(self._threshold("trend_window"))
+        if window <= 0 or speedup is None:
+            if speedup is not None:
+                self._recent_speedups.append(speedup)
+            return False
+        prior = list(self._recent_speedups)
+        self._recent_speedups.append(speedup)
+        recent = prior[-window:]
+        # Need a couple of points to call it a trend; require a strict new high.
+        return len(recent) >= 2 and speedup > max(recent) * 1.001
 
     def _classify(self, repeat_hits: int) -> StagnationSignal:
         """Return the highest triggered level given current counters."""
@@ -166,6 +190,7 @@ class StagnationDetector:
         self.consecutive_correctness_failures = 0
         self.consecutive_no_improvement = 0
         self._recent_hashes.clear()
+        self._recent_speedups.clear()  # new direction starts a fresh trend window
         if not partial:
             self.supervisor_cycles_without_commit = 0
 

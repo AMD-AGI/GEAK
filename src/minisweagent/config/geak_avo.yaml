@@ -27,9 +27,19 @@ avo:
   commit_epsilon: 0.001          # tolerance vs current best (don't regress)
   min_commit_speedup: 1.0        # anti-lazy-opt floor: a commit must EXCEED this vs baseline (reject ~1.0x trivial rewrites)
   min_per_shape_speedup: 0.0     # per-shape regression guard (B2): 0=off; set e.g. 0.95 to reject commits that regress any shape >5%
+  # (B1 noise-robust knobs verify_repeats / commit_significance_margin are set below near verify_each_step)
   min_commits_before_stop: 5     # budget-remaining runs should not stop empty-handed
   verify_each_step: true         # run FULL_BENCHMARK + per-shape geomean per step (accurate; slower)
+  verify_repeats: 1              # B1: re-measure each candidate N times, use the median (noise-robust); 1=off, 3 recommended on noisy harnesses (N x benchmark cost)
+  commit_significance_margin: 0.0  # B1: a commit must exceed best*(1+margin) (noise floor above best); 0=off, e.g. 0.01 to require >1% real gain
+  skip_verify_on_no_gain: true   # C3: skip the FULL_BENCHMARK re-verify when the agent self-reports no gain (<= floor)
+  # C2 verified-result dedup cache (avo_state/verify_cache.json) is always on; identical patches are not re-benchmarked.
   inject_best_exemplar: true     # inject the current-best diff + metrics into each step's prompt (Kernel-Smith style)
+  lineage_context_k: 3           # also inject top-K OTHER prior implementations + per-shape scores to compare (AVO §3.2); 0=off
+  # P-mem-3 (option C): continuous causal memory across steps
+  evolution_log_enabled: true    # inject a bounded causal evolution log (rationale + profiling delta + recent raw tail)
+  evolution_log_recent: 2        # show the last N steps' verbatim raw tail
+  evolution_log_max_versions: 8  # show up to N older steps as structured one-liners
   profiling_after_step: 3        # delayed profiling (CuTeGen): structural-first for the first N steps, then profiling-guided (set 0 for simple/elementwise kernels to profile early)
 
   stagnation:

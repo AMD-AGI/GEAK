@@ -35,7 +35,7 @@ from minisweagent.models import get_model
 from minisweagent.run.avo.lineage_store import LineageStore
 from minisweagent.run.avo.stagnation import StagnationDetector, StagnationLevel
 from minisweagent.run.avo.supervisor import apply_directive, build_bundle, run_supervisor
-from minisweagent.run.avo.variation_step import run_variation_step
+from minisweagent.run.avo.variation_step import run_variation_step, write_evolution_entry
 from minisweagent.run.budget import BudgetSpec, RunBudget
 from minisweagent.utils.log import add_file_handler
 
@@ -151,13 +151,26 @@ def run_avo(
         language=kernel_language,
         min_commit_speedup=float(avo_cfg.get("min_commit_speedup", 1.0)),
         min_per_shape_speedup=float(avo_cfg.get("min_per_shape_speedup", 0.0)),
+        significance_margin=float(avo_cfg.get("commit_significance_margin", 0.0)),
     )
     lineage.seed_from_baseline(output_dir, repo=repo)
     detector = StagnationDetector(avo_cfg.get("stagnation", {}))
     strategy_file = output_dir / ".optimization_strategies.md"
     min_commits = int(avo_cfg.get("min_commits_before_stop", 0))
     verify_each_step = bool(avo_cfg.get("verify_each_step", True))
+    verify_repeats = int(avo_cfg.get("verify_repeats", 1))  # B1: noise-robust median over N re-measures
+    skip_verify_on_no_gain = bool(avo_cfg.get("skip_verify_on_no_gain", True))  # C3
+    min_commit_speedup = float(avo_cfg.get("min_commit_speedup", 1.0))
     profiling_after_step = int(avo_cfg.get("profiling_after_step", 3))
+
+    # C2: verified-result cache (patch content hash → verified speedup), persisted.
+    verify_cache_path = output_dir / "avo_state" / "verify_cache.json"
+    verify_cache: dict = {}
+    if verify_cache_path.exists():
+        try:
+            verify_cache = json.loads(verify_cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            verify_cache = {}
 
     # Context reused by GEAK's evaluate_round_best for verified per-shape geomean
     # scoring (P0) and by the ESCALATE rescue round (P1).
@@ -199,9 +212,20 @@ def run_avo(
 
             lineage.record_attempts(result)
             if verify_each_step:
-                _apply_verified_score(result, verify_ctx, step_idx, output_dir)
+                _apply_verified_score(
+                    result,
+                    verify_ctx,
+                    step_idx,
+                    output_dir,
+                    repeats=verify_repeats,
+                    min_commit_speedup=min_commit_speedup,
+                    skip_on_no_gain=skip_verify_on_no_gain,
+                    cache=verify_cache,
+                    cache_path=verify_cache_path,
+                )
             committed = lineage.maybe_commit(result, repo=repo)
             _record_to_notebook(notebook_root, step_idx, result, committed)
+            write_evolution_entry(output_dir, result, committed)  # P-mem-3 causal log
 
             signal = detector.evaluate(result, committed)
             console.print(
@@ -283,6 +307,40 @@ def _read_per_shape_speedups(output_dir: Path, step_index: int) -> dict:
     return out
 
 
+_PROFILE_METRIC_HINTS = ("occupancy", "bandwidth", "util", "tflops", "duration", "latency", "throughput", "register", "lds", "smem")
+
+
+def _read_profile_metrics(output_dir: Path, step_index: int) -> dict:
+    """Best-effort numeric profiler metrics from round_{N}_evaluation.json (P-mem-3).
+
+    Cross-backend: scans (one level deep) for scalar fields whose key looks like a
+    perf metric. Empty when no profiler data is present.
+    """
+    import json as _json
+
+    path = Path(output_dir) / f"round_{step_index}_evaluation.json"
+    if not path.exists():
+        return {}
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, float] = {}
+
+    def _scan(prefix: str, obj) -> None:
+        if not isinstance(obj, dict):
+            return
+        for k, v in obj.items():
+            key = str(k).lower()
+            if isinstance(v, (int, float)) and any(h in key for h in _PROFILE_METRIC_HINTS):
+                out[f"{prefix}{k}"] = float(v)
+            elif isinstance(v, dict) and prefix == "":
+                _scan(f"{k}.", v)
+
+    _scan("", data)
+    return dict(list(out.items())[:8])  # cap
+
+
 def _build_verify_ctx(repo: Path, output_dir: Path, gpu_ids: list[int], task: str) -> dict:
     """Build the ctx dict consumed by GEAK's ``evaluate_round_best``."""
     return {
@@ -317,46 +375,191 @@ def _discover_harness_path(output_dir: Path) -> str:
     return ""
 
 
-def _apply_verified_score(result, verify_ctx: dict, step_index: int, output_dir: Path) -> None:
-    """Overwrite the step's best score with GEAK's verified per-shape geomean.
+def _eval_once(verify_ctx: dict, step_index: int, output_dir: Path):
+    """One independent verification via GEAK's ``evaluate_round_best``.
 
-    Reuses ``evaluate_round_best`` over ``results/round_{step}/`` — it applies the
-    best patch in a temp worktree, runs FULL_BENCHMARK + PROFILE, and computes a
-    per-shape geomean speedup (the same machinery GEAK's round loop trusts). This
-    closes gaps #1 (geomean) and #4 (independent verification) at once.
+    Returns ``(verified_speedup, best_patch, per_shape)`` or ``None`` when there
+    is no verifiable candidate. Each call applies the best patch in a fresh
+    worktree and re-runs FULL_BENCHMARK, so repeated calls yield independent
+    measurements of the *same* candidate (pure measurement noise).
     """
-    from minisweagent.run.avo.result import AttemptRecord
     from minisweagent.run.postprocess.evaluation import evaluate_round_best
 
     results_dir = output_dir / "results" / f"round_{step_index}"
     try:
-        ctx = dict(verify_ctx)
-        round_eval = evaluate_round_best(ctx, step_index, results_dir)
+        round_eval = evaluate_round_best(dict(verify_ctx), step_index, results_dir)
     except Exception as exc:  # noqa: BLE001 — verification failure must not kill the loop
-        logger.warning("verify step %d: evaluate_round_best failed (%s); keeping light score.", step_index, exc)
-        return
-
+        logger.warning("verify step %d: evaluate_round_best failed (%s).", step_index, exc)
+        return None
     if round_eval is None or not getattr(round_eval, "best_patch", ""):
-        result.best_speedup = None
-        result.best_correct = False
-        result.best_patch_path = None
-        return
-
+        return None
     fb = getattr(round_eval, "full_benchmark", None)
     verified = fb.verified_speedup if fb is not None and getattr(fb, "verified_speedup", None) is not None else None
     if verified is None:
         verified = getattr(round_eval, "benchmark_speedup", None)
-
     if verified is None:
+        return None
+    return float(verified), round_eval.best_patch, _read_per_shape_speedups(output_dir, step_index)
+
+
+def _median_per_shape(per_shapes: list[dict]) -> dict:
+    """Per-shape median across repeated measurements (outlier-robust, B1)."""
+    import statistics
+
+    keys: set[str] = set()
+    for ps in per_shapes:
+        keys.update(ps.keys())
+    out: dict[str, float] = {}
+    for k in keys:
+        vals = [ps[k] for ps in per_shapes if k in ps]
+        if vals:
+            out[k] = float(statistics.median(vals))
+    return out
+
+
+def _peek_candidate(output_dir: Path, step_index: int) -> tuple[float | None, Path | None]:
+    """Read the agent's self-reported best (speedup + patch file) before verifying.
+
+    Used by C2 (dedup) and C3 (skip-on-no-gain) to avoid an expensive
+    FULL_BENCHMARK when it cannot change the outcome.
+    """
+    import json as _json
+
+    results_dir = output_dir / "results" / f"round_{step_index}"
+    best_sp: float | None = None
+    best_patch: Path | None = None
+    if not results_dir.is_dir():
+        return None, None
+    for br in results_dir.glob("*/best_results.json"):
+        try:
+            data = _json.loads(br.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        sp = data.get("best_patch_speedup")
+        pf = data.get("best_patch_file")
+        try:
+            sp = float(sp) if sp is not None else None
+        except (TypeError, ValueError):
+            sp = None
+        if sp is not None and (best_sp is None or sp > best_sp):
+            best_sp = sp
+            best_patch = Path(pf) if pf else None
+    return best_sp, best_patch
+
+
+def _patch_fingerprint(patch_file: Path | None) -> str | None:
+    if patch_file is None or not Path(patch_file).exists():
+        return None
+    try:
+        from minisweagent.run.avo.result import patch_hash
+
+        return patch_hash(Path(patch_file).read_text(encoding="utf-8", errors="ignore"))
+    except OSError:
+        return None
+
+
+def _apply_verified_score(
+    result,
+    verify_ctx: dict,
+    step_index: int,
+    output_dir: Path,
+    *,
+    repeats: int = 1,
+    min_commit_speedup: float = 1.0,
+    skip_on_no_gain: bool = True,
+    cache: dict | None = None,
+    cache_path: Path | None = None,
+) -> None:
+    """Overwrite the step's best score with a noise-robust verified speedup (B1).
+
+    Runs GEAK's ``evaluate_round_best`` ``repeats`` times (each = fresh worktree +
+    FULL_BENCHMARK over ``results/round_{step}/``) and uses the **median** speedup
+    (and per-shape medians) to suppress measurement-noise spikes that would
+    otherwise drive false commits or false stalls. ``repeats=1`` preserves the
+    original single-shot behavior (no extra GPU cost).
+
+    Cost guards: C3 skips verification when the agent's self-reported best shows
+    no gain (cannot commit anyway); C2 reuses a cached verified result when the
+    same patch (by content hash) was already benchmarked.
+    """
+    import statistics
+
+    from minisweagent.run.avo.result import AttemptRecord
+
+    self_sp, cand_patch = _peek_candidate(output_dir, step_index)
+
+    # C3: agent itself reports no gain → cannot clear the commit floor; skip the
+    # expensive FULL_BENCHMARK and treat as no committable candidate.
+    if skip_on_no_gain and self_sp is not None and self_sp <= min_commit_speedup:
+        logger.info(
+            "verify step %d: agent self-reports %.4fx (<= floor %.4f); skipping verification.",
+            step_index,
+            self_sp,
+            min_commit_speedup,
+        )
         result.best_speedup = None
         result.best_correct = False
         result.best_patch_path = None
         return
 
+    # C2: identical patch already verified → reuse cached result, skip re-bench.
+    fp = _patch_fingerprint(cand_patch)
+    if cache is not None and fp and fp in cache:
+        cached = cache[fp]
+        logger.info("verify step %d: cache hit (%s) → %.4fx (skipping re-benchmark).", step_index, fp, cached["speedup"])
+        result.best_speedup = float(cached["speedup"])
+        result.best_correct = True
+        result.best_patch_path = Path(cached["patch"]) if cached.get("patch") else cand_patch
+        result.per_shape_speedups = dict(cached.get("per_shape") or {})
+        result.attempts.append(
+            AttemptRecord(
+                strategy=result.strategy,
+                returncode=0,
+                correctness_passed=True,
+                verified_speedup=float(cached["speedup"]),
+                patch_hash=fp,
+                ts=time.time(),
+            )
+        )
+        return
+
+    n = max(1, int(repeats))
+    samples: list[float] = []
+    per_shapes: list[dict] = []
+    best_patch: str | None = None
+    for i in range(n):
+        out = _eval_once(verify_ctx, step_index, output_dir)
+        if out is None:
+            continue
+        sp, patch, per_shape = out
+        samples.append(sp)
+        per_shapes.append(per_shape)
+        best_patch = patch
+
+    if not samples or best_patch is None:
+        result.best_speedup = None
+        result.best_correct = False
+        result.best_patch_path = None
+        return
+
+    verified = statistics.median(samples)
+    if n > 1:
+        spread = (max(samples) - min(samples)) / verified if verified else 0.0
+        logger.info(
+            "verify step %d: %d samples, median=%.4fx (min=%.4f max=%.4f spread=%.1f%%)",
+            step_index,
+            len(samples),
+            verified,
+            min(samples),
+            max(samples),
+            spread * 100.0,
+        )
+
     result.best_speedup = float(verified)
     result.best_correct = True
-    result.best_patch_path = Path(round_eval.best_patch)
-    result.per_shape_speedups = _read_per_shape_speedups(output_dir, step_index)  # B2
+    result.best_patch_path = Path(best_patch)
+    result.per_shape_speedups = _median_per_shape(per_shapes) if n > 1 else (per_shapes[0] if per_shapes else {})
+    result.profiling = _read_profile_metrics(output_dir, step_index)  # P-mem-3 causal signal
     # Record an authoritative attempt so the detector sees the verified outcome.
     result.attempts.append(
         AttemptRecord(
@@ -364,10 +567,20 @@ def _apply_verified_score(result, verify_ctx: dict, step_index: int, output_dir:
             returncode=0,
             correctness_passed=True,
             verified_speedup=float(verified),
-            patch_hash=None,
+            patch_hash=fp,
             ts=time.time(),
         )
     )
+    # C2: remember this verified result keyed by patch content hash.
+    if cache is not None and fp:
+        cache[fp] = {"speedup": float(verified), "patch": str(best_patch), "per_shape": result.per_shape_speedups}
+        if cache_path is not None:
+            try:
+                import json as _json
+
+                cache_path.write_text(_json.dumps(cache, indent=2, default=str), encoding="utf-8")
+            except OSError:
+                logger.debug("verify cache write failed (non-fatal)")
     logger.info("verify step %d: verified geomean speedup = %.4fx", step_index, verified)
 
 
@@ -480,11 +693,57 @@ def _finalize(output_dir: Path, lineage: LineageStore) -> dict:
     import json
 
     (output_dir / "final_report.json").write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+    _write_trajectory(output_dir, lineage)
     console.print(
         f"[green]AVO done[/green]: {len(lineage.committed)} committed versions, "
         f"best={lineage.best_id} ({lineage.best_speedup:.3f}x)."
     )
     return report
+
+
+def _write_trajectory(output_dir: Path, lineage: LineageStore) -> None:
+    """Emit ``trajectory.json``: evolution health at a glance (observability).
+
+    Best-effort: never raises. Captures the running-best curve over commits,
+    total attempts vs commits, per-strategy stats, and supervisor interventions.
+    """
+    import json as _json
+
+    try:
+        curve = []
+        running_best = 0.0
+        per_strategy: dict[str, dict] = {}
+        for node in lineage.committed:
+            running_best = max(running_best, node.speedup)
+            curve.append({"id": node.id, "speedup": node.speedup, "running_best": running_best, "strategy": node.strategy})
+            st = per_strategy.setdefault(node.strategy or "?", {"commits": 0, "best": 0.0})
+            st["commits"] += 1
+            st["best"] = max(st["best"], node.speedup)
+
+        attempts = 0
+        attempts_path = lineage.attempts_path
+        if attempts_path.exists():
+            attempts = sum(1 for line in attempts_path.read_text(encoding="utf-8").splitlines() if line.strip())
+
+        interventions = 0
+        sup_log = lineage.state_dir / "supervisor_log.jsonl"
+        if sup_log.exists():
+            interventions = sum(1 for line in sup_log.read_text(encoding="utf-8").splitlines() if line.strip())
+
+        committed = max(0, len(lineage.committed) - 1)  # exclude baseline v0
+        trajectory = {
+            "best_id": lineage.best_id,
+            "best_speedup": lineage.best_speedup,
+            "committed_versions": committed,
+            "total_attempts": attempts,
+            "commit_rate": round(committed / attempts, 4) if attempts else None,
+            "supervisor_interventions": interventions,
+            "best_speedup_curve": curve,
+            "per_strategy": per_strategy,
+        }
+        (output_dir / "trajectory.json").write_text(_json.dumps(trajectory, indent=2, default=str), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("trajectory.json write failed (non-fatal): %s", exc)
 
 
 # ---------------------------------------------------------------------------

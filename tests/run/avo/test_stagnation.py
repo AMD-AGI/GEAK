@@ -84,6 +84,41 @@ def test_full_reset_clears_supervisor_cycles():
     assert det.supervisor_cycles_without_commit == 0
 
 
+def test_trend_rescues_climbing_direction():
+    # A non-committing but *rising* trajectory (new intra-direction highs) must
+    # not accrue no-improvement stall — slow-but-real directions get more room.
+    det = StagnationDetector(_CFG)
+    for sp in (0.90, 0.95, 1.00):  # rising, all below lineage best, correctness fails
+        det.evaluate(
+            VariationResult(
+                step_index=1,
+                step_dir=Path("."),
+                attempts=[AttemptRecord(correctness_passed=False, verified_speedup=sp)],
+                best_speedup=sp,
+                best_correct=False,
+            ),
+            committed=False,
+        )
+    assert det.consecutive_no_improvement == 0
+
+
+def test_flat_direction_still_redirects():
+    det = StagnationDetector(_CFG)
+    sig = None
+    for _ in range(_CFG["consecutive_no_improvement"]):
+        sig = det.evaluate(
+            VariationResult(
+                step_index=1,
+                step_dir=Path("."),
+                attempts=[AttemptRecord(correctness_passed=False, verified_speedup=0.9)],
+                best_speedup=0.9,
+                best_correct=False,
+            ),
+            committed=False,
+        )
+    assert sig.level == StagnationLevel.REDIRECT
+
+
 def test_nudge_before_redirect():
     det = StagnationDetector(_CFG)
     # half of consecutive_no_improvement (4 // 2 = 2) → NUDGE, not yet REDIRECT

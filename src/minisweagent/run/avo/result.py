@@ -56,6 +56,13 @@ class VariationResult:
     # Per-shape verified speedups (B2 regression guard). Empty when single-shape
     # or unavailable. Maps shape label -> speedup (candidate/baseline).
     per_shape_speedups: dict[str, float] = field(default_factory=dict)
+    # Continuous-memory signal (P-mem-3 / option C): the agent's own rationale
+    # for this step, a short verbatim tail of its reasoning + tool output, and a
+    # small dict of profiler metrics — captured per step and replayed (bounded)
+    # into later steps as a causal evolution log.
+    rationale: str = ""
+    raw_tail: str = ""
+    profiling: dict[str, float] = field(default_factory=dict)
 
     @property
     def produced_verified_improvement_candidate(self) -> bool:

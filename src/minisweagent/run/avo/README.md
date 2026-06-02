@@ -137,7 +137,10 @@ optimization_logs/avo_<repo>_<ts>/
 │   ├── direction.json        # current assigned strategy
 │   ├── heartbeat.json        # liveness + resume anchor
 │   ├── notebook/             # cross-step working notebook (memory summary source)
+│   ├── evolution_log/        # per-step causal memory (rationale + profiling + raw tail) — P-mem-3
+│   ├── verify_cache.json     # verified-speedup cache keyed by patch hash (C2)
 │   └── patches/v{N}.patch    # committed patches, one per lineage node
+├── trajectory.json           # evolution health: best-speedup curve, commit rate, per-strategy, supervisor interventions
 ├── variation_0001/           # one directory per variation step (logs + strategies)
 │   ├── agent.log
 │   └── .optimization_strategies.md
@@ -161,9 +164,17 @@ committed — mirroring the paper's "500+ internal attempts → ~40 commits". Se
 `avo.verify_each_step: false` to skip per-step FULL_BENCHMARK and use a
 lightweight log parse instead.
 
+**Noise-robust progress (B1):** on noisy harnesses set `avo.verify_repeats: 3`
+to re-measure each candidate 3× and use the median (suppresses outlier spikes),
+and/or `avo.commit_significance_margin: 0.01` to require a commit to clear the
+current best by a real >1% margin (a within-noise "tie" is not committed).
+
 Each step's prompt also injects the **current-best diff + its verified metrics**
 (`avo.inject_best_exemplar`, default on) so the agent edits from the best
-implementation rather than re-deriving it.
+implementation rather than re-deriving it, plus the **top-K other prior
+implementations** with their verified + per-shape speedups and truncated diffs
+(`avo.lineage_context_k`, default 3) so it can compare approaches across the
+lineage (AVO §3.2). Full source of any version: `git show avo-v{id}`.
 
 **Delayed profiling** (CuTeGen): the first `avo.profiling_after_step` steps
 (default 3) are marked *structural-first* (profiler-driven micro-tuning withheld
@@ -195,6 +206,14 @@ The outer controller **never stops because a variation agent stopped** — any
 agent termination (`Submitted`, `LimitsExceeded`, exception, deadline) is just
 "this step is done", and the loop continues until the budget's `soft_stop`.
 
+The detector is also **trend-aware** (`stagnation.trend_window`): a non-committing
+step that sets a new intra-direction high is "still climbing" and does not count
+toward the stall, so slow-but-real directions aren't cut prematurely. The LLM
+supervisor's proposed directions are **self-validated** — already-tried/duplicate
+directions are dropped and a fallback direction is spliced in if nothing novel
+remains. A `trajectory.json` (best-speedup curve, commit rate, per-strategy stats,
+supervisor interventions) is written at finalize for at-a-glance run health.
+
 ---
 
 ## Skills used
@@ -222,8 +241,14 @@ AVO reconstructs cross-step memory two ways:
   (best-so-far, what worked, dead ends, recent evidence) is injected into every
   step's prompt.
 
-This is a compact reconstruction, not the paper's full continuous conversation
-memory — see the design doc's memory section for the remaining gap.
+On top of these, a bounded **evolution log** (P-mem-3, option C) carries the
+*causal* history across steps: each step records the agent's rationale, a short
+verbatim raw tail, the verified speedup/commit flag, and profiler metrics; later
+steps see recent steps verbatim plus older steps as one-liners with the
+bottleneck delta. Knobs: `avo.evolution_log_enabled` / `evolution_log_recent` /
+`evolution_log_max_versions`. This approximates the paper's continuous memory
+while staying bounded; a literal persistent single agent is out of scope by
+design (conflicts with the per-step worktree reset).
 
 ---
 

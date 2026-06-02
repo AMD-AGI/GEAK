@@ -620,6 +620,13 @@ avo:
   inject_best_exemplar: true     # inject current-best diff + metrics into each step (§16.2)
   profiling_after_step: 3        # delayed profiling: structural-first for N steps, then profiling-guided (§16.3)
 
+  verify_repeats: 1              # B1 noise-robust median over N re-measures (§17.7)
+  commit_significance_margin: 0.0  # B1 noise floor above best (§17.7)
+  skip_verify_on_no_gain: true   # C3 skip FULL_BENCHMARK when agent self-reports no gain (§17.5)
+  evolution_log_enabled: true    # P-mem-3 causal cross-step memory (§17.9)
+  evolution_log_recent: 2        # recent steps shown verbatim
+  evolution_log_max_versions: 8  # older steps as structured one-liners
+
   stagnation:
     steps_without_commit: 80
     wall_time_without_commit_s: 2700
@@ -627,6 +634,7 @@ avo:
     consecutive_no_improvement: 8
     patch_hash_repeat: 3
     supervisor_cycles_without_commit: 3
+    trend_window: 3              # rescue a climbing direction from false-stall (§17.8); 0=off
 
   escalate:
     enabled: true
@@ -713,7 +721,7 @@ Tracks which AVO features exist and how each is realized on GEAK. Update the
 | Variant transfer e.g. MHA→GQA (§4.3) | `skills/avo-evolution/docs/kernel_adaptation.md` | ✔ doc done |
 | Persistent memory (§4.1) — strategy state | run-wide `.optimization_strategies.md` shared by agents + supervisor | ✔ done (P-mem-1) |
 | Persistent memory (§4.1) — attempt history | run-wide `WorkingNotebook` summary injected each step | ✔ done (P-mem-2) |
-| Persistent memory (§4.1) — continuous raw context | (reconstructed summary, not full conversation) | 🟡 partial (P-mem-3 future) |
+| Persistent memory (§4.1) — continuous causal context | evolution log: rationale + profiling Δ + raw tail (§17.9, option C) | ✔ done (option C; option B by design out) |
 | Anti-lazy-optimization commit floor | `min_commit_speedup` (Kernel-Smith §16.1) | ✔ done |
 | Best-program exemplar in prompt | `build_best_exemplar` (Kernel-Smith §16.2) | ✔ done |
 | Delayed profiling injection | stage note + `profiling_after_step` (CuTeGen §16.3) | ✔ done |
@@ -722,7 +730,13 @@ Tracks which AVO features exist and how each is realized on GEAK. Update the
 | Worktree clean between steps | `git clean -fd` in `_checkout` (§17.2) | ✔ done |
 | Per-shape regression guard | `min_per_shape_speedup` (§17.3) | ✔ done |
 | Hardware grounding per step | `hardware_summary` injection (§17.4) | ✔ done |
-| Best-of-K parallel generations | main-loop population (§17.5) | ⬜ follow-up |
+| Multi-version lineage context in prompt (AVO §3.2) | `build_lineage_context` + per-node per_shape (§17.6) | ✔ done |
+| Noise-robust progress signal | `verify_repeats` median + `commit_significance_margin` (§17.7) | ✔ done |
+| Trend-aware stall detection | `trend_window` rescue of climbing directions (§17.8) | ✔ done |
+| Supervisor directive self-validation | `_validate_directive` (§17.8) | ✔ done |
+| Verified dedup cache (C2) / skip-on-no-gain (C3) | `verify_cache.json` + `skip_verify_on_no_gain` (§17.5) | ✔ done |
+| Trajectory observability | `trajectory.json` at finalize (§17.5) | ✔ done |
+| Best-of-K parallel generations (C1) | main-loop population (§17.5) | ⬜ deferred by choice |
 | Population / MAP-Elites diversity | single-lineage by design (§16.5) | ⬜ optional (future) |
 | Pattern registry + whole-graph composition | cross-session reuse / module mode (FACT §16.5) | ⬜ optional (future) |
 | Attention micro-arch patterns (§5) | `attention-microarch-optimization` skill | ⬜ optional (not yet created) |
@@ -885,10 +899,11 @@ So both axes are bounded: **across steps** (reset + fixed-size summaries) and
 `attempts.jsonl` / notebook events grow, but they are never injected verbatim —
 only their bounded summary is.
 
-**Residual gap (P-mem-3):** the flip side of resetting per step is that there is
-no continuous *raw* reasoning/profiler context across steps (the paper keeps
-one). The reconstruction is a compact summary. Closing this without blowing the
-window requires a *rolling compressed* context, which is future work.
+**Residual gap (P-mem-3):** the flip side of resetting per step is no continuous
+*raw* context across steps. This is now mitigated by the bounded **evolution log**
+(§17.9, option C): rationale + profiler delta + a short verbatim recent tail are
+carried across steps. A literal persistent agent (option B) remains out of scope
+by design (conflicts with the per-step worktree reset).
 
 ### 15.2 No oscillation, no lying-flat
 
@@ -1104,21 +1119,104 @@ Because the agent is reset each step, GPU facts must be re-grounded per prompt.
 then NVIDIA (`nvidia-smi`) and injects a `## Target hardware` block into each
 step, so tiling/occupancy/tensor-core decisions are arch-aware.
 
-### 17.5 Scoped follow-ups (not yet implemented)
+### 17.6 Multi-version lineage context (AVO §3.2 alignment, done)
 
-- **Best-of-K parallel generations (C1).** The normal loop is single-lineage and
-  sequential, underusing multi-GPU. Generalizing the ESCALATE "diversified
-  workers + `evaluate_round_best` + `commit_from_round`" into the main loop
-  (K parallel directions per generation, keep best) is the biggest throughput +
-  exploration win, but changes the control flow — deferred for careful design.
-- **Verified-result dedup cache (C2)** keyed by `patch_hash`, to skip
-  re-benchmarking an already-verified diff.
-- **Skip re-verification on agent-reported no-gain steps (C3)** to save a
-  per-step FULL_BENCHMARK — needs a reliability guard on the agent's self-report.
-- **Measurement significance (B1):** require the verified speedup to clear a
-  noise-aware margin; relies on harness warm-up/repeat/outlier discipline.
-- **Trajectory observability:** emit a `trajectory.json` (best-speedup curve,
-  commit rate, per-strategy hit rate) at finalize.
+The AVO paper notes the agent "frequently examines multiple prior implementations
+in P_t within a single variation step, comparing their profiling characteristics."
+Previously AVO injected only the single best (the exemplar) plus a text summary.
+`build_lineage_context` now also injects the **top-K other committed versions**
+(config `avo.lineage_context_k`, default 3; 0=off) — each with its verified
+speedup, **per-shape** profile (worst-shape-first, to show where to improve), and
+a truncated diff, with a pointer that full source is available via
+`git show avo-v{id}`. Per-shape speedups are persisted on each `LineageNode`
+(`score.per_shape`). Diffs are capped (1500 chars each) to keep the prompt bounded
+(§15.1). This closes the largest remaining §3.2 gap; the residual difference is
+that backtracking to an earlier P_t version is supervisor-driven, not
+agent-autonomous mid-step (an autonomy choice, not a missing capability).
+
+### 17.5 Scoped follow-ups
+
+- **Best-of-K parallel generations (C1) — NOT implemented (deferred by choice).**
+  The normal loop is single-lineage and sequential, underusing multi-GPU.
+  Generalizing the ESCALATE "diversified workers + `evaluate_round_best` +
+  `commit_from_round`" into the main loop (K parallel directions per generation,
+  keep best) is the biggest throughput + exploration win, but changes the control
+  flow — deferred for careful design.
+- **Verified-result dedup cache (C2) — done.** `avo_state/verify_cache.json` keyed
+  by patch content hash; `_apply_verified_score` reuses a cached verified speedup
+  instead of re-benchmarking an identical diff.
+- **Skip re-verification on no-gain (C3) — done.** `skip_verify_on_no_gain`
+  (default on): when the agent's self-reported best is ≤ the commit floor (cannot
+  commit anyway), the per-step FULL_BENCHMARK is skipped.
+- **Trajectory observability — done.** `_write_trajectory` emits
+  `trajectory.json` at finalize (running-best curve, commits, total attempts,
+  commit rate, supervisor interventions, per-strategy stats).
+
+### 17.7 Measurement significance — noise-robust progress signal (B1, done)
+
+The detector's "did we progress?" input is only as objective as the benchmark is
+stable; noise can drive false commits (resetting stall counters) or false stalls
+(premature redirects). Two opt-in knobs make the verified-speedup signal
+noise-robust:
+
+- `verify_repeats` (default `1`): `_apply_verified_score` re-runs
+  `evaluate_round_best` N times (each a fresh worktree + FULL_BENCHMARK of the
+  *same* candidate → independent measurements) and uses the **median** speedup
+  and per-shape **medians** (`_median_per_shape`), suppressing outlier spikes.
+  Cost is N× benchmark, so default 1; set 3 on noisy harnesses.
+- `commit_significance_margin` (default `0.0`): the commit gate requires
+  `candidate ≥ best · (1 + margin)` (the stricter of this and the epsilon
+  tolerance), i.e. a candidate must clear the current best by a noise floor
+  rather than merely "match" it. Set e.g. `0.01` to require a real >1% gain.
+
+Verified by `tests/run/avo/test_lineage_store.py::test_significance_margin_*`.
+This raises the *objectivity* of the progress signal that feeds the
+deterministic supervisor; harness-side warm-up/repeat discipline (noted in
+`skills/avo-evolution`) remains complementary.
+
+### 17.8 Supervision reliability upgrades (done)
+
+Three changes raise the reliability/objectivity of the supervisor loop beyond the
+B1 progress signal:
+
+- **Trend-aware stall detection.** `StagnationDetector` tracks recent verified
+  speedups; a non-committing step that sets a new intra-direction high (vs a
+  `trend_window` of recent steps) is treated as "still climbing" and does **not**
+  accrue the no-improvement stall — rescuing slow-but-real directions from
+  premature redirect (false-stall). Verified by `test_trend_rescues_climbing_direction`.
+- **Supervisor directive self-validation.** `run_supervisor._validate_directive`
+  deterministically drops proposed directions already in `strategy_state`
+  (failed/successful/exploring/skipped) or equal to the current one, de-dups, and
+  splices a fallback-taxonomy direction if nothing novel remains — turning a
+  subjective single-shot LLM proposal into a checked one (no extra model calls).
+  Verified by `tests/run/avo/test_supervisor.py`.
+- **Cost guards (C2/C3).** Dedup cache + skip-on-no-gain (see §17.5) cut wasted
+  re-benchmarks so the budget buys more genuine exploration.
+
+Residual (intentional): direction *generation* is still LLM-authored; multi-sample
+self-consistency voting (needs sampling temperature) is left out as marginal.
+
+### 17.9 Continuous causal memory across steps (P-mem-3, option C, done)
+
+The paper's "persistent conversation history" cannot be carried raw across a
+multi-day run (any window overflows), so AVO carries the **causal signal** of a
+continuous session in a bounded form. After each step, `write_evolution_entry`
+persists `avo_state/evolution_log/step_{N}.json` with the agent's **rationale**
+(its last substantive assistant message), a short **verbatim raw tail** (last
+assistant/tool turns, capped), the **verified speedup / committed flag**, and a
+small dict of **profiler metrics** (`_read_profile_metrics`, cross-backend
+best-effort). `build_evolution_log` then injects a bounded
+`## Evolution log (causal history)` block each step: the most recent
+`evolution_log_recent` steps verbatim, older steps collapsed to one-liners
+(`strategy → speedup [committed/rejected] | bottleneck Δ | rationale/failure`),
+capped at `evolution_log_max_versions`. This gives the agent the *why/what/effect*
+chain across versions (the part of continuous memory that drives cumulative
+micro-arch reasoning) while staying O(1) in prompt size (§15.1).
+
+This is **option C** of the P-mem-3 proposal — not a literal persistent single
+agent (option B), which conflicts with the per-step worktree reset and needs
+core changes. Verified by `tests/run/avo/test_evolution_log.py`. The residual
+gap vs option B (true uncompressed continuity) is accepted by design.
 
 ---
 

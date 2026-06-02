@@ -223,3 +223,24 @@ def test_per_shape_guard_disabled_by_default(tmp_path: Path):
     store.seed_from_baseline(tmp_path)
     weak = _make_result_with_shapes(1, 1.30, {"A": 2.0, "B": 0.5}, tmp_path)
     assert store.maybe_commit(weak) is True  # guard off → geomean-only behavior
+
+
+def test_significance_margin_rejects_within_noise_tie(tmp_path: Path):
+    # B1: with a 1% noise floor, a 0.5% "improvement" vs baseline is within noise
+    # and must not commit; a 2% gain clears it.
+    store = LineageStore(tmp_path / "avo_state", significance_margin=0.01)
+    store.seed_from_baseline(tmp_path)
+    assert store.maybe_commit(_make_result(1, 1.005, correct=True, patch_dir=tmp_path)) is False
+    assert store.best_id == "v0"
+    assert store.maybe_commit(_make_result(2, 1.02, correct=True, patch_dir=tmp_path)) is True
+    assert store.best_speedup == 1.02
+    # next must beat 1.02 * 1.01 = 1.0302
+    assert store.maybe_commit(_make_result(3, 1.025, correct=True, patch_dir=tmp_path)) is False
+    assert store.maybe_commit(_make_result(4, 1.05, correct=True, patch_dir=tmp_path)) is True
+
+
+def test_significance_margin_off_by_default(tmp_path: Path):
+    store = LineageStore(tmp_path / "avo_state")  # significance_margin defaults to 0.0
+    store.seed_from_baseline(tmp_path)
+    # 1.002x clears the anti-lazy floor (>1.0); with no margin it commits.
+    assert store.maybe_commit(_make_result(1, 1.002, correct=True, patch_dir=tmp_path)) is True

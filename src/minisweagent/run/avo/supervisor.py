@@ -66,13 +66,57 @@ def build_bundle(signal: StagnationSignal, lineage: LineageStore, step_dir: Path
 
 
 def run_supervisor(bundle: str, avo_config: dict, *, model: Any = None) -> dict:
-    """Return a directive dict. LLM-first, deterministic-fallback."""
+    """Return a directive dict. LLM-first, self-validated, deterministic-fallback."""
     if model is not None:
         directive = _run_llm_supervisor(bundle, model)
         if directive is not None:
-            return directive
+            return _validate_directive(directive, bundle)
         logger.warning("supervisor: LLM path failed/unparseable; using fallback taxonomy.")
     return _fallback_directive(bundle)
+
+
+def _validate_directive(directive: dict, bundle: str) -> dict:
+    """Self-verify the LLM directive against known-tried strategies (objectivity).
+
+    The LLM can propose directions already marked failed / already the current
+    one. We drop those deterministically; if no genuinely-novel direction
+    remains, we splice in the next untried fallback-taxonomy direction so the run
+    always gets a fresh move. This turns a subjective single-shot proposal into
+    a checked one without extra model calls.
+    """
+    tried = _tried_set(bundle)
+    proposed = directive.get("new_strategies") or []
+    novel = []
+    seen: set[str] = set()
+    for strat in proposed:
+        name = str(strat.get("name", "")).strip()
+        key = name.lower()
+        if not name or key in tried or key in seen:
+            continue
+        seen.add(key)
+        novel.append(strat)
+    if not novel:
+        logger.info("supervisor: all proposed directions already tried; splicing fallback taxonomy.")
+        fb = _fallback_directive(bundle).get("new_strategies") or []
+        novel = fb[:1]
+    directive["new_strategies"] = novel
+    return directive
+
+
+def _tried_set(bundle: str) -> set[str]:
+    tried: set[str] = set()
+    try:
+        data = json.loads(bundle)
+        state = data.get("strategy_state", {}) or {}
+        for bucket in ("failed", "successful", "exploring", "skipped"):
+            for item in state.get(bucket, []) or []:
+                tried.add(str(item).lower())
+        cur = (data.get("current_direction", {}) or {}).get("strategy")
+        if cur:
+            tried.add(str(cur).lower())
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    return tried
 
 
 def apply_directive(
