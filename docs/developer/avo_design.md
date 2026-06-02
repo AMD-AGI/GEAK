@@ -612,9 +612,13 @@ run:
 avo:
   variation_step_limit: 200      # OptimizationAgent step_limit per variation
   variation_cost_limit: 0.0
-  commit_epsilon: 0.001          # min relative speedup to enter lineage
+  commit_epsilon: 0.001          # tolerance vs current best (don't regress)
+  min_commit_speedup: 1.0        # anti-lazy-opt floor; a commit must EXCEED this vs baseline (§16.1)
+  min_per_shape_speedup: 0.0     # per-shape regression guard; 0=off, e.g. 0.95 (§17.3)
   min_commits_before_stop: 5     # budget-remaining runs may not stop empty-handed
   verify_each_step: true         # FULL_BENCHMARK + per-shape geomean per step (P0)
+  inject_best_exemplar: true     # inject current-best diff + metrics into each step (§16.2)
+  profiling_after_step: 3        # delayed profiling: structural-first for N steps, then profiling-guided (§16.3)
 
   stagnation:
     steps_without_commit: 80
@@ -710,6 +714,17 @@ Tracks which AVO features exist and how each is realized on GEAK. Update the
 | Persistent memory (§4.1) — strategy state | run-wide `.optimization_strategies.md` shared by agents + supervisor | ✔ done (P-mem-1) |
 | Persistent memory (§4.1) — attempt history | run-wide `WorkingNotebook` summary injected each step | ✔ done (P-mem-2) |
 | Persistent memory (§4.1) — continuous raw context | (reconstructed summary, not full conversation) | 🟡 partial (P-mem-3 future) |
+| Anti-lazy-optimization commit floor | `min_commit_speedup` (Kernel-Smith §16.1) | ✔ done |
+| Best-program exemplar in prompt | `build_best_exemplar` (Kernel-Smith §16.2) | ✔ done |
+| Delayed profiling injection | stage note + `profiling_after_step` (CuTeGen §16.3) | ✔ done |
+| Kernel-class menus + anti-simplify rules | `optimization_playbook.md` (CuTeGen §16.4) | ✔ done |
+| Lineage tag ≡ verified patch | `_materialize_and_tag` + baseline tag (§17.1) | ✔ done |
+| Worktree clean between steps | `git clean -fd` in `_checkout` (§17.2) | ✔ done |
+| Per-shape regression guard | `min_per_shape_speedup` (§17.3) | ✔ done |
+| Hardware grounding per step | `hardware_summary` injection (§17.4) | ✔ done |
+| Best-of-K parallel generations | main-loop population (§17.5) | ⬜ follow-up |
+| Population / MAP-Elites diversity | single-lineage by design (§16.5) | ⬜ optional (future) |
+| Pattern registry + whole-graph composition | cross-session reuse / module mode (FACT §16.5) | ⬜ optional (future) |
 | Attention micro-arch patterns (§5) | `attention-microarch-optimization` skill | ⬜ optional (not yet created) |
 
 Legend: ✅ reused (already in GEAK) · ⬜ planned (to build) · 🟡 partial/wired · ✔ done.
@@ -958,10 +973,165 @@ exploration breadth becomes the bottleneck.
 
 ---
 
-## 16. References
+## 16. Insights adopted from related work
+
+This section records ideas borrowed from adjacent papers, what was implemented,
+and what was deliberately left out.
+
+### Kernel-Smith (arXiv:2603.28342)
+
+**Kernel-Smith** (*A Unified Recipe for Evolutionary Kernel Optimization*,
+Shanghai AI Lab + MetaX) studies the same evolutionary-kernel-optimization
+problem with a population (island + MAP-Elites) agent and an evolution-oriented
+post-training recipe. Two of its engineering findings are directly applicable to
+AVO and are now implemented:
+
+### 16.1 Anti-"lazy optimization" commit floor (implemented)
+
+Kernel-Smith documents a failure mode where strong models produce a
+correct-but-trivial rewrite (e.g. re-expressing an elementwise add in Triton)
+that passes compilation/correctness at ≈1.0x but has no real value ("lazy /
+advanced hacking"). Our original commit gate (`candidate >= best·(1-ε)`) would,
+when `best = 1.0` (the baseline), admit such a 1.0x candidate as the first
+"improvement".
+
+**Fix:** `LineageStore.min_commit_speedup` (config `avo.min_commit_speedup`,
+default `1.0`). A candidate must **exceed** this verified speedup over the
+baseline to enter the lineage — a ≈1.0x trivial rewrite is rejected. Set it
+higher (e.g. `1.05`) to require a minimum gain per commit. Verified by
+`tests/run/avo/test_lineage_store.py::test_commit_gate_rejects_lazy_no_gain` and
+`::test_commit_gate_respects_custom_min_speedup`.
+
+### 16.2 Best-program exemplar in the step prompt (implemented)
+
+Kernel-Smith injects the **top-performing program(s)** plus structured metrics
+as exemplars each iteration, so the model edits from the best implementation
+rather than re-deriving it. AVO already resets the worktree to the best version,
+but previously the prompt carried only a *text summary*. `build_best_exemplar`
+now injects the **current-best diff + its verified speedup + the strategy that
+produced it** (config `avo.inject_best_exemplar`, default on), truncated to keep
+the prompt bounded (§15.1). Verified by `tests/run/avo/test_variation_exemplar.py`.
+
+### CuTeGen (arXiv:2604.01489)
+
+**CuTeGen** (*An LLM-Based Agentic Framework … using CuTe*, U. Toronto) does
+single-kernel progressive refinement (no population) with three findings; two
+are adopted:
+
+#### 16.3 Delayed profiling injection (implemented)
+
+CuTeGen shows (with an ablation) that exposing profiler feedback too early on
+structurally complex kernels biases the model toward premature parameter tuning
+(tile-size sweeps) and poor local optima; withholding it until the structure is
+sound yields a better trajectory. AVO now stamps each step's prompt with an
+**Optimization stage**: `STRUCTURAL (profiling withheld)` for the first
+`avo.profiling_after_step` steps (default 3) — flipped on early if a real commit
+already landed — then `PROFILING-GUIDED`. `compose_task` injects the matching
+note; the `avo-evolution` skill instructs the agent to honor it. Set
+`profiling_after_step: 0` for simple/elementwise kernels (profile early).
+
+#### 16.4 Kernel-class menus + non-negotiable anti-simplify rules (implemented)
+
+CuTeGen's optimization/debugging prompts (Appendices A/B) first **classify** the
+kernel (GEMM / elementwise / other) and offer a class-specific optimization
+menu, and enforce a **non-negotiable rule**: never "fix" or "optimize" by
+simplifying away the kernel structure or falling back to PyTorch/cuBLAS. This is
+the *debug/optimize-side* complement to §16.1's commit-side anti-lazy floor.
+Captured in `skills/avo-evolution/docs/optimization_playbook.md` and summarized
+in `SKILL.md` (loaded into every variation step).
+
+### 16.5 Considered but not adopted (kept as future work)
+
+- **Population / MAP-Elites + island diversity** (Kernel-Smith). A *diverse*
+  archive (feature space = kernel complexity × score) sampling top + diverse
+  exemplars would address the "no explicit novelty pressure" gap (§15.4) but
+  changes AVO's single-lineage regime (chosen by the AVO paper to isolate the
+  operator). Optional extension.
+- **Dynamic pattern registry + whole-graph multi-pattern composition** (FACT,
+  *Framework for Agentic CUTLASS Transpilation*, arXiv:2604.26666). FACT indexes
+  realized kernels by `(rule, dtype, arch)` and reuses them across workloads, and
+  optimizes *multiple* subgraphs of a whole model then composes them. For AVO
+  this maps to (a) persisting committed patches keyed by kernel metadata into the
+  cross-session knowledge base for cross-run reuse, and (b) a module-level
+  multi-kernel mode. Both are larger, scenario-level extensions — left as future.
+- **Evolution-oriented post-training** (Kernel-Smith step-centric SFT/RL). AVO
+  uses a frozen frontier model via `OptimizationAgent`; training a local improver
+  is out of scope for this additive layer.
+- **Measurement stability** (Kernel-Smith / CuTeGen: warm-up, repeated runs +
+  outlier removal, CUDAGraph → <1% noise). AVO relies on GEAK's harness /
+  `evaluate_round_best`; the dependency is noted in `skills/avo-evolution` so
+  harness authors keep timing stable (noise compounds across an evolutionary run).
+
+---
+
+## 17. Expert-review hardening
+
+A kernel-agent-systems review surfaced correctness/efficiency gaps; the
+high-leverage, low-risk ones are implemented (the rest are scoped follow-ups).
+
+### 17.1 Lineage integrity — tag ≡ verified patch (A1, done)
+
+`save_and_test` produces an **incremental** `git diff` against the current HEAD,
+and each step starts from `reset_worktree_to_best`, so a step's patch is
+`best → new`. The old `_tag_git` committed the agent's *final dirty worktree*,
+which can differ from the verified-best patch — so `avo-v{N}` could point at a
+worse/abandoned attempt and the next step would resume from the wrong code.
+Fixed: `seed_from_baseline(repo=...)` commits + tags the baseline as `avo-v0`,
+and `_materialize_and_tag` reconstructs each commit by checking out the
+parent-best, `git apply`-ing the **verified** incremental patch (the same diff
+`evaluate_round_best` benchmarked), then committing + tagging. Result: `avo-v{N}`
+≡ the verified patch. Verified by `tests/run/avo/test_lineage_git.py`.
+
+### 17.2 Worktree hygiene (A2, done)
+
+`reset_worktree_to_best` / `_checkout` now run `git clean -fd` after
+`checkout -f` so untracked junk from an aborted step cannot leak into the next
+step's diff. Legitimate new files are preserved because each commit captures them
+via `git add -A`.
+
+### 17.3 Per-shape regression guard (B2, done)
+
+`evaluate_round_best` already computes per-shape verified speedups; the geomean
+commit gate could still hide a regressed shape. `min_per_shape_speedup` (config,
+default `0.0` = off) rejects a commit if any shape falls below the floor. Set
+`0.95` to forbid commits that regress any shape >5%. Verified by
+`test_per_shape_guard_*`.
+
+### 17.4 Hardware grounding in every step (D1, done)
+
+Because the agent is reset each step, GPU facts must be re-grounded per prompt.
+`variation_step.hardware_summary` (cached) probes ROCm (`rocminfo`/`detect_gpu_arch`)
+then NVIDIA (`nvidia-smi`) and injects a `## Target hardware` block into each
+step, so tiling/occupancy/tensor-core decisions are arch-aware.
+
+### 17.5 Scoped follow-ups (not yet implemented)
+
+- **Best-of-K parallel generations (C1).** The normal loop is single-lineage and
+  sequential, underusing multi-GPU. Generalizing the ESCALATE "diversified
+  workers + `evaluate_round_best` + `commit_from_round`" into the main loop
+  (K parallel directions per generation, keep best) is the biggest throughput +
+  exploration win, but changes the control flow — deferred for careful design.
+- **Verified-result dedup cache (C2)** keyed by `patch_hash`, to skip
+  re-benchmarking an already-verified diff.
+- **Skip re-verification on agent-reported no-gain steps (C3)** to save a
+  per-step FULL_BENCHMARK — needs a reliability guard on the agent's self-report.
+- **Measurement significance (B1):** require the verified speedup to clear a
+  noise-aware margin; relies on harness warm-up/repeat/outlier discipline.
+- **Trajectory observability:** emit a `trajectory.json` (best-speedup curve,
+  commit rate, per-strategy hit rate) at finalize.
+
+---
+
+## 18. References
 
 - AVO paper: *Agentic Variation Operators for Autonomous Evolutionary Search*,
   NVIDIA, arXiv:2603.24517.
+- Kernel-Smith: *A Unified Recipe for Evolutionary Kernel Optimization*,
+  Shanghai AI Lab + MetaX, arXiv:2603.28342.
+- CuTeGen: *An LLM-Based Agentic Framework for Generation and Optimization of
+  High-Performance GPU Kernels using CuTe*, U. Toronto, arXiv:2604.01489.
+- FACT: *Compositional Kernel Synthesis with a Three-Stage Agentic Workflow*,
+  Virginia Tech, arXiv:2604.26666.
 - GEAK building blocks referenced above: `run/budget.py`, `run/unified.py`,
   `agents/optimization_agent.py`, `tools/strategy_manager.py`,
   `skills/skill_runtime.py`, `subagents/subagent_registry.py`,

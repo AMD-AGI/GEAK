@@ -152,11 +152,33 @@ optimization_logs/avo_<repo>_<ts>/
 The **commit gate**: after each step the controller runs GEAK's
 `evaluate_round_best` (apply best patch in a temp worktree → `FULL_BENCHMARK` +
 `PROFILE` → **per-shape geomean** verified speedup). A version enters
-`lineage.json` only if its candidate is correct **and** that *verified* speedup
-is at least the running best (within `commit_epsilon`). Non-improving / failing
-attempts are recorded in `attempts.jsonl` but never committed — mirroring the
-paper's "500+ internal attempts → ~40 commits". Set `avo.verify_each_step:
-false` to skip per-step FULL_BENCHMARK and use a lightweight log parse instead.
+`lineage.json` only if its candidate is correct, its *verified* speedup is at
+least the running best (within `commit_epsilon`), **and** it exceeds the
+anti-lazy-optimization floor `min_commit_speedup` (default `1.0` → must be
+genuinely faster than baseline; raise to e.g. `1.05` to require ≥5% per commit).
+Non-improving / failing attempts are recorded in `attempts.jsonl` but never
+committed — mirroring the paper's "500+ internal attempts → ~40 commits". Set
+`avo.verify_each_step: false` to skip per-step FULL_BENCHMARK and use a
+lightweight log parse instead.
+
+Each step's prompt also injects the **current-best diff + its verified metrics**
+(`avo.inject_best_exemplar`, default on) so the agent edits from the best
+implementation rather than re-deriving it.
+
+**Delayed profiling** (CuTeGen): the first `avo.profiling_after_step` steps
+(default 3) are marked *structural-first* (profiler-driven micro-tuning withheld
+to avoid premature local optima); later steps are *profiling-guided*. Set it to
+`0` for simple/elementwise kernels. The `avo-evolution` skill also carries
+kernel-class optimization menus and non-negotiable "don't simplify away the
+kernel / don't fall back to cuBLAS" rules (`docs/optimization_playbook.md`).
+
+**Lineage integrity:** each committed version is reconstructed by applying the
+*verified* patch onto the parent-best and tagged `avo-v{N}` (so the next step
+resumes from the real best, not the agent's last dirty edit); the worktree is
+`git clean`-ed between steps. **Per-shape guard:** set `avo.min_per_shape_speedup`
+(e.g. `0.95`) to reject commits that regress any shape even when the geomean
+passes. Each step's prompt also injects a **target-hardware** summary so tiling /
+occupancy / tensor-core decisions are arch-aware.
 
 ---
 

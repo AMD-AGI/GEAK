@@ -9,7 +9,9 @@ skill injection. The agent's own ``save_and_test`` outputs (``patch_*.patch`` /
 
 from __future__ import annotations
 
+import functools
 import logging
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -45,6 +47,41 @@ def select_skills(kernel_language: str, task: str) -> list[str]:
     if "attention" in task.lower() or "flash" in task.lower():
         skills.append("attention-microarch-optimization")
     return skills
+
+
+@functools.lru_cache(maxsize=1)
+def hardware_summary() -> str | None:
+    """Best-effort one-line target-hardware summary, injected into every step (D1).
+
+    Kernel decisions (tiling, occupancy, split-K, WMMA/MFMA) depend on the real
+    GPU. Because AVO resets the agent each step, the hardware facts must be
+    re-grounded in every prompt rather than relying on the agent to re-probe.
+    Tries ROCm (rocminfo) then NVIDIA (nvidia-smi); returns ``None`` if neither
+    is available, leaving the prompt unchanged.
+    """
+    # AMD / ROCm
+    try:
+        from minisweagent.run.utils.gpu_arch import detect_gpu_arch
+
+        arch = detect_gpu_arch()
+        if arch:
+            return f"## Target hardware\n- GPU arch: {arch} (AMD ROCm). Ground tiling/occupancy/MFMA-WMMA choices in this arch."
+    except Exception:  # noqa: BLE001
+        pass
+    # NVIDIA
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,compute_cap,memory.total", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        line = out.stdout.strip().splitlines()[0].strip() if out.returncode == 0 and out.stdout.strip() else ""
+        if line:
+            return f"## Target hardware\n- GPU: {line} (NVIDIA). Ground tiling/occupancy/tensor-core choices in this SM/arch."
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def _read_memory_summary(notebook_root: Path | None) -> str | None:
@@ -89,17 +126,82 @@ def inject_skill_bodies(task_body: str, skills: list[str]) -> str:
     return "\n\n---\n\n".join(bodies + [task_body])
 
 
-def compose_task(base_task: str, lineage, direction: dict[str, Any], memory_summary: str | None = None) -> str:
-    """Prefix the AVO contract (+ optional cross-step memory) onto the task body."""
+# Delayed-profiling stage notes (CuTeGen): withhold profiler-driven micro-tuning
+# until the kernel structure is sound, to avoid premature convergence to a poor
+# local optimum.
+_STRUCTURAL_NOTE = (
+    "## Optimization stage: STRUCTURAL (profiling withheld)\n"
+    "Establish a strong overall structure FIRST — tiling / work decomposition, memory-hierarchy use, "
+    "and data movement / pipelining. Do NOT do profiler-driven micro-tuning (e.g. tile-size sweeps) this "
+    "step, and do not lean on profile.json yet. Profiling feedback is introduced in later steps once the "
+    "structure is sound (this avoids premature convergence to a poor local optimum)."
+)
+_PROFILING_NOTE = (
+    "## Optimization stage: PROFILING-GUIDED\n"
+    "The kernel structure is established. You may now use profile.json / the profile_kernel tool for "
+    "targeted low-level tuning (occupancy, tile sizes, bank conflicts, memory fences)."
+)
+
+
+def compose_task(
+    base_task: str,
+    lineage,
+    direction: dict[str, Any],
+    memory_summary: str | None = None,
+    exemplar: str | None = None,
+    profiling_enabled: bool = True,
+    hardware: str | None = None,
+) -> str:
+    """Prefix the AVO contract (+ hardware + stage note + best-exemplar + memory) onto the task body."""
     contract = _AVO_CONTRACT.format(
         best_summary=lineage.summary(last_n=5),
         direction=direction.get("strategy") or "(none assigned — pick the highest-priority pending strategy)",
     )
     parts = [contract]
+    if hardware:
+        parts.append(hardware)
+    parts.append(_PROFILING_NOTE if profiling_enabled else _STRUCTURAL_NOTE)
+    if exemplar:
+        parts.append(exemplar)
     if memory_summary:
         parts.append(f"## Cross-step memory (prior attempts in this run)\n{memory_summary}")
     parts.append(base_task)
     return "\n\n".join(parts)
+
+
+# Max chars of the best-version diff injected as an exemplar (keeps the prompt
+# bounded for long runs — see design doc §15.1).
+_EXEMPLAR_DIFF_MAX = 4000
+
+
+def build_best_exemplar(lineage) -> str | None:
+    """Build a 'current best implementation' exemplar from the lineage (P-B).
+
+    Mirrors Kernel-Smith's practice of injecting the top-performing program +
+    its structured metrics. The worktree is already reset to this version, so
+    this shows the agent *what produced* the current best and its verified
+    speedup, to build on rather than re-derive. Returns ``None`` for the
+    baseline (v0, no patch).
+    """
+    node = getattr(lineage, "best_node", None)
+    if node is None or not getattr(node, "patch", None):
+        return None
+    patch_path = Path(node.patch)
+    if not patch_path.exists():
+        return None
+    try:
+        diff = patch_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    if len(diff) > _EXEMPLAR_DIFF_MAX:
+        diff = diff[:_EXEMPLAR_DIFF_MAX] + "\n... [diff truncated] ...\n"
+    return (
+        f"## Current best implementation ({node.id}, {node.speedup:.4f}x"
+        f"{f' via {node.strategy}' if node.strategy else ''})\n"
+        "You start from this version (already applied in your worktree). It was reached by the diff below; "
+        "build on it — do not re-derive from the baseline.\n"
+        f"```diff\n{diff}\n```"
+    )
 
 
 def run_variation_step(
@@ -115,6 +217,7 @@ def run_variation_step(
     deadline=None,
     nudge: str | None = None,
     notebook_root: Path | None = None,
+    profiling_enabled: bool = True,
 ) -> VariationResult:
     """Build + run one OptimizationAgent and return a structured result."""
     step_dir.mkdir(parents=True, exist_ok=True)
@@ -133,7 +236,16 @@ def run_variation_step(
     worker_dir.mkdir(parents=True, exist_ok=True)
 
     memory_summary = _read_memory_summary(notebook_root)
-    task_body = compose_task(base_task, lineage, direction, memory_summary=memory_summary)
+    exemplar = build_best_exemplar(lineage) if avo_config.get("inject_best_exemplar", True) else None
+    task_body = compose_task(
+        base_task,
+        lineage,
+        direction,
+        memory_summary=memory_summary,
+        exemplar=exemplar,
+        profiling_enabled=profiling_enabled,
+        hardware=hardware_summary(),
+    )
     if nudge:
         task_body += f"\n\n## Supervisor nudge\n{nudge}\n"
     task_body = inject_skill_bodies(task_body, select_skills(lineage.language, base_task))

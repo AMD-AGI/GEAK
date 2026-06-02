@@ -24,9 +24,13 @@ avo:
   variation_step_limit: 200      # OptimizationAgent step_limit per variation step
   variation_cost_limit: 0.0      # 0 = disabled (budget governs the run)
   env_timeout_s: 3600
-  commit_epsilon: 0.001          # min relative speedup to enter the lineage
+  commit_epsilon: 0.001          # tolerance vs current best (don't regress)
+  min_commit_speedup: 1.0        # anti-lazy-opt floor: a commit must EXCEED this vs baseline (reject ~1.0x trivial rewrites)
+  min_per_shape_speedup: 0.0     # per-shape regression guard (B2): 0=off; set e.g. 0.95 to reject commits that regress any shape >5%
   min_commits_before_stop: 5     # budget-remaining runs should not stop empty-handed
   verify_each_step: true         # run FULL_BENCHMARK + per-shape geomean per step (accurate; slower)
+  inject_best_exemplar: true     # inject the current-best diff + metrics into each step's prompt (Kernel-Smith style)
+  profiling_after_step: 3        # delayed profiling (CuTeGen): structural-first for the first N steps, then profiling-guided (set 0 for simple/elementwise kernels to profile early)
 
   stagnation:
     steps_without_commit: 80

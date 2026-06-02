@@ -53,6 +53,9 @@ class VariationResult:
     best_speedup: float | None = None  # verified; None if nothing verified
     best_correct: bool = False
     wall_time_s: float = 0.0
+    # Per-shape verified speedups (B2 regression guard). Empty when single-shape
+    # or unavailable. Maps shape label -> speedup (candidate/baseline).
+    per_shape_speedups: dict[str, float] = field(default_factory=dict)
 
     @property
     def produced_verified_improvement_candidate(self) -> bool:

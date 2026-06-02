@@ -149,12 +149,15 @@ def run_avo(
         output_dir / "avo_state",
         epsilon=float(avo_cfg.get("commit_epsilon", 0.001)),
         language=kernel_language,
+        min_commit_speedup=float(avo_cfg.get("min_commit_speedup", 1.0)),
+        min_per_shape_speedup=float(avo_cfg.get("min_per_shape_speedup", 0.0)),
     )
-    lineage.seed_from_baseline(output_dir)
+    lineage.seed_from_baseline(output_dir, repo=repo)
     detector = StagnationDetector(avo_cfg.get("stagnation", {}))
     strategy_file = output_dir / ".optimization_strategies.md"
     min_commits = int(avo_cfg.get("min_commits_before_stop", 0))
     verify_each_step = bool(avo_cfg.get("verify_each_step", True))
+    profiling_after_step = int(avo_cfg.get("profiling_after_step", 3))
 
     # Context reused by GEAK's evaluate_round_best for verified per-shape geomean
     # scoring (P0) and by the ESCALATE rescue round (P1).
@@ -173,6 +176,11 @@ def run_avo(
             lineage.reset_worktree_to_best(repo)
             lineage.heartbeat(step_index=step_idx)
 
+            # Delayed profiling (CuTeGen): withhold profiler-driven micro-tuning
+            # until structure is sound — i.e. past the step threshold OR once a
+            # real improvement has been committed.
+            profiling_enabled = step_idx > profiling_after_step or len(lineage.committed) > 1
+
             result = run_variation_step(
                 repo=repo,
                 base_task=task,
@@ -185,6 +193,7 @@ def run_avo(
                 deadline=budget.optimization_deadline() if hasattr(budget, "optimization_deadline") else None,
                 nudge=pending_nudge,
                 notebook_root=notebook_root,
+                profiling_enabled=profiling_enabled,
             )
             pending_nudge = None
 
@@ -250,6 +259,28 @@ def _record_to_notebook(notebook_root: Path, step_index: int, result, committed:
             )
     except Exception as exc:  # noqa: BLE001
         logger.debug("notebook record failed (non-fatal): %s", exc)
+
+
+def _read_per_shape_speedups(output_dir: Path, step_index: int) -> dict:
+    """Read per-shape verified speedups from round_{N}_evaluation.json (B2)."""
+    import json as _json
+
+    path = Path(output_dir) / f"round_{step_index}_evaluation.json"
+    if not path.exists():
+        return {}
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    raw = data.get("per_shape_speedups") or {}
+    out: dict[str, float] = {}
+    if isinstance(raw, dict):
+        for shape, val in raw.items():
+            try:
+                out[str(shape)] = float(val)
+            except (TypeError, ValueError):
+                continue
+    return out
 
 
 def _build_verify_ctx(repo: Path, output_dir: Path, gpu_ids: list[int], task: str) -> dict:
@@ -325,6 +356,7 @@ def _apply_verified_score(result, verify_ctx: dict, step_index: int, output_dir:
     result.best_speedup = float(verified)
     result.best_correct = True
     result.best_patch_path = Path(round_eval.best_patch)
+    result.per_shape_speedups = _read_per_shape_speedups(output_dir, step_index)  # B2
     # Record an authoritative attempt so the detector sees the verified outcome.
     result.attempts.append(
         AttemptRecord(

@@ -61,6 +61,26 @@ def test_commit_gate_rejects_incorrect(tmp_path: Path):
     assert store.best_id == "v0"
 
 
+def test_commit_gate_rejects_lazy_no_gain(tmp_path: Path):
+    # A correct, verified, but ~1.0x ("lazy optimization") candidate must NOT
+    # enter the lineage as the first improvement (Kernel-Smith anti-lazy guard).
+    store = LineageStore(tmp_path / "avo_state")
+    store.seed_from_baseline(tmp_path)
+    committed = store.maybe_commit(_make_result(1, 1.0, correct=True, patch_dir=tmp_path))
+    assert committed is False
+    assert store.best_id == "v0"
+
+
+def test_commit_gate_respects_custom_min_speedup(tmp_path: Path):
+    store = LineageStore(tmp_path / "avo_state", min_commit_speedup=1.10)
+    store.seed_from_baseline(tmp_path)
+    # 1.05x is a real gain but below the configured 1.10 floor → rejected.
+    assert store.maybe_commit(_make_result(1, 1.05, correct=True, patch_dir=tmp_path)) is False
+    # 1.20x clears the floor → committed.
+    assert store.maybe_commit(_make_result(2, 1.20, correct=True, patch_dir=tmp_path)) is True
+    assert store.best_speedup == 1.20
+
+
 def test_commit_gate_rejects_unverified(tmp_path: Path):
     store = LineageStore(tmp_path / "avo_state")
     store.seed_from_baseline(tmp_path)
@@ -168,3 +188,38 @@ def test_commit_from_round_no_patch_rejected(tmp_path: Path):
     store.seed_from_baseline(tmp_path)
     assert store.commit_from_round(_RoundEval("", 2.0, 1.8)) is False
     assert store.best_id == "v0"
+
+
+def _make_result_with_shapes(step: int, speedup: float, per_shape: dict, patch_dir: Path):
+    patch = patch_dir / f"p{step}.patch"
+    patch.write_text(f"patch {step}", encoding="utf-8")
+    return VariationResult(
+        step_index=step,
+        step_dir=patch_dir,
+        strategy=f"s{step}",
+        attempts=[AttemptRecord(correctness_passed=True, verified_speedup=speedup)],
+        best_patch_path=patch,
+        best_speedup=speedup,
+        best_correct=True,
+        per_shape_speedups=per_shape,
+    )
+
+
+def test_per_shape_guard_blocks_regressed_shape(tmp_path: Path):
+    store = LineageStore(tmp_path / "avo_state", min_per_shape_speedup=0.95)
+    store.seed_from_baseline(tmp_path)
+    # geomean passes but shapeB regresses below 0.95 → rejected.
+    blocked = _make_result_with_shapes(1, 1.30, {"A": 2.0, "B": 0.85}, tmp_path)
+    assert store.maybe_commit(blocked) is False
+    assert store.best_id == "v0"
+    # all shapes clear the floor → committed.
+    ok = _make_result_with_shapes(2, 1.30, {"A": 1.4, "B": 1.2}, tmp_path)
+    assert store.maybe_commit(ok) is True
+    assert store.best_id == "v1"
+
+
+def test_per_shape_guard_disabled_by_default(tmp_path: Path):
+    store = LineageStore(tmp_path / "avo_state")  # min_per_shape_speedup defaults to 0.0
+    store.seed_from_baseline(tmp_path)
+    weak = _make_result_with_shapes(1, 1.30, {"A": 2.0, "B": 0.5}, tmp_path)
+    assert store.maybe_commit(weak) is True  # guard off → geomean-only behavior

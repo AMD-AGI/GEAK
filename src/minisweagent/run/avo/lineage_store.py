@@ -79,6 +79,17 @@ class LineageStore:
     state_dir: Path
     epsilon: float = 0.001
     language: str = "python"
+    # Anti-"lazy optimization" floor (Kernel-Smith §3.3): a committed version
+    # must EXCEED this verified speedup over the original baseline. Default 1.0
+    # means a candidate must be genuinely faster than the baseline — a trivial
+    # correct-but-no-gain (~1.0x) rewrite is rejected instead of entering the
+    # lineage as the first "improvement".
+    min_commit_speedup: float = 1.0
+    # Per-shape regression guard (B2): reject a commit if ANY shape's verified
+    # speedup falls below this floor, even when the geomean passes. Default 0.0
+    # disables it (preserves single-number behavior); set e.g. 0.95 to forbid
+    # commits that regress any shape by >5%.
+    min_per_shape_speedup: float = 0.0
     committed: list[LineageNode] = field(default_factory=list)
     # Explicit "tip" pointer. When set, ``best_node`` returns this node instead
     # of the global max-speedup node. Used by supervisor backtracking (P2) so a
@@ -163,11 +174,18 @@ class LineageStore:
     # Seeding (v0 baseline)
     # ------------------------------------------------------------------
 
-    def seed_from_baseline(self, output_dir: Path) -> None:
-        """Create ``v0`` from the preprocess baseline if the lineage is empty."""
+    def seed_from_baseline(self, output_dir: Path, repo: Path | None = None) -> None:
+        """Create ``v0`` from the preprocess baseline if the lineage is empty.
+
+        When ``repo`` is a git repo, the current (pristine, post-preprocess) repo
+        state is committed and tagged ``avo-v0`` so the lineage chain has a real
+        base to apply incremental patches onto (A1).
+        """
         if self.committed:
             return
         latency = self._read_baseline_latency(output_dir)
+        if repo is not None:
+            self._tag_baseline(repo)
         node = LineageNode(
             id="v0",
             parent_id=None,
@@ -181,6 +199,23 @@ class LineageStore:
         self.committed.append(node)
         self._save()
         logger.info("LineageStore: seeded v0 baseline (latency_ms=%s)", latency)
+
+    def _tag_baseline(self, repo: Path) -> None:
+        """Commit + tag the current repo state as ``avo-v0`` (the lineage base)."""
+        if not (Path(repo) / ".git").exists():
+            logger.warning("LineageStore: %s is not a git repo; worktree reset/tagging disabled.", repo)
+            return
+        try:
+            subprocess.run(["git", "-C", str(repo), "add", "-A"], check=False, capture_output=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "avo: baseline (v0)", "--allow-empty"],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(["git", "-C", str(repo), "tag", "-f", "avo-v0"], check=False, capture_output=True)
+            logger.info("LineageStore: tagged baseline as avo-v0")
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("LineageStore: baseline tagging failed: %s", exc)
 
     @staticmethod
     def _read_baseline_latency(output_dir: Path) -> float | None:
@@ -242,6 +277,17 @@ class LineageStore:
             return False
 
         candidate_speedup = float(result.best_speedup)  # type: ignore[arg-type]
+
+        # Anti-lazy-optimization floor: must be genuinely faster than baseline.
+        if candidate_speedup <= self.min_commit_speedup:
+            logger.info(
+                "commit gate: step %d speedup %.4fx not above lazy-opt floor %.4fx; not committed.",
+                result.step_index,
+                candidate_speedup,
+                self.min_commit_speedup,
+            )
+            return False
+
         threshold = self.best_speedup * (1.0 - self.epsilon)
         if candidate_speedup < threshold:
             logger.info(
@@ -253,11 +299,25 @@ class LineageStore:
             )
             return False
 
+        # Per-shape regression guard (B2): geomean can hide a regressed shape.
+        if self.min_per_shape_speedup > 0.0 and result.per_shape_speedups:
+            weak = {s: v for s, v in result.per_shape_speedups.items() if v < self.min_per_shape_speedup}
+            if weak:
+                logger.info(
+                    "commit gate: step %d rejected — %d shape(s) below per-shape floor %.3fx: %s",
+                    result.step_index,
+                    len(weak),
+                    self.min_per_shape_speedup,
+                    weak,
+                )
+                return False
+
         version_id = self._next_version_id()
         git_ref = f"avo-{version_id}"
+        parent_ref = self.best_git_ref  # captured BEFORE appending the new node
         stored_patch = self._store_patch(result, version_id)
         if repo is not None and stored_patch is not None:
-            self._tag_git(repo, git_ref)
+            self._materialize_and_tag(repo, parent_ref, stored_patch, git_ref)
 
         node = LineageNode(
             id=version_id,
@@ -316,13 +376,30 @@ class LineageStore:
     # Git helpers (worktree reset + tagging)
     # ------------------------------------------------------------------
 
-    def _tag_git(self, repo: Path, git_ref: str) -> None:
-        """Commit the current worktree state and tag it ``git_ref``.
+    def _materialize_and_tag(self, repo: Path, parent_ref: str | None, patch: Path, git_ref: str) -> None:
+        """Make ``git_ref`` authoritatively equal the *verified* patch (A1).
 
-        Best-effort: a failure here does not invalidate the lineage entry
-        (the ``.patch`` file remains the source of truth).
+        The agent's final worktree may hold a different (or worse) attempt than
+        the verified best. So instead of committing the dirty worktree, we
+        reconstruct the verified state: reset to the parent best, apply the
+        verified incremental patch (the same diff ``evaluate_round_best`` used),
+        then commit + tag. This guarantees ``avo-v{N}`` == the patch that was
+        benchmarked, so the next step's ``reset_worktree_to_best`` starts from
+        the real best.
         """
+        if not (Path(repo) / ".git").exists():
+            return
+        base = parent_ref or "avo-v0"
         try:
+            self._checkout(repo, base)  # clean parent-best worktree
+            applied = self._git_apply(repo, patch)
+            if not applied:
+                logger.warning(
+                    "LineageStore: git apply of %s onto %s failed; committing current worktree as fallback "
+                    "(tag may diverge from verified patch).",
+                    patch.name,
+                    base,
+                )
             subprocess.run(["git", "-C", str(repo), "add", "-A"], check=False, capture_output=True)
             subprocess.run(
                 ["git", "-C", str(repo), "commit", "-m", f"avo: {git_ref}", "--allow-empty"],
@@ -331,7 +408,20 @@ class LineageStore:
             )
             subprocess.run(["git", "-C", str(repo), "tag", "-f", git_ref], check=False, capture_output=True)
         except (OSError, subprocess.SubprocessError) as exc:
-            logger.warning("LineageStore: git tag %s failed: %s", git_ref, exc)
+            logger.warning("LineageStore: materialize/tag %s failed: %s", git_ref, exc)
+
+    @staticmethod
+    def _git_apply(repo: Path, patch: Path) -> bool:
+        """Apply ``patch`` (git-style relative diff). Try --3way, then plain."""
+        for extra in (["--3way"], []):
+            res = subprocess.run(
+                ["git", "-C", str(repo), "apply", *extra, str(patch)],
+                check=False,
+                capture_output=True,
+            )
+            if res.returncode == 0:
+                return True
+        return False
 
     def reset_worktree_to_best(self, repo: Path) -> None:
         """Reset the repo worktree to the current best git ref before a step.
@@ -369,7 +459,11 @@ class LineageStore:
     def _checkout(self, repo: Path, ref: str) -> None:
         try:
             subprocess.run(["git", "-C", str(repo), "checkout", "-f", ref], check=False, capture_output=True)
-            logger.info("LineageStore: worktree reset to %s", ref)
+            # A2: drop untracked junk from a prior aborted step so it can't leak
+            # into the next step's diff. Tracked files (incl. anything captured by
+            # a prior commit's `git add -A`) are preserved by checkout -f.
+            subprocess.run(["git", "-C", str(repo), "clean", "-fd"], check=False, capture_output=True)
+            logger.info("LineageStore: worktree reset to %s (clean)", ref)
         except (OSError, subprocess.SubprocessError) as exc:
             logger.warning("LineageStore: worktree reset to %s failed: %s", ref, exc)
 
