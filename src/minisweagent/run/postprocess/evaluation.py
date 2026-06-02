@@ -94,6 +94,29 @@ def _stderr_indicates_broken_contract(stderr: str) -> str | None:
     return None
 
 
+# Stderr signatures of transient/environmental GPU failures that are unrelated
+# to the kernel or the COMMANDMENT contract — typically a momentary ROCm hiccup
+# under heavy worker oversubscription. These should NOT abort the whole task.
+_TRANSIENT_GPU_PATTERNS: tuple[str, ...] = (
+    "No HIP GPUs are available",
+    "No CUDA GPUs are available",
+    "HIP error",
+    "hipErrorNoDevice",
+    "CUDA error: out of memory",
+    "HSA_STATUS_ERROR",
+)
+
+
+def _stderr_indicates_transient_gpu_error(stderr: str) -> str | None:
+    """Return the first transient-GPU signature found in *stderr*, or None."""
+    if not stderr:
+        return None
+    for pattern in _TRANSIENT_GPU_PATTERNS:
+        if pattern in stderr:
+            return pattern
+    return None
+
+
 def _format_stderr_tail(stderr: str, *, max_lines: int = 20) -> str:
     """Return the last *max_lines* of *stderr*, joined for log inclusion."""
     if not stderr:
@@ -145,6 +168,11 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
         )
         logger.warning("Initialised temporary git repo in non-git eval worktree: %s", eval_dir)
 
+    # The COMMANDMENT references the sanitized harness via ``${GEAK_WORK_DIR}_logs/...``
+    # which at eval time resolves to ``<eval_dir>_logs``; mirror the original _logs
+    # dir there so those references resolve. Cleaned up by cleanup_eval_worktree.
+    mirror_sanitized_logs(output_dir, eval_dir)
+
     git_env = get_git_safe_env(output_dir)
     patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     # errors="replace" is the Unicode error handling mode for str.decode()
@@ -183,8 +211,31 @@ def setup_eval_worktree(repo_root: str, patch_file: str, output_dir: Path) -> Pa
     return eval_dir
 
 
+def mirror_sanitized_logs(output_dir: Path, worktree_dir: Path) -> Path | None:
+    """Mirror the original ``_logs`` dir next to a temporary worktree.
+
+    The COMMANDMENT references the sanitized harness via
+    ``${GEAK_WORK_DIR}_logs/_geak_sanitized_test_kernel_harness.sh`` (the
+    original repo_root is rewritten to ``${GEAK_WORK_DIR}`` in
+    preprocess_v3/tools.py). At runtime ``GEAK_WORK_DIR`` is the worktree, so
+    those references resolve to a ``<worktree>_logs`` sibling. Per-agent
+    worktrees get that sibling automatically; the bare worktrees created for
+    preflight / round-eval do not — so copy ``output_dir`` (the original
+    ``<repo_root>_logs`` dir) to ``<worktree>_logs``.
+
+    Returns the mirrored path (for later cleanup), or ``None`` on failure.
+    """
+    logs_dir = Path(str(worktree_dir) + "_logs")
+    try:
+        shutil.copytree(output_dir, logs_dir, dirs_exist_ok=True)
+        return logs_dir
+    except (OSError, shutil.Error) as exc:
+        logger.warning("mirror_sanitized_logs: could not mirror %s -> %s: %s", output_dir, logs_dir, exc)
+        return None
+
+
 def cleanup_eval_worktree(repo_root: str, eval_dir: Path) -> None:
-    """Remove the temporary evaluation worktree."""
+    """Remove the temporary evaluation worktree (and its mirrored _logs)."""
     repo = Path(repo_root).resolve()
     is_git = (repo / ".git").exists() or (repo / ".git").is_file()
     if is_git:
@@ -198,6 +249,10 @@ def cleanup_eval_worktree(repo_root: str, eval_dir: Path) -> None:
         )
     if eval_dir.exists():
         shutil.rmtree(eval_dir, ignore_errors=True)
+    # Remove the mirrored ``<worktree>_logs`` sibling if present.
+    logs_sibling = Path(str(eval_dir) + "_logs")
+    if logs_sibling.exists():
+        shutil.rmtree(logs_sibling, ignore_errors=True)
 
 
 def build_eval_env(
@@ -365,26 +420,11 @@ def preflight_commandment_contract(
 
         preflight_dir = (Path(output_dir) / "_preflight_worktree").resolve()
         create_worktree(repo_root_path, preflight_dir)
-
-        # The COMMANDMENT references the sanitized harness via
-        # ``${GEAK_WORK_DIR}_logs/...`` (repo_root rewritten to GEAK_WORK_DIR
-        # in tools.py). Per-agent worktrees get a matching ``<worktree>_logs``
-        # sibling, but the bare worktree created here does not — so mirror the
-        # sanitized scripts into ``<preflight_dir>_logs`` so those references
-        # resolve. ``output_dir`` is the original ``<repo_root>_logs`` dir.
-        preflight_logs_dir = Path(str(preflight_dir) + "_logs")
-        try:
-            shutil.copytree(output_dir, preflight_logs_dir, dirs_exist_ok=True)
-        except (OSError, shutil.Error) as exc:
-            logger.warning(
-                "preflight_commandment_contract: could not mirror %s -> %s: %s",
-                output_dir,
-                preflight_logs_dir,
-                exc,
-            )
+        # Mirror the original _logs dir so ``${GEAK_WORK_DIR}_logs/...`` references
+        # in the COMMANDMENT resolve inside the worktree (see mirror_sanitized_logs).
+        mirror_sanitized_logs(output_dir, preflight_dir)
     else:
         preflight_dir = repo_root_path
-        preflight_logs_dir = None
 
     try:
         env = build_eval_env(preflight_dir, str(repo_root_path), harness_path, gpu_ids)
@@ -434,6 +474,22 @@ def preflight_commandment_contract(
                 time.sleep(5)
 
         stderr_tail = _format_stderr_tail(last_result.stderr)
+
+        # A transient/environmental GPU error (e.g. a momentary "No HIP GPUs"
+        # under heavy worker oversubscription) is not a contract break. The
+        # preflight is only an upfront smoke test, so skip it rather than abort
+        # the whole task — the per-round eval will still catch real failures.
+        transient = _stderr_indicates_transient_gpu_error(last_result.stderr)
+        if transient is not None:
+            logger.warning(
+                "preflight_commandment_contract: skipped after %d attempts due to transient "
+                "GPU error %r (not a contract break); proceeding to optimization:\n%s",
+                max_attempts,
+                transient,
+                stderr_tail,
+            )
+            return
+
         broken = _stderr_indicates_broken_contract(last_result.stderr)
         detail = (
             f"contract-broken signature {broken!r}; stderr tail:\n{stderr_tail}"
@@ -450,8 +506,6 @@ def preflight_commandment_contract(
     finally:
         if preflight_dir != repo_root_path:
             cleanup_eval_worktree(repo_root, preflight_dir)
-            if preflight_logs_dir is not None:
-                shutil.rmtree(preflight_logs_dir, ignore_errors=True)
 
 
 def recapture_commandment_baseline(
