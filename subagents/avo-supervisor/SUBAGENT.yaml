@@ -1,0 +1,44 @@
+name: avo-supervisor
+description: >-
+  Use to re-plan an AVO continuous-evolution run that has stalled. Reads the
+  committed lineage, recent failed attempts, strategy-manager state, and the
+  profiler bottleneck, then outputs a JSON directive (diagnosis, strategies to
+  mark failed, new strategies to try, optional backtrack target). Read-only:
+  it proposes optimization directions and never edits kernels or runs the GPU.
+
+execution_mode: inprocess
+
+parameters:
+  - name: bundle
+    type: string
+    description: >-
+      Stagnation bundle JSON containing lineage summary, recent attempts,
+      strategy state, and profile bottleneck.
+    required: true
+
+agent:
+  system_template_file: SYSTEM_PROMPT.md
+  instance_template: |
+    Stagnation bundle:
+    {{bundle}}
+
+    Return ONLY the JSON directive described in your instructions.
+  step_limit: 12
+  cost_limit: 0.0
+
+model:
+  model_class: amd_llm
+  model_name: claude-opus-4.6
+  api_key: null
+  model_kwargs:
+    temperature: 0.0
+    max_tokens: 8000
+
+env:
+  env:
+    PAGER: cat
+  timeout: 600
+
+tools:
+  profiling: false
+  rag: true

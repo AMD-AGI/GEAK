@@ -1,0 +1,41 @@
+# AVO configuration. Deep-merged OVER geak.yaml by the geak-avo controller
+# (model / env / tools / run.budgets defaults come from geak.yaml; this file
+# only adds AVO-specific knobs and a longer "full" wall-clock cap).
+#
+# See docs/developer/avo_design.md §10.
+
+run:
+  mode: full
+  budgets:
+    full:
+      total_s: 604800            # 7 days — AVO is a long-horizon run
+      preprocess_soft_cap_s: 1800
+      preprocess_hard_cap_fraction: 0.1
+      finalize_grace_s: 600
+      kill_buffer_s: 360
+    quick:
+      total_s: 3600              # 1 hour — smoke / debugging
+      preprocess_soft_cap_s: 900
+      preprocess_hard_cap_fraction: 0.5
+      finalize_grace_s: 300
+      kill_buffer_s: 360
+
+avo:
+  variation_step_limit: 200      # OptimizationAgent step_limit per variation step
+  variation_cost_limit: 0.0      # 0 = disabled (budget governs the run)
+  env_timeout_s: 3600
+  commit_epsilon: 0.001          # min relative speedup to enter the lineage
+  min_commits_before_stop: 5     # budget-remaining runs should not stop empty-handed
+
+  stagnation:
+    steps_without_commit: 80
+    wall_time_without_commit_s: 2700      # 45 min
+    consecutive_correctness_failures: 5
+    consecutive_no_improvement: 8
+    patch_hash_repeat: 3
+    supervisor_cycles_without_commit: 3
+
+  escalate:
+    enabled: true
+    rescue_mode: planned
+    rescue_workers: 4
