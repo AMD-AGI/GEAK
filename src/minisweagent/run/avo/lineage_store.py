@@ -80,6 +80,10 @@ class LineageStore:
     epsilon: float = 0.001
     language: str = "python"
     committed: list[LineageNode] = field(default_factory=list)
+    # Explicit "tip" pointer. When set, ``best_node`` returns this node instead
+    # of the global max-speedup node. Used by supervisor backtracking (P2) so a
+    # run can resume exploration from an earlier committed version.
+    active_best_id: str | None = None
 
     def __post_init__(self) -> None:
         self.state_dir = Path(self.state_dir)
@@ -101,13 +105,18 @@ class LineageStore:
         try:
             data = json.loads(self.lineage_path.read_text(encoding="utf-8"))
             self.committed = [LineageNode.from_dict(d) for d in data.get("committed", [])]
+            self.active_best_id = data.get("active_best_id")
             logger.info("LineageStore: resumed %d committed versions from %s", len(self.committed), self.lineage_path)
         except (json.JSONDecodeError, OSError, KeyError) as exc:
             logger.warning("LineageStore: failed to load %s (%s); starting empty.", self.lineage_path, exc)
             self.committed = []
 
     def _save(self) -> None:
-        payload = {"best_id": self.best_id, "committed": [n.to_dict() for n in self.committed]}
+        payload = {
+            "best_id": self.best_id,
+            "active_best_id": self.active_best_id,
+            "committed": [n.to_dict() for n in self.committed],
+        }
         self.lineage_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
     # ------------------------------------------------------------------
@@ -118,6 +127,10 @@ class LineageStore:
     def best_node(self) -> LineageNode | None:
         if not self.committed:
             return None
+        if self.active_best_id:
+            for node in self.committed:
+                if node.id == self.active_best_id:
+                    return node
         return max(self.committed, key=lambda n: n.speedup)
 
     @property
@@ -257,9 +270,36 @@ class LineageStore:
             committed_at=_now_iso(),
         )
         self.committed.append(node)
+        self.active_best_id = version_id  # advance the tip to the new commit
         self._save()
         logger.info("commit gate: committed %s (%.4fx) from step %d.", version_id, candidate_speedup, result.step_index)
         return True
+
+    def commit_from_round(self, round_eval: Any, repo: Path | None = None) -> bool:
+        """Fold a GEAK ``RoundEvaluation`` (e.g. from an ESCALATE rescue) into the lineage.
+
+        Reuses :meth:`maybe_commit` so the same commit gate applies. Prefers the
+        independently-verified FULL_BENCHMARK geomean speedup over the
+        agent-reported one.
+        """
+        if round_eval is None:
+            return False
+        fb = getattr(round_eval, "full_benchmark", None)
+        verified = fb.verified_speedup if fb is not None and getattr(fb, "verified_speedup", None) is not None else None
+        if verified is None:
+            verified = getattr(round_eval, "benchmark_speedup", None)
+        patch = getattr(round_eval, "best_patch", "") or ""
+        if not patch or verified is None:
+            return False
+        synthetic = VariationResult(
+            step_index=-1,
+            step_dir=Path(patch).parent,
+            strategy="escalate",
+            best_patch_path=Path(patch),
+            best_speedup=float(verified),
+            best_correct=True,
+        )
+        return self.maybe_commit(synthetic, repo=repo)
 
     def _store_patch(self, result: VariationResult, version_id: str) -> Path | None:
         if result.best_patch_path is None or not Path(result.best_patch_path).exists():
@@ -301,6 +341,32 @@ class LineageStore:
         ref = self.best_git_ref
         if ref is None or ref == "avo-v0":
             return
+        self._checkout(repo, ref)
+
+    def set_best_pointer(self, version_id: str) -> bool:
+        """Backtrack: move the active-best tip to an earlier committed version.
+
+        Returns False if ``version_id`` is not a committed node. Subsequent
+        commits gate against (and branch from) this node — single-lineage
+        semantics, no archive/tree.
+        """
+        if any(n.id == version_id for n in self.committed):
+            self.active_best_id = version_id
+            self._save()
+            logger.info("LineageStore: best pointer backtracked to %s", version_id)
+            return True
+        logger.warning("LineageStore: backtrack target %s not found; ignored.", version_id)
+        return False
+
+    def reset_worktree_to(self, repo: Path, version_id: str) -> None:
+        """Checkout the worktree to a specific committed version's git ref."""
+        node = next((n for n in self.committed if n.id == version_id), None)
+        if node is None or not node.git_ref:
+            logger.warning("LineageStore: cannot reset worktree to %s (unknown or untagged).", version_id)
+            return
+        self._checkout(repo, node.git_ref)
+
+    def _checkout(self, repo: Path, ref: str) -> None:
         try:
             subprocess.run(["git", "-C", str(repo), "checkout", "-f", ref], check=False, capture_output=True)
             logger.info("LineageStore: worktree reset to %s", ref)

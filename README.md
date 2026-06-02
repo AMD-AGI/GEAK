@@ -256,6 +256,7 @@ GEAK uses **skills** (domain knowledge bases) and **subagents** (delegated speci
 | `flydsl` | Writing, optimizing, and debugging `@flyc.kernel` FlyDSL kernels |
 | `pytorch2flydsl-translation` | Translating PyTorch GPU kernels to FlyDSL |
 | `fp8-gemm-tuning-sglang-aiter` | FP8 GEMM tuning for SGLang + AITer workloads |
+| `avo-evolution` | AVO continuous-evolution variation steps (lineage, commit gate, self-pivot) |
 
 **Subagents** (`subagents/`):
 
@@ -268,6 +269,12 @@ GEAK uses **skills** (domain knowledge bases) and **subagents** (delegated speci
 | `speedup-verify` | Parses benchmark logs and computes speedup |
 | `reverse-knowledge` | Extracts optimization insights from git history |
 | `pytorch-to-flydsl` | PyTorch → FlyDSL kernel translation |
+| `avo-supervisor` | Re-plans a stalled AVO evolution run (read-only direction planner) |
+
+> **AVO (Agentic Variation Operators):** for long-horizon, single-lineage
+> continuous kernel evolution, GEAK ships the `geak-avo` CLI. See the
+> [AVO usage README](src/minisweagent/run/avo/README.md) and the
+> [design doc](docs/developer/avo_design.md).
 
 ---
 

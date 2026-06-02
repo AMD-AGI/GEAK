@@ -47,6 +47,24 @@ def select_skills(kernel_language: str, task: str) -> list[str]:
     return skills
 
 
+def _read_memory_summary(notebook_root: Path | None) -> str | None:
+    """Compact summary of prior attempts in this run (cross-step memory, P-mem-2).
+
+    Reuses GEAK's ``WorkingNotebook.summarize_dir``; returns ``None`` on the first
+    step (no events yet) so the prompt is unchanged when there is no memory.
+    """
+    if notebook_root is None:
+        return None
+    try:
+        from minisweagent.memory.working_notebook import WorkingNotebook
+
+        summary = WorkingNotebook.summarize_dir(notebook_root)
+        return summary or None
+    except Exception as exc:  # noqa: BLE001 — memory is best-effort, never fatal
+        logger.debug("variation step: memory summary unavailable: %s", exc)
+        return None
+
+
 def inject_skill_bodies(task_body: str, skills: list[str]) -> str:
     """Force-inject SKILL.md bodies via the existing SkillRuntime discovery.
 
@@ -71,13 +89,17 @@ def inject_skill_bodies(task_body: str, skills: list[str]) -> str:
     return "\n\n---\n\n".join(bodies + [task_body])
 
 
-def compose_task(base_task: str, lineage, direction: dict[str, Any]) -> str:
-    """Prefix the AVO contract onto the base task body."""
+def compose_task(base_task: str, lineage, direction: dict[str, Any], memory_summary: str | None = None) -> str:
+    """Prefix the AVO contract (+ optional cross-step memory) onto the task body."""
     contract = _AVO_CONTRACT.format(
         best_summary=lineage.summary(last_n=5),
         direction=direction.get("strategy") or "(none assigned — pick the highest-priority pending strategy)",
     )
-    return f"{contract}\n\n{base_task}"
+    parts = [contract]
+    if memory_summary:
+        parts.append(f"## Cross-step memory (prior attempts in this run)\n{memory_summary}")
+    parts.append(base_task)
+    return "\n\n".join(parts)
 
 
 def run_variation_step(
@@ -92,26 +114,43 @@ def run_variation_step(
     model_factory,
     deadline=None,
     nudge: str | None = None,
+    notebook_root: Path | None = None,
 ) -> VariationResult:
     """Build + run one OptimizationAgent and return a structured result."""
     step_dir.mkdir(parents=True, exist_ok=True)
     step_index = _step_index_from_dir(step_dir)
     t0 = time.monotonic()
 
-    task_body = compose_task(base_task, lineage, direction)
+    # Patches + best_results.json land in GEAK's canonical results/round_N/<worker>/
+    # layout so the controller can reuse ``evaluate_round_best`` for verified,
+    # per-shape-geomean scoring (P0). Logs/strategies stay under ``step_dir``.
+    # ESCALATE rescue workers pass an explicit worker dir via ``_escalate_patch_dir``.
+    escalate_dir = avo_config.get("_escalate_patch_dir")
+    if escalate_dir:
+        worker_dir = Path(escalate_dir)
+    else:
+        worker_dir = output_dir / "results" / f"round_{step_index}" / "avo-worker"
+    worker_dir.mkdir(parents=True, exist_ok=True)
+
+    memory_summary = _read_memory_summary(notebook_root)
+    task_body = compose_task(base_task, lineage, direction, memory_summary=memory_summary)
     if nudge:
         task_body += f"\n\n## Supervisor nudge\n{nudge}\n"
     task_body = inject_skill_bodies(task_body, select_skills(lineage.language, base_task))
 
     exit_status = "NotRun"
     try:
-        agent = _build_agent(repo, step_dir, output_dir, avo_config, model_factory)
+        agent = _build_agent(repo, step_dir, worker_dir, output_dir, avo_config, model_factory)
         exit_status, _msg = agent.run(task_body)
     except Exception as exc:  # noqa: BLE001 — a failed step must not kill the loop
         logger.exception("variation step %d crashed: %s", step_index, exc)
         exit_status = type(exc).__name__
 
-    result = _collect_result(step_dir, step_index, direction.get("strategy"))
+    # Light parse of the worker dir for cycle/patch-hash signal. The controller
+    # may overwrite best_speedup/best_correct with the independently-verified
+    # FULL_BENCHMARK geomean (see controller._apply_verified_score).
+    result = _collect_result(worker_dir, step_index, direction.get("strategy"))
+    result.step_dir = step_dir
     result.exit_status = exit_status
     result.wall_time_s = time.monotonic() - t0
     logger.info(
@@ -129,7 +168,7 @@ def run_variation_step(
 # ---------------------------------------------------------------------------
 
 
-def _build_agent(repo: Path, step_dir: Path, output_dir: Path, avo_config: dict, model_factory):
+def _build_agent(repo: Path, step_dir: Path, worker_dir: Path, output_dir: Path, avo_config: dict, model_factory):
     from minisweagent.agents.optimization_agent import OptimizationAgent
     from minisweagent.environments import get_environment_class
 
@@ -150,7 +189,13 @@ def _build_agent(repo: Path, step_dir: Path, output_dir: Path, avo_config: dict,
         "use_strategy_manager": True,
         "use_skills": True,
         "tool_profile": "full",
-        "patch_output_dir": str(step_dir),
+        "patch_output_dir": str(worker_dir),
+        # P-mem-1: pin the strategy file to a single run-wide location so the
+        # "tried / failed" strategy memory persists across variation steps and is
+        # shared with the supervisor. An absolute path makes OptimizationAgent's
+        # _get_strategy_file ignore the per-step patch_output_dir. Kept outside the
+        # repo worktree so it never leaks into kernel patches.
+        "strategy_file_path": str((output_dir / ".optimization_strategies.md").resolve()),
     }
 
     test_command = _derive_test_command(output_dir)

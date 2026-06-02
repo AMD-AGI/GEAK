@@ -98,3 +98,73 @@ def test_direction_round_trip(tmp_path: Path):
     assert d["strategy"] == "vectorized_load"
     assert d["assigned_by"] == "supervisor"
     assert d["supervisor_cycle"] == 2
+
+
+def test_active_pointer_advances_on_commit(tmp_path: Path):
+    store = LineageStore(tmp_path / "avo_state")
+    store.seed_from_baseline(tmp_path)
+    store.maybe_commit(_make_result(1, 1.20, correct=True, patch_dir=tmp_path))
+    store.maybe_commit(_make_result(2, 1.50, correct=True, patch_dir=tmp_path))
+    assert store.active_best_id == "v2"
+    assert store.best_speedup == 1.50
+
+
+def test_backtrack_pointer(tmp_path: Path):
+    state_dir = tmp_path / "avo_state"
+    store = LineageStore(state_dir)
+    store.seed_from_baseline(tmp_path)
+    store.maybe_commit(_make_result(1, 1.20, correct=True, patch_dir=tmp_path))
+    store.maybe_commit(_make_result(2, 1.50, correct=True, patch_dir=tmp_path))
+
+    assert store.set_best_pointer("v1") is True
+    assert store.best_id == "v1"
+    assert store.best_speedup == 1.20
+
+    # persists across reload
+    reloaded = LineageStore(state_dir)
+    assert reloaded.active_best_id == "v1"
+    assert reloaded.best_id == "v1"
+
+    # unknown target is rejected
+    assert store.set_best_pointer("v404") is False
+
+
+def test_backtrack_then_commit_branches_from_pointer(tmp_path: Path):
+    store = LineageStore(tmp_path / "avo_state")
+    store.seed_from_baseline(tmp_path)
+    store.maybe_commit(_make_result(1, 1.20, correct=True, patch_dir=tmp_path))
+    store.maybe_commit(_make_result(2, 1.50, correct=True, patch_dir=tmp_path))
+    store.set_best_pointer("v1")  # back to 1.20
+
+    # 1.30 beats the backtracked tip (1.20) so it commits, and the tip advances.
+    assert store.maybe_commit(_make_result(3, 1.30, correct=True, patch_dir=tmp_path)) is True
+    assert store.active_best_id == store.best_id
+    assert store.best_speedup == 1.30
+
+
+class _FB:
+    def __init__(self, v):
+        self.verified_speedup = v
+
+
+class _RoundEval:
+    def __init__(self, patch, verified, bench):
+        self.best_patch = patch
+        self.full_benchmark = _FB(verified)
+        self.benchmark_speedup = bench
+
+
+def test_commit_from_round_prefers_verified(tmp_path: Path):
+    store = LineageStore(tmp_path / "avo_state")
+    store.seed_from_baseline(tmp_path)
+    patch = tmp_path / "rescue.patch"
+    patch.write_text("rescue", encoding="utf-8")
+    assert store.commit_from_round(_RoundEval(str(patch), 2.0, 1.8)) is True
+    assert store.best_speedup == 2.0
+
+
+def test_commit_from_round_no_patch_rejected(tmp_path: Path):
+    store = LineageStore(tmp_path / "avo_state")
+    store.seed_from_baseline(tmp_path)
+    assert store.commit_from_round(_RoundEval("", 2.0, 1.8)) is False
+    assert store.best_id == "v0"

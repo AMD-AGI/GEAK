@@ -26,6 +26,7 @@ avo:
   env_timeout_s: 3600
   commit_epsilon: 0.001          # min relative speedup to enter the lineage
   min_commits_before_stop: 5     # budget-remaining runs should not stop empty-handed
+  verify_each_step: true         # run FULL_BENCHMARK + per-shape geomean per step (accurate; slower)
 
   stagnation:
     steps_without_commit: 80

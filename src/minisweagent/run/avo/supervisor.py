@@ -56,7 +56,10 @@ def build_bundle(signal: StagnationSignal, lineage: LineageStore, step_dir: Path
         "current_direction": lineage.current_direction(),
         "best_speedup": lineage.best_speedup,
         "recent_attempts": _recent_attempts(lineage, limit=10),
-        "strategy_state": _read_strategy_state(step_dir),
+        # P-mem-1: read the run-wide strategy file (same path the variation agents
+        # write to), not a per-step dir, so the supervisor sees the real
+        # tried/failed history.
+        "strategy_state": _read_strategy_state(output_dir),
         "profile_bottleneck": _read_profile_bottleneck(output_dir),
     }
     return json.dumps(bundle, indent=2, default=str)
@@ -72,7 +75,14 @@ def run_supervisor(bundle: str, avo_config: dict, *, model: Any = None) -> dict:
     return _fallback_directive(bundle)
 
 
-def apply_directive(directive: dict, lineage: LineageStore, strategy_file: Path, *, supervisor_cycle: int) -> None:
+def apply_directive(
+    directive: dict,
+    lineage: LineageStore,
+    strategy_file: Path,
+    *,
+    supervisor_cycle: int,
+    repo: Path | None = None,
+) -> None:
     """Execute a supervisor directive against GEAK's strategy_manager + lineage."""
     from minisweagent.tools.strategy_manager import StrategyManager
 
@@ -108,9 +118,12 @@ def apply_directive(directive: dict, lineage: LineageStore, strategy_file: Path,
         next_strategy = str(new_strategies[0].get("name", ""))
     lineage.set_direction(next_strategy, assigned_by="supervisor", supervisor_cycle=supervisor_cycle)
 
-    # Optional backtrack to an earlier lineage node.
+    # Optional backtrack to an earlier lineage node (P2): move the active-best
+    # pointer and, if we have the repo, reset the worktree to that version.
     if backtrack_to:
         logger.info("supervisor: directive requests backtrack to %s", backtrack_to)
+        if lineage.set_best_pointer(str(backtrack_to)) and repo is not None:
+            lineage.reset_worktree_to(repo, str(backtrack_to))
 
     _log_supervisor(lineage, directive, supervisor_cycle)
 
@@ -214,8 +227,8 @@ def _recent_attempts(lineage: LineageStore, limit: int) -> list[dict]:
     return rows
 
 
-def _read_strategy_state(step_dir: Path) -> dict:
-    strat_file = step_dir / ".optimization_strategies.md"
+def _read_strategy_state(base_dir: Path) -> dict:
+    strat_file = base_dir / ".optimization_strategies.md"
     if not strat_file.exists():
         return {"successful": [], "failed": [], "pending": []}
     try:

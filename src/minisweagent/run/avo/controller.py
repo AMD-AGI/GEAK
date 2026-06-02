@@ -126,10 +126,12 @@ def run_avo(
     budget: RunBudget,
     model_name: str | None,
     kernel_language: str = "python",
+    gpu_ids: list[int] | None = None,
 ) -> dict:
     """Run one single-lineage AVO evolution; return the final report dict."""
     avo_cfg = dict(config.get("avo") or {})
     model_cfg = config.get("model", {})
+    gpu_ids = gpu_ids or [0]
 
     def model_factory():
         return get_model(model_name, model_cfg)
@@ -152,6 +154,15 @@ def run_avo(
     detector = StagnationDetector(avo_cfg.get("stagnation", {}))
     strategy_file = output_dir / ".optimization_strategies.md"
     min_commits = int(avo_cfg.get("min_commits_before_stop", 0))
+    verify_each_step = bool(avo_cfg.get("verify_each_step", True))
+
+    # Context reused by GEAK's evaluate_round_best for verified per-shape geomean
+    # scoring (P0) and by the ESCALATE rescue round (P1).
+    verify_ctx = _build_verify_ctx(repo, output_dir, gpu_ids, task)
+
+    # Run-wide working notebook for cross-step memory (P-mem-2). One notebook for
+    # the whole run; each step injects its summary and records its outcome.
+    notebook_root = output_dir / "avo_state" / "notebook"
 
     step_idx = 0
     pending_nudge: str | None = None
@@ -173,11 +184,15 @@ def run_avo(
                 model_factory=model_factory,
                 deadline=budget.optimization_deadline() if hasattr(budget, "optimization_deadline") else None,
                 nudge=pending_nudge,
+                notebook_root=notebook_root,
             )
             pending_nudge = None
 
             lineage.record_attempts(result)
+            if verify_each_step:
+                _apply_verified_score(result, verify_ctx, step_idx, output_dir)
             committed = lineage.maybe_commit(result, repo=repo)
+            _record_to_notebook(notebook_root, step_idx, result, committed)
 
             signal = detector.evaluate(result, committed)
             console.print(
@@ -188,9 +203,9 @@ def run_avo(
             if signal.level == StagnationLevel.NUDGE:
                 pending_nudge = f"Progress is stalling ({signal.reason}). Try a different angle or mark the current strategy failed."
             elif signal.level == StagnationLevel.REDIRECT:
-                _do_redirect(signal, lineage, step_dir, output_dir, strategy_file, detector, model_factory)
+                _do_redirect(signal, lineage, step_dir, output_dir, strategy_file, detector, model_factory, repo)
             elif signal.level == StagnationLevel.ESCALATE:
-                _do_escalate(lineage, output_dir, config, model_factory, budget)
+                _do_escalate(lineage, output_dir, config, model_factory, verify_ctx, repo, base_task=task)
                 detector.reset(partial=False)
 
         # Budget exhausted; honour min-commits as a best-effort note.
@@ -206,8 +221,126 @@ def run_avo(
     return _finalize(output_dir, lineage)
 
 
-def _do_redirect(signal, lineage, step_dir, output_dir, strategy_file, detector, model_factory) -> None:
-    """Invoke the LLM supervisor, apply its directive, reset stall counters."""
+def _record_to_notebook(notebook_root: Path, step_index: int, result, committed: bool) -> None:
+    """Append this step's outcome to the run-wide working notebook (P-mem-2).
+
+    Best-effort: notebook I/O must never interrupt the evolution loop.
+    """
+    try:
+        from minisweagent.memory.working_notebook import WorkingNotebook
+
+        nb = WorkingNotebook(notebook_root, writer_id="avo")
+        nb.record_attempt(strategy=result.strategy, change_category=None, step=step_index)
+        nb.record_round_evaluation(
+            round_num=step_index,
+            best_task=result.strategy,
+            verified_speedup=result.best_speedup,
+            baseline_ms=None,
+            candidate_ms=None,
+            per_shape_speedups=None,
+        )
+        if not committed and not result.best_correct:
+            nb.append_event(
+                "result",
+                strategy=result.strategy,
+                tag="FAIL",
+                message=f"step {step_index}: no committable candidate ({result.exit_status})",
+                step=step_index,
+                returncode=1,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("notebook record failed (non-fatal): %s", exc)
+
+
+def _build_verify_ctx(repo: Path, output_dir: Path, gpu_ids: list[int], task: str) -> dict:
+    """Build the ctx dict consumed by GEAK's ``evaluate_round_best``."""
+    return {
+        "output_dir": str(output_dir),
+        "preprocess_dir": str(output_dir),
+        "repo_root": str(repo),
+        "harness_path": _discover_harness_path(output_dir),
+        "gpu_ids": list(gpu_ids),
+        "num_parallel": 1,
+        "metric": None,
+        "starting_patch": "",
+        "_best_global_speedup": 0,
+        "user_instructions": task,
+    }
+
+
+def _discover_harness_path(output_dir: Path) -> str:
+    """Best-effort harness path from preprocess artifacts (PROFILE-only; non-fatal)."""
+    import json as _json
+
+    for name in ("testcase_selection.json", "preprocess_context.json"):
+        path = output_dir / name
+        if not path.exists():
+            continue
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+            hp = data.get("harness_path") if isinstance(data, dict) else None
+            if hp:
+                return str(hp)
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
+def _apply_verified_score(result, verify_ctx: dict, step_index: int, output_dir: Path) -> None:
+    """Overwrite the step's best score with GEAK's verified per-shape geomean.
+
+    Reuses ``evaluate_round_best`` over ``results/round_{step}/`` — it applies the
+    best patch in a temp worktree, runs FULL_BENCHMARK + PROFILE, and computes a
+    per-shape geomean speedup (the same machinery GEAK's round loop trusts). This
+    closes gaps #1 (geomean) and #4 (independent verification) at once.
+    """
+    from minisweagent.run.avo.result import AttemptRecord
+    from minisweagent.run.postprocess.evaluation import evaluate_round_best
+
+    results_dir = output_dir / "results" / f"round_{step_index}"
+    try:
+        ctx = dict(verify_ctx)
+        round_eval = evaluate_round_best(ctx, step_index, results_dir)
+    except Exception as exc:  # noqa: BLE001 — verification failure must not kill the loop
+        logger.warning("verify step %d: evaluate_round_best failed (%s); keeping light score.", step_index, exc)
+        return
+
+    if round_eval is None or not getattr(round_eval, "best_patch", ""):
+        result.best_speedup = None
+        result.best_correct = False
+        result.best_patch_path = None
+        return
+
+    fb = getattr(round_eval, "full_benchmark", None)
+    verified = fb.verified_speedup if fb is not None and getattr(fb, "verified_speedup", None) is not None else None
+    if verified is None:
+        verified = getattr(round_eval, "benchmark_speedup", None)
+
+    if verified is None:
+        result.best_speedup = None
+        result.best_correct = False
+        result.best_patch_path = None
+        return
+
+    result.best_speedup = float(verified)
+    result.best_correct = True
+    result.best_patch_path = Path(round_eval.best_patch)
+    # Record an authoritative attempt so the detector sees the verified outcome.
+    result.attempts.append(
+        AttemptRecord(
+            strategy=result.strategy,
+            returncode=0,
+            correctness_passed=True,
+            verified_speedup=float(verified),
+            patch_hash=None,
+            ts=time.time(),
+        )
+    )
+    logger.info("verify step %d: verified geomean speedup = %.4fx", step_index, verified)
+
+
+def _do_redirect(signal, lineage, step_dir, output_dir, strategy_file, detector, model_factory, repo) -> None:
+    """Invoke the LLM supervisor, apply its directive (incl. backtrack), reset counters."""
     detector.note_supervisor_cycle()
     cycle = detector.supervisor_cycles_without_commit
     console.print(f"[yellow]AVO supervisor[/yellow] (cycle {cycle}): {signal.reason}")
@@ -218,27 +351,83 @@ def _do_redirect(signal, lineage, step_dir, output_dir, strategy_file, detector,
     except Exception as exc:  # noqa: BLE001
         logger.warning("supervisor: could not build model (%s); using fallback taxonomy.", exc)
     directive = run_supervisor(bundle, {}, model=model)
-    apply_directive(directive, lineage, strategy_file, supervisor_cycle=cycle)
+    apply_directive(directive, lineage, strategy_file, supervisor_cycle=cycle, repo=repo)
     detector.reset(partial=True)
 
 
-def _do_escalate(lineage, output_dir, config, model_factory, budget) -> None:
-    """Run one GEAK parallel ``planned`` round as a rescue; fold best into lineage."""
-    esc = dict(config.get("avo", {}).get("escalate", {}))
+def _do_escalate(lineage, output_dir, config, model_factory, verify_ctx, repo, *, base_task: str) -> None:
+    """Diversified rescue: run a few variation steps under distinct directions,
+    evaluate them together with GEAK's multi-candidate evaluator, and fold the
+    best verified result into the lineage (P1).
+
+    This reuses ``evaluate_round_best`` — which already selects the best among
+    multiple worker dirs in a round — instead of constructing a full
+    ``PipelineContext``, keeping the rescue self-contained and low-risk.
+    """
+    avo_cfg = dict(config.get("avo", {}))
+    esc = dict(avo_cfg.get("escalate", {}))
     if not esc.get("enabled", True):
         return
-    console.print("[magenta]AVO escalate[/magenta]: running one GEAK planned rescue round.")
-    try:
-        from minisweagent.run.postprocess.results import post_round_evaluate
+    n_workers = int(esc.get("rescue_workers", 4))
+    rescue_round = 9000 + len(lineage.committed)  # unique round id, away from normal steps
+    console.print(f"[magenta]AVO escalate[/magenta]: diversified rescue with {n_workers} workers (round {rescue_round}).")
 
-        ctx = lineage.build_postprocess_ctx(output_dir)
-        # The rescue round writes into results/round_1; reuse GEAK's evaluator.
-        round_eval = post_round_evaluate(ctx, round_num=1, output_dir=Path(output_dir))
-        if round_eval is not None:
-            sp = getattr(round_eval, "benchmark_speedup", None)
-            logger.info("AVO escalate: rescue round speedup=%s", sp)
+    lineage.reset_worktree_to_best(repo)
+    directions = _diversified_directions(n_workers)
+    rescue_dir = Path(output_dir) / "results" / f"round_{rescue_round}"
+    rescue_dir.mkdir(parents=True, exist_ok=True)
+    notebook_root = Path(output_dir) / "avo_state" / "notebook"
+
+    for k, strat in enumerate(directions):
+        worker_dir = rescue_dir / f"rescue-worker-{k}"
+        worker_dir.mkdir(parents=True, exist_ok=True)
+        step_dir = Path(output_dir) / f"escalate_{rescue_round}_{k}"
+        try:
+            run_variation_step(
+                repo=repo,
+                base_task=base_task,
+                step_dir=step_dir,
+                lineage=lineage,
+                direction={"strategy": strat, "assigned_by": "escalate", "supervisor_cycle": 0},
+                output_dir=output_dir,
+                avo_config=_with_patch_dir(avo_cfg, worker_dir),
+                model_factory=model_factory,
+                notebook_root=notebook_root,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("AVO escalate: rescue worker %d failed (%s).", k, exc)
+
+    try:
+        from minisweagent.run.postprocess.evaluation import evaluate_round_best
+
+        round_eval = evaluate_round_best(dict(verify_ctx), rescue_round, rescue_dir)
+        if lineage.commit_from_round(round_eval, repo=repo):
+            console.print(f"[green]AVO escalate[/green]: rescue produced a new best ({lineage.best_speedup:.3f}x).")
+        else:
+            logger.info("AVO escalate: rescue did not beat current best.")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("AVO escalate: rescue round failed (non-fatal): %s", exc)
+        logger.warning("AVO escalate: evaluation failed (non-fatal): %s", exc)
+
+
+def _diversified_directions(n: int) -> list[str]:
+    """Pick N distinct generic directions for an ESCALATE rescue."""
+    from minisweagent.run.avo.supervisor import _FALLBACK_TAXONOMY
+
+    names = [t["name"] for t in _FALLBACK_TAXONOMY]
+    return names[:n] if n <= len(names) else names + names[: n - len(names)]
+
+
+def _with_patch_dir(avo_cfg: dict, worker_dir: Path) -> dict:
+    """ESCALATE workers write into their own rescue worker dir.
+
+    ``run_variation_step`` derives the worker dir from ``output_dir`` + step
+    index, so for the rescue we instead point the agent's patch_output_dir via a
+    config hint consumed by variation_step. The default path is unchanged for
+    normal steps.
+    """
+    cfg = dict(avo_cfg)
+    cfg["_escalate_patch_dir"] = str(worker_dir)
+    return cfg
 
 
 def _finalize(output_dir: Path, lineage: LineageStore) -> dict:
@@ -280,6 +469,7 @@ def main(
     mode: str = typer.Option("full", "--mode", help="Budget mode: quick | full."),
     total_budget_s: float | None = typer.Option(None, "--total-budget-s", help="Override wall-clock cap (seconds)."),
     kernel_language: str = typer.Option("python", "--kernel-language", help="triton | hip | flydsl | python."),
+    gpu_ids: str = typer.Option("0", "--gpu-ids", help="Comma-separated GPU device indices for evaluation."),
     config_path: str | None = typer.Option(None, "-c", "--config", help="Extra YAML config to merge last."),
 ) -> None:
     """Run a single-lineage AVO continuous-evolution session on a kernel repo."""
@@ -296,6 +486,8 @@ def main(
     for line in budget.banner_lines():
         console.print(f"[bold cyan]{line}[/bold cyan]")
 
+    parsed_gpu_ids = [int(x.strip()) for x in gpu_ids.split(",") if x.strip()] or [0]
+
     try:
         run_avo(
             repo=repo.resolve(),
@@ -305,6 +497,7 @@ def main(
             budget=budget,
             model_name=model,
             kernel_language=kernel_language,
+            gpu_ids=parsed_gpu_ids,
         )
     except KeyboardInterrupt:
         console.print("[red]Interrupted.[/red]")
