@@ -50,18 +50,17 @@ Filter out:
 
 ### G3: Verify Top Candidates
 
-For the top 2-3 candidates (or all candidates with speedup > 1.0x), independently verify:
+For the top 2-3 candidates (or all candidates with speedup > 1.0x), independently verify in the canonical workspace.
+
+**Note**: The canonical workspace's git HEAD already contains the cumulative best from all prior rounds (TechLead committed each round's winner in Phase G). So `git checkout -- .` resets to the current-best state, and each engineer's patch was generated relative to that same HEAD — `git apply` will apply cleanly.
 
 For each candidate:
 ```bash
-# 1. Reset to clean state (current best, or baseline for round 1)
-cd $KERNEL_PATH
-git checkout -- .  # Reset all kernel files
-# If not round 1, apply the current-best patch first
-git apply $EVAL_DIR/current_best.diff 2>/dev/null || true
+# 1. Reset canonical workspace to current-best HEAD
+cd $KERNEL_PATH                     # = $EVAL_DIR/workspace
+git checkout -- .
 
 # 2. Apply this candidate's patch
-git checkout -- .  # Clean slate
 git apply $EVAL_DIR/round_N/engineer_X/best_patch.diff
 
 # 3. Clear build cache
@@ -86,16 +85,14 @@ Record verified speedups. These override engineer-reported speedups.
 
 The candidate with the highest **verified** geometric mean speedup wins the round.
 
-Save the winning patch as `$EVAL_DIR/current_best.diff`:
+Record the winning patch path — the actual commit of the winner into the canonical workspace happens in tech_lead.md Phase G's "Update the canonical workspace" step (after merge is evaluated), which does:
 ```bash
-# Apply winning patch
-cd $KERNEL_PATH
-git checkout -- .
-git apply $EVAL_DIR/round_N/engineer_X/best_patch.diff
-
-# Save as current best
-git diff > $EVAL_DIR/current_best.diff
+git apply $WINNER_PATCH
+git add -A && git commit -q -m "round_$N winner: <strategy summary>"
+git diff $(git rev-list --max-parents=0 HEAD)..HEAD > $EVAL_DIR/current_best.diff
 ```
+
+So `current_best.diff` is always the **cumulative** diff from baseline to the latest committed best — not just this round's increment.
 
 ### G5: Output
 

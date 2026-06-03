@@ -2,7 +2,7 @@
 
 ## Overview
 
-Comparison of GEAK_v3 and GEAK Skills Mode optimization results on AMD MI300X (gfx942) across 13 HIP kernels. All speedups are arithmetic mean across test cases.
+Comparison of GEAK_v3 and GEAK Skills Mode optimization results on AMD MI300X (gfx942) across 13 HIP kernels. Per-kernel results show arithmetic mean (A) and geometric mean (G) across test shapes.
 
 ## Setup
 
@@ -12,37 +12,41 @@ Comparison of GEAK_v3 and GEAK Skills Mode optimization results on AMD MI300X (g
 
 ## Per-Kernel Results
 
-| Kernel | GEAK_v3 | Skills Mode | Winner |
-|--------|---------|-------------|--------|
-| roipoint_pool3d | 16.82x | 14.61x | GEAK_v3 |
-| ball_query | 11.62x | 13.14x | Skills Mode |
-| roiaware_pool3d | 10.24x | 9.92x | GEAK_v3 |
-| three_nn | 1.43x | 8.82x | Skills Mode |
-| knn | FAIL | 6.56x | Skills Mode |
-| assign_score_withk | 3.76x | 4.00x | Skills Mode |
-| silu | 1.21x | 1.26x | Skills Mode |
-| matrix_multiplication | 1.14x | 1.19x | Skills Mode |
-| three_interpolate | 1.01x | 1.15x | Skills Mode |
-| furthest_point_sample | FAIL | 1.04x | Skills Mode |
-| points_in_boxes | 1.03x | 1.04x | Tie |
-| gather_points | 1.32x | 0.96x | GEAK_v3 |
-| mla_decode | N/A | 586.00x | Skills Mode |
+| Kernel | GEAK_v3 (A / G) | Skills Mode (A / G) | Winner (by G) |
+|--------|-----------------|----------------------|---------------|
+| roipoint_pool3d | 16.82x / 9.59x | 14.61x / 8.73x | GEAK_v3 |
+| ball_query | 11.62x / 6.39x | 13.14x / 6.71x | Skills Mode |
+| roiaware_pool3d | 10.24x / 7.96x | 9.92x / 7.67x | GEAK_v3 |
+| three_nn | 1.43x / 1.35x | 8.82x / 3.64x | Skills Mode |
+| knn | FAIL | 6.56x / 4.61x | Skills Mode |
+| assign_score_withk | 3.76x / 1.85x | 4.00x / 2.01x | Skills Mode |
+| silu | 1.21x / 1.19x | 1.26x / 1.23x | Skills Mode |
+| matrix_multiplication | 1.14x / 1.14x | 1.19x / 1.19x | Skills Mode |
+| three_interpolate | 1.01x / 1.01x | 1.15x / 1.12x | Skills Mode |
+| furthest_point_sample | FAIL | 1.04x / 1.04x | Skills Mode |
+| points_in_boxes | 1.03x / 1.03x | 1.04x / 1.04x | Tie |
+| gather_points | 1.32x / 1.32x | 0.96x / 0.96x | GEAK_v3 |
+| mla_decode | N/A | 589.43x / 424.84x | Skills Mode |
 
 ## Summary
 
+Aggregates over the 12 common kernels (mla_decode excluded; FAIL counted as 1.0x):
+
 | Metric | GEAK_v3 | Skills Mode |
 |--------|---------|-------------|
-| Wins | 3 | 9 |
+| Wins (by geomean) | 3 | 8 (+ 1 tie) |
 | Failures | 2 | 0 |
-| Arith Mean Speedup (12 common, fail=1.0x) | 4.30x | 5.31x |
-| Arith Mean Speedup (10 common, excl failures) | 4.96x | 5.61x |
+| Arith-of-Arith (across shapes & kernels) | 4.30x | 5.31x |
+| **Geo-of-Geo (across shapes & kernels)** | **1.90x** | **2.33x** |
 
 ## Analysis
 
-- **Skills Mode large wins**: three_nn (1.43x vs 8.82x, 6x gap) and knn (FAIL vs 6.56x). Both kernels benefited from deeper algorithmic restructuring including warp-cooperative algorithms and K-split parallelization.
-- **GEAK_v3 wins**: roipoint_pool3d (16.82x vs 14.61x), roiaware_pool3d (10.24x vs 9.92x), gather_points (1.32x vs 0.96x). GEAK_v3 achieved better memory access optimization on these kernels.
+All numbers below are **per-kernel geometric means across shapes**.
+
+- **Skills Mode large wins**: three_nn (1.35x vs 3.64x, ~2.7x gap) and knn (FAIL vs 4.61x). Both kernels benefited from deeper algorithmic restructuring including warp-cooperative algorithms and K-split parallelization.
+- **GEAK_v3 wins**: roipoint_pool3d (9.59x vs 8.73x), roiaware_pool3d (7.96x vs 7.67x), gather_points (1.32x vs 0.96x). GEAK_v3 achieved better memory access optimization on these kernels.
 - **Reliability**: Skills Mode produced valid results on all 13 kernels. GEAK_v3 failed on 2 kernels (knn, furthest_point_sample).
-- **Overall**: On the 12 common kernels, Skills Mode achieved 5.31x arithmetic mean speedup vs GEAK_v3's 4.30x, a 23% lead.
+- **Overall**: On the 12 common kernels, Skills Mode achieved 2.33x geomean speedup vs GEAK_v3's 1.90x, a 23% lead (5.31x vs 4.30x by arithmetic mean).
 
 ## Reproduce
 
