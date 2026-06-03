@@ -980,7 +980,10 @@ def main(
 
         from minisweagent.run.unified import PipelineContext, run_pipeline
 
-        pipeline_mode = "mixed"
+        pipeline_mode = os.environ.get("GEAK_PIPELINE_MODE", "mixed").strip().lower()
+        if pipeline_mode not in {"fixed", "planned", "mixed"}:
+            logger.warning("Invalid GEAK_PIPELINE_MODE=%r, falling back to 'mixed'", pipeline_mode)
+            pipeline_mode = "mixed"
         logger.info("Running unified pipeline mode: %s", pipeline_mode)
         pipeline_result = run_pipeline(
             PipelineContext(

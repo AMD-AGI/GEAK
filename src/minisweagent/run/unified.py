@@ -582,7 +582,7 @@ def _run_unified_loop(ctx: PipelineContext, mode: Mode) -> Any:
         )
 
         # 2. SELECT — pick N tasks from pool
-        plan = dispatcher.select(pool, mode, n_workers)
+        plan = dispatcher.select(pool, mode, n_workers, round_evals=round_evals)
 
         # 3. WRITE — .md task files for traceability
         task_files = write_dispatch_plan_as_task_files(
