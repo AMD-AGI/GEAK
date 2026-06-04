@@ -151,6 +151,7 @@ optimization_logs/avo_<repo>_<ts>/
 ├── COMMANDMENT.md            # the test/benchmark contract (= scoring f), from preprocess
 ├── baseline_metrics.json     # preprocess baseline
 ├── profile.json              # preprocess profiling
+├── avo_repo/                 # isolated clone of --repo (agent edits + lineage git tags live here; original repo untouched)
 ├── .optimization_strategies.md   # run-wide strategy state (shared by agents + supervisor)
 ├── avo_state/
 │   ├── lineage.json          # committed versions (P_t) + best_id + active tip
