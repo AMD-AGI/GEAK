@@ -107,6 +107,8 @@ optional and has a sensible default — a minimal run is just
 | `--kernel-language` | No | `python` | `triton` \| `hip` \| `flydsl` \| `python` — selects which skills to inject. Internal to AVO (not forwarded to preprocess, which auto-detects the kernel type). |
 | `--gpu-ids` | No | `0` | Comma-separated GPU device indices. Applied end-to-end: preprocess, each variation step's `save_and_test` (via `GEAK_GPU_DEVICE` / `HIP_VISIBLE_DEVICES`), per-step verification, and ESCALATE workers. |
 | `--test_command`, `--test-command` | No | — | Manually specify the unit-test / eval command. Forwarded to preprocess so `geak` bakes it into the COMMANDMENT/harness (skips UnitTestAgent auto-discovery); variation steps pick it up from `COMMANDMENT.md`. Only takes effect on a fresh run (preprocess is skipped on resume). |
+| `--rag` / `--no-rag` | No | from config (`true`) | Enable/disable RAG tools (`query`/`optimize`). **Overrides** `avo.use_rag`. |
+| `--profiling` / `--no-profiling` | No | from config (`true`) | Enable/disable profiling (`profile_kernel` tool + per-step verification `PROFILE`). **Overrides** `avo.use_profiling`. |
 | `-c`, `--config` | No | — | Extra YAML merged last over `geak.yaml` + `geak_avo.yaml`. Also forwarded to the preprocess subprocess — note `geak`'s `-c` *replaces* `geak.yaml` as the user layer (it does not merge), so pass a complete config, not a snippet. |
 
 > **Forwarded to preprocess.** `--model`, `--gpu-ids`, `--mode`, `--config`, and
@@ -127,6 +129,8 @@ avo:
   variation_step_limit: 200      # OptimizationAgent step_limit per variation step
   commit_epsilon: 0.001          # min relative speedup to enter the lineage
   min_commits_before_stop: 5     # budget-remaining runs should not stop empty-handed
+  use_rag: true                  # RAG tools (query/optimize) per step; false disables them
+  use_profiling: true            # profiling (profile_kernel tool + per-step verification PROFILE); false skips both
   stagnation:
     steps_without_commit: 80
     consecutive_no_improvement: 8
@@ -141,6 +145,38 @@ avo:
 
 The wall-clock caps come from `run.budgets.{quick,full}` (the `full` mode is
 overridden to 7 days in `geak_avo.yaml`).
+
+### Feature switches (`use_rag`, `use_profiling`)
+
+Both default **on**; set either to `false` to speed up / simplify test runs.
+Precedence (highest first): **CLI flag (`--no-rag` / `--no-profiling`) → config
+(`avo.use_rag` / `avo.use_profiling`) → default `true`**. The resolved value is
+applied **globally and uniformly** — to every variation step, the ESCALATE
+rescue workers, and per-step verification:
+
+| Switch | `false` disables |
+|--------|------------------|
+| `use_rag` | the `query` / `optimize` RAG tools in every step (also skips the RAG postprocessor model) |
+| `use_profiling` | the agent's `profile_kernel` tool, the per-step verification `PROFILE` (via `GEAK_SKIP_PROFILE=1`), and the profiling-stage prompt note |
+
+Fast smoke-test — via CLI flags (simplest, highest priority):
+
+```bash
+geak-avo --repo <path> --task "<goal>" --mode quick --no-rag --no-profiling
+```
+
+…or via config:
+
+```yaml
+# avo_fast.yaml  (used with --config)
+avo:
+  use_rag: false
+  use_profiling: false
+```
+
+`use_profiling: false` keeps the verified `FULL_BENCHMARK` (so the commit gate
+and speedups stay accurate) — it only drops profiling, which AVO uses for
+supervisor diagnosis and causal memory, not for the commit decision.
 
 ---
 

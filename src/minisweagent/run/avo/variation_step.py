@@ -442,6 +442,10 @@ def run_variation_step(
         if avo_config.get("evolution_log_enabled", True)
         else None
     )
+    # Honor the global profiling switch uniformly (normal + ESCALATE callers):
+    # when avo.use_profiling=false, never tell the agent to use the (disabled)
+    # profile_kernel tool.
+    profiling_enabled = profiling_enabled and bool(avo_config.get("use_profiling", True))
     task_body = compose_task(
         base_task,
         lineage,
@@ -531,6 +535,23 @@ def _build_agent(repo: Path, step_dir: Path, worker_dir: Path, output_dir: Path,
         # repo worktree so it never leaks into kernel patches.
         "strategy_file_path": str((output_dir / ".optimization_strategies.md").resolve()),
     }
+
+    # Give the agent the model config so secondary models (e.g. the RAG
+    # postprocessor wired by DefaultAgent via self.config.model_config) build with
+    # the same provider/model_class instead of falling back to a provider-less
+    # LitellmModel default ("LLM Provider NOT provided").
+    model_config = avo_config.get("_model_config")
+    if model_config:
+        cfg["model_config"] = dict(model_config)
+
+    # Feature switches (default on): turn off RAG / profiling tools per step.
+    disabled_tools: list[str] = []
+    if not bool(avo_config.get("use_rag", True)):
+        disabled_tools += ["query", "optimize"]  # RAG MCP tools
+    if not bool(avo_config.get("use_profiling", True)):
+        disabled_tools.append("profile_kernel")  # in-step profiling tool
+    if disabled_tools:
+        cfg["disabled_tools"] = disabled_tools
 
     test_command = _derive_test_command(output_dir)
     if test_command:

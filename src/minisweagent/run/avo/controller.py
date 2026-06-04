@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -258,6 +259,8 @@ def run_avo(
     mode: str = "full",
     config_path: str | None = None,
     test_command: str | None = None,
+    use_rag: bool | None = None,
+    use_profiling: bool | None = None,
 ) -> dict:
     """Run one single-lineage AVO evolution; return the final report dict."""
     avo_cfg = dict(config.get("avo") or {})
@@ -269,6 +272,33 @@ def run_avo(
     # --gpu-ids only reached verification and steps silently ran on GPU 0.
     avo_cfg["_gpu_ids"] = list(gpu_ids)
     config.setdefault("avo", {})["_gpu_ids"] = list(gpu_ids)
+    # Pass the model config (incl. model_class, e.g. amd_llm) down to the
+    # variation-step agent so secondary models it builds — notably the RAG
+    # postprocessor (DefaultAgent wires it with self.config.model_config) — use
+    # the same provider. Without this, the postprocessor falls back to a bare
+    # get_model() → LitellmModel with a provider-less default model name and
+    # fails with "LLM Provider NOT provided".
+    avo_cfg["_model_config"] = dict(model_cfg)
+    config.setdefault("avo", {})["_model_config"] = dict(model_cfg)
+
+    # Feature switches. Precedence: CLI override (highest) > config > default(True).
+    # The resolved values are written back into avo_cfg AND config["avo"] so every
+    # downstream reader (variation steps, ESCALATE workers) sees the same value.
+    # use_profiling=false also skips the per-step verification PROFILE via
+    # GEAK_SKIP_PROFILE; use_rag=false disables query/optimize tools per step.
+    eff_use_rag = use_rag if use_rag is not None else bool(avo_cfg.get("use_rag", True))
+    eff_use_profiling = use_profiling if use_profiling is not None else bool(avo_cfg.get("use_profiling", True))
+    avo_cfg["use_rag"] = eff_use_rag
+    avo_cfg["use_profiling"] = eff_use_profiling
+    config.setdefault("avo", {})["use_rag"] = eff_use_rag
+    config.setdefault("avo", {})["use_profiling"] = eff_use_profiling
+    if not eff_use_profiling:
+        os.environ["GEAK_SKIP_PROFILE"] = "1"
+        logger.info("AVO: profiling disabled (use_profiling=false) — GEAK_SKIP_PROFILE=1.")
+    else:
+        os.environ.pop("GEAK_SKIP_PROFILE", None)  # ensure a prior run's flag doesn't leak in
+    if not eff_use_rag:
+        logger.info("AVO: RAG disabled (use_rag=false) — query/optimize tools off in variation steps.")
 
     def model_factory():
         return get_model(model_name, model_cfg)
@@ -337,8 +367,10 @@ def run_avo(
 
             # Delayed profiling (CuTeGen): withhold profiler-driven micro-tuning
             # until structure is sound — i.e. past the step threshold OR once a
-            # real improvement has been committed.
-            profiling_enabled = step_idx > profiling_after_step or len(lineage.committed) > 1
+            # real improvement has been committed. Forced off when profiling is
+            # globally disabled (avo.use_profiling=false) so the prompt never
+            # tells the agent to use the (disabled) profile_kernel tool.
+            profiling_enabled = use_profiling and (step_idx > profiling_after_step or len(lineage.committed) > 1)
 
             result = run_variation_step(
                 repo=work_repo,
@@ -915,6 +947,15 @@ def main(
         help="Manually specify the unit-test / eval command (forwarded to preprocess; "
         "skips UnitTestAgent auto-discovery).",
     ),
+    use_rag: bool | None = typer.Option(
+        None, "--rag/--no-rag", help="Enable/disable RAG tools (query/optimize). Overrides avo.use_rag in config."
+    ),
+    use_profiling: bool | None = typer.Option(
+        None,
+        "--profiling/--no-profiling",
+        help="Enable/disable profiling (profile_kernel tool + per-step verification PROFILE). "
+        "Overrides avo.use_profiling in config.",
+    ),
 ) -> None:
     """Run a single-lineage AVO continuous-evolution session on a kernel repo."""
     config = load_avo_config(config_path)
@@ -945,6 +986,8 @@ def main(
             mode=mode,
             config_path=config_path,
             test_command=test_command,
+            use_rag=use_rag,
+            use_profiling=use_profiling,
         )
     except KeyboardInterrupt:
         console.print("[red]Interrupted.[/red]")

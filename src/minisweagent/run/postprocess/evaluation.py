@@ -778,7 +778,16 @@ def run_profile(
     This function picks up the resulting file, copies it to *results_dir*,
     and builds a comparison against ``baseline_metrics.json``.
     Mutates ``round_eval["profile_comparison"]`` in place.
+
+    Skipped entirely when ``GEAK_SKIP_PROFILE=1`` (or via the eval env), letting
+    callers (e.g. AVO with ``avo.use_profiling: false``) trade profiler insight
+    for speed.
     """
+    if os.environ.get("GEAK_SKIP_PROFILE", "").strip() == "1" or str(eval_env.get("GEAK_SKIP_PROFILE", "")).strip() == "1":
+        logger.info("run_profile: skipped (GEAK_SKIP_PROFILE=1)")
+        round_eval["profile_comparison"] = {"skipped": "GEAK_SKIP_PROFILE=1"}
+        return
+
     # Path-A dedup: skip PROFILE if identical to CORRECTNESS (opaque commands
     # won't produce profile.json anyway)
     from minisweagent.run.dispatch import _read_commandment_section

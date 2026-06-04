@@ -24,6 +24,9 @@ avo:
   variation_step_limit: 200      # OptimizationAgent step_limit per variation step
   variation_cost_limit: 0.0      # 0 = disabled (budget governs the run)
   env_timeout_s: 3600
+  # Feature switches (default ON; set false to speed up / simplify AVO test runs):
+  use_rag: true                  # RAG retrieval tools (query/optimize) in each variation step; false disables them
+  use_profiling: true            # profiling: the agent's profile_kernel tool AND the per-step verification PROFILE; false skips both (sets GEAK_SKIP_PROFILE=1)
   commit_epsilon: 0.001          # tolerance vs current best (don't regress)
   min_commit_speedup: 1.0        # anti-lazy-opt floor: a commit must EXCEED this vs baseline (reject ~1.0x trivial rewrites)
   min_per_shape_speedup: 0.0     # per-shape regression guard (B2): 0=off; set e.g. 0.95 to reject commits that regress any shape >5%
