@@ -1778,13 +1778,15 @@ def _finish_blockers(
         # Profiling must be attempted at least once, but a repeated failure is
         # non-fatal (profile is advisory for the optimizer, not required).
         blockers.append("Path B missing profile result (call collect_profile)")
-    elif (
-        profile is not None
-        and getattr(profile, "success", True) is False
-        and profile_attempts < _MAX_DETERMINISTIC_PROBE_ATTEMPTS
-    ):
-        blockers.append(
-            f"Path B profile collection failed ({profile_attempts}/{_MAX_DETERMINISTIC_PROBE_ATTEMPTS} attempts)"
+    elif profile is not None and getattr(profile, "success", True) is False:
+        # Profile is advisory context for the optimizer, NOT a load-bearing
+        # measurement: the verified-speedup gate relies on the baseline
+        # benchmark (above), not the profile. A profiler/environment failure
+        # must not abort an otherwise-valid preprocess (mirrors the orchestrator
+        # prompt's "if either call fails, proceed anyway"). Non-blocking warning.
+        logger.warning(
+            "Path B profile collection failed; proceeding without profile "
+            "(advisory only, not a blocker)."
         )
 
     if not agent._collected.get("commandment_path"):

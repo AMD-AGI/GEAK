@@ -857,9 +857,12 @@ class PreprocessOrchestratorAgent:
         a warning; everything else stays in the errors list and
         invalidates ``success`` as usual.
 
-        On **Path B**, nothing is downgraded — the legacy strict
-        criteria are preserved (any error invalidates ``success``). The
-        returned ``warnings`` list is always empty on Path B.
+        On **Path B**, profile-collection failures are STILL downgraded
+        to warnings: the profile is advisory context for the optimizer
+        and the verified-speedup gate relies on the baseline benchmark,
+        not the profile, so a profiler/environment failure must never
+        invalidate ``success``. Every other Path-B error stays strict
+        (legacy criteria: any non-profile error invalidates ``success``).
 
         Args:
             errors: Cumulative error strings (loop + finish-payload).
@@ -870,21 +873,30 @@ class PreprocessOrchestratorAgent:
             together contain exactly the same strings as ``errors``,
             preserving order within each bucket.
         """
-        if path_taken != "A":
-            return list(errors), []
         real_errors: list[str] = []
         warnings: list[str] = []
         for err in errors:
             text = err if isinstance(err, str) else str(err)
             stripped = text.lstrip()
             lower = stripped.lower()
-            if (
+            # Profile collection is advisory on EVERY path: the verified-speedup
+            # gate uses the baseline benchmark, not the profile, so a profiler /
+            # environment failure must never invalidate ``success``.
+            is_profile = (
+                stripped.startswith("collect_profile")
+                or "profile collection" in lower
+            )
+            # Path-A-only soft errors: the harness IS the user's run command,
+            # so baseline misses / partial coverage / opaque sources are
+            # expected there and stay informational. Path B keeps these strict.
+            is_path_a_soft = path_taken == "A" and (
                 stripped.startswith("collect_baseline")
                 or stripped.startswith("collect_profile")
                 or stripped.startswith("PATH_A_PARTIAL_COVERAGE")
                 or "opaque" in lower
                 or "no harness_path available" in lower
-            ):
+            )
+            if is_profile or is_path_a_soft:
                 warnings.append(text)
             else:
                 real_errors.append(text)
