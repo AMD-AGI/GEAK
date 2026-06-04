@@ -124,7 +124,25 @@ def _run_preprocess(
     if (output_dir / "COMMANDMENT.md").exists():
         logger.info("preprocess: COMMANDMENT.md already present in %s; skipping.", output_dir)
         return
-    cmd = ["geak", "--repo", str(repo), "--task", task, "-o", str(output_dir), "--preprocess-only", "--yolo"]
+
+    # When a test command is supplied, steer the v3 orchestrator to Case A (an
+    # explicit run command) so it skips the slow test-discovery + harness
+    # generation and builds the COMMANDMENT directly from the command. The
+    # orchestrator classifies Case A/B/C from the *task text*, so embedding the
+    # command there (in addition to forwarding --test-command) is what triggers
+    # the skip. This is a prompt-level steer (LLM-judged), not a hard guarantee.
+    pp_task = task
+    if test_command:
+        pp_task = (
+            f"{task}\n\n"
+            "## Evaluation command (authoritative — Case A)\n"
+            f"Run and evaluate the kernel using this exact command-line invocation: `{test_command}`\n"
+            "This is an explicit user-provided run command. Classify this task as **Case A**: "
+            "skip `run_discovery` (test discovery is unnecessary) and build the COMMANDMENT "
+            "directly from this command via `commandment_from_user_command`. Do not generate a harness."
+        )
+
+    cmd = ["geak", "--repo", str(repo), "--task", pp_task, "-o", str(output_dir), "--preprocess-only", "--yolo"]
     if model_name:
         cmd += ["--model", model_name]
     if test_command:
