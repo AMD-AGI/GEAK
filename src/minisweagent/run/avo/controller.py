@@ -107,12 +107,17 @@ def _run_preprocess(
     gpu_ids: list[int] | None = None,
     mode: str | None = None,
     config_path: str | None = None,
+    test_command: str | None = None,
 ) -> None:
     """Produce COMMANDMENT.md / baseline / profile via ``geak --preprocess-only``.
 
     Note: ``--kernel-language`` is intentionally NOT forwarded — ``geak`` has no
     such flag (it auto-detects the kernel type during preprocess); AVO's
     ``kernel_language`` is only used internally for skill selection / lineage.
+
+    A user-supplied ``test_command`` is forwarded so ``geak`` bakes it into the
+    COMMANDMENT/harness (instead of auto-discovering via UnitTestAgent); AVO's
+    variation steps then pick it up from COMMANDMENT.md (``_derive_test_command``).
     """
     if (output_dir / "COMMANDMENT.md").exists():
         logger.info("preprocess: COMMANDMENT.md already present in %s; skipping.", output_dir)
@@ -120,6 +125,8 @@ def _run_preprocess(
     cmd = ["geak", "--repo", str(repo), "--task", task, "-o", str(output_dir), "--preprocess-only", "--yolo"]
     if model_name:
         cmd += ["--model", model_name]
+    if test_command:
+        cmd += ["--test-command", test_command]
     if gpu_ids:
         # Propagate GPU selection so baseline/profile run on the requested devices
         # (otherwise preprocess silently defaults to GPU 0).
@@ -250,6 +257,7 @@ def run_avo(
     gpu_ids: list[int] | None = None,
     mode: str = "full",
     config_path: str | None = None,
+    test_command: str | None = None,
 ) -> dict:
     """Run one single-lineage AVO evolution; return the final report dict."""
     avo_cfg = dict(config.get("avo") or {})
@@ -268,7 +276,7 @@ def run_avo(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── preprocess (reused) ───────────────────────────────────────────
-    _run_preprocess(repo, task, output_dir, model_name, gpu_ids, mode, config_path)
+    _run_preprocess(repo, task, output_dir, model_name, gpu_ids, mode, config_path, test_command)
     pp_elapsed = time.monotonic() - budget.started_at
     budget.commit_preprocess(pp_elapsed)
     budget.schedule_optimization_watchdog()
@@ -900,6 +908,13 @@ def main(
     kernel_language: str = typer.Option("python", "--kernel-language", help="triton | hip | flydsl | python."),
     gpu_ids: str = typer.Option("0", "--gpu-ids", help="Comma-separated GPU device indices for evaluation."),
     config_path: str | None = typer.Option(None, "-c", "--config", help="Extra YAML config to merge last."),
+    test_command: str | None = typer.Option(
+        None,
+        "--test_command",
+        "--test-command",
+        help="Manually specify the unit-test / eval command (forwarded to preprocess; "
+        "skips UnitTestAgent auto-discovery).",
+    ),
 ) -> None:
     """Run a single-lineage AVO continuous-evolution session on a kernel repo."""
     config = load_avo_config(config_path)
@@ -929,6 +944,7 @@ def main(
             gpu_ids=parsed_gpu_ids,
             mode=mode,
             config_path=config_path,
+            test_command=test_command,
         )
     except KeyboardInterrupt:
         console.print("[red]Interrupted.[/red]")
