@@ -20,6 +20,7 @@ It reuses GEAK wholesale and modifies nothing:
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import sys
@@ -113,6 +114,99 @@ def _run_preprocess(repo: Path, task: str, output_dir: Path, model_name: str | N
 
 
 # ---------------------------------------------------------------------------
+# Isolated work repo (never modify the user's original repository)
+# ---------------------------------------------------------------------------
+
+
+def _prepare_work_repo(repo: Path, output_dir: Path) -> Path:
+    """Create a **fully independent** working copy of ``repo`` so AVO never
+    touches it — not even its ``.git`` (refs/tags/commits).
+
+    AVO drives a coding agent and writes git commits/tags (``avo-v{N}``) as it
+    evolves the kernel. To stay non-intrusive over a multi-day run, all
+    variation steps, ``save_and_test`` edits, worktree resets
+    (``git checkout -f`` / ``git clean -fd``), and lineage commits/tags happen
+    inside this isolated repo at ``<output_dir>/avo_repo``. The original ``repo``
+    is only **read** (for preprocess and as the snapshot source).
+
+    Unlike a shared ``git worktree``, this uses an **independent clone** so the
+    ``avo-v{N}`` tags live only in ``avo_repo/.git`` and never appear in the
+    user's ``git tag`` list:
+
+    - Git repos: ``git clone --local`` (objects hardlinked → ~no extra disk),
+      then sync the **live** tree (dirty-tracked + untracked + JIT ``.so``
+      symlinks) via GEAK's existing helpers so the snapshot matches the working
+      tree preprocess profiled.
+    - Non-git directories: a full copy bootstrapped into a throwaway git repo.
+
+    **Resume protection.** The ``avo-v{N}`` commits/tags exist ONLY inside
+    ``avo_repo/.git``; re-cloning on resume would pull them from the (clean)
+    user repo and lose them, breaking ``reset_worktree_to_best``. So if a git
+    repo already exists at the target path, reuse it as-is instead of recreating
+    it — preserving the accumulated lineage history.
+    """
+    work_repo = (output_dir / "avo_repo").resolve()
+
+    # Resume: an existing repo already holds the lineage's avo-v{N} history.
+    # Never wipe/re-clone it, or the best-version refs are lost.
+    if (work_repo / ".git").exists():
+        logger.info("AVO: reusing existing isolated repo at %s (resume; lineage history preserved).", work_repo)
+        return work_repo
+
+    # A leftover dir without a valid .git (e.g. a crashed setup) would make
+    # ``git clone`` fail on a non-empty target — clear it first.
+    if work_repo.exists():
+        import shutil
+
+        logger.warning("AVO: removing stale %s (no .git) before fresh setup.", work_repo)
+        shutil.rmtree(work_repo, ignore_errors=True)
+
+    work_repo.parent.mkdir(parents=True, exist_ok=True)
+
+    if (Path(repo) / ".git").exists():
+        from minisweagent.run.task_file import (
+            _apply_dirty_tracked_changes,
+            _copy_nested_git_repos,
+            _copy_untracked_files,
+            _neutralize_nested_git_repos,
+            _symlink_gitignored_so_files,
+        )
+        from minisweagent.run.utils.git_safe_env import get_git_safe_env
+
+        git_env = get_git_safe_env(work_repo.parent)
+        # --local hardlinks the object store (fast, ~no extra disk); the clone
+        # gets its OWN .git, so commits/tags never reach the user's repo.
+        subprocess.run(
+            ["git", "clone", "--local", "--no-checkout", str(repo), str(work_repo)],
+            check=True,
+            capture_output=True,
+            env=git_env,
+        )
+        subprocess.run(
+            ["git", "-C", str(work_repo), "checkout", "HEAD"],
+            check=False,
+            capture_output=True,
+            env=git_env,
+        )
+        # Match the user's *live* tree (clone only carries committed state).
+        _apply_dirty_tracked_changes(repo, work_repo, git_env)
+        _copy_untracked_files(repo, work_repo, git_env)
+        _symlink_gitignored_so_files(repo, work_repo, git_env)
+        # Submodules / nested repos are not recursed by clone; copy them as plain
+        # files so the snapshot is complete and diffs stay clean.
+        _copy_nested_git_repos(repo, work_repo)
+        _neutralize_nested_git_repos(work_repo)
+        logger.info("AVO: independent clone at %s (separate .git; original repo fully isolated).", work_repo)
+    else:
+        from minisweagent.run.utils.parallel_helpers import bootstrap_git_repo, create_copy_workdir
+
+        create_copy_workdir(repo, work_repo)
+        bootstrap_git_repo(work_repo)
+        logger.info("AVO: isolated copy + bootstrapped git repo at %s (original repo untouched).", work_repo)
+    return work_repo
+
+
+# ---------------------------------------------------------------------------
 # Core loop
 # ---------------------------------------------------------------------------
 
@@ -144,6 +238,13 @@ def run_avo(
     budget.commit_preprocess(pp_elapsed)
     budget.schedule_optimization_watchdog()
 
+    # ── isolated work repo (never touch the user's original repo) ──────
+    # Every variation step, agent edit, worktree reset, and lineage commit/tag
+    # below operates on ``work_repo`` (an independent clone under output_dir),
+    # not on ``repo``. The original repository — including its .git refs/tags —
+    # is only read for preprocess + snapshot.
+    work_repo = _prepare_work_repo(repo, output_dir)
+
     # ── state ─────────────────────────────────────────────────────────
     lineage = LineageStore(
         output_dir / "avo_state",
@@ -153,7 +254,7 @@ def run_avo(
         min_per_shape_speedup=float(avo_cfg.get("min_per_shape_speedup", 0.0)),
         significance_margin=float(avo_cfg.get("commit_significance_margin", 0.0)),
     )
-    lineage.seed_from_baseline(output_dir, repo=repo)
+    lineage.seed_from_baseline(output_dir, repo=work_repo)
     detector = StagnationDetector(avo_cfg.get("stagnation", {}))
     strategy_file = output_dir / ".optimization_strategies.md"
     min_commits = int(avo_cfg.get("min_commits_before_stop", 0))
@@ -173,8 +274,10 @@ def run_avo(
             verify_cache = {}
 
     # Context reused by GEAK's evaluate_round_best for verified per-shape geomean
-    # scoring (P0) and by the ESCALATE rescue round (P1).
-    verify_ctx = _build_verify_ctx(repo, output_dir, gpu_ids, task)
+    # scoring (P0) and by the ESCALATE rescue round (P1). Points at the isolated
+    # work repo so the verified patch (best→candidate) applies onto the same base
+    # the agent edited — and so verification never touches the user's repo.
+    verify_ctx = _build_verify_ctx(work_repo, output_dir, gpu_ids, task)
 
     # Run-wide working notebook for cross-step memory (P-mem-2). One notebook for
     # the whole run; each step injects its summary and records its outcome.
@@ -186,7 +289,7 @@ def run_avo(
         while not budget.soft_stop.is_set():
             step_idx += 1
             step_dir = output_dir / f"variation_{step_idx:04d}"
-            lineage.reset_worktree_to_best(repo)
+            lineage.reset_worktree_to_best(work_repo)
             lineage.heartbeat(step_index=step_idx)
 
             # Delayed profiling (CuTeGen): withhold profiler-driven micro-tuning
@@ -195,7 +298,7 @@ def run_avo(
             profiling_enabled = step_idx > profiling_after_step or len(lineage.committed) > 1
 
             result = run_variation_step(
-                repo=repo,
+                repo=work_repo,
                 base_task=task,
                 step_dir=step_dir,
                 lineage=lineage,
@@ -223,7 +326,7 @@ def run_avo(
                     cache=verify_cache,
                     cache_path=verify_cache_path,
                 )
-            committed = lineage.maybe_commit(result, repo=repo)
+            committed = lineage.maybe_commit(result, repo=work_repo)
             _record_to_notebook(notebook_root, step_idx, result, committed)
             write_evolution_entry(output_dir, result, committed)  # P-mem-3 causal log
 
@@ -236,9 +339,9 @@ def run_avo(
             if signal.level == StagnationLevel.NUDGE:
                 pending_nudge = f"Progress is stalling ({signal.reason}). Try a different angle or mark the current strategy failed."
             elif signal.level == StagnationLevel.REDIRECT:
-                _do_redirect(signal, lineage, step_dir, output_dir, strategy_file, detector, model_factory, repo)
+                _do_redirect(signal, lineage, step_dir, output_dir, strategy_file, detector, model_factory, work_repo)
             elif signal.level == StagnationLevel.ESCALATE:
-                _do_escalate(lineage, output_dir, config, model_factory, verify_ctx, repo, base_task=task)
+                _do_escalate(lineage, output_dir, config, model_factory, verify_ctx, work_repo, base_task=task)
                 detector.reset(partial=False)
 
         # Budget exhausted; honour min-commits as a best-effort note.

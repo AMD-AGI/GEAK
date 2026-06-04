@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -625,9 +626,14 @@ def _correctness_passed(text: str) -> bool:
 
 
 def _step_index_from_dir(step_dir: Path) -> int:
-    name = step_dir.name
-    digits = "".join(ch for ch in name if ch.isdigit())
+    """Parse a step index from a step dir name.
+
+    Uses the **first** contiguous digit group, not every digit concatenated, so
+    multi-number names stay sane: ``variation_0001`` → 1, and an ESCALATE worker
+    dir ``escalate_9001_0`` → 9001 (the rescue round) rather than ``90010``.
+    """
+    match = re.search(r"\d+", step_dir.name)
     try:
-        return int(digits) if digits else 0
+        return int(match.group(0)) if match else 0
     except ValueError:
         return 0

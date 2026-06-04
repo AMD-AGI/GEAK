@@ -14,6 +14,29 @@ new modules, the **Supervisor** that keeps a long run from stalling, the
 > `src/minisweagent/run/avo/`, `subagents/avo-supervisor/`, and
 > `skills/avo-evolution/`.
 >
+> **Repo isolation (important).** AVO **never touches the user's original
+> repository** — not even its `.git` (refs/tags/commits). After preprocess, the
+> controller builds a **fully independent clone** at `<output_dir>/avo_repo` via
+> `_prepare_work_repo`:
+>
+> - **Git repos:** `git clone --local` (objects hardlinked → ~no extra disk;
+>   the clone gets its **own** `.git`), then the *live* tree is synced
+>   (dirty-tracked + untracked + JIT `.so` symlinks + nested repos) using GEAK's
+>   existing worktree helpers so the snapshot matches what preprocess profiled.
+> - **Non-git directories:** a full copy bootstrapped into a throwaway git repo.
+>
+> All variation steps, `save_and_test` edits, worktree resets
+> (`git checkout -f` / `git clean -fd`), and lineage commits/tags (`avo-v{N}`)
+> happen inside that clone. Because the clone has a **separate `.git`**, the
+> `avo-v{N}` tags never appear in the user's `git tag` list — a multi-day run
+> cannot mutate, clean, or pollute the user's repository in any way.
+>
+> **Resume protection.** The `avo-v{N}` commits/tags live ONLY in
+> `avo_repo/.git`. Re-cloning on resume would pull from the (clean) user repo
+> and lose them, breaking `reset_worktree_to_best`. So `_prepare_work_repo`
+> reuses an existing `avo_repo/.git` as-is instead of recreating it, preserving
+> the accumulated lineage history across restarts.
+>
 > **Implementation note.** The AVO package is placed under
 > `src/minisweagent/run/avo/` rather than a top-level `scripts/avo/` so that the
 > `geak-avo` console script and the unit tests import it like every other GEAK
@@ -132,6 +155,7 @@ optimization_logs/<kernel>_<ts>/
 ├── COMMANDMENT.md            # reused (= f)
 ├── baseline_metrics.json     # reused
 ├── profile.json              # reused
+├── avo_repo/                 # NEW — independent clone (agent edits here, not the user's repo)
 ├── avo_state/                # NEW
 │   ├── lineage.json          # committed versions (P_t)
 │   ├── attempts.jsonl        # every attempt, incl. failures
@@ -290,6 +314,10 @@ Key reuse points (import, never fork):
 - `auto_finalize` for the final report — keeps `final_report.json` parseable by
   existing tooling.
 - Worktree reset uses the same git plumbing GEAK already relies on.
+- `_prepare_work_repo` builds the independent clone `avo_repo` (separate `.git`)
+  so the loop operates on `work_repo`, never the user's original `repo`. The
+  verify context's `repo_root` also points at `work_repo` so the verified
+  `best → candidate` patch applies onto the same base the agent edited.
 
 ---
 
@@ -646,7 +674,7 @@ CLI entry (one line in `pyproject.toml`, mirrors `geak` / `geak-gemm-tuning`):
 
 ```toml
 [project.scripts]
-geak-avo = "scripts.avo.controller:app"
+geak-avo = "minisweagent.run.avo.controller:app"
 ```
 
 ---
@@ -727,6 +755,7 @@ Tracks which AVO features exist and how each is realized on GEAK. Update the
 | Delayed profiling injection | stage note + `profiling_after_step` (CuTeGen §16.3) | ✔ done |
 | Kernel-class menus + anti-simplify rules | `optimization_playbook.md` (CuTeGen §16.4) | ✔ done |
 | Lineage tag ≡ verified patch | `_materialize_and_tag` + baseline tag (§17.1) | ✔ done |
+| Isolated work repo (original repo fully untouched, incl. .git) | `_prepare_work_repo` → independent clone `avo_repo` (separate .git) + resume reuse; loop uses `work_repo` | ✔ done |
 | Worktree clean between steps | `git clean -fd` in `_checkout` (§17.2) | ✔ done |
 | Per-shape regression guard | `min_per_shape_speedup` (§17.3) | ✔ done |
 | Hardware grounding per step | `hardware_summary` injection (§17.4) | ✔ done |

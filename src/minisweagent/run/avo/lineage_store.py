@@ -518,12 +518,22 @@ class LineageStore:
             payload.update(extra)
         self.heartbeat_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
+    # Round dir used to surface the lineage's verified best to ``auto_finalize``.
+    # A large, fixed id keeps it clear of normal steps (``round_{N}``) and
+    # ESCALATE rescue rounds (``round_{9000+}``).
+    _FINALIZE_ROUND = 999999
+
     def build_postprocess_ctx(self, output_dir: Path) -> dict[str, Any]:
         """Build the ctx dict ``auto_finalize`` expects.
 
-        AVO writes its own best patch into ``results/round_1/avo-best/`` so the
-        existing ``auto_finalize`` scanner can pick it up without modification.
+        Before returning, materialize the lineage's **verified committed best**
+        into ``results/round_{_FINALIZE_ROUND}/avo-best/best_results.json`` (+ the
+        patch) so the reused ``auto_finalize`` scanner — which ranks
+        ``results/round_*/*/best_results.json`` — surfaces the AVO-authoritative
+        best, not just whatever self-reported number a worker dir left behind.
+        No-op when only the baseline exists.
         """
+        self._write_finalize_best(output_dir)
         return {
             "output_dir": str(output_dir),
             "preprocess_dir": str(output_dir),
@@ -532,6 +542,44 @@ class LineageStore:
             "best_speedup": self.best_speedup,
             "best_id": self.best_id,
         }
+
+    def _write_finalize_best(self, output_dir: Path) -> None:
+        """Write the verified committed best as a canonical ``best_results.json``.
+
+        Best-effort: finalize must never crash the run. Skips the baseline (v0,
+        no patch) and any case where the stored patch is missing.
+        """
+        node = self.best_node
+        if node is None or not node.patch:
+            return
+        patch_src = Path(node.patch)
+        if not patch_src.exists():
+            logger.warning("LineageStore: finalize best patch missing (%s); skipping avo-best.", patch_src)
+            return
+        dest_dir = Path(output_dir) / "results" / f"round_{self._FINALIZE_ROUND}" / "avo-best"
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            patch_dest = dest_dir / "best_patch.patch"
+            patch_dest.write_text(patch_src.read_text(encoding="utf-8"), encoding="utf-8")
+            best_results = {
+                "best_patch_speedup": node.speedup,  # verified geomean (commit-gated)
+                "best_patch_file": str(patch_dest.resolve()),
+                "best_patch_verified": True,
+                "best_version_id": node.id,
+                "strategy": node.strategy,
+                "per_shape_speedups": node.per_shape,
+                "llm_selection_analysis": (
+                    f"AVO committed best {node.id}"
+                    f"{f' via {node.strategy}' if node.strategy else ''} "
+                    f"({node.speedup:.4f}x verified)."
+                ),
+            }
+            (dest_dir / "best_results.json").write_text(
+                json.dumps(best_results, indent=2, default=str), encoding="utf-8"
+            )
+            logger.info("LineageStore: wrote finalize best (%s, %.4fx) to %s", node.id, node.speedup, dest_dir)
+        except OSError as exc:
+            logger.warning("LineageStore: failed to write finalize best (non-fatal): %s", exc)
 
 
 def _now_iso() -> str:
