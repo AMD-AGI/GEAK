@@ -91,16 +91,51 @@ REQUIRED_COMMANDMENT_SECTIONS = (
     r"^##\s+Profile\b",
 )
 
+#: A bare ``None`` token in a command position signals a templating leak: a
+#: Jinja ``{{ cmd | default(...) }}`` where ``cmd`` was Python ``None`` (the
+#: single-arg ``default`` filter does NOT fire on a defined-but-None value, so
+#: ``None`` is rendered literally). Such a COMMANDMENT produces ``... && None``
+#: and fails at runtime with rc=127 ("None: command not found"). Catch it at
+#: generation time (fail-loud) instead of deep inside a preflight/eval run.
+_NONE_COMMAND_TOKEN = re.compile(r"(?:^|[\s&|;])None(?:\s|$)")
+
+
+def _commandment_command_lines(text: str) -> list[tuple[int, str]]:
+    """Return ``(1-based line number, line)`` for command lines inside ``bash`` fences."""
+    out: list[tuple[int, str]] = []
+    in_fence = False
+    fence_re = re.compile(r"^```")
+    for idx, raw in enumerate(text.splitlines(), start=1):
+        stripped = raw.strip()
+        if fence_re.match(stripped):
+            in_fence = not in_fence
+            continue
+        if in_fence and stripped and not stripped.startswith("#"):
+            out.append((idx, stripped))
+    return out
+
 
 def validate_commandment(path: Path) -> None:
     """Verify a COMMANDMENT.md has the 5 required level-2 sections in order.
 
-    Permissive today (WARN-level); tightens to FAIL once PR-2's Jinja templates
-    and validators land.
+    Section presence is permissive today (WARN-level; tightens once PR-2's Jinja
+    templates and validators land). A bare ``None`` command token, however, is
+    always a hard failure: it is never legitimate and would otherwise surface as
+    an opaque rc=127 ("None: command not found") at preflight/eval time.
     """
     if not path.exists():
         raise ContractViolation(f"commandment path does not exist: {path}")
     text = path.read_text(encoding="utf-8", errors="ignore")
+
+    # Fail-loud on a templating leak (bare ``None`` in a command position).
+    leaked = [(ln, line) for ln, line in _commandment_command_lines(text) if _NONE_COMMAND_TOKEN.search(line)]
+    if leaked:
+        details = "; ".join(f"line {ln}: {line!r}" for ln, line in leaked[:5])
+        raise ContractViolation(
+            "commandment contains a bare 'None' command token (templating leak that would fail at "
+            f"runtime with rc=127 'None: command not found'): {details}"
+        )
+
     missing: list[str] = []
     for pat in REQUIRED_COMMANDMENT_SECTIONS:
         if not re.search(pat, text, re.MULTILINE):

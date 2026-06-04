@@ -32,26 +32,26 @@ export PYTHONPATH="${GEAK_WORK_DIR}:${GEAK_REPO_ROOT:-{{ repo_root }}}:${PYTHONP
 ## Correctness
 
 ```bash
-cd "${GEAK_WORK_DIR}" && {{ correctness_command | default("python3 " + harness_path + " --correctness") }}
+cd "${GEAK_WORK_DIR}" && {{ correctness_command | default("python3 " + harness_path + " --correctness", true) }}
 ```
 
 ## Benchmark
 
 ```bash
-cd "${GEAK_WORK_DIR}" && {{ performance_command | default("python3 " + harness_path + " --benchmark") }}
+cd "${GEAK_WORK_DIR}" && {{ performance_command | default("python3 " + harness_path + " --benchmark", true) }}
 ```
 
 ## Full Benchmark
 
 ```bash
-cd "${GEAK_WORK_DIR}" && {{ performance_command | default("python3 " + harness_path + " --full-benchmark") }}
+cd "${GEAK_WORK_DIR}" && {{ performance_command | default("python3 " + harness_path + " --full-benchmark", true) }}
 ```
 
 ## Profile
 
 ```bash
-kernel-profile "cd ${GEAK_WORK_DIR} && {{ performance_command | default("python3 " + harness_path + " --profile") }}" \
+kernel-profile "cd ${GEAK_WORK_DIR} && {{ performance_command | default("python3 " + harness_path + " --profile", true) }}" \
   --gpu-devices ${GEAK_GPU_DEVICE:-0} \
-  --replays {{ profile_replays | default(3) }} \
+  --replays {{ profile_replays | default(3, true) }} \
   --json -o ${GEAK_WORK_DIR}/profile.json
 ```
