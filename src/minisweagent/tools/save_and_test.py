@@ -767,6 +767,13 @@ class SaveAndTestTool:
                 "*.a",
                 "*.out",
                 "*.hipfb",
+                # Compiler intermediates / assembly + IR dumps (debug artifacts,
+                # not source — agents often emit these while inspecting codegen).
+                "*.s",
+                "*.ll",
+                "*.ptx",
+                "*.cubin",
+                "*.bc",
                 # Profiling artifacts
                 "*.csv",
                 "*.sqlite",
@@ -807,6 +814,12 @@ class SaveAndTestTool:
                 "*.a",
                 "*.out",
                 "*.hipfb",
+                # Compiler intermediates / assembly + IR dumps (debug, not source).
+                "*.s",
+                "*.ll",
+                "*.ptx",
+                "*.cubin",
+                "*.bc",
                 "*.sqlite",
                 "*.nsys-rep",
                 "*.ncu-rep",

@@ -509,6 +509,14 @@ def run_avo(
             lineage.record_attempts(result)
             _verify_dt = 0.0
             if verify_each_step:
+                # Reset the work repo to the clean best BEFORE verifying. The agent
+                # edited work_repo in place (modified kernel + scratch files like
+                # *.s / test_*.hip); evaluate_round_best builds its eval worktree by
+                # syncing work_repo's tree, so a dirty tree makes the verified patch
+                # fail to apply ("already exists in working directory" / hunk
+                # conflicts). The agent's patch is already saved under
+                # results/round_{step}/, so resetting loses nothing.
+                lineage.reset_worktree_to_best(work_repo)
                 _verify_t0 = time.monotonic()
                 _apply_verified_score(
                     result,
