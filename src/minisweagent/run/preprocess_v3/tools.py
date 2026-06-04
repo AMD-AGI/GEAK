@@ -832,12 +832,19 @@ def _schema_collect_profile() -> dict[str, Any]:
         "parameters": {
             "type": "object",
             "properties": {
-                "harness_path": {"type": "string", "description": "Absolute path to the verified harness."},
+                "harness_path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the verified harness. Optional: when omitted, the "
+                        "harness recorded by the dispatcher / commandment_from_user_command is "
+                        "used; if none exists (command-only Case A), profiling is skipped."
+                    ),
+                },
                 "work_dir": {"type": "string", "description": "Working directory."},
                 "gpu_id": {"type": "integer", "description": "HIP_VISIBLE_DEVICES value.", "default": 0},
                 "out_path": {"type": "string", "description": "Optional path to write the profile JSON."},
             },
-            "required": ["harness_path"],
+            "required": [],
         },
     }
 
@@ -1272,7 +1279,7 @@ def _make_tool_collect_profile(
     agent: PreprocessOrchestratorAgent,
 ) -> Callable[..., dict[str, Any]]:
     def _impl(
-        harness_path: str,
+        harness_path: str | None = None,
         work_dir: str | None = None,
         gpu_id: int | None = None,
         out_path: str | None = None,
@@ -1282,6 +1289,16 @@ def _make_tool_collect_profile(
         # accept-and-log policy for LLM-invented kwargs.
         if _extra_ignored:
             logger.debug("collect_profile ignored extra kwargs: %s", list(_extra_ignored))
+        # ``harness_path`` is optional: recover the one the dispatcher / Path-A
+        # commandment tool stored, so a bare ``collect_profile()`` call (common in
+        # Case A) does not raise TypeError. Profiling is best-effort — not required
+        # for preprocess success — so when no harness is available (command-only
+        # Case A) we skip gracefully instead of crashing the orchestrator.
+        if not harness_path:
+            harness_path = agent._collected.get("harness_path")
+        if not harness_path:
+            logger.warning("collect_profile: no harness_path available (command-only Case A?); skipping profiling.")
+            return {"ok": False, "skipped": True, "error": "no harness_path available for profiling"}
         profile: ProfileResult = collect_profile(
             Path(harness_path),
             work_dir=Path(work_dir) if work_dir else None,

@@ -14,9 +14,9 @@ run:
       finalize_grace_s: 600
       kill_buffer_s: 360
     quick:
-      total_s: 3600              # 1 hour — smoke / debugging
-      preprocess_soft_cap_s: 900
-      preprocess_hard_cap_fraction: 0.5
+      total_s: 7200              # 2 hours — smoke / debugging
+      preprocess_soft_cap_s: 1800   # 30 min target for preprocess (HIP compile/harness can be slow)
+      preprocess_hard_cap_fraction: 0.5  # -> 3600 s (1 h) hard ceiling for preprocess
       finalize_grace_s: 300
       kill_buffer_s: 360
 
