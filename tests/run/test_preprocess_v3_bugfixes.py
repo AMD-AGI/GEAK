@@ -87,6 +87,61 @@ def test_path_a_commandment_runs_user_command_through_run_sh(tmp_path: Path) -> 
     assert "${GEAK_WORK_DIR}/scripts/task_runner.py" in text
 
 
+def test_path_a_flagless_command_does_not_render_silent_duplicates(tmp_path: Path) -> None:
+    """Issue #258: a flag-less Path-A command must NOT render an all-modes-identical
+    COMMANDMENT, even when the LLM marks all four modes covered. The deterministic
+    backstop refuses and signals PATH_A_FLAG_MISSING instead."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out_path = tmp_path / "COMMANDMENT.md"
+    agent = PreprocessOrchestratorAgent(
+        model=object(),
+        config=PreprocessOrchestratorConfig(repo=repo),
+    )
+
+    tool = _make_tool_commandment_from_user_command(agent)
+    result = tool(
+        run_command="timeout 600 python op_tests/test_rmsnorm2dFusedAddQuant.py",
+        out_path=str(out_path),
+        # Even with all four marked covered, the backstop must still fire.
+        modes_covered=["correctness", "profile", "benchmark", "full_benchmark"],
+        inferred_modes=[],
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "PATH_A_FLAG_MISSING"
+    assert any("PATH_A_FLAG_MISSING" in w for w in result["warnings"])
+    # No runnable COMMANDMENT may be written for the flag-less case.
+    assert not out_path.exists()
+
+
+def test_path_a_flag_aware_command_still_renders_four_modes(tmp_path: Path) -> None:
+    """A1 happy path: a command that already carries a GEAK mode flag still renders
+    four distinct mode sections. Confirms the is_flagless detector does NOT mis-fire."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out_path = tmp_path / "COMMANDMENT.md"
+    agent = PreprocessOrchestratorAgent(
+        model=object(),
+        config=PreprocessOrchestratorConfig(repo=repo),
+    )
+
+    tool = _make_tool_commandment_from_user_command(agent)
+    result = tool(
+        run_command="python kernel_bench.py --benchmark",
+        out_path=str(out_path),
+        modes_covered=["correctness", "profile", "benchmark", "full_benchmark"],
+        inferred_modes=[],
+    )
+
+    assert result["ok"] is True
+    text = out_path.read_text()
+    # Each section carries its own real flag (substituted from --benchmark).
+    assert "--correctness" in text
+    assert "--full-benchmark" in text
+    assert "--profile" in text
+
+
 def test_dispatch_subagent_uses_sandbox_worktree_env(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
