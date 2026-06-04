@@ -497,9 +497,20 @@ def _build_agent(repo: Path, step_dir: Path, worker_dir: Path, output_dir: Path,
 
     model = model_factory()
 
+    agent_env: dict[str, str] = {"PAGER": "cat", "MANPAGER": "cat", "PIP_PROGRESS_BAR": "off", "TQDM_DISABLE": "1"}
+    # Pin save_and_test (correctness/benchmark) to the requested GPUs. The
+    # COMMANDMENT commands read ``${GEAK_GPU_DEVICE:-0}``; mirror GEAK's
+    # build_eval_env convention (set both GEAK_GPU_DEVICE and HIP_VISIBLE_DEVICES)
+    # so a step does not silently run on GPU 0 when --gpu-ids selected others.
+    gpu_ids = avo_config.get("_gpu_ids") or []
+    if gpu_ids:
+        devices = ",".join(str(g) for g in gpu_ids)
+        agent_env["GEAK_GPU_DEVICE"] = devices
+        agent_env["HIP_VISIBLE_DEVICES"] = devices
+
     env_kwargs: dict[str, Any] = {
         "cwd": str(repo),
-        "env": {"PAGER": "cat", "MANPAGER": "cat", "PIP_PROGRESS_BAR": "off", "TQDM_DISABLE": "1"},
+        "env": agent_env,
         "timeout": int(avo_config.get("env_timeout_s", 3600)),
     }
     env = get_environment_class("local")(**env_kwargs)

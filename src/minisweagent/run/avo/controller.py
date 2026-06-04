@@ -99,14 +99,41 @@ def _build_budget(config: dict, mode: str, total_budget_s: float | None) -> RunB
 # ---------------------------------------------------------------------------
 
 
-def _run_preprocess(repo: Path, task: str, output_dir: Path, model_name: str | None) -> None:
-    """Produce COMMANDMENT.md / baseline / profile via ``geak --preprocess-only``."""
+def _run_preprocess(
+    repo: Path,
+    task: str,
+    output_dir: Path,
+    model_name: str | None,
+    gpu_ids: list[int] | None = None,
+    mode: str | None = None,
+    config_path: str | None = None,
+) -> None:
+    """Produce COMMANDMENT.md / baseline / profile via ``geak --preprocess-only``.
+
+    Note: ``--kernel-language`` is intentionally NOT forwarded — ``geak`` has no
+    such flag (it auto-detects the kernel type during preprocess); AVO's
+    ``kernel_language`` is only used internally for skill selection / lineage.
+    """
     if (output_dir / "COMMANDMENT.md").exists():
         logger.info("preprocess: COMMANDMENT.md already present in %s; skipping.", output_dir)
         return
     cmd = ["geak", "--repo", str(repo), "--task", task, "-o", str(output_dir), "--preprocess-only", "--yolo"]
     if model_name:
         cmd += ["--model", model_name]
+    if gpu_ids:
+        # Propagate GPU selection so baseline/profile run on the requested devices
+        # (otherwise preprocess silently defaults to GPU 0).
+        cmd += ["--gpu-ids", ",".join(str(g) for g in gpu_ids)]
+    if mode:
+        # Propagate the run mode so preprocess uses the matching budget/presets
+        # instead of geak.yaml's default (otherwise --mode quick silently ran the
+        # preprocess subprocess as mode=full).
+        cmd += ["--mode", mode]
+    if config_path:
+        # Forward the user's extra config so preprocess honors the same overrides.
+        # Note: geak's -c REPLACES geak.yaml as the user layer (it does not merge),
+        # so an explicit AVO --config should be a complete config, not a snippet.
+        cmd += ["--config", config_path]
     logger.info("preprocess: %s", " ".join(cmd))
     subprocess.run(cmd, check=False)
     if not (output_dir / "COMMANDMENT.md").exists():
@@ -221,11 +248,19 @@ def run_avo(
     model_name: str | None,
     kernel_language: str = "python",
     gpu_ids: list[int] | None = None,
+    mode: str = "full",
+    config_path: str | None = None,
 ) -> dict:
     """Run one single-lineage AVO evolution; return the final report dict."""
     avo_cfg = dict(config.get("avo") or {})
     model_cfg = config.get("model", {})
     gpu_ids = gpu_ids or [0]
+    # Make the requested GPUs visible to every stage: the variation-step agent's
+    # save_and_test (via _build_agent), the ESCALATE rescue workers (which derive
+    # their cfg from config["avo"]), and the verify context below. Without this,
+    # --gpu-ids only reached verification and steps silently ran on GPU 0.
+    avo_cfg["_gpu_ids"] = list(gpu_ids)
+    config.setdefault("avo", {})["_gpu_ids"] = list(gpu_ids)
 
     def model_factory():
         return get_model(model_name, model_cfg)
@@ -233,7 +268,7 @@ def run_avo(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── preprocess (reused) ───────────────────────────────────────────
-    _run_preprocess(repo, task, output_dir, model_name)
+    _run_preprocess(repo, task, output_dir, model_name, gpu_ids, mode, config_path)
     pp_elapsed = time.monotonic() - budget.started_at
     budget.commit_preprocess(pp_elapsed)
     budget.schedule_optimization_watchdog()
@@ -892,6 +927,8 @@ def main(
             model_name=model,
             kernel_language=kernel_language,
             gpu_ids=parsed_gpu_ids,
+            mode=mode,
+            config_path=config_path,
         )
     except KeyboardInterrupt:
         console.print("[red]Interrupted.[/red]")
