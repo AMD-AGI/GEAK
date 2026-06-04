@@ -116,6 +116,38 @@ optional and has a sensible default — a minimal run is just
 > so preprocess and the evolution loop stay consistent (e.g. `--gpu-ids 2` runs
 > baseline/profile on GPU 2, not GPU 0).
 
+### `--test-command` format
+
+The value must be a **runnable shell command** — not a natural-language
+description. GEAK runs it in `cwd=GEAK_WORK_DIR` (the isolated worktree), with
+`GEAK_WORK_DIR` / `GEAK_GPU_DEVICE` / `GEAK_REPO_ROOT` / `GEAK_BENCHMARK_ITERATIONS`
+available; relative paths are fine and hardcoded absolute repo paths are
+auto-rewritten.
+
+Requirements / conventions:
+
+- **Runnable, no prose.** `python3 scripts/task_runner.py correctness` ✅ —
+  not `python3 scripts/task_runner.py for correctness and perf check` ❌.
+- **Exit code = correctness**: `0` = pass, non-zero = fail.
+- **Multiple steps via `&&`**: GEAK splits on `&&` to separate correctness
+  (left) from performance (right), e.g.
+  `python3 scripts/task_runner.py correctness && python3 scripts/task_runner.py performance`.
+- **Emit timing markers** for accurate speedups: print
+  `GEAK_RESULT_LATENCY_MS=<float>` (and `GEAK_RESULT_SPEEDUP=<float>` for the
+  full benchmark) on stdout, or per-shape latencies. Without markers GEAK falls
+  back to wall-clock timing (noisier).
+- **Best case**: point at a `*.py` harness that supports `--correctness`,
+  `--benchmark`, `--full-benchmark`, `--profile` — GEAK promotes it directly.
+
+GEAK accepts two shapes:
+
+| Shape | Example | Handling |
+|-------|---------|----------|
+| Standard 4-mode harness | `python3 test_silu_harness.py` | promoted directly (cleanest) |
+| Plain / compound eval command | `python3 scripts/task_runner.py correctness && ... performance` | wrapped into the 4-mode contract (`eval_contract_adapter`) |
+
+Tip: verify it runs before passing it — `cd <repo> && <your --test-command>`.
+
 ---
 
 ## Configuration
