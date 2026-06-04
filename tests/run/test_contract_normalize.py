@@ -9,6 +9,7 @@ from minisweagent.run.preprocess.contract_normalize import (
     codebase_context_excerpt,
     discovery_digest,
     infer_compile_command_from_eval,
+    is_amalgamation_command,
 )
 
 
@@ -38,6 +39,37 @@ class TestInferCompileCommandFromEval:
 
     def test_no_build_token_returns_none(self) -> None:
         assert infer_compile_command_from_eval("pytest -q") is None
+
+
+class TestIsAmalgamationCommand:
+    def test_no_double_amp_is_not_amalgamation(self) -> None:
+        # A single command (flag-less or flag-bearing) is never an amalgamation.
+        assert is_amalgamation_command("python t.py") is False
+        assert is_amalgamation_command("python t.py --benchmark") is False
+
+    def test_non_build_double_amp_is_amalgamation(self) -> None:
+        # Same script run twice with different settings, no build step.
+        assert is_amalgamation_command("python t.py --mode 1 && python t.py --mode 2") is True
+        # Flag-bearing variant must also be caught (it would otherwise yield a
+        # harness path and slip past the flag-less backstop).
+        assert (
+            is_amalgamation_command(
+                "python t.py --benchmark --opt-a && python t.py --benchmark --opt-b"
+            )
+            is True
+        )
+
+    def test_build_bearing_double_amp_is_not_amalgamation(self) -> None:
+        # A genuine compile + run contract has a leading build prefix and may split.
+        assert is_amalgamation_command("make && python t.py --benchmark") is False
+        assert (
+            is_amalgamation_command(
+                "python3 scripts/task_runner.py compile && "
+                "python3 scripts/task_runner.py correctness && "
+                "python3 scripts/task_runner.py performance"
+            )
+            is False
+        )
 
 
 def test_discovery_digest_truncates_large_payload() -> None:

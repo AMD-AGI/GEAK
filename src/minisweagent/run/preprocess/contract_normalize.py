@@ -102,6 +102,30 @@ def infer_compile_command_from_eval(eval_command: str | None) -> str | None:
     return None
 
 
+def is_amalgamation_command(cmd: str) -> bool:
+    """True when *cmd* chains segments with ``&&`` but has no confident leading
+    compile/build prefix — i.e. a joint/amalgamation command (the same script run
+    twice with different settings, or two different tests chained).
+
+    Such a command must be resolved into a single latency value by the harness
+    generator (Case A2), NOT split blindly left=correctness / right=performance
+    (which silently drops one metric). We gate on
+    :func:`infer_compile_command_from_eval` rather than a raw build-token substring
+    scan so the keep-vs-refuse decision stays consistent with the compile-prefix the
+    split paths actually re-prepend, and to avoid whole-string false positives. This
+    *reduces, not eliminates*, false positives: a build substring living only inside
+    a flag value of the first segment (e.g. ``--mode compile_fwd``) still reads as a
+    compile prefix and is treated as build-bearing.
+
+    Shared by the preprocessor (``commandment_from_user_command``) and the CLI
+    entry point (``mini.py``) so a compound ``--test-command`` is classified the
+    same way regardless of which layer sees it first.
+    """
+    if "&&" not in cmd:
+        return False
+    return infer_compile_command_from_eval(cmd) is None
+
+
 def discovery_digest(discovery: dict[str, Any] | None, *, max_chars: int = 6000) -> dict[str, Any]:
     """Return a JSON-serializable, size-capped snapshot for contract.json."""
     if not discovery:

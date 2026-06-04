@@ -34,6 +34,7 @@ from minisweagent.run.pipeline_helpers import (
     apply_mode_presets,
     resolve_max_rounds,
 )
+from minisweagent.run.preprocess.contract_normalize import is_amalgamation_command
 from minisweagent.run.preprocess_v3.adapter import run_preprocess_v3 as run_preprocessor
 from minisweagent.run.state import (
     PreprocessState,
@@ -682,7 +683,16 @@ def main(
                 else:
                     raise
         else:
-            if isinstance(test_command, str) and "&&" in test_command:
+            # Only pre-split a compound ``cmd_a && cmd_b`` into correctness /
+            # performance hints when it is a genuine build-bearing contract
+            # (mirrors the preprocessor's _try_synthesize_shell_contract_harness
+            # split). A non-build ``&&`` is an amalgamation (same script run twice
+            # with different settings, or two different tests chained); splitting it
+            # left=correctness / right=performance silently drops one metric. Pass
+            # it through whole as eval_command so the preprocessor's deterministic
+            # amalgamation guard fires (PATH_A_FLAG_MISSING) and routes it to the
+            # harness generator (Case A2), which resolves it into one metric.
+            if isinstance(test_command, str) and "&&" in test_command and not is_amalgamation_command(test_command):
                 left, right = test_command.rsplit("&&", 1)
                 correctness_command = left.strip() or None
                 performance_command = right.strip() or None

@@ -187,36 +187,25 @@ def _extract_harness_from_command(cmd: str) -> str | None:
 
 
 def _is_amalgamation_command(cmd: str) -> bool:
-    """True when *cmd* chains segments with ``&&`` but has no confident leading
-    compile/build prefix — i.e. a joint/amalgamation command (the same script run
-    twice with different settings, or two different tests chained).
+    """Thin wrapper over :func:`contract_normalize.is_amalgamation_command`.
 
-    Such a command must be resolved into a single latency value by the harness
-    generator, NOT split blindly by :func:`_try_synthesize_shell_contract_harness`
-    (whose ``rsplit("&&", 1)`` treats left=correctness / right=performance and
-    would silently drop one metric). We gate on ``infer_compile_command_from_eval``
-    rather than a raw build-token substring scan so the keep-vs-refuse decision
-    stays consistent with the compile-prefix the split path actually re-prepends,
-    and to avoid whole-string false positives. This *reduces, not eliminates*,
-    false positives: a build substring living only inside a flag value of the
-    first segment (e.g. ``--mode compile_fwd``) still reads as a compile prefix and
-    is treated as build-bearing.
-
-    Flag-independent by design: it must catch flag-bearing amalgamations too, since
-    those would otherwise yield a harness path via ``_extract_harness_from_command``
-    and slip past the flag-less backstop in ``commandment_from_user_command``.
+    Kept local so this module's call sites read clearly and to preserve the safe
+    ImportError fallback: if the shared module cannot be imported, treat a ``&&``
+    command as an amalgamation and route to the harness generator (A2) rather than
+    risk a blind split. Flag-independent by design — it must catch flag-bearing
+    amalgamations too, since those would otherwise yield a harness path via
+    ``_extract_harness_from_command`` and slip past the flag-less backstop in
+    ``commandment_from_user_command``.
     """
     if "&&" not in cmd:
         return False
     try:
         from minisweagent.run.preprocess.contract_normalize import (
-            infer_compile_command_from_eval,
+            is_amalgamation_command,
         )
     except ImportError:
-        # Cannot determine a compile prefix -> treat as amalgamation and route to
-        # the harness generator (A2), the safe path, rather than risk a blind split.
         return True
-    return infer_compile_command_from_eval(cmd) is None
+    return is_amalgamation_command(cmd)
 
 
 def _try_synthesize_shell_contract_harness(
