@@ -73,6 +73,18 @@ geak-avo \
   --mode full           # 7-day wall-clock cap (see geak_avo.yaml)
 ```
 
+Pinning GPUs and supplying your own unit-test / eval command:
+
+```bash
+geak-avo \
+  --repo GEAK/examples/knn \
+  --task "Optimize the knn kernel. Metric: latency (lower is better)." \
+  --kernel-language hip \
+  --mode quick \
+  --gpu-ids 2 \
+  --test-command "python3 scripts/task_runner.py correctness"
+```
+
 The run **resumes automatically**: if the output directory already contains
 `avo_state/lineage.json`, AVO continues from the existing best version.
 
@@ -80,17 +92,27 @@ The run **resumes automatically**: if the output directory already contains
 
 ## CLI options
 
-| Option | Default | Meaning |
-|--------|---------|---------|
-| `--repo` | (required) | Target kernel repository root. |
-| `-t`, `--task` | (required) | Optimization task description (include the metric). |
-| `-o`, `--output` | `optimization_logs/avo_<repo>_<ts>/` | Run output directory. |
-| `-m`, `--model` | from config | Model name override. |
-| `--mode` | `full` | Budget mode: `quick` (1 h) or `full` (7 d). |
-| `--total-budget-s` | — | Override the mode's wall-clock cap, in seconds. |
-| `--kernel-language` | `python` | `triton` \| `hip` \| `flydsl` \| `python` — selects which skills to inject. |
-| `--gpu-ids` | `0` | Comma-separated GPU device indices used for per-step verification. |
-| `-c`, `--config` | — | Extra YAML merged last over `geak.yaml` + `geak_avo.yaml`. |
+**Only two options are required:** `--repo` and `--task`. Everything else is
+optional and has a sensible default — a minimal run is just
+`geak-avo --repo <path> --task "<goal incl. metric>"`.
+
+| Option | Required? | Default | Meaning |
+|--------|-----------|---------|---------|
+| `--repo` | **Yes** | — | Target kernel repository root. |
+| `-t`, `--task` | **Yes** | — | Optimization task description (include the metric). |
+| `-o`, `--output` | No | `optimization_logs/avo_<repo>_<ts>/` | Run output directory. |
+| `-m`, `--model` | No | from config | Model name override. |
+| `--mode` | No | `full` | Budget mode: `quick` (1 h) or `full` (7 d). |
+| `--total-budget-s` | No | — | Override the mode's wall-clock cap, in seconds. |
+| `--kernel-language` | No | `python` | `triton` \| `hip` \| `flydsl` \| `python` — selects which skills to inject. Internal to AVO (not forwarded to preprocess, which auto-detects the kernel type). |
+| `--gpu-ids` | No | `0` | Comma-separated GPU device indices. Applied end-to-end: preprocess, each variation step's `save_and_test` (via `GEAK_GPU_DEVICE` / `HIP_VISIBLE_DEVICES`), per-step verification, and ESCALATE workers. |
+| `--test_command`, `--test-command` | No | — | Manually specify the unit-test / eval command. Forwarded to preprocess so `geak` bakes it into the COMMANDMENT/harness (skips UnitTestAgent auto-discovery); variation steps pick it up from `COMMANDMENT.md`. Only takes effect on a fresh run (preprocess is skipped on resume). |
+| `-c`, `--config` | No | — | Extra YAML merged last over `geak.yaml` + `geak_avo.yaml`. Also forwarded to the preprocess subprocess — note `geak`'s `-c` *replaces* `geak.yaml` as the user layer (it does not merge), so pass a complete config, not a snippet. |
+
+> **Forwarded to preprocess.** `--model`, `--gpu-ids`, `--mode`, `--config`, and
+> `--test-command` are passed through to the `geak --preprocess-only` subprocess
+> so preprocess and the evolution loop stay consistent (e.g. `--gpu-ids 2` runs
+> baseline/profile on GPU 2, not GPU 0).
 
 ---
 
