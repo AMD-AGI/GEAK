@@ -119,7 +119,10 @@ def _resolve_tools(ctx: PipelineContext, mode: Mode):
         runtime.disable_tools(["query", "optimize"])
     else:
         try:
-            runtime.wrap_rag_tools_with_postprocessor()
+            # Pass the model config (incl. model_class) so the RAG postprocessor
+            # builds its model with the right provider instead of a provider-less
+            # get_model() default ("LLM Provider NOT provided").
+            runtime.wrap_rag_tools_with_postprocessor(model_config=(ctx.config or {}).get("model"))
         except Exception as exc:
             logger.warning("Failed to wrap RAG tools with postprocessor: %s", exc)
 

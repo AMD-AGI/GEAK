@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -246,6 +247,76 @@ def _prepare_work_repo(repo: Path, output_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+@contextmanager
+def _timed(label: str, *, note: str | None = None, slow_after_s: float | None = None):
+    """Time a phase: optional up-front reminder, an elapsed log, and a slow warning.
+
+    Reminders/timers are best-effort observability only — they never alter control
+    flow. ``note`` prints before the work (e.g. "this can be slow"); ``slow_after_s``
+    emits a hint when the phase exceeds that many seconds.
+    """
+    if note:
+        console.print(f"[yellow]{note}[/yellow]")
+    t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        dt = time.monotonic() - t0
+        console.print(f"[dim]timing: {label} took {dt:.1f}s[/dim]")
+        logger.info("AVO timing: %s took %.1fs", label, dt)
+        if slow_after_s is not None and dt > slow_after_s:
+            console.print(
+                f"[yellow]NOTE: {label} took {dt:.0f}s (> ~{slow_after_s:.0f}s). "
+                f"Tips: --no-profiling skips the per-step PROFILE; also check GPU contention and shape sizes.[/yellow]"
+            )
+
+
+def _log_resolved_config(
+    *,
+    repo: Path,
+    output_dir: Path,
+    model_name: str | None,
+    kernel_language: str,
+    gpu_ids: list[int],
+    mode: str,
+    config_path: str | None,
+    test_command: str | None,
+    use_rag: bool,
+    use_profiling: bool,
+    avo_cfg: dict,
+) -> None:
+    """Print the resolved AVO configuration banner (mirrors geak's resolved-config block)."""
+    rows = [
+        ("repo", str(repo)),
+        ("output_dir", str(output_dir)),
+        ("mode", mode),
+        ("gpu_ids", ",".join(str(g) for g in gpu_ids)),
+        ("kernel_language", kernel_language),
+        ("model", model_name or "from config (default)"),
+        ("config", config_path or "Not provided (geak.yaml + geak_avo.yaml)"),
+        ("test_command", test_command or "auto (from COMMANDMENT / discovery)"),
+        ("use_rag", str(use_rag)),
+        ("use_profiling", str(use_profiling)),
+        ("verify_each_step", str(bool(avo_cfg.get("verify_each_step", True)))),
+        ("variation_step_limit", str(avo_cfg.get("variation_step_limit", 200))),
+    ]
+    bar = "=" * 70
+    console.print(f"[bold cyan]{bar}[/bold cyan]")
+    console.print("[bold cyan]Resolved AVO configuration (CLI > config > default):[/bold cyan]")
+    console.print(f"[bold cyan]{bar}[/bold cyan]")
+    for key, val in rows:
+        console.print(f"  [cyan]{key:<22}[/cyan] {val}")
+    console.print(f"[bold cyan]{bar}[/bold cyan]")
+    logger.info(
+        "AVO resolved config: mode=%s gpu_ids=%s use_rag=%s use_profiling=%s verify_each_step=%s",
+        mode,
+        gpu_ids,
+        use_rag,
+        use_profiling,
+        bool(avo_cfg.get("verify_each_step", True)),
+    )
+
+
 def run_avo(
     *,
     repo: Path,
@@ -300,13 +371,33 @@ def run_avo(
     if not eff_use_rag:
         logger.info("AVO: RAG disabled (use_rag=false) — query/optimize tools off in variation steps.")
 
+    _log_resolved_config(
+        repo=repo,
+        output_dir=output_dir,
+        model_name=model_name,
+        kernel_language=kernel_language,
+        gpu_ids=gpu_ids,
+        mode=mode,
+        config_path=config_path,
+        test_command=test_command,
+        use_rag=eff_use_rag,
+        use_profiling=eff_use_profiling,
+        avo_cfg=avo_cfg,
+    )
+
     def model_factory():
         return get_model(model_name, model_cfg)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── preprocess (reused) ───────────────────────────────────────────
-    _run_preprocess(repo, task, output_dir, model_name, gpu_ids, mode, config_path, test_command)
+    with _timed(
+        "preprocess",
+        note="Preprocess starting (harness generation + baseline + profiling). This can take "
+        "several minutes — longer for HIP (kernel compilation). Subsequent runs reuse COMMANDMENT.md.",
+        slow_after_s=600,
+    ):
+        _run_preprocess(repo, task, output_dir, model_name, gpu_ids, mode, config_path, test_command)
     pp_elapsed = time.monotonic() - budget.started_at
     budget.commit_preprocess(pp_elapsed)
     budget.schedule_optimization_watchdog()
@@ -356,6 +447,13 @@ def run_avo(
     # the whole run; each step injects its summary and records its outcome.
     notebook_root = output_dir / "avo_state" / "notebook"
 
+    # One-time reminder about the dominant per-step cost.
+    if verify_each_step and eff_use_profiling:
+        console.print(
+            "[yellow]Reminder: each verified step runs FULL_BENCHMARK + PROFILE; profiling is the slow part. "
+            "Use --no-profiling (or avo.use_profiling=false) for faster test runs.[/yellow]"
+        )
+
     step_idx = 0
     pending_nudge: str | None = None
     try:
@@ -372,6 +470,7 @@ def run_avo(
             # tells the agent to use the (disabled) profile_kernel tool.
             profiling_enabled = use_profiling and (step_idx > profiling_after_step or len(lineage.committed) > 1)
 
+            _step_t0 = time.monotonic()
             result = run_variation_step(
                 repo=work_repo,
                 base_task=task,
@@ -386,10 +485,13 @@ def run_avo(
                 notebook_root=notebook_root,
                 profiling_enabled=profiling_enabled,
             )
+            _agent_dt = time.monotonic() - _step_t0
             pending_nudge = None
 
             lineage.record_attempts(result)
+            _verify_dt = 0.0
             if verify_each_step:
+                _verify_t0 = time.monotonic()
                 _apply_verified_score(
                     result,
                     verify_ctx,
@@ -401,6 +503,7 @@ def run_avo(
                     cache=verify_cache,
                     cache_path=verify_cache_path,
                 )
+                _verify_dt = time.monotonic() - _verify_t0
             committed = lineage.maybe_commit(result, repo=work_repo)
             _record_to_notebook(notebook_root, step_idx, result, committed)
             write_evolution_entry(output_dir, result, committed)  # P-mem-3 causal log
@@ -408,15 +511,33 @@ def run_avo(
             signal = detector.evaluate(result, committed)
             console.print(
                 f"[cyan]AVO step {step_idx}[/cyan]: committed={committed} "
-                f"level={signal.level.name} best={lineage.best_speedup:.3f}x — {signal.reason}"
+                f"level={signal.level.name} best={lineage.best_speedup:.3f}x "
+                f"(agent {_agent_dt:.0f}s, verify {_verify_dt:.0f}s) — {signal.reason}"
             )
+            logger.info(
+                "AVO timing: step %d agent=%.1fs verify=%.1fs total=%.1fs",
+                step_idx,
+                _agent_dt,
+                _verify_dt,
+                _agent_dt + _verify_dt,
+            )
+            if _verify_dt > 300:
+                console.print(
+                    f"[yellow]NOTE: step {step_idx} verification took {_verify_dt:.0f}s "
+                    f"(profiling dominates). Use --no-profiling for faster runs.[/yellow]"
+                )
 
             if signal.level == StagnationLevel.NUDGE:
                 pending_nudge = f"Progress is stalling ({signal.reason}). Try a different angle or mark the current strategy failed."
             elif signal.level == StagnationLevel.REDIRECT:
                 _do_redirect(signal, lineage, step_dir, output_dir, strategy_file, detector, model_factory, work_repo)
             elif signal.level == StagnationLevel.ESCALATE:
-                _do_escalate(lineage, output_dir, config, model_factory, verify_ctx, work_repo, base_task=task)
+                with _timed(
+                    f"ESCALATE rescue (after step {step_idx})",
+                    note="ESCALATE: launching diversified rescue workers + evaluation — this is expensive.",
+                    slow_after_s=900,
+                ):
+                    _do_escalate(lineage, output_dir, config, model_factory, verify_ctx, work_repo, base_task=task)
                 detector.reset(partial=False)
 
         # Budget exhausted; honour min-commits as a best-effort note.
@@ -429,7 +550,8 @@ def run_avo(
     finally:
         budget.cancel_all_timers()
 
-    return _finalize(output_dir, lineage)
+    with _timed("finalize"):
+        return _finalize(output_dir, lineage)
 
 
 def _record_to_notebook(notebook_root: Path, step_index: int, result, committed: bool) -> None:

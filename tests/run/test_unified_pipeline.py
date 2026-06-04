@@ -37,7 +37,7 @@ def test_resolve_tools_disables_rag_when_flag_off():
         def disable_tools(self, names):
             self.disabled.append(list(names))
 
-        def wrap_rag_tools_with_postprocessor(self):  # pragma: no cover - not hit
+        def wrap_rag_tools_with_postprocessor(self, model_config=None):  # pragma: no cover - not hit
             raise AssertionError("should not be called when rag is off")
 
     with patch("minisweagent.tools.tools_runtime.ToolRuntime", _FakeRuntime):
@@ -56,7 +56,7 @@ def test_resolve_tools_wraps_rag_when_enabled():
         def disable_tools(self, names):  # pragma: no cover - not hit
             self.disabled.append(list(names))
 
-        def wrap_rag_tools_with_postprocessor(self):
+        def wrap_rag_tools_with_postprocessor(self, model_config=None):
             self.wrapped = True
 
     with patch("minisweagent.tools.tools_runtime.ToolRuntime", _FakeRuntime):

@@ -130,6 +130,12 @@ class AgentConfig:
     use_strategy_manager: bool = False
     strategy_file_path: str = ".optimization_strategies.md"
 
+    # ─── model config for secondary models (e.g. RAG postprocessor) ───
+    # Passed to wrap_rag_tools_with_postprocessor so the postprocessor builds its
+    # model with the same provider/model_class (e.g. amd_llm) instead of falling
+    # back to a provider-less get_model() default ("LLM Provider NOT provided").
+    model_config: dict | None = None
+
     # ─── context ───
     profiling_type: str | None = None
     codebase_context: str | None = None
@@ -243,9 +249,11 @@ class OptimizationAgent:
         if self.config.disabled_tools:
             self.toolruntime.disable_tools(self.config.disabled_tools)
 
-        # RAG MCP postprocessor wrapping (from DefaultAgent)
+        # RAG MCP postprocessor wrapping (from DefaultAgent). Pass model_config so
+        # the postprocessor's model uses the same provider/model_class as the agent
+        # (otherwise it falls back to a provider-less get_model() default).
         try:
-            self.toolruntime.wrap_rag_tools_with_postprocessor()
+            self.toolruntime.wrap_rag_tools_with_postprocessor(model_config=self.config.model_config)
         except Exception as e:
             logger.warning("Failed to wrap RAG tools with postprocessor: %s", e)
 
