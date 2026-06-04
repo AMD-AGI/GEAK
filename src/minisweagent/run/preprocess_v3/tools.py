@@ -1273,7 +1273,19 @@ def _make_tool_collect_baseline(
                 eval_command = saved_eval
 
         resolved_gpu = gpu_id if gpu_id is not None else agent.config.gpu_id
-        resolved_work_dir = Path(work_dir) if work_dir else None
+        # Fall back to the orchestrator's source repo when the subagent omits
+        # work_dir (it has no schema default and is frequently not passed).
+        # A None work_dir means _build_env sets neither PYTHONPATH nor
+        # GEAK_WORK_DIR, so the harness can't find the kernel source and silently
+        # produces no latency. At preprocess time no per-slot worktree exists yet,
+        # so the source repo is the correct target; optimization-time runs pass
+        # their per-slot worktree explicitly via the legacy run_harness path.
+        if work_dir:
+            resolved_work_dir = Path(work_dir)
+        elif agent.config.repo:
+            resolved_work_dir = Path(agent.config.repo)
+        else:
+            resolved_work_dir = None
 
         if harness_path:
             baseline: BaselineMetrics = collect_baseline_metrics(
@@ -1412,6 +1424,11 @@ def _make_tool_render_commandment(
             except Exception as exc:  # noqa: BLE001 — never let the gate crash finalize
                 logger.debug("render_commandment bypass-gate skipped (validator error): %s", exc)
 
+        # compile_command is intentionally left unset: for HIP the harness owns
+        # its own build (the harness-generator contract requires it to self-build
+        # via subprocess.run(make/hipcc), mtime-keyed on the kernel source). So the
+        # rendered COMMANDMENT carries no compile step — that is by design, not a
+        # gap. A changed CK/HIP source is still recompiled by the harness/JIT layer.
         ctx = CommandmentContext(
             kernel_path=Path(kernel_path),
             harness_path=Path(harness_path),

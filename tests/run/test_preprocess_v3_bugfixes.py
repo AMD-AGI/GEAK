@@ -10,6 +10,7 @@ from minisweagent.run.preprocess_v3.orchestrator import (
     PreprocessOrchestratorConfig,
 )
 from minisweagent.run.preprocess_v3.tools import (
+    _make_tool_collect_baseline,
     _make_tool_commandment_from_user_command,
     _make_tool_dispatch_subagent,
     _make_tool_finish_preprocess,
@@ -215,6 +216,68 @@ def test_path_a_build_bearing_amalgamation_still_synthesizes(tmp_path: Path) -> 
 
     assert result["ok"] is True
     assert out_path.exists()
+
+
+def test_baseline_build_env_exports_geak_work_dir(tmp_path: Path) -> None:
+    """_build_env must export GEAK_WORK_DIR (and GEAK_REPO_ROOT) when work_dir is
+    given, so a contract-compliant harness resolves the real source tree instead
+    of falling back to its own directory (silent 'produced no latency')."""
+    from minisweagent.run.preprocess_v3.baseline import _build_env
+
+    work = tmp_path / "repo"
+    work.mkdir()
+
+    env = _build_env(work, gpu_id=0)
+    assert env["GEAK_WORK_DIR"] == str(work)
+    assert env["GEAK_REPO_ROOT"] == str(work)
+    assert str(work) in env["PYTHONPATH"]
+
+    # When work_dir is None, neither key is added (preserves prior no-op behavior).
+    env_none = _build_env(None, gpu_id=0)
+    assert "GEAK_WORK_DIR" not in env_none
+    assert "GEAK_REPO_ROOT" not in env_none
+
+
+def test_collect_baseline_defaults_work_dir_to_source_repo(tmp_path: Path, monkeypatch) -> None:
+    """When the subagent omits work_dir, collect_baseline must fall back to the
+    orchestrator's source repo so baseline runs with a valid GEAK_WORK_DIR."""
+    import minisweagent.run.preprocess_v3.tools as tools_module
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = tmp_path / "harness.py"
+    harness.write_text("print('GEAK_RESULT_LATENCY_MS=1.0')\n")
+
+    captured: dict[str, object] = {}
+
+    def fake_collect_baseline_metrics(harness_path, *, repeats, work_dir, gpu_id):
+        captured["work_dir"] = work_dir
+        return SimpleNamespace(
+            success=True,
+            median_ms=1.0,
+            samples_ms=[1.0],
+            stdev_ms=0.0,
+            repeats=repeats,
+            harness_path=harness_path,
+            command="",
+        )
+
+    monkeypatch.setattr(tools_module, "collect_baseline_metrics", fake_collect_baseline_metrics)
+    # capture_full_benchmark_stdout is imported lazily inside the tool from the
+    # baseline module; stub it there so this unit test runs no real subprocess.
+    import minisweagent.run.preprocess_v3.baseline as baseline_module
+
+    monkeypatch.setattr(baseline_module, "capture_full_benchmark_stdout", lambda *a, **k: None)
+
+    agent = PreprocessOrchestratorAgent(
+        model=object(),
+        config=PreprocessOrchestratorConfig(repo=repo),
+    )
+    tool = _make_tool_collect_baseline(agent)
+    # No work_dir passed -> must default to agent.config.repo.
+    tool(harness_path=str(harness), repeats=1)
+
+    assert captured["work_dir"] == repo
 
 
 def test_dispatch_subagent_uses_sandbox_worktree_env(tmp_path: Path) -> None:

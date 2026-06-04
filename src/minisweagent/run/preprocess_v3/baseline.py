@@ -202,6 +202,15 @@ def _build_env(
     if work_dir is not None:
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{work_dir}:{existing}" if existing else str(work_dir)
+        # Worktree-awareness contract (mirrors run_harness._build_env): a
+        # contract-compliant harness resolves every repo path from GEAK_WORK_DIR
+        # (e.g. ``os.environ.get("GEAK_WORK_DIR", "<fallback>")``). Without this
+        # the harness falls back to its own directory and cannot find the kernel
+        # source, so it runs nothing and emits no GEAK_RESULT_LATENCY_MS marker
+        # (silent "produced no latency"). GEAK_REPO_ROOT uses setdefault so an
+        # already-exported source root (set by the adapter) is preserved.
+        env["GEAK_WORK_DIR"] = str(work_dir)
+        env.setdefault("GEAK_REPO_ROOT", str(work_dir))
     env["HIP_VISIBLE_DEVICES"] = str(gpu_id)
     env["PYTHONUNBUFFERED"] = "1"
     if extra:
