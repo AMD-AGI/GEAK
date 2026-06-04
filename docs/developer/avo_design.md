@@ -7,6 +7,15 @@ Search*, arXiv:2603.24517) onto GEAK's existing building blocks, specifies the
 new modules, the **Supervisor** that keeps a long run from stalling, the
 **skills** strategy, and a phased plan with a feature-status table.
 
+> **Companion module docs.** This is the top-level design. Three subsystems have
+> their own deep-dive documents:
+> [`avo_supervisor_design.md`](avo_supervisor_design.md) (two-layer anti-stall
+> supervisor), [`avo_memory_design.md`](avo_memory_design.md) (bounded
+> cross-step memory), and
+> [`avo_evaluation_design.md`](avo_evaluation_design.md) (verified scoring &
+> profiling). Usage/run instructions live in
+> [`run/avo/README.md`](../../src/minisweagent/run/avo/README.md).
+
 > **Scope.** AVO is an **additive layer**. It reuses GEAK's preprocess,
 > `OptimizationAgent`, `save_and_test`, `strategy_manager`, RAG, `RunBudget`,
 > and git-worktree isolation. It does **not** modify `run/unified.py`,
@@ -203,6 +212,10 @@ optimization_logs/<kernel>_<ts>/
 ```
 
 ### 4.2 Commit gate (aligns with paper §3.2)
+
+> **Module deep-dive:** how the verified speedup that feeds this gate is computed
+> (per-shape geomean, profiling stages/timeouts, cost guards) is detailed in
+> [`avo_evaluation_design.md`](avo_evaluation_design.md).
 
 A candidate enters `committed[]` **iff**:
 
@@ -411,6 +424,11 @@ This text is the runtime mirror of `skills/avo-evolution/docs/variation_step_con
 ---
 
 ## 8. Supervisor — two layers
+
+> **Module deep-dive:** see [`avo_supervisor_design.md`](avo_supervisor_design.md)
+> for the full supervisor module design (every counter, the directive pipeline,
+> control flow, and the anti-stall guarantee matrix). This section is the
+> overview.
 
 The supervisor is what keeps the run from "lying flat" (摆烂). It has a
 **deterministic layer** (always fires) and an **LLM layer** (re-plans). The
@@ -790,6 +808,9 @@ environment (`make install`).
 
 ### Scoring & verification (P0 — implemented)
 
+> **Module deep-dive:** [`avo_evaluation_design.md`](avo_evaluation_design.md)
+> covers the full verification flow, profiling stages/timeouts, and cost guards.
+
 Each variation step writes its patches + `best_results.json` into GEAK's
 canonical `results/round_{step}/avo-worker/` layout. After the step, the
 controller calls `_apply_verified_score`, which reuses
@@ -819,6 +840,10 @@ reuses GEAK's multi-candidate evaluator instead of constructing a full
 branch from — the backtracked node (single-lineage semantics; no archive/tree).
 
 ### Memory mechanism (P-mem — implemented)
+
+> **Module deep-dive:** the three memory layers (strategy file / working notebook
+> / causal evolution log) and their boundedness are detailed in
+> [`avo_memory_design.md`](avo_memory_design.md).
 
 The paper uses **one long-running agent with continuous conversation memory**
 across the whole run. GEAK's `OptimizationAgent` resets `messages` per run, so
