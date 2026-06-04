@@ -186,6 +186,39 @@ def _extract_harness_from_command(cmd: str) -> str | None:
     return None
 
 
+def _is_amalgamation_command(cmd: str) -> bool:
+    """True when *cmd* chains segments with ``&&`` but has no confident leading
+    compile/build prefix — i.e. a joint/amalgamation command (the same script run
+    twice with different settings, or two different tests chained).
+
+    Such a command must be resolved into a single latency value by the harness
+    generator, NOT split blindly by :func:`_try_synthesize_shell_contract_harness`
+    (whose ``rsplit("&&", 1)`` treats left=correctness / right=performance and
+    would silently drop one metric). We gate on ``infer_compile_command_from_eval``
+    rather than a raw build-token substring scan so the keep-vs-refuse decision
+    stays consistent with the compile-prefix the split path actually re-prepends,
+    and to avoid whole-string false positives. This *reduces, not eliminates*,
+    false positives: a build substring living only inside a flag value of the
+    first segment (e.g. ``--mode compile_fwd``) still reads as a compile prefix and
+    is treated as build-bearing.
+
+    Flag-independent by design: it must catch flag-bearing amalgamations too, since
+    those would otherwise yield a harness path via ``_extract_harness_from_command``
+    and slip past the flag-less backstop in ``commandment_from_user_command``.
+    """
+    if "&&" not in cmd:
+        return False
+    try:
+        from minisweagent.run.preprocess.contract_normalize import (
+            infer_compile_command_from_eval,
+        )
+    except ImportError:
+        # Cannot determine a compile prefix -> treat as amalgamation and route to
+        # the harness generator (A2), the safe path, rather than risk a blind split.
+        return True
+    return infer_compile_command_from_eval(cmd) is None
+
+
 def _try_synthesize_shell_contract_harness(
     cmd: str,
     *,
@@ -221,6 +254,18 @@ def _try_synthesize_shell_contract_harness(
         return None
     if not repo_root_str:
         return None
+    # Only synthesize for a genuine build-bearing command. A non-build `&&` is an
+    # amalgamation (same script twice with different settings, or two different
+    # tests chained); its resolution is delegated to the harness generator (A2) —
+    # the deterministic split below is intentionally NOT used for it. We do not
+    # distinguish same-script-twice from different-scripts here: the generator
+    # handles both, so neither is a "limitation" of this path.
+    if _is_amalgamation_command(cmd):
+        return None
+    # The split below hard-codes left=correctness / right=performance ordering;
+    # this is an intentional assumption that holds for the canonical
+    # "compile && correctness && performance" pattern but degrades for 3+ mixed
+    # segments (e.g. "make && python a && python b"). Kept deliberately simple.
     # Only split when the command has multiple meaningful segments, not
     # when && is just directory navigation (e.g. "cd /dir && bash script.sh").
     # A cd-only left half is not a correctness command.
@@ -1466,6 +1511,28 @@ def _make_tool_commandment_from_user_command(
                 output_dir_str,
                 agent.model,
             )
+
+        # Deterministic amalgamation backstop (must run BEFORE harness extraction).
+        # A non-build ``&&`` command is a joint/amalgamation instruction (same
+        # script run twice with different settings, or two different tests chained).
+        # Splitting it left=correctness / right=performance silently drops one
+        # latency number. This guard is flag-INDEPENDENT on purpose: a flag-bearing
+        # amalgamation (e.g. "python t.py --benchmark --a && python t.py --benchmark
+        # --b") would otherwise yield a harness_path via
+        # ``_extract_harness_from_command`` and slip past the flag-less backstop
+        # below, running only the first half. Refuse here and route to A2.
+        if _is_amalgamation_command(cmd):
+            return {
+                "ok": False,
+                "error": "PATH_A_FLAG_MISSING",
+                "warnings": [
+                    "PATH_A_FLAG_MISSING: command chains segments with '&&' but has "
+                    "no build/compile prefix (amalgamation); a deterministic split "
+                    "would drop one metric. Dispatch harness-generator (Case A2) to "
+                    "resolve it into a single test emitting one metric. Do NOT retry "
+                    "commandment_from_user_command with the same command."
+                ],
+            }
 
         # Extract the harness path from the (possibly sanitized) command
         # so collect_baseline/collect_profile can use the real filesystem path.

@@ -142,6 +142,81 @@ def test_path_a_flag_aware_command_still_renders_four_modes(tmp_path: Path) -> N
     assert "--profile" in text
 
 
+def test_path_a_flagless_amalgamation_is_refused(tmp_path: Path) -> None:
+    """A non-build ``&&`` amalgamation (same script run twice with different
+    settings, no build step) must be refused with PATH_A_FLAG_MISSING rather than
+    blindly split left=correctness / right=performance (which drops one metric)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out_path = tmp_path / "COMMANDMENT.md"
+    agent = PreprocessOrchestratorAgent(
+        model=object(),
+        config=PreprocessOrchestratorConfig(repo=repo),
+    )
+
+    tool = _make_tool_commandment_from_user_command(agent)
+    result = tool(
+        run_command="python test.py --opt-a && python test.py --opt-b",
+        out_path=str(out_path),
+        modes_covered=["correctness", "benchmark"],
+        inferred_modes=[],
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "PATH_A_FLAG_MISSING"
+    assert not out_path.exists()
+
+
+def test_path_a_flag_bearing_amalgamation_is_refused(tmp_path: Path) -> None:
+    """R2-1: a *flag-bearing* amalgamation would yield a harness path via
+    _extract_harness_from_command and slip past the flag-less backstop, running
+    only the first half. The flag-independent amalgamation guard (placed before
+    harness extraction) must still refuse it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out_path = tmp_path / "COMMANDMENT.md"
+    agent = PreprocessOrchestratorAgent(
+        model=object(),
+        config=PreprocessOrchestratorConfig(repo=repo),
+    )
+
+    tool = _make_tool_commandment_from_user_command(agent)
+    result = tool(
+        run_command="python test.py --benchmark --opt-a && python test.py --benchmark --opt-b",
+        out_path=str(out_path),
+        modes_covered=["benchmark"],
+        inferred_modes=[],
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "PATH_A_FLAG_MISSING"
+    assert not out_path.exists()
+
+
+def test_path_a_build_bearing_amalgamation_still_synthesizes(tmp_path: Path) -> None:
+    """A build-bearing ``&&`` (compile + run) is NOT an amalgamation: it has a
+    confident leading compile prefix, so the deterministic split path is preserved
+    and the amalgamation guard does not mis-fire."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out_path = tmp_path / "COMMANDMENT.md"
+    agent = PreprocessOrchestratorAgent(
+        model=object(),
+        config=PreprocessOrchestratorConfig(repo=repo),
+    )
+
+    tool = _make_tool_commandment_from_user_command(agent)
+    result = tool(
+        run_command="make && python test.py --benchmark",
+        out_path=str(out_path),
+        modes_covered=["benchmark"],
+        inferred_modes=["correctness"],
+    )
+
+    assert result["ok"] is True
+    assert out_path.exists()
+
+
 def test_dispatch_subagent_uses_sandbox_worktree_env(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
