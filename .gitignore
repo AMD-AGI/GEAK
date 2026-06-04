@@ -202,6 +202,7 @@ docs/superpowers/
 HIP_Shared_Memory_Optimization_Best_Practices.md
 examples/add_kernel/
 examples/matmul_kernel/
+examples/assign_score_withk/
 hip_shared_memory_best_practices.md
 test_harness.py
 .rocprofv3/
