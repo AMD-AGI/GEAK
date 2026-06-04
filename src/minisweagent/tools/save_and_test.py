@@ -787,7 +787,7 @@ class SaveAndTestTool:
                 shell=True,
             )
             if result.returncode == 0 and result.stdout.strip():
-                return self._strip_jit_cache_from_patch(result.stdout)
+                return self._strip_binary_files_from_patch(self._strip_jit_cache_from_patch(result.stdout))
             # Fall through to diff -ruN when git diff fails or returns empty.
 
         if ctx.base_repo_path and ctx.base_repo_path.exists():
@@ -847,9 +847,42 @@ class SaveAndTestTool:
             # ``--- /home/user/repo/.../kernel.py``. Otherwise eval fails
             # with "kernel.py: No such file or directory".
             normalized = _normalize_diff_ruN_to_git(result.stdout, ctx.base_repo_path, cwd)
-            return self._strip_jit_cache_from_patch(normalized)
+            return self._strip_binary_files_from_patch(self._strip_jit_cache_from_patch(normalized))
 
         return ""
+
+    @staticmethod
+    def _strip_binary_files_from_patch(patch_text: str) -> str:
+        """Drop ``diff --git`` sections for binary files (non-appliable artifacts).
+
+        ``git diff`` / ``diff -ruN`` render a changed binary file as a
+        ``Binary files ... differ`` stub with no full-index delta. Such a stub
+        cannot be reapplied (``git apply`` errors "cannot apply binary patch ...
+        without full index line"), and because ``git apply`` is **atomic** it
+        would reject the WHOLE patch — including the real source edits, leaving
+        ``kernel.hip`` "does not apply". Binary files captured here are compiled
+        build outputs (e.g. an extensionless executable not matched by the
+        ``*.o`` / ``*.so`` excludes) that are rebuilt anyway, so strip them so the
+        source patch stays appliable.
+        """
+        if "Binary files" not in patch_text:
+            return patch_text
+        lines = patch_text.splitlines(keepends=True)
+        out: list[str] = []
+        i, n = 0, len(lines)
+        while i < n:
+            if lines[i].startswith("diff --git "):
+                j = i + 1
+                while j < n and not lines[j].startswith("diff --git "):
+                    j += 1
+                section = lines[i:j]
+                if not any(s.startswith("Binary files ") for s in section):
+                    out.extend(section)
+                i = j
+            else:
+                out.append(lines[i])
+                i += 1
+        return "".join(out)
 
     @staticmethod
     def _strip_jit_cache_from_patch(patch_text: str) -> str:
