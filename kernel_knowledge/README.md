@@ -1,6 +1,6 @@
 # kernel_knowledge — AMD MI300X Kernel Authoring Knowledge Base
 
-A deep, AMD-only (CDNA3 / gfx942 first; gfx950 / MI355X deltas flagged) reference库 whose job is
+A deep, AMD-only (CDNA3 / gfx942 first; gfx950 / MI355X deltas flagged) reference library whose job is
 to let an agent **write super-high-quality kernel code and pick the right backend** for LLM inference
 on AMD Instinct. It is the "how do I actually make this op fast on this chip" layer that sits under
 the `workflow_e2e_team` optimizer — the System Architect / Op Benchmarker / kernel squad consult it
@@ -9,10 +9,10 @@ when choosing a backend, designing an autotune space, or hand-writing a Triton/H
 - **39 documents, ~10k lines, 200 unique web sources** (ROCm docs + blogs, GitHub repos/PRs/issues,
   arXiv, AMD whitepapers, Hot Chips). Every doc ends with its own in-context `## Sources`; the union
   is aggregated in [`SOURCES.md`](SOURCES.md).
-- Organized along 4 requested dimensions + a hardware基座: **hardware → languages → libraries →
+- Organized along 4 requested dimensions + a hardware foundation: **hardware → languages → libraries →
   operators → optimization strategy**.
 
-## How an agent should use this库
+## How an agent should use this library
 1. **Start from the op.** Going to optimize a kernel? Open the matching `03_operators/*.md` — it gives
    you the algorithm, real kernel logic, the shape-regime split (prefill large-M vs decode skinny-M),
    the backend ladder, and a tuning-knob table.
@@ -26,9 +26,9 @@ when choosing a backend, designing an autotune space, or hand-writing a Triton/H
    memory/occupancy checklists, quantization accuracy gates, and the rocprof/omniperf → Top-N → Amdahl
    triage loop.
 
-This库 is read-only reference. It complements (does not replace) the workflow's own persistent
+This library is read-only reference. It complements (does not replace) the workflow's own persistent
 experience files: `../workflow_e2e_team/knowledge/backend_playbook.md` and `gemm_attention_backends.md`
-(those carry *measured* per-run results; this库 carries the *general* engineering knowledge).
+(those carry *measured* per-run results; this library carries the *general* engineering knowledge).
 
 ## Map
 
@@ -39,7 +39,7 @@ experience files: `../workflow_e2e_team/knowledge/backend_playbook.md` and `gemm
 | [memory_hierarchy_occupancy.md](00_hardware/memory_hierarchy_occupancy.md) | VGPR/AGPR, LDS banks & conflict rules, L1/L2(per-XCD)/Infinity Cache, coalescing, occupancy math (worked examples), direct-to-LDS double buffering |
 | [matrix_cores_numerics.md](00_hardware/matrix_cores_numerics.md) | full MFMA/WMMA instruction table (shapes×dtypes×throughput), register/lane mapping, fp8/fp6/fp4 & OCP/FNUZ formats, intrinsic usage |
 
-### 01_languages/ — language类型 (Triton / HIP / CK / asm)
+### 01_languages/ — language types (Triton / HIP / CK / asm)
 | file | what it gives you |
 |---|---|
 | [triton_amd.md](01_languages/triton_amd.md) | AMD Triton backend, TTIR→AMDGCN pipeline, `tl.dot`→MFMA, wave64, fp8 fnuz, annotated GEMM + fused softmax |
@@ -51,7 +51,7 @@ experience files: `../workflow_e2e_team/knowledge/backend_playbook.md` and `gemm
 | [asm_mfma_intrinsics.md](01_languages/asm_mfma_intrinsics.md) | CDNA3 ISA for perf, MFMA encoding/register banking, inline asm, scheduling for MFMA/global-load overlap |
 | [rocwmma.md](01_languages/rocwmma.md) | rocWMMA fragment API, gfx942 tile/dtype support, complete fragment GEMM, vs raw MFMA vs CK |
 
-### 02_libraries/ — 算子库 (aiter / hipBLASLt / rocBLAS / CK / sglang / vllm / RCCL)
+### 02_libraries/ — operator libraries (aiter / hipBLASLt / rocBLAS / CK / sglang / vllm / RCCL)
 | file | what it gives you |
 |---|---|
 | [aiter.md](02_libraries/aiter.md) | AMD AITER op catalog, backend dispatch (asm>CK>Triton>HIP), real call examples, when it beats hipBLASLt/CK |
@@ -63,7 +63,7 @@ experience files: `../workflow_e2e_team/knowledge/backend_playbook.md` and `gemm
 | [rccl_comm.md](02_libraries/rccl_comm.md) | RCCL collectives for TP/EP, xGMI topology, `NCCL_*`/`RCCL_*` tuning, MoE all-to-all, custom all-reduce |
 | [rocm_ecosystem.md](02_libraries/rocm_ecosystem.md) | MIOpen/rocPRIM/rocSPARSE/runtime overview, ROCm 6.x/7.x version matrix, PyTorch-ROCm op→lib dispatch |
 
-### 03_operators/ — 具体算子 (GEMM family, MoE, quant, attention family)
+### 03_operators/ — specific operators (GEMM family, MoE, quant, attention family)
 | file | what it gives you |
 |---|---|
 | [gemm.md](03_operators/gemm.md) | dense GEMM: tiled-MFMA, split-K/stream-K, persistent, epilogue fusion, dtype variants, backend ladder, annotated Triton GEMM |
@@ -81,7 +81,7 @@ experience files: `../workflow_e2e_team/knowledge/backend_playbook.md` and `gemm
 | [mla.md](03_operators/mla.md) | DeepSeek MLA math, weight absorption/matrix merging for decode, prefill vs decode, aiter/CK MLA, fp8 |
 | [deepseek_v3_v4_attention.md](03_operators/deepseek_v3_v4_attention.md) | V3 MLA+MoE serving, V4/NSA sparse attention, MI300X gaps & PRs, ranked "what to optimize" plan |
 
-### 04_optimization/ — 优化策略 (tuning, algorithms, fusion, memory, quant, profiling)
+### 04_optimization/ — optimization strategy (tuning, algorithms, fusion, memory, quant, profiling)
 | file | what it gives you |
 |---|---|
 | [gemm_tuning.md](04_optimization/gemm_tuning.md) | full GEMM tuning playbook: Tensile/`hipblaslt-bench`, TunableOp, Triton autotune space, ckProfiler, per-shape DB recipe |
