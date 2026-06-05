@@ -34,11 +34,31 @@ new modules, the **Supervisor** that keeps a long run from stalling, the
 >   existing worktree helpers so the snapshot matches what preprocess profiled.
 > - **Non-git directories:** a full copy bootstrapped into a throwaway git repo.
 >
-> All variation steps, `save_and_test` edits, worktree resets
-> (`git checkout -f` / `git clean -fd`), and lineage commits/tags (`avo-v{N}`)
-> happen inside that clone. Because the clone has a **separate `.git`**, the
-> `avo-v{N}` tags never appear in the user's `git tag` list — a multi-day run
-> cannot mutate, clean, or pollute the user's repository in any way.
+> `avo_repo` holds the lineage (`.git` + `avo-v{N}` tags). Because the clone has
+> a **separate `.git`**, the `avo-v{N}` tags never appear in the user's `git tag`
+> list — a multi-day run cannot mutate, clean, or pollute the user's repository
+> in any way.
+>
+> **Per-step ephemeral worktree (GEAK-aligned).** The agent does **not** run
+> directly in `avo_repo`. Each variation step (and each ESCALATE rescue worker)
+> runs in a fresh `git worktree` created from the current best
+> (`variation_NNNN/repo`), discarded right after the step — exactly like GEAK's
+> per-round/per-slot worktrees. This keeps `avo_repo` clean (the agent's scratch
+> — assembly dumps, test variants, build outputs — cannot accumulate or leak into
+> the lineage) and gives verification a pristine `avo-v{best}` base. The agent's
+> patch is saved under `results/round_{step}/`, so discarding the worktree loses
+> nothing (`_make_step_worktree` / `_remove_step_worktree`).
+>
+> **Patch hygiene + anti "test hacking".** `save_and_test` drops non-source noise
+> from captured patches — binary `Binary files … differ` stubs and compiler
+> intermediates (`*.s`, `*.ll`, `*.ptx`, `*.cubin`, `*.bc`) — so the verified
+> `best→candidate` patch applies cleanly and the lineage stays source-only. AVO
+> also sets `GEAK_PROTECT_TEST_FILES=1`, which strips edits to test/harness files
+> (`conftest.py`, `test_*.py`, `*_test.py`, `*harness*.py`, `task_runner.py`) from
+> the patch: since verification re-applies the patch onto a clean base, an agent
+> that tries to pass correctness by weakening the test/reference never affects the
+> verified score or the lineage. (Both are env-gated and additive; standard GEAK
+> is unchanged unless `GEAK_PROTECT_TEST_FILES=1` is set.)
 >
 > **Resume protection.** The `avo-v{N}` commits/tags live ONLY in
 > `avo_repo/.git`. Re-cloning on resume would pull from the (clean) user repo

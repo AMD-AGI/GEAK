@@ -1,6 +1,7 @@
 """Save-and-test tool: saves patches and runs correctness + benchmark tests."""
 
 import contextlib
+import fnmatch
 import json
 import logging
 import os
@@ -794,7 +795,9 @@ class SaveAndTestTool:
                 shell=True,
             )
             if result.returncode == 0 and result.stdout.strip():
-                return self._strip_binary_files_from_patch(self._strip_jit_cache_from_patch(result.stdout))
+                return self._strip_protected_test_files_from_patch(
+                    self._strip_binary_files_from_patch(self._strip_jit_cache_from_patch(result.stdout))
+                )
             # Fall through to diff -ruN when git diff fails or returns empty.
 
         if ctx.base_repo_path and ctx.base_repo_path.exists():
@@ -860,9 +863,63 @@ class SaveAndTestTool:
             # ``--- /home/user/repo/.../kernel.py``. Otherwise eval fails
             # with "kernel.py: No such file or directory".
             normalized = _normalize_diff_ruN_to_git(result.stdout, ctx.base_repo_path, cwd)
-            return self._strip_binary_files_from_patch(self._strip_jit_cache_from_patch(normalized))
+            return self._strip_protected_test_files_from_patch(
+                self._strip_binary_files_from_patch(self._strip_jit_cache_from_patch(normalized))
+            )
 
         return ""
+
+    #: Test / harness / reference files the agent must not edit (anti "test
+    #: hacking"). Matched against each diff section's basename via fnmatch.
+    _PROTECTED_TEST_GLOBS = (
+        "conftest.py",
+        "test_*.py",
+        "*_test.py",
+        "*harness*.py",
+        "task_runner.py",
+    )
+
+    @staticmethod
+    def _strip_protected_test_files_from_patch(patch_text: str) -> str:
+        """Drop diffs to test / harness / reference files (anti "test hacking").
+
+        Active only when ``GEAK_PROTECT_TEST_FILES=1`` (AVO sets this for its
+        evolutionary loop; standard GEAK is unchanged by default). In a long
+        evolutionary run an agent may try to make correctness pass by weakening
+        the test / harness / reference instead of optimizing the kernel.
+        Verification re-applies the captured patch onto a clean base, so stripping
+        these sections guarantees verification runs the ORIGINAL spec — an agent
+        edit to the test never reaches the verified score or the lineage.
+        """
+        if os.environ.get("GEAK_PROTECT_TEST_FILES", "").strip() != "1":
+            return patch_text
+        if "diff --git " not in patch_text:
+            return patch_text
+        lines = patch_text.splitlines(keepends=True)
+        out: list[str] = []
+        i, n = 0, len(lines)
+        while i < n:
+            if lines[i].startswith("diff --git "):
+                j = i + 1
+                while j < n and not lines[j].startswith("diff --git "):
+                    j += 1
+                match = re.match(r"diff --git a/(?P<a>.+?) b/(?P<b>.+?)\s*$", lines[i])
+                path = (match.group("b") if match else "").strip()
+                base = path.rsplit("/", 1)[-1]
+                if path and any(fnmatch.fnmatch(base, g) for g in SaveAndTestTool._PROTECTED_TEST_GLOBS):
+                    logger.warning(
+                        "save_and_test: dropping edit to protected test/harness file from patch "
+                        "(GEAK_PROTECT_TEST_FILES=1): %s",
+                        path,
+                    )
+                    i = j
+                    continue
+                out.extend(lines[i:j])
+                i = j
+            else:
+                out.append(lines[i])
+                i += 1
+        return "".join(out)
 
     @staticmethod
     def _strip_binary_files_from_patch(patch_text: str) -> str:

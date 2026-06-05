@@ -260,6 +260,49 @@ def _prepare_work_repo(repo: Path, output_dir: Path) -> Path:
     return work_repo
 
 
+def _make_step_worktree(work_repo: Path, dest: Path) -> Path:
+    """Create a fresh ephemeral worktree from ``work_repo``'s HEAD (= current best).
+
+    Mirrors GEAK's per-round/per-slot worktree model: the variation agent runs in
+    this throwaway worktree so it never dirties the persistent lineage repo
+    (``work_repo``) with scratch (assembly dumps, test variants, build outputs).
+    The worktree is removed right after the step (the patch is already saved under
+    ``results/round_{step}/``). Returns the worktree path, or ``work_repo`` itself
+    as a fallback if worktree creation fails.
+    """
+    from minisweagent.run.task_file import create_worktree
+
+    try:
+        if dest.exists():
+            _remove_step_worktree(work_repo, dest)
+        return create_worktree(work_repo, dest)
+    except Exception as exc:  # noqa: BLE001 — never let worktree setup kill the loop
+        logger.warning("AVO: step worktree creation failed (%s); agent will run in work_repo.", exc)
+        return work_repo
+
+
+def _remove_step_worktree(work_repo: Path, dest: Path) -> None:
+    """Discard an ephemeral step worktree (best-effort; never raises)."""
+    import shutil
+
+    if Path(dest).resolve() == Path(work_repo).resolve():
+        return  # fallback used work_repo directly — never remove the lineage repo
+    try:
+        subprocess.run(
+            ["git", "-C", str(work_repo), "worktree", "remove", "--force", str(dest)],
+            check=False,
+            capture_output=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if Path(dest).exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    try:
+        subprocess.run(["git", "-C", str(work_repo), "worktree", "prune"], check=False, capture_output=True)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Core loop
 # ---------------------------------------------------------------------------
@@ -369,6 +412,12 @@ def run_avo(
     # fails with "LLM Provider NOT provided".
     avo_cfg["_model_config"] = dict(model_cfg)
     config.setdefault("avo", {})["_model_config"] = dict(model_cfg)
+
+    # Anti "test hacking": in a long evolutionary run an agent may try to pass
+    # correctness by editing the test/harness/reference instead of optimizing the
+    # kernel. This makes save_and_test drop such edits from the captured patch, so
+    # verification (re-apply on a clean base) always runs the original spec.
+    os.environ["GEAK_PROTECT_TEST_FILES"] = "1"
 
     # Feature switches. Precedence: CLI override (highest) > config > default(True).
     # The resolved values are written back into avo_cfg AND config["avo"] so every
@@ -488,35 +537,37 @@ def run_avo(
             # tells the agent to use the (disabled) profile_kernel tool.
             profiling_enabled = use_profiling and (step_idx > profiling_after_step or len(lineage.committed) > 1)
 
+            # GEAK-aligned: run the agent in a fresh ephemeral worktree from the
+            # current best so it never dirties the persistent lineage repo with
+            # scratch (assembly dumps / test variants / build outputs). The patch
+            # is saved under results/round_{step}/, so the worktree is removed
+            # right after the run; verification + commit use work_repo (kept clean
+            # at best by reset_worktree_to_best above).
+            agent_repo = _make_step_worktree(work_repo, step_dir / "repo")
             _step_t0 = time.monotonic()
-            result = run_variation_step(
-                repo=work_repo,
-                base_task=task,
-                step_dir=step_dir,
-                lineage=lineage,
-                direction=lineage.current_direction(),
-                output_dir=output_dir,
-                avo_config=avo_cfg,
-                model_factory=model_factory,
-                deadline=budget.optimization_deadline() if hasattr(budget, "optimization_deadline") else None,
-                nudge=pending_nudge,
-                notebook_root=notebook_root,
-                profiling_enabled=profiling_enabled,
-            )
+            try:
+                result = run_variation_step(
+                    repo=agent_repo,
+                    base_task=task,
+                    step_dir=step_dir,
+                    lineage=lineage,
+                    direction=lineage.current_direction(),
+                    output_dir=output_dir,
+                    avo_config=avo_cfg,
+                    model_factory=model_factory,
+                    deadline=budget.optimization_deadline() if hasattr(budget, "optimization_deadline") else None,
+                    nudge=pending_nudge,
+                    notebook_root=notebook_root,
+                    profiling_enabled=profiling_enabled,
+                )
+            finally:
+                _remove_step_worktree(work_repo, agent_repo)
             _agent_dt = time.monotonic() - _step_t0
             pending_nudge = None
 
             lineage.record_attempts(result)
             _verify_dt = 0.0
             if verify_each_step:
-                # Reset the work repo to the clean best BEFORE verifying. The agent
-                # edited work_repo in place (modified kernel + scratch files like
-                # *.s / test_*.hip); evaluate_round_best builds its eval worktree by
-                # syncing work_repo's tree, so a dirty tree makes the verified patch
-                # fail to apply ("already exists in working directory" / hunk
-                # conflicts). The agent's patch is already saved under
-                # results/round_{step}/, so resetting loses nothing.
-                lineage.reset_worktree_to_best(work_repo)
                 _verify_t0 = time.monotonic()
                 _apply_verified_score(
                     result,
@@ -953,9 +1004,12 @@ def _do_escalate(lineage, output_dir, config, model_factory, verify_ctx, repo, *
         worker_dir = rescue_dir / f"rescue-worker-{k}"
         worker_dir.mkdir(parents=True, exist_ok=True)
         step_dir = Path(output_dir) / f"escalate_{rescue_round}_{k}"
+        # Each rescue worker runs in its own ephemeral worktree (GEAK-aligned) so
+        # workers don't dirty the lineage repo or step on each other.
+        rescue_repo = _make_step_worktree(repo, step_dir / "repo")
         try:
             run_variation_step(
-                repo=repo,
+                repo=rescue_repo,
                 base_task=base_task,
                 step_dir=step_dir,
                 lineage=lineage,
@@ -967,6 +1021,8 @@ def _do_escalate(lineage, output_dir, config, model_factory, verify_ctx, repo, *
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("AVO escalate: rescue worker %d failed (%s).", k, exc)
+        finally:
+            _remove_step_worktree(repo, rescue_repo)
 
     try:
         from minisweagent.run.postprocess.evaluation import evaluate_round_best

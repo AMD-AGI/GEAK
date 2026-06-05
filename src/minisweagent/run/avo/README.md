@@ -210,6 +210,30 @@ avo:
 and speedups stay accurate) — it only drops profiling, which AVO uses for
 supervisor diagnosis and causal memory, not for the commit decision.
 
+### Isolation & integrity
+
+AVO mirrors GEAK's worktree model so a long run stays clean and trustworthy:
+
+- **Per-step ephemeral worktree.** Each variation step runs the agent in a fresh
+  `git worktree` created from the current best (`variation_NNNN/repo`), removed
+  right after the step — exactly like GEAK's per-round/per-slot worktrees. The
+  agent never dirties the persistent lineage repo (`avo_repo`), so scratch
+  (assembly dumps, test variants, build outputs) cannot accumulate or leak into
+  the lineage. The agent's patch is saved under `results/round_{step}/`, so
+  discarding the worktree loses nothing; verification + commit run against the
+  clean `avo_repo`.
+- **Patch hygiene.** Captured patches drop non-source noise — binary artifacts
+  (`Binary files … differ` stubs, e.g. extensionless executables) and compiler
+  intermediates (`*.s`, `*.ll`, `*.ptx`, `*.cubin`, `*.bc`) — so the verified
+  `best→candidate` patch applies cleanly and the lineage stays source-only.
+- **Anti "test hacking".** In an evolutionary loop an agent may try to pass
+  correctness by editing the test/harness/reference instead of optimizing the
+  kernel. AVO sets `GEAK_PROTECT_TEST_FILES=1`, which strips edits to test/
+  harness files (`conftest.py`, `test_*.py`, `*_test.py`, `*harness*.py`,
+  `task_runner.py`) from the captured patch. Because verification re-applies the
+  patch onto a clean base, it always runs the **original** spec — an agent edit
+  to the test never reaches the verified score or the lineage.
+
 ---
 
 ## Outputs
@@ -219,7 +243,7 @@ optimization_logs/avo_<repo>_<ts>/
 ├── COMMANDMENT.md            # the test/benchmark contract (= scoring f), from preprocess
 ├── baseline_metrics.json     # preprocess baseline
 ├── profile.json              # preprocess profiling
-├── avo_repo/                 # isolated clone of --repo (agent edits + lineage git tags live here; original repo untouched)
+├── avo_repo/                 # isolated clone of --repo: holds the lineage (.git + avo-v{N} tags). NOT edited by the agent.
 ├── .optimization_strategies.md   # run-wide strategy state (shared by agents + supervisor)
 ├── avo_state/
 │   ├── lineage.json          # committed versions (P_t) + best_id + active tip
@@ -234,7 +258,8 @@ optimization_logs/avo_<repo>_<ts>/
 ├── trajectory.json           # evolution health: best-speedup curve, commit rate, per-strategy, supervisor interventions
 ├── variation_0001/           # one directory per variation step (logs + strategies)
 │   ├── agent.log
-│   └── .optimization_strategies.md
+│   ├── .optimization_strategies.md
+│   └── repo/                 # ephemeral per-step worktree the agent runs in (removed after the step)
 ├── results/round_1/avo-worker/   # GEAK-canonical layout (patches + best_results.json)
 │   ├── patch_*.patch / patch_*_test.txt
 │   └── best_results.json
