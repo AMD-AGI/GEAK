@@ -215,6 +215,12 @@ def bootstrap_git_repo(repo_path: Path, console=None) -> bool:
                 "*.ptx",
                 "*.cubin",
                 "*.bc",
+                # Editor / agent backup + scratch files (kernel.hip.bak / .new etc.)
+                "*.bak",
+                "*.new",
+                "*.orig",
+                "*.tmp",
+                "*.old",
                 "*.log",
                 "*.dat",
                 "optimization_logs/",

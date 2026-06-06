@@ -775,6 +775,13 @@ class SaveAndTestTool:
                 "*.ptx",
                 "*.cubin",
                 "*.bc",
+                # Editor / agent backup + scratch files (e.g. kernel.hip.bak /
+                # kernel.hip.new — agents often back up before editing; never source).
+                "*.bak",
+                "*.new",
+                "*.orig",
+                "*.tmp",
+                "*.old",
                 # Profiling artifacts
                 "*.csv",
                 "*.sqlite",
@@ -786,8 +793,12 @@ class SaveAndTestTool:
                 *self._generated_helper_excludes(),
             ]
             exclude_args = " ".join(f"':(exclude){entry}'" for entry in excludes)
+            # --full-index emits full blob SHAs so a later ``git apply --3way``
+            # (used by the eval worktree and the lineage tagger) can resolve the
+            # pre-image blobs and bridge context shifts instead of failing with
+            # "patch does not apply".
             result = subprocess.run(
-                f"git add -N . && git diff -- . {exclude_args}",
+                f"git add -N . && git diff --full-index -- . {exclude_args}",
                 cwd=cwd,
                 capture_output=True,
                 text=True,
@@ -823,6 +834,12 @@ class SaveAndTestTool:
                 "*.ptx",
                 "*.cubin",
                 "*.bc",
+                # Editor / agent backup + scratch files (kernel.hip.bak / .new etc.)
+                "*.bak",
+                "*.new",
+                "*.orig",
+                "*.tmp",
+                "*.old",
                 "*.sqlite",
                 "*.nsys-rep",
                 "*.ncu-rep",

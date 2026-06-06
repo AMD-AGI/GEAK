@@ -7,10 +7,12 @@ Search*, arXiv:2603.24517) onto GEAK's existing building blocks, specifies the
 new modules, the **Supervisor** that keeps a long run from stalling, the
 **skills** strategy, and a phased plan with a feature-status table.
 
-> **Companion module docs.** This is the top-level design. Three subsystems have
-> their own deep-dive documents:
-> [`avo_supervisor_design.md`](avo_supervisor_design.md) (two-layer anti-stall
-> supervisor), [`avo_memory_design.md`](avo_memory_design.md) (bounded
+> **Companion module docs.** This is the top-level design. Subsystems have their
+> own deep-dive documents:
+> [`avo_control_flow_design.md`](avo_control_flow_design.md) (execution model:
+> the two-level loop, per-step lifecycle, `submit` vs commit gate, exit
+> conditions), [`avo_supervisor_design.md`](avo_supervisor_design.md) (two-layer
+> anti-stall supervisor), [`avo_memory_design.md`](avo_memory_design.md) (bounded
 > cross-step memory), and
 > [`avo_evaluation_design.md`](avo_evaluation_design.md) (verified scoring &
 > profiling). Usage/run instructions live in
