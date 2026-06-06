@@ -651,14 +651,38 @@ def _collect_result(step_dir: Path, step_index: int, strategy: str | None) -> Va
     return result
 
 
+#: Failure signals — ANY of these means the step did not pass correctness.
+_CORRECTNESS_NEGATIVE_MARKERS = (
+    "correctness: fail",
+    "correctness failed",
+    "correctness check failed",
+    "❌ correctness",
+    "assertionerror",
+    "traceback (most recent",
+)
+#: Explicit pass signals.
+_CORRECTNESS_POSITIVE_MARKERS = (
+    "correctness: pass",
+    "correctness passed",
+    "all tests passed",
+    "✓ correctness",
+)
+
+
 def _correctness_passed(text: str) -> bool:
-    """Heuristic correctness detection from a save_and_test log."""
+    """Heuristic correctness detection from a save_and_test log.
+
+    **Failure takes precedence.** Any failure signal (a fail marker,
+    ``AssertionError``, or a traceback) means NOT passed — even if a pass marker
+    also appears elsewhere in the same log (e.g. multi-shape runs where some
+    shapes pass and others fail, or an earlier attempt passed before the final
+    one failed). A pass is reported only when an explicit pass marker is present
+    AND no failure signal is — never on a mixed log.
+    """
     low = text.lower()
-    positive = any(m in low for m in ("correctness: pass", "correctness passed", "all tests passed", "✓ correctness"))
-    negative = any(m in low for m in ("correctness: fail", "correctness failed", "assertionerror", "traceback (most recent"))
-    if negative and not positive:
+    if any(m in low for m in _CORRECTNESS_NEGATIVE_MARKERS):
         return False
-    return positive
+    return any(m in low for m in _CORRECTNESS_POSITIVE_MARKERS)
 
 
 def _step_index_from_dir(step_dir: Path) -> int:
