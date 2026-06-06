@@ -684,6 +684,34 @@ def _read_per_shape_speedups(output_dir: Path, step_index: int) -> dict:
     return out
 
 
+def _read_candidate_latency(output_dir: Path, step_index: int) -> float | None:
+    """Read the verified candidate latency (ms) from round_{N}_evaluation.json.
+
+    Populated only for single-shape direct-latency runs (multi-shape uses the
+    per-shape geomean instead). Returns ``None`` when unavailable, so the lineage
+    ``latency_ms`` is filled when we have it rather than always being null.
+    """
+    import json as _json
+
+    path = Path(output_dir) / f"round_{step_index}_evaluation.json"
+    if not path.exists():
+        return None
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    for section in ("full_benchmark", "benchmark"):
+        sec = data.get(section)
+        if isinstance(sec, dict):
+            val = sec.get("candidate_ms")
+            try:
+                if val is not None and float(val) > 0:
+                    return float(val)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 _PROFILE_METRIC_HINTS = ("occupancy", "bandwidth", "util", "tflops", "duration", "latency", "throughput", "register", "lds", "smem")
 
 
@@ -936,6 +964,7 @@ def _apply_verified_score(
     result.best_correct = True
     result.best_patch_path = Path(best_patch)
     result.per_shape_speedups = _median_per_shape(per_shapes) if n > 1 else (per_shapes[0] if per_shapes else {})
+    result.best_latency_ms = _read_candidate_latency(output_dir, step_index)  # verified candidate latency for the lineage
     result.profiling = _read_profile_metrics(output_dir, step_index)  # P-mem-3 causal signal
     # Record an authoritative attempt so the detector sees the verified outcome.
     result.attempts.append(

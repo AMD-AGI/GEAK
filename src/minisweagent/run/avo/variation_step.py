@@ -243,6 +243,38 @@ def _read_memory_summary(notebook_root: Path | None) -> str | None:
         return None
 
 
+def _latest_recorded_strategy(output_dir: Path | None) -> str | None:
+    """Best label for the strategy that produced this step, from the agent's own
+    run-wide strategy file (``.optimization_strategies.md``).
+
+    Used to fill the lineage ``strategy`` field for self-directed steps (no
+    supervisor-assigned direction), so the commit history records WHAT worked
+    instead of ``null``. Prefers the most recent ``successful`` strategy, else
+    the most recent ``exploring`` one, else the last listed. Best-effort —
+    returns ``None`` on any failure (never blocks the loop).
+    """
+    if output_dir is None:
+        return None
+    strat_file = Path(output_dir) / ".optimization_strategies.md"
+    if not strat_file.exists():
+        return None
+    try:
+        from minisweagent.tools.strategy_manager import StrategyManager
+
+        manager = StrategyManager(str(strat_file))
+        ordered = [strat for _idx, strat in manager.list_strategies()]
+        if not ordered:
+            return None
+        for status in ("successful", "exploring"):
+            named = [s.name for s in ordered if getattr(s.status, "value", "") == status and s.name]
+            if named:
+                return named[-1]
+        return ordered[-1].name or None
+    except Exception as exc:  # noqa: BLE001 — strategy label is best-effort metadata
+        logger.debug("variation step: could not derive strategy label: %s", exc)
+        return None
+
+
 def inject_skill_bodies(task_body: str, skills: list[str]) -> str:
     """Force-inject SKILL.md bodies via the existing SkillRuntime discovery.
 
@@ -473,7 +505,11 @@ def run_variation_step(
     # Light parse of the worker dir for cycle/patch-hash signal. The controller
     # may overwrite best_speedup/best_correct with the independently-verified
     # FULL_BENCHMARK geomean (see controller._apply_verified_score).
-    result = _collect_result(worker_dir, step_index, direction.get("strategy"))
+    # Strategy label for the lineage: the supervisor-assigned direction if any,
+    # else the strategy the agent itself recorded as successful this run (so a
+    # self-directed step still records WHAT produced the commit, not null).
+    strategy_label = direction.get("strategy") or _latest_recorded_strategy(output_dir)
+    result = _collect_result(worker_dir, step_index, strategy_label)
     result.step_dir = step_dir
     result.exit_status = exit_status
     # Capture the agent's rationale + a short raw tail for the evolution log (P-mem-3).
@@ -623,7 +659,7 @@ def _collect_result(step_dir: Path, step_index: int, strategy: str | None) -> Va
 
         parsed = parse_speedup_report(text)
         speedup = parsed.get("overall_speedup")
-        correctness = _correctness_passed(text)
+        correctness = _parse_correctness(text)
         patch_path = test_file.with_name(test_file.name.replace("_test.txt", ".patch"))
         ph = None
         if patch_path.exists():
@@ -649,6 +685,33 @@ def _collect_result(step_dir: Path, step_index: int, strategy: str | None) -> Va
             result.best_patch_path = patch_path if patch_path.exists() else None
 
     return result
+
+
+#: save_and_test writes a structured header per ``patch_*_test.txt`` recording
+#: the test command's exit code (the authoritative correctness verdict):
+#:   ``Test status: PASSED ✓`` / ``Return code: 0``  (or FAILED / non-zero).
+#: These appear in the header, before the raw ``## Test Output:`` block, so the
+#: first match is always the authoritative one — immune to whatever the kernel
+#: itself printed (mixed PASS/FAIL, tracebacks, multi-shape output).
+_RETURN_CODE_RE = re.compile(r"^Return code:\s*(-?\d+)\s*$", re.MULTILINE)
+_TEST_STATUS_RE = re.compile(r"^Test status:\s*(PASSED|FAILED)\b", re.MULTILINE | re.IGNORECASE)
+
+
+def _parse_correctness(text: str) -> bool:
+    """Authoritative correctness from save_and_test's structured header (exit code).
+
+    Prefers the ``Return code:`` / ``Test status:`` header that save_and_test
+    derives from the test command's exit code (the real correctness verdict).
+    Only when no structured header is present (older logs / a non-save_and_test
+    producer) does it fall back to the conservative substring heuristic.
+    """
+    match = _RETURN_CODE_RE.search(text)
+    if match:
+        return int(match.group(1)) == 0
+    match = _TEST_STATUS_RE.search(text)
+    if match:
+        return match.group(1).upper() == "PASSED"
+    return _correctness_passed(text)  # legacy fallback
 
 
 #: Failure signals — ANY of these means the step did not pass correctness.

@@ -360,7 +360,7 @@ class LineageStore:
             git_ref=git_ref,
             strategy=result.strategy or (self.current_direction().get("strategy") or None),
             speedup=candidate_speedup,
-            latency_ms=None,
+            latency_ms=getattr(result, "best_latency_ms", None),
             committed_at=_now_iso(),
             per_shape=dict(result.per_shape_speedups or {}),
         )

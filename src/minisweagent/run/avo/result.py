@@ -51,6 +51,7 @@ class VariationResult:
     attempts: list[AttemptRecord] = field(default_factory=list)
     best_patch_path: Path | None = None
     best_speedup: float | None = None  # verified; None if nothing verified
+    best_latency_ms: float | None = None  # verified candidate latency (single-shape); None if unavailable
     best_correct: bool = False
     wall_time_s: float = 0.0
     # Per-shape verified speedups (B2 regression guard). Empty when single-shape
