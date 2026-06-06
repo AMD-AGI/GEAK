@@ -457,6 +457,13 @@ def run_avo(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── isolated work repo (MUST come before preprocess to avoid Bug K) ──
+    # Every variation step, agent edit, worktree reset, lineage commit/tag,
+    # AND preprocess below operates on ``work_repo`` (an independent clone
+    # under output_dir), not on ``repo``. The original repository — including
+    # its .git refs/tags — is only read as the clone snapshot source.
+    work_repo = _prepare_work_repo(repo, output_dir)
+
     # ── preprocess (reused) ───────────────────────────────────────────
     with _timed(
         "preprocess",
@@ -464,17 +471,10 @@ def run_avo(
         "several minutes — longer for HIP (kernel compilation). Subsequent runs reuse COMMANDMENT.md.",
         slow_after_s=600,
     ):
-        _run_preprocess(repo, task, output_dir, model_name, gpu_ids, mode, config_path, test_command)
+        _run_preprocess(work_repo, task, output_dir, model_name, gpu_ids, mode, config_path, test_command)
     pp_elapsed = time.monotonic() - budget.started_at
     budget.commit_preprocess(pp_elapsed)
     budget.schedule_optimization_watchdog()
-
-    # ── isolated work repo (never touch the user's original repo) ──────
-    # Every variation step, agent edit, worktree reset, and lineage commit/tag
-    # below operates on ``work_repo`` (an independent clone under output_dir),
-    # not on ``repo``. The original repository — including its .git refs/tags —
-    # is only read for preprocess + snapshot.
-    work_repo = _prepare_work_repo(repo, output_dir)
 
     # ── state ─────────────────────────────────────────────────────────
     lineage = LineageStore(

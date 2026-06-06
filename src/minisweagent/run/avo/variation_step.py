@@ -511,6 +511,10 @@ def _build_agent(repo: Path, step_dir: Path, worker_dir: Path, output_dir: Path,
         devices = ",".join(str(g) for g in gpu_ids)
         agent_env["GEAK_GPU_DEVICE"] = devices
         agent_env["HIP_VISIBLE_DEVICES"] = devices
+    # Bug K Layer 3 fix: ensure shell-level `cd "${GEAK_WORK_DIR:-...}"` in
+    # COMMANDMENT-derived scripts resolves to the isolated ephemeral worktree,
+    # not the commandment-baked fallback path (covers resume w/ stale COMMANDMENT).
+    agent_env["GEAK_WORK_DIR"] = str(repo)
 
     env_kwargs: dict[str, Any] = {
         "cwd": str(repo),
