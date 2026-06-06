@@ -565,7 +565,6 @@ def run_avo(
             _agent_dt = time.monotonic() - _step_t0
             pending_nudge = None
 
-            lineage.record_attempts(result)
             _verify_dt = 0.0
             if verify_each_step:
                 _verify_t0 = time.monotonic()
@@ -581,6 +580,11 @@ def run_avo(
                     cache_path=verify_cache_path,
                 )
                 _verify_dt = time.monotonic() - _verify_t0
+            # Record AFTER verification so the authoritative AttemptRecord that
+            # _apply_verified_score appends (cache hit / main path) is persisted
+            # to attempts.jsonl. Before this reorder the verify-time append only
+            # lived in memory and the on-disk jsonl was missing the truth.
+            lineage.record_attempts(result)
             committed = lineage.maybe_commit(result, repo=work_repo)
             _record_to_notebook(notebook_root, step_idx, result, committed)
             write_evolution_entry(output_dir, result, committed)  # P-mem-3 causal log

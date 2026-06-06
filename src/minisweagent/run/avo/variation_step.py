@@ -722,6 +722,9 @@ _CORRECTNESS_NEGATIVE_MARKERS = (
     "❌ correctness",
     "assertionerror",
     "traceback (most recent",
+    # Current HIP harness format: "[correctness] B=N, H=M: FAIL" / "Check: ... -> FAIL".
+    "]: fail",
+    "-> fail",
 )
 #: Explicit pass signals.
 _CORRECTNESS_POSITIVE_MARKERS = (
@@ -729,6 +732,9 @@ _CORRECTNESS_POSITIVE_MARKERS = (
     "correctness passed",
     "all tests passed",
     "✓ correctness",
+    # Current HIP harness format: "[correctness] B=N, H=M: PASS" / "Check: ... -> PASS".
+    "]: pass",
+    "-> pass",
 )
 
 

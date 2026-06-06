@@ -34,6 +34,22 @@ from minisweagent.run.utils.generated_artifacts import (
 logger = logging.getLogger(__name__)
 
 
+def _test_log_with_header(test_output: str, *, test_passed: bool, returncode: int) -> str:
+    """Prepend ``Test status:`` / ``Return code:`` to the raw test output.
+
+    AVO's ``_parse_correctness`` reads these two lines as the authoritative
+    correctness verdict (the test command's exit code is ground truth, not
+    whatever the kernel printed). Without this header on disk, ``_parse_correctness``
+    falls through to the substring heuristic and mis-classifies modern HIP
+    harness logs whose body uses ``[correctness] B=N, H=M: PASS``.
+
+    Format matches ``_format_output``'s in-memory tool response so both
+    surfaces speak the same protocol.
+    """
+    status = "PASSED ✓" if test_passed else "FAILED ✗"
+    return f"Test status: {status}\nReturn code: {returncode}\n\n{test_output}"
+
+
 def _normalize_diff_ruN_to_git(patch_text: str, base_repo: Path, cwd: Path) -> str:
     """Rewrite ``diff -ruN`` headers (absolute paths) to git-style relative.
 
@@ -225,7 +241,10 @@ class SaveAndTestTool:
             # Save files
             if ctx.patch_output_dir:
                 self._save_patch_file(patch_name, patch_content)
-                self._save_test_output(patch_name, test_output)
+                self._save_test_output(
+                    patch_name,
+                    _test_log_with_header(test_output, test_passed=test_passed, returncode=test_returncode),
+                )
 
             output = self._format_output(
                 patch_name,
@@ -1336,7 +1355,10 @@ class SaveAndTestTool:
 
         if ctx.patch_output_dir:
             self._save_patch_file(patch_name, patch_content)
-            self._save_test_output(patch_name, error_msg)
+            self._save_test_output(
+                patch_name,
+                _test_log_with_header(error_msg, test_passed=False, returncode=-1),
+            )
 
         output = self._format_output(patch_name, patch_content, error_msg, False, -1)
         return {"output": output, "returncode": 1}
