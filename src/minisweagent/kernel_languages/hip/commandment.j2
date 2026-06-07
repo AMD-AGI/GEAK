@@ -24,6 +24,11 @@ mandatory and enforced by kernel_languages/contract.py::validate_commandment.
 ```bash
 export GEAK_WORK_DIR="${GEAK_WORK_DIR:-{{ repo_root }}}"
 export PYTHONPATH="${GEAK_WORK_DIR}:${GEAK_REPO_ROOT:-{{ repo_root }}}:${PYTHONPATH:-}"
+# Keep any JIT/Triton compile cache OUTSIDE the worktree so the per-round patch
+# capture never sweeps compiled blobs into the diff (honours an inherited value;
+# default lands in /tmp keyed per GPU slot).
+export GEAK_JIT_CACHE_DIR="${GEAK_JIT_CACHE_DIR:-/tmp/geak_jit_cache/gpu${GEAK_GPU_DEVICE:-0}}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${GEAK_JIT_CACHE_DIR}/triton}"
 {% if compile_command -%}
 {{ compile_command }}
 {%- endif %}

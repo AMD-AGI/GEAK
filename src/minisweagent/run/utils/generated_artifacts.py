@@ -8,8 +8,11 @@ evaluation when they leak into patch capture.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import subprocess
+import tempfile
 from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
@@ -255,14 +258,84 @@ _JIT_CACHE_PATH_SEGMENTS: frozenset[str] = frozenset(
         "triton_cache",
         "torch_compile_cache",
         ".aiter_jit",
+        "__pycache__",
+    }
+)
+
+# Directory-segment *prefixes* that identify a JIT runtime cache even when the
+# cache dir carries a suffix. Triton honours a per-process ``TRITON_CACHE_DIR``
+# that a worktree-local harness can point at a dir such as ``.triton_cache_geak``
+# (or ``triton_cache_slot0``); exact-equality matching against the segment set
+# above silently misses those. That gap let ~680 KB of
+# ``.triton_cache_geak/<hash>/fused_moe_kernel.{hsaco,amdgcn,llir,ttir,ttgir,
+# source,json}`` ride along inside the reactor's per-round patch, which then
+# failed to re-apply on a clean checkout and collapsed GEAK's internal A/B
+# speedup to 1.0x (so the KEEP gate never fired hands-off).
+#
+# Kept toolchain-agnostic on purpose: the prefixes cover the cache dirs that do
+# NOT literally contain "cache" (``.triton``, ``.aiter``/``.aiter_jit``,
+# ``torchinductor_<user>``); the substrings below catch every ``*cache*`` dir
+# (``triton_cache``, ``torch_compile_cache``, ``.cache``, ``__pycache__`` ...).
+_JIT_CACHE_SEGMENT_PREFIXES: tuple[str, ...] = (
+    ".triton",        # .triton, .triton_cache_geak, triton_cache_slotN
+    ".aiter",         # .aiter, .aiter_jit, .aiter_cpp_itfs
+    "torch_compile",  # torch_compile_cache
+    "torchinductor",  # torchinductor_<user> (torch._inductor runtime cache)
+    "flydsl_cache",
+)
+
+# Directory-segment *substrings*: any path component containing one of these is
+# treated as a runtime/compile cache dir. ``cache`` catches the long tail of
+# toolchain cache dirs (``triton_cache``, ``torch_compile_cache``, ``.cache``,
+# ``__pycache__``, ``*_cache``) without enumerating each one. Applied to
+# *directory* components only (never the leaf file), so source files such as
+# ``cache_utils.py`` / ``triton_cache_config.py`` are never misclassified.
+_JIT_CACHE_SEGMENT_SUBSTRINGS: tuple[str, ...] = ("cache",)
+
+# Extensions that are *always* JIT/AOT compile outputs (Triton IR dumps and GPU
+# code objects / object files), never hand-written source. Belt-and-suspenders
+# so an unrecognised cache-dir name still cannot smuggle compiled blobs into a
+# source patch.
+_JIT_COMPILE_OUTPUT_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".hsaco",  # AMD GPU code object (compiled binary)
+        ".amdgcn",  # AMDGCN assembly dump
+        ".llir",  # LLVM IR dump
+        ".ttir",  # Triton IR dump
+        ".ttgir",  # Triton GPU IR dump
+        ".cubin",  # NVIDIA CUDA binary
+        ".ptx",  # NVIDIA PTX assembly
+        ".spv",  # SPIR-V binary
+        ".o",  # object file (compiled)
+        ".so",  # shared object (compiled)
     }
 )
 
 _JIT_NESTED_BUILD_DIRS: frozenset[str] = frozenset({"build", "__pycache__"})
 
 
+def _segment_is_jit_cache_dir(segment: str) -> bool:
+    """True when a single path segment names a JIT runtime cache directory."""
+
+    if segment in _JIT_CACHE_PATH_SEGMENTS:
+        return True
+    if any(segment.startswith(prefix) for prefix in _JIT_CACHE_SEGMENT_PREFIXES):
+        return True
+    return any(sub in segment for sub in _JIT_CACHE_SEGMENT_SUBSTRINGS)
+
+
 def is_jit_cache_artifact(rel_path: str | None) -> bool:
-    """Return True when *rel_path* lives inside a known JIT runtime cache."""
+    """Return True when *rel_path* is a JIT/compile cache artifact.
+
+    A path is a cache artifact when any of its *directory* components names a JIT
+    runtime cache (exact match in ``_JIT_CACHE_PATH_SEGMENTS``, a suffixed cache
+    dir matched by ``_JIT_CACHE_SEGMENT_PREFIXES``, or a ``*cache*`` dir matched
+    by ``_JIT_CACHE_SEGMENT_SUBSTRINGS``), when it sits under a
+    ``jit/{build,__pycache__}`` tree, or when its extension is an unambiguous
+    compile output (``_JIT_COMPILE_OUTPUT_SUFFIXES``). Prefix/substring matching
+    is restricted to *directory* components so source files such as
+    ``triton_cache_config.py`` / ``cache_utils.py`` are never misclassified.
+    """
 
     if not rel_path:
         return False
@@ -271,13 +344,24 @@ def is_jit_cache_artifact(rel_path: str | None) -> bool:
         rel = rel[2:]
     if not rel:
         return False
-    parts = PurePosixPath(rel).parts
-    for seg in parts:
-        if seg in _JIT_CACHE_PATH_SEGMENTS:
+    pure = PurePosixPath(rel)
+    parts = pure.parts
+
+    # Any directory component that is a JIT cache dir taints the whole path.
+    for seg in parts[:-1]:
+        if _segment_is_jit_cache_dir(seg):
             return True
+    # The leaf only counts on an exact cache-dir name (e.g. a bare ".triton"
+    # entry), to avoid flagging source files whose name merely starts with a
+    # cache prefix.
+    if parts and parts[-1] in _JIT_CACHE_PATH_SEGMENTS:
+        return True
     for i in range(len(parts) - 1):
         if parts[i] == "jit" and parts[i + 1] in _JIT_NESTED_BUILD_DIRS:
             return True
+    # Unambiguous compile outputs by extension (covers unknown cache dirs).
+    if pure.suffix in _JIT_COMPILE_OUTPUT_SUFFIXES:
+        return True
     return False
 
 
@@ -288,9 +372,156 @@ def strip_jit_cache_sections(patch_text: str) -> tuple[str, list[str]]:
 
 
 def jit_cache_diff_basename_excludes() -> list[str]:
-    """Return JIT-cache directory basenames for ``diff -ruN --exclude=PATTERN``."""
+    """Return JIT-cache exclude patterns for ``diff -ruN`` / ``git diff``.
 
-    return sorted(_JIT_CACHE_PATH_SEGMENTS)
+    Includes exact cache-dir basenames, prefix globs for suffixed cache dirs
+    (e.g. ``.triton_cache_geak``), substring globs for any ``*cache*`` dir, and
+    compile-output extension globs so the cache trees are skipped before the
+    patch is even rendered.
+    """
+
+    patterns: set[str] = set(_JIT_CACHE_PATH_SEGMENTS)
+    patterns.update(f"{prefix}*" for prefix in _JIT_CACHE_SEGMENT_PREFIXES)
+    patterns.update(f"*{sub}*" for sub in _JIT_CACHE_SEGMENT_SUBSTRINGS)
+    patterns.update(f"*{suffix}" for suffix in _JIT_COMPILE_OUTPUT_SUFFIXES)
+    return sorted(patterns)
+
+
+def jit_cache_env(
+    work_dir: str | Path | None,
+    *,
+    base: str | Path | None = None,
+) -> dict[str, str]:
+    """Return env vars that relocate JIT/compile caches OUTSIDE *work_dir*.
+
+    This is the PRIMARY, toolchain-agnostic half of the "no JIT artifacts in the
+    round patch" fix. GEAK runs each optimization round inside a git worktree
+    (*work_dir*) and captures the per-round patch with ``git diff`` *inside that
+    worktree*. If a runtime compiler (Triton, torch inductor, ...) writes its
+    cache under the worktree, the compiled blobs (``*.hsaco`` / IR dumps) get
+    swept into the patch; re-applying that patch for the reactor's A/B then either
+    aborts the atomic ``git apply`` (the blobs already exist in the freshly
+    seeded worktree) or writes stale blobs that mask the patched kernel -- so the
+    measured speedup collapses to 1.0x and a genuinely-good kernel (the
+    fused_moe +1.68x) never clears the KEEP gate.
+
+    Pointing the caches at a dedicated dir OUTSIDE the diffed tree keeps the
+    captured patch source-only and lets the A/B compile the patched source fresh
+    and see the real speedup. The location is:
+
+    * **outside** *work_dir* (so ``git diff`` in the worktree never sees it);
+    * **stable per worktree** (a slot reuses its own compile cache across rounds
+      -- no needless recompiles; Triton is content-addressed by source so this is
+      always correct);
+    * **unique per worktree** (parallel slots never collide / contend).
+
+    Sets ``TRITON_CACHE_DIR`` (Triton) and ``GEAK_JIT_CACHE_DIR`` (a generic root
+    the sanitized harness and other toolchains -- aiter, inductor -- hang their
+    caches off of; see the harness-sanitizer R5 rule). Returns ``{}`` when
+    *work_dir* is falsy. ``base`` overrides the parent dir (test hook / explicit
+    out-of-tree root); it defaults to ``$TMPDIR/geak_jit_cache``.
+    """
+    if not work_dir:
+        return {}
+    wt = Path(work_dir).resolve()
+    if base is not None:
+        root = Path(base)
+    else:
+        root = Path(tempfile.gettempdir()) / "geak_jit_cache"
+    slot = hashlib.sha1(str(wt).encode("utf-8")).hexdigest()[:16]
+    cache_root = root / slot
+    return {
+        "GEAK_JIT_CACHE_DIR": str(cache_root),
+        "TRITON_CACHE_DIR": str(cache_root / "triton"),
+    }
+
+
+def _section_is_pure_addition(section_lines: list[str]) -> bool:
+    """True when a diff section creates a brand-new file (``new file mode``)."""
+
+    for line in section_lines[1:6]:
+        if line.startswith("new file mode"):
+            return True
+        if line.startswith("@@"):
+            break
+    return False
+
+
+def strip_already_present_additions(patch_text: str, base_dir: str | Path) -> tuple[str, list[str]]:
+    """Drop ``diff --git`` sections that *add* a file already present in *base_dir*.
+
+    ``create_worktree`` seeds every fresh worktree with the repo's untracked,
+    non-ignored files (see ``task_file._copy_untracked_files``). When the
+    captured patch *also* records those same files as new-file additions (because
+    ``git add -N`` listed them at capture time), re-applying the patch onto such a
+    worktree aborts atomically with ``error: <path>: already exists in working
+    directory`` -- taking the legitimate source modification down with it and
+    leaving GEAK's A/B at 1.0x. Such additions are no-ops (an identical file is
+    already there), so dropping them is safe and lets the real edit apply.
+
+    Only *pure additions* (``new file mode``) whose target already exists under
+    *base_dir* are removed. Modifications, deletions, and additions of genuinely
+    new (agent-authored) files are preserved verbatim.
+
+    Returns ``(sanitized_patch_text, removed_paths)``.
+    """
+
+    if not patch_text.strip():
+        return patch_text, []
+
+    base = Path(base_dir)
+    lines = patch_text.splitlines(keepends=True)
+    preamble: list[str] = []
+    sections: list[list[str]] = []
+    current: list[str] | None = None
+    for line in lines:
+        if line.startswith("diff --git "):
+            if current is not None:
+                sections.append(current)
+            current = [line]
+        elif current is None:
+            preamble.append(line)
+        else:
+            current.append(line)
+    if current is not None:
+        sections.append(current)
+    if not sections:
+        return patch_text, []
+
+    kept: list[str] = list(preamble)
+    removed: list[str] = []
+    for section in sections:
+        parsed = _parse_git_diff_paths(section[0])
+        if parsed is not None and _section_is_pure_addition(section):
+            a_path, b_path = parsed
+            target = b_path or a_path
+            try:
+                present = bool(target) and (base / target).exists()
+            except OSError:
+                present = False
+            if present:
+                removed.append(target)
+                continue
+        kept.extend(section)
+    return "".join(kept), removed
+
+
+def sanitize_patch_for_apply(patch_text: str, cwd: str | Path) -> tuple[str, list[str]]:
+    """Strip patch sections that can never carry an applicable source edit.
+
+    Combines, in order: JIT/compile-cache stripping, removal of new-file
+    additions already present in *cwd* (the destination worktree), and
+    generated-helper stripping. Returns ``(sanitized_text, removed_paths)``.
+    """
+
+    removed_all: list[str] = []
+    text, removed = strip_jit_cache_sections(patch_text)
+    removed_all.extend(removed)
+    text, removed = strip_already_present_additions(text, cwd)
+    removed_all.extend(removed)
+    text, removed = strip_generated_helper_sections(text)
+    removed_all.extend(removed)
+    return text, removed_all
 
 
 # Conflict-marker regexes. We reject patches whose 3-way merge result contains
@@ -535,7 +766,16 @@ def apply_patch_with_generated_helper_fallback(
         if norm_result.returncode == 0:
             return norm_result, []
 
-    sanitized_patch, removed_paths = strip_generated_helper_sections(patch_text)
+    # Strip sections that can never carry an applicable source edit, then retry:
+    #   (1) JIT/compile-cache artifacts (Triton TRITON_CACHE_DIR blobs, IR dumps);
+    #   (2) new-file additions whose target already exists in this worktree --
+    #       create_worktree seeds the worktree with the repo's untracked,
+    #       non-ignored files, so re-adding them aborts the *atomic* apply with
+    #       "already exists in working directory", killing the real edit too;
+    #   (3) generated helper artifacts (legacy behaviour).
+    # This is what lets the reactor's clean-checkout re-apply land the genuine
+    # kernel edit so the A/B measures the true speedup instead of 1.0x.
+    sanitized_patch, removed_paths = sanitize_patch_for_apply(patch_text, cwd)
     if not removed_paths:
         three_way = _try_three_way_with_alternates(
             patch_text=patch_text,

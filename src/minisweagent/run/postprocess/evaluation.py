@@ -39,6 +39,7 @@ from minisweagent.run.postprocess.benchmark_parsing import (
 )
 from minisweagent.run.utils.generated_artifacts import (
     apply_patch_with_generated_helper_fallback,
+    jit_cache_env,
 )
 from minisweagent.run.utils.git_safe_env import get_git_safe_env
 
@@ -329,6 +330,11 @@ def build_eval_env(
             pass
     pp_parts.append(env.get("PYTHONPATH", ""))
     env["PYTHONPATH"] = ":".join(p for p in pp_parts if p)
+    # Relocate Triton / JIT caches to a per-worktree dir OUTSIDE ``work_dir`` so
+    # the eval-side patch capture / re-apply A/B never sweeps compiled blobs into
+    # the diff and the patched kernel is always recompiled fresh (mirrors the
+    # reactor-side save_and_test._build_test_env relocation).
+    env.update(jit_cache_env(work_dir))
     alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF", "")
     if "expandable_segments" in alloc_conf:
         logger.debug("build_eval_env: removing PYTORCH_CUDA_ALLOC_CONF with expandable_segments.")

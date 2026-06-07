@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -27,6 +28,8 @@ from minisweagent.run.postprocess.benchmark_parsing import (
 from minisweagent.run.utils.generated_artifacts import (
     generated_helper_excludes,
     jit_cache_diff_basename_excludes,
+    jit_cache_env,
+    strip_already_present_additions,
     strip_jit_cache_sections,
 )
 
@@ -517,6 +520,15 @@ class SaveAndTestTool:
                     continue
                 test_env[str(key)] = str(value)
         test_env["PYTHONUNBUFFERED"] = "1"
+        # Layer 1 (primary) of the "no JIT artifacts in the round patch" fix:
+        # relocate Triton/JIT caches OUTSIDE the worktree (ctx.cwd) so the
+        # per-round ``git diff`` capture never sweeps compiled blobs into the
+        # patch (that broke the reactor's clean-checkout re-apply and pinned the
+        # A/B speedup at 1.0x, hiding real wins like fused_moe +1.68x). Set last
+        # so it overrides any stale in-worktree TRITON_CACHE_DIR inherited via
+        # env_vars; the sanitized harness (R5) defers to GEAK_JIT_CACHE_DIR.
+        if ctx and ctx.cwd:
+            test_env.update(jit_cache_env(ctx.cwd))
         return test_env
 
     @staticmethod
@@ -785,6 +797,59 @@ class SaveAndTestTool:
                 )
         return lines
 
+    def _source_pathspecs(self, cwd: str) -> list[str]:
+        """Return *cwd*-relative pathspecs for the agent's declared editable source.
+
+        Layer 3 (allowlist) of the "no JIT artifacts in the round patch" fix:
+        ``SaveAndTestContext.source_file_paths`` carries the files the agent is
+        allowed to modify. When known, the patch capture scopes its ``git diff``
+        to these so it can only ever record genuine source edits. Entries are
+        normalised to be relative to *cwd* (the worktree) -- accepting absolute
+        paths, paths relative to the worktree, and paths relative to
+        ``base_repo_path`` -- and filtered to those that actually exist in the
+        worktree. Returns ``[]`` when no editable set is configured (callers
+        then fall back to the blanket worktree diff).
+        """
+        ctx = self.context
+        raw = list(ctx.source_file_paths or []) if ctx else []
+        if not raw:
+            return []
+        cwd_path = Path(cwd).resolve()
+        base = Path(ctx.base_repo_path).resolve() if ctx and ctx.base_repo_path else None
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            if not item:
+                continue
+            p = Path(str(item))
+            candidates: list[Path] = []
+            if p.is_absolute():
+                candidates.append(p)
+            else:
+                candidates.append(cwd_path / p)
+                if base is not None:
+                    candidates.append(base / p)
+            rel: str | None = None
+            for cand in candidates:
+                try:
+                    cand_res = cand.resolve()
+                except OSError:
+                    continue
+                for root in (cwd_path, base):
+                    if root is None:
+                        continue
+                    try:
+                        rel = str(cand_res.relative_to(root))
+                        break
+                    except ValueError:
+                        continue
+                if rel is not None:
+                    break
+            if rel and rel not in seen and (cwd_path / rel).exists():
+                seen.add(rel)
+                out.append(rel)
+        return out
+
     def _get_patch_content(self) -> str:
         """Get current changes as patch content."""
         ctx = self.context
@@ -832,9 +897,36 @@ class SaveAndTestTool:
                 # Build / compile caches
                 "__hip_fatbin/",
                 ".cache/",
+                # JIT runtime caches (TRITON_CACHE_DIR like .triton_cache_geak,
+                # .aiter_jit, flydsl_cache, ...) and compile outputs (*.hsaco,
+                # *.amdgcn, IR dumps). Pre-excluded so the diff never renders the
+                # ~680 KB of per-round JIT blobs that otherwise broke re-apply.
+                *jit_cache_diff_basename_excludes(),
                 *self._generated_helper_excludes(),
             ]
             exclude_args = " ".join(f"':(exclude){entry}'" for entry in excludes)
+
+            # Layer 3 (allowlist) of the patch-capture fix: when the agent's
+            # editable source set is known, scope the diff to it so the captured
+            # patch can ONLY contain genuine source edits -- never environmental
+            # noise (JIT caches, hipified copies, profiler dumps). Falls back to
+            # the blanket worktree diff below if the scoped capture is empty, so
+            # an edit outside the declared set is never silently dropped.
+            source_specs = self._source_pathspecs(cwd)
+            if source_specs:
+                spec_args = " ".join(shlex.quote(s) for s in source_specs)
+                scoped = subprocess.run(
+                    f"git add -N -- {spec_args} && git diff -- {spec_args} {exclude_args}",
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    shell=True,
+                )
+                if scoped.returncode == 0 and scoped.stdout.strip():
+                    return self._sanitize_captured_patch(scoped.stdout)
+                # else: fall through to the blanket diff (don't lose real edits).
+
             result = subprocess.run(
                 f"git add -N . && git diff -- . {exclude_args}",
                 cwd=cwd,
@@ -844,7 +936,7 @@ class SaveAndTestTool:
                 shell=True,
             )
             if result.returncode == 0 and result.stdout.strip():
-                return self._strip_jit_cache_from_patch(result.stdout)
+                return self._sanitize_captured_patch(result.stdout)
             # Fall through to diff -ruN when git diff fails or returns empty.
 
         if ctx.base_repo_path and ctx.base_repo_path.exists():
@@ -927,6 +1019,41 @@ class SaveAndTestTool:
                 len(removed),
                 ", ".join(removed[:3]),
             )
+        return sanitized
+
+    def _sanitize_captured_patch(self, patch_text: str) -> str:
+        """Reduce a ``git diff`` capture to genuine source edits only.
+
+        Two scrubs, both keyed off the same root cause that pinned GEAK's A/B
+        speedup at 1.0x:
+
+        1. JIT/compile-cache sections (TRITON_CACHE_DIR blobs, IR dumps) -- the
+           ~680 KB of ``.triton_cache_geak/<hash>/fused_moe_kernel.*`` that broke
+           re-apply.
+        2. New-file additions for files that already exist in the base repo
+           (``base_repo_path``). ``git add -N .`` lists every untracked,
+           non-ignored file (quant configs, hipified ``*.hip``, profilers) as an
+           addition; ``create_worktree`` later seeds the eval worktree with those
+           same files, so re-adding them aborts the atomic apply with "already
+           exists". They are environmental, not agent-authored, so dropping them
+           leaves only the real edit (e.g. the ``get_default_config`` change).
+        """
+
+        if not patch_text:
+            return patch_text
+        sanitized = self._strip_jit_cache_from_patch(patch_text)
+
+        ctx = self.context
+        base = ctx.base_repo_path if ctx else None
+        if base is not None and Path(base).exists():
+            sanitized, removed = strip_already_present_additions(sanitized, base)
+            if removed:
+                logger.info(
+                    "save_and_test: dropped %d environmental addition(s) already present in "
+                    "base repo from captured patch (sample: %s)",
+                    len(removed),
+                    ", ".join(removed[:3]),
+                )
         return sanitized
 
     # Evaluation infrastructure files that agents must never modify.

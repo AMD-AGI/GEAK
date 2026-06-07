@@ -27,7 +27,12 @@ mandatory and enforced by kernel_languages/contract.py::validate_commandment.
 
 ```bash
 export GEAK_WORK_DIR="${GEAK_WORK_DIR:-{{ repo_root }}}"
-printf '#!/bin/bash\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\nexport HIP_VISIBLE_DEVICES=%s\ncd "%s" && exec python3 "$@"\n' "${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT:-{{ repo_root }}}" "${GEAK_GPU_DEVICE:-0}" "${GEAK_WORK_DIR}" > ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh
+# Keep the Triton/JIT compile cache OUTSIDE the worktree so the per-round patch
+# capture never sweeps compiled blobs (*.hsaco / IR) into the diff (which broke
+# re-apply and pinned GEAK's A/B speedup at 1.0x). Honour an inherited value
+# (GEAK sets GEAK_JIT_CACHE_DIR/TRITON_CACHE_DIR in the eval env); only the
+# default lands in /tmp, keyed per GPU slot.
+printf '#!/bin/bash\nexport PYTHONPATH=%s:%s:${PYTHONPATH}\nexport HIP_VISIBLE_DEVICES=%s\nexport GEAK_JIT_CACHE_DIR="${GEAK_JIT_CACHE_DIR:-/tmp/geak_jit_cache/gpu${GEAK_GPU_DEVICE:-0}}"\nexport TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${GEAK_JIT_CACHE_DIR}/triton}"\ncd "%s" && exec python3 "$@"\n' "${GEAK_WORK_DIR}" "${GEAK_REPO_ROOT:-{{ repo_root }}}" "${GEAK_GPU_DEVICE:-0}" "${GEAK_WORK_DIR}" > ${GEAK_WORK_DIR}/run.sh && chmod +x ${GEAK_WORK_DIR}/run.sh
 {% if inner_kernel -%}
 mkdir -p "${GEAK_WORK_DIR}/_work"
 cp "{{ kernel_path }}" "${GEAK_WORK_DIR}/_work/kernel.py"

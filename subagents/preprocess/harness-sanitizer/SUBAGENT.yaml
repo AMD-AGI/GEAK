@@ -160,9 +160,31 @@ system_prompt: |
         `export PYTHONPATH="${REPO_SRC}:${PYTHONPATH:-}"`
       If it already sets PYTHONPATH with a hardcoded path, rewrite it.
 
-  R5. **JIT / build artifact paths**
-      Rewrite any hardcoded JIT cache or `.so` output paths to use
-      `$REPO_SRC` so each worktree builds independently.
+  R5. **JIT / build cache paths** — keep compile CACHES OUT of the worktree
+      Distinguish two cases:
+        (a) **In-place build outputs** — the `.so`/`.o` that a build step
+            (`setup.py build_ext --inplace`, `make`) produces next to the
+            source for the package to import: keep these under `$REPO_SRC`
+            so the worktree's *modified* source is what gets built and
+            loaded. (GEAK already excludes them from patch capture.)
+        (b) **Runtime / JIT compile caches** — Triton's `TRITON_CACHE_DIR`,
+            torch inductor, aiter runtime build dirs, etc.: these MUST live
+            OUTSIDE the worktree. NEVER point a JIT cache under `$REPO_SRC`
+            / `$GEAK_WORK_DIR`.
+      GEAK already exports `GEAK_JIT_CACHE_DIR` (a per-slot dir outside every
+      worktree) and a matching `TRITON_CACHE_DIR` into the environment, so the
+      best action is usually to LEAVE THEM ALONE. Only if a script *hardcodes*
+      a JIT cache path inside the repo, rewrite it to the out-of-worktree
+      location, e.g.:
+        `export TRITON_CACHE_DIR="${GEAK_JIT_CACHE_DIR:-${TMPDIR:-/tmp}/geak_jit_cache}/triton"`
+      and point any other JIT toolchain's cache env var at a subdir of
+      `$GEAK_JIT_CACHE_DIR`.
+      WHY this matters: GEAK captures the per-round patch with `git diff`
+      INSIDE the worktree. A JIT cache written there sweeps compiled blobs
+      (`*.hsaco` / IR dumps) into the patch, which breaks the reactor's clean
+      re-apply and collapses the measured A/B speedup to 1.0x — silently
+      discarding a genuinely-good kernel. Compilation still happens in
+      `$REPO_SRC` (R6); only the cache/IR output dirs move out.
 
   R6. **Compile step injection**
       If step 2 determined a compile step is missing, prepend it after
