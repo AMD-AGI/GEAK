@@ -109,6 +109,24 @@ it is captured and deployable.
   and nests them → fields read as None. Use the `AITER_TUNE_GEMM=1` capture path instead (more accurate
   anyway — it records the exact shapes the server issues).
 
+## Confirmed result (Qwen3.5-27B / gfx942 / sglang, ISL/OSL=1024 conc=64)
+A bias-correct, full-coverage aiter GEMM tune (live `AITER_TUNE_GEMM=1` capture → gradlib →
+`AITER_CONFIG_GEMM_BF16`) **wins +2.23% e2e** stacked on `--attention-backend triton`
+(ref 1548.9 → cand 1583.5 tok/s, non-overlapping 5-repeat A/B, **246 `is tuned on cu_num` hits**).
+Combined with the attention-backend flag that's ~+6% over the stack-default baseline. The two things
+that make it work (and that an earlier ~0/−0.59% attempt got wrong): (1) the tune input comes from the
+LIVE capture so `bias=False` and the full shape set match the runtime keys (engagement >0), and (2) it's
+gated STACKED on the current accepted config with the tight A/B. So: **GEMM tuning IS a real lever here**
+— do it (this supersedes any earlier "GEMM tune nets ~0" note).
+
+## ⚠️ Cost / fork-storm caveat (finding #8)
+The head GEMM optimization is the dominant runtime cost, and nesting it (head Triton author + milestone
+parallel recursions, each spawning ROCm/aiter init) can fork-storm the host with hundreds of
+`rocm_agent_enumerator` processes → CPU thrash → near-stall AND corrupted e2e timing. For bounded/
+validation runs: cap the tune shape count (bucket-reduce hard), keep `head_author_max` low, lower
+`kernel_budget`, and avoid running many heavy nested tunes concurrently (serialize them). Never run an
+e2e A/B measurement while a process storm is active — pin it to a quiet window.
+
 ## Measurement methodology (so the result is trustworthy)
 - **Always gate a GEMM tune STACKED on the current accepted config, never in isolation.** The GEMM
   tune's contribution depends on the surrounding timing regime — e.g. its standalone effect on default
