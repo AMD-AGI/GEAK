@@ -4,6 +4,7 @@ export const meta = {
   whenToUse: 'Optimize the inference speed of a kernel directory (single kernel, fused kernels) or an end-to-end vLLM/SGLang model. Pass args.kernel_path (required), args.budget, args.gpu_ids, args.task.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
+    { title: 'Author', detail: 'author_engineer writes a fresh baseline (only when mode=author)' },
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
     { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
@@ -44,6 +45,15 @@ const EVAL_DIR_OVERRIDE = A.eval_dir || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const KERNEL_NAME_HINT = KERNEL_PATH_ORIG.replace(/\/+$/, '').split('/').pop();
 
+// --- author mode: when there is NO existing source, write a fresh baseline first, then optimize it.
+// mode=optimize (default) keeps the exact original behavior (backward compatible). mode=author seeds
+// the workspace from an op task dir (immutable oracle), the author_engineer writes a passing baseline,
+// then the SAME optimize loop runs. KERNEL_KNOWLEDGE_DIR is the AMD authoring knowledge base (optional).
+const MODE = String(A.mode != null ? A.mode : 'optimize').trim() || 'optimize';
+const TARGET_LANGUAGE = String(A.target_language != null ? A.target_language : 'triton').trim() || 'triton';
+const OP_SPEC = A.op_spec || {};
+const KERNEL_KNOWLEDGE_DIR = String(A.kernel_knowledge_dir || '').replace(/\/+$/, '');
+
 // ---------------------------------------------------------------------------
 // Reusable JSON-schema fragments.
 // ---------------------------------------------------------------------------
@@ -66,6 +76,12 @@ const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
   kernel_name: { type: 'string' }, source_files: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
 }, ['eval_dir', 'workspace', 'kernel_name']);
+
+const AUTHOR_SCHEMA = obj({
+  authored: { type: 'boolean' }, target_language: { type: 'string' }, correctness: { type: 'string' },
+  baseline_ms: { type: 'number' }, kernel_src_path: { type: 'string' }, entry_point: { type: 'string' },
+  build: { type: 'boolean' }, notes: { type: 'string' },
+}, ['authored', 'correctness']);
 
 const ANALYZE_SCHEMA = obj({
   kernel_type: { type: 'string' }, kernel_file: { type: 'string' }, entry_point: { type: 'string' },
@@ -176,6 +192,7 @@ phase('Setup');
 const setup = await agent(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
     KERNEL_PATH_ORIG, EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK, SKILL_DIR: WORKFLOW_DIR,
+    MODE, TARGET_LANGUAGE, OP_SPEC,
   }),
   { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
 if (!setup || !setup.eval_dir) throw new Error('Setup failed: director did not return an eval_dir');
@@ -184,6 +201,33 @@ const CANONICAL = setup.workspace;       // canonical current-best workspace (ad
 const KERNEL_NAME = setup.kernel_name;
 const COMMANDMENT = `${EVAL_DIR}/COMMANDMENT.md`;
 log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
+
+// ===========================================================================
+// PHASE: Author (mode=author only) — write a fresh baseline from scratch.
+// On success, HEAD of CANONICAL becomes the authored baseline and the rest of
+// the pipeline (Analyze/Benchmark/Profile/optimize loop) runs UNCHANGED on it.
+// On failure (no correct baseline), abort early with a structured result so the
+// e2e caller drops this language.
+// ===========================================================================
+if (MODE === 'author') {
+  phase('Author');
+  const authored = await agent(
+    roleAgent('author_engineer', 'author', 'Write the simplest correct baseline in the target language.', {
+      TARGET_LANGUAGE, OP_SPEC, WORKSPACE: CANONICAL, TASK_DIR: KERNEL_PATH_ORIG,
+      GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
+    }),
+    { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
+  if (!authored || !authored.authored || authored.correctness !== 'pass') {
+    log(`Author mode FAILED for ${TARGET_LANGUAGE}: ${authored ? authored.notes || authored.correctness : 'no result'}. Aborting (no baseline to optimize).`);
+    return {
+      mode: 'author', authored: false, target_language: TARGET_LANGUAGE,
+      eval_dir: EVAL_DIR, kernel_name: KERNEL_NAME,
+      final_geomean: 0, final_patch: '', validation_status: 'author_failed',
+      reason: authored ? authored.notes || 'author produced no correct baseline' : 'author returned nothing',
+    };
+  }
+  log(`Author mode: ${TARGET_LANGUAGE} baseline written (correct, ${authored.baseline_ms || '?'} ms). Optimizing it now.`);
+}
 
 // ===========================================================================
 // PHASE: Analyze + Roadmap (TechLead)
@@ -444,6 +488,9 @@ const finalGeomean = validation ? validation.director_verified_speedup_geomean :
 log(`COMPLETE. ${KERNEL_NAME}: verified geomean ${finalGeomean ? finalGeomean.toFixed(2) : '?'}x (status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
 
 return {
+  mode: MODE,
+  target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
+  authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
   kernel_name: KERNEL_NAME,
   final_geomean: finalGeomean,

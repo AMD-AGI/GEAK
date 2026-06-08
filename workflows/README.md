@@ -63,10 +63,24 @@ Workflow({
     task: "focus on ...",      // optional natural-language steer
     exp_root: "",              // optional, output root; default = sibling "exp/" next to workflow_dir
     eval_dir: "",              // optional, override the output dir for this single run
-    apply_to_original: "false" // optional; if "true", write the validated patch back to kernel_path
+    apply_to_original: "false",// optional; if "true", write the validated patch back to kernel_path
+    // --- author mode (write a fresh implementation from scratch, then optimize it) ---
+    mode: "optimize",          // optional: "optimize" (default, edit an existing kernel) | "author"
+    target_language: "triton", // author mode: triton (always) | hip | ck — the language to write
+    op_spec: {},               // author mode: {op_kind, shapes, dtype, math_contract, regime} for the op
+    kernel_knowledge_dir: ""   // optional: AMD authoring knowledge base the author_engineer reads
   }
 })
 ```
+
+### Author mode (NEW)
+`mode="author"` is for when there is **no existing source to optimize** — a hot op (e.g. a library
+GEMM/attention) needs a fresh implementation. Here `kernel_path` is an **op task dir** holding the
+IMMUTABLE oracle (`meta.json` + `unittest.py` + optional `reference_io.pt`). The `author_engineer`
+writes the simplest correct implementation in `target_language` (correctness-judged against the
+oracle), commits it as the baseline, and then the **same optimize loop** improves it. Returns
+`authored:false` / `validation_status:"author_failed"` if no correct baseline can be produced (the
+caller drops that language). `mode="optimize"` (default) is unchanged and fully backward compatible.
 
 `<WF_DIR>` is the only location-specific value and it is supplied at call time (it is just the
 dirname of `scriptPath`). Everything else is derived: `exp_root` defaults to `<parent of WF_DIR>/exp`.

@@ -10,6 +10,11 @@ the whole workflow depends on this being correct and stable. Operate on the cano
 
 ### 1. Discover existing infrastructure (prefer reusing it)
 Look for, in order:
+- **Author mode**: if the workspace holds an IMMUTABLE `unittest.py` + `meta.json` (the op task dir's
+  oracle, copied in read-only by the Director's author-mode setup), THAT is the runner — reuse it
+  verbatim. It already does correctness-vs-oracle + per-case timing in the canonical print shape. Do
+  NOT write a new harness and do NOT modify it; just point the COMMANDMENT's CORRECTNESS/BENCHMARK at
+  `python3 unittest.py` (via gpu_lock) and record the authored baseline from its output.
 - `config.yaml` / `config.json` declaring `compile_command` / `correctness_command` /
   `performance_command` (common in GEAK kernels).
 - `scripts/task_runner.py` with `compile|correctness|performance` modes.
