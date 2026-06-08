@@ -1,0 +1,34 @@
+source_file_path:
+- src/rocm/attention.cu
+target_kernel_functions:
+- paged_attention_ll4mi_QKV_mfma4_kernel
+- paged_attention_ll4mi_QKV_mfma16_kernel
+- paged_attention_ll4mi_reduce_kernel
+compile_command:
+- python3 scripts/task_runner.py compile
+correctness_command:
+- python3 scripts/task_runner.py correctness
+performance_command:
+- python3 scripts/task_runner.py performance
+roofline_probe_command:
+- env GEAK_PERF_LARGE=1 python3 scripts/task_runner.py performance
+task_type: hip2hip
+task_result_template: null
+prompt:
+  source_code: null
+  instructions: "Optimize the paged_attention kernel extracted from vllm. It is registered\
+    \ into the `extracted_<op>` torch namespace via src/bindings.cpp; do not depend\
+    \ on the host engine. Tests generate inputs from test_cases.json on the fly \u2014\
+    \ no pre-saved golden tensors. This 'large' variant removes the legacy seq_len=32\
+    \ clamp (captured cases now run at their real recorded max_seq_len with\
+    \ self-consistent block tables) and the default performance run additionally\
+    \ times a sweep of constructed memory-bound decode cases (disjoint KV blocks ->\
+    \ real HBM streaming). Regenerate the large cases with scripts/gen_perf_cases.py."
+  cheatsheet: null
+extracted_from:
+  engine: vllm
+  kernel_id: torch.ops._rocm_C.paged_attention
+  op: paged_attention
+  local_namespace: extracted_paged_attention
+  source: engine_csrc
+  test_cases: 16

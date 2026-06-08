@@ -1,0 +1,60 @@
+{
+  "rank": 19,
+  "backend": "hip",
+  "kernel_name": "fused_add_rms_norm",
+  "op_category": "norm",
+  "max_time_pct": 3.58,
+  "n_source_models": 4,
+  "n_instances": 5,
+  "canonical": {
+    "combo": "Qwen_Qwen3-235B-A22B-FP8__vllm_default",
+    "task_dir": "vllm_fused_add_rms_norm"
+  },
+  "instances": [
+    {
+      "model": "Qwen_Qwen3-235B-A22B-FP8",
+      "engine": "vllm",
+      "mode": "default",
+      "combo": "Qwen_Qwen3-235B-A22B-FP8__vllm_default",
+      "time_pct": 3.58,
+      "source_dir": "results/Qwen_Qwen3-235B-A22B-FP8__vllm_default/vllm_fused_add_rms_norm",
+      "is_canonical": true
+    },
+    {
+      "model": "openai_gpt-oss-120b",
+      "engine": "vllm",
+      "mode": "default",
+      "combo": "openai_gpt-oss-120b__vllm_default",
+      "time_pct": 3.41,
+      "source_dir": "results/openai_gpt-oss-120b__vllm_default/vllm_fused_add_rms_norm",
+      "is_canonical": false
+    },
+    {
+      "model": "Qwen_Qwen3.5-35B-A3B",
+      "engine": "vllm",
+      "mode": "default",
+      "combo": "Qwen_Qwen3.5-35B-A3B__vllm_default",
+      "time_pct": 3.15,
+      "source_dir": "results/Qwen_Qwen3.5-35B-A3B__vllm_default/vllm_fused_add_rms_norm",
+      "is_canonical": false
+    },
+    {
+      "model": "deepseek-ai_DeepSeek-R1",
+      "engine": "vllm",
+      "mode": "triton_mla",
+      "combo": "deepseek-ai_DeepSeek-R1__vllm_triton_mla",
+      "time_pct": 2.66,
+      "source_dir": "results/deepseek-ai_DeepSeek-R1__vllm_triton_mla/vllm_fused_add_rms_norm",
+      "is_canonical": false
+    },
+    {
+      "model": "deepseek-ai_DeepSeek-R1",
+      "engine": "vllm",
+      "mode": "default",
+      "combo": "deepseek-ai_DeepSeek-R1__vllm_default",
+      "time_pct": 1.66,
+      "source_dir": "results/deepseek-ai_DeepSeek-R1__vllm_default/vllm_fused_add_rms_norm",
+      "is_canonical": false
+    }
+  ]
+}
