@@ -119,3 +119,10 @@ model:
   model_kwargs:
     temperature: 0.0
     max_tokens: 16000
+  # Cost accounting rates (USD per million tokens) used to populate
+  # translation_cost_usd in translation_result.json. Defaults below are public
+  # Claude Opus rates; override per model/gateway as needed.
+  cost_per_mtok_input: 15.0
+  cost_per_mtok_output: 75.0
+  cost_per_mtok_cache_write: 18.75
+  cost_per_mtok_cache_read: 1.5

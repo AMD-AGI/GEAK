@@ -70,6 +70,71 @@ def _parse_timing_from_harness_output(
     )
 
 
+# Default LLM pricing (USD per million tokens), Claude Opus public rates.
+# Overridable per key via the model: section of the translation YAML
+# (cost_per_mtok_input / _output / _cache_write / _cache_read).
+_DEFAULT_COST_RATES_PER_MTOK = {
+    "input": 15.0,
+    "output": 75.0,
+    "cache_write": 18.75,
+    "cache_read": 1.50,
+}
+
+
+def _aggregate_trajectory_tokens(output_dir: Path) -> dict[str, int]:
+    """Sum token usage across all round trajectories under *output_dir*.
+
+    Reads ``round_*/traj.json`` (JSON or concatenated JSONL) written by the
+    translation agent and accumulates Anthropic-style usage fields.  Returns
+    zeros when no trajectory is found.
+    """
+    agg = {"calls": 0, "input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
+    decoder = json.JSONDecoder()
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            if "output_tokens" in obj:
+                agg["calls"] += 1
+                agg["input"] += int(obj.get("input_tokens") or 0)
+                agg["output"] += int(obj.get("output_tokens") or 0)
+                agg["cache_write"] += int(obj.get("cache_creation_input_tokens") or 0)
+                agg["cache_read"] += int(obj.get("cache_read_input_tokens") or 0)
+            for value in obj.values():
+                _walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                _walk(value)
+
+    for traj in sorted(output_dir.glob("round_*/traj.json")):
+        try:
+            text = traj.read_text()
+        except OSError:
+            continue
+        idx, length = 0, len(text)
+        while idx < length:
+            while idx < length and text[idx] in " \t\r\n":
+                idx += 1
+            if idx >= length:
+                break
+            try:
+                obj, idx = decoder.raw_decode(text, idx)
+            except ValueError:
+                break
+            _walk(obj)
+    return agg
+
+
+def _estimate_cost_usd(tokens: dict, rates_per_mtok: dict) -> float:
+    """Estimate USD cost from a token breakdown and per-million-token rates."""
+    return round(
+        (tokens.get("input", 0) * rates_per_mtok["input"]
+         + tokens.get("output", 0) * rates_per_mtok["output"]
+         + tokens.get("cache_write", 0) * rates_per_mtok["cache_write"]
+         + tokens.get("cache_read", 0) * rates_per_mtok["cache_read"]) / 1e6,
+        4,
+    )
+
+
 def run_translation(
     kernel_path: Path,
     output_dir: Path,
@@ -144,6 +209,10 @@ def run_translation(
         "translation_rounds_used": 0,
         "translation_pytorch_latency_ms": None,
         "translation_flydsl_latency_ms": None,
+        "translation_speedup": None,
+        "translation_cost_usd": None,
+        "translation_tokens": None,
+        "translation_model_calls": None,
         "translation_errors": [],
     }
 
@@ -327,13 +396,25 @@ def run_translation(
         )
         assert isinstance(harness_result, dict)
 
+        # Always persist the PyTorch reference latency, even when the candidate
+        # is incorrect or the harness errors out.  The harness prints the
+        # reference latency before running/comparing the candidate, so it is
+        # available in stdout regardless of correctness.  (Candidate latency and
+        # speedup are only meaningful for a CORRECT candidate, so those are
+        # parsed in the success branch below.)
+        _ref_only = re.search(
+            r"PyTorch reference latency:\s*([\d.]+)\s*ms",
+            harness_result.get("stdout", ""),
+        )
+        if _ref_only:
+            result["translation_pytorch_latency_ms"] = float(_ref_only.group(1))
+
         if harness_result["success"]:
             _print(f"  Round {round_num}: CORRECT")
             result["translation_success"] = True
             result["translation_kernel_path"] = str(candidate_path)
 
-            # Parse timing from the validation run's stdout — the harness
-            # prints latencies and speedup when the candidate is tested.
+            # Parse full timing (reference + candidate + speedup) from stdout.
             _parse_timing_from_harness_output(
                 harness_result.get("stdout", ""),
                 result,
@@ -444,6 +525,31 @@ def run_translation(
 
     if result["translation_success"]:
         _print(f"  Translation successful in {result['translation_rounds_used']} rounds ({elapsed:.1f}s)")
+
+    # -- Cost accounting (token-based estimate from the round trajectories) --
+    # Persisted regardless of success so failed/partial runs still record spend.
+    try:
+        rates = dict(_DEFAULT_COST_RATES_PER_MTOK)
+        for _key, _cfg_key in (
+            ("input", "cost_per_mtok_input"),
+            ("output", "cost_per_mtok_output"),
+            ("cache_write", "cost_per_mtok_cache_write"),
+            ("cache_read", "cost_per_mtok_cache_read"),
+        ):
+            if model_config.get(_cfg_key) is not None:
+                rates[_key] = float(model_config[_cfg_key])
+        tokens = _aggregate_trajectory_tokens(output_dir)
+        result["translation_tokens"] = tokens
+        result["translation_model_calls"] = tokens["calls"] or getattr(_model, "n_calls", None)
+        result["translation_cost_usd"] = _estimate_cost_usd(tokens, rates)
+        result["translation_cost_rates_per_mtok"] = rates
+        _print(
+            f"  Cost: ${result['translation_cost_usd']:.2f} "
+            f"({tokens['calls']} calls, in={tokens['input']} out={tokens['output']} "
+            f"cache_r={tokens['cache_read']} cache_w={tokens['cache_write']})"
+        )
+    except Exception as exc:
+        _print(f"  Warning: cost accounting failed: {exc}")
 
     # Write result metadata
     (output_dir / "translation_result.json").write_text(json.dumps(result, indent=2, default=str))
