@@ -248,9 +248,11 @@ def run_translation(
         )
     except Exception:
         _DEFAULT_BENCH_ITERS = 30
-    bench_warmup = int(agent_config_dict.get("bench_warmup", 10))
-    bench_iters = int(agent_config_dict.get("bench_iters", _DEFAULT_BENCH_ITERS))
-    reference_mode = str(agent_config_dict.get("reference_mode", "compile_fallback")).strip().lower()
+    # pop (not get): these are translation-harness settings, not agent fields,
+    # so they must not be splatted into TranslationAgentConfig(**agent_config).
+    bench_warmup = int(agent_config_dict.pop("bench_warmup", 10))
+    bench_iters = int(agent_config_dict.pop("bench_iters", _DEFAULT_BENCH_ITERS))
+    reference_mode = str(agent_config_dict.pop("reference_mode", "compile_fallback")).strip().lower()
     _print(f"  Latency bench: warmup={bench_warmup} iters={bench_iters} (median), "
            f"reference_mode={reference_mode}")
 
