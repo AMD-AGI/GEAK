@@ -170,6 +170,21 @@ def run_translation(
         _print(f"  [red]{msg}[/red]" if console else f"  ERROR: {msg}")
         return result
 
+    # -- Benchmark / reference settings (from the translation YAML, no env vars) --
+    # bench_iters defaults to the shared optimization constant so the two stages
+    # cannot drift; the generated harness itself reads no environment.
+    try:
+        from minisweagent.run.preprocess.harness_utils import (
+            DEFAULT_EVAL_BENCHMARK_ITERATIONS as _DEFAULT_BENCH_ITERS,
+        )
+    except Exception:
+        _DEFAULT_BENCH_ITERS = 30
+    bench_warmup = int(agent_config_dict.get("bench_warmup", 10))
+    bench_iters = int(agent_config_dict.get("bench_iters", _DEFAULT_BENCH_ITERS))
+    reference_mode = str(agent_config_dict.get("reference_mode", "compile_fallback")).strip().lower()
+    _print(f"  Latency bench: warmup={bench_warmup} iters={bench_iters} (median), "
+           f"reference_mode={reference_mode}")
+
     # -- Resolve model --
     # Precedence: explicit model object > explicit model_name > YAML config > factory default
     _model = model
@@ -219,6 +234,9 @@ def run_translation(
             model=_model,
             repo_root=repo_root,
             output_dir=output_dir,
+            bench_warmup=bench_warmup,
+            bench_iters=bench_iters,
+            reference_mode=reference_mode,
         )
     except Exception as exc:
         msg = f"Failed to create translation harness: {exc}"
@@ -743,6 +761,9 @@ def _create_translation_harness(
     model,
     repo_root: Path,
     output_dir: Path,
+    bench_warmup: int = 10,
+    bench_iters: int = 30,
+    reference_mode: str = "compile_fallback",
 ) -> Path:
     """Create a comparison harness for translation validation.
 
@@ -755,6 +776,9 @@ def _create_translation_harness(
         kernel_path=kernel_path,
         candidate_path=candidate_path,
         candidate_flag=pair.harness_candidate_flag,
+        bench_warmup=bench_warmup,
+        bench_iters=bench_iters,
+        reference_mode=reference_mode,
     )
     harness_path.write_text(harness_code)
     logger.info("Created translation harness: %s", harness_path)
@@ -766,6 +790,9 @@ def _generate_minimal_translation_harness(
     kernel_path: Path,
     candidate_path: Path,
     candidate_flag: str,
+    bench_warmup: int = 10,
+    bench_iters: int = 30,
+    reference_mode: str = "compile_fallback",
 ) -> str:
     """Generate a minimal Python harness that validates translation correctness.
 
@@ -817,27 +844,65 @@ def _is_native_pattern(module):
             and not hasattr(module, "Model"))
 
 
+# -- Benchmark settings (baked in from the translation YAML; no env reads) --
+_BENCH_WARMUP = {bench_warmup}
+_BENCH_ITERS = {bench_iters}
+_REFERENCE_MODE = "{reference_mode}"
+
+
+def _bench_median_ms(run_fn, warmup=_BENCH_WARMUP, iters=_BENCH_ITERS):
+    """Median latency (ms) over ``iters`` timed calls after ``warmup`` warmups.
+
+    Uses CUDA events per iteration (no Triton). Returns (last_output, median_ms).
+    """
+    out = None
+    with torch.no_grad():
+        for _ in range(warmup):
+            run_fn()
+        torch.cuda.synchronize()
+        samples = []
+        for _ in range(iters):
+            s = torch.cuda.Event(enable_timing=True)
+            e = torch.cuda.Event(enable_timing=True)
+            s.record()
+            out = run_fn()
+            e.record()
+            torch.cuda.synchronize()
+            samples.append(s.elapsed_time(e))
+    samples.sort()
+    return out, samples[len(samples) // 2]
+
+
+def _make_reference_callable(model, inputs):
+    """Return (callable, mode_label) for the PyTorch reference, honoring _REFERENCE_MODE.
+
+    eager            -> raw eager forward.
+    compile          -> torch.compile, errors surface.
+    compile_fallback -> torch.compile, fall back to eager on any failure (PyTorch at its best).
+    """
+    eager_fn = lambda: model(*inputs)
+    if _REFERENCE_MODE == "eager":
+        return eager_fn, "eager"
+    try:
+        cmodel = torch.compile(model)
+        with torch.no_grad():
+            cmodel(*inputs)  # probe: triggers compilation outside the timed loop
+        return (lambda: cmodel(*inputs)), "compile"
+    except Exception as exc:
+        if _REFERENCE_MODE == "compile":
+            raise
+        print(f"Reference mode: compile failed ({{type(exc).__name__}}: {{exc}}); falling back to eager")
+        return eager_fn, "eager (compile fallback)"
+
+
 def _run_native(module, inputs):
     """Run a native-pattern module (build_model + forward)."""
     get_init_inputs = getattr(module, "get_init_inputs", None)
     init_inputs = get_init_inputs() if get_init_inputs else []
     state = module.build_model(*init_inputs)
 
-    # Warmup
-    with torch.no_grad():
-        for _ in range(3):
-            module.forward(state, *inputs)
-    torch.cuda.synchronize()
-
-    # Timed run
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    with torch.no_grad():
-        start.record()
-        output = module.forward(state, *inputs)
-        end.record()
-    torch.cuda.synchronize()
-    latency_ms = start.elapsed_time(end)
+    run_fn = lambda: module.forward(state, *inputs)
+    output, latency_ms = _bench_median_ms(run_fn)
     return output, latency_ms
 
 
@@ -858,21 +923,9 @@ def run_reference():
         model = model.half()
         inputs = [x.cuda().half() if isinstance(x, torch.Tensor) else x for x in inputs]
 
-    # Warmup
-    with torch.no_grad():
-        for _ in range(3):
-            model(*inputs)
-    torch.cuda.synchronize()
-
-    # Timed run
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    with torch.no_grad():
-        start.record()
-        ref_output = model(*inputs)
-        end.record()
-    torch.cuda.synchronize()
-    latency_ms = start.elapsed_time(end)
+    run_fn, _ref_mode = _make_reference_callable(model, inputs)
+    print(f"Reference mode: {{_ref_mode}}")
+    ref_output, latency_ms = _bench_median_ms(run_fn)
 
     return model, inputs, ref_output, latency_ms
 
@@ -892,21 +945,8 @@ def run_candidate(candidate_path: str, ref_inputs):
 
     inputs = ref_inputs
 
-    # Warmup
-    with torch.no_grad():
-        for _ in range(3):
-            model(*inputs)
-    torch.cuda.synchronize()
-
-    # Timed run
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    with torch.no_grad():
-        start.record()
-        cand_output = model(*inputs)
-        end.record()
-    torch.cuda.synchronize()
-    latency_ms = start.elapsed_time(end)
+    run_fn = lambda: model(*inputs)
+    cand_output, latency_ms = _bench_median_ms(run_fn)
 
     return cand_output, latency_ms
 
@@ -967,7 +1007,7 @@ def main():
         print("CORRECTNESS: PASS")
 
         speedup = ref_latency / cand_latency if cand_latency > 0 else float("inf")
-        print(f"Speedup: {{speedup:.2f}}x (ref={{ref_latency:.3f}}ms, cand={{cand_latency:.3f}}ms)")
+        print(f"Speedup: {{speedup:.2f}}x (ref={{ref_latency:.3f}}ms, cand={{cand_latency:.3f}}ms, median of {bench_iters})")
 
         if speedup < 0.5:
             print("WARNING: FlyDSL candidate is significantly slower than PyTorch reference")
