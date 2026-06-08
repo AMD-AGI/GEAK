@@ -127,10 +127,13 @@ def _aggregate_trajectory_tokens(output_dir: Path) -> dict[str, int]:
 def _estimate_cost_usd(tokens: dict, rates_per_mtok: dict) -> float:
     """Estimate USD cost from a token breakdown and per-million-token rates."""
     return round(
-        (tokens.get("input", 0) * rates_per_mtok["input"]
-         + tokens.get("output", 0) * rates_per_mtok["output"]
-         + tokens.get("cache_write", 0) * rates_per_mtok["cache_write"]
-         + tokens.get("cache_read", 0) * rates_per_mtok["cache_read"]) / 1e6,
+        (
+            tokens.get("input", 0) * rates_per_mtok["input"]
+            + tokens.get("output", 0) * rates_per_mtok["output"]
+            + tokens.get("cache_write", 0) * rates_per_mtok["cache_write"]
+            + tokens.get("cache_read", 0) * rates_per_mtok["cache_read"]
+        )
+        / 1e6,
         4,
     )
 
@@ -253,8 +256,7 @@ def run_translation(
     bench_warmup = int(agent_config_dict.pop("bench_warmup", 10))
     bench_iters = int(agent_config_dict.pop("bench_iters", _DEFAULT_BENCH_ITERS))
     reference_mode = str(agent_config_dict.pop("reference_mode", "compile_fallback")).strip().lower()
-    _print(f"  Latency bench: warmup={bench_warmup} iters={bench_iters} (median), "
-           f"reference_mode={reference_mode}")
+    _print(f"  Latency bench: warmup={bench_warmup} iters={bench_iters} (median), reference_mode={reference_mode}")
 
     # -- Resolve model --
     # Precedence: explicit model object > explicit model_name > YAML config > factory default
@@ -404,6 +406,8 @@ def run_translation(
         # available in stdout regardless of correctness.  (Candidate latency and
         # speedup are only meaningful for a CORRECT candidate, so those are
         # parsed in the success branch below.)
+        import re
+
         _ref_only = re.search(
             r"PyTorch reference latency:\s*([\d.]+)\s*ms",
             harness_result.get("stdout", ""),
