@@ -546,6 +546,25 @@ def _preprocess_result_to_legacy_context(
     kernel_path = result.kernel_path or kernel_path_input
     kernel_language_name = result.kernel_language.name if result.kernel_language is not None else "unknown"
 
+    # When a PyTorch->FlyDSL translation occurred, the translate tool staged the
+    # translated kernel into a PER-RUN optimization repo (``<output_dir>/_opt_repo``)
+    # and retargeted ``result.kernel_path`` there. Root the optimization at that
+    # per-run directory so the optimization worktrees and the final optimized
+    # kernel stay inside this run's ``output_dir`` instead of the shared source
+    # kernel directory (which would otherwise be overwritten across runs).
+    #
+    # Non-translation runs (HIP/Triton direct ``--kernel-url``) never stage and
+    # keep the originally resolved ``repo_root`` untouched -- so their behavior
+    # is unchanged.
+    if (
+        result.translation is not None
+        and getattr(result.translation, "success", False)
+        and result.kernel_path is not None
+    ):
+        translated_parent = Path(result.kernel_path).expanduser().resolve().parent
+        if translated_parent.name == "_opt_repo":
+            repo_root = str(translated_parent)
+
     baseline_metrics = _project_baseline(result)
     baseline_metrics_path: str | None = None
     if baseline_metrics:

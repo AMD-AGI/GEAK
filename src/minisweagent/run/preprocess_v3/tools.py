@@ -54,7 +54,7 @@ import shlex
 import shutil
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -1101,6 +1101,49 @@ def _make_tool_translate_to_flydsl(
             repo=agent.config.repo,
             flydsl_repo=agent.config.flydsl_repo,
         )
+        # Stage the translated kernel into a PER-RUN optimization repo so the
+        # optimization stage can see and diff it WITHOUT polluting (or
+        # overwriting across parallel runs) the shared source kernel directory.
+        #
+        # The optimization worktree is rooted at ``repo_root``; when a
+        # PyTorch->FlyDSL translation leaves the candidate only under
+        # ``output_dir`` (outside that worktree), every per-round ``git diff``
+        # captures just the bootstrap ``.gitignore`` and all real kernel edits
+        # are lost (367B patches). Historically we copied the candidate into the
+        # shared source ``repo_root`` (e.g. ``/data/kernels``), which made every
+        # run clobber the previous run's translated + final-optimized kernel.
+        #
+        # Instead we stage into ``<output_dir>/_opt_repo`` (per-run) and
+        # retarget ``translated_kernel_path`` there. Downstream, the adapter
+        # roots the optimization at this same per-run directory (parent of the
+        # translated kernel), so the staged translated kernel, the optimization
+        # worktrees, and the final optimized kernel all stay inside this run's
+        # ``output_dir`` -- enabling clean parallel runs with no cross-run
+        # overwrites, while keeping the proven git-diff patch-capture path.
+        if result.success and result.translated_kernel_path is not None:
+            try:
+                opt_repo = (Path(output_dir).expanduser().resolve() / "_opt_repo").resolve()
+                cand = Path(result.translated_kernel_path).expanduser().resolve()
+                staged = (opt_repo / cand.name).resolve()
+                if cand.exists() and staged != cand:
+                    opt_repo.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(cand, staged)
+                    snapshot = cand.parent / f"{cand.stem}.translated.py"
+                    if snapshot.exists():
+                        shutil.copy2(snapshot, opt_repo / snapshot.name)
+                    result = replace(result, translated_kernel_path=staged)
+                    logger.info(
+                        "Staged translated kernel into per-run optimization repo "
+                        "for patch capture: %s -> %s",
+                        cand,
+                        staged,
+                    )
+            except OSError as exc:
+                logger.warning(
+                    "Could not stage translated kernel into per-run optimization "
+                    "repo (%s); optimization patches may capture only .gitignore.",
+                    exc,
+                )
         agent._collected["translation"] = result
         return {
             "ok": result.success,
@@ -1118,7 +1161,32 @@ def _make_tool_dispatch_subagent(
     agent: PreprocessOrchestratorAgent,
     dispatcher: PreprocessSubagentDispatcher,
 ) -> Callable[..., dict[str, Any]]:
-    def _impl(name: str, task: str, context: Any = None) -> dict[str, Any]:
+    def _impl(name: str, task: str | None = None, context: Any = None) -> dict[str, Any]:
+        # The orchestrator LLM occasionally omits the required ``task`` arg.
+        # Previously this raised ``TypeError`` inside the tool loop, so the
+        # harness never got generated, ``benchmark_baseline.txt`` was never
+        # produced, and the preprocess soft cap aborted the entire run. Be
+        # defensive: synthesize a sensible default task from ``name`` so the
+        # subagent still gets dispatched (the subagents carry their own
+        # detailed system prompts; ``task`` is only a focusing instruction).
+        if not task or not str(task).strip():
+            _default_tasks = {
+                "harness-generator": (
+                    "Generate a benchmark harness for the target kernel, "
+                    "verify it runs the standard CLI modes, and emit a single "
+                    "`HARNESS_PATH:` line pointing at the harness."
+                ),
+                "harness-verifier": (
+                    "Verify the generated harness by running its CLI modes "
+                    "(--correctness, --profile, --benchmark) and report "
+                    "HARNESS_VERIFIED with the HARNESS_PATH."
+                ),
+            }
+            task = _default_tasks.get(name, "Proceed with the assigned preprocess subagent task.")
+            logger.warning(
+                "dispatch_subagent('%s') called without `task`; using synthesized default.",
+                name,
+            )
         if context is None:
             context = {}
         elif isinstance(context, str):

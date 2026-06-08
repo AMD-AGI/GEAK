@@ -190,8 +190,10 @@ def run_homogeneous_agent(
         try:
             from minisweagent.run.postprocess.optimized_codes import collect_optimized_codes
 
-            if report.get("best_patch"):
-                manifest = collect_optimized_codes(final_repo, report["best_patch"], final_output_dir)
+            # Run even without best_patch: collect_optimized_codes prefers the
+            # translation-snapshot diff (<stem>.translated.py vs <stem>.py).
+            if report.get("best_patch") or list(Path(final_output_dir).glob("*.translated.py")):
+                manifest = collect_optimized_codes(final_repo, report.get("best_patch"), final_output_dir)
                 if manifest:
                     report["optimized_codes"] = manifest
         except Exception as snapshot_exc:

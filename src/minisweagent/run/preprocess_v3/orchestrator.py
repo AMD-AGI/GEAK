@@ -781,6 +781,33 @@ class PreprocessOrchestratorAgent:
         translation: TranslationResult | None = collected.get("translation")
         if translation is not None and translation.translated_kernel_path is not None:
             translated_path = translation.translated_kernel_path
+            # After a successful PyTorch->FlyDSL translation the downstream
+            # kernel IS a FlyDSL kernel. Re-detect language from the translated
+            # file so kernel_language/kernel_type reflect ``flydsl`` (not the
+            # stale source-language detection, which is ``unknown`` for a plain
+            # PyTorch .py). This keeps the optimization stage's metadata,
+            # subagent selection, and agent context aligned with the actual
+            # optimization target -- identical to a direct FlyDSL --kernel-url
+            # run.
+            try:
+                from minisweagent.run.preprocess_v3.lang import FLYDSL, detect_language
+
+                redetected = detect_language(Path(translated_path))
+                if redetected is not None and redetected.name.lower() != "unknown":
+                    kernel_language = redetected
+                elif translation.success and (translation.target_language or "").lower() == "flydsl":
+                    # Only force FLYDSL when the translation TARGET is actually
+                    # flydsl. Today that is the only registered pair, but guard
+                    # against a future pytorch->triton/hip pair: if detection
+                    # fails for such a target we must NOT mislabel it as flydsl,
+                    # so leave kernel_language untouched in that case.
+                    kernel_language = FLYDSL
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Could not re-detect language on translated kernel %s: %s",
+                    translated_path,
+                    exc,
+                )
 
         harness_path = _coerce_path(collected.get("harness_path"))
         baseline = collected.get("baseline")

@@ -426,6 +426,21 @@ def run_translation(
 
     if result["translation_success"]:
         _print(f"  Translation successful in {result['translation_rounds_used']} rounds ({elapsed:.1f}s)")
+        # Snapshot the translation-stage kernel under a separate name. The
+        # optimization phase overwrites the main candidate file in place, so
+        # without this snapshot the pre-optimization code is lost and the
+        # translation->optimization delta cannot be reviewed (the .patch
+        # artifacts are currently unreliable). Diff this against the final
+        # kernel to see exactly what optimization changed.
+        try:
+            import shutil as _shutil
+
+            translated_snapshot = output_dir / f"{candidate_path.stem}.translated.py"
+            _shutil.copyfile(candidate_path, translated_snapshot)
+            result["translation_snapshot_path"] = str(translated_snapshot)
+            _print(f"  Saved translation snapshot: {translated_snapshot}")
+        except OSError as _exc:
+            _print(f"  WARNING: could not save translation snapshot: {_exc}")
 
     # Write result metadata
     (output_dir / "translation_result.json").write_text(json.dumps(result, indent=2, default=str))

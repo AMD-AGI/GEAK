@@ -21,6 +21,7 @@ caller can safely embed the result without branching.
 
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 import shutil
@@ -226,6 +227,109 @@ def _copy_snapshot(
     return copied, total
 
 
+def _reconstruct_from_translation_snapshot(
+    output_dir: Path,
+    target_dir: Path,
+) -> dict[str, Any] | None:
+    """Rebuild the optimized-code view directly from translation snapshots.
+
+    The worktree-based patch capture (``save_and_test`` -> ``git diff`` in
+    ``GEAK_WORK_DIR``) cannot see the FlyDSL kernel under optimization,
+    because that kernel lives in ``output_dir`` (e.g. ``kernel_foo_flydsl.py``)
+    rather than inside the bootstrapped worktree (a copy of ``repo_root``).
+    The resulting ``*.patch`` artifacts therefore capture only the
+    auto-generated ``.gitignore`` and drop every real kernel change.
+
+    To recover the true translation->optimization delta we diff the
+    pre-optimization snapshot ``<stem>.translated.py`` (written by the
+    translate stage) against the final in-place kernel ``<stem>.py``. When at
+    least one such pair differs we emit a real unified patch
+    (``output_dir/optimization.patch``) and snapshot the optimized kernels
+    into ``target_dir``.
+
+    Returns a manifest dict on success, or ``None`` to signal the caller to
+    fall back to the legacy patch-replay path (no snapshots / no diffs).
+    """
+    snapshots = sorted(output_dir.glob("*.translated.py"))
+    if not snapshots:
+        return None
+
+    patch_chunks: list[str] = []
+    changed_files: list[str] = []
+    unchanged_files: list[str] = []
+
+    for snap in snapshots:
+        stem = snap.name[: -len(".translated.py")]
+        final = snap.with_name(f"{stem}.py")
+        if not final.is_file():
+            continue
+        try:
+            before = snap.read_text().splitlines(keepends=True)
+            after = final.read_text().splitlines(keepends=True)
+        except OSError as exc:
+            logger.warning("snapshot reconstruction: could not read %s/%s: %s", snap, final, exc)
+            continue
+        if before == after:
+            unchanged_files.append(final.name)
+            continue
+        diff = difflib.unified_diff(before, after, fromfile=f"a/{final.name}", tofile=f"b/{final.name}")
+        chunk = "".join(diff)
+        if not chunk.strip():
+            unchanged_files.append(final.name)
+            continue
+        patch_chunks.append(f"diff --git a/{final.name} b/{final.name}\n{chunk}")
+        changed_files.append(final.name)
+
+    if not patch_chunks:
+        return None
+
+    patch_text = "\n".join(patch_chunks)
+    if not patch_text.endswith("\n"):
+        patch_text += "\n"
+    patch_out: Path | None = output_dir / "optimization.patch"
+    try:
+        patch_out.write_text(patch_text)
+    except OSError as exc:
+        logger.warning("snapshot reconstruction: could not write %s: %s", patch_out, exc)
+        patch_out = None
+
+    if target_dir.exists():
+        shutil.rmtree(target_dir, ignore_errors=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    total_bytes = 0
+    copied: list[str] = []
+    for name in changed_files:
+        src = output_dir / name
+        try:
+            shutil.copy2(src, target_dir / name)
+            total_bytes += (target_dir / name).stat().st_size
+            copied.append(name)
+        except OSError as exc:
+            logger.warning("snapshot reconstruction: could not copy %s: %s", src, exc)
+
+    logger.info(
+        "collect_optimized_codes: reconstructed %d optimized kernel(s) from translation "
+        "snapshot diff (%d unchanged) -> %s",
+        len(copied),
+        len(unchanged_files),
+        target_dir,
+    )
+    return {
+        "status": "complete",
+        "source": "translation_snapshot_diff",
+        "directory": str(target_dir),
+        "patch": str(patch_out) if patch_out else None,
+        "files": sorted(copied),
+        "added": [],
+        "modified": sorted(copied),
+        "deleted": [],
+        "renamed": [],
+        "unchanged": sorted(unchanged_files),
+        "total_bytes": total_bytes,
+        "filtered_jit_cache": [],
+    }
+
+
 def collect_optimized_codes(
     repo_root: str | Path,
     patch_file: str | Path | None,
@@ -247,6 +351,20 @@ def collect_optimized_codes(
         ``optimized_codes`` key. Never raises.
     """
     output_dir = Path(output_dir).resolve()
+    target_dir = output_dir / target_dir_name
+
+    # Preferred path: rebuild the optimized view from the translation snapshot
+    # (<stem>.translated.py vs <stem>.py). The worktree git-diff patch capture
+    # cannot see the FlyDSL kernel (it lives in output_dir), so the *.patch
+    # artifacts only contain .gitignore; diffing the actual kernel files
+    # recovers the real translation->optimization delta.
+    try:
+        snapshot_manifest = _reconstruct_from_translation_snapshot(output_dir, target_dir)
+    except Exception as exc:  # never let reconstruction abort the report
+        logger.warning("snapshot reconstruction raised: %s", exc, exc_info=True)
+        snapshot_manifest = None
+    if snapshot_manifest is not None:
+        return snapshot_manifest
 
     if not patch_file:
         return {"status": "skipped", "reason": "no_best_patch"}
@@ -261,7 +379,6 @@ def collect_optimized_codes(
     if not repo.exists():
         return {"status": "skipped", "reason": "repo_root_missing", "repo_root": str(repo)}
 
-    target_dir = output_dir / target_dir_name
     eval_dir: Path | None = None
     try:
         try:

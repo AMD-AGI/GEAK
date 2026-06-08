@@ -307,16 +307,16 @@ def _attach_optimized_codes(
     because the snapshot step did.
     """
     best_patch = report.get("best_patch")
-    if not best_patch:
-        return
     repo_root = ctx.get("repo_root")
-    if not repo_root:
-        logger.debug("optimized_codes: ctx['repo_root'] missing; skipping snapshot.")
+    # Do NOT bail when best_patch is missing: collect_optimized_codes prefers
+    # rebuilding the view from the translation snapshot (<stem>.translated.py
+    # vs <stem>.py) in output_dir, which needs neither best_patch nor repo_root.
+    if not best_patch and not list(Path(output_dir).glob("*.translated.py")):
         return
     try:
         from minisweagent.run.postprocess.optimized_codes import collect_optimized_codes
 
-        manifest = collect_optimized_codes(repo_root, best_patch, output_dir)
+        manifest = collect_optimized_codes(repo_root or "", best_patch, output_dir)
         if manifest:
             report["optimized_codes"] = manifest
     except Exception as exc:
