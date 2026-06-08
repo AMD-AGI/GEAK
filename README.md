@@ -79,6 +79,48 @@ Workflow({
 })
 ```
 
+### Using Team Workflow E2E (end-to-end serving throughput)
+
+`workflow_e2e_team/` raises the **sglang/vllm serving throughput** of a whole LLM on MI300X. It is a
+system layer that wraps — and recursively calls — the unchanged single-kernel `workflows/team_workflow.js`:
+it preflights the env, profiles a running server, triages hot kernels by **Amdahl** (`pct_gpu_time ×
+achievable_speedup`), then pulls levers cheapest-first — config/backend sweep → head GEMM/attention
+bake-off (aiter per-shape DB tune + a Triton kernel **authored** via the recursive kernel layer) →
+editable-kernel milestone loop (parallel optimize, serial integrate, cumulative stacking) — overlaying
+each accepted change back **reversibly** and gating it on a measured warm-server throughput delta
+(interleaved A/B, 0.5% band + engagement proof + output parity). Every run writes a complete Chinese
+**`final_report.md`** (with a 阶段树 Phases tree + 产物 tree).
+
+**Natural language (recommended):**
+
+```
+用 workflow_e2e_team 优化 /path/to/model 的推理，sglang，ISL/OSL=1024，conc=64
+```
+
+**Programmatic invocation:**
+
+```js
+Workflow({
+  scriptPath: "<PerfSkills>/workflow_e2e_team/team_workflow_e2e.js",
+  args: {
+    model_path: "/abs/path/to/model",            // required (e2e mode)
+    workflow_dir: "<PerfSkills>/workflow_e2e_team", // required
+    backend: "sglang",                            // sglang | vllm (scripts/adapters/<backend>.sh)
+    isl: 1024, osl: 1024, conc: 64,               // workload (profile + bench use the SAME)
+    gpu_ids: "0,1,2,3",                           // optimization-parallelism pool (serving stays TP=1)
+    budget: 6, min_kernel_tasks: 4, kernel_budget: 6,
+    head_budget: 3, head_author_max: 2,           // head GEMM/attn bake-off + author
+    e2e_repeats: 7, config_tune: "true",          // tight A/B; Tier-0 sweep on
+    apply_to_original: "false"
+  }
+})
+// Single-kernel pass-through (backward compatible): pass kernel_path instead of model_path.
+```
+
+Output lands under `workflow_e2e_team/exp/e2e_<model>_<timestamp>/` — `final_report.md`,
+`architect_report.md`, `final/` (overlay + patch + `final_launch.sh`), and per-stage artifacts.
+See a real run in [`examples/team_workflow_e2e/`](examples/team_workflow_e2e/).
+
 ### Batch optimization (multiple kernels)
 
 For optimizing many kernels in parallel, spawn one agent per kernel with isolated GPU assignments:
@@ -126,16 +168,22 @@ PerfSkills/
 │       ├── knowledge/     # 7 knowledge files (MI300X, HIP, Triton, strategies, profiling, wrapper, self-monitoring)
 │       ├── scripts/       # gpu_lock.sh, profile_kernel.sh
 │       └── sub_skills/    # analyze, benchmark_setup, profile, engineer, evaluate, merge_engineer, tech_lead
-├── workflows/
-│   ├── team_workflow.js   # Deterministic JS orchestration (Workflow)
-│   ├── roles/             # director, tech_lead, engineer, benchmark/profile/verify engineers, integrator
+├── workflows/             # Single-kernel optimizer (Workflow)
+│   ├── team_workflow.js   # Deterministic JS orchestration
+│   ├── roles/             # director, tech_lead, engineer, author/benchmark/profile/verify engineers, integrator
 │   ├── knowledge/         # optimization strategies, HIP/Triton/wrapper guides, profiling, MI300X, self-monitoring
 │   ├── scripts/           # gpu_lock.sh, profile_kernel.sh
 │   └── README.md
+├── workflow_e2e_team/     # End-to-end LLM serving-throughput optimizer (wraps workflows/)
+│   ├── team_workflow_e2e.js  # system-layer orchestration (config/head-GEMM/kernel tracks + e2e gate)
+│   ├── roles/             # director, system_architect, profiler, config_tuner, kernel_extractor, op_benchmarker, e2e_integrator
+│   ├── knowledge/         # e2e_optimization, aiter_gemm_tuning, gemm_attention_backends, backend_playbook, preflight, sglang_internals, …
+│   ├── scripts/           # bench_e2e.sh + adapters/{sglang,vllm}.sh, op_bench.py, capture_shapes.py, overlay_setup.py, parse_profile.py
+│   └── README.md / PLAN.md
 ├── examples/
-│   ├── tasks/             # Example kernel tasks
-│   │   └── knn/           # K-Nearest Neighbors kernel
-│   └── result/            # Benchmark comparisons
+│   ├── tasks/             # Example kernel tasks (e.g. knn)
+│   ├── result/            # Benchmark comparisons
+│   └── team_workflow_e2e/ # Example e2e run (final_report.md with 阶段树, final_launch.sh)
 └── exp/                   # Experiment outputs (timestamped per run)
 ```
 
