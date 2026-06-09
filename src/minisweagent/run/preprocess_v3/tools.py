@@ -1138,10 +1138,16 @@ def _make_tool_translate_to_flydsl(
                     # Without this copy the optimization preflight fails with
                     # ``FileNotFoundError`` / "Reference module not importable from
                     # worktree" and the run produces no optimized result.
+                    # Stage into BOTH ``_opt_repo`` (for harnesses resolving via
+                    # ``$GEAK_REPO_ROOT``) and the run ``output_dir`` (for harnesses
+                    # that bare-``import <source_name>`` or read ``dirname(__file__)``).
                     ref_src = Path(source_path).expanduser().resolve()
-                    ref_staged = (opt_repo / ref_src.name).resolve()
-                    if ref_src.exists() and ref_staged != ref_src:
-                        shutil.copy2(ref_src, ref_staged)
+                    out_root = Path(output_dir).expanduser().resolve()
+                    for dest_dir in (opt_repo, out_root):
+                        ref_dest = (dest_dir / ref_src.name).resolve()
+                        if ref_src.exists() and ref_dest != ref_src:
+                            ref_dest.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(ref_src, ref_dest)
                     result = replace(result, translated_kernel_path=staged)
                     logger.info(
                         "Staged translated kernel into per-run optimization repo "
