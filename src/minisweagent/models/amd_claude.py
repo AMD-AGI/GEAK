@@ -58,6 +58,15 @@ class AmdClaudeModel(AmdLlmModelBase):
         self.client = anthropic.Anthropic(
             api_key="dummy",
             base_url=base_url,
+            # Bound every request with a wall-clock timeout. Without it, a stalled
+            # gateway socket (server accepts the connection but never sends bytes)
+            # blocks the read forever, the tenacity ``@retry`` below never fires, and
+            # the whole preprocess/agent loop hangs indefinitely. ``anthropic.APITimeoutError``
+            # is NOT in the no-retry exclusion list, so a timed-out call is retried with
+            # exponential backoff. ``max_retries=0`` hands retry control entirely to
+            # tenacity (no double layer). Same env/default as LitellmModel.
+            timeout=float(os.getenv("GEAK_LLM_REQUEST_TIMEOUT", "600")),
+            max_retries=0,
             default_headers={
                 "Ocp-Apim-Subscription-Key": api_key,
                 "user": user,
