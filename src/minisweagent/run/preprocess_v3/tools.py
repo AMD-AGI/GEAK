@@ -1131,6 +1131,17 @@ def _make_tool_translate_to_flydsl(
                     snapshot = cand.parent / f"{cand.stem}.translated.py"
                     if snapshot.exists():
                         shutil.copy2(snapshot, opt_repo / snapshot.name)
+                    # Also stage the ORIGINAL reference kernel into ``_opt_repo``.
+                    # Optimization roots ``GEAK_REPO_ROOT`` at this per-run dir, and
+                    # some generated harnesses resolve their PyTorch reference as
+                    # ``$GEAK_REPO_ROOT/<source_name>`` (e.g. ``kernel_copy.py``).
+                    # Without this copy the optimization preflight fails with
+                    # ``FileNotFoundError`` / "Reference module not importable from
+                    # worktree" and the run produces no optimized result.
+                    ref_src = Path(source_path).expanduser().resolve()
+                    ref_staged = (opt_repo / ref_src.name).resolve()
+                    if ref_src.exists() and ref_staged != ref_src:
+                        shutil.copy2(ref_src, ref_staged)
                     result = replace(result, translated_kernel_path=staged)
                     logger.info(
                         "Staged translated kernel into per-run optimization repo "
