@@ -1178,7 +1178,12 @@ def _make_tool_dispatch_subagent(
     agent: PreprocessOrchestratorAgent,
     dispatcher: PreprocessSubagentDispatcher,
 ) -> Callable[..., dict[str, Any]]:
-    def _impl(name: str, task: str | None = None, context: Any = None) -> dict[str, Any]:
+    def _impl(name: str, task: str | None = None, context: Any = None, **_extra_ignored: Any) -> dict[str, Any]:
+        # The orchestrator LLM occasionally passes extra args (e.g. ``kernel_path``)
+        # that this tool does not accept, which previously raised ``TypeError`` and
+        # aborted preprocess. Swallow unknown kwargs like the other tools do.
+        if _extra_ignored:
+            logger.debug("dispatch_subagent ignored extra kwargs: %s", list(_extra_ignored))
         # The orchestrator LLM occasionally omits the required ``task`` arg.
         # Previously this raised ``TypeError`` inside the tool loop, so the
         # harness never got generated, ``benchmark_baseline.txt`` was never
