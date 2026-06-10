@@ -7,27 +7,24 @@ GPU kernel optimization skills for LLM-based coding agents. Target: AMD MI300X (
 
 | Method | Type | Architecture | Iteration | Key Idea |
 | --- | --- | --- | --- | --- |
-| [GEAK](skills/geak/SKILL.md) | Skill | Orchestrator + parallel workers | Single round | One agent plans, N workers execute in parallel |
-| [Team](skills/team/SKILL.md) | Skill | Director → TechLead → Engineers | Multi-round with re-profiling | Hierarchical delegation, budget-controlled iteration, wrapper overhead detection |
+| [GEAK skill](skills/geak/SKILL.md) | Skill | Orchestrator + parallel workers | Single round | One agent plans, N workers execute in parallel |
+| [Team skill](skills/team/SKILL.md) | Skill | Director → TechLead → Engineers | Multi-round with re-profiling | Hierarchical delegation, budget-controlled iteration, wrapper overhead detection |
 | [Team Workflow](workflows/) | Workflow | Director → TechLead → Specialist Engineers | Multi-round with re-profiling | JS-orchestrated deterministic pipeline, independent verification, specialist engineers, cross-round memory |
 
 
 ### Design Comparison
 
 
-|                        | GEAK                                       | Team Skill                                                | Team Workflow                                                     |
-| ---------------------- | ------------------------------------------ | --------------------------------------------------------- | ----------------------------------------------------------------- |
-| **Origin**             | Refactored from GEAK_v3, reuses its logic  | Ground-up redesign                                        | Successor to Team Skill — JS control flow                         |
-| **Architecture**       | Flat: Orchestrator + parallel workers      | Hierarchical: Director → TechLead → Engineers → Merge     | Same hierarchy, but orchestration in JS, not LLM-interpreted prose |
-| **Iteration**          | Single round                               | Multi-round, budget-controlled                            | Multi-round, budget-controlled                                    |
-| **Orchestration**      | LLM-driven                                 | LLM-driven                                               | **Deterministic JS** — loop/parallelism/verification in code       |
-| **Verification**       | Orchestrator verifies                      | Director independently re-benchmarks                      | **Pipelined** — each patch verified immediately by a separate agent |
-| **Engineer types**     | Generic                                    | Generic                                                   | **Specialist**: algorithm, memory, compute, host_runtime           |
-| **Cross-round memory** | None                                       | Implicit (TechLead context)                               | **Explicit**: insight blackboard + hypothesis ledger                |
-| **Patch combination**  | Best-of-N                                  | Merge Engineer combines top patches                       | **Integrator** agent stacks/hand-merges compatible patches         |
-| **Re-profiling**       | No                                         | Yes, with bottleneck shift analysis                       | Yes, with bottleneck shift analysis                                |
-| **Wrapper detection**  | No                                         | Auto-detects host overhead                                | **host_runtime** specialist as first-class track                   |
-| **Best for**           | Single optimization direction suffices     | Complex kernels, multi-round gains                        | Same as Team Skill, with higher reliability and reproducibility    |
+|                        | GEAK v3                                   | GEAK Skill                                 | Team Skill                                                | Team Workflow                                                     |
+| ---------------------- | ----------------------------------------- | ------------------------------------------ | --------------------------------------------------------- | ----------------------------------------------------------------- |
+| **Origin**             | GEAK                                      | Refactored from GEAK_v3, reuses its logic  | Ground-up redesign                                        | Successor to Team Skill — JS control flow                         |
+| **Architecture**       | Orchestrator + parallel workers           | Orchestrator + parallel workers      | Hierarchical: Director → TechLead → Engineers → Merge     | Same hierarchy, but orchestration in JS, not LLM-interpreted prose |
+| **Iteration**          | Multi-round                               | Single round                               | Multi-round, budget-controlled                            | Multi-round, budget-controlled                                    |
+| **Orchestration**      | Python                                    | LLM-driven                                 | LLM-driven                                                | **Deterministic JS** — loop/parallelism/verification in code       |
+| **Verification**       | Orchestrator verifies                     | Orchestrator verifies                      | Director independently re-benchmarks                      | **Pipelined** — each patch verified immediately by a separate agent |
+| **Engineer types**     | Generic                                   | Generic                                    | Generic                                                   | **Specialist**: algorithm, memory, compute, host_runtime           |
+| **Cross-round memory** | miniswe-memory control                    | None                                       | Implicit (TechLead context)                               | **Explicit**: insight blackboard + hypothesis ledger               |
+| **Best for**           | Programmatic kernel optimization workflow | Single optimization direction suffices     | Complex kernels, multi-round gains                        | Same as Team Skill, with higher reliability and reproducibility    |
 
 
 ### Skill vs Workflow
