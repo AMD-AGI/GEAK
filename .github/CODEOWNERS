@@ -1,0 +1,5 @@
+# Team slugs: https://github.com/orgs/AMD-AGI/teams
+# Syntax: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# Last matching rule wins. Prefer GitHub Teams over individuals.
+# Default - every file requires project-team approval
+*        @AMD-AGI/ai-algorithm
