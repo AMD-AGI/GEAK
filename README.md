@@ -17,6 +17,7 @@ GPU kernel optimization skills for LLM-based coding agents. Target: AMD MI300X (
 
 |                        | GEAK v3                                   | GEAK Skill                                 | Team Skill                                                | Team Workflow                                                     |
 | ---------------------- | ----------------------------------------- | ------------------------------------------ | --------------------------------------------------------- | ----------------------------------------------------------------- |
+| **Agent backend**      | miniswe                                   | Claude/Cursor                              | Claude/Cursor                                             | Claude                                                     |
 | **Origin**             | GEAK                                      | Refactored from GEAK_v3, reuses its logic  | Ground-up redesign                                        | Successor to Team Skill — JS control flow                         |
 | **Architecture**       | Orchestrator + parallel workers           | Orchestrator + parallel workers      | Hierarchical: Director → TechLead → Engineers → Merge     | Same hierarchy, but orchestration in JS, not LLM-interpreted prose |
 | **Iteration**          | Multi-round                               | Single round                               | Multi-round, budget-controlled                            | Multi-round, budget-controlled                                    |
