@@ -426,3 +426,94 @@ def test_legacy_context_recovers_harness_path_from_promoted_command(tmp_path: Pa
     assert ctx["full_benchmark_baseline"] == str(output_dir / "full_benchmark_baseline.txt")
     assert (output_dir / "benchmark_baseline.txt").read_text() == "GEAK_RESULT_LATENCY_MS=1.25\n"
     assert ctx["v3_path_taken"] == "A"
+
+
+def test_prevalidated_harness_bypasses_llm_orchestrator(tmp_path: Path, monkeypatch) -> None:
+    """A pre-validated harness must run the deterministic Path-A sequence
+    (collect_baseline -> collect_profile -> render_commandment) WITHOUT ever
+    invoking the LLM orchestrator.
+
+    Regression: the orchestrator's LLM classifier could misroute a shape-bearing
+    task to the harness-generator or fail to converge, burning the whole
+    preprocess budget with no baseline. ``_run_prevalidated_path_a`` short-circuits
+    that. Here the model is a sentinel that raises if queried — proving the LLM
+    loop is skipped entirely.
+    """
+    import minisweagent.run.preprocess_v3.adapter as adapter_module
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "kernel.py").write_text("# kernel\n")
+    harness = tmp_path / "harness.py"
+    harness.write_text("print('GEAK_RESULT_LATENCY_MS=2.0')\n")
+    output_dir = tmp_path / "out"
+
+    class _ExplodingModel:
+        def query(self, *a, **k):  # pragma: no cover - must never be called
+            raise AssertionError("LLM orchestrator was invoked for a pre-validated harness")
+
+    # Stub the deterministic building blocks so the test runs no real subprocess.
+    def fake_collect_baseline_metrics(harness_path, *, work_dir=None, gpu_id=0, repeats=5):
+        return SimpleNamespace(
+            success=True, median_ms=2.0, samples_ms=[2.0], stdev_ms=0.0,
+            repeats=repeats, harness_path=harness_path, command="python harness",
+            raw_outputs=[{"stdout": "GEAK_RESULT_LATENCY_MS=2.0", "returncode": 0, "latency_ms": 2.0}],
+        )
+
+    monkeypatch.setattr(adapter_module, "PreprocessOrchestratorAgent",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("orchestrator constructed")))
+    # The worktree-bypass gate (contract.validate_harness) is a separate concern;
+    # disable it here so the test exercises the bypass control-flow, not harness
+    # contract validation (covered elsewhere).
+    monkeypatch.setenv("GEAK_ALLOW_HARDCODED_PATHS", "1")
+    import minisweagent.run.preprocess_v3.baseline as baseline_module
+    monkeypatch.setattr(baseline_module, "collect_baseline_metrics", fake_collect_baseline_metrics)
+    monkeypatch.setattr(baseline_module, "capture_full_benchmark_stdout", lambda *a, **k: "GEAK_RESULT_LATENCY_MS=2.0")
+    monkeypatch.setattr(baseline_module, "collect_profile",
+                        lambda *a, **k: SimpleNamespace(success=False, profile=None, command="", backend="metrix", profile_path=None))
+
+    ctx = adapter_module.run_preprocess_v3(
+        kernel_url=str(repo / "kernel.py"),
+        output_dir=output_dir,
+        gpu_id=0,
+        model=_ExplodingModel(),
+        harness=str(harness),
+        repo=str(repo),
+    )
+
+    # Deterministic path produced the baseline + commandment, LLM never ran.
+    assert ctx["v3_path_taken"] == "A"
+    assert (output_dir / "COMMANDMENT.md").is_file()
+    assert ctx["benchmark_baseline"] == str(output_dir / "benchmark_baseline.txt")
+
+
+def test_prevalidated_bypass_opt_out_env(tmp_path: Path, monkeypatch) -> None:
+    """GEAK_NO_PREVALIDATED_BYPASS=1 disables the deterministic short-circuit
+    (falls back to the LLM orchestrator path)."""
+    import minisweagent.run.preprocess_v3.adapter as adapter_module
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "kernel.py").write_text("# kernel\n")
+    harness = tmp_path / "harness.py"
+    harness.write_text("print('ok')\n")
+
+    monkeypatch.setenv("GEAK_NO_PREVALIDATED_BYPASS", "1")
+
+    called = {"bypass": False}
+    monkeypatch.setattr(adapter_module, "_run_prevalidated_path_a",
+                        lambda **k: called.__setitem__("bypass", True))
+    # Make the orchestrator path raise immediately so we can detect we reached it
+    # (and did NOT take the bypass).
+    monkeypatch.setattr(adapter_module, "PreprocessOrchestratorAgent",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("reached-orchestrator")))
+
+    with pytest.raises(RuntimeError, match="reached-orchestrator"):
+        adapter_module.run_preprocess_v3(
+            kernel_url=str(repo / "kernel.py"),
+            output_dir=tmp_path / "out",
+            model=object(),
+            harness=str(harness),
+            repo=str(repo),
+        )
+    assert called["bypass"] is False

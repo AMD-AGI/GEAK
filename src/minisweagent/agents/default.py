@@ -468,10 +468,21 @@ class DefaultAgent:
         }
         content = response.get("content", "")
         actions = re.findall(r"```bash\s*\n(.*?)\n```", content, re.DOTALL) if content else []
+        # Track whether ANY real action dispatched (bash / tool / skill). A
+        # prose-only turn — no fenced bash, no native tool call — must NOT be
+        # silently accepted as a successful no-op: the model has stalled (it
+        # often *believes* it called ``submit`` and narrates the result in
+        # prose), and returning {"output":"","returncode":0} gives it no signal
+        # to correct, so it repeats "Done." every step until the step limit
+        # (observed in the heterogeneous task-planner: 143 prose turns -> 0
+        # tool calls -> LimitsExceeded). Raise FormatError instead so the model
+        # is nudged to emit a real action / tool call.
+        acted = False
         if len(actions) == 1:
             bash_action = self.execute_action({"action": actions[0].strip(), **response})
             all_action["output"] += bash_action["output"]
             all_action["returncode"] = max(all_action["returncode"], bash_action["returncode"])
+            acted = True
         if response.get("tools"):
             from minisweagent.tools.submit import Submitted as ToolSubmitted
 
@@ -484,10 +495,16 @@ class DefaultAgent:
             tool_action = self._handle_tool_result(result)
             all_action["output"] += tool_action["output"]
             all_action["returncode"] = max(all_action["returncode"], tool_action["returncode"])
+            acted = True
         if self.config.use_skills:
             skills_action = self.skillruntime.load_skill(response)
             all_action["output"] += skills_action["output"]
             all_action["returncode"] = max(all_action["returncode"], skills_action["returncode"])
+            if skills_action.get("output") or skills_action.get("returncode"):
+                acted = True
+        if not acted:
+            # No bash, no tool, no skill — prose-only stall. Nudge the model.
+            raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
         if all_action["output"] or all_action["returncode"] == 0:
             return all_action
         else:

@@ -139,6 +139,52 @@ def run_preprocess_v3(
     source_language = detected_language.name
     target_lang_name = (target_language or detected_language.name).lower()
 
+    # Deterministic Path-A bypass for a PRE-VALIDATED harness.
+    #
+    # When the caller hands us a harness it already validated end-to-end, the
+    # entire A1 preprocess (render COMMANDMENT -> collect_baseline ->
+    # collect_profile) is deterministic — there is nothing for the LLM
+    # orchestrator to decide. Driving it through the LLM loop anyway is not just
+    # wasteful: the classifier can misroute (e.g. divert a shape-bearing task to
+    # the harness-GENERATOR) or simply fail to converge, burning the whole
+    # preprocess budget without ever producing a baseline. Run the deterministic
+    # sequence directly and skip the LLM entirely. Opt-out: GEAK_NO_PREVALIDATED_BYPASS=1.
+    _bypass_disabled = os.environ.get("GEAK_NO_PREVALIDATED_BYPASS", "").strip().lower() in ("1", "true", "yes", "on")
+    if harness and not translate_only and not _bypass_disabled and Path(harness).is_file():
+        t0 = time.monotonic()
+        result = _run_prevalidated_path_a(
+            harness=Path(harness),
+            kernel_path=kernel_path,
+            repo_root=repo_root,
+            kernel_language=detected_language,
+            output_dir=output_dir,
+            gpu_id=gpu_id,
+            correctness_command=correctness_command,
+            performance_command=performance_command,
+        )
+        # PreprocessResult is a frozen dataclass; stamp elapsed via replace().
+        from dataclasses import replace as _dc_replace
+        result = _dc_replace(result, elapsed_s=time.monotonic() - t0)
+        logger.info(
+            "v3 preprocess (pre-validated Path-A bypass) completed in %.1fs (success=%s, errors=%d)",
+            result.elapsed_s, result.success, len(result.errors),
+        )
+        if not result.success and not _can_proceed_despite_failure(result):
+            raise RuntimeError(
+                "v3 preprocess (pre-validated bypass) failed: "
+                + ("; ".join(result.errors) if result.errors else "no artefacts produced")
+            )
+        return _preprocess_result_to_legacy_context(
+            result=result,
+            repo_root=repo_root,
+            output_dir=output_dir,
+            kernel_path_input=kernel_path,
+            harness=harness,
+            eval_command=eval_command,
+            correctness_command=correctness_command,
+            performance_command=performance_command,
+        )
+
     config = PreprocessOrchestratorConfig(
         gpu_id=gpu_id,
         repo=Path(repo_root) if repo_root else None,
@@ -207,6 +253,130 @@ def run_preprocess_v3(
         eval_command=eval_command,
         correctness_command=correctness_command,
         performance_command=performance_command,
+    )
+
+
+def _run_prevalidated_path_a(
+    *,
+    harness: Path,
+    kernel_path: Path,
+    repo_root: str | None,
+    kernel_language: KernelLanguage,
+    output_dir: Path,
+    gpu_id: int,
+    correctness_command: str | list[str] | None,
+    performance_command: str | list[str] | None,
+) -> PreprocessResult:
+    """Run the deterministic A1 preprocess for a pre-validated harness — no LLM.
+
+    Mirrors exactly what the orchestrator's deterministic tools do on Path A
+    (``collect_baseline`` -> ``collect_profile`` -> ``render_commandment``),
+    but called directly so a pre-validated harness never depends on the LLM
+    classifier converging. The same worktree-bypass gate the
+    ``render_commandment`` tool enforces is applied here, so a harness that
+    hardcodes the source-repo path is still rejected (it would otherwise
+    measure the unpatched baseline at ~1.00x).
+    """
+    from minisweagent.run.preprocess_v3.baseline import (
+        BaselineMetrics,
+        ProfileResult,
+        capture_full_benchmark_stdout,
+        collect_baseline_metrics,
+        collect_profile,
+    )
+    from minisweagent.run.preprocess_v3.commandment import (
+        CommandmentContext,
+        render_commandment,
+    )
+
+    work_dir = Path(repo_root) if repo_root else None
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # Worktree-bypass gate (deterministic, final) — identical contract to the
+    # render_commandment tool. A harness that imports the source repo directly
+    # silently evaluates the UNPATCHED baseline, so refuse it up front.
+    if not os.environ.get("GEAK_ALLOW_HARDCODED_PATHS") and repo_root:
+        try:
+            from minisweagent.kernel_languages.contract import (
+                ContractViolation,
+                validate_harness,
+            )
+
+            validate_harness(harness, repo_root=repo_root)
+        except ContractViolation as exc:
+            logger.error("pre-validated bypass REJECTED harness (worktree bypass): %s", exc)
+            return PreprocessResult(
+                success=False,
+                kernel_language=kernel_language,
+                kernel_path=kernel_path,
+                harness_path=harness,
+                path_taken="A",
+                errors=[f"worktree_bypass: {exc}"],
+            )
+        except Exception as exc:  # noqa: BLE001 — never let the gate crash the bypass
+            logger.debug("pre-validated bypass: worktree gate skipped (validator error): %s", exc)
+
+    baseline: BaselineMetrics | None = None
+    full_benchmark_stdout: str | None = None
+    try:
+        baseline = collect_baseline_metrics(
+            harness, work_dir=work_dir, gpu_id=gpu_id,
+        )
+        full_benchmark_stdout = capture_full_benchmark_stdout(
+            harness, work_dir=work_dir, gpu_id=gpu_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"collect_baseline failed: {exc}")
+        logger.error("pre-validated bypass: collect_baseline failed: %s", exc)
+
+    # Profiling is advisory (matches the orchestrator escape-hatch contract: a
+    # run with a verified harness + baseline is salvageable even if profile fails).
+    profile: ProfileResult | None = None
+    try:
+        profile = collect_profile(harness, work_dir=work_dir, gpu_id=gpu_id)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"collect_profile failed (non-fatal): {exc}")
+        logger.warning("pre-validated bypass: collect_profile failed (non-fatal): %s", exc)
+
+    commandment_path: Path | None = None
+    try:
+        ctx = CommandmentContext(
+            kernel_path=kernel_path,
+            harness_path=harness,
+            repo_root=Path(repo_root) if repo_root else None,
+            correctness_command=correctness_command,
+            performance_command=performance_command,
+        )
+        out_path = output_dir / "COMMANDMENT.md"
+        render_commandment(kernel_language, ctx, out_path=out_path)
+        commandment_path = out_path
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"render_commandment failed: {exc}")
+        logger.error("pre-validated bypass: render_commandment failed: %s", exc)
+
+    success = (
+        baseline is not None
+        and baseline.success
+        and commandment_path is not None
+    )
+    return PreprocessResult(
+        success=success,
+        kernel_language=kernel_language,
+        kernel_path=kernel_path,
+        harness_path=harness,
+        baseline=baseline,
+        full_benchmark_stdout=full_benchmark_stdout,
+        profile=profile,
+        commandment_path=commandment_path,
+        path_taken="A",
+        tool_calls=[
+            {"name": "collect_baseline", "args": {"harness_path": str(harness)}},
+            {"name": "collect_profile", "args": {"harness_path": str(harness)}},
+            {"name": "render_commandment", "args": {"harness_path": str(harness)}},
+        ],
+        errors=errors,
+        warnings=warnings,
     )
 
 

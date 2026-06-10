@@ -333,3 +333,43 @@ def test_empty_actions_handling(model_factory):
     assert exit_status == "Submitted"
     assert submission == "done\n"
     assert agent.model.n_calls == 2
+
+
+def test_prose_only_turn_is_nudged_not_silently_accepted(model_factory):
+    """A prose-only turn (no fenced bash, no tool call) must surface a
+    FormatError nudge in the next observation, NOT be silently accepted as a
+    successful no-op.
+
+    Regression: ``parse_action`` previously returned ``{"output":"",
+    "returncode":0}`` for a prose-only response, which passed the
+    ``returncode == 0`` check and produced an empty observation. A model that
+    believes it already finished (e.g. narrates "Done." / "tasks submitted")
+    then repeats that prose every step with no corrective signal, looping until
+    the step limit (observed: heterogeneous task-planner, 143 prose turns -> 0
+    tool calls -> LimitsExceeded). The fix raises FormatError so the model is
+    told to emit a real action.
+    """
+    factory, config = model_factory
+    agent = DefaultAgent(
+        model=factory(
+            [
+                # Prose only — the model thinks it is done but took no action.
+                ("The tasks have been successfully submitted. No further action is needed.", []),
+                ("Actually finishing now", [{"command": "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'done'"}]),
+            ]
+        ),
+        env=LocalEnvironment(),
+        **config,
+    )
+
+    exit_status, submission = agent.run("Test prose-only nudge")
+    assert exit_status == "Submitted"
+    assert submission == "done\n"
+    # The prose-only turn must have produced a corrective observation (the
+    # format-error nudge) rather than an empty no-op the model can't learn from.
+    nudge_seen = any(
+        "EXACTLY ONE action" in get_text(m)
+        for m in agent.messages
+        if m.get("role") == "user"
+    )
+    assert nudge_seen, "prose-only turn should surface a format-error nudge to the model"
