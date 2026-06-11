@@ -122,6 +122,9 @@ minisweagent = [
     "run/preprocess/config/**/*",
     "tools/*.json",
     "memory/cross_session/*.json",
+    # Bundled data assets (subagent definitions + skills) so a plain
+    # `pip install` ships a working subagent registry and skills KB.
+    "assets/**/*",
 ]
 
 [tool.ruff]

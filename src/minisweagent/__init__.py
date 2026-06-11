@@ -22,6 +22,23 @@ from minisweagent.utils.log import logger
 
 package_dir = Path(__file__).resolve().parent
 
+#: Root of the data assets bundled *inside* the installed package (subagent
+#: definitions, skills). Living under ``src/minisweagent/assets`` means these
+#: ship in the wheel via ``[tool.setuptools.package-data]`` and resolve the same
+#: way whether GEAK is run from a source checkout or a plain ``pip install``
+#: (no source tree, no ``/workspace`` copy, no ``GEAK_*_ROOT`` env required).
+bundled_assets_dir = package_dir / "assets"
+
+
+def get_bundled_subagents_dir() -> Path:
+    """Return the bundled ``subagents/`` directory shipped inside the package."""
+    return bundled_assets_dir / "subagents"
+
+
+def get_bundled_skills_dir() -> Path:
+    """Return the bundled ``skills/`` directory shipped inside the package."""
+    return bundled_assets_dir / "skills"
+
 
 def get_repo_root() -> Path:
     """Locate the GEAK repository root.
@@ -29,6 +46,11 @@ def get_repo_root() -> Path:
     Checks, in order: GEAK_ROOT env var, /workspace (Docker convention),
     then __file__-relative (works for editable installs where source is
     in the repo tree).
+
+    Note: this points at a *source/working* tree and is **not** guaranteed to
+    exist for a plain ``pip install``. For shipped data assets (subagents,
+    skills) prefer :data:`bundled_assets_dir` / :func:`get_bundled_subagents_dir`
+    / :func:`get_bundled_skills_dir`, which always resolve.
     """
     if env_root := os.environ.get("GEAK_ROOT"):
         p = Path(env_root)
@@ -94,6 +116,10 @@ __all__ = [
     "Model",
     "Environment",
     "package_dir",
+    "bundled_assets_dir",
+    "get_bundled_subagents_dir",
+    "get_bundled_skills_dir",
+    "get_repo_root",
     "__version__",
     "global_config_file",
     "global_config_dir",

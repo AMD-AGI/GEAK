@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from minisweagent import get_bundled_skills_dir
 from minisweagent.kernel_languages.base import KernelLanguage
 
 logger = logging.getLogger(__name__)
@@ -49,12 +50,17 @@ def _strip_frontmatter(content: str) -> str:
 
 
 def _default_skills_root() -> Path:
-    """Resolve ``<repo>/skills`` by walking up from this file.
+    """Resolve the bundled ``skills`` directory.
 
-    Same shape as ``SubagentRegistry._default_root``: prefer a parent
-    that has both ``pyproject.toml`` and a ``skills/`` directory, fall
-    back to four-levels-up.
+    Prefers the copy shipped inside the installed package
+    (``minisweagent/assets/skills``) so it resolves for a plain
+    ``pip install`` as well as a source checkout. Falls back to a
+    source-checkout walk-up (``pyproject.toml`` + ``skills/``) and finally
+    four-levels-up, mirroring ``SubagentRegistry._default_root``.
     """
+    bundled = get_bundled_skills_dir()
+    if bundled.is_dir():
+        return bundled
     here = Path(__file__).resolve()
     for candidate in here.parents:
         if (candidate / "pyproject.toml").exists() and (candidate / "skills").is_dir():

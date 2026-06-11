@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from minisweagent import get_repo_root
+from minisweagent import get_bundled_skills_dir, get_repo_root
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +21,29 @@ class SkillDescriptor:
 
 class SkillRuntime:
     def __init__(self):
-        skills_dir = get_repo_root() / "skills"
-        self.skills = self._discover_skills(skills_dir)
+        self.skills = self._discover_all_skills()
+
+    @staticmethod
+    def _skill_roots() -> list[Path]:
+        """Skill discovery roots, in increasing precedence.
+
+        The skills bundled inside the installed package are always available
+        (they ship in the wheel). A user-supplied ``skills/`` directory in the
+        working tree / ``/workspace`` is overlaid on top so users can extend or
+        override the bundled defaults without losing them.
+        """
+        roots = [get_bundled_skills_dir()]
+        user_root = get_repo_root() / "skills"
+        if user_root not in roots:
+            roots.append(user_root)
+        return roots
+
+    def _discover_all_skills(self) -> dict:
+        """Discover skills across all roots; later roots override by name."""
+        merged: dict = {}
+        for root in self._skill_roots():
+            merged.update(self._discover_skills(root))
+        return merged
 
     def _extract_yaml_frontmatter(self, markdown: str) -> dict:
         FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)

@@ -14,9 +14,10 @@ RUN make install
 # Verify core imports
 RUN python3 -c "from profiler_mcp.server import profile_kernel; from metrix import Metrix; print('Core imports verified')"
 
-# Runtime assets (not needed for install; changes only rebuild cheap COPY layers)
-COPY subagents/ subagents/
-COPY skills/ skills/
+# Runtime assets (not needed for install; changes only rebuild cheap COPY layers).
+# Subagent definitions and skills now ship *inside* the package (under
+# src/minisweagent/assets/), so they are installed by `make install` above and
+# no longer need to be copied to /workspace separately.
 COPY docs/ docs/
 COPY scripts/ scripts/
 COPY entrypoint.sh ./

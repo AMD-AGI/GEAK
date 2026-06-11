@@ -17,10 +17,13 @@ Design notes
   in :attr:`SubagentSpec.extras` so we can extend the contract later
   without rev-locking the registry.
 
-* The default root is ``<repo>/subagents/preprocess``, resolved
-  *relative to the repository* rather than the CWD, so the registry is
-  usable from arbitrary callers (CLI, tests, orchestrator) without
-  caring about working directory.
+* The default root is the bundled ``subagents/preprocess`` directory
+  shipped inside the installed package
+  (``minisweagent/assets/subagents/preprocess``), resolved *relative to
+  the package* rather than the CWD. This makes the registry usable from
+  arbitrary callers (CLI, tests, orchestrator) and — crucially — from a
+  plain ``pip install`` with no source checkout. See :func:`_default_root`
+  for the full resolution order and fallbacks.
 
 * Discovery is best-effort: a folder without a ``SUBAGENT.yaml`` is
   silently skipped (it might be a README-only placeholder, like the
@@ -39,6 +42,7 @@ from typing import Any
 
 import yaml
 
+from minisweagent import get_bundled_subagents_dir
 from minisweagent.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -83,27 +87,32 @@ UNLIMITED_MAX_STEPS: int = -1
 
 
 def _default_root() -> Path:
-    """Resolve the default discovery root to ``<repo>/subagents/preprocess``.
+    """Resolve the default discovery root to ``subagents/preprocess``.
 
     Search order:
     1. ``GEAK_SUBAGENTS_ROOT`` env var (explicit override for containers).
-    2. Walk up from this file looking for ``pyproject.toml`` + ``subagents/``
-       (works when running from a source checkout).
-    3. ``/workspace/subagents/preprocess`` (Docker convention).
-    4. Four-levels-up fallback (matches the on-disk layout when this file
-       is at ``src/minisweagent/run/preprocess_v3/registry.py``).
+    2. The subagents bundled **inside the installed package**
+       (``minisweagent/assets/subagents/preprocess``). This is the canonical
+       location and resolves for a plain ``pip install`` as well as a source
+       checkout — no working tree or ``/workspace`` copy required.
+    3. ``/workspace/subagents/preprocess`` (Docker convention, legacy fallback).
+    4. Walk up from this file looking for ``pyproject.toml`` + ``subagents/``
+       (source checkout with a user-supplied top-level ``subagents/``).
     """
     env_root = os.environ.get("GEAK_SUBAGENTS_ROOT")
     if env_root:
         return Path(env_root)
-    here = Path(__file__).resolve()
-    for candidate in here.parents:
-        if (candidate / "pyproject.toml").exists() and (candidate / "subagents").is_dir():
-            return candidate / "subagents" / "preprocess"
+    bundled = get_bundled_subagents_dir() / "preprocess"
+    if bundled.is_dir():
+        return bundled
     # Docker container: subagents/ copied to /workspace/
     workspace = Path("/workspace/subagents/preprocess")
     if workspace.is_dir():
         return workspace
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        if (candidate / "pyproject.toml").exists() and (candidate / "subagents").is_dir():
+            return candidate / "subagents" / "preprocess"
     return here.parents[4] / "subagents" / "preprocess"
 
 

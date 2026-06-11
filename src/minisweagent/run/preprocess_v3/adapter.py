@@ -216,15 +216,25 @@ def run_preprocess_v3(
 
 
 def _find_codebase_explore_prompt() -> Path:
-    """Locate ``subagents/codebase-explore/SYSTEM_PROMPT.md``."""
+    """Locate ``subagents/codebase-explore/SYSTEM_PROMPT.md``.
+
+    Prefers the copy bundled inside the installed package (works for a plain
+    ``pip install``), then a ``/workspace`` copy, then a source-checkout
+    walk-up.
+    """
+    from minisweagent import get_bundled_subagents_dir
+
+    bundled = get_bundled_subagents_dir() / "codebase-explore" / "SYSTEM_PROMPT.md"
+    if bundled.is_file():
+        return bundled
+    workspace = Path("/workspace/subagents/codebase-explore/SYSTEM_PROMPT.md")
+    if workspace.is_file():
+        return workspace
     here = Path(__file__).resolve().parent
     for candidate in here.parents:
         p = candidate / "subagents" / "codebase-explore" / "SYSTEM_PROMPT.md"
         if p.is_file():
             return p
-    workspace = Path("/workspace/subagents/codebase-explore/SYSTEM_PROMPT.md")
-    if workspace.is_file():
-        return workspace
     raise FileNotFoundError("Could not find subagents/codebase-explore/SYSTEM_PROMPT.md")
 
 

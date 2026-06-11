@@ -247,7 +247,9 @@ Automatically selects the best result across rounds:
 
 GEAK uses **skills** (domain knowledge bases) and **subagents** (delegated specialist agents) to handle different kernel types and optimization tasks.
 
-**Skills** (`skills/`):
+These ship bundled inside the installed package (under `src/minisweagent/assets/skills/` and `src/minisweagent/assets/subagents/`), so they are available out of the box with a plain `pip install` — no source checkout or `/workspace` copy required. You can still extend or override them by placing your own `skills/<name>/SKILL.md` or `subagents/<name>/SUBAGENT.yaml` in the GEAK working tree (or `/workspace`); user-supplied entries are overlaid on top of the bundled defaults.
+
+**Skills** (bundled, plus user overlay from `skills/`):
 
 | Skill | When loaded |
 |-------|-------------|
@@ -257,7 +259,7 @@ GEAK uses **skills** (domain knowledge bases) and **subagents** (delegated speci
 | `pytorch2flydsl-translation` | Translating PyTorch GPU kernels to FlyDSL |
 | `fp8-gemm-tuning-sglang-aiter` | FP8 GEMM tuning for SGLang + AITer workloads |
 
-**Subagents** (`subagents/`):
+**Subagents** (bundled, plus user overlay from `subagents/`):
 
 | Subagent | Purpose |
 |----------|---------|

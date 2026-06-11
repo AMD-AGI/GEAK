@@ -20,7 +20,7 @@ from typing import Any
 
 import yaml
 
-from minisweagent import get_repo_root
+from minisweagent import get_bundled_subagents_dir, get_repo_root
 from minisweagent.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -76,9 +76,20 @@ class SubAgentRegistry:
     DEFINITION_FILE = "SUBAGENT.yaml"
 
     def __init__(self, subagents_dir: Path | None = None):
-        if subagents_dir is None:
-            subagents_dir = get_repo_root() / "subagents"
-        self._subagents_dir = subagents_dir
+        if subagents_dir is not None:
+            # Explicit single-root mode (used by tests and ad-hoc callers).
+            self._subagents_dir = subagents_dir
+            self._discovery_roots = [subagents_dir]
+        else:
+            # Default mode: subagents bundled inside the installed package
+            # (always present, ships in the wheel) overlaid with an optional
+            # user-supplied ``subagents/`` in the working tree / ``/workspace``.
+            bundled = get_bundled_subagents_dir()
+            self._subagents_dir = bundled
+            user_root = get_repo_root() / "subagents"
+            self._discovery_roots = [bundled]
+            if user_root not in self._discovery_roots:
+                self._discovery_roots.append(user_root)
         self.subagents: dict[str, SubAgentDescriptor] = self._discover()
 
     # ------------------------------------------------------------------
@@ -86,13 +97,24 @@ class SubAgentRegistry:
     # ------------------------------------------------------------------
 
     def _discover(self) -> dict[str, SubAgentDescriptor]:
-        """Scan ``subagents/`` for folders containing SUBAGENT.yaml."""
-        if not self._subagents_dir.is_dir():
-            logger.debug("Subagents directory not found: %s", self._subagents_dir)
+        """Scan each discovery root for folders containing SUBAGENT.yaml.
+
+        Roots are scanned in increasing precedence: a subagent found in a
+        later root (e.g. a user-supplied ``subagents/``) overrides a bundled
+        one with the same name.
+        """
+        found: dict[str, SubAgentDescriptor] = {}
+        for root in self._discovery_roots:
+            found.update(self._discover_root(root))
+        return found
+
+    def _discover_root(self, root: Path) -> dict[str, SubAgentDescriptor]:
+        if not root.is_dir():
+            logger.debug("Subagents directory not found: %s", root)
             return {}
 
         found: dict[str, SubAgentDescriptor] = {}
-        for folder in sorted(self._subagents_dir.iterdir()):
+        for folder in sorted(root.iterdir()):
             if not folder.is_dir():
                 continue
             yaml_path = folder / self.DEFINITION_FILE

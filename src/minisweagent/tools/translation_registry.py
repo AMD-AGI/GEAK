@@ -17,6 +17,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from minisweagent import get_bundled_skills_dir
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -217,7 +219,7 @@ def load_translation_kb(
        - Translation guide (PyTorch op mapping, structural patterns, pitfalls)
        - Category-specific guides (reductions, GEMM, attention)
     """
-    kb_root = Path(__file__).resolve().parents[3] / "skills" / "pytorch2flydsl-translation" / "docs"
+    kb_root = get_bundled_skills_dir() / "pytorch2flydsl-translation" / "docs"
     native_pure_root = kb_root / "native-pure"
     native_root = kb_root / "native"
     sections: list[str] = []

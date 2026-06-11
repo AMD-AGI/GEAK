@@ -166,9 +166,14 @@ class TestLoadSkill:
         assert desc.loaded is False
 
 
+from minisweagent import get_bundled_skills_dir
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _EXAMPLE_SILU = _REPO_ROOT / "examples" / "skills" / "silu-optimization" / "SKILL.md"
-_USER_SKILLS_SILU = _REPO_ROOT / "skills" / "silu-optimization" / "SKILL.md"
+# Skills now ship bundled inside the package (so a plain ``pip install`` works);
+# discovery resolves to the bundled directory unless a user overlays their own.
+_SKILLS_ROOT = get_bundled_skills_dir()
+_USER_SKILLS_SILU = _SKILLS_ROOT / "silu-optimization" / "SKILL.md"
 
 
 @pytest.mark.skipif(not _EXAMPLE_SILU.is_file(), reason="example skill examples/skills/silu-optimization not present")
@@ -188,8 +193,6 @@ class TestSkillRuntimeIntegration:
             assert s.path == _USER_SKILLS_SILU.parent
             assert "AMD" in s.description or "silu" in s.description.lower()
 
-
-_SKILLS_ROOT = _REPO_ROOT / "skills"
 
 _EXPECTED_FLYDSL_DOCS = [
     "flydsl_optimization.md",
