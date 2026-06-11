@@ -1150,8 +1150,7 @@ def _make_tool_translate_to_flydsl(
                             shutil.copy2(ref_src, ref_dest)
                     result = replace(result, translated_kernel_path=staged)
                     logger.info(
-                        "Staged translated kernel into per-run optimization repo "
-                        "for patch capture: %s -> %s",
+                        "Staged translated kernel into per-run optimization repo for patch capture: %s -> %s",
                         cand,
                         staged,
                     )
