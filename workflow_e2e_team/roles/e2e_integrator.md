@@ -151,7 +151,7 @@ patches, `BASELINE_THROUGHPUT`, `SKILL_DIR`.
 1. Assemble the deliverable bundle in `EVAL_DIR/final/`: the accepted overlay dir, a concatenated
    `final_patch.diff` (all accepted kernel patches), and a `final_launch.sh` that reproduces the
    optimized server (sets `BACKEND=<backend>`, `PYTHONPATH=<overlay>`, the accepted flags/env, and runs
-   the bench via bench_e2e.sh + its adapter). This is the spec deliverable: "完整的 patch + 启动测速脚本".
+   the bench via bench_e2e.sh + its adapter). This is the spec deliverable: "complete patch + launch/benchmark script".
 2. Do a final warm-server bench of the assembled bundle to confirm the combined result matches the
    sum of accepted milestones (combined effects can interact). Record it.
 

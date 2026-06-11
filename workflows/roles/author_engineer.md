@@ -12,7 +12,10 @@ You work in the canonical `WORKSPACE` (the author mode's empty/seed workspace bu
 from the op task dir). The op's correctness contract is an **IMMUTABLE** unittest you must not edit.
 
 ## Inputs (in your prompt)
-- `TARGET_LANGUAGE` — `triton` (always supported) | `hip` | `ck` (pluggable; only if requested).
+- `TARGET_LANGUAGE` — `triton` (always supported) | `flydsl` | `hip` | `ck` (pluggable; only if
+  requested). `flydsl` is aiter's Python kernel DSL (JIT like triton — NO build step); it is the
+  preferred author target for **dense / quantized GEMM (esp. fp8 / A4W4 / mxfp4)** because aiter ships a
+  production FlyDSL hgemm you reuse as the correct baseline, then the optimize loop tunes its knobs.
 - `OP_SPEC` — from the extractor's `meta.json`: `op_kind` (gemm|attn|…), `shapes` / `a_shape`/
   `b_shape`/`transpose_b`/`bias` (gemm), captured tensor spec (attn), `dtype`, `math_contract`
   (e.g. `C = A·Bᵀ + bias`), `regime` (prefill|decode|both).
@@ -21,17 +24,38 @@ from the op task dir). The op's correctness contract is an **IMMUTABLE** unittes
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path (its CORRECTNESS/BENCHMARK point at the immutable
   unittest), and `KERNEL_KNOWLEDGE_DIR` (the AMD authoring knowledge base, may be empty).
 
-## Load the authoring knowledge for your language + op (focused context)
-Read, before writing a line:
-- Language skeleton: `KERNEL_KNOWLEDGE_DIR/01_languages/<lang>*.md`
-  (`triton_amd.md` for triton; `hip_cpp.md`/`hip_intrinsics_async.md` for hip; `composable_kernel.md`/
-  `ck_tile.md` for ck). These give annotated GEMM/FMHA skeletons you adapt.
-- Op algorithm: `KERNEL_KNOWLEDGE_DIR/03_operators/<op>*.md` (e.g. `gemm.md`, `attention_prefill.md`,
-  `attention_decode_paged.md`, `mla.md`, `linear_attention.md`) — the math + the shape-regime split.
-- Hardware sanity for the FIRST cut only (don't over-tune): `00_hardware/matrix_cores_numerics.md`
-  for the right MFMA shape/dtype, and the cross-cutting gotchas in the knowledge-base README
-  (FNUZ fp8 on gfx942; prefer `matrix_instr_nonkdim=16`). If `KERNEL_KNOWLEDGE_DIR` is empty, fall
-  back to the canonical textbook algorithm for the op.
+## The knowledge base is REFERENCE ONLY (read this contract first)
+`KERNEL_KNOWLEDGE_DIR` is reference material that may be **stale, incomplete, or wrong**. It gives you
+*facts and examples* (API entrypoints, code skeletons, knobs, pitfalls, which backends exist) — **not
+decisions**. Decisions are YOURS; correctness/perf is decided by the **immutable unittest + benchmark**,
+never by the knowledge base. Rules (these guarantee the KB can only help, never hurt):
+- **Baseline first, always.** Write your own clean *canonical* correct implementation first (textbook
+  algorithm or the obvious library call). It is your floor — measured no matter what the KB says.
+- **KB only adds candidates / shows how.** Use it to find options you might miss and implement them
+  correctly faster. Never let it *narrow* your options or override your judgment.
+- **Ignore time-sensitive claims as decisions.** Any `status: sota`, TFLOPS, or "X× faster" is *dated
+  evidence* — a weak hint at most. Don't pick based on it; measure.
+- If `KERNEL_KNOWLEDGE_DIR` is empty/missing, use the canonical algorithm — no behavior change.
+
+## Load the authoring knowledge for your language + op (focused context, optional)
+Semantic dirs (resolve short names via `index/capability_index.yaml` + `index/taxonomy.md` if unsure).
+Read, as reference, before writing:
+- **How-to / levers (durable):** `KERNEL_KNOWLEDGE_DIR/index/recipes.md` — procedures (tuning flow,
+  fusion, knob dictionaries) that don't go stale.
+- **Language skeleton:** `KERNEL_KNOWLEDGE_DIR/languages/<dir>/` — map: triton→`triton_amd`, flydsl→`flydsl`,
+  hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`, tilelang→`tilelang`, gluon→`gluon`,
+  hipkittens→`hipkittens` (read `overview.md`/`patterns.md`/`knobs.md`). For **flydsl GEMM**, the simplest
+  correct baseline is to call aiter's `flydsl_hgemm` — `out = a @ b.T (+bias)` — rather than hand-writing
+  layout algebra; commit that, the optimize loop tunes tile/split_k/preshuffle. flydsl is JIT (no build).
+- **Op + per-backend authoring card:** `KERNEL_KNOWLEDGE_DIR/operators/<op>/overview.md` plus
+  `operators/<op>/backends/<lang>.md` (the card for your exact language — code skeleton, knobs, pitfalls).
+  Op short→dir: gemm→`dense_gemm`, attention_prefill→`attention_prefill_fmha`,
+  attention_decode→`attention_decode_paged`, mla→`mla_attention`,
+  linear_attention→`linear_attention_gated_delta`, moe→`fused_moe_grouped_gemm`/`grouped_gemm_moe`
+  (else the closest dir under `operators/`).
+- **Hardware sanity (first cut only):** `hardware/shared/matrix_core_mfma_smfmac.md` + `dtype_numerics.md`
+  for MFMA shape/dtype; gotchas (FNUZ fp8 on gfx942; prefer `matrix_instr_nonkdim=16`) in
+  `quantization/fnuz_vs_ocp.md` / `optimization/mfma_scheduling.md`.
 
 ## Rules (NON-NEGOTIABLE)
 1. NEVER modify `TASK_DIR/unittest.py`, `reference_io.pt`, or `meta.json` — they are the immutable
@@ -53,7 +77,8 @@ Read, before writing a line:
    hip/ck). Use the knowledge-base skeleton for the language + op. Keep it simple and correct.
 3. **For build-required languages** (hip/ck): set `meta.json.build=true` is handled by the extractor;
    you provide a build command (e.g. `torch.utils.cpp_extension.load`) the unittest can invoke, OR a
-   thin python wrapper that JIT-builds on import. Triton needs no build (JIT).
+   thin python wrapper that JIT-builds on import. Triton and **flydsl** need no build (both JIT —
+   flydsl compiles to GPU code through its embedded MLIR runtime on first launch).
 4. **Correctness loop**: `cd $WORKSPACE && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID python3
    $TASK_DIR/unittest.py` (or the COMMANDMENT CORRECTNESS cmd). Debug until it PASSES every case.
 5. **Record a baseline number**: once correct, run the unittest's timing once to capture `baseline_ms`
@@ -69,7 +94,7 @@ Return JSON:
 ```json
 {
   "authored": true,
-  "target_language": "triton|hip|ck",
+  "target_language": "triton|flydsl|hip|ck",
   "correctness": "pass|fail",
   "baseline_ms": 0.0,
   "kernel_src_path": "<WORKSPACE>/kernel_src/<file>",

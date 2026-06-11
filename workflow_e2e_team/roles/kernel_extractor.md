@@ -153,7 +153,7 @@ op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for a
 > **Shapes must be the REAL ones the server issues.** A head op serves many M buckets (decode M=1..conc
 > + prefill chunk Ms). Capture/scope the unittest to the actual profiled shape set (or the
 > `AITER_TUNE_GEMM`-captured shapes), not a single arbitrary M — an optimization tuned on the wrong
-> shape won't be hit at runtime and won't move e2e (this is the whole point of "靠谱的 unittest").
+> shape won't be hit at runtime and won't move e2e (this is the whole point of a "trustworthy unittest").
 
 Return JSON:
 ```json

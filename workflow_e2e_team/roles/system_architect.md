@@ -20,8 +20,18 @@ You are invoked per PHASE. Read first, every time:
   APPEND to its "Learned" section after every run.
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder + per-backend priors; use
   it to build `head_candidates` (GEMM/attention) and pick their candidate backends.
-- For deeper per-op/per-backend engineering priors (how to actually make each op fast), consult the
-  AMD knowledge base at `PerfSkills/kernel_knowledge/` (e.g. `03_operators/*`, `04_optimization/*`).
+- The AMD knowledge base at `PerfSkills/kernel_knowledge/` is **REFERENCE ONLY** — facts/how-to, not
+  decisions. Use it to *enumerate candidates and learn mechanisms*, never to pick a winner (you decide;
+  measurement confirms). Concretely:
+  - `index/capability_index.yaml` — which backends have a documented impl for an op + the gens/dtypes/
+    regimes each supports. **Filter by the detected `gfx`/dtype/regime to build `head_candidates`'s
+    candidate backend list.** It has NO ranking on purpose — do not infer "best" from it; enumerate, then
+    let the Op Benchmarker measure. It can only *widen* coverage, never prune your own candidates.
+  - `index/recipes.md` + `operators/<op>/` + `optimization/*` — durable how-to (tuning flow, fusion,
+    knobs) for making an op fast once chosen.
+  - `sota_registry.yaml`/card `status`/TFLOPS are **time-sensitive dated evidence** — a weak hint at most,
+    NEVER a routing decision. Always keep a baseline candidate; rank by Amdahl + cheapest-lever-first, not
+    by any stored ranking.
 
 ## The core principle (do not violate)
 e2e is **Amdahl-dominated**: rank every candidate by `pct_gpu_time × achievable_speedup`. A 5× on a
@@ -188,38 +198,42 @@ Write TWO files:
 **(a) `EVAL_DIR/architect_report.md`** — the concise English summary (baseline vs final, accepted
 config + kernels, remaining headroom). Keep it short.
 
-**(b) `EVAL_DIR/final_report.md`** — the COMPLETE Chinese timeline report (the headline deliverable).
+**(b) `EVAL_DIR/final_report.md`** — the COMPLETE English timeline report (the headline deliverable).
 Information must be COMPLETE, keeping every attempt whether it worked or not. REQUIRED sections, in order:
-- **运行概况**: 模型/架构、服务栈、负载(ISL/OSL/conc)、GPU、时间、最终结论一句话。
-- **阶段树 (Phases)**: a `tree`-style (`├──/└──`) module — MANDATORY. Two trees in fenced code blocks:
-  1. **Phases 树**: one node per phase (Setup→Validate); under ConfigSweep/HeadKernel/Milestone list each
+- **Run overview**: model/architecture, serving stack, workload (ISL/OSL/conc), GPU, date, and a one-line
+  final conclusion.
+- **Phases tree**: a `tree`-style (`├──/└──`) module — MANDATORY. Two trees in fenced code blocks:
+  1. **Phases tree**: one node per phase (Setup→Validate); under ConfigSweep/HeadKernel/Milestone list each
      attempt as a child leaf with `✔/✘`, the lever, iso speedup, e2e delta%, and verdict. End with a
-     legend (✔ 接受 · ✘ 拒绝 · STACK) and a one-line 结论 (what entered the final stack). Example shape:
+     legend (✔ accepted · ✘ rejected · STACK) and a one-line conclusion (what entered the final stack).
+     Example shape:
      ```
      Phases
      ├── ✔ 1 Setup        baseline = <tok/s> (TP=1)
      ├── ✔ 4 ConfigSweep
-     │   ├── ✔ cfg0 <flag>   e2e +X%  → 接受
-     │   └── ✘ cfg1 <flag>   e2e −Y%  → 拒绝
+     │   ├── ✔ cfg0 <flag>   e2e +X%  → accepted
+     │   └── ✘ cfg1 <flag>   e2e −Y%  → rejected
      ├── ✔ 5 HeadKernel
-     │   ├── ✘ aiter DB 调优  iso 1.0Zx → <engage?>
-     │   └── ✘ Triton GEMM   iso 0.9Wx
+     │   ├── ✘ aiter DB tune  iso 1.0Zx → <engage?>
+     │   └── ✘ Triton GEMM    iso 0.9Wx
      ├── ✔ 6 Milestone
      │   ├── ✘ <kernel> iso 1.1x → e2e +0.1% (n.nn%gpu)
      │   └── ...
      └── ✔ 9 Validate     <tok/s>, +X%, accepted, parity pass
      ```
-  2. **产物树**: `tree -L 2 -I "__pycache__|*.pyc|.git|*.so"` of the eval dir, annotating which phase
-     produced each path (e.g. `[P1]…[P9]`). Run the actual `tree` command on `EVAL_DIR` to get it real.
-- **Baseline 阶段**: 完整报告 —— baseline 吞吐(中位+spread+各次 repeat)、TTFT/TPOT，以及 **profile 细分**
-  (从 `PROFILE_TOPN` / `EVAL_DIR/profile/round_0/profile_topN.md` 读出 Top-N：每个 kernel 的 %gpu、调用数、
-  总 ms、shape、backend、是否可编辑)。读 `EVAL_DIR/baseline/bench_summary.json` 取真实数字。
-- **按时间线逐阶段**: 每个阶段(ConfigSweep / HeadKernel 每个 op / 每个 Milestone)写：做了哪些尝试(尝试1、
-  尝试2…)、每个尝试的隔离效果 + e2e 效果(给具体 tok/s 和 % + 是否过 0.5% 闸 + 引擎是否生效) + 决策(接受/
-  拒绝及原因)。**有效和无效都保留。** 数据来源：`HISTORY.ledger`、`config/sweep_results.json`、各
-  `overlay/*/bench_summary.json`、`kernels/_exp/*` 的递归结果。
-- **汇总表**: 所有尝试一张表(杠杆 | 隔离 | e2e | 判定 | 根因)。
-- **最终交付 + 测量注意事项(box 漂移→只信同会话 A/B) + 下一步可探方向。**
+  2. **Artifacts tree**: `tree -L 2 -I "__pycache__|*.pyc|.git|*.so"` of the eval dir, annotating which
+     phase produced each path (e.g. `[P1]…[P9]`). Run the actual `tree` command on `EVAL_DIR` to get it real.
+- **Baseline phase**: full report — baseline throughput (median + spread + each repeat), TTFT/TPOT, and the
+  **profile breakdown** (read the Top-N from `PROFILE_TOPN` / `EVAL_DIR/profile/round_0/profile_topN.md`:
+  per kernel — %gpu, call count, total ms, shape, backend, whether editable). Read
+  `EVAL_DIR/baseline/bench_summary.json` for the real numbers.
+- **Per-phase timeline**: for each phase (ConfigSweep / each HeadKernel op / each Milestone) write: which
+  attempts were made (attempt 1, attempt 2 …), each attempt's isolated effect + e2e effect (give concrete
+  tok/s and % + whether it passed the 0.5% gate + whether the engine actually engaged) + the decision
+  (accept/reject and why). **Keep BOTH the wins and the no-ops.** Data sources: `HISTORY.ledger`,
+  `config/sweep_results.json`, each `overlay/*/bench_summary.json`, and the recursive `kernels/_exp/*` results.
+- **Summary table**: one table of all attempts (lever | isolated | e2e | verdict | root cause).
+- **Final deliverable + measurement caveats (box drift → trust only same-session A/B) + next directions to explore.**
 Read the actual files under `EVAL_DIR` for real numbers; do not invent. Return JSON (report_path points
 to architect_report.md; also mention `final_report.md` in `note` if the schema lacks a field):
 ```json

@@ -141,8 +141,8 @@ TRUE baseline with the tight 2-block protocol and decide if the COMBINED result 
    - Parity fail / server fails to launch with overlay → `flagged`.
 5. Only if `APPLY_TO_ORIGINAL=true` AND `accepted`: write a clear "apply" bundle — the final overlay
    dir + a `final_launch.sh` that sets `PYTHONPATH`/flags — into `EVAL_DIR/final/`. **Do not edit
-   site-packages even here**; the deliverable is the overlay + launch script (per spec: "完整的
-   patch + 启动测速脚本"). Assemble `EVAL_DIR/final/final_patch.diff` (concatenated kernel patches)
+   site-packages even here**; the deliverable is the overlay + launch script (per spec: "complete
+   patch + launch/benchmark script"). Assemble `EVAL_DIR/final/final_patch.diff` (concatenated kernel patches)
    for the record.
 6. Write `EVAL_DIR/director_e2e_validation.json` with the full result.
 

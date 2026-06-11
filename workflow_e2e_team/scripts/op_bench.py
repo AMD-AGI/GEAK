@@ -163,7 +163,7 @@ def bench_gemm(args, meta):
     # Default excludes the experimental triton stub (it's a placeholder; real triton GEMM is a Tier-C
     # kernel-squad rewrite, not a bake-off candidate). Request it explicitly with --backends if wanted.
     want = [b.strip() for b in args.backends.split(",") if b.strip()] if args.backends else \
-        ["hipblaslt", "tunableop", "rocblas", "ck", "aiter"]
+        ["hipblaslt", "tunableop", "rocblas", "ck", "aiter", "flydsl"]
     results = []
 
     def record(name, fn, note="", artifact=""):
@@ -239,6 +239,22 @@ def bench_gemm(args, meta):
     if "aiter" in want:
         record("aiter", lambda: _aiter_gemm(A, B, bias, transpose_b), note="aiter fused gemm (auto-probed)")
 
+    # FlyDSL GEMM — aiter's Python kernel DSL hgemm (the SOTA fp8/MoE/quantized-GEMM author backend on
+    # gfx942/950). This is a REAL implementation (unlike the retired triton stub), so it IS a first-class
+    # bake-off candidate. Gated by is_flydsl_available(); unavailable -> recorded "skipped", not a crash.
+    if "flydsl" in want:
+        try:
+            from aiter.ops.flydsl.utils import is_flydsl_available
+            if not is_flydsl_available():
+                results.append({"backend": "flydsl", "available": False, "correct": False, "ms": None,
+                                "note": "is_flydsl_available()==False (flydsl not installed on this image)", "artifact": ""})
+            else:
+                record("flydsl", lambda: _flydsl_gemm(A, B, bias, transpose_b),
+                       note="aiter flydsl_hgemm (a@b.T+bias, default tiling; per-shape knobs tuned in Tier-B/C)")
+        except Exception as e:
+            results.append({"backend": "flydsl", "available": False, "correct": False, "ms": None,
+                            "note": f"flydsl unavailable: {e!r}", "artifact": ""})
+
     # Triton matmul — RETIRED as a bake-off candidate. This is a naive placeholder, NOT a real Triton
     # GEMM, and it is never in the default `want` list. A real Triton (or HIP/CK) implementation now
     # comes from the AUTHOR route: the Op Benchmarker emits an `author_plan` and the orchestrator runs
@@ -268,6 +284,35 @@ def bench_gemm(args, meta):
                             "note": f"triton unavailable: {e!r}", "artifact": ""})
 
     return results
+
+
+def _flydsl_gemm(A, B, bias, transpose_b):
+    """aiter FlyDSL hgemm: out = a @ b.T (+bias), with a=[M,K], b=[N,K] (TN, linear-weight layout).
+    Uses default tiling for a correctness-first bake-off number; the per-shape knobs (tile_m/n/k,
+    split_k, b_preshuffle, ...) are what Tier-B/Tier-C tune. Value-independent perf, so the synthesized
+    inputs from the oracle are fine for timing.
+
+    flydsl_hgemm is **bf16/fp16 only**. For an fp8 (a8w8) head GEMM the flydsl path is
+    `flydsl_preshuffle_gemm_a8(XQ, WQ, x_scale, w_scale, Out, ...)`, which needs the quantized operands +
+    per-token/per-channel scales that this bake-off's plain (A,B,bias) synth does not carry. Rather than
+    fabricate scales (a wrong number is worse than a skip), raise a clear guidance error so the harness
+    records flydsl as a graceful "skipped" for fp8 — the live fp8-flydsl win is reached via the aiter
+    per-shape DB tune (gradlib races `libtype=flydsl`; deploy `AITER_CONFIG_GEMM_BF16`) and/or the
+    author route (`target_language=flydsl`, baseline = `flydsl_preshuffle_gemm_a8`)."""
+    if A.dtype in (getattr(__import__("torch"), "float8_e4m3fnuz", None),
+                   getattr(__import__("torch"), "float8_e5m2fnuz", None),
+                   getattr(__import__("torch"), "float8_e4m3fn", None)):
+        raise RuntimeError(
+            "flydsl_hgemm is bf16/fp16 only; fp8 a8w8 GEMM uses flydsl_preshuffle_gemm_a8 (needs "
+            "x_scale/w_scale). Reach flydsl-fp8 via the aiter DB tune (libtype=flydsl) or the "
+            "author route, not this plain bake-off probe.")
+    from aiter.ops.flydsl.gemm_kernels import flydsl_hgemm
+    Kr = A.shape[-1]
+    a2 = A.reshape(-1, Kr).contiguous()
+    b_nk = (B if transpose_b else B.t()).contiguous()  # ensure [N,K]
+    out = flydsl_hgemm(a2, b_nk, bias=bias,
+                       b_preshuffle=False, auto_shuffle_b=False)  # no preshuffle = simplest correct path
+    return out.reshape(*A.shape[:-1], b_nk.shape[0])
 
 
 def _aiter_gemm(A, B, bias, transpose_b):

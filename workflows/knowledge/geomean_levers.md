@@ -76,12 +76,22 @@ Tiny shapes underfill the 304 CUs. A grid of a few blocks wastes launch latency 
 - Use **persistent threads** (launch ~#CU blocks, loop over work items) to amortize launch.
 - Or batch multiple logical calls into one launch when the harness issues several in a row.
 
-## Lever 6 — CUDA graph / stream capture (e2e and repeated-call workloads)
+## Lever 6 — CUDA/HIP graph / stream capture (collapses the launch-overhead floor)
 
-When the same sequence of launches repeats every iteration (typical in benchmarks and in vLLM/
-SGLang decode loops), capture it once into a HIP/CUDA graph and replay. This removes per-launch CPU
-overhead and is a major lever for the overhead-bound regime. For e2e serving this also covers the
-Python dispatch overhead across many ops.
+When the same sequence of launches repeats every iteration, capture it once into a HIP/CUDA graph
+and replay. This removes the per-call CPU launch + Python dispatch overhead and is the primary lever
+for the overhead-bound / floor-dominated regime.
+
+**This applies to single-kernel benchmarks too, not just e2e.** The per-case benchmark harness times
+MANY repeated calls of the same op, so it is a repeated-call workload by construction — exactly the
+pattern graph capture is for. Do it at the **wrapper layer** (capture the full op: layout fixups +
+launch + any reductions), not at the C++ `<<<>>>` launcher (launcher-level capture cannot reach the
+Python/dispatch overhead that forms most of the floor, and is typically a dead-end). **Gate it on
+measured replay benefit**: build the graph once, compare replayed latency vs eager per shape, and
+use replay only where it actually wins (so it never regresses shapes that don't benefit).
+
+When the geomean is floor-dominated, this is frequently the single largest geomean win available —
+it lifts EVERY floored case at once — so treat it as a first-class direction, not a last resort.
 
 ## CRITICAL: the floor-dominated-signal trap (read this every round)
 
@@ -92,14 +102,18 @@ how much faster you make the *kernel*. This silently mis-steers the optimizer �
 overhead work it has already won, and **under-rewarded for real kernel-compute gains on the large,
 compute-bound cases** — so it converges to a mediocre kernel and stops too early.
 
-How to avoid it:
-1. **Detect the floor.** If several cases of very different problem sizes share nearly the same
-   latency, that latency is the floor. Treat those cases as "done" (only HIP-graph/Lever 6 moves
-   them) and STOP optimizing for them.
-2. **Switch the success metric to the compute-bound cases' ABSOLUTE latency.** Identify the
-   case(s) whose latency is well ABOVE the floor (the largest-N / highest-k shapes). Drive THEIR
-   absolute milliseconds down. A direction that halves the worst compute-bound case is a win even if
-   the floor-dominated geomean barely changes.
+How to avoid it — attack BOTH ends (the floor is improvable, not "done"):
+1. **Detect the floor, then COLLAPSE it.** If several cases of very different problem sizes share
+   nearly the same latency, that latency is the floor. The floor is NOT unimprovable: under the
+   repeated-call benchmark harness it is directly attackable with wrapper-level HIP-graph
+   capture/replay (Lever 6). When the geomean is floor-dominated (most cases sit at the floor),
+   collapsing the floor is the single highest-impact direction — it lifts every floored case at once
+   — so dispatch a `host_runtime` graph-capture direction to attack it BEFORE concluding those cases
+   are done. A floored case is only truly "done" once the floor itself has been attacked.
+2. **In parallel, drive down the compute-bound cases' ABSOLUTE latency.** Identify the case(s) whose
+   latency is well ABOVE the floor (the largest-N / highest-k shapes). Drive THEIR absolute
+   milliseconds down. A direction that halves the worst compute-bound case is a win even if the
+   floor-dominated geomean barely changes. (Do this alongside Lever 6, not instead of it.)
 3. **Do not declare victory on a flat geomean** while the worst compute-bound case is still many×
    the floor — that means the kernel still has compute headroom. Keep pushing kernel efficiency
    (better warp-cooperative scan, lower VGPR/occupancy, LDS merge, ILP/sorting-network) until the
@@ -113,7 +127,9 @@ How to avoid it:
    the kernel compute is already fast.
 3. Lever 2 (host) cleans up the remainder.
 4. Lever 4 then squeezes the single worst case.
-5. Lever 5/6 for the small-shape / repeated-call floor.
+5. Lever 5/6 for the small-shape / repeated-call floor. When the geomean is floor-dominated (most
+   cases already at the floor), promote Lever 6 (graph capture) to the TOP priority — it is the only
+   lever that moves the cases carrying the geomean, so do it before chasing compute-bound outliers.
 
 Do NOT stop optimizing just because GPU kernel time is small — at that point the overhead IS the
 bottleneck, and these levers are where the remaining 1.5–3x of geomean lives.

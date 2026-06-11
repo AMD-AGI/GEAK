@@ -48,11 +48,14 @@ const KERNEL_NAME_HINT = KERNEL_PATH_ORIG.replace(/\/+$/, '').split('/').pop();
 // --- author mode: when there is NO existing source, write a fresh baseline first, then optimize it.
 // mode=optimize (default) keeps the exact original behavior (backward compatible). mode=author seeds
 // the workspace from an op task dir (immutable oracle), the author_engineer writes a passing baseline,
-// then the SAME optimize loop runs. KERNEL_KNOWLEDGE_DIR is the AMD authoring knowledge base (optional).
+// then the SAME optimize loop runs. KERNEL_KNOWLEDGE_DIR is the AMD authoring knowledge base — REFERENCE
+// ONLY (facts/how-to, never decisions; the author always writes a measured baseline regardless). Default:
+// sibling kernel_knowledge/ so standalone runs use it too; empty if WORKFLOW_DIR is unset (no behavior change).
 const MODE = String(A.mode != null ? A.mode : 'optimize').trim() || 'optimize';
 const TARGET_LANGUAGE = String(A.target_language != null ? A.target_language : 'triton').trim() || 'triton';
 const OP_SPEC = A.op_spec || {};
-const KERNEL_KNOWLEDGE_DIR = String(A.kernel_knowledge_dir || '').replace(/\/+$/, '');
+const KERNEL_KNOWLEDGE_DIR = String(A.kernel_knowledge_dir ||
+  (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_knowledge' : '')).replace(/\/+$/, '');
 
 // ---------------------------------------------------------------------------
 // Reusable JSON-schema fragments.

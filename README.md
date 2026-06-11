@@ -51,11 +51,11 @@ skills/team/SKILL.md \
 **Natural language (recommended)** — just tell Claude Code what to optimize:
 
 ```
-用 workflow 优化下 /path/to/knn，gpu 4
+use the workflow to optimize /path/to/knn, gpu 4
 ```
 
 ```
-用 workflow 优化 /path/to/silu，budget 8，重点优化 wrapper 开销
+use the workflow to optimize /path/to/silu, budget 8, focus on wrapper overhead
 ```
 
 Claude Code will automatically resolve all paths and invoke the Workflow tool. You only need to specify the kernel path and optionally the GPU / budget / focus area.
@@ -86,13 +86,13 @@ achievable_speedup`), then pulls levers cheapest-first — config/backend sweep 
 bake-off (aiter per-shape DB tune + a Triton kernel **authored** via the recursive kernel layer) →
 editable-kernel milestone loop (parallel optimize, serial integrate, cumulative stacking) — overlaying
 each accepted change back **reversibly** and gating it on a measured warm-server throughput delta
-(interleaved A/B, 0.5% band + engagement proof + output parity). Every run writes a complete Chinese
-**`final_report.md`** (with a 阶段树 Phases tree + 产物 tree).
+(interleaved A/B, 0.5% band + engagement proof + output parity). Every run writes a complete
+**`final_report.md`** (with a Phases tree + artifacts tree).
 
 **Natural language (recommended):**
 
 ```
-用 workflow_e2e_team 优化 /path/to/model 的推理，sglang，ISL/OSL=1024，conc=64
+use workflow_e2e_team to optimize inference for /path/to/model, sglang, ISL/OSL=1024, conc=64
 ```
 
 **Programmatic invocation:**
@@ -181,7 +181,7 @@ PerfSkills/
 ├── examples/
 │   ├── tasks/             # Example kernel tasks (e.g. knn)
 │   ├── result/            # Benchmark comparisons
-│   └── team_workflow_e2e/ # Example e2e run (final_report.md with 阶段树, final_launch.sh)
+│   └── team_workflow_e2e/ # Example e2e run (final_report.md with Phases tree, final_launch.sh)
 └── exp/                   # Experiment outputs (timestamped per run)
 ```
 

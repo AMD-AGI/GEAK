@@ -10,8 +10,14 @@ e2e Integrator turns your winner into an overlay/config and runs the Amdahl gate
 
 Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — **YOUR experience library** (the ladder, the
-  per-backend tuning knobs, the ranked plan per op class, parity/accuracy notes). APPEND after a run.
+  per-backend tuning knobs, parity/accuracy notes). APPEND after a run.
 - `SKILL_DIR/knowledge/e2e_optimization.md` — Amdahl reasoning + measurement discipline.
+- `PerfSkills/kernel_knowledge/index/capability_index.yaml` — **REFERENCE ONLY**, to *widen* your Tier-A
+  candidate set: which backends have a documented impl for this op + the gens/dtypes/regimes they support.
+  Filter by the box's `gfx`/dtype/regime and ADD any candidates you'd have missed. It has **no ranking** —
+  never infer "best" from it; you bench every candidate and the measurement decides. It can only add
+  candidates, never remove yours. Per-backend how-to/knobs: `kernel_knowledge/operators/<op>/backends/<backend>.md`
+  + `kernel_knowledge/index/recipes.md` (treat any stored `status`/TFLOPS as dated hints, not decisions).
 
 ## The doctrine: try EVERY candidate backend, and OPTIMIZE each one — don't stop at "pick fastest default"
 For a head op you produce the **best-optimized version of each candidate backend**, then compare them on
@@ -30,13 +36,26 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
     Tier-B is the `--attention-backend` swap (a server flag the Config Tuner owns).
   - Write any driver script you need into `$EVAL_DIR` (NOT the shared `scripts/`). Discover tool paths
     (e.g. gradlib) generically, never hardcode. The env winner is `winner_kind=env`.
-- **Tier C — code (author or rewrite)** (editable languages: triton/hip/ck): the **workflows route**.
+- **Tier C — code (author or rewrite)** (editable languages: triton/**flydsl**/hip/ck): the **workflows route**.
   Two cases, both handed to the recursive `team_workflow` (it enforces the immutable unittest):
   - **rewrite** — an editable implementation already exists → optimize it (`mode=optimize`).
   - **author (NEW)** — no existing editable implementation → write a fresh baseline in the target
     language, then optimize it (`mode=author`, `target_language=<lang>`). This is the path that lets a
-    library GEMM/attention get a from-scratch Triton (or HIP/CK) implementation that the optimize loop
-    then improves. **Triton is always a viable author target; HIP/CK only when requested/feasible.**
+    library GEMM/attention get a from-scratch Triton / **FlyDSL** (or HIP/CK) implementation that the
+    optimize loop then improves. **Triton is always a viable author target. For a dense / quantized GEMM
+    (esp. fp8 / A4W4 / mxfp4), FlyDSL is the preferred author target** — it's aiter's SOTA GEMM DSL, the
+    author baseline reuses aiter's production `flydsl_hgemm` / `flydsl_preshuffle_gemm_a8`, and the
+    optimize loop tunes its tile/split_k/preshuffle knobs (JIT, no build). HIP/CK only when
+    requested/feasible.
+
+  **FlyDSL has TWO reachability paths — use both as candidates:**
+  1. **env (cheapest, no author)** — FlyDSL is one of the backends aiter's per-shape DB tune races
+     (`libtype=flydsl`). When `is_flydsl_available()` is true (verify it), a normal `AITER_TUNE_GEMM=1`
+     capture → `gradlib/gemm_tuner.py` → `AITER_CONFIG_GEMM_BF16` deploy will select FlyDSL solutions for
+     shapes where it wins, with ZERO extra code — it rides the same env winner as the aiter tune. Confirm
+     engagement with `AITER_LOG_TUNED_CONFIG=1` (look for `libtype is flydsl`).
+  2. **author (Tier-C)** — emit `{language: flydsl, route: author}` so the orchestrator writes + optimizes
+     a fresh FlyDSL GEMM against the immutable oracle and the e2e gate picks best of {tuned, authored}.
   You do NOT call `team_workflow` yourself — you emit an **`author_plan`** and the orchestrator drives
   the recursion (one allowed nesting level).
 - **Tier D — quantization** (only if `ENABLE_FP8`): fp8 GEMM / kv fp8 → **accuracy gate, not byte
@@ -47,10 +66,13 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
   candidate (if it helps).
 - **Always emit an `author_plan` for the big head op** (`pct_gpu_time ≥ HEAD_THRESHOLD`): at minimum
   `{language: triton, route: author}` (route=`rewrite` if an editable impl already exists). This forces
-  the orchestrator to run `team_workflow` and actually optimize a real Triton kernel for the op — the
-  whole point of the head track. Add `hip`/`ck` too when headroom is large and the image supports them
-  (the orchestrator caps at `HEAD_AUTHOR_MAX`). The Integrator's e2e gate picks the best of {tuned,
-  authored} — you are NOT deciding the winner, you are GENERATING strong candidates.
+  the orchestrator to run `team_workflow` and actually optimize a real kernel for the op — the whole
+  point of the head track. **For a GEMM head (especially fp8/quantized), add `{language: flydsl, route:
+  author}` and order it FIRST** (FlyDSL is the SOTA GEMM DSL on gfx942/950 and beats a from-scratch
+  Triton GEMM for this class). Add `hip`/`ck` too when headroom is large and the image supports them (the
+  orchestrator caps at `HEAD_AUTHOR_MAX` — so put the highest-ROI language first). The Integrator's e2e
+  gate picks the best of {tuned, authored} — you are NOT deciding the winner, you are GENERATING strong
+  candidates.
 - Only drop a *language* (not the whole op) if it's structurally impossible on this image (e.g. ck build
   absent). Do NOT skip authoring just because "the library is probably already fast" — let the e2e gate
   decide. Past results are priors for ORDERING, never a reason to not try.
@@ -84,10 +106,14 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    Read `opbench_result.json`: per-backend {available, correct, ms, max_rel_err}, the winner, the
    `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`.
    Set `best_known_ms` = fastest correct backend's ms — this is the BAR any authored kernel must beat.
-   For each candidate language (triton always; hip/ck if requested), note whether an **existing
-   editable implementation** is present on this image (an importable triton/aiter kernel for the op) or
-   not (→ author needed). NOTE: the experimental triton GEMM stub is NOT a real implementation — treat
-   "no editable triton kernel for this op" as author-needed, not as existing.
+   The default backend set now includes **flydsl** (aiter's `flydsl_hgemm` for bf16/fp16; gated by
+   `is_flydsl_available()`). For an **fp8 (a8w8) GEMM**, op_bench records flydsl as a graceful skip (the
+   plain probe has no scales) — reach flydsl-fp8 via the aiter DB tune (`libtype=flydsl`) and the author
+   route instead. For each candidate language (triton always; flydsl for GEMM; hip/ck if requested), note
+   whether an **existing editable implementation** is present on this image or not (→ author needed).
+   NOTE: the experimental triton GEMM stub is NOT a real implementation — treat "no editable triton
+   kernel for this op" as author-needed. FlyDSL DOES have a real importable GEMM (`flydsl_hgemm` /
+   `flydsl_preshuffle_gemm_a8`), so a flydsl author baseline reuses it rather than starting from zero.
 3. **Tier B per-backend tune (direct_light)** — for GEMM, run the **aiter DB tune** (see
    `SKILL_DIR/knowledge/aiter_gemm_tuning.md`). **The tune input MUST come from a live `AITER_TUNE_GEMM=1`
    capture, NOT synthesized/profile-derived shapes.** ⚠️ Critical: the runtime lookup key includes the
@@ -108,8 +134,9 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
      capture (do NOT return a known-0-engagement env; it wastes the Integrator's gate). **Never TunableOp /
      `HIPBLASLT_TUNING_FILE`** (zero engagement on this stack).
 4. **ALWAYS build `author_plan` for the head op (Tier C, the workflows route)** — at minimum
-   `{language: triton, route: author|rewrite, rationale}`. Add `hip`/`ck` when headroom is large and the
-   image supports them. `route=author` (no existing editable impl) → orchestrator runs `team_workflow`
+   `{language: triton, route: author|rewrite, rationale}`. **For a GEMM head, add `{language: flydsl,
+   route: author}` and list it FIRST** (SOTA GEMM DSL; baseline reuses aiter's flydsl GEMM). Add
+   `hip`/`ck` when headroom is large and the image supports them. `route=author` (no existing editable impl) → orchestrator runs `team_workflow`
    `mode=author target_language=<lang>` on the op task dir (writes a fresh baseline, then optimizes it
    against the immutable oracle); `route=rewrite` (existing editable impl) → `mode=optimize`. You do NOT
    invoke the Workflow tool yourself; emit the plan and set `recommend_tier_c=true`. Order by ROI
@@ -125,14 +152,14 @@ Return JSON:
   "short_name": "<short_name>",
   "op_kind": "gemm|attn",
   "provenance_ok": true,
-  "winner_backend": "aiter|hipblaslt|triton|ck|none",
+  "winner_backend": "aiter|hipblaslt|triton|flydsl|ck|none",
   "winner_kind": "env|flag|patch|none",
   "isolated_speedup": 1.0,
   "winner_editable": false,
   "best_known_ms": 0.0,
   "recommend_tier_c": false,
   "author_plan": [
-    {"language": "triton|hip|ck", "route": "author|rewrite", "rationale": "headroom + why this language"}
+    {"language": "flydsl|triton|hip|ck", "route": "author|rewrite", "rationale": "headroom + why this language (flydsl first for GEMM)"}
   ],
   "tuning_artifact": "<path to aiter bf16_tuned_gemm.csv / triton autotune config>",
   "apply_env": "<KEY=VAL ... for an env-kind direct_light winner>",

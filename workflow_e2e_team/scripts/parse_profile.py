@@ -2,7 +2,7 @@
 """Standardized profile -> per-kernel Top-N summary.
 
 Turns a profiler trace into ONE canonical, deterministic schema (JSON + Markdown) so every
-downstream agent reads the bottleneck the same way. This is the "规范" contract for the e2e
+downstream agent reads the bottleneck the same way. This is the "spec" contract for the e2e
 workflow's Profile phase.
 
 Two input sources (use either or both; merged when both given):

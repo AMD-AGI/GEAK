@@ -1,0 +1,2508 @@
+# sota_registry.yaml — HUMAN/AUDIT view (status badges for browsing). AUTO-GENERATED.
+# NOT consumed by the workflows. The `status` field is TIME-SENSITIVE, dated evidence — it goes
+# stale as ROCm/aiter evolve. Do NOT use it to pick a backend. Workflows consume
+# capability_index.yaml (no status/perf) to ENUMERATE candidates, then DECIDE by measurement.
+# Edit card frontmatter and re-run index/_gen_registry.py; do not hand-edit entries.
+
+schema:
+  version: 2
+  entry: {operator, backend, status: sota|competitive|experimental|legacy|na, gens, dtypes, regimes, card, sources}
+
+entries:
+  - operator: dense_gemm
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/dense_gemm/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+      - ROCm/aiter@a6bb4993:gradlib/gradlib/GemmTuner.py
+      - ROCm/aiter@a6bb4993:aiter/jit/core.py
+      - ROCm/aiter@a6bb4993:csrc/py_itfs_cu/gemm_common.cu
+  - operator: dense_gemm
+    backend: asm
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp6, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/dense_gemm/backends/asm.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
+      - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+  - operator: dense_gemm
+    backend: ck
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8, mxfp4]
+    regimes: [prefill, decode]
+    card: ../operators/dense_gemm/backends/ck.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+      - https://github.com/ROCm/composable_kernel
+      - https://rocm.blogs.amd.com/software-tools-optimization/ck-int8-gemm-sq/README.html
+      - ROCm/aiter@a6bb4993:csrc/ck_gemm_a8w8/gemm_a8w8.cu
+  - operator: dense_gemm
+    backend: flydsl
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp4_e2m1, mxfp4]
+    regimes: [prefill, decode]
+    card: ../operators/dense_gemm/backends/flydsl.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/gemm_kernels.py
+      - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+      - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
+  - operator: dense_gemm
+    backend: gluon
+    status: sota
+    gens: [gfx950]
+    dtypes: [fp16, bf16]
+    regimes: [prefill, training]
+    card: ../operators/dense_gemm/backends/gluon.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
+      - https://github.com/ROCm/gfx950-gluon-tutorials
+      - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/4wave-fp8gemm/README.html
+  - operator: dense_gemm
+    backend: hipblaslt
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill, decode]
+    card: ../operators/dense_gemm/backends/hipblaslt.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/hipblaslt-offline-tuning-part1/README.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html
+      - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+  - operator: dense_gemm
+    backend: hipkittens
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, training]
+    card: ../operators/dense_gemm/backends/hipkittens.md
+    sources:
+      - https://arxiv.org/abs/2511.08083
+      - https://arxiv.org/html/2511.08083v1
+      - https://hazyresearch.stanford.edu/blog/2025-11-09-hk
+      - https://github.com/HazyResearch/HipKittens
+  - operator: dense_gemm
+    backend: rocwmma
+    status: legacy
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/dense_gemm/backends/rocwmma.md
+    sources:
+      - https://github.com/ROCm/rocWMMA
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+  - operator: dense_gemm
+    backend: tilelang
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/dense_gemm/backends/tilelang.md
+    sources:
+      - https://github.com/tile-ai/tilelang
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: dense_gemm
+    backend: triton
+    status: competitive
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/dense_gemm/backends/triton.md
+    sources:
+      - https://rocm.docs.amd.com/en/docs-6.1.1/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+      - https://rocm.docs.amd.com/projects/ai-developer-hub/en/latest/notebooks/gpu_dev_optimize/triton_kernel_dev.html
+      - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+      - https://arxiv.org/html/2511.08083v1
+  - operator: batched_gemm
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/batched_gemm/backends/aiter.md
+    sources:
+      - ROCm/aiter@HEAD:aiter/tuned_gemm.py
+      - ROCm/aiter@HEAD:gradlib/gradlib/gemm_tuner.py
+      - https://github.com/ROCm/aiter
+  - operator: batched_gemm
+    backend: asm
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/batched_gemm/backends/asm.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
+  - operator: batched_gemm
+    backend: ck
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
+    regimes: [prefill, decode]
+    card: ../operators/batched_gemm/backends/ck.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+      - https://github.com/ROCm/composable_kernel
+  - operator: batched_gemm
+    backend: hip
+    status: legacy
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, decode]
+    card: ../operators/batched_gemm/backends/hip.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+      - https://github.com/ROCm/hipBLASLt
+  - operator: batched_gemm
+    backend: hipblaslt
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/batched_gemm/backends/hipblaslt.md
+    sources:
+      - https://github.com/ROCm/hipBLASLt
+      - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: batched_gemm
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/batched_gemm/backends/triton.md
+    sources:
+      - https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: grouped_gemm_moe
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/grouped_gemm_moe/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/fused_moe.py
+      - ROCm/aiter@a6bb4993:aiter/jit/core.py
+      - https://github.com/ROCm/aiter
+      - https://rocm.blogs.amd.com/artificial-intelligence/aiter-intergration-s/README.html
+  - operator: grouped_gemm_moe
+    backend: ck
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, training]
+    card: ../operators/grouped_gemm_moe/backends/ck.md
+    sources:
+      - https://github.com/ROCm/composable_kernel
+      - https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html
+      - https://github.com/ROCm/aiter
+  - operator: grouped_gemm_moe
+    backend: flydsl
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp4_e2m1, fp16, bf16]
+    regimes: [prefill, decode]
+    card: ../operators/grouped_gemm_moe/backends/flydsl.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/moe_kernels.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/moe_gemm_2stage.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/__init__.py
+      - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
+  - operator: grouped_gemm_moe
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/grouped_gemm_moe/backends/hip.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+      - https://github.com/ROCm/aiter
+  - operator: grouped_gemm_moe
+    backend: tilelang
+    status: experimental
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/grouped_gemm_moe/backends/tilelang.md
+    sources:
+      - https://github.com/tile-ai/tilelang
+      - https://github.com/ROCm/aiter
+  - operator: grouped_gemm_moe
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/grouped_gemm_moe/backends/triton.md
+    sources:
+      - https://github.com/ROCm/aiter
+      - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
+  - operator: splitk_streamk_gemm
+    backend: asm
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode, prefill]
+    card: ../operators/splitk_streamk_gemm/backends/asm.md
+    sources:
+      - https://github.com/ROCm/aiter
+      - https://arxiv.org/abs/2301.03598
+  - operator: splitk_streamk_gemm
+    backend: ck
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/splitk_streamk_gemm/backends/ck.md
+    sources:
+      - https://github.com/ROCm/composable_kernel
+      - https://arxiv.org/abs/2301.03598
+  - operator: splitk_streamk_gemm
+    backend: flydsl
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, decode]
+    card: ../operators/splitk_streamk_gemm/backends/flydsl.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/gemm_kernels.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/splitk_hgemm.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/test_flydsl_splitk_hgemm.py
+      - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+  - operator: splitk_streamk_gemm
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/splitk_streamk_gemm/backends/hip.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+      - https://arxiv.org/abs/2301.03598
+  - operator: splitk_streamk_gemm
+    backend: hipblaslt
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/splitk_streamk_gemm/backends/hipblaslt.md
+    sources:
+      - https://github.com/ROCm/hipBLASLt
+      - https://arxiv.org/abs/2301.03598
+  - operator: splitk_streamk_gemm
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/splitk_streamk_gemm/backends/triton.md
+    sources:
+      - https://triton-lang.org/main/getting-started/tutorials/09-persistent-matmul.html
+      - https://arxiv.org/abs/2301.03598
+  - operator: scaled_quant_gemm
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp8_e5m2_fnuz, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/scaled_quant_gemm/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+      - ROCm/aiter@a6bb4993:aiter/ops/gemm_op_a8w8.py
+      - ROCm/aiter@a6bb4993:aiter/ops/gemm_op_a4w4.py
+      - ROCm/aiter@a6bb4993:aiter/jit/core.py
+  - operator: scaled_quant_gemm
+    backend: asm
+    status: competitive
+    gens: [gfx950, gfx942]
+    dtypes: [fp8_e4m3_fnuz, fp4_e2m1, fp6_e2m3]
+    regimes: [prefill, decode]
+    card: ../operators/scaled_quant_gemm/backends/asm.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
+      - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
+      - ROCm/aiter@a6bb4993:aiter/ops/gemm_op_a4w4.py
+  - operator: scaled_quant_gemm
+    backend: ck
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp4_e2m1, fp6_e2m3]
+    regimes: [prefill, decode]
+    card: ../operators/scaled_quant_gemm/backends/ck.md
+    sources:
+      - https://github.com/ROCm/composable_kernel
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+  - operator: scaled_quant_gemm
+    backend: flydsl
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, int8, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/scaled_quant_gemm/backends/flydsl.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/preshuffle_gemm.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/gemm_tune/flydsl_gemm_a8w8_bpreshuffle_common.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/test_flydsl_moe_a4w4.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/gemm_kernels.py
+  - operator: scaled_quant_gemm
+    backend: gluon
+    status: sota
+    gens: [gfx950]
+    dtypes: [fp8_e5m2, fp8_e4m3]
+    regimes: [prefill, training]
+    card: ../operators/scaled_quant_gemm/backends/gluon.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
+      - https://github.com/ROCm/gfx950-gluon-tutorials
+      - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/4wave-fp8gemm/README.html
+  - operator: scaled_quant_gemm
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp4_e2m1, fp6_e2m3, fp6_e3m2]
+    regimes: [prefill, decode]
+    card: ../operators/scaled_quant_gemm/backends/hip.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+      - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
+  - operator: scaled_quant_gemm
+    backend: hipblaslt
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp8_e5m2_fnuz, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/scaled_quant_gemm/backends/hipblaslt.md
+    sources:
+      - https://github.com/ROCm/hipBLASLt
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+  - operator: scaled_quant_gemm
+    backend: hipkittens
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3, fp8_e5m2]
+    regimes: [prefill, training]
+    card: ../operators/scaled_quant_gemm/backends/hipkittens.md
+    sources:
+      - https://arxiv.org/abs/2511.08083
+      - https://arxiv.org/html/2511.08083v1
+      - https://hazyresearch.stanford.edu/blog/2025-11-09-hk
+      - https://github.com/HazyResearch/HipKittens
+  - operator: scaled_quant_gemm
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp4_e2m1, fp6_e2m3, fp6_e3m2]
+    regimes: [prefill, decode]
+    card: ../operators/scaled_quant_gemm/backends/triton.md
+    sources:
+      - https://triton-lang.org/main/getting-started/tutorials/10-block-scaled-matmul.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+  - operator: gemm_epilogue_fused
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/gemm_epilogue_fused/backends/aiter.md
+    sources:
+      - ROCm/aiter@HEAD:aiter/tuned_gemm.py
+      - ROCm/aiter@HEAD:gradlib/gradlib/gemm_tuner.py
+      - https://github.com/ROCm/aiter
+  - operator: gemm_epilogue_fused
+    backend: ck
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8, mxfp4]
+    regimes: [prefill, decode]
+    card: ../operators/gemm_epilogue_fused/backends/ck.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/ck-int8-gemm-sq/README.html
+      - https://github.com/ROCm/composable_kernel
+  - operator: gemm_epilogue_fused
+    backend: flydsl
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/gemm_epilogue_fused/backends/flydsl.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/mfma_epilogues.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/mfma_preshuffle_pipeline.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/preshuffle_gemm.py
+      - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+  - operator: gemm_epilogue_fused
+    backend: hip
+    status: legacy
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/gemm_epilogue_fused/backends/hip.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: gemm_epilogue_fused
+    backend: hipblaslt
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/gemm_epilogue_fused/backends/hipblaslt.md
+    sources:
+      - https://github.com/ROCm/hipBLASLt
+      - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: gemm_epilogue_fused
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/gemm_epilogue_fused/backends/triton.md
+    sources:
+      - https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: skinny_gemv_decode
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/skinny_gemv_decode/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+      - ROCm/aiter@a6bb4993:csrc/kernels/custom_kernels.cu
+      - https://github.com/ROCm/aiter
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
+  - operator: skinny_gemv_decode
+    backend: asm
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/skinny_gemv_decode/backends/asm.md
+    sources:
+      - https://github.com/ROCm/aiter
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
+  - operator: skinny_gemv_decode
+    backend: flydsl
+    status: competitive
+    gens: [gfx950]
+    dtypes: [bf16]
+    regimes: [decode]
+    card: ../operators/skinny_gemv_decode/backends/flydsl.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/small_m_hgemm.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/gemm_kernels.py
+      - ROCm/aiter@a6bb4993:aiter/tuned_gemm.py
+  - operator: skinny_gemv_decode
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/skinny_gemv_decode/backends/hip.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
+  - operator: skinny_gemv_decode
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/skinny_gemv_decode/backends/triton.md
+    sources:
+      - https://triton-lang.org/main/getting-started/tutorials/09-persistent-matmul.html
+      - https://github.com/ROCm/aiter
+  - operator: attention_prefill_fmha
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill]
+    card: ../operators/attention_prefill_fmha/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/mha.py
+      - https://github.com/ROCm/aiter
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+  - operator: attention_prefill_fmha
+    backend: asm
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill]
+    card: ../operators/attention_prefill_fmha/backends/asm.md
+    sources:
+      - https://github.com/ROCm/aiter
+      - https://arxiv.org/abs/2511.08083
+      - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
+  - operator: attention_prefill_fmha
+    backend: ck
+    status: sota
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill]
+    card: ../operators/attention_prefill_fmha/backends/ck.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/ck-tile-flash/README.html
+      - ROCm/composable_kernel:example/ck_tile/01_fmha
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/mha.py
+      - https://github.com/Dao-AILab/flash-attention
+  - operator: attention_prefill_fmha
+    backend: fa_rocm
+    status: competitive
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32, fp8_e4m3]
+    regimes: [prefill]
+    card: ../operators/attention_prefill_fmha/backends/fa_rocm.md
+    sources:
+      - https://github.com/Dao-AILab/flash-attention
+      - https://github.com/ROCm/flash-attention
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+  - operator: attention_prefill_fmha
+    backend: hipkittens
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, training]
+    card: ../operators/attention_prefill_fmha/backends/hipkittens.md
+    sources:
+      - https://arxiv.org/abs/2511.08083
+      - https://arxiv.org/html/2511.08083v1
+      - https://hazyresearch.stanford.edu/blog/2025-11-09-hk
+      - https://github.com/HazyResearch/HipKittens
+  - operator: attention_prefill_fmha
+    backend: tilelang
+    status: competitive
+    gens: [gfx90a, gfx942]
+    dtypes: [fp16, bf16]
+    regimes: [prefill]
+    card: ../operators/attention_prefill_fmha/backends/tilelang.md
+    sources:
+      - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
+      - https://github.com/tile-ai/tilelang
+      - https://arxiv.org/abs/2511.08083
+  - operator: attention_prefill_fmha
+    backend: triton
+    status: competitive
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32, fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill]
+    card: ../operators/attention_prefill_fmha/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py
+      - https://github.com/Dao-AILab/flash-attention
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+      - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
+  - operator: attention_decode_paged
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/attention_decode_paged/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/paged_attn.py
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+      - https://github.com/ROCm/aiter
+  - operator: attention_decode_paged
+    backend: ck
+    status: competitive
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/attention_decode_paged/backends/ck.md
+    sources:
+      - https://github.com/ROCm/composable_kernel/tree/develop/example/ck_tile/01_fmha
+      - https://rocm.blogs.amd.com/software-tools-optimization/ck-tile-flash/README.html
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/mha.py
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+  - operator: attention_decode_paged
+    backend: fa_rocm
+    status: competitive
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3]
+    regimes: [decode]
+    card: ../operators/attention_decode_paged/backends/fa_rocm.md
+    sources:
+      - https://github.com/Dao-AILab/flash-attention
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+      - https://github.com/ROCm/aiter
+  - operator: attention_decode_paged
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/attention_decode_paged/backends/hip.md
+    sources:
+      - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
+      - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/torch_bindings.cpp
+      - https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
+  - operator: attention_decode_paged
+    backend: triton
+    status: competitive
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/attention_decode_paged/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/pa_decode.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+  - operator: attention_decode_paged
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/attention_decode_paged/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+      - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
+  - operator: mla_attention
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/mla_attention/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
+      - https://rocm.blogs.amd.com/software-tools-optimization/aiter-mla/README.html
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+  - operator: mla_attention
+    backend: ck
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/mla_attention/backends/ck.md
+    sources:
+      - https://github.com/ROCm/composable_kernel/tree/develop/example/ck_tile/01_fmha
+      - https://rocm.blogs.amd.com/software-tools-optimization/ck-tile-flash/README.html
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+  - operator: mla_attention
+    backend: fa_rocm
+    status: na
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, decode]
+    card: ../operators/mla_attention/backends/fa_rocm.md
+    sources:
+      - https://github.com/Dao-AILab/flash-attention
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
+  - operator: mla_attention
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode, prefill]
+    card: ../operators/mla_attention/backends/hip.md
+    sources:
+      - https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends/mla
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/mla.py
+  - operator: mla_attention
+    backend: triton
+    status: competitive
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/mla_attention/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/mla_decode.py
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+  - operator: gqa_mqa_attention
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/gqa_mqa_attention/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/paged_attn.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+      - https://github.com/ROCm/aiter
+  - operator: gqa_mqa_attention
+    backend: ck
+    status: competitive
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/gqa_mqa_attention/backends/ck.md
+    sources:
+      - https://github.com/ROCm/composable_kernel/tree/develop/example/ck_tile/01_fmha
+      - https://rocm.blogs.amd.com/software-tools-optimization/ck-tile-flash/README.html
+      - https://github.com/Dao-AILab/flash-attention
+  - operator: gqa_mqa_attention
+    backend: fa_rocm
+    status: competitive
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3]
+    regimes: [prefill, decode]
+    card: ../operators/gqa_mqa_attention/backends/fa_rocm.md
+    sources:
+      - https://github.com/Dao-AILab/flash-attention
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+      - https://github.com/ROCm/aiter
+  - operator: gqa_mqa_attention
+    backend: hipkittens
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [training, prefill]
+    card: ../operators/gqa_mqa_attention/backends/hipkittens.md
+    sources:
+      - https://arxiv.org/abs/2511.08083
+      - https://arxiv.org/html/2511.08083v1
+      - https://hazyresearch.stanford.edu/blog/2025-11-09-hk
+      - https://github.com/HazyResearch/HipKittens
+  - operator: gqa_mqa_attention
+    backend: triton
+    status: competitive
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/gqa_mqa_attention/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/mha.py
+      - https://github.com/Dao-AILab/flash-attention
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+  - operator: sliding_window_attention
+    backend: aiter
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/sliding_window_attention/backends/aiter.md
+    sources:
+      - https://github.com/ROCm/aiter
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+      - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+  - operator: sliding_window_attention
+    backend: ck
+    status: sota
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, decode]
+    card: ../operators/sliding_window_attention/backends/ck.md
+    sources:
+      - https://github.com/Dao-AILab/flash-attention
+      - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+      - ROCm/composable_kernel:example/ck_tile/01_fmha/mask.hpp
+  - operator: sliding_window_attention
+    backend: fa_rocm
+    status: competitive
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3]
+    regimes: [prefill, decode]
+    card: ../operators/sliding_window_attention/backends/fa_rocm.md
+    sources:
+      - https://github.com/Dao-AILab/flash-attention
+      - https://github.com/ROCm/flash-attention
+      - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+  - operator: sliding_window_attention
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/sliding_window_attention/backends/triton.md
+    sources:
+      - https://github.com/Dao-AILab/flash-attention
+      - https://github.com/ROCm/aiter
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+  - operator: chunked_prefill
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/chunked_prefill/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/chunked_pa_prefill.py
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+  - operator: chunked_prefill
+    backend: sglang_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/chunked_prefill/backends/sglang_kernels.md
+    sources:
+      - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/attention_registry.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py
+      - https://docs.sglang.io/platforms/amd_gpu.html
+  - operator: chunked_prefill
+    backend: triton
+    status: sota
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill, decode, both]
+    card: ../operators/chunked_prefill/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py
+      - https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/triton_attn.py
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+  - operator: chunked_prefill
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/chunked_prefill/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/triton_attn.py
+      - https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+  - operator: sparse_attention_nsa
+    backend: hip
+    status: experimental
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/sparse_attention_nsa/backends/hip.md
+    sources:
+      - https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+  - operator: sparse_attention_nsa
+    backend: tilelang
+    status: experimental
+    gens: [gfx90a, gfx942]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, decode]
+    card: ../operators/sparse_attention_nsa/backends/tilelang.md
+    sources:
+      - https://github.com/tile-ai/tilelang
+      - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
+      - ROCm/composable_kernel:example/ck_tile/50_sparse_attn
+      - https://arxiv.org/abs/2511.08083
+  - operator: sparse_attention_nsa
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/sparse_attention_nsa/backends/triton.md
+    sources:
+      - https://github.com/fla-org/native-sparse-attention
+      - https://arxiv.org/html/2508.18224v1
+      - https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+  - operator: linear_attention_gated_delta
+    backend: flydsl
+    status: experimental
+    gens: [gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [decode]
+    card: ../operators/linear_attention_gated_delta/backends/flydsl.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/linear_attention_kernels.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/gdr_decode.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/gdr_decode_tuned.jsonl
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/test_flydsl_linear_attention.py
+  - operator: linear_attention_gated_delta
+    backend: hip
+    status: experimental
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, decode]
+    card: ../operators/linear_attention_gated_delta/backends/hip.md
+    sources:
+      - https://github.com/fla-org/flash-linear-attention
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+  - operator: linear_attention_gated_delta
+    backend: tilelang
+    status: experimental
+    gens: [gfx90a, gfx942]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, decode]
+    card: ../operators/linear_attention_gated_delta/backends/tilelang.md
+    sources:
+      - https://github.com/tile-ai/tilelang
+      - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
+      - https://arxiv.org/abs/2511.08083
+  - operator: linear_attention_gated_delta
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, decode]
+    card: ../operators/linear_attention_gated_delta/backends/triton.md
+    sources:
+      - https://github.com/fla-org/flash-linear-attention
+      - https://www.amd.com/en/developer/resources/technical-articles/2026/day-0-support-for-qwen-3-5-on-amd-instinct-gpus.html
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+      - https://vllm.ai/blog/2025-09-11-qwen3-next
+  - operator: context_parallel_attention
+    backend: aiter
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill]
+    card: ../operators/context_parallel_attention/backends/aiter.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: context_parallel_attention
+    backend: sglang_kernels
+    status: experimental
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill]
+    card: ../operators/context_parallel_attention/backends/sglang_kernels.md
+    sources:
+      - https://github.com/sgl-project/sglang/issues/22223
+      - https://github.com/sgl-project/sglang/blob/main/docs/platforms/amd_gpu.md
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: context_parallel_attention
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [prefill]
+    card: ../operators/context_parallel_attention/backends/triton.md
+    sources:
+      - https://github.com/sgl-project/sglang/issues/22223
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+  - operator: speculative_decode_verify
+    backend: aiter
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/speculative_decode_verify/backends/aiter.md
+    sources:
+      - https://rocm.blogs.amd.com/artificial-intelligence/spec_decode_mi300x/README.html
+      - https://github.com/sgl-project/sglang/issues/16027
+      - https://github.com/ROCm/ATOM
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+  - operator: speculative_decode_verify
+    backend: sglang_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/speculative_decode_verify/backends/sglang_kernels.md
+    sources:
+      - https://github.com/sgl-project/sglang/issues/16027
+      - https://github.com/sgl-project/sglang/blob/main/docs/platforms/amd_gpu.md
+      - https://rocm.blogs.amd.com/artificial-intelligence/ssd_mi300x/README.html
+  - operator: speculative_decode_verify
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/speculative_decode_verify/backends/triton.md
+    sources:
+      - https://rocm.blogs.amd.com/artificial-intelligence/ssd_mi300x/README.html
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0
+  - operator: speculative_decode_verify
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode]
+    card: ../operators/speculative_decode_verify/backends/vllm_kernels.md
+    sources:
+      - https://docs.vllm.ai/en/latest/features/speculative_decoding/
+      - https://rocm.blogs.amd.com/artificial-intelligence/spec_decode_mi300x/README.html
+      - https://www.amd.com/en/developer/resources/technical-articles/vllm-x-amd-highly-efficient-llm-inference-on-amd-instinct-mi300x-gpus.html
+      - https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+  - operator: rmsnorm
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/rmsnorm/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/rmsnorm.py
+      - ROCm/aiter@a6bb4993:aiter/ops/triton/normalization/rmsnorm.py
+      - ROCm/aiter@a6bb4993:csrc/kernels/rmsnorm_kernels.cu
+      - https://github.com/vllm-project/vllm/pull/14959
+  - operator: rmsnorm
+    backend: flydsl
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/rmsnorm/backends/flydsl.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/reduce.py
+      - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/silu_and_mul_fq.py
+      - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
+  - operator: rmsnorm
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/rmsnorm/backends/hip.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: rmsnorm
+    backend: hipkittens
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, decode, training]
+    card: ../operators/rmsnorm/backends/hipkittens.md
+    sources:
+      - https://arxiv.org/abs/2511.08083
+      - https://arxiv.org/html/2511.08083v1
+      - https://hazyresearch.stanford.edu/blog/2025-11-09-hk
+      - https://github.com/HazyResearch/HipKittens
+  - operator: rmsnorm
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/rmsnorm/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/triton/normalization/rmsnorm.py
+      - ROCm/aiter@a6bb4993:aiter/ops/triton/_triton_kernels/normalization/rmsnorm.py
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: rmsnorm
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/rmsnorm/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
+      - https://github.com/vllm-project/vllm/pull/14959
+      - https://github.com/vllm-project/vllm/pull/22602
+  - operator: layernorm
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/layernorm/backends/aiter.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/norm.py
+      - /sgl-workspace/aiter/aiter/ops/triton/normalization/norm.py
+  - operator: layernorm
+    backend: flydsl
+    status: experimental
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/layernorm/backends/flydsl.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/reduce.py
+  - operator: layernorm
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/layernorm/backends/hip.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
+  - operator: layernorm
+    backend: miopen
+    status: competitive
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16]
+    regimes: [both, training]
+    card: ../operators/layernorm/backends/miopen.md
+    sources:
+      - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
+      - https://github.com/ROCm/MIOpen/blob/develop/CHANGELOG.md
+  - operator: layernorm
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both, training]
+    card: ../operators/layernorm/backends/triton.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/triton/normalization/norm.py
+      - https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: layernorm
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/layernorm/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
+      - https://github.com/vllm-project/vllm/blob/main/csrc/torch_bindings.cpp
+  - operator: softmax
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/softmax/backends/aiter.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/triton/softmax.py
+      - /sgl-workspace/aiter/aiter/ops/topk.py
+      - /sgl-workspace/aiter/aiter/ops/mha.py
+  - operator: softmax
+    backend: flydsl
+    status: experimental
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/softmax/backends/flydsl.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/reduce.py
+  - operator: softmax
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/softmax/backends/hip.md
+    sources:
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: softmax
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/softmax/backends/triton.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/triton/softmax.py
+      - /sgl-workspace/aiter/aiter/ops/triton/_triton_kernels/softmax.py
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: act_and_mul_silu_gelu
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, mxfp4]
+    regimes: [both]
+    card: ../operators/act_and_mul_silu_gelu/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/activation.py
+      - ROCm/aiter@a6bb4993:csrc/kernels/activation_kernels.cu
+      - ROCm/aiter@a6bb4993:aiter/ops/triton/activation.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/silu_and_mul_fq.py
+  - operator: act_and_mul_silu_gelu
+    backend: flydsl
+    status: sota
+    gens: [gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/act_and_mul_silu_gelu/backends/flydsl.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/silu_and_mul_fq.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/moe_kernels.py
+  - operator: act_and_mul_silu_gelu
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/act_and_mul_silu_gelu/backends/hip.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/activation.cu
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: act_and_mul_silu_gelu
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, mxfp4]
+    regimes: [both]
+    card: ../operators/act_and_mul_silu_gelu/backends/triton.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/triton/activation.py
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: act_and_mul_silu_gelu
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/act_and_mul_silu_gelu/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/activation.cu
+      - https://docs.vllm.ai/en/v0.10.2/api/vllm/model_executor/layers/activation.html
+  - operator: fused_add_rmsnorm
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/fused_add_rmsnorm/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/rmsnorm.py
+      - ROCm/aiter@a6bb4993:aiter/ops/triton/normalization/rmsnorm.py
+      - ROCm/aiter@a6bb4993:aiter/ops/triton/_triton_kernels/normalization/rmsnorm.py
+      - https://github.com/vllm-project/vllm/pull/14959
+  - operator: fused_add_rmsnorm
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/fused_add_rmsnorm/backends/hip.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
+      - https://github.com/vllm-project/vllm/pull/22602
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: fused_add_rmsnorm
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/fused_add_rmsnorm/backends/triton.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/triton/normalization/rmsnorm.py
+      - /sgl-workspace/aiter/aiter/ops/triton/normalization/fused_add_rmsnorm_pad.py
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: fused_add_rmsnorm
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/fused_add_rmsnorm/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
+      - https://github.com/vllm-project/vllm/pull/14959
+      - https://github.com/vllm-project/vllm/pull/29181
+  - operator: fused_norm_quant
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, int8, mxfp4]
+    regimes: [both]
+    card: ../operators/fused_norm_quant/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/rmsnorm.py
+      - ROCm/aiter@a6bb4993:aiter/ops/gated_rmsnorm_fp8_group_quant.py
+      - ROCm/aiter@a6bb4993:aiter/ops/fused_qk_rmsnorm_group_quant.py
+      - ROCm/aiter@a6bb4993:aiter/ops/fused_qk_norm_rope_cache_quant.py
+  - operator: fused_norm_quant
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, int8]
+    regimes: [both]
+    card: ../operators/fused_norm_quant/backends/hip.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/gated_rmsnorm_fp8_group_quant.py
+      - https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: fused_norm_quant
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, int8, mxfp4]
+    regimes: [both]
+    card: ../operators/fused_norm_quant/backends/triton.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/triton/normalization/rmsnorm.py
+      - /sgl-workspace/aiter/aiter/ops/triton/normalization/norm.py
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: rope
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/rope/backends/aiter.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/rope.py
+      - /sgl-workspace/aiter/aiter/ops/fused_qk_norm_rope_cache_quant.py
+      - https://github.com/sgl-project/sglang/issues/18466
+      - https://docs.vllm.ai/en/latest/design/fusions/
+  - operator: rope
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/rope/backends/hip.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/pos_encoding.cu
+      - /sgl-workspace/aiter/aiter/ops/pos_encoding.py
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: rope
+    backend: hipkittens
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16]
+    regimes: [prefill, decode]
+    card: ../operators/rope/backends/hipkittens.md
+    sources:
+      - https://arxiv.org/abs/2511.08083
+      - https://arxiv.org/html/2511.08083v1
+      - https://hazyresearch.stanford.edu/blog/2025-11-09-hk
+      - https://github.com/HazyResearch/HipKittens
+  - operator: rope
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/rope/backends/triton.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/triton/rope/rope.py
+      - https://github.com/vllm-project/vllm/pull/16457
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: rope
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/rope/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/pos_encoding.cu
+      - https://github.com/vllm-project/vllm/pull/16457
+      - https://docs.vllm.ai/en/stable/api/vllm/model_executor/layers/rotary_embedding.html
+  - operator: mrope
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/mrope/backends/aiter.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/fused_qk_norm_mrope_cache_quant.py
+      - https://github.com/sgl-project/sglang/issues/18466
+  - operator: mrope
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/mrope/backends/hip.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/pos_encoding.cu
+      - /sgl-workspace/aiter/aiter/ops/fused_qk_norm_mrope_cache_quant.py
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: mrope
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/mrope/backends/triton.md
+    sources:
+      - https://github.com/vllm-project/vllm/pull/22593
+      - https://github.com/vllm-project/vllm/pull/16457
+      - /sgl-workspace/aiter/aiter/ops/triton/rope/rope.py
+  - operator: alibi
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/alibi/backends/hip.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/attention.cu
+      - https://arxiv.org/abs/2108.12409
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: alibi
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/alibi/backends/triton.md
+    sources:
+      - https://arxiv.org/abs/2108.12409
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+      - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/attention.cu
+  - operator: moe_routing_topk
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [prefill, decode]
+    card: ../operators/moe_routing_topk/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/topk.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/topk_softmax_kernels_group.cu
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/moe_align_block_size_kernels.cu
+      - https://github.com/ROCm/aiter/pull/1909
+  - operator: moe_routing_topk
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [prefill, decode]
+    card: ../operators/moe_routing_topk/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/moe_align_block_size_kernels.cu
+      - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
+      - https://www.amd.com/en/blogs/2025/revolutionizing-mixture-of-experts-performance-10.html
+  - operator: moe_routing_topk
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [prefill, decode]
+    card: ../operators/moe_routing_topk/backends/triton.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/topk.py
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: moe_routing_topk
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [prefill, decode]
+    card: ../operators/moe_routing_topk/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/pull/17955
+      - https://github.com/vllm-project/vllm/pull/16752
+      - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py
+  - operator: moe_dispatch_combine
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill, decode]
+    card: ../operators/moe_dispatch_combine/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/moe_sorting.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/moe_align_block_size_kernels.cu
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:op_tests/multigpu_tests/test_mori_all2all.py
+      - https://github.com/ROCm/mori/blob/main/docs/MORI-EP-GUIDE.md
+  - operator: moe_dispatch_combine
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill, decode]
+    card: ../operators/moe_dispatch_combine/backends/hip.md
+    sources:
+      - https://gau-nernst.github.io/amd-a2a/
+      - https://github.com/ROCm/mori
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/moe_sorting.py
+  - operator: moe_dispatch_combine
+    backend: mori
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp8_e4m3, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/moe_dispatch_combine/backends/mori.md
+    sources:
+      - https://github.com/ROCm/mori/blob/main/docs/MORI-EP-GUIDE.md
+      - https://github.com/ROCm/mori
+      - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
+      - https://gau-nernst.github.io/amd-a2a/
+  - operator: moe_dispatch_combine
+    backend: triton
+    status: experimental
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/moe_dispatch_combine/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/all_gather.py
+      - https://github.com/ROCm/iris
+      - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py
+  - operator: fused_moe_grouped_gemm
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp8_e4m3, int8, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/fused_moe_grouped_gemm/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/fused_moe.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/configs/tuned_fmoe.csv
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/moe_sorting.py
+      - https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
+  - operator: fused_moe_grouped_gemm
+    backend: ck
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp8_e4m3, int8, fp4_e2m1, mxfp4]
+    regimes: [prefill, decode]
+    card: ../operators/fused_moe_grouped_gemm/backends/ck.md
+    sources:
+      - https://github.com/ROCm/composable_kernel
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/configs/tuned_fmoe.csv
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+      - https://github.com/ROCm/aiter/issues/2946
+  - operator: fused_moe_grouped_gemm
+    backend: flydsl
+    status: sota
+    gens: [gfx950]
+    dtypes: [fp4_e2m1, fp8_e4m3_fnuz, bf16]
+    regimes: [prefill, decode]
+    card: ../operators/fused_moe_grouped_gemm/backends/flydsl.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/moe_kernels.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/test_flydsl_moe_a4w4.py
+      - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
+  - operator: fused_moe_grouped_gemm
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill, decode]
+    card: ../operators/fused_moe_grouped_gemm/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/fused_moe_bf16_asm.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/configs/tuned_fmoe.csv
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+  - operator: fused_moe_grouped_gemm
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, int8]
+    regimes: [prefill, decode]
+    card: ../operators/fused_moe_grouped_gemm/backends/triton.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py
+      - https://pytorch.org/blog/enabling-vllm-v1-on-amd-gpus-with-triton/
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+      - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
+  - operator: shared_expert_fusion
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill, decode]
+    card: ../operators/shared_expert_fusion/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/fused_moe_dp_shared_expert.py
+      - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
+  - operator: shared_expert_fusion
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill, decode]
+    card: ../operators/shared_expert_fusion/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/fused_moe_dp_shared_expert.py
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: shared_expert_fusion
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode]
+    card: ../operators/shared_expert_fusion/backends/triton.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py
+      - https://github.com/vllm-project/vllm/pull/17955
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: allreduce
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8, int4]
+    regimes: [decode, prefill, both]
+    card: ../operators/allreduce/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/custom_all_reduce.cu
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/include/custom_all_reduce.cuh
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/include/quick_all_reduce.cuh
+      - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
+  - operator: allreduce
+    backend: rccl
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/allreduce/backends/rccl.md
+    sources:
+      - https://rocm.docs.amd.com/projects/rccl/en/develop/how-to/rccl-usage-tips.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
+      - https://rocm.blogs.amd.com/artificial-intelligence/quick-reduce/README.html
+      - https://rocm.blogs.amd.com/artificial-intelligence/quick-reduce-2/README.html
+  - operator: allreduce
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8, int6, int4]
+    regimes: [decode, prefill, both]
+    card: ../operators/allreduce/backends/vllm_kernels.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
+      - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
+  - operator: allgather
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/allgather/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/all_gather.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/fused/reduce_scatter_rmsnorm_quant_all_gather.py
+      - https://github.com/ROCm/iris
+  - operator: allgather
+    backend: rccl
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/allgather/backends/rccl.md
+    sources:
+      - https://rocm.docs.amd.com/projects/rccl/en/develop/how-to/rccl-usage-tips.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
+  - operator: reduce_scatter
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/reduce_scatter/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/reduce_scatter.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/fused/reduce_scatter_rmsnorm_quant_all_gather.py
+      - https://github.com/ROCm/iris
+  - operator: reduce_scatter
+    backend: rccl
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/reduce_scatter/backends/rccl.md
+    sources:
+      - https://rocm.docs.amd.com/projects/rccl/en/develop/how-to/rccl-usage-tips.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
+  - operator: fused_allreduce_rmsnorm
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/fused_allreduce_rmsnorm/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/comms/fused/reduce_scatter_rmsnorm_quant_all_gather.py
+      - https://github.com/ROCm/aiter/releases
+      - https://docs.vllm.ai/en/latest/design/fusions/
+  - operator: fused_allreduce_rmsnorm
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/fused_allreduce_rmsnorm/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/custom_all_reduce.cu
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/rmsnorm_kernels.cu
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: fused_allreduce_rmsnorm
+    backend: rccl
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/fused_allreduce_rmsnorm/backends/rccl.md
+    sources:
+      - https://rocm.docs.amd.com/projects/rccl/en/develop/how-to/rccl-usage-tips.html
+      - https://docs.vllm.ai/en/latest/design/fusions/
+  - operator: quant_dequant_fp8
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp8_e4m3, fp8_e5m2]
+    regimes: [prefill, decode, both]
+    card: ../operators/quant_dequant_fp8/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/quant.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/quant_kernels.cu
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/include/smoothquant.h
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/quant/fused_fp8_quant.py
+  - operator: quant_dequant_fp8
+    backend: asm
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [both]
+    card: ../operators/quant_dequant_fp8/backends/asm.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/quant_kernels.cu
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+  - operator: quant_dequant_fp8
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill, decode, both]
+    card: ../operators/quant_dequant_fp8/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/quant_kernels.cu
+      - vllm-project/vllm@HEAD:csrc/quantization/fp8/common.cu
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: quant_dequant_fp8
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill, decode, both]
+    card: ../operators/quant_dequant_fp8/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/quant/quant.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/quant/fused_fp8_quant.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/quant.py
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: quant_dequant_fp8
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [prefill, decode, both]
+    card: ../operators/quant_dequant_fp8/backends/vllm_kernels.md
+    sources:
+      - vllm-project/vllm@HEAD:csrc/quantization/fp8/common.cu
+      - vllm-project/vllm@HEAD:csrc/quantization/fp8/amd/quant_utils.cuh
+      - vllm-project/vllm@HEAD:csrc/quantization/compressed_tensors/int8_quant_kernels.cu
+      - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
+  - operator: quant_int8
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [int8]
+    regimes: [prefill, decode, both]
+    card: ../operators/quant_int8/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/quant.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/include/smoothquant.h
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/quant_kernels.cu
+  - operator: quant_int8
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [int8]
+    regimes: [both]
+    card: ../operators/quant_int8/backends/hip.md
+    sources:
+      - vllm-project/vllm@HEAD:csrc/quantization/compressed_tensors/int8_quant_kernels.cu
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/quant_kernels.cu
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: quant_int8
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [int8]
+    regimes: [both]
+    card: ../operators/quant_int8/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/quant/quant.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/moe/moe_op_gemm_int8_smoothquant.py
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: quant_int8
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [int8]
+    regimes: [prefill, decode, both]
+    card: ../operators/quant_int8/backends/vllm_kernels.md
+    sources:
+      - vllm-project/vllm@HEAD:csrc/quantization/compressed_tensors/int8_quant_kernels.cu
+      - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
+  - operator: quant_fp4_mxfp
+    backend: aiter
+    status: sota
+    gens: [gfx950]
+    dtypes: [mxfp4, mxfp6, fp4_e2m1]
+    regimes: [prefill, decode, both]
+    card: ../operators/quant_fp4_mxfp/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/quant.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/utility/fp4_utils.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/quant/fused_mxfp4_quant.py
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+  - operator: quant_fp4_mxfp
+    backend: ck
+    status: sota
+    gens: [gfx950]
+    dtypes: [mxfp4, mxfp6, mxfp8]
+    regimes: [both]
+    card: ../operators/quant_fp4_mxfp/backends/ck.md
+    sources:
+      - https://github.com/ROCm/composable_kernel/blob/develop/include/ck_tile/README.md
+      - https://github.com/ROCm/composable_kernel/blob/develop/CHANGELOG.md
+      - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+  - operator: quant_fp4_mxfp
+    backend: gluon
+    status: sota
+    gens: [gfx950]
+    dtypes: [fp4_e2m1]
+    regimes: [prefill, training]
+    card: ../operators/quant_fp4_mxfp/backends/gluon.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
+      - https://github.com/ROCm/gfx950-gluon-tutorials
+      - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/4wave-fp8gemm/README.html
+  - operator: quant_fp4_mxfp
+    backend: hip
+    status: sota
+    gens: [gfx950]
+    dtypes: [mxfp4, fp4_e2m1]
+    regimes: [both]
+    card: ../operators/quant_fp4_mxfp/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/quant_kernels.cu
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/quant.py
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+  - operator: quant_fp4_mxfp
+    backend: triton
+    status: sota
+    gens: [gfx950]
+    dtypes: [mxfp4, mxfp6]
+    regimes: [both]
+    card: ../operators/quant_fp4_mxfp/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/quant/quant.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/utility/fp4_utils.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/quant/fused_mxfp4_quant.py
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: kv_cache_quant
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [decode, prefill, both]
+    card: ../operators/kv_cache_quant/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/fused_qk_norm_rope_cache_quant.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/fused_qk_norm_mrope_cache_quant.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/cache_kernels.cu
+      - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
+  - operator: kv_cache_quant
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp8_e4m3, int8]
+    regimes: [decode, prefill, both]
+    card: ../operators/kv_cache_quant/backends/hip.md
+    sources:
+      - vllm-project/vllm@HEAD:csrc/cache_kernels.cu
+      - vllm-project/vllm@HEAD:csrc/quantization/fp8/amd/quant_utils.cuh
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: kv_cache_quant
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp8_e4m3]
+    regimes: [decode, prefill, both]
+    card: ../operators/kv_cache_quant/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton
+      - vllm-project/vllm@HEAD:vllm/v1/attention/backends/triton_attn.py
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: kv_cache_quant
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp8_e4m3_fnuz, fp8_e4m3, int8]
+    regimes: [decode, prefill, both]
+    card: ../operators/kv_cache_quant/backends/vllm_kernels.md
+    sources:
+      - vllm-project/vllm@HEAD:csrc/cache_kernels.cu
+      - vllm-project/vllm@HEAD:csrc/quantization/fp8/amd/quant_utils.cuh
+      - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
+  - operator: embedding
+    backend: hip
+    status: competitive
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/embedding/backends/hip.md
+    sources:
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+      - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/vocab_parallel_embedding.py
+  - operator: embedding
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/embedding/backends/triton.md
+    sources:
+      - https://github.com/pytorch/pytorch/pull/143286
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: embedding
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [both]
+    card: ../operators/embedding/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/vocab_parallel_embedding.py
+      - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/vocab_parallel_embedding.py
+      - https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
+  - operator: lm_head_logits
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode, prefill, both]
+    card: ../operators/lm_head_logits/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/tuned_gemm.py
+      - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/logits_processor.py
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: lm_head_logits
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode, prefill, both]
+    card: ../operators/lm_head_logits/backends/hip.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/skinny_gemms.cu
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: lm_head_logits
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [decode, prefill, both]
+    card: ../operators/lm_head_logits/backends/triton.md
+    sources:
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/tuned_gemm.py
+  - operator: lm_head_logits
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode, prefill, both]
+    card: ../operators/lm_head_logits/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/logits_processor.py
+      - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/skinny_gemms.cu
+      - https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
+  - operator: sampling_topk_topp
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16]
+    regimes: [decode, both]
+    card: ../operators/sampling_topk_topp/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/cpp_itfs/sampling/sampling.cuh
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/sampling.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/sample.py
+      - https://flashinfer.ai/2025/03/10/sampling.html
+  - operator: sampling_topk_topp
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16]
+    regimes: [decode, both]
+    card: ../operators/sampling_topk_topp/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/cpp_itfs/sampling/sampling.cuh
+      - https://flashinfer.ai/2025/03/10/sampling.html
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: sampling_topk_topp
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16]
+    regimes: [decode, both]
+    card: ../operators/sampling_topk_topp/backends/triton.md
+    sources:
+      - https://vllm.ai/blog/mrv2
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+      - https://flashinfer.ai/2025/03/10/sampling.html
+      - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/sampler.py
+  - operator: sampling_topk_topp
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16]
+    regimes: [decode, both]
+    card: ../operators/sampling_topk_topp/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/blob/main/vllm/v1/sample/ops/topk_topp_sampler.py
+      - https://github.com/vllm-project/vllm/blob/main/vllm/v1/sample/sampler.py
+      - https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
+  - operator: elementwise
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz, int8]
+    regimes: [both]
+    card: ../operators/elementwise/backends/hip.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+      - https://developer.nvidia.com/blog/cuda-pro-tip-increase-performance-with-vectorized-memory-access/
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: elementwise
+    backend: pytorch_inductor
+    status: sota
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both, training]
+    card: ../operators/elementwise/backends/pytorch_inductor.md
+    sources:
+      - https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py
+      - https://rocm.blogs.amd.com/artificial-intelligence/pytorch-amd-gpus/README.html
+      - https://github.com/pytorch/pytorch/pull/143286
+  - operator: elementwise
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/elementwise/backends/triton.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+  - operator: reduction
+    backend: ck
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, int32]
+    regimes: [both]
+    card: ../operators/reduction/backends/ck.md
+    sources:
+      - https://github.com/ROCmSoftwarePlatform/composable_kernel/pull/82
+      - https://rocm.docs.amd.com/projects/composable_kernel/en/latest/
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+  - operator: reduction
+    backend: flydsl
+    status: experimental
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both]
+    card: ../operators/reduction/backends/flydsl.md
+    sources:
+      - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/reduce.py
+  - operator: reduction
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, int32]
+    regimes: [both]
+    card: ../operators/reduction/backends/hip.md
+    sources:
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_runtime_api/cooperative_groups.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: reduction
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16]
+    regimes: [both]
+    card: ../operators/reduction/backends/triton.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+      - https://triton-lang.org/main/python-api/triton.language.html
+      - https://github.com/triton-lang/triton/issues/3017
+  - operator: cumsum_scan
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, int32, int64]
+    regimes: [both]
+    card: ../operators/cumsum_scan/backends/hip.md
+    sources:
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - https://moderngpu.github.io/scan.html
+      - https://github.com/proger/accelerated-scan
+  - operator: cumsum_scan
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, int32]
+    regimes: [both]
+    card: ../operators/cumsum_scan/backends/triton.md
+    sources:
+      - https://triton-lang.org/main/python-api/generated/triton.language.associative_scan.html
+      - https://triton-lang.org/main/python-api/generated/triton.language.cumsum.html
+      - https://github.com/triton-lang/triton/issues/2359
+      - https://github.com/proger/accelerated-scan
+  - operator: argmax_topk
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16]
+    regimes: [both]
+    card: ../operators/argmax_topk/backends/hip.md
+    sources:
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - https://moderngpu.github.io/scan.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: argmax_topk
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16]
+    regimes: [both]
+    card: ../operators/argmax_topk/backends/triton.md
+    sources:
+      - https://triton-lang.org/main/python-api/generated/triton.language.argmax.html
+      - https://triton-lang.org/main/python-api/generated/triton.language.max.html
+      - https://github.com/triton-lang/triton/issues/6635
+      - https://github.com/openai/triton/issues/802
+  - operator: cast_fill_copy
+    backend: hip
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz, int8]
+    regimes: [both]
+    card: ../operators/cast_fill_copy/backends/hip.md
+    sources:
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+  - operator: cast_fill_copy
+    backend: pytorch_inductor
+    status: sota
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [both, training]
+    card: ../operators/cast_fill_copy/backends/pytorch_inductor.md
+    sources:
+      - https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py
+      - https://rocm.blogs.amd.com/artificial-intelligence/pytorch-amd-gpus/README.html
+      - https://rocm.docs.amd.com/en/docs-6.3.1/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: cast_fill_copy
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz, int8]
+    regimes: [both]
+    card: ../operators/cast_fill_copy/backends/triton.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+      - https://github.com/sgl-project/sglang/pull/2601
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+  - operator: causal_conv1d
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [prefill, decode]
+    card: ../operators/causal_conv1d/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/causal_conv1d.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/causal_conv1d.py
+      - https://github.com/ROCm/aiter
+  - operator: causal_conv1d
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [decode]
+    card: ../operators/causal_conv1d/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/kernels/causal_conv1d_update.cu
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/causal_conv1d.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:csrc/include/causal_conv1d.h
+  - operator: causal_conv1d
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp32]
+    regimes: [prefill, decode]
+    card: ../operators/causal_conv1d/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/causal_conv1d.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/_triton_kernels/causal_conv1d.py
+      - https://docs.vllm.ai/en/stable/api/vllm/model_executor/layers/mamba/ops/causal_conv1d/
+  - operator: depthwise_conv
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16]
+    regimes: [both]
+    card: ../operators/depthwise_conv/backends/hip.md
+    sources:
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
+  - operator: depthwise_conv
+    backend: miopen
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, int8]
+    regimes: [both, training]
+    card: ../operators/depthwise_conv/backends/miopen.md
+    sources:
+      - https://rocm.docs.amd.com/projects/MIOpen/en/develop/doxygen/html/group__convolutions.html
+      - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
+      - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/use-fusion-api.html
+      - https://github.com/ROCm/MIOpen/blob/develop/CHANGELOG.md
+  - operator: depthwise_conv
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16]
+    regimes: [both]
+    card: ../operators/depthwise_conv/backends/triton.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: conv2d
+    backend: ck
+    status: sota
+    gens: [gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, int8]
+    regimes: [both, training]
+    card: ../operators/conv2d/backends/ck.md
+    sources:
+      - https://rocm.docs.amd.com/projects/composable_kernel/en/docs-6.4.2/doxygen/html/device__grouped__conv__fwd__multiple__d__multiple__r__xdl__cshuffle_8hpp.html
+      - https://github.com/ROCm/composable_kernel
+      - https://docs.nvidia.com/cutlass/latest/media/docs/cpp/implicit_gemm_convolution.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+  - operator: conv2d
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16]
+    regimes: [both]
+    card: ../operators/conv2d/backends/hip.md
+    sources:
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+      - https://docs.nvidia.com/cutlass/latest/media/docs/cpp/implicit_gemm_convolution.html
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: conv2d
+    backend: miopen
+    status: sota
+    gens: [gfx908, gfx90a, gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, int8]
+    regimes: [both, training]
+    card: ../operators/conv2d/backends/miopen.md
+    sources:
+      - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
+      - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/use-fusion-api.html
+      - https://github.com/ROCm/MIOpen/blob/develop/CHANGELOG.md
+      - https://github.com/ROCm/MIOpen/issues/2001
+  - operator: transpose
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz, int8]
+    regimes: [both]
+    card: ../operators/transpose/backends/hip.md
+    sources:
+      - https://rocm.blogs.amd.com/software-tools-optimization/lds-bank-conflict/README.html
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
+      - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
+  - operator: transpose
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
+    regimes: [both]
+    card: ../operators/transpose/backends/triton.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+      - https://rocm.blogs.amd.com/software-tools-optimization/lds-bank-conflict/README.html
+      - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+  - operator: gather_scatter
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, int8, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/gather_scatter/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/moe_sorting.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/fused_moe.py
+      - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
+  - operator: gather_scatter
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz, int8]
+    regimes: [both]
+    card: ../operators/gather_scatter/backends/hip.md
+    sources:
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+      - https://llvm.org/docs/AMDGPUUsage.html
+      - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
+  - operator: gather_scatter
+    backend: triton
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
+    regimes: [both]
+    card: ../operators/gather_scatter/backends/triton.md
+    sources:
+      - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
+      - https://pytorch.org/blog/accelerating-moes-with-a-triton-persistent-cache-aware-grouped-gemm-kernel/
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+  - operator: all_to_all_dispatch_combine
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp4_e2m1]
+    regimes: [prefill, decode, both]
+    card: ../operators/all_to_all_dispatch_combine/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/fused_moe.py
+      - https://github.com/ROCm/mori/blob/main/docs/MORI-EP-GUIDE.md
+      - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
+  - operator: all_to_all_dispatch_combine
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz]
+    regimes: [prefill, decode, both]
+    card: ../operators/all_to_all_dispatch_combine/backends/hip.md
+    sources:
+      - https://gau-nernst.github.io/amd-a2a/
+      - https://github.com/ROCm/mori/blob/main/docs/MORI-EP-GUIDE.md
+      - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
+      - https://arxiv.org/abs/2506.04667
+  - operator: all_to_all_dispatch_combine
+    backend: mori
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp8_e4m3, fp4_e2m1]
+    regimes: [prefill, decode, both]
+    card: ../operators/all_to_all_dispatch_combine/backends/mori.md
+    sources:
+      - https://github.com/ROCm/mori/blob/main/docs/MORI-EP-GUIDE.md
+      - https://github.com/ROCm/mori
+      - https://rocm.blogs.amd.com/software-tools-optimization/wide-ep-deepseek/README.html
+      - https://gau-nernst.github.io/amd-a2a/
+  - operator: paged_kv_copy
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
+    regimes: [decode, prefill, both]
+    card: ../operators/paged_kv_copy/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/cache.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/fused_qk_norm_rope_cache_quant.py
+      - https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
+  - operator: paged_kv_copy
+    backend: hip
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
+    regimes: [decode, prefill, both]
+    card: ../operators/paged_kv_copy/backends/hip.md
+    sources:
+      - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/cache.py
+      - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+  - operator: paged_kv_copy
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode, prefill, both]
+    card: ../operators/paged_kv_copy/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+      - https://docs.vllm.ai/en/latest/design/paged_attention/
+  - operator: paged_kv_copy
+    backend: vllm_kernels
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz]
+    regimes: [decode, prefill, both]
+    card: ../operators/paged_kv_copy/backends/vllm_kernels.md
+    sources:
+      - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
+      - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+      - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
+      - https://docs.vllm.ai/en/latest/design/paged_attention/
+  - operator: layout_shuffle
+    backend: aiter
+    status: sota
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp4_e2m1, int8]
+    regimes: [prefill, decode, both]
+    card: ../operators/layout_shuffle/backends/aiter.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/shuffle.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/tuned_gemm.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/configs/
+  - operator: layout_shuffle
+    backend: flydsl
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8, fp4_e2m1]
+    regimes: [prefill, decode]
+    card: ../operators/layout_shuffle/backends/flydsl.md
+    sources:
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/preshuffle_gemm.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/layout_utils.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/mfma_preshuffle_pipeline.py
+      - ROCm/aiter@a6bb4993:aiter/ops/flydsl/gemm_kernels.py
+  - operator: layout_shuffle
+    backend: hip
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, int8]
+    regimes: [both]
+    card: ../operators/layout_shuffle/backends/hip.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/shuffle.py
+      - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
+      - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
+  - operator: layout_shuffle
+    backend: triton
+    status: competitive
+    gens: [gfx942, gfx950]
+    dtypes: [bf16, fp8_e4m3_fnuz, fp4_e2m1, int8]
+    regimes: [both]
+    card: ../operators/layout_shuffle/backends/triton.md
+    sources:
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/shuffle.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton
+      - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html

@@ -33,7 +33,7 @@ throughput delta that exceeds the noise band. See `knowledge/e2e_optimization.md
   host tracks, per-milestone planning + stop rule, and the **persistent cross-run experience library**
   (`knowledge/backend_playbook.md`, grown after every run).
 - **Profiler** = warm-server trace (torch + optional rocprofv3) → ONE standardized Top-N artifact via
-  `scripts/parse_profile.py` (the "规范" contract).
+  `scripts/parse_profile.py` (the "spec" contract).
 - **Config Tuner** = Tier-0 flag/env/backend sweep, runs FIRST (default ON), no source rewrite.
 - **Kernel Extractor** = capture real shapes + a reference I/O oracle → an IMMUTABLE standalone
   unittest task dir the kernel layer consumes (anti-cheating).
@@ -64,18 +64,22 @@ is no rig-specific default that could silently bench the wrong target.
 
 ## The three backend dimensions (per spec)
 A kernel's backend can be changed from three places, in increasing cost (knob names are backend-
-specific — see `kernel_knowledge/02_libraries/<backend>_rocm.md`):
+specific — see `kernel_knowledge/backends/<backend>/` + `kernel_knowledge/reference/env_vars.md`, as
+reference only; verify every switch by measuring):
 1. **launch flags** (`--attention-backend`, `--quantization`, …) — Config Tuner
 2. **env vars** (sglang `SGLANG_USE_AITER` / vllm `VLLM_ROCM_USE_AITER`, `HIPBLASLT_TUNING_FILE`, …) — Config Tuner
-3. **source** (a Triton/HIP/CK/asm reimplementation) — Kernel Extractor + kernel squad, overlaid back
-   reversibly (never editing site-packages). For a hot op with **no existing editable implementation**,
-   the head track now **authors one from scratch**: the Op Benchmarker DISCOVERs existing impls + tunes
-   cheap levers, then emits an `author_plan`; the orchestrator runs the kernel layer in **author mode**
-   (`mode=author target_language=triton|hip|ck`) to write a fresh baseline against the immutable oracle
-   and optimize it, then the Integrator rebinds the op's call site to it and gates on e2e. Routing
-   (direct_light tune vs author/rewrite via the kernel layer vs drop) is decided by Amdahl headroom +
-   rewrite type. Triton is always a viable author target; HIP/CK when the headroom justifies them
-   (`head_author_max`, default 1 = Triton only).
+3. **source** (a Triton/**FlyDSL**/HIP/CK/asm reimplementation) — Kernel Extractor + kernel squad,
+   overlaid back reversibly (never editing site-packages). For a hot op with **no existing editable
+   implementation**, the head track now **authors one from scratch**: the Op Benchmarker DISCOVERs
+   existing impls + tunes cheap levers, then emits an `author_plan`; the orchestrator runs the kernel
+   layer in **author mode** (`mode=author target_language=flydsl|triton|hip|ck`) to write a fresh
+   baseline against the immutable oracle and optimize it, then the Integrator rebinds the op's call site
+   to it and gates on e2e. Routing (direct_light tune vs author/rewrite via the kernel layer vs drop) is
+   decided by Amdahl headroom + rewrite type. Triton is always a viable author target; **for a dense /
+   quantized GEMM (esp. fp8/A4W4) FlyDSL is the preferred author target** (aiter's SOTA GEMM DSL — JIT,
+   no build, baseline reuses `flydsl_hgemm`/`flydsl_preshuffle_gemm_a8`; FlyDSL is also one of the
+   backends aiter's per-shape DB tune races, so it can also win via the cheap env lever with no author
+   step). HIP/CK when the headroom justifies them (`head_author_max`, default 2 = FlyDSL+Triton).
 
 ## Invocation
 Run via the `Workflow` tool. `workflow_dir` must be this folder (a JS workflow can't read its own

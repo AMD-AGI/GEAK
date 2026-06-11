@@ -69,9 +69,22 @@ Your job: decide this round's directions (or stop). Re-read `geomean_levers.md` 
 optimization knowledge first.
 
 Rules:
-1. Produce between 1 and `BUDGET_REMAINING` directions. Fewer is fine if you believe the marginal
-   direction won't pay off — conserve budget. Set `stop=true` (and empty directions) if you judge
-   the kernel is optimized enough or further directions are unlikely to help.
+1. **Default to USING the budget — stopping early is the exception, not the default.** Unspent
+   budget is wasted optimization, and the biggest wins are often found in LATER rounds (after
+   integration shifts the bottleneck). Two rules:
+   - **Pace, don't dump.** Issue ~2–3 directions THIS round (≤ `BUDGET_REMAINING`), not all of it at
+     once. Each round re-profiles and builds on the committed winner, so reserving budget lets you
+     attack the NEW dominant bottleneck that appears after this round's winner is integrated — that
+     post-integration bottleneck is frequently where the decisive lever lives (e.g. the launch-floor
+     collapse only becomes the obvious top target once dispatch/layout/compute are already done).
+   - **Stop only against a hard gate.** Set `stop=true` ONLY if ALL of these hold: (a) where the
+     harness is repeated-call, the launch floor has actually been attacked (wrapper-level graph
+     capture tried — note a *launcher*-level graph dead-end does NOT satisfy this; they are different
+     levers, see `geomean_levers.md` Lever 6); (b) no compute-bound case remains ≳3× the floor; AND
+     (c) the last round's best VERIFIED gain was <~3%. If any of (a)-(c) fails and budget remains,
+     you MUST issue at least one more direction. When you do stop, state in `reasoning` which of
+     (a)-(c) are satisfied. "Floor-dominated / further work not justified" is NOT a valid stop reason
+     unless (a) is genuinely met.
 2. **Diversity / orthogonality (this replaces any separate dedup step)**: every direction MUST have
    a distinct `specialty`+strategy AND a distinct primary `focus_files` set, so they don't collide
    and CAN be integrated. Never issue two near-duplicate directions in one round.
@@ -81,14 +94,20 @@ Rules:
    per-case explicitly with at least one direction.
 3a. **Floor-aware steering (do not fall into the floor-dominated trap — see `geomean_levers.md`).**
    Detect the launch-overhead floor: cases of very different sizes sharing nearly the same latency
-   ARE at the floor and are effectively done (only HIP-graph moves them). When the geomean is
-   floor-dominated, STOP optimizing the floored cases and aim remaining directions at the cases whose
-   ABSOLUTE latency is well above the floor (the compute-bound large-N/high-k shapes) — judge those
-   directions by how far they cut the worst case's milliseconds, not by the floor-diluted geomean.
-   **Never set `stop=true` while the worst compute-bound case is still ≳3× the floor and budget
-   remains** — that means the kernel still has real compute headroom (better warp-cooperative scan,
-   lower VGPR/occupancy, LDS merge, ILP/sorting-network). A truly optimized kernel pulls every shape
-   to near the floor.
+   are at the floor. The floor is NOT "done" — under the repeated-call benchmark harness it is
+   directly attackable with wrapper-level HIP-graph capture/replay (gated on measured replay
+   benefit). Attack BOTH ends:
+   - **When the geomean is floor-dominated (most cases sit at the floor), the floor is the dominant
+     geomean contributor — you MUST dispatch a `host_runtime` graph-capture direction to collapse
+     it** (it lifts every floored case at once). This is the highest-impact direction in that regime,
+     not a last resort; do not pivot away from the floored cases before attacking the floor itself.
+   - In parallel, aim other directions at the cases whose ABSOLUTE latency is well above the floor
+     (the compute-bound large-N/high-k shapes), judged by how far they cut the worst case's
+     milliseconds, not by the floor-diluted geomean.
+   **Never set `stop=true` while EITHER (a) the floor has not yet been attacked with graph capture
+   and most of the geomean sits on it, OR (b) the worst compute-bound case is still ≳3× the floor —
+   and budget remains.** Both mean real headroom is left. A truly optimized kernel has both collapsed
+   its floor (graph capture where it pays) AND pulled every compute-bound shape near the floor.
 4. Pattern triggers (from `optimization_strategies.md`): if a single thread scans a large array →
    round-1 MUST include a warp-cooperative `algorithm` direction. Oversized runtime arrays →
    include a template-specialization direction.
@@ -164,7 +183,7 @@ table, `BASELINE_TIMING`, and `BASELINE_GEOMEAN_MS`.
    - **Summary**: kernel, type, final geomean & arithmetic speedup, rounds, budget used / total.
    - **Round-by-round**: for EACH round list EVERY engineer individually (id, specialty, strategy,
      verified speedup, success/fail + one-line reason), the integrate result, the round winner, and
-     the bottleneck shift. This is the "第一轮优化了 a,b,c 结果怎么样，合并后多少，第二轮…" narrative.
+     the bottleneck shift. This is the "round 1 optimized a, b, c — what were the results, what after merging; round 2 …" narrative.
    - **Final per-test-case table** (baseline ms / optimized ms / speedup) + geomean + arithmetic.
    - **Key optimizations applied** (what + impact).
    - **What didn't work** (dead-ends from the ledger).

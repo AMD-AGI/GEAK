@@ -86,8 +86,8 @@ caller drops that language). `mode="optimize"` (default) is unchanged and fully 
 dirname of `scriptPath`). Everything else is derived: `exp_root` defaults to `<parent of WF_DIR>/exp`.
 
 The user-facing prompt stays minimal & generic, e.g.:
-- `优化下 /xxx/xxx/knn`
-- `优化下 /xxx/xxx/knn， budget 6，重点优化下 wrapper 开销`
+- `optimize /xxx/xxx/knn`
+- `optimize /xxx/xxx/knn, budget 6, focus on wrapper overhead`
 These map to `kernel_path` (+ optional `budget` / `task`). No repo URL needed.
 
 ## Output

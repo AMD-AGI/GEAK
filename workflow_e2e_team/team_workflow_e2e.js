@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Profile', detail: 'Profiler captures a warm trace -> standardized Top-N' },
     { title: 'Strategize', detail: 'System Architect routes kernels by Amdahl (config vs kernel vs host)' },
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
-    { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> backend bake-off + tune -> e2e gate' },
+    { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> backend bake-off (incl. FlyDSL) + aiter-DB/author tune -> e2e gate' },
     { title: 'Milestone', detail: 'loop: plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
     { title: 'Finalize', detail: 'e2e Integrator assembles the overlay + patch + launch bundle' },
     { title: 'Report', detail: 'System Architect writes the throughput report + grows the playbook' },
@@ -52,10 +52,13 @@ const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true
 // Head-kernel track (GEMM/attention) — the highest-pct_gpu_time ops, optimized regardless of edit flag.
 const HEAD_THRESHOLD_PCT = parseFloat(A.head_threshold_pct != null ? A.head_threshold_pct : 5);
 const HEAD_BUDGET = parseInt(A.head_budget != null ? A.head_budget : 3, 10); // max head-op bake-offs
-// Author route: how many languages to author per head op (triton is always first). Default 1 = triton
-// only — keeps the kernel-layer cost bounded; bump to try hip/ck too when the headroom justifies it.
+// Author route: how many languages to author per head op. The Op Benchmarker orders author_plan by ROI
+// (for a GEMM head: flydsl first — SOTA GEMM DSL — then triton). Default 2 covers flydsl+triton per head
+// while keeping the kernel-layer cost bounded; bump to try hip/ck too when the headroom justifies it.
 const HEAD_AUTHOR_MAX = parseInt(A.head_author_max != null ? A.head_author_max : 2, 10);
-// The AMD authoring knowledge base the author_engineer reads. Default: sibling kernel_knowledge/.
+// The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
+// measure). Default: sibling kernel_knowledge/. Workflows enumerate candidates from
+// index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
 const KERNEL_KNOWLEDGE_DIR = String(A.kernel_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_knowledge')).replace(/\/+$/, '');
 const GEMM_SYNTH = String(A.gemm_synth != null ? A.gemm_synth : 'true');     // synth GEMM inputs (cheap)
@@ -662,7 +665,7 @@ if (want('final')) {
 
   phase('Report');
   report = await safeAgent(
-    roleAgent('system_architect', 'report', 'Write architect_report.md AND the full Chinese final_report.md (with the 阶段树 Phases tree + 产物 tree modules).', {
+    roleAgent('system_architect', 'report', 'Write architect_report.md AND the full final_report.md in English (with the Phases tree + artifacts tree modules).', {
       EVAL_DIR, HISTORY: history, BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: finalTput,
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
