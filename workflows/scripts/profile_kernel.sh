@@ -1,7 +1,25 @@
 #!/bin/bash
-# Kernel profiling wrapper with warmup and fallback chain
+# Thin profiling wrapper: warmup + gpu_lock + detect best available profiler + run it + dump RAW output.
+#
+# It deliberately does NOT parse or interpret the profiler output. The profile_engineer reads the raw
+# artifacts written here and classifies the bottleneck itself, following knowledge/profiling_guide.md
+# (which documents how to extract the key metrics + dispatch counts from EACH profiler's format and how
+# to degrade gracefully when a field is absent). Keeping the parsing out of this script is what makes it
+# portable: it never greps for profiler-/version-specific section names ("System Speed-of-Light",
+# "Wavefront", …) or assumes a particular CSV layout, so it keeps working when the toolchain changes.
+#
 # Usage: bash profile_kernel.sh <gpu_id> <benchmark_cmd> <output_dir>
-# Profiles the kernel using rocprof-compute (preferred) with fallbacks
+#
+# Optional env overrides (all have sensible defaults; nothing kernel-specific is hard-coded):
+#   PROFILER_PRIORITY  space-separated profiler order to try
+#                      (default: "rocprof-compute omniperf rocprofv3 rocprof")
+#   WARMUP_RUNS        number of warmup runs before profiling (default: 3)
+#   RPC_PROFILE_ARGS   extra args passed to rocprof-compute/omniperf `profile` (default: "--no-roof")
+#   RPV3_TRACE_ARGS    args passed to rocprofv3 (default: "--kernel-trace --stats --output-format csv")
+#
+# Output: everything lands under <output_dir>. The single entry point for the profile_engineer is
+#   <output_dir>/profile_report.txt   (raw, human/agent-readable; the chosen profiler's full output)
+# plus any profiler-native artifacts (e.g. rocprofv3 CSVs) left in <output_dir>/ for deeper parsing.
 
 set -euo pipefail
 
@@ -12,131 +30,99 @@ OUTPUT_DIR="${3:?Missing output directory}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GPU_LOCK="$SCRIPT_DIR/gpu_lock.sh"
 
-mkdir -p "$OUTPUT_DIR"
+WARMUP_RUNS="${WARMUP_RUNS:-3}"
+PROFILER_PRIORITY="${PROFILER_PRIORITY:-rocprof-compute omniperf rocprofv3 rocprof}"
+RPC_PROFILE_ARGS="${RPC_PROFILE_ARGS:---no-roof}"
+RPV3_TRACE_ARGS="${RPV3_TRACE_ARGS:---kernel-trace --stats --output-format csv}"
 
-# Use the local GPU arch so profiling does not trigger a fresh ~9-arch global rebuild (generic; the
-# BENCHMARK_CMD is expected to `cd` into the workspace whose isolated .torch_ext already holds the .so).
-# Override the environment's multi-arch default (set KERNEL_ENV_KEEP_ARCH=1 to opt out).
-if [ "${KERNEL_ENV_KEEP_ARCH:-0}" != "1" ]; then
+mkdir -p "$OUTPUT_DIR"
+REPORT="$OUTPUT_DIR/profile_report.txt"
+: > "$REPORT"
+
+# Compile for the local GPU arch only so profiling does not trigger a fresh ~9-arch global rebuild
+# (the BENCHMARK_CMD is expected to `cd` into the workspace whose isolated .torch_ext already holds the
+# built .so). Generic; honors a caller-set PYTORCH_ROCM_ARCH, and KERNEL_ENV_KEEP_ARCH=1 opts out.
+if [ "${KERNEL_ENV_KEEP_ARCH:-0}" != "1" ] && [ -z "${PYTORCH_ROCM_ARCH:-}" ]; then
     _ARCH="$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)"
     [ -n "${_ARCH:-}" ] && export PYTORCH_ROCM_ARCH="$_ARCH"
 fi
 
-echo "=== Profiling Setup ==="
+echo "=== Profiling setup ==="
 echo "GPU: $GPU_ID"
 echo "Command: $BENCHMARK_CMD"
 echo "Output: $OUTPUT_DIR"
+echo "Profiler priority: $PROFILER_PRIORITY"
 
-# Step 1: Warmup runs to stabilize GPU clocks
+# Step 1: Warmup to stabilize GPU clocks (all GPU work goes through gpu_lock).
 echo ""
-echo "=== Warmup (3 runs) ==="
-for i in 1 2 3; do
-    echo "Warmup run $i/3..."
+echo "=== Warmup ($WARMUP_RUNS runs) ==="
+for i in $(seq 1 "$WARMUP_RUNS"); do
+    echo "Warmup run $i/$WARMUP_RUNS..."
     bash "$GPU_LOCK" "$GPU_ID" bash -c "$BENCHMARK_CMD" > /dev/null 2>&1 || true
 done
 
-# Step 2: Try profilers in order of preference
+# Step 2: Pick the first available profiler from the priority list.
 PROFILER=""
+for p in $PROFILER_PRIORITY; do
+    if command -v "$p" &> /dev/null; then PROFILER="$p"; break; fi
+done
+
 PROFILE_SUCCESS=false
 
-# Try rocprof-compute (formerly omniperf)
-if command -v rocprof-compute &> /dev/null; then
-    PROFILER="rocprof-compute"
-elif command -v omniperf &> /dev/null; then
-    PROFILER="omniperf"
-fi
-
-if [ -n "$PROFILER" ]; then
-    echo ""
-    echo "=== Profiling with $PROFILER ==="
-
-    WORKLOAD_DIR="/tmp/team_workloads/profile_$(date +%s)"
-    mkdir -p "$(dirname "$WORKLOAD_DIR")"
-
-    # Profile (with GPU lock)
+run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump the FULL analyze text.
+    local tool="$1"
+    local workload="$OUTPUT_DIR/${tool}_workload"
+    rm -rf "$workload"; mkdir -p "$workload"
+    echo "=== Profiling with $tool (profile $RPC_PROFILE_ARGS) ==="
     bash "$GPU_LOCK" "$GPU_ID" \
-        $PROFILER profile --no-roof -n "$WORKLOAD_DIR" -- bash -c "$BENCHMARK_CMD" \
-        > "$OUTPUT_DIR/profile_raw.log" 2>&1
-
-    if [ $? -eq 0 ] && [ -d "$WORKLOAD_DIR" ]; then
-        echo "Profile data collected at $WORKLOAD_DIR"
-
-        # Analyze
-        echo ""
-        echo "=== Analyzing profile data ==="
-        $PROFILER analyze -p "$WORKLOAD_DIR" \
-            > "$OUTPUT_DIR/profile_report.txt" 2>&1 || true
-
-        if [ -f "$OUTPUT_DIR/profile_report.txt" ] && [ -s "$OUTPUT_DIR/profile_report.txt" ]; then
-            PROFILE_SUCCESS=true
-            echo "Profile report saved to $OUTPUT_DIR/profile_report.txt"
-
-            # Extract key sections
-            echo ""
-            echo "=== Key Metrics ==="
-            grep -A 50 "System Speed-of-Light" "$OUTPUT_DIR/profile_report.txt" 2>/dev/null | head -60 || true
-            echo "---"
-            grep -A 30 "Wavefront" "$OUTPUT_DIR/profile_report.txt" 2>/dev/null | head -40 || true
-        fi
-
-        # Cleanup workload directory
-        rm -rf "$WORKLOAD_DIR" 2>/dev/null || true
+        "$tool" profile $RPC_PROFILE_ARGS -n "$workload" -- bash -c "$BENCHMARK_CMD" \
+        > "$OUTPUT_DIR/${tool}_profile_raw.log" 2>&1 || true
+    if [ -d "$workload" ]; then
+        echo "=== $tool analyze (full, unparsed) ===" >> "$REPORT"
+        bash "$GPU_LOCK" "$GPU_ID" "$tool" analyze -p "$workload" >> "$REPORT" 2>&1 || true
     fi
-fi
+    [ -s "$REPORT" ] && PROFILE_SUCCESS=true
+}
 
-# Fallback: rocprofv3 (modern profiler; gives per-kernel dispatch counts + durations)
-if [ "$PROFILE_SUCCESS" = false ] && command -v rocprofv3 &> /dev/null; then
-    echo ""
-    echo "=== Fallback: rocprofv3 --kernel-trace ==="
-    PROFILER="rocprofv3"
-    RPV3_DIR="$OUTPUT_DIR/rocprofv3"
-    mkdir -p "$RPV3_DIR"
+run_rocprofv3() {        # modern profiler: kernel trace + stats CSVs (per-kernel dispatch counts + durations).
+    local dir="$OUTPUT_DIR/rocprofv3"
+    rm -rf "$dir"; mkdir -p "$dir"
+    echo "=== Profiling with rocprofv3 ($RPV3_TRACE_ARGS) ==="
     bash "$GPU_LOCK" "$GPU_ID" \
-        rocprofv3 --kernel-trace --stats --output-format csv -d "$RPV3_DIR" -- bash -c "$BENCHMARK_CMD" \
-        > "$OUTPUT_DIR/profile_report.txt" 2>&1 || true
-    # Surface any kernel-stats CSV into the report for the profile engineer to parse.
-    for csv in "$RPV3_DIR"/*kernel*stats*.csv "$RPV3_DIR"/*/*kernel*stats*.csv "$RPV3_DIR"/*.csv; do
-        [ -f "$csv" ] || continue
-        echo "" >> "$OUTPUT_DIR/profile_report.txt"
-        echo "=== rocprofv3 kernel stats: $csv ===" >> "$OUTPUT_DIR/profile_report.txt"
-        cat "$csv" >> "$OUTPUT_DIR/profile_report.txt"
-    done
-    if [ -s "$OUTPUT_DIR/profile_report.txt" ]; then
-        PROFILE_SUCCESS=true
-        echo "rocprofv3 report saved"
-    fi
-fi
+        rocprofv3 $RPV3_TRACE_ARGS -d "$dir" -- bash -c "$BENCHMARK_CMD" \
+        > "$OUTPUT_DIR/rocprofv3_run.log" 2>&1 || true
+    # Surface every artifact rocprofv3 produced into the report (generic: no fixed filename glob).
+    { cat "$OUTPUT_DIR/rocprofv3_run.log"; echo ""; } >> "$REPORT" 2>/dev/null || true
+    while IFS= read -r f; do
+        { echo ""; echo "=== rocprofv3 artifact: $f ==="; cat "$f"; } >> "$REPORT" 2>/dev/null || true
+    done < <(find "$dir" -type f \( -name '*.csv' -o -name '*.json' -o -name '*.txt' \) 2>/dev/null | sort)
+    [ -s "$REPORT" ] && PROFILE_SUCCESS=true
+}
 
-# Fallback: rocprof --stats
-if [ "$PROFILE_SUCCESS" = false ] && command -v rocprof &> /dev/null; then
-    echo ""
-    echo "=== Fallback: rocprof --stats ==="
-    PROFILER="rocprof"
+run_rocprof() {          # legacy: rocprof --stats (HIP dispatch stats).
+    echo "=== Profiling with rocprof --stats ==="
+    bash "$GPU_LOCK" "$GPU_ID" rocprof --stats bash -c "$BENCHMARK_CMD" >> "$REPORT" 2>&1 || true
+    [ -s "$REPORT" ] && PROFILE_SUCCESS=true
+}
 
-    bash "$GPU_LOCK" "$GPU_ID" \
-        rocprof --stats bash -c "$BENCHMARK_CMD" \
-        > "$OUTPUT_DIR/profile_report.txt" 2>&1 || true
+case "$PROFILER" in
+    rocprof-compute|omniperf) run_rocprof_compute "$PROFILER" ;;
+    rocprofv3)                run_rocprofv3 ;;
+    rocprof)                  run_rocprof ;;
+    "")                       echo "No profiler found in priority list; benchmark-only." ;;
+esac
 
-    if [ -f "$OUTPUT_DIR/profile_report.txt" ] && [ -s "$OUTPUT_DIR/profile_report.txt" ]; then
-        PROFILE_SUCCESS=true
-        echo "rocprof stats saved"
-    fi
-fi
-
-# Final fallback: benchmark-only
+# Final fallback: no profiler available, or the chosen one produced nothing -> benchmark-only.
 if [ "$PROFILE_SUCCESS" = false ]; then
     echo ""
-    echo "=== Fallback: benchmark-only (no profiler available) ==="
+    echo "=== Fallback: benchmark-only (no usable profiler output) ==="
     PROFILER="benchmark-only"
-
-    bash "$GPU_LOCK" "$GPU_ID" bash -c "$BENCHMARK_CMD" \
-        > "$OUTPUT_DIR/profile_report.txt" 2>&1
-
-    echo "Benchmark output saved (no profiler data)"
+    bash "$GPU_LOCK" "$GPU_ID" bash -c "$BENCHMARK_CMD" >> "$REPORT" 2>&1 || true
 fi
 
 echo ""
-echo "=== Profiling Complete ==="
-echo "Profiler used: $PROFILER"
-echo "Report: $OUTPUT_DIR/profile_report.txt"
-echo "Success: $PROFILE_SUCCESS"
+echo "=== Profiling complete ==="
+echo "Profiler used: ${PROFILER:-benchmark-only}"
+echo "Report: $REPORT"
+echo "Artifacts:"
+find "$OUTPUT_DIR" -maxdepth 2 -type f 2>/dev/null | sort | sed 's/^/  /' || true

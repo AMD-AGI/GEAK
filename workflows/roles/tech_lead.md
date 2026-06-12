@@ -14,7 +14,7 @@ Always-available references (Read what's relevant to the phase):
 - `SKILL_DIR/knowledge/geomean_levers.md` — how to beat the wall-clock floor (read every round)
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per kernel type
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns
-- `SKILL_DIR/knowledge/amd_mi300x.md`, `SKILL_DIR/knowledge/profiling_guide.md`
+- `SKILL_DIR/knowledge/amd_instinct.md` (the target card — detect gfx942/gfx950 on-box), `SKILL_DIR/knowledge/profiling_guide.md`
 
 ### `KERNEL_KNOWLEDGE_DIR` — the AMD operator×backend SOTA base (REFERENCE ONLY)
 When `KERNEL_KNOWLEDGE_DIR` is non-empty, it points at the `kernel_knowledge/` base: per-operator,
@@ -27,13 +27,24 @@ COMMANDMENT correctness + on-box benchmark; the verify step re-measures every pa
 only help, never hurt. If it is empty or no card matches this kernel (e.g. a point-cloud HIP op),
 ignore it — behavior is unchanged.
 
-## The four engineer specialties (you assign every direction to exactly one)
+## The engineer specialties (you assign every direction to exactly one)
+The first four are **narrow specialists** — one technique, one `focus_files` lane, kept orthogonal so
+they can run in parallel and be merged:
 - **algorithm** — P0: warp-cooperative, complexity reduction, kernel fusion, template specialization.
 - **memory** — P1/P2: LDS tiling, coalescing, vectorized loads, SoA/native layouts.
 - **compute** — P3/P4: branchless, ILP, FMA, unrolling, launch bounds, occupancy/VGPR tuning.
 - **host_runtime** — PW: wrapper/binding overhead, output layout, allocation, dispatch collapse,
   CUDA-graph/persistent kernels. This is a FIRST-CLASS track, not an afterthought — once the kernel
   compute is fast, host/runtime + dispatch overhead is usually the dominant remaining cost.
+
+The fifth is the **open-ended deep optimizer** — use it differently (see the plan_round rule on it):
+- **deep_explore** — NO single technique and NO fixed lane. You give it a HIGH target (a speedup
+  multiple and/or "reach ~90% of roofline") and minimal directional steering; it has broad authority
+  (may edit kernel + wrapper + binding together), combines many levers into one coherent rewrite, and
+  runs its OWN long measure→self-profile→rewrite loop. It is heavyweight: it costs **DEEP_COST budget
+  (default 2)** and ALWAYS runs in a **dedicated round by itself** (the script drops any other
+  directions you pair with it that round, and its broad rewrite is not expected to merge with
+  specialist patches — it competes as a standalone candidate).
 
 ---
 
@@ -158,6 +169,20 @@ Rules:
    orthogonal to the other directions this round).
 6. Carry forward learning: fold the HISTORY insights into the prompts ("E0 last round showed K=10
    spills VGPRs — try LDS for the top-K merge").
+7. **When to dispatch `deep_explore`.** It is your high-risk/high-reward lever — reach for it when:
+   (a) the specialist directions have **plateaued** (the ledger shows the last round's verified gains
+   are small and orthogonal tweaks are exhausted), OR (b) the kernel needs a **ground-up rewrite** that
+   no single narrow lane can deliver (the winning implementation must fuse algorithm + memory + compute
+   + host_runtime at once), OR (c) you want to make a focused push to a **roofline target**. How to
+   issue it:
+   - Make it the **only** direction that round (the script enforces a dedicated round anyway, and it
+     costs DEEP_COST budget — so confirm `BUDGET_REMAINING ≥ DEEP_COST` before issuing one).
+   - Set an **ambitious `expected_speedup`** (e.g. ~2–3× beyond the current cumulative, or the multiple
+     implied by the roofline) and state the target in the `prompt` as a goal, NOT a recipe. Give
+     context (current bottleneck, per-case worst offenders, roofline estimate, confirmed dead-ends from
+     the ledger) but DO NOT prescribe the technique — finding the path is its job.
+   - `focus_files` are hints only; it may edit any modifiable source. Do not pair it with specialists
+     expecting a merge.
 
 Return JSON:
 ```json

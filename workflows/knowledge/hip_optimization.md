@@ -172,7 +172,8 @@ Use `#pragma unroll` for small, fixed-trip-count loops. Use `#pragma unroll N` t
 Higher occupancy hides latency but limits registers per thread. For register-heavy kernels, lower occupancy with more registers can be faster.
 
 ### Grid Size
-- Ensure enough blocks to fill all 304 CUs
+- Ensure enough blocks to fill all CUs (detect the count with `rocminfo` — 304 on MI300X/MI325X, 228 on
+  MI300A, 256 on MI350/MI355, reduced on MI308X; do not hard-code 304)
 - For small problems: use persistent threads (fewer blocks, each does more work)
 
 ## P5: Autotuning

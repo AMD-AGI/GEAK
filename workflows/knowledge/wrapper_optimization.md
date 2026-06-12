@@ -1,6 +1,6 @@
 # Python Wrapper Optimization Patterns
 
-When the GPU kernel itself is already fast (< 10us), the Python/C++ wrapper becomes the dominant bottleneck. On AMD MI300X, PyTorch framework overhead creates a ~14us floor per kernel call. Optimizing the wrapper can provide 2-5x additional speedup.
+When the GPU kernel itself is already fast (< 10us), the Python/C++ wrapper becomes the dominant bottleneck. On AMD Instinct (MI300-series and newer), PyTorch framework overhead creates a roughly ~10–15us floor per kernel call (varies by card, ROCm/PyTorch version, and host — measure it on your box). Optimizing the wrapper can provide 2-5x additional speedup.
 
 ## Priority Order
 

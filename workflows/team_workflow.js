@@ -1,6 +1,6 @@
 export const meta = {
   name: 'team-perf-workflow',
-  description: 'Multi-agent GPU kernel / e2e-model optimization (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes a kernel or vLLM/SGLang model for inference speed on AMD MI300X.',
+  description: 'Multi-agent GPU kernel / e2e-model optimization (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes a kernel or vLLM/SGLang model for inference speed on AMD Instinct MI-series GPUs (MI300X/300A/308X/325X on CDNA3 gfx942, MI350X/355X on CDNA4 gfx950 — the target card is auto-detected on-box).',
   whenToUse: 'Optimize the inference speed of a kernel directory (single kernel, fused kernels) or an end-to-end vLLM/SGLang model. Pass args.kernel_path (required), args.budget, args.gpu_ids, args.task.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
     { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
-    { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist engineers optimize, reprofile' },
+    { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist OR deep_explore engineers optimize, reprofile' },
     { title: 'Verify', detail: 'each candidate patch independently re-benchmarked' },
     { title: 'Merge', detail: 'integrator combines the round winners' },
     { title: 'Report', detail: 'tech_lead writes the final report + patch' },
@@ -38,6 +38,21 @@ const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/
 
 const KERNEL_PATH_ORIG = A.kernel_path;
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
+// Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
+// into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
+// gate is tunable per run (e.g. raise it on a noisy box, lower it to bank small compounding wins).
+const MIN_IMPROVE = (() => {
+  const v = parseFloat(A.min_improve != null ? A.min_improve : 0.02);
+  return Number.isFinite(v) && v >= 0 ? v : 0.02;
+})();
+// Budget cost of ONE `deep_explore` direction. The deep-explore engineer does far more than a single
+// specialist — broad rewrite authority, its own multi-iteration measure→profile→rewrite loop — so it
+// is charged more than 1 against the direction budget (default 2). It also always runs in a DEDICATED
+// round (no other directions that round), enforced below.
+const DEEP_COST = (() => {
+  const v = parseInt(A.deep_cost != null ? A.deep_cost : 2, 10);
+  return Number.isFinite(v) && v >= 1 ? v : 2;
+})();
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 const TASK = A.task || '';
@@ -108,6 +123,9 @@ const BENCH_SCHEMA = obj({
 
 const PROFILE_SCHEMA = obj({
   bottleneck: { type: 'string' }, profiler_used: { type: 'string' }, dispatch_count: { type: 'number' },
+  // The accelerator detected on-box (e.g. "MI300X / gfx942 / CDNA3, 304 CU, ~5.3 TB/s"), so the
+  // roofline ceiling + grid-sizing advice downstream use the real card instead of an assumed MI300X.
+  device: { type: 'string' },
   key_metrics: { type: 'object', additionalProperties: true },
   top_kernels: { type: 'array', items: { type: 'object', additionalProperties: true } },
   top_opportunities: { type: 'array', items: { type: 'string' } },
@@ -120,7 +138,7 @@ const PLAN_SCHEMA = obj({
     type: 'array',
     items: obj({
       id: { type: 'string' }, title: { type: 'string' },
-      specialty: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime'] },
+      specialty: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime', 'deep_explore'] },
       focus_files: { type: 'array', items: { type: 'string' } },
       expected_speedup: { type: 'number' }, prompt: { type: 'string' },
       kk_refs: { type: 'array', items: { type: 'string' } }, // optional: kernel_knowledge card paths for THIS direction (REFERENCE ONLY)
@@ -322,13 +340,30 @@ while (dispatched < BUDGET && noImprove < 2) {
     gpu_id: GPU_LIST[i % GPU_LIST.length],
     out_dir: `${EVAL_DIR}/round_${round}/engineer_${i}`,
   }));
-  dispatched += directions.length;
-  log(`Round ${round}: ${directions.length} directions [${directions.map(d => d.specialty).join(', ')}], budget ${dispatched}/${BUDGET}`);
+  // deep_explore is a DEDICATED-ROUND, heavyweight mandate: if the plan includes one, run ONLY it this
+  // round (its broad ground-up rewrite touches many files and can't be merged with specialist patches),
+  // and charge DEEP_COST against the budget. Otherwise each specialist direction costs 1.
+  const deepDir = directions.find(d => d.specialty === 'deep_explore');
+  if (deepDir) directions = [deepDir];
+  const roundCost = directions.reduce((s, d) => s + (d.specialty === 'deep_explore' ? DEEP_COST : 1), 0);
+  dispatched += roundCost;
+  log(`Round ${round}: ${directions.length} direction(s) [${directions.map(d => d.specialty).join(', ')}], cost ${roundCost}, budget ${dispatched}/${BUDGET}`);
 
   // --- (b,c) Optimize -> Verify, pipelined per direction ----------------
   const results = await pipeline(
     directions,
-    (d) => agent(
+    (d) => {
+      const isDeep = d.specialty === 'deep_explore';
+      // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
+      const readLine = isDeep
+        ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and ALL knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
+          `(you have broad authority — combine algorithm + memory + compute + host_runtime levers in one ` +
+          `coherent rewrite), and follow them. You MAY edit ANY modifiable source (kernel + Python wrapper ` +
+          `+ C++ binding), not just focus_files. Run your OWN multi-iteration measure→(self-)profile→rewrite ` +
+          `loop and push to the TARGET; keep the best correct version.`
+        : `Then Read ${WORKFLOW_DIR}/roles/engineer.md and ${WORKFLOW_DIR}/knowledge/self_monitoring.md and the ` +
+          `knowledge files for your specialty, and follow them.`;
+      return agent(
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
 First create YOUR private workspace, then optimize.
 \`\`\`bash
@@ -338,16 +373,16 @@ rm -rf ${d.out_dir}/workspace; cp -r ${CANONICAL}/. ${d.out_dir}/workspace
 # inherited cache would rebuild the wrong location. Each workspace builds its own fresh.
 rm -rf ${d.out_dir}/workspace/build ${d.out_dir}/workspace/__pycache__ ${d.out_dir}/workspace/*/__pycache__ ${d.out_dir}/workspace/*.so ${d.out_dir}/workspace/.torch_ext 2>/dev/null || true
 \`\`\`
-Then Read ${WORKFLOW_DIR}/roles/engineer.md and ${WORKFLOW_DIR}/knowledge/self_monitoring.md and the
-knowledge files for your specialty, and follow them. If KK_OPERATOR is non-empty, also consult the
-operator/language SOTA cards under KERNEL_KNOWLEDGE_DIR per engineer.md's "operator/language SOTA
-knowledge (REFERENCE ONLY)" section (facts/how-to only; measure everything; never go below baseline).
+${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
+KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
+(facts/how-to only; measure everything; never go below baseline).
 Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patch.diff\` when geomean>1.0.
 
 ## Inputs
 ${cfg({
         SPECIALTY: d.specialty,
         DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
+        ...(isDeep ? { TARGET: d.expected_speedup ? `reach ${d.expected_speedup}x (or ~90% of the roofline ceiling), whichever is the harder bar` : 'reach ~90% of the roofline ceiling' } : {}),
         KERNEL_PATH: `${d.out_dir}/workspace`,
         OUTPUT_DIR: d.out_dir,
         CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
@@ -360,8 +395,9 @@ ${cfg({
       })}
 
 Return ONLY the worker_result.json structure as StructuredOutput.`,
-      { phase: 'Optimize', label: `eng ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
-    ).then((eng) => ({ d, eng })),
+      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
+    ).then((eng) => ({ d, eng }));
+    },
 
     (prev) => {
       const { d, eng } = prev;
@@ -416,7 +452,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
 
   candidates.sort((a, b) => b.geomean - a.geomean);
   const winner = candidates[0] || null;
-  const improved = !!(winner && winner.geomean > cumulative * 1.05);
+  const improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
@@ -426,13 +462,20 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
 cd ${CANONICAL}
 git checkout -- .
-git apply ${winner.patch}
+# Try a plain apply first, then a 3-way apply (auto-reconciles context-line drift against the blobs)
+# before falling back to a manual reconstruction. --3way resolves most "patch does not apply" cases
+# that are just context offsets, so the manual path is only hit on a genuine semantic conflict.
+git apply ${winner.patch} || git apply --3way ${winner.patch}
 git -c user.email=team@workflow -c user.name=team add -A
 git -c user.email=team@workflow -c user.name=team commit -q -m "round ${round} winner: ${winner.source} (${winner.geomean.toFixed(2)}x)"
 git --no-pager diff "$(git rev-list --max-parents=0 HEAD)..HEAD" > ${EVAL_DIR}/current_best.diff
 \`\`\`
-If \`git apply\` fails, inspect the patch and apply it manually (edit files to match), then commit.
-Confirm correctness is unaffected is NOT required here (already verified). Return JSON {committed, current_best_diff, note}.`,
+If BOTH \`git apply\` and \`git apply --3way\` fail, inspect the patch and apply it manually (edit the
+files to match the patch's intent), then \`add -A\` + commit. The applied source is NOT guaranteed to
+match the patch verbatim after a hand-merge, so after committing, RE-RUN the COMMANDMENT correctness
+check (cd ${CANONICAL} && the COMMANDMENT CORRECTNESS cmd via gpu_lock); only report committed=true if
+it still passes. (When a clean \`git apply\`/\`--3way\` succeeds, correctness was already verified and a
+re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
     cumulative = winner.geomean;
     bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;

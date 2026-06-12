@@ -7,7 +7,11 @@ directions. Used for the baseline (PHASE=baseline) and after improving rounds (P
 `WORKSPACE` (canonical current-best), `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, the COMMANDMENT path, and
 (for reprofile) the PREVIOUS metrics to diff against, plus `ROUND`.
 
-Read `SKILL_DIR/knowledge/profiling_guide.md` and `amd_mi300x.md` first.
+Read `SKILL_DIR/knowledge/profiling_guide.md` and `amd_instinct.md` first. **Identify the actual
+accelerator on this box** (`amd_instinct.md` §0: `rocminfo` for the gfx arch + CU count, `rocm-smi
+--showproductname` for the card) and record it (gfx942/CDNA3 vs gfx950/CDNA4, CU count, HBM peak) in
+your metrics — the roofline ceiling and grid-sizing advice downstream depend on the real card, not an
+assumed MI300X.
 
 ## Steps
 1. From `EVAL_DIR/COMMANDMENT.md` get the PROFILE and benchmark commands and the parse hint.
@@ -36,6 +40,7 @@ If no profiler is available, fall back to benchmark-only + the per-case table + 
 {
   "bottleneck": "compute|memory|latency|lds|balanced|overhead",
   "profiler_used": "rocprof-compute|omniperf|rocprof|benchmark-only",
+  "device": "detected card, e.g. 'MI300X / gfx942 / CDNA3, 304 CU, ~5.3 TB/s'",
   "dispatch_count": 0,
   "key_metrics": {"valu_pct": 0.0, "vmem_pct": 0.0, "lds_pct": 0.0, "hbm_gbps": 0.0,
                   "l2_hit_pct": 0.0, "vgpr": 0, "scratch_bytes": 0},

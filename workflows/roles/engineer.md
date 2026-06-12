@@ -16,8 +16,8 @@ work in your OWN private workspace copy — total isolation, no coordination wit
 
 ## Load only the knowledge for your specialty (keeps context focused)
 - algorithm  → `hip_optimization.md` (P0/P1) or `triton_optimization.md`, + `geomean_levers.md`
-- memory     → `hip_optimization.md` (P1/P2) or `triton_optimization.md`, + `amd_mi300x.md`
-- compute    → `hip_optimization.md` (P3/P4) + `amd_mi300x.md` (occupancy/VGPR table)
+- memory     → `hip_optimization.md` (P1/P2) or `triton_optimization.md`, + `amd_instinct.md`
+- compute    → `hip_optimization.md` (P3/P4) + `amd_instinct.md` (detect the card; occupancy/VGPR table)
 - host_runtime → `wrapper_optimization.md` + `geomean_levers.md` (dispatch collapse, native layout,
   allocation, CUDA graph). You MAY edit the Python wrapper AND the C++ binding, not just the kernel.
 

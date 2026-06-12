@@ -2,7 +2,9 @@
 
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that optimizes the inference
 speed of a GPU kernel directory — a single kernel, several kernels fused together, or an end-to-end
-vLLM / SGLang model — on AMD MI300X. It is the dynamic-workflow successor to the markdown-driven
+vLLM / SGLang model — on AMD Instinct MI-series accelerators (MI300X / MI300A / MI308X / MI325X on
+CDNA3 gfx942, and MI350X / MI355X on CDNA4 gfx950 — the card is detected on-box, not assumed). It is
+the dynamic-workflow successor to the markdown-driven
 `skills/team` skill: the budget loop, round fan-out, and verification are now **JS control flow**,
 while every judgement call is made by an agent returning **structured JSON**.
 
@@ -13,7 +15,11 @@ while every judgement call is made by an agent returning **structured JSON**.
    by a separate `verify_engineer` in a clean workspace *as soon as it finishes* (pipelined). The
    script trusts only verified, absolute-latency numbers → the winner is genuinely the fastest.
 3. **Specialist engineers (A)** — `algorithm | memory | compute | host_runtime`; each loads only its
-   relevant knowledge → focused context, sharper results, naturally orthogonal & mergeable.
+   relevant knowledge → focused context, sharper results, naturally orthogonal & mergeable. Plus a
+   fifth **`deep_explore`** track: an open-ended deep optimizer the TechLead hands a high target (Nx
+   and/or ~90% roofline) with minimal steering — broad authority (kernel + wrapper + binding), its own
+   long measure→self-profile→rewrite loop. It costs `deep_cost` budget (default 2) and always runs in a
+   dedicated round on its own (its ground-up rewrite isn't expected to merge with specialist patches).
 4. **Host/Runtime as a first-class track (B)** — attacks the wall-clock floor (dispatch collapse,
    native layouts, CUDA graph, wrapper overhead). This is where the last 1.5–3x of geomean lives.
 5. **Cross-round memory (C)** — an insight blackboard + hypothesis ledger threads what was learned
@@ -59,6 +65,10 @@ Workflow({
     workflow_dir: "<WF_DIR>",  // REQUIRED: same folder as scriptPath (holds roles/ knowledge/ scripts/);
                                //           a JS workflow can't read its own path, so the caller passes it
     budget: 6,                 // optional, default 6
+    min_improve: 0.02,         // optional, default 0.02 (2%): min verified geomean gain over the
+                               //           cumulative best for a round winner to be committed
+    deep_cost: 2,              // optional, default 2: budget cost of one deep_explore direction
+                               //           (heavyweight; always runs in its own dedicated round)
     gpu_ids: "0",              // optional, comma-separated, default "0"
     task: "focus on ...",      // optional natural-language steer
     exp_root: "",              // optional, output root; default = sibling "exp/" next to workflow_dir
@@ -66,7 +76,7 @@ Workflow({
     apply_to_original: "false",// optional; if "true", write the validated patch back to kernel_path
     // --- author mode (write a fresh implementation from scratch, then optimize it) ---
     mode: "optimize",          // optional: "optimize" (default, edit an existing kernel) | "author"
-    target_language: "triton", // author mode: triton (always) | hip | ck — the language to write
+    target_language: "triton", // author mode: triton (always) | flydsl | hip | ck — the language to write
     op_spec: {},               // author mode: {op_kind, shapes, dtype, math_contract, regime} for the op
     kernel_knowledge_dir: ""   // optional: AMD authoring knowledge base the author_engineer reads
   }
@@ -110,9 +120,10 @@ Director/TechLead/Engineer orchestration is identical.
 ## Files
 ```
 team_workflow.js     orchestration (deterministic)
-roles/               director, tech_lead, engineer, benchmark_engineer,
-                     profile_engineer, verify_engineer, integrator
+roles/               director, tech_lead, engineer, deep_engineer (deep_explore),
+                     author_engineer, benchmark_engineer, profile_engineer,
+                     verify_engineer, integrator
 knowledge/           optimization_strategies, hip/triton/wrapper, profiling_guide,
-                     amd_mi300x, self_monitoring, geomean_levers
+                     amd_instinct (multi-card: gfx942/gfx950), self_monitoring, geomean_levers
 scripts/             gpu_lock.sh, profile_kernel.sh
 ```

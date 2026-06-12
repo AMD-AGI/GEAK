@@ -139,7 +139,12 @@ AMD uses 64-thread wavefronts (not 32). This affects:
 - Memory coalescing width: 64 threads * 4 bytes = 256 bytes per access
 
 ### MFMA Tile Sizes
-MFMA supports specific tile sizes on gfx942: 4x4x4, 16x16x16, 32x32x8. Match `BLOCK_M/N/K` to these for best utilization.
+Match `BLOCK_M/N/K` to the hardware MFMA tile shapes for best utilization (detect the arch with
+`rocminfo`):
+- **gfx942 (CDNA3)**: 4x4x4, 16x16x16, 32x32x8 (plus 16x16x32 / 32x32x16 for 8-bit). Prefer
+  `matrix_instr_nonkdim=16`.
+- **gfx950 (CDNA4)**: adds new/wider MFMA variants and native MXFP4/MXFP6/MXFP8 (block-scaled) matrix
+  ops not present on gfx942 — a major low-precision GEMM lever. See `amd_instinct.md` §3.
 
 ## P4: Autotune Configurations
 

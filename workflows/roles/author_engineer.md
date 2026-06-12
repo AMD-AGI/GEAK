@@ -53,9 +53,12 @@ Read, as reference, before writing:
   attention_decode→`attention_decode_paged`, mla→`mla_attention`,
   linear_attention→`linear_attention_gated_delta`, moe→`fused_moe_grouped_gemm`/`grouped_gemm_moe`
   (else the closest dir under `operators/`).
-- **Hardware sanity (first cut only):** `hardware/shared/matrix_core_mfma_smfmac.md` + `dtype_numerics.md`
-  for MFMA shape/dtype; gotchas (FNUZ fp8 on gfx942; prefer `matrix_instr_nonkdim=16`) in
-  `quantization/fnuz_vs_ocp.md` / `optimization/mfma_scheduling.md`.
+- **Hardware sanity (first cut only):** detect the arch with `rocminfo` and read
+  `SKILL_DIR/knowledge/amd_instinct.md` §3 for the arch-specific fp8 format + MFMA shapes —
+  **fp8 is FNUZ on gfx942 (CDNA3) but OCP on gfx950 (CDNA4), which also adds MXFP4/MXFP6**; picking the
+  wrong fp8 format silently fails correctness. Also `hardware/shared/matrix_core_mfma_smfmac.md` +
+  `dtype_numerics.md` for MFMA shape/dtype, and `quantization/fnuz_vs_ocp.md` /
+  `optimization/mfma_scheduling.md` (prefer `matrix_instr_nonkdim=16` on gfx942).
 
 ## Rules (NON-NEGOTIABLE)
 1. NEVER modify `TASK_DIR/unittest.py`, `reference_io.pt`, or `meta.json` — they are the immutable

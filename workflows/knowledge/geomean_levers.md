@@ -72,7 +72,8 @@ and target it specifically:
 
 ## Lever 5 — Persistent / grid-right kernels for small problems
 
-Tiny shapes underfill the 304 CUs. A grid of a few blocks wastes launch latency relative to work.
+Tiny shapes underfill the device's CUs (304 on MI300X/MI325X, 228 on MI300A, 256 on MI350/MI355 —
+detect with `rocminfo`, see `amd_instinct.md`). A grid of a few blocks wastes launch latency relative to work.
 - Use **persistent threads** (launch ~#CU blocks, loop over work items) to amortize launch.
 - Or batch multiple logical calls into one launch when the harness issues several in a row.
 
