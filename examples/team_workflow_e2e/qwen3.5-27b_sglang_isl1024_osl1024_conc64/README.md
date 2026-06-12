@@ -18,9 +18,9 @@ Workflow({
 ```
 
 ## Files
-- **`final_report.md`** — the headline deliverable: complete Chinese timeline with the **阶段树
-  (Phases tree)** + **产物树 (artifact tree)** modules, baseline + profile breakdown, every attempt
-  (kept AND rejected) with isolated/e2e deltas and verdicts, summary table, and next steps.
+- **`final_report.md`** — the headline deliverable: complete timeline with the **Phases tree** +
+  **artifact tree** modules, baseline + profile breakdown, every attempt (kept AND rejected) with
+  isolated/e2e deltas and verdicts, summary table, and next steps.
 - **`final_launch.sh`** — reproduces the optimized server + bench (carries the accepted config).
 
 ## Result (headline)
@@ -28,7 +28,7 @@ Workflow({
 - Accepted lever: `--attention-backend triton`.
 - Head dense GEMM (aiter DB tune + authored Triton) and the editable gated-delta/mamba kernels each
   had real *isolated* speedups but landed below the 0.5% e2e noise band (Amdahl-dominated by ~81%
-  dense GEMM in this prefill regime) — see the report's 阶段树 for the full per-step breakdown.
+  dense GEMM in this prefill regime) — see the report's Phases tree for the full per-step breakdown.
 
 This example shows the workflow exercising every track (config sweep, head-GEMM bake-off + aiter tune
 + Triton author via the recursive kernel layer, the editable-kernel milestone loop with cumulative
