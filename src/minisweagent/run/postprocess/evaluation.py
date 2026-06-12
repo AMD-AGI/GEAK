@@ -345,10 +345,21 @@ def preflight_commandment_contract(
     if not commandment_path.exists():
         raise CommandmentExecutionError("PREFLIGHT", None, f"COMMANDMENT.md not found at {commandment_path}")
 
-    script = build_eval_script(str(commandment_path), ["SETUP", "CORRECTNESS"])
+    # On a translation run the strict CORRECTNESS section is not enforced (the
+    # translation harness judges correctness), so smoke-test SETUP only to keep
+    # validating that the contract can build/run.
+    _skip_strict_correctness = os.environ.get("GEAK_TRANSLATION_RUN", "").strip() == "1"
+    _preflight_sections = ["SETUP"] if _skip_strict_correctness else ["SETUP", "CORRECTNESS"]
+    if _skip_strict_correctness:
+        logger.info(
+            "preflight_commandment_contract: GEAK_TRANSLATION_RUN=1 -- smoke-testing SETUP only "
+            "(strict CORRECTNESS skipped; translation harness judges correctness)",
+        )
+    script = build_eval_script(str(commandment_path), _preflight_sections)
     if not script:
         logger.warning(
-            "preflight_commandment_contract: no SETUP/CORRECTNESS commands in %s; skipping",
+            "preflight_commandment_contract: no %s commands in %s; skipping",
+            "+".join(_preflight_sections),
             commandment_path,
         )
         return
@@ -550,9 +561,24 @@ def run_correctness_and_benchmark(
     """
     from minisweagent.run.dispatch import _read_commandment_section
 
-    correctness_script = build_eval_script(str(commandment_path), ["SETUP", "CORRECTNESS"])
+    # When a translation run produced the kernel, the op-aware scaled-tolerance
+    # translation harness already judged correctness. The strict COMMANDMENT
+    # CORRECTNESS gate uses a tighter fixed tolerance that can reject valid
+    # cross-language translations, so skip it here and proceed to the benchmark
+    # (which runs its own SETUP and is unaffected).
+    _skip_strict_correctness = os.environ.get("GEAK_TRANSLATION_RUN", "").strip() == "1"
+    correctness_script = (
+        None if _skip_strict_correctness else build_eval_script(str(commandment_path), ["SETUP", "CORRECTNESS"])
+    )
     _correctness_stdout = None
-    if correctness_script:
+    if _skip_strict_correctness:
+        logger.info(
+            "GEAK_TRANSLATION_RUN=1 -- skipping strict COMMANDMENT CORRECTNESS gate; "
+            "translation harness (op-aware scaled tolerance) is the correctness judge. "
+            "Proceeding to benchmark."
+        )
+        round_eval["correctness"] = {"skipped": True, "reason": "translation_run"}
+    elif correctness_script:
         logger.info("Running CORRECTNESS on best kernel from round %d...", round_num)
         try:
             correctness_result = subprocess.run(

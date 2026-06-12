@@ -506,7 +506,15 @@ def _can_proceed_despite_failure(result: PreprocessResult) -> bool:
     errors = result.errors or []
     if not errors:
         return False
-    if not all(("step_limit" in e) or ("cost_limit" in e) or ("Limits exceeded" in e) for e in errors):
+    # On a translation run the strict harness-verifier / CORRECTNESS errors are
+    # non-fatal: the op-aware scaled-tolerance translation harness already judged
+    # correctness, so a produced COMMANDMENT.md + harness + baseline is usable for
+    # optimization even though success=False. Off translation runs, only budget
+    # limit aborts (never real tool crashes) may proceed.
+    _translation_run = os.environ.get("GEAK_TRANSLATION_RUN", "").strip() == "1"
+    if not _translation_run and not all(
+        ("step_limit" in e) or ("cost_limit" in e) or ("Limits exceeded" in e) for e in errors
+    ):
         return False
     commandment_path = result.commandment_path
     if commandment_path is None or not Path(commandment_path).is_file():

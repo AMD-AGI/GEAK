@@ -381,7 +381,15 @@ def collect_baseline_metrics(
     # cycle (~5+ min). Mirrors the legacy harness validation shape; can be
     # disabled via ``GEAK_SKIP_CORRECTNESS_GATE=1`` when you explicitly want
     # baseline numbers from a correctness-failing kernel.
-    if not os.environ.get("GEAK_SKIP_CORRECTNESS_GATE"):
+    # On a translation run the op-aware scaled-tolerance translation harness
+    # is the correctness judge; this strict fixed-tolerance gate can reject a
+    # valid cross-language translation, so skip it (parity with the postprocess
+    # CORRECTNESS gate) while still collecting the baseline benchmark.
+    _skip_correctness_gate = bool(
+        os.environ.get("GEAK_SKIP_CORRECTNESS_GATE")
+        or os.environ.get("GEAK_TRANSLATION_RUN", "").strip() == "1"
+    )
+    if not _skip_correctness_gate:
         gate = _run_benchmark_once(
             harness_path,
             work_dir=work_dir,
