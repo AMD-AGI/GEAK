@@ -16,6 +16,17 @@ Always-available references (Read what's relevant to the phase):
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns
 - `SKILL_DIR/knowledge/amd_mi300x.md`, `SKILL_DIR/knowledge/profiling_guide.md`
 
+### `KERNEL_KNOWLEDGE_DIR` — the AMD operator×backend SOTA base (REFERENCE ONLY)
+When `KERNEL_KNOWLEDGE_DIR` is non-empty, it points at the `kernel_knowledge/` base: per-operator,
+per-language SOTA cards (code skeletons, knobs, pitfalls, measured perf) for GEMM / attention / MoE /
+norm / quant / rope / sampling, etc. **Contract (do not violate):** it gives *facts and how-to, not
+decisions*. It may be stale/incomplete/wrong. Use it only to *locate/seed* candidate techniques faster;
+**never** let it narrow your options or override measurement, and **never** treat a stored
+`status`/TFLOPS/"X× faster" as a verdict (dated evidence, weak hint). Every choice is decided by the
+COMMANDMENT correctness + on-box benchmark; the verify step re-measures every patch, so the base can
+only help, never hurt. If it is empty or no card matches this kernel (e.g. a point-cloud HIP op),
+ignore it — behavior is unchanged.
+
 ## The four engineer specialties (you assign every direction to exactly one)
 - **algorithm** — P0: warp-cooperative, complexity reduction, kernel fusion, template specialization.
 - **memory** — P1/P2: LDS tiling, coalescing, vectorized loads, SoA/native layouts.
@@ -28,7 +39,7 @@ Always-available references (Read what's relevant to the phase):
 
 ## PHASE=analyze
 
-Inputs: `WORKSPACE`, `EVAL_DIR`, `TASK` (may be empty), `SKILL_DIR`.
+Inputs: `WORKSPACE`, `EVAL_DIR`, `TASK` (may be empty), `SKILL_DIR`, `KERNEL_KNOWLEDGE_DIR` (may be empty).
 
 1. Read every source file under `WORKSPACE`. Classify kernel type (triton / hip / cuda / composable
    / e2e-model) using the patterns in `optimization_strategies.md` and the file contents.
@@ -36,10 +47,28 @@ Inputs: `WORKSPACE`, `EVAL_DIR`, `TASK` (may be empty), `SKILL_DIR`.
    pattern, launch config, and an initial bottleneck guess.
 3. Map modifiable files. **Always include the Python wrapper AND the C++ binding (`PYBIND11_MODULE`)
    as modifiable**, not just the kernel source — host/runtime work needs them.
-4. Write `EVAL_DIR/analysis.json` and `EVAL_DIR/codebase_context.md` (human-readable, INCLUDE the
+4. **Resolve the kernel_knowledge pointer (REFERENCE ONLY; skip if `KERNEL_KNOWLEDGE_DIR` empty).**
+   Map this kernel to the base's controlled vocabulary so engineers read focused cards, not the whole
+   base. Read `KERNEL_KNOWLEDGE_DIR/index/taxonomy.md` (operator + language ids) and, if needed,
+   `KERNEL_KNOWLEDGE_DIR/index/capability_index.yaml` to pick:
+   - `kk_operator`: the taxonomy operator id this kernel implements (e.g. `dense_gemm`,
+     `scaled_quant_gemm`, `attention_decode_paged`, `mla_attention`, `rmsnorm`, `fused_add_rmsnorm`,
+     `act_and_mul_silu_gelu`, `rope`, `sampling_topk_topp`, `fused_moe_grouped_gemm`,
+     `gather_scatter`, `reduction`, …). Use `null` if NONE genuinely fits (most point-cloud/custom HIP
+     ops — do NOT force a bad match).
+   - `kk_language`: the backend/language id of the editable source — `triton` | `hip` | `ck` | `asm`
+     | `flydsl` | `tilelang` (match the kernel's actual language).
+   - `kk_refs`: 2–4 concrete card paths under `KERNEL_KNOWLEDGE_DIR` worth reading first, e.g.
+     `operators/<kk_operator>/tuning.md`, `operators/<kk_operator>/backends/<kk_language>.md`,
+     `operators/<kk_operator>/{numerics,fusion}.md`, `index/recipes.md`. Verify each path exists
+     (`ls`); drop any that don't. Empty `[]` when `kk_operator` is `null`.
+   Treat all of this as facts/how-to to *widen* the candidate set — not decisions (see the contract
+   above). Do not let it override the per-case data or measurement.
+5. Write `EVAL_DIR/analysis.json` and `EVAL_DIR/codebase_context.md` (human-readable, INCLUDE the
    full kernel source for engineers to reference).
-5. Write `EVAL_DIR/roadmap.md`: kernel summary, bottleneck hypothesis, a multi-round strategy sketch
-   mapped to specialties, and which round-1 results could later compound/integrate.
+6. Write `EVAL_DIR/roadmap.md`: kernel summary, bottleneck hypothesis, a multi-round strategy sketch
+   mapped to specialties, and which round-1 results could later compound/integrate. If a kk operator
+   was resolved, note the relevant SOTA levers/knobs it surfaces (as reference hypotheses to measure).
 
 Return JSON:
 ```json
@@ -52,7 +81,10 @@ Return JSON:
   "roadmap_summary": "3-6 sentences",
   "candidate_directions": [
     {"title": "...", "specialty": "algorithm|memory|compute|host_runtime", "why": "..."}
-  ]
+  ],
+  "kk_operator": "<taxonomy operator id or null>",
+  "kk_language": "<triton|hip|ck|asm|flydsl|tilelang or null>",
+  "kk_refs": ["<existing card paths under KERNEL_KNOWLEDGE_DIR>"]
 }
 ```
 
@@ -63,7 +95,8 @@ Return JSON:
 Inputs: `EVAL_DIR`, `ROUND` (1-based), `BUDGET_REMAINING` (hard cap on directions this round),
 `CUMULATIVE_SPEEDUP` (best verified geomean so far, 1.0 at start), `BASELINE_GEOMEAN_MS`, the latest
 `PROFILE_SUMMARY` (path + inline), and `HISTORY` (the insight blackboard + hypothesis ledger from
-prior rounds — see below). Also the current best per-case table.
+prior rounds — see below). Also the current best per-case table. Plus `KERNEL_KNOWLEDGE_DIR`,
+`KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` (the kk pointer resolved in analyze; may be empty).
 
 Your job: decide this round's directions (or stop). Re-read `geomean_levers.md` and the relevant
 optimization knowledge first.
@@ -88,6 +121,15 @@ Rules:
 2. **Diversity / orthogonality (this replaces any separate dedup step)**: every direction MUST have
    a distinct `specialty`+strategy AND a distinct primary `focus_files` set, so they don't collide
    and CAN be integrated. Never issue two near-duplicate directions in one round.
+2a. **Seed from kernel_knowledge when available (REFERENCE ONLY).** If `KK_OPERATOR` is non-empty,
+   skim the resolved cards (`KK_REFS`, plus `operators/<KK_OPERATOR>/tuning.md` and
+   `KERNEL_KNOWLEDGE_DIR/index/{decision_trees,recipes}.md`) to *widen* the candidate techniques for
+   this operator+language (SOTA knobs, tiling/split-K/preshuffle, fusion, MFMA/numerics pitfalls,
+   alternative backends to mimic). Use it only to add directions you might have missed and to make a
+   direction's `prompt` concrete; it never replaces the profile/per-case signal and never shrinks the
+   set. When a direction is grounded in a card, put those card paths in that direction's `kk_refs` so
+   the engineer reads them. Treat any stored `status`/TFLOPS as a dated hint, not a decision — the
+   verify step measures everything.
 3. Use the data: look at the per-case table and `geomean_levers.md`. If several cases are
    overhead-bound (similar latency across sizes, or dispatch count > 1), you MUST include at least
    one `host_runtime` direction (dispatch collapse / native layout / wrapper). Target the WORST
@@ -129,7 +171,8 @@ Return JSON:
       "specialty": "algorithm|memory|compute|host_runtime",
       "focus_files": ["<rel paths this direction may edit>"],
       "expected_speedup": 2.0,
-      "prompt": "full, self-contained task description for the engineer"
+      "prompt": "full, self-contained task description for the engineer",
+      "kk_refs": ["<optional kernel_knowledge card paths grounding THIS direction; omit/[] if none>"]
     }
   ]
 }

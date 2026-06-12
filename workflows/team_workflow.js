@@ -91,6 +91,11 @@ const ANALYZE_SCHEMA = obj({
   modifiable_files: { type: 'array', items: { type: 'string' } },
   bottleneck_guess: { type: 'string' }, roadmap_summary: { type: 'string' },
   candidate_directions: { type: 'array', items: { type: 'object', additionalProperties: true } },
+  // kernel_knowledge resolution (REFERENCE ONLY): the operator/language this kernel maps to in the
+  // AMD kernel_knowledge base, plus the most relevant card paths, so engineers read focused context
+  // instead of re-navigating the whole base. Empty string / [] / null when no card applies.
+  kk_operator: { type: ['string', 'null'] }, kk_language: { type: ['string', 'null'] },
+  kk_refs: { type: 'array', items: { type: 'string' } },
 }, ['kernel_type', 'roadmap_summary']);
 
 const BENCH_SCHEMA = obj({
@@ -118,6 +123,7 @@ const PLAN_SCHEMA = obj({
       specialty: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime'] },
       focus_files: { type: 'array', items: { type: 'string' } },
       expected_speedup: { type: 'number' }, prompt: { type: 'string' },
+      kk_refs: { type: 'array', items: { type: 'string' } }, // optional: kernel_knowledge card paths for THIS direction (REFERENCE ONLY)
     }, ['id', 'title', 'specialty', 'prompt']),
   },
 }, ['stop', 'directions']);
@@ -239,9 +245,17 @@ phase('Analyze');
 const analysis = await agent(
   roleAgent('tech_lead', 'analyze', 'Analyze the kernel and write the roadmap.', {
     WORKSPACE: CANONICAL, EVAL_DIR, TASK, SKILL_DIR: WORKFLOW_DIR,
+    KERNEL_KNOWLEDGE_DIR,
   }),
   { phase: 'Analyze', label: 'tech_lead:analyze', schema: ANALYZE_SCHEMA });
 log(`Analyze done. kernel_type=${analysis ? analysis.kernel_type : '?'}`);
+
+// kernel_knowledge pointers resolved by the TechLead in analyze (REFERENCE ONLY; threaded to the
+// planner + engineers so they read focused op/language cards instead of the whole base). Empty when
+// no operator card applies (e.g. point-cloud HIP ops) or KERNEL_KNOWLEDGE_DIR is unset → no change.
+const KK_OPERATOR = (analysis && analysis.kk_operator) || '';
+const KK_LANGUAGE = (analysis && analysis.kk_language) || '';
+const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs : [];
 
 // ===========================================================================
 // PHASE: Benchmark setup (Benchmark Engineer)
@@ -292,6 +306,7 @@ while (dispatched < BUDGET && noImprove < 2) {
       EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
       BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
       CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
+      KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
     }),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
 
@@ -324,7 +339,10 @@ rm -rf ${d.out_dir}/workspace; cp -r ${CANONICAL}/. ${d.out_dir}/workspace
 rm -rf ${d.out_dir}/workspace/build ${d.out_dir}/workspace/__pycache__ ${d.out_dir}/workspace/*/__pycache__ ${d.out_dir}/workspace/*.so ${d.out_dir}/workspace/.torch_ext 2>/dev/null || true
 \`\`\`
 Then Read ${WORKFLOW_DIR}/roles/engineer.md and ${WORKFLOW_DIR}/knowledge/self_monitoring.md and the
-knowledge files for your specialty, and follow them. Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patch.diff\` when geomean>1.0.
+knowledge files for your specialty, and follow them. If KK_OPERATOR is non-empty, also consult the
+operator/language SOTA cards under KERNEL_KNOWLEDGE_DIR per engineer.md's "operator/language SOTA
+knowledge (REFERENCE ONLY)" section (facts/how-to only; measure everything; never go below baseline).
+Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patch.diff\` when geomean>1.0.
 
 ## Inputs
 ${cfg({
@@ -337,6 +355,8 @@ ${cfg({
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
         baseline_per_case: BASELINE_PER_CASE,
         INSIGHTS: history.insights,
+        KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
+        KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
       })}
 
 Return ONLY the worker_result.json structure as StructuredOutput.`,
