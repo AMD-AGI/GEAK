@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Strategize', detail: 'System Architect routes kernels by Amdahl (config vs kernel vs host)' },
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
     { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> backend bake-off (incl. FlyDSL) + aiter-DB/author tune -> e2e gate' },
-    { title: 'Milestone', detail: 'loop: plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
+    { title: 'Milestone', detail: 'loop over editable kernels ABOVE milestone_min_pct% GPU (default 5): plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
     { title: 'Finalize', detail: 'e2e Integrator assembles the overlay + patch + launch bundle' },
     { title: 'Report', detail: 'System Architect writes the throughput report + grows the playbook' },
     { title: 'Validate', detail: 'e2e Director independently re-measures throughput + arbitrates' },
@@ -47,6 +47,11 @@ const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);       // max kerne
 // MIN floor: dispatch at LEAST this many editable-kernel tasks before the loop may stop on no-improve /
 // empty queue (prompt-tunable). Prevents the milestone track from never firing. Capped by BUDGET.
 const MIN_KERNEL_TASKS = Math.min(parseInt(A.min_kernel_tasks != null ? A.min_kernel_tasks : 4, 10), BUDGET);
+// Milestone only optimizes editable kernels whose profiled share is worth it: skip any candidate with
+// pct_gpu_time below this threshold (Amdahl — a kernel a few % of GPU can't move e2e past the noise band).
+// Configurable via args.milestone_min_pct (default 5). This OVERRIDES the MIN_KERNEL_TASKS floor: if no
+// candidate clears the bar, the milestone stops rather than grinding low-value kernels.
+const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_min_pct : 5);
 const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : 6, 10); // budget passed DOWN per kernel
 const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true') === 'true';
 // Head-kernel track (GEMM/attention) — the highest-pct_gpu_time ops, optimized regardless of edit flag.
@@ -73,7 +78,9 @@ const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC };
 const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
 // Repeats per timed e2e measurement (the integrator/validator pass this to bench_e2e.sh; the shared
 // bench script is NOT edited — interleaving is driven from the eval dir). Prompt-tunable.
-const E2E_REPEATS = parseInt(A.e2e_repeats != null ? A.e2e_repeats : 7, 10);
+// Default 2: with <0.5% spreads, 2 reps + the non-overlap (cand_min>ref_max) check is sufficient to
+// judge a win; 7 was overkill and ~3x slower. Bump via args.e2e_repeats for a noisy box.
+const E2E_REPEATS = parseInt(A.e2e_repeats != null ? A.e2e_repeats : 2, 10);
 const TASK = A.task || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
@@ -521,17 +528,23 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
   const plan = (milestone === 1 && kernelQueue.length)
     ? { stop: false, kernel_candidates: kernelQueue }
     : await safeAgent(
-      roleAgent('system_architect', 'plan_milestone', 'Nominate next kernels (must nominate while below the min floor).', {
+      roleAgent('system_architect', 'plan_milestone', `Nominate next kernels — ONLY editable kernels with pct_gpu_time >= ${MILESTONE_MIN_PCT}% (below that, Amdahl says they can't move e2e; do not nominate them even to meet the floor). Each candidate MUST carry its pct_gpu_time.`, {
         EVAL_DIR, ROUND: milestone, BUDGET_REMAINING: remaining, CURRENT_THROUGHPUT: curTput,
-        BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
+        BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, MILESTONE_MIN_PCT,
         MIN_KERNEL_TASKS, DISPATCHED_SO_FAR: dispatched, BELOW_MIN_FLOOR: belowFloor,
         PROFILE_TOPN: profile ? profile.profile_topN_json : '', HISTORY: history, SKILL_DIR: WORKFLOW_DIR,
       }),
       { phase: 'Milestone', label: `architect:plan m${milestone}`, schema: PLAN_SCHEMA });
 
-  const planCands = (plan && plan.kernel_candidates) ? plan.kernel_candidates : [];
+  const planCandsRaw = (plan && plan.kernel_candidates) ? plan.kernel_candidates : [];
+  // pct_gpu_time gate: only optimize kernels above MILESTONE_MIN_PCT (a candidate missing pct is kept,
+  // not silently dropped — but logged). This gate OVERRIDES the min-floor: low-pct kernels are not worth it.
+  const planCands = planCandsRaw.filter(c => c.pct_gpu_time == null || c.pct_gpu_time >= MILESTONE_MIN_PCT);
+  const skipped = planCandsRaw.filter(c => c.pct_gpu_time != null && c.pct_gpu_time < MILESTONE_MIN_PCT);
+  if (skipped.length) log(`Milestone ${milestone}: skipped ${skipped.length} kernel(s) below ${MILESTONE_MIN_PCT}% GPU [${skipped.map(c => `${c.short_name || '?'}@${(+c.pct_gpu_time).toFixed(1)}%`).join(', ')}].`);
   if (!planCands.length) {
-    if (belowFloor) log(`Milestone ${milestone}: below floor (${dispatched}/${MIN_KERNEL_TASKS}) but Architect nominated nothing — cannot fabricate candidates; stopping.`);
+    if (planCandsRaw.length) log(`Milestone ${milestone}: stop — no remaining kernel clears the ${MILESTONE_MIN_PCT}% GPU bar (Amdahl: sub-threshold kernels can't move e2e). Floor is overridden by the pct gate.`);
+    else if (belowFloor) log(`Milestone ${milestone}: below floor (${dispatched}/${MIN_KERNEL_TASKS}) but Architect nominated nothing — cannot fabricate candidates; stopping.`);
     else log(`Milestone ${milestone}: stop (floor ${MIN_KERNEL_TASKS} met). ${plan ? plan.reasoning || '' : ''}`);
     break;
   }

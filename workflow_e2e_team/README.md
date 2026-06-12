@@ -95,6 +95,8 @@ Workflow({
     kernel_workflow_dir: "<...>/workflows",          // optional; default = sibling workflows/
     budget: 4,            // max kernel-optimization tasks (kernel-layer tasks; config sweep is free)
     kernel_budget: 6,     // budget passed DOWN to each recursive single-kernel run
+    milestone_min_pct: 5, // Milestone only optimizes editable kernels with pct_gpu_time >= this (default 5);
+                          //   overrides min_kernel_tasks — sub-threshold kernels are skipped (Amdahl)
     config_tune: "true",  // Tier-0 sweep on/off (default ON)
     gpu_ids: "0",         // comma-separated
     isl: 1024, osl: 1024, conc: 64,  // workload (profile + bench use the SAME)
