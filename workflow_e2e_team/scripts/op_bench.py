@@ -211,9 +211,11 @@ def bench_blockscale_gemm(args, meta):
     plan = [("aiter_blockscale", base_spec)]
     if tgt_spec and tgt_spec != base_spec:
         plan.append(("aiter_blockscale_target", tgt_spec))
-    if base_spec and ":" in str(base_spec):
-        modn = str(base_spec).split(":", 1)[0]
-        plan.append(("aiter_bpreshuffle", f"{modn}:gemm_a8w8_blockscale_bpreshuffle"))
+    # bpreshuffle variant (large-M prefill lever) lives at top-level aiter, NOT the triton submodule.
+    # Plain-weight call may not match its preshuffled-weight signature -> guarded by record()'s try/except
+    # + the correctness gate (a wrong-layout call fails correctness and is simply not a winner; the real
+    # CK/asm/bpreshuffle race is the aiter DB tune in Tier-B, which the op_benchmarker drives).
+    plan.append(("aiter_bpreshuffle", "aiter:gemm_a8w8_blockscale_bpreshuffle"))
     for name, spec in plan:
         fn = _resolve_callable(spec)
         if fn is None:
