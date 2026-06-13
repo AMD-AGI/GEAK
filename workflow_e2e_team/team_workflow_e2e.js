@@ -56,6 +56,10 @@ const HEAD_BUDGET = parseInt(A.head_budget != null ? A.head_budget : 3, 10); // 
 // (for a GEMM head: flydsl first — SOTA GEMM DSL — then triton). Default 2 covers flydsl+triton per head
 // while keeping the kernel-layer cost bounded; bump to try hip/ck too when the headroom justifies it.
 const HEAD_AUTHOR_MAX = parseInt(A.head_author_max != null ? A.head_author_max : 2, 10);
+// Dominant-head protection: an op whose pct_gpu_time >= this is NEVER silently skipped. If its bake-off
+// hits a harness fault / no-win / extraction failure, the orchestrator LOUDLY flags it (and still tries
+// the author route when a plan exists) instead of dropping the biggest lever on the floor. Default 30%.
+const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_pct : 30);
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling kernel_knowledge/. Workflows enumerate candidates from
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
@@ -145,7 +149,9 @@ const OPBENCH_SCHEMA = obj({
   best_known_ms: { type: 'number' },
   recommend_tier_c: { type: 'boolean' }, author_plan: arrObj, tuning_artifact: { type: 'string' },
   apply_env: { type: 'string' }, apply_flags: { type: 'string' }, code_patch: { type: 'string' },
-  per_backend: arrObj, parity_note: { type: 'string' }, gate: { type: 'string' }, reason: { type: 'string' },
+  per_backend: arrObj, parity_note: { type: 'string' },
+  gate: { type: 'string', enum: ['have_winner', 'author_recommended', 'no_win', 'harness_error', 'tamper'] },
+  harness_suspect: { type: 'boolean' }, reason: { type: 'string' },
 }, ['gate', 'isolated_speedup']);
 
 const EXTRACT_SCHEMA = obj({
@@ -374,6 +380,7 @@ let milestone = 0;
 let noImprove = 0;
 const acceptedKernels = (ST.accepted_kernels || []).slice();
 const acceptedHeads = (ST.accepted_heads || []).slice();
+const flaggedHeads = (ST.flagged_heads || []).slice();   // dominant heads that could NOT be optimized (loudly surfaced, never silently skipped)
 let headDispatched = 0;
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
 
@@ -398,9 +405,17 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
       }),
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
+    const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
     if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
-      log(`  ${h.short_name}: op extraction failed (${ext ? ext.notes || ext.smoke : 'none'}); skipping.`);
-      history.ledger.push({ direction: h.short_name, verdict: 'dead_end', lesson: 'op extraction failed' });
+      const why = ext ? ext.notes || ext.smoke : 'none';
+      if (isDominant) {
+        log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU) op extraction FAILED (${why}) — flagged, NOT silently skipped.`);
+        flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract', gate: 'extract_failed', reason: why });
+        history.ledger.push({ direction: h.short_name, verdict: 'flagged', lesson: `DOMINANT head extraction failed (${why})` });
+      } else {
+        log(`  ${h.short_name}: op extraction failed (${why}); skipping.`);
+        history.ledger.push({ direction: h.short_name, verdict: 'dead_end', lesson: 'op extraction failed' });
+      }
       continue;
     }
 
@@ -413,9 +428,23 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }),
       { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
     if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {
-      log(`  ${h.short_name}: no win and nothing worth authoring (${bake ? bake.reason || bake.gate : 'none'}); skipping.`);
-      history.ledger.push({ direction: h.short_name, isolated_speedup: bake ? bake.isolated_speedup : 0, verdict: 'dead_end', lesson: bake ? bake.reason || 'no op win' : 'bakeoff failed' });
-      continue;
+      const gate = bake ? bake.gate : 'null';
+      const harness = !!(bake && (bake.gate === 'harness_error' || bake.harness_suspect));
+      const hasPlan = !!(bake && Array.isArray(bake.author_plan) && bake.author_plan.length);
+      // A DOMINANT head, or a HARNESS fault (not a real no-win), must NEVER be silently skipped.
+      // Flag it loudly; and if there is an author_plan, STILL try the author route (it is judged by the
+      // immutable unittest, independent of the broken bake-off probe) — so fall through instead of skip.
+      if (isDominant || harness) {
+        log(`  ⚠️ FLAG ${h.short_name}: ${isDominant ? `DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU)` : 'head'} bake-off gate=${gate}${harness ? ' (HARNESS ERROR — bake-off could not measure; NOT a real no-win)' : ''}. ${hasPlan ? 'Proceeding to author route anyway.' : 'No author_plan to fall back on.'}`);
+        flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'bakeoff', gate, harness_error: harness, had_author_plan: hasPlan, reason: bake ? bake.reason || gate : 'bakeoff returned null' });
+        history.ledger.push({ direction: h.short_name, isolated_speedup: bake ? bake.isolated_speedup : 0, verdict: harness ? 'harness_error' : 'flagged', lesson: bake ? bake.reason || gate : 'bakeoff null' });
+        if (!hasPlan) continue;       // can't author -> FLAGGED (surfaced in report), not a silent skip
+        // else: fall through to the author route below (do NOT continue)
+      } else {
+        log(`  ${h.short_name}: no win and nothing worth authoring (${bake ? bake.reason || gate : 'none'}); skipping.`);
+        history.ledger.push({ direction: h.short_name, isolated_speedup: bake ? bake.isolated_speedup : 0, verdict: 'dead_end', lesson: bake ? bake.reason || 'no op win' : 'bakeoff failed' });
+        continue;
+      }
     }
 
     // Build the candidate list: the cheap direct_light winner (if any) + any authored implementations.
@@ -454,7 +483,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     }
     if (!headCands.length) {
-      log(`  ${h.short_name}: no candidate to integrate; skipping.`);
+      if (isDominant) {
+        log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU) produced NO candidate (bake-off + author route both empty) — flagged, NOT silently skipped.`);
+        if (!flaggedHeads.some(f => f.short_name === h.short_name)) {
+          flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'no_candidate', gate: 'no_candidate', reason: 'bake-off harness/no-win and author route produced no usable kernel' });
+        }
+        history.ledger.push({ direction: h.short_name, verdict: 'flagged', lesson: 'DOMINANT head: no candidate to integrate' });
+      } else {
+        log(`  ${h.short_name}: no candidate to integrate; skipping.`);
+      }
       continue;
     }
     headCands.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
@@ -502,6 +539,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       { phase: 'Profile', label: 'profiler:post-head', schema: PROFILE_SCHEMA });
   }
   log(`Head-kernel track done. ${acceptedHeads.length} accepted, throughput ${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x).`);
+  if (flaggedHeads.length) {
+    log(`⚠️ ${flaggedHeads.length} DOMINANT head(s) FLAGGED (not optimized, NOT silently skipped): ` +
+      flaggedHeads.map(f => `${f.short_name} [${(f.pct_gpu_time || 0).toFixed(1)}% GPU, ${f.gate}${f.harness_error ? '/harness' : ''}]`).join('; ') +
+      `. These carry the most headroom — see the report's FLAGGED section.`);
+  }
 }
 
 // ===========================================================================
@@ -668,7 +710,7 @@ if (want('final')) {
     roleAgent('system_architect', 'report', 'Write architect_report.md AND the full final_report.md in English (with the Phases tree + artifacts tree modules).', {
       EVAL_DIR, HISTORY: history, BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: finalTput,
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
-      ACCEPTED_HEADS: acceptedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
+      ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
     }),
     { phase: 'Report', label: 'architect:report', schema: REPORT_SCHEMA });
@@ -696,7 +738,7 @@ const carryState = {
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
-  headQueue, kernelQueue, accepted_heads: acceptedHeads, accepted_kernels: acceptedKernels, history,
+  headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels, history,
 };
 
 return {
@@ -713,6 +755,7 @@ return {
   accepted_config: { flags: curFlags, env: curEnv },
   accepted_kernels: acceptedKernels,
   accepted_heads: acceptedHeads,
+  flagged_heads: flaggedHeads,   // dominant heads surfaced but not optimized (harness/extract/no-candidate) — never silently dropped
   config_tune_enabled: CONFIG_TUNE_ENABLED,
   head_budget: HEAD_BUDGET,
   head_used: headDispatched,

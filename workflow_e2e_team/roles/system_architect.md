@@ -233,6 +233,11 @@ Information must be COMPLETE, keeping every attempt whether it worked or not. RE
   (accept/reject and why). **Keep BOTH the wins and the no-ops.** Data sources: `HISTORY.ledger`,
   `config/sweep_results.json`, each `overlay/*/bench_summary.json`, and the recursive `kernels/_exp/*` results.
 - **Summary table**: one table of all attempts (lever | isolated | e2e | verdict | root cause).
+- **⚠️ FLAGGED dominant heads** (from `FLAGGED_HEADS`): a MANDATORY section if non-empty. For each flagged
+  head list its `pct_gpu_time`, the stage it failed at (extract / bakeoff / no_candidate), whether it was a
+  `harness_error` (the bake-off could not measure — NOT a real no-win), and the `reason`. State plainly that
+  these dominant ops were NOT optimized and carry the LARGEST remaining headroom — they are the top "next
+  direction". Never bury a flagged head in the no-ops; it is a workflow gap, not a benign negative result.
 - **Final deliverable + measurement caveats (box drift → trust only same-session A/B) + next directions to explore.**
 Read the actual files under `EVAL_DIR` for real numbers; do not invent. Return JSON (report_path points
 to architect_report.md; also mention `final_report.md` in `note` if the schema lacks a field):

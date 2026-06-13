@@ -114,6 +114,34 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    NOTE: the experimental triton GEMM stub is NOT a real implementation — treat "no editable triton
    kernel for this op" as author-needed. FlyDSL DOES have a real importable GEMM (`flydsl_hgemm` /
    `flydsl_preshuffle_gemm_a8`), so a flydsl author baseline reuses it rather than starting from zero.
+2b. **HARNESS SELF-CHECK + bounded self-repair (do NOT mistake a broken harness for "no win").**
+   Distinguish two completely different outcomes in `opbench_result.json`:
+   - a backend that **ran and produced a number** but was slower / not correct → a legitimate per-backend
+     no-win (that backend loses). Normal.
+   - a candidate (or the reference/synth) that **raised an exception** so NOTHING produced a correct timed
+     number → the **harness itself is broken** (bad input construction / wrong call signature / a
+     symbolic shape like `a_shape=["M",K]` reaching `torch.randn`). This is NOT a no-win; reporting it as
+     one silently buries the op.
+   `op_bench.py` surfaces this as **`harness_suspect:true`** (+ `harness_error`) when no candidate ran and
+   every failure was an exception. When you see `harness_suspect:true` (or you can see all `results` have
+   `raised:true` / `"call raised"` / `backend:"ERROR"`), **self-repair, up to 3 bounded attempts:**
+   1. Read `harness_error` + the failing `note`/`trace` and the task's `meta.json` + **`unittest.py`**
+      (the immutable oracle already encodes the CORRECT input construction + call signature — mirror it).
+   2. Fix the cause. Common cases: (a) **symbolic dim** — resolve `"M"` from `meta.m_buckets` (dominant =
+      largest bucket); (b) **wrong signature / quant op** — a block-scaled fp8 GEMM needs
+      `fn(x, w, x_scale, w_scale, dtype=out)` with per-block scales, NOT a dense `A@Bᵀ` (op_bench.py now
+      routes these to its blockscale path; if a different quant layout appears, write a corrected driver).
+   3. **Write a corrected driver into `$EVAL_DIR`** (NEVER edit the shared `scripts/op_bench.py` from
+      here, and NEVER edit the immutable `unittest.py`/`meta.json`): a small script that builds the case
+      exactly like `unittest.py._synth_case`, benches each `CANDIDATE_BACKENDS` callable, and writes the
+      same `opbench_result.json` shape. Re-run it (pin the GPU) and re-read the result.
+   Only AFTER 3 failed repair attempts do you give up on measuring — and then return
+   **`gate:"harness_error"`** (NOT `no_win`), with `reason` = the diagnosed harness fault + what you tried.
+   The orchestrator treats `harness_error` on a dominant head as a hard flag (never a silent skip).
+   IMPORTANT: even when the harness is broken, **still emit the `author_plan`** (step 4) — an authored
+   kernel is judged by the IMMUTABLE `unittest.py`, which is independent of this bake-off harness, so the
+   head can still be optimized via the author route even if the bake-off probe could not measure a baseline.
+
 3. **Tier B per-backend tune (direct_light)** — for GEMM, run the **aiter DB tune** (see
    `SKILL_DIR/knowledge/aiter_gemm_tuning.md`). **The tune input MUST come from a live `AITER_TUNE_GEMM=1`
    capture, NOT synthesized/profile-derived shapes.** ⚠️ Critical: the runtime lookup key includes the
@@ -167,14 +195,21 @@ Return JSON:
   "code_patch": "<final_patch.diff path if a rewrite produced one, else ''>",
   "per_backend": [{"backend":"...","ms":0.0,"correct":true,"max_rel_err":0.0}],
   "parity_note": "expected_close|needs_accuracy_gate",
-  "gate": "have_winner|author_recommended|no_win|tamper",
+  "gate": "have_winner|author_recommended|no_win|harness_error|tamper",
+  "harness_suspect": false,
   "reason": "the route decision: direct_light winner and/or which languages to author, with Amdahl headroom"
 }
 ```
 - `gate:"have_winner"` — a direct_light (env/flag) winner is ready to integrate now.
 - `gate:"author_recommended"` — no direct win, but `author_plan` is non-empty: the orchestrator should
   run `team_workflow` per the plan and integrate the fastest authored result that beats `best_known_ms`.
-- `gate:"no_win"` — neither a direct win nor a worthwhile author target (headroom below noise). Record
-  the dead-end in the playbook so the Architect drops the op.
+- `gate:"no_win"` — neither a direct win nor a worthwhile author target (headroom genuinely below noise),
+  AND the bake-off actually RAN (numbers were produced). Record the dead-end so the Architect drops the op.
+  **Never return `no_win` when the bake-off did not run** (that is `harness_error`).
+- `gate:"harness_error"` — the bake-off could not be measured because the harness/driver was broken and
+  3 bounded self-repair attempts failed. This is NOT "the op has no win" — the dominant head still has
+  unknown headroom. Set `harness_suspect:true`, put the diagnosis in `reason`, and STILL emit the
+  `author_plan` (the author route uses the immutable unittest, independent of this probe). The
+  orchestrator hard-flags this for a dominant head instead of silently skipping it.
 You may return BOTH a direct_light winner AND an `author_plan` (e.g. ship the cheap tune now, and also
 let the orchestrator try authoring a faster Triton kernel) — the Integrator's e2e gate picks the best.

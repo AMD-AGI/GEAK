@@ -78,7 +78,153 @@ def _correct(torch, out, ref, tol):
 def _dtype(torch, name):
     return {"bf16": torch.bfloat16, "bfloat16": torch.bfloat16, "fp16": torch.float16,
             "float16": torch.float16, "fp32": torch.float32, "float32": torch.float32,
-            "fp8": getattr(torch, "float8_e4m3fnuz", torch.bfloat16)}.get(str(name).lower(), torch.bfloat16)
+            "fp8": getattr(torch, "float8_e4m3fnuz", torch.bfloat16),
+            "fp8_e4m3fnuz": getattr(torch, "float8_e4m3fnuz", torch.bfloat16),
+            "fp8_e5m2fnuz": getattr(torch, "float8_e5m2fnuz", torch.bfloat16),
+            "fp8_e4m3fn": getattr(torch, "float8_e4m3fn", torch.bfloat16),
+            "fp8_e5m2": getattr(torch, "float8_e5m2", torch.bfloat16),
+            }.get(str(name).lower(), torch.bfloat16)
+
+
+def _resolve_shape(shape, meta):
+    """Resolve a shape that may carry SYMBOLIC dims (e.g. "M" for a dynamic GEMM row count) into
+    concrete ints. String dims are mapped via meta: "M"/"m*"/"-1"/None -> a representative value from
+    meta["m_buckets"] (the dominant = LARGEST profiled bucket). Raises a CLEAR error if a symbolic dim
+    cannot be resolved, so the caller records a meaningful harness error instead of a cryptic
+    `randn(str, int, ...)` TypeError (the exact bug this guards against)."""
+    if not shape:
+        raise ValueError("empty/None shape")
+    buckets = [int(b) for b in (meta.get("m_buckets") or []) if str(b).strip().lstrip("-").isdigit()]
+    rep_m = max(buckets) if buckets else None
+    out = []
+    for d in shape:
+        if isinstance(d, bool):
+            raise ValueError(f"bool dim {d!r} in shape {shape}")
+        if isinstance(d, int):
+            out.append(int(d)); continue
+        s = str(d).strip().lower()
+        if s.lstrip("-").isdigit() and int(s) > 0:
+            out.append(int(s)); continue
+        if s in ("m", "-1", "none", "") or s.startswith("m"):
+            if rep_m is None:
+                raise ValueError(f"symbolic dim {d!r} in shape {shape} but meta has no usable m_buckets to resolve it")
+            out.append(rep_m); continue
+        raise ValueError(f"unresolvable symbolic dim {d!r} in shape {shape} (give ints, or an m_buckets list)")
+    return out
+
+
+def _resolve_callable(spec):
+    """'module:attr' -> callable (or None if unimportable)."""
+    if not spec or ":" not in str(spec):
+        return None
+    try:
+        import importlib
+        mod_name, attr = str(spec).split(":", 1)
+        m = importlib.import_module(mod_name)
+        return getattr(m, attr, None)
+    except Exception:
+        return None
+
+
+def _is_blockscale_gemm(meta):
+    """True for a quantized block-scaled GEMM (fp8 a8w8 blockscale etc.) — these CANNOT be benched by the
+    generic dense torch-BLAS path (fp8 + per-block scales), so they take the dedicated blockscale path."""
+    dt = str(meta.get("dtype", "")).lower()
+    qs = str(meta.get("quant_scheme", "")).lower()
+    is_fp8 = ("fp8" in dt or "e4m3" in dt or "e5m2" in dt)
+    has_block = bool(meta.get("weight_block_size")) or "block" in qs
+    return is_fp8 and has_block
+
+
+def _synth_blockscale_case(torch, meta, M, device, seed):
+    """Synthesize an fp8 a8w8 blockscale GEMM case + its dequant oracle, MIRRORING the extracted
+    unittest's `_synth_case` exactly (so op_bench's correctness target matches the immutable oracle).
+    Returns {x(fp8 [M,K]), w(fp8 [N,K]), x_scale([M,sK]), w_scale([sN,sK]), ref(out_dt [M,N]), M, out_dt}."""
+    N = int(meta["b_shape"][0]); K = int(meta["b_shape"][1])
+    blk = meta.get("weight_block_size") or [128, 128]
+    BLK_N, BLK_K = int(blk[0]), int(blk[1])
+    fp8 = _dtype(torch, meta.get("dtype", "fp8"))
+    out_dt = _dtype(torch, meta.get("out_dtype", "bf16"))
+    sK = (K + BLK_K - 1) // BLK_K
+    sN = (N + BLK_N - 1) // BLK_N
+    fmax = float(torch.finfo(fp8).max)
+    gen = torch.Generator(device=device).manual_seed(int(seed))
+    x_hp = (torch.randn(M, K, generator=gen, dtype=torch.float32, device=device) * 0.1)
+    w_hp = (torch.randn(N, K, generator=gen, dtype=torch.float32, device=device) * 0.05)
+    padK = sK * BLK_K
+    xb = torch.zeros(M, padK, device=device); xb[:, :K] = x_hp
+    x_blk = xb.reshape(M, sK, BLK_K)
+    x_scale = (x_blk.abs().amax(dim=2).clamp_min(1e-8) / fmax).to(torch.float32)          # [M, sK]
+    x_q = (x_blk / x_scale[:, :, None]).clamp(-fmax, fmax).reshape(M, padK)[:, :K].to(fp8)
+    padN = sN * BLK_N
+    wb = torch.zeros(padN, padK, device=device); wb[:N, :K] = w_hp
+    w_blk = wb.reshape(sN, BLK_N, sK, BLK_K)
+    w_scale = (w_blk.abs().amax(dim=(1, 3)).clamp_min(1e-8) / fmax).to(torch.float32)      # [sN, sK]
+    w_q = (w_blk / w_scale[:, None, :, None]).clamp(-fmax, fmax).reshape(padN, padK)[:N, :K].to(fp8)
+    x_scale_full = x_scale.repeat_interleave(BLK_K, dim=1)[:, :K]
+    x_deq = x_q.to(torch.float32) * x_scale_full
+    w_scale_full = w_scale.repeat_interleave(BLK_N, dim=0).repeat_interleave(BLK_K, dim=1)[:N, :K]
+    w_deq = w_q.to(torch.float32) * w_scale_full
+    ref = (x_deq @ w_deq.t()).to(out_dt)
+    return {"x": x_q, "w": w_q, "x_scale": x_scale, "w_scale": w_scale, "ref": ref, "M": M, "out_dt": out_dt}
+
+
+def bench_blockscale_gemm(args, meta):
+    """Bake-off for an fp8 a8w8 blockscale GEMM head. The generic dense torch-BLAS backends cannot
+    represent this op (fp8 + per-block scales), so the candidates are the meta callable(s):
+    the live baseline blockscale path + its bpreshuffle variant (same signature
+    fn(x, w, x_scale, w_scale, dtype=out)). Benched at the DOMINANT (largest) m_bucket — the GPU-time
+    mass. Returns the standard per-backend results list."""
+    torch = _torch()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    buckets = [int(b) for b in (meta.get("m_buckets") or []) if str(b).strip().lstrip("-").isdigit()]
+    if not buckets:
+        buckets = [int(_resolve_shape(meta.get("a_shape") or ["M"], meta)[0])]
+    M = max(buckets)
+    case = _synth_blockscale_case(torch, meta, M, device, args.seed)
+    out_dt = case["out_dt"]
+
+    def _call(fn):
+        return fn(case["x"], case["w"], case["x_scale"], case["w_scale"], dtype=out_dt)
+
+    results = []
+
+    def record(name, fn, note=""):
+        try:
+            _call(fn); _sync(torch)          # warmup (compile/autotune) on a clean launch
+            out = _call(fn)
+        except Exception as e:
+            # An EXCEPTION (not a slow/incorrect number) -> candidate could not run. The op_benchmarker
+            # treats "all candidates raised" as a harness self-fault (see its role); we surface it clearly.
+            results.append({"backend": name, "available": True, "correct": False, "ms": None,
+                            "note": f"call raised: {e!r}", "raised": True})
+            return
+        ok, err = _correct(torch, out, case["ref"], args.tol)
+        ms = _time_call(lambda: _call(fn), args.warmup, args.repeats)
+        results.append({"backend": name, "available": True, "correct": bool(ok),
+                        "max_rel_err": round(err, 5) if math.isfinite(err) else None,
+                        "ms": round(ms, 4) if ms else None, "note": note, "raised": False})
+
+    base_spec = meta.get("baseline_callable") or meta.get("target_callable")
+    tgt_spec = meta.get("target_callable") or base_spec
+    seen = set()
+    plan = [("aiter_blockscale", base_spec)]
+    if tgt_spec and tgt_spec != base_spec:
+        plan.append(("aiter_blockscale_target", tgt_spec))
+    if base_spec and ":" in str(base_spec):
+        modn = str(base_spec).split(":", 1)[0]
+        plan.append(("aiter_bpreshuffle", f"{modn}:gemm_a8w8_blockscale_bpreshuffle"))
+    for name, spec in plan:
+        fn = _resolve_callable(spec)
+        if fn is None:
+            results.append({"backend": name, "available": False, "correct": False, "ms": None,
+                            "note": f"callable not importable: {spec}", "raised": False})
+            continue
+        if id(fn) in seen:
+            continue
+        seen.add(id(fn))
+        record(name, fn, note=f"{spec} @ M={M} (dominant bucket)")
+    return results
 
 
 def _load_or_synth_gemm(torch, task, meta, device, seed):
@@ -103,10 +249,12 @@ def _load_or_synth_gemm(torch, task, meta, device, seed):
                 if bias is not None:
                     ref = ref + bias
             return A.to(dt), B.to(dt), (bias.to(dt) if bias is not None else None), transpose_b, ref.float()
-    # synthesize from shapes
-    a_shape = meta.get("a_shape"); b_shape = meta.get("b_shape")
-    if not (a_shape and b_shape):
+    # synthesize from shapes (resolve any SYMBOLIC dims like "M" via meta.m_buckets -> ints first)
+    a_shape0 = meta.get("a_shape"); b_shape0 = meta.get("b_shape")
+    if not (a_shape0 and b_shape0):
         raise ValueError("gemm task has neither reference_io.pt nor a_shape/b_shape in meta.json")
+    a_shape = _resolve_shape(a_shape0, meta)
+    b_shape = _resolve_shape(b_shape0, meta)
     g = torch.Generator(device="cpu").manual_seed(int(seed))
     A = (torch.randn(*a_shape, generator=g) * 0.1).to(device=device, dtype=dt)
     B = (torch.randn(*b_shape, generator=g) * 0.1).to(device=device, dtype=dt)
@@ -157,6 +305,11 @@ def _tunableop(torch, enable, tuning, filename=None):
 
 def bench_gemm(args, meta):
     torch = _torch()
+    # Quantized block-scaled GEMM (fp8 a8w8 blockscale, …) takes the dedicated path — the generic dense
+    # torch-BLAS backends below cannot represent fp8 + per-block scales (this is the head that used to die
+    # on `randn(str,int,...)`; it is now benched with the immutable-oracle construction).
+    if _is_blockscale_gemm(meta):
+        return bench_blockscale_gemm(args, meta)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     A, B, bias, transpose_b, ref = _load_or_synth_gemm(torch, args.task, meta, device, args.seed)
     ref = ref.to(device)
@@ -461,8 +614,22 @@ def main():
 
     correct = [r for r in results if r.get("correct") and r.get("ms")]
     correct.sort(key=lambda r: r["ms"])
-    baseline = next((r for r in results if r["backend"] in ("hipblaslt", "current") and r.get("ms")), None)
+    baseline = next((r for r in results if r["backend"] in ("hipblaslt", "current", "aiter_blockscale") and r.get("ms")), None)
     winner = correct[0] if correct else None
+
+    # ---- Harness self-fault signal (for op_benchmarker self-repair + orchestrator dominant-head guard).
+    # If NOTHING produced a correct timed number AND every failure is an EXCEPTION (candidate/reference
+    # raised, or the top-level synth ERROR), the harness itself is broken (bad input construction / call),
+    # NOT a legitimately-no-faster backend. Surface it explicitly so a dominant head is never silently
+    # written off as "no win". A backend that merely ran-but-slow / ran-but-incorrect does NOT trip this.
+    ran_any = any(r.get("ms") for r in results)
+    raised = [r for r in results if r.get("raised") or r.get("backend") == "ERROR"
+              or "raised" in str(r.get("note", "")) or "failed:" in str(r.get("note", ""))]
+    harness_suspect = bool(results) and (not ran_any) and len(raised) > 0
+    harness_error = ""
+    if harness_suspect:
+        r0 = raised[0]
+        harness_error = str(r0.get("note") or r0.get("trace") or "unknown harness error")[:400]
     speedup = (baseline["ms"] / winner["ms"]) if (winner and baseline and winner["ms"]) else (
         1.0 if winner else 0.0)
     wb = winner["backend"] if winner else None
@@ -486,6 +653,8 @@ def main():
     summary = {
         "op_kind": op_kind,
         "task": a.task,
+        "harness_suspect": harness_suspect,
+        "harness_error": harness_error,
         "results": results,
         "winner_backend": wb,
         "winner_ms": winner["ms"] if winner else None,
@@ -508,7 +677,9 @@ def main():
             fh.write(out)
     print(out)
     print(f"OPBENCH winner={summary['winner_backend']} speedup={summary['isolated_speedup']}x "
-          f"editable={summary['winner_editable']} kind={summary['winner_kind']}")
+          f"editable={summary['winner_editable']} kind={summary['winner_kind']} "
+          f"harness_suspect={summary['harness_suspect']}"
+          + (f" harness_error={summary['harness_error']!r}" if summary['harness_suspect'] else ""))
 
 
 if __name__ == "__main__":
