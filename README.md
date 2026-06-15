@@ -1,6 +1,6 @@
 # PerfSkills
 
-GPU kernel optimization skills for LLM-based coding agents. Target: AMD MI300X (gfx942).
+GPU kernel optimization skills for LLM-based coding agents. Target: AMD Instinct MI GPUs (CDNA, e.g. gfx942 / gfx950) — the on-box card is auto-detected.
 
 ## Skills & Workflows
 
@@ -79,7 +79,7 @@ Workflow({
 
 ### Using Team Workflow E2E (end-to-end serving throughput)
 
-`workflow_e2e_team/` raises the **sglang/vllm serving throughput** of a whole LLM on MI300X. It is a
+`workflow_e2e_team/` raises the **sglang/vllm serving throughput** of a whole LLM on AMD Instinct MI GPUs. It is a
 system layer that wraps — and recursively calls — the unchanged single-kernel `workflows/team_workflow.js`:
 it preflights the env, profiles a running server, triages hot kernels by **Amdahl** (`pct_gpu_time ×
 achievable_speedup`), then pulls levers cheapest-first — config/backend sweep → head GEMM/attention
@@ -135,7 +135,7 @@ GPU access is serialized via `scripts/gpu_lock.sh` (flock-based), so multiple ke
 
 ## Results
 
-12 HIP kernels on AMD MI300X (excluding mla_decode; FAIL counted as 1.0x):
+12 HIP kernels, measured on AMD MI300X (gfx942) (excluding mla_decode; FAIL counted as 1.0x):
 
 | Method | LLM | Geo Mean |
 | ------ | --- | -------- |
@@ -169,7 +169,7 @@ PerfSkills/
 ├── workflows/             # Single-kernel optimizer (Workflow)
 │   ├── team_workflow.js   # Deterministic JS orchestration
 │   ├── roles/             # director, tech_lead, engineer, author/benchmark/profile/verify engineers, integrator
-│   ├── knowledge/         # optimization strategies, HIP/Triton/wrapper guides, profiling, MI300X, self-monitoring
+│   ├── knowledge/         # optimization strategies, HIP/Triton/wrapper guides, profiling, AMD Instinct, self-monitoring
 │   ├── scripts/           # gpu_lock.sh, profile_kernel.sh
 │   └── README.md
 ├── workflow_e2e_team/     # End-to-end LLM serving-throughput optimizer (wraps workflows/)
@@ -187,7 +187,7 @@ PerfSkills/
 
 ## Prerequisites
 
-- AMD MI300X GPU (gfx942), ROCm 6.x, `rocprof-compute`, Python 3.8+
+- An AMD Instinct MI GPU (CDNA, e.g. gfx942 / gfx950), ROCm 6+, a profiler (`rocprof-compute` / `rocprofv3` / `rocprof`), Python 3.8+
 
 ## License
 

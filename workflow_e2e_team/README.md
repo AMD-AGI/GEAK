@@ -1,7 +1,7 @@
-# team_workflow_e2e — End-to-End LLM Inference-Throughput Optimizer (MI300X)
+# team_workflow_e2e — End-to-End LLM Inference-Throughput Optimizer (AMD Instinct MI GPUs)
 
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that raises the **sglang/vllm
-serving throughput** of an LLM on AMD MI300X. It is a *system layer* built on top of — and recursively
+serving throughput** of an LLM on AMD Instinct MI GPUs. It is a *system layer* built on top of — and recursively
 calling — the UNCHANGED single-kernel `team_workflow` (`../workflows/`). The single-kernel workflow's
 quality is preserved verbatim; this layer adds everything above the kernel: profiling a running
 server, Amdahl triage, config/backend tuning, extracting hot kernels into standalone unittests,

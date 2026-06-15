@@ -2,7 +2,7 @@
 
 ## Goal
 Extend the single-kernel `team_workflow` into an end-to-end LLM inference-throughput optimizer for
-sglang/vllm on MI300X, **without changing the single-kernel workflow** and while staying backward
+sglang/vllm on AMD Instinct MI GPUs, **without changing the single-kernel workflow** and while staying backward
 compatible with single-kernel optimization. Spec: `../instruct_e2e.md`.
 
 ## Locked design decisions (2026-06-03, via interactive Q&A)

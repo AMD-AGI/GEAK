@@ -1,6 +1,6 @@
 ---
 name: team
-description: "Multi-agent GPU kernel optimization with Director/TechLead/Engineer hierarchy. Optimizes HIP or Triton kernels on AMD MI300X with budget-controlled parallel optimization rounds, patch combination, and iterative re-profiling."
+description: "Multi-agent GPU kernel optimization with Director/TechLead/Engineer hierarchy. Optimizes HIP or Triton kernels on AMD Instinct MI GPUs with budget-controlled parallel optimization rounds, patch combination, and iterative re-profiling."
 arguments:
   - name: kernel_path
     description: "Absolute path to the kernel directory containing source files"

@@ -2,7 +2,7 @@
 
 This is the map the **Config Tuner** and **Kernel Extractor** use to find the editable surface of a
 running sglang server, and how the **e2e Integrator** overlays an optimized kernel reversibly. Seeded
-for sglang 0.5.11 on ROCm/MI300X (gfx942); verify paths against the installed version at run time
+from a sglang 0.5.11 / ROCm setup; verify paths against the installed version at run time
 (`python3 -c "import sglang, os; print(os.path.dirname(sglang.__file__))"`).
 
 ## 1. The three knobs that change which kernel runs (no source edit)
