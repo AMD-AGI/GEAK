@@ -9,7 +9,7 @@ Two workflows ship here:
 | Workflow                                      | Scope               | What it optimizes                                     |
 | --------------------------------------------- | ------------------- | ----------------------------------------------------- |
 | **[Team Workflow E2E](workflow_e2e_team/)** ⭐ | Whole-model serving | End-to-end **sglang / vLLM throughput** of a full LLM |
-| [Team Workflow](workflows/)                   | Single kernel       | Latency / speedup of a single GPU kernel (Triton, HIP, CUDA, CK, …) |
+| [Team Workflow](workflows/)                   | Single kernel       | Latency / speedup of a single AMD GPU kernel (Triton, HIP, CK, FlyDSL, …) |
 
 
 > **Team Workflow E2E is the headline.** It raises the serving throughput of a real model by triaging hot
@@ -100,7 +100,7 @@ See a real run in `[examples/team_workflow_e2e/](examples/team_workflow_e2e/)`.
 
 ## Team Workflow — single kernel
 
-`workflows/` optimizes a single GPU kernel — Triton, HIP, CUDA, CK, or any GPU source: Director → TechLead → specialist engineers
+`workflows/` optimizes a single AMD GPU kernel — Triton, HIP, CK, FlyDSL, or any AMD GPU source: Director → TechLead → specialist engineers
 (algorithm / memory / compute / host_runtime), multi-round and budget-controlled, with each patch
 independently verified before it's accepted.
 
