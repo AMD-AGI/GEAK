@@ -51,11 +51,12 @@ Workflow({
   attempt (accepted AND rejected), per-kernel isolated breakdown, the final validated A/B, caveats.
 - **`final_launch.sh`** — reproduces the optimized server (triton attn + FlyDSL down-proj overlay).
 - **`architect_report.md`** — concise summary.
-- **`evidence/`** — the JSONs/artifacts the report cites:
+- **`kernel/`** — the optimized FlyDSL kernel saved standalone (see `kernel/README.md`):
+  - `gemm_a8w8_blockscale_flydsl.py` — the final authored fused fp8 down-proj kernel (2.432× isolated, shipped).
+  - `sitecustomize.py` — the capture-safe overlay seam (lazy meta-path finder, precompile-before-capture
+    warmup hook, host-sync-free data_ptr weight cache, one-shot engagement proof).
+- **`evidence/`** — the JSONs the report cites:
   - `flydsl_downproj_integrate_result.json` — the e2e gate verdict (`gate: accepted`, +60.09%, parity pass).
   - `upgate_integrate_result_rejected.json` — the do-no-harm rejection of h0 (−0.26%).
   - `h1_downproj_director_validation.json` — independent per-case isolated validation (2.432×, correctness pass).
   - `validate_base_bench_summary.json` / `validate_stack_bench_summary.json` — the final 931.6 → 1559.9 A/B.
-  - `gemm_a8w8_blockscale_flydsl.py` — the authored fused fp8 kernel (shipped).
-  - `sitecustomize_capture_safe_seam.py` — the capture-safe overlay seam (lazy meta-path finder,
-    precompile-before-capture warmup hook, host-sync-free data_ptr weight cache, one-shot engagement proof).
