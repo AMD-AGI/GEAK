@@ -5,10 +5,12 @@ on-box card is auto-detected). Driven by Claude Code, orchestrated by determinis
 
 Two workflows ship here:
 
-| Workflow | Scope | What it optimizes |
-| --- | --- | --- |
+
+| Workflow                                      | Scope               | What it optimizes                                     |
+| --------------------------------------------- | ------------------- | ----------------------------------------------------- |
 | **[Team Workflow E2E](workflow_e2e_team/)** ⭐ | Whole-model serving | End-to-end **sglang / vLLM throughput** of a full LLM |
-| [Team Workflow](workflows/) | Single kernel | Latency / speedup of one HIP or Triton kernel |
+| [Team Workflow](workflows/)                   | Single kernel       | Latency / speedup of a single GPU kernel (Triton, HIP, CUDA, CK, …) |
+
 
 > **Team Workflow E2E is the headline.** It raises the serving throughput of a real model by triaging hot
 > kernels and pulling levers cheapest-first, then *recursively* calls the single-kernel Team Workflow to
@@ -21,17 +23,19 @@ Two workflows ship here:
 ### 1. Prerequisites
 
 - An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), **ROCm 6+**, a profiler (`rocprof-compute` /
-  `rocprofv3` / `rocprof`), Python 3.8+.
+`rocprofv3` / `rocprof`), Python 3.8+.
 - **Claude Code ≥ 2.1.177** — the workflows use the **dynamic Workflow** (JS orchestration) feature, which
-  is only available from this version onward. Check with `claude --version`.
+is only available from this version onward. Check with `claude --version`.
 - For E2E: a running-capable serving backend (`sglang` or `vllm`) and the model weights on disk.
 
 ### 2. Launch Claude Code in auto mode
 
 The workflows spawn many sub-agents and run profiling / benchmark / build commands on the box, so run
-Claude Code with permissions auto-approved:
+Claude Code with permissions auto-approved. Update Claude Code first to make sure you have the dynamic
+Workflow feature (≥ 2.1.177):
 
 ```bash
+claude update                                    # update Claude Code to the latest version
 IS_SANDBOX=1 claude --dangerously-skip-permissions
 ```
 
@@ -56,16 +60,16 @@ that wraps — and recursively calls — the single-kernel Team Workflow:
 2. **Profile** a running server on your exact workload.
 3. **Triage** hot kernels by **Amdahl** (`pct_gpu_time × achievable_speedup`).
 4. **Pull levers cheapest-first** — config/backend sweep → head GEMM/attention bake-off (aiter per-shape
-   tune + a Triton kernel *authored* via the recursive kernel layer) → editable-kernel milestone loop.
+  tune + a Triton kernel *authored* via the recursive kernel layer) → editable-kernel milestone loop.
 5. **Overlay** each accepted change back **reversibly**, gated on a measured warm-server throughput delta
-   (interleaved A/B, 0.5% band + engagement proof + output parity).
+  (interleaved A/B, 0.5% band + engagement proof + output parity).
 
-Every run writes a complete **`final_report.md`** (with a Phases tree + artifacts tree).
+Every run writes a complete `**final_report.md`** (with a Phases tree + artifacts tree).
 
 ### Example — natural language (recommended)
 
 ```
-use workflow_e2e_team to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
+use path/to/workflow_e2e_team to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
 ```
 
 ### Example — programmatic (`Workflow` tool)
@@ -90,24 +94,24 @@ Workflow({
 
 **Output** lands under `workflow_e2e_team/exp/e2e_<model>_<timestamp>/` — `final_report.md`,
 `architect_report.md`, `final/` (overlay + patch + `final_launch.sh`), and per-stage artifacts.
-See a real run in [`examples/team_workflow_e2e/`](examples/team_workflow_e2e/).
+See a real run in `[examples/team_workflow_e2e/](examples/team_workflow_e2e/)`.
 
 ---
 
 ## Team Workflow — single kernel
 
-`workflows/` optimizes one HIP or Triton kernel: Director → TechLead → specialist engineers
+`workflows/` optimizes a single GPU kernel — Triton, HIP, CUDA, CK, or any GPU source: Director → TechLead → specialist engineers
 (algorithm / memory / compute / host_runtime), multi-round and budget-controlled, with each patch
 independently verified before it's accepted.
 
 ### Example — natural language (recommended)
 
 ```
-use the workflow to optimize /path/to/knn, gpu 4
+use path/to/workflows to optimize /path/to/knn, gpu 4
 ```
 
 ```
-use the workflow to optimize /path/to/silu, budget 8, focus on wrapper overhead
+use path/to/workflows to optimize /path/to/silu, budget 8, focus on wrapper overhead
 ```
 
 ### Example — programmatic (`Workflow` tool)
@@ -144,13 +148,15 @@ reference, but the workflows are the recommended path.)
 
 12 HIP kernels, measured on AMD MI300X (gfx942) (excluding mla_decode; FAIL counted as 1.0x):
 
-| Method | LLM | Geo Mean |
-| ------ | --- | -------- |
-| GEAK_v3 | n/a | 1.90x |
-| GEAK Skill | Sonnet 4.6 | 2.33x |
-| Team Skill | Opus 4.6 | 3.56x |
-| Team Skill | Opus 4.8 | 3.32x |
+
+| Method            | LLM          | Geo Mean  |
+| ----------------- | ------------ | --------- |
+| GEAK_v3           | n/a          | 1.90x     |
+| GEAK Skill        | Sonnet 4.6   | 2.33x     |
+| Team Skill        | Opus 4.6     | 3.56x     |
+| Team Skill        | Opus 4.8     | 3.32x     |
 | **Team Workflow** | **Opus 4.8** | **3.68x** |
+
 
 > Team Skill and Team Workflow are measured with unified baselines (3 runs, median); GEAK_v3 / GEAK Skill
 > use each run's own baseline. Per-kernel breakdowns:
