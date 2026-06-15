@@ -6,10 +6,10 @@ on-box card is auto-detected). Driven by Claude Code, orchestrated by determinis
 Two workflows ship here:
 
 
-| Workflow                                      | Scope               | What it optimizes                                     |
-| --------------------------------------------- | ------------------- | ----------------------------------------------------- |
-| **[Team Workflow E2E](workflow_e2e_team/)** ⭐ | Whole-model serving | End-to-end **sglang / vLLM throughput** of a full LLM |
-| [Team Workflow](workflows/)                   | Single kernel       | Latency / speedup of a single AMD GPU kernel (Triton, HIP, CK, FlyDSL, …) |
+| Workflow                                      | Scope               | What it optimizes                                                   |
+| --------------------------------------------- | ------------------- | ------------------------------------------------------------------- |
+| **[Team Workflow E2E](workflow_e2e_team/)** ⭐ | Whole-model serving | End-to-end **sglang / vLLM throughput** of a full LLM               |
+| [Team Workflow](workflows/)                   | Single kernel       | Latency / speedup of a single GPU kernel (Triton, HIP, CUDA, CK, …) |
 
 
 > **Team Workflow E2E is the headline.** It raises the serving throughput of a real model by triaging hot
@@ -100,14 +100,14 @@ See a real run in `[examples/team_workflow_e2e/](examples/team_workflow_e2e/)`.
 
 ## Team Workflow — single kernel
 
-`workflows/` optimizes a single AMD GPU kernel — Triton, HIP, CK, FlyDSL, or any AMD GPU source: Director → TechLead → specialist engineers
+`workflows/` optimizes a single GPU kernel — Triton, HIP, CUDA, CK, or any GPU source: Director → TechLead → specialist engineers
 (algorithm / memory / compute / host_runtime), multi-round and budget-controlled, with each patch
 independently verified before it's accepted.
 
 ### Example — natural language (recommended)
 
 ```
-use path/to/workflows to optimize /path/to/knn, gpu 4
+use path/to/workflows to optimize /path/to/knn
 ```
 
 ```
@@ -179,6 +179,23 @@ PerfSkills/
 ├── examples/            # Example tasks, benchmark comparisons, a real e2e run
 └── exp/                 # Experiment outputs (timestamped per run)
 ```
+
+## Approaches compared
+
+How the methods in this repo (and their predecessors) relate:
+
+|                        | GEAK v3                                   | GEAK Skill                                 | Team Skill                                             | Team Workflow                                                      | E2E Workflow                                                       |
+| ---------------------- | ----------------------------------------- | ------------------------------------------ | ----------------------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------- |
+| **Target**             | Single kernel                             | Single kernel                              | Single kernel                                         | Single kernel                                                     | **Whole-model sglang/vLLM serving throughput**                    |
+| **Agent backend**      | miniswe                                   | Claude/Cursor                              | Claude/Cursor                                         | Claude                                                            | Claude                                                            |
+| **Origin**             | GEAK                                      | Refactored from GEAK_v3, reuses its logic  | Ground-up redesign                                    | Successor to Team Skill — JS control flow                         | System layer over Team Workflow (recursively calls it)            |
+| **Architecture**       | Orchestrator + parallel workers           | Orchestrator + parallel workers            | Hierarchical: Director → TechLead → Engineers → Merge | Same hierarchy, orchestration in JS, not LLM-interpreted prose    | e2e Director → System Architect → Profiler / Config Tuner / Kernel Extractor / e2e Integrator (wraps the kernel layer) |
+| **Iteration**          | Multi-round                               | Single round                               | Multi-round, budget-controlled                        | Multi-round, budget-controlled                                    | Multi-round, Amdahl-triaged, budget-controlled                    |
+| **Orchestration**      | Python                                    | LLM-driven                                 | LLM-driven                                            | **Deterministic JS** — loop/parallelism/verification in code     | **Deterministic JS**                                              |
+| **Verification**       | Orchestrator verifies                     | Orchestrator verifies                      | Director independently re-benchmarks                  | **Pipelined** — each patch verified by a separate agent          | **Warm-server interleaved A/B** — throughput delta + engagement proof + output parity |
+| **Engineer types**     | Generic                                   | Generic                                    | Generic                                               | **Specialist**: algorithm, memory, compute, host_runtime         | System roles + the specialist kernel squad via the recursive layer |
+| **Cross-round memory** | miniswe-memory control                    | None                                       | Implicit (TechLead context)                           | **Explicit**: insight blackboard + hypothesis ledger             | **Explicit**: insight blackboard + per-backend knowledge          |
+| **Best for**           | Programmatic kernel optimization workflow | Single optimization direction suffices     | Complex kernels, multi-round gains                    | Single-kernel gains with high reliability/reproducibility        | **Raising end-to-end serving throughput of a full model**         |
 
 ## License
 
