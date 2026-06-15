@@ -16,6 +16,12 @@
 #   WARMUP_RUNS        number of warmup runs before profiling (default: 3)
 #   RPC_PROFILE_ARGS   extra args passed to rocprof-compute/omniperf `profile` (default: "--no-roof")
 #   RPV3_TRACE_ARGS    args passed to rocprofv3 (default: "--kernel-trace --stats --output-format csv")
+#   RPROF_ARGS         args passed to legacy rocprof (default: "--stats")
+#
+# Fault tolerance: a profiler that fails (e.g. a flag was renamed across toolchain versions) no longer
+# degrades silently. The failure + a self-heal pointer (which env var to override, where the recipe is)
+# is written into profile_report.txt so the engineer can re-run with a corrected arg. See the
+# "Profiler failed? — fault-tolerance ladder" section of knowledge/profiling_guide.md.
 #
 # Output: everything lands under <output_dir>. The single entry point for the profile_engineer is
 #   <output_dir>/profile_report.txt   (raw, human/agent-readable; the chosen profiler's full output)
@@ -34,6 +40,7 @@ WARMUP_RUNS="${WARMUP_RUNS:-3}"
 PROFILER_PRIORITY="${PROFILER_PRIORITY:-rocprof-compute omniperf rocprofv3 rocprof}"
 RPC_PROFILE_ARGS="${RPC_PROFILE_ARGS:---no-roof}"
 RPV3_TRACE_ARGS="${RPV3_TRACE_ARGS:---kernel-trace --stats --output-format csv}"
+RPROF_ARGS="${RPROF_ARGS:---stats}"
 
 mkdir -p "$OUTPUT_DIR"
 REPORT="$OUTPUT_DIR/profile_report.txt"
@@ -69,14 +76,35 @@ done
 
 PROFILE_SUCCESS=false
 
+# Surface a profiler failure (instead of silently degrading) + tell the engineer how to self-heal:
+# which env var to override and where the per-profiler recovery recipe lives.
+emit_profiler_failure() {  # <tool> <exit_code> <override_env_var> <raw_log>
+    local tool="$1" code="$2" envvar="$3" log="$4"
+    {
+        echo ""
+        echo "!!! PROFILER FAILED: $tool exited $code — its output may be unusable; degrading."
+        echo ">>> Most likely a CLI/version mismatch (a flag was renamed or removed in this toolchain)."
+        echo ">>> Self-heal: run \`$tool --help\` to find the current flag, then re-run this script with"
+        echo ">>>   an override, e.g.   $envvar=\"<corrected args>\" bash profile_kernel.sh <gpu> <cmd> <out>"
+        echo ">>> Recipe: knowledge/profiling_guide.md  →  \"Profiler failed? — fault-tolerance ladder\"  →  $tool"
+        if [ -n "$log" ] && [ -s "$log" ]; then
+            echo ">>> Last error lines from $(basename "$log"):"
+            tail -n 15 "$log" 2>/dev/null | sed 's/^/    /'
+        fi
+        echo ""
+    } >> "$REPORT"
+}
+
 run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump the FULL analyze text.
     local tool="$1"
     local workload="$OUTPUT_DIR/${tool}_workload"
     rm -rf "$workload"; mkdir -p "$workload"
     echo "=== Profiling with $tool (profile $RPC_PROFILE_ARGS) ==="
+    local rc=0
     bash "$GPU_LOCK" "$GPU_ID" \
         "$tool" profile $RPC_PROFILE_ARGS -n "$workload" -- bash -c "$BENCHMARK_CMD" \
-        > "$OUTPUT_DIR/${tool}_profile_raw.log" 2>&1 || true
+        > "$OUTPUT_DIR/${tool}_profile_raw.log" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then emit_profiler_failure "$tool" "$rc" RPC_PROFILE_ARGS "$OUTPUT_DIR/${tool}_profile_raw.log"; fi
     if [ -d "$workload" ]; then
         echo "=== $tool analyze (full, unparsed) ===" >> "$REPORT"
         bash "$GPU_LOCK" "$GPU_ID" "$tool" analyze -p "$workload" >> "$REPORT" 2>&1 || true
@@ -88,9 +116,11 @@ run_rocprofv3() {        # modern profiler: kernel trace + stats CSVs (per-kerne
     local dir="$OUTPUT_DIR/rocprofv3"
     rm -rf "$dir"; mkdir -p "$dir"
     echo "=== Profiling with rocprofv3 ($RPV3_TRACE_ARGS) ==="
+    local rc=0
     bash "$GPU_LOCK" "$GPU_ID" \
         rocprofv3 $RPV3_TRACE_ARGS -d "$dir" -- bash -c "$BENCHMARK_CMD" \
-        > "$OUTPUT_DIR/rocprofv3_run.log" 2>&1 || true
+        > "$OUTPUT_DIR/rocprofv3_run.log" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then emit_profiler_failure rocprofv3 "$rc" RPV3_TRACE_ARGS "$OUTPUT_DIR/rocprofv3_run.log"; fi
     # Surface every artifact rocprofv3 produced into the report (generic: no fixed filename glob).
     { cat "$OUTPUT_DIR/rocprofv3_run.log"; echo ""; } >> "$REPORT" 2>/dev/null || true
     while IFS= read -r f; do
@@ -100,8 +130,10 @@ run_rocprofv3() {        # modern profiler: kernel trace + stats CSVs (per-kerne
 }
 
 run_rocprof() {          # legacy: rocprof --stats (HIP dispatch stats).
-    echo "=== Profiling with rocprof --stats ==="
-    bash "$GPU_LOCK" "$GPU_ID" rocprof --stats bash -c "$BENCHMARK_CMD" >> "$REPORT" 2>&1 || true
+    echo "=== Profiling with rocprof ($RPROF_ARGS) ==="
+    local rc=0
+    bash "$GPU_LOCK" "$GPU_ID" rocprof $RPROF_ARGS bash -c "$BENCHMARK_CMD" >> "$REPORT" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then emit_profiler_failure rocprof "$rc" RPROF_ARGS "$REPORT"; fi
     [ -s "$REPORT" ] && PROFILE_SUCCESS=true
 }
 

@@ -53,6 +53,8 @@ The COMMANDMENT MUST contain, with concrete commands (not placeholders):
 - `BENCHMARK` — wrapped in gpu_lock (quick measurement).
 - `FULL_BENCHMARK` — wrapped in gpu_lock (authoritative).
 - `PROFILE` — `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<cmd that cd's into the workspace>" <out_dir>`.
+  If the report shows a `!!! PROFILER FAILED` block, follow the fault-tolerance ladder in
+  `knowledge/profiling_guide.md` (override the named env var with the corrected flag, or degrade and say so).
 - `PARSE` — a one-paragraph description of how to extract per-case latency from the output (the
   exact token/regex and the case-id mapping), so verify/profile engineers parse identically.
 - `MODIFIABLE FILES` and the rules (never modify harness/COMMANDMENT/files outside the workspace;

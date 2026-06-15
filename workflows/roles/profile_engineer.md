@@ -19,6 +19,10 @@ assumed MI300X.
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<profile/benchmark cmd>" $EVAL_DIR/profile_output[_rN]`
    This warms up, then profiles with the best available profiler (rocprof-compute → omniperf →
    rocprof → benchmark-only) and writes a report.
+   If the report contains a `!!! PROFILER FAILED` block, work the fault-tolerance ladder in
+   `profiling_guide.md` ("Profiler failed?"): use `<tool> --help` to find the renamed flag, re-run once
+   with the named env override, then degrade deliberately — and record which tool actually ran + why in
+   `profiler_used` / your summary. Do not accept a silent degrade.
 3. Read the report. Extract what's available: VALU/VMEM/LDS utilization, effective HBM bandwidth,
    active vs total cycles, dependency/issue wait, L1/L2 hit rate, coalescing %, branch divergence,
    active threads/instr, VGPR/SGPR usage, scratch bytes, **and the per-kernel dispatch breakdown

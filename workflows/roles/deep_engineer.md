@@ -93,6 +93,8 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
 4. **Self-profile to re-steer**: every few accepted changes, re-run
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<benchmark cmd that cd's into $KERNEL_PATH>" $OUTPUT_DIR/profile_rN`
    to find the NEW dominant bottleneck, and attack that next. This is the core of going deep.
+   If the report shows a `!!! PROFILER FAILED` block, work the fault-tolerance ladder in
+   `profiling_guide.md` (use `<tool> --help`, re-run with the named env override, or degrade and say so).
 5. **Stop rule** (later than the specialist's): stop and submit when ANY holds —
    (a) you hit the TARGET (multiple reached, or ≳90% roofline on the compute-bound cases AND the small
    cases are at/near the launch floor); OR

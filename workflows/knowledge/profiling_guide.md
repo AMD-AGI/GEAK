@@ -17,6 +17,58 @@ means the parsing responsibility is yours, and you must adapt to whichever profi
    your summary and classify from whatever IS present (at minimum: per-case latency + dispatch count).
    Never block on a field that this toolchain doesn't emit.
 
+## Profiler failed? — fault-tolerance ladder
+
+`profile_kernel.sh` no longer degrades **silently**. If a profiler errors out (almost always because a
+flag was renamed or removed across ROCm/profiler versions), the report contains a block like:
+
+```
+!!! PROFILER FAILED: rocprofv3 exited 2 — its output may be unusable; degrading.
+>>> Self-heal: run `rocprofv3 --help` to find the current flag, then re-run this script with
+>>>   an override, e.g.   RPV3_TRACE_ARGS="<corrected args>" bash profile_kernel.sh <gpu> <cmd> <out>
+>>> Recipe: knowledge/profiling_guide.md → "Profiler failed? — fault-tolerance ladder" → rocprofv3
+>>> Last error lines from rocprofv3_run.log: ...
+```
+
+When you see that block, **do not just accept the degraded result** — work this ladder:
+
+1. **Read the error** (the `Last error lines` in the block, or the named raw log in the output dir).
+2. **Discover the correct flag**: run `<tool> --help` (or `<tool> <subcmd> --help`). Map the rejected
+   option to its current equivalent (see the per-tool notes below).
+3. **Re-run once with an env override** — the script takes every profiler's args from an env var, so you
+   never edit the script: prefix the same `profile_kernel.sh` invocation with the corrected var.
+4. **Still failing → degrade deliberately**, one rung down the priority list, and **say so**: set
+   `profiler_used` to what actually ran and add one line to your `profiling_summary.md` naming the failed
+   tool and why (e.g. "rocprofv3 rejected `--output-format`; fell back to rocprof --stats"). Never let a
+   degrade pass unrecorded.
+
+Priority / degrade order: `rocprof-compute → omniperf → rocprofv3 → rocprof → benchmark-only`.
+Override env vars (defaults in `profile_kernel.sh`): `PROFILER_PRIORITY`, `WARMUP_RUNS`,
+`RPC_PROFILE_ARGS` (rocprof-compute/omniperf `profile`), `RPV3_TRACE_ARGS` (rocprofv3), `RPROF_ARGS`
+(legacy rocprof).
+
+### Per-tool "if it fails"
+
+- **rocprof-compute / omniperf** — override `RPC_PROFILE_ARGS`.
+  - `--no-roof` rejected → newer builds may drop it (roofline already off by default); retry with
+    `RPC_PROFILE_ARGS=""`.
+  - `profile`/`analyze` subcommand missing → check `rocprof-compute --help`; on some installs the entry
+    point is `omniperf` (or vice-versa) — set `PROFILER_PRIORITY="omniperf rocprofv3 rocprof"`.
+  - workload dir empty / analyze finds nothing → counters likely need permissions (see rocprofv3 note);
+    drop to rocprofv3.
+- **rocprofv3** — override `RPV3_TRACE_ARGS`.
+  - `unrecognized argument --output-format` → older/newer builds spell it differently; check
+    `rocprofv3 --help | grep -i output` (e.g. `-f csv`, or CSV is the default and the flag is dropped).
+  - counter collection needs elevated perf access → fall back to trace only:
+    `RPV3_TRACE_ARGS="--kernel-trace"` (you lose SoL/cache, keep durations + dispatch counts).
+  - still nothing → degrade to `rocprof`.
+- **rocprof (legacy)** — override `RPROF_ARGS`.
+  - `--stats` rejected or empty → try `RPROF_ARGS="--hip-trace --stats"`; if the binary is absent
+    entirely, you are at the bottom rung → **benchmark-only**.
+- **benchmark-only** (no profiler usable) — not a failure to fix, it is the floor. Classify from the
+  per-case latency table + dispatch shape per the `benchmark-only` bullet above, and state plainly in
+  your summary that no profiler was available on this box.
+
 ### Per-profiler extraction
 
 - **`rocprof-compute` / `omniperf`** (richest): `profile_report.txt` holds the full `analyze` text —
