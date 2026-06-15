@@ -386,8 +386,7 @@ def collect_baseline_metrics(
     # valid cross-language translation, so skip it (parity with the postprocess
     # CORRECTNESS gate) while still collecting the baseline benchmark.
     _skip_correctness_gate = bool(
-        os.environ.get("GEAK_SKIP_CORRECTNESS_GATE")
-        or os.environ.get("GEAK_TRANSLATION_RUN", "").strip() == "1"
+        os.environ.get("GEAK_SKIP_CORRECTNESS_GATE") or os.environ.get("GEAK_TRANSLATION_RUN", "").strip() == "1"
     )
     if not _skip_correctness_gate:
         gate = _run_benchmark_once(
