@@ -236,11 +236,37 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
 // must NOT kill a multi-hour run. Retry a few times, then DEGRADE to null so the caller's existing
 // null-guards skip/continue gracefully (critical phases like setup re-throw on null themselves).
+// Bound each attempt: an agent LLM call that HANGS (no response, no terminal error) would block this
+// await forever — the harness resolves terminal errors to null but not an indefinite hang. Race the
+// call against a VERY generous timeout that resolves null, which the loop below treats as a failed
+// attempt (retry, then degrade). A true hang never returns, so a generous bound still catches it while
+// NEVER killing a legitimately-long agent. The OUTER e2e agents orchestrate the serving stack (Director
+// launches sglang + runs the baseline bench ~30min; ConfigTuner does multiple server-launch+bench
+// cycles; the head e2e gate overlays + launches + A/B benches) — these run far longer than a kernel
+// agent, so the bound must be large (default 120min). Too-short a bound here causes the long setup
+// agent to be killed and retried, spawning duplicate exp dirs. args.agent_timeout_ms=0 disables;
+// falls back to raw agent() if setTimeout is unavailable.
+const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 7200000, 10);
+function agentBounded(prompt, opts) {
+  if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return agent(prompt, opts);
+  let to;
+  const guard = new Promise((resolve) => {
+    to = setTimeout(() => {
+      log(`  [hung-agent guard] ${(opts && opts.label) || 'agent'} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — treating as a failed attempt.`);
+      resolve(null);
+    }, AGENT_TIMEOUT_MS);
+  });
+  return Promise.race([
+    agent(prompt, opts).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+    guard,
+  ]);
+}
+
 async function safeAgent(prompt, opts, tries = 3) {
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
-      const r = await agent(prompt, opts);
+      const r = await agentBounded(prompt, opts);
       if (r) return r;
       lastErr = 'null/empty result';
     } catch (e) { lastErr = String(e); }
@@ -403,6 +429,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH,
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
+        // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
+        // Pass the decode M explicitly (= running batch ≈ conc) so it is never dropped, plus a
+        // per-step M=1. See kernel_extractor.md "Shapes must span BOTH regimes".
+        REQUIRE_DECODE_BUCKET: true,
+        DECODE_M_BUCKETS: [1, CONC],
+        PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
       }),
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
@@ -440,17 +473,37 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     for (const ap of plan) {
       const lang = ap.language || 'triton';
       let al;
-      try {
-        al = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
-          kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
-          mode: ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
-          op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '' },
-          kernel_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
-          budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
-          task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${bake.best_known_ms || '?'} ms). ` + (TASK || ''),
-          apply_to_original: 'false',
-        });
-      } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
+      // Retry the nested author on a TRANSIENT/early failure (threw, or returned with no real
+      // optimization: no final_geomean) — a transient nested-workflow death must NOT silently drop a
+      // language (it dropped FlyDSL in the 2026-06-12 run). Do NOT retry a COMPLETED no-speedup
+      // (final_geomean present but <=1.0) — that's a real result, retrying just wastes budget.
+      const AUTHOR_TRIES = parseInt(A.head_author_tries != null ? A.head_author_tries : 2, 10);
+      for (let attempt = 1; attempt <= AUTHOR_TRIES; attempt++) {
+        try {
+          al = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+            kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
+            mode: ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
+            op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true },
+            kernel_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+            budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
+            task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${bake.best_known_ms || '?'} ms). ` +
+              `This kernel will be overlaid onto the LIVE sglang decode path, which is CUDA-graph captured: its STEADY-STATE hot ` +
+              `path (2nd call onward) MUST be host-sync-free — NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize() ` +
+              `and no Python branch on a GPU scalar (a host sync DEADLOCKS graph capture → 0 live forwards → e2e rejected). ` +
+              `Cache any weight prep (transpose/requant/preshuffle) by weight.data_ptr() done ONCE, not per call. ` +
+              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: the persistent weight cache is kept for ALL layers at once, so do NOT ` +
+              `re-materialize full bf16 weights (raw+preshuffled bf16 across every layer = tens of GB → forces mem-fraction ` +
+              `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). Use the FUSED fp8 path ` +
+              `(fold the block-scale into the operand scale, run ONE fp8 MFMA GEMM — the "kill the dequant" lever) and cache ` +
+              `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
+              `kernel MUST fit at the same mem-fraction the accepted config uses. ` + (TASK || ''),
+            apply_to_original: 'false',
+          });
+        } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
+        const transient = !al || al.validation_status === 'error' || (al.authored === false && al.final_geomean == null);
+        if (!transient || attempt === AUTHOR_TRIES) break;
+        log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
+      }
       if (al && al.authored !== false && al.final_geomean > 1.0 && al.final_patch) {
         headCands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: al.final_geomean });

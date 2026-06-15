@@ -7,6 +7,15 @@
 adapter_default_port() { echo 30000; }
 
 adapter_launch() {
+  # Raise the scheduler watchdog by default: an authored/JIT kernel (FlyDSL/triton-author) overlaid on
+  # the path JIT-compiles on first prefill, which can exceed sglang's default watchdog and kill the
+  # server before CUDA-graph capture. Harmless for stock runs. Only add it if the caller didn't already
+  # set one in EXTRA_SERVER_ARGS (override via WATCHDOG_TIMEOUT=...; set empty to disable).
+  local _wd=""
+  case " $EXTRA_SERVER_ARGS " in
+    *" --watchdog-timeout "*) _wd="" ;;
+    *) [ -n "${WATCHDOG_TIMEOUT:-600}" ] && _wd="--watchdog-timeout ${WATCHDOG_TIMEOUT:-600}" ;;
+  esac
   # shellcheck disable=SC2086
   env $EXTRA_ENV \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
@@ -18,6 +27,7 @@ adapter_launch() {
       --tp-size "$TP" \
       --trust-remote-code \
       --mem-fraction-static "$MEM_FRACTION" \
+      $_wd \
       $EXTRA_SERVER_ARGS \
       > "$LOG" 2>&1 &
   SERVER_PID=$!
