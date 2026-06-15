@@ -25,7 +25,6 @@ adapter_launch() {
       --model-path "$MODEL" \
       --host "$HOST" --port "$PORT" \
       --tp-size "$TP" \
-      --trust-remote-code \
       --mem-fraction-static "$MEM_FRACTION" \
       $_wd \
       $EXTRA_SERVER_ARGS \

@@ -22,7 +22,6 @@ adapter_launch() {
     vllm serve "$MODEL" \
       --host "$HOST" --port "$PORT" \
       --tensor-parallel-size "$TP" \
-      --trust-remote-code \
       --gpu-memory-utilization "$MEM_FRACTION" \
       $EXTRA_SERVER_ARGS \
       > "$LOG" 2>&1 &
