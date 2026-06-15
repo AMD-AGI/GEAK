@@ -50,8 +50,10 @@ regime), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`.
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/capture_<short_name>.log"
    ```
    (REPEATS=0 → just warmup drives a short window; capture flushes on server exit via atexit.) Verify
-   `reference_io.pt` + `meta.json` exist and `num_cases` ≥ 1 (ideally both prefill & decode shapes if
-   the kernel serves both).
+   `reference_io.pt` + `meta.json` exist and `num_cases` ≥ 1. For a head GEMM that serves both regimes
+   you MUST capture/synthesize BOTH a decode case (M ≈ `WORKLOAD.conc`) and a prefill case (large M) —
+   see the mandatory both-regimes rule below. Decode M is often under-ranked by GPU-time in the capture
+   window; add it explicitly from WORKLOAD if the capture missed it.
 3. **Copy the editable source** into `kernel_src/` (the minimal owning subtree), so the kernel layer
    and the later overlay can diff against it.
 4. **Write `unittest.py`** — backend-agnostic and IMMUTABLE:
@@ -150,10 +152,28 @@ op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for a
    backend forward you captured. Only return `target_callable=""` if no Python seam genuinely exists
    (then an authored kernel can't be wired and a direct_light env winner still applies).
 
-> **Shapes must be the REAL ones the server issues.** A head op serves many M buckets (decode M=1..conc
-> + prefill chunk Ms). Capture/scope the unittest to the actual profiled shape set (or the
-> `AITER_TUNE_GEMM`-captured shapes), not a single arbitrary M — an optimization tuned on the wrong
-> shape won't be hit at runtime and won't move e2e (this is the whole point of a "trustworthy unittest").
+> **Shapes must be the REAL ones the server issues — and they MUST span BOTH regimes.** A head GEMM
+> serves many M buckets: the **decode** regime at small M = the steady-state running batch (M ≈ `WORKLOAD.conc`,
+> e.g. 64; also a per-step M like 1) AND the **prefill** regime at large M (chunk sizes, M ≈ thousands).
+> The unittest's `per_case` M-buckets **MUST include at least one decode case (M ≈ conc, derived from
+> WORKLOAD) and at least one prefill case** for every weight (N,K) the op serves. This is mandatory, not
+> "ideally".
+>
+> **Why this is mandatory (do not skip it):** steady-state serving throughput is **decode/TPOT-bound** —
+> at conc=64 the server spends most wall-clock in decode (skinny-M GEMMs), even though a profiler ranks
+> the big prefill GEMMs higher by *GPU-time*. If you scope the unittest to the GPU-time-dominant prefill
+> M only, the optimizer is blind to decode and will happily author a prefill-tuned kernel (tall BLOCK_M
+> tiles, per-call weight transpose/requant materialization, JIT dispatch) that is fast in isolation but
+> **regresses the decode path and loses e2e** — observed: isolated 1.39× on prefill-only buckets → e2e
+> −9% (TPOT 58→67ms), gate-rejected. Including the decode M forces the optimizer/gate's isolated geomean
+> to reflect the real e2e-critical regime, so a kernel that wins isolated also wins (or at least does not
+> regress) e2e. The winning reference run benchmarked 3 prefill + 3 decode cases and won all six.
+>
+> Scope to the actual profiled/`AITER_TUNE_GEMM`-captured shapes for the (N,K) set, but ALWAYS add the
+> decode-M bucket from WORKLOAD even if the profiler under-ranked it by GPU-time. **If the inputs include
+> `DECODE_M_BUCKETS` (and `REQUIRE_DECODE_BUCKET: true`), you MUST emit one decode `per_case` at each of
+> those M values for every (N,K) — these are non-negotiable; the smoke-test and downstream gate depend on
+> them.** Combine with the prefill M per `PREFILL_M_NOTE`.
 
 Return JSON:
 ```json

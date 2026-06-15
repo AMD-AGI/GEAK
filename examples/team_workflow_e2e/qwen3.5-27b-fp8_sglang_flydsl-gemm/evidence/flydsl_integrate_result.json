@@ -1,0 +1,44 @@
+{
+  "short_name": "_gemm_a8w8_blockscale_kernel",
+  "winner_kind": "authored",
+  "winner_backend": "flydsl",
+  "provenance_ok": true,
+  "isolated_speedup": 1.7735,
+  "pct_gpu_time": 81.9,
+  "serving_config": {
+    "tp": 1,
+    "gpu": "single",
+    "mem_fraction_static": 0.78,
+    "flags": "--attention-backend triton --kv-cache-dtype fp8_e4m3 --watchdog-timeout 600"
+  },
+  "ref_throughput_runs": [
+    1173.4785629734363,
+    1171.5773716599713,
+    1170.743394861745,
+    1170.0097272139494,
+    1169.475192508449,
+    1169.274591895629,
+    1167.957660812744
+  ],
+  "cand_throughput_runs": [
+    1339.3615742964214,
+    1336.8943409013668,
+    1335.0607328279411,
+    1336.0204890055293,
+    1335.2285394073058,
+    1335.7750928792182,
+    1334.6960715508853
+  ],
+  "ref_med": 1170.01,
+  "cand_med": 1335.775,
+  "ref_max": 1173.479,
+  "cand_min": 1334.696,
+  "e2e_delta_pct": 14.168,
+  "non_overlapping": true,
+  "engagement": "ENGAGED banner in cand server.log; CUDA-graph capture completed (no crash)",
+  "parity": {
+    "byte_exact_greedy": "6/12 (approximate kernel, expected_close)",
+    "task_accuracy": "cand 6/12 >= ref 5/12, cand correct on every item ref is; quality preserved"
+  },
+  "gate": "accepted"
+}

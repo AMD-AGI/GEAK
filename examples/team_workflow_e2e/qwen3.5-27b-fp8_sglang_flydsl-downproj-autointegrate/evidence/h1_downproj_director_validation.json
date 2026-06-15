@@ -1,0 +1,18 @@
+{
+  "kernel_name": "h1_gemm_a8w8_blockscale_downproj_task",
+  "director_verified_speedup_geomean": 2.432,
+  "director_verified_speedup_arithmetic": 3.2124,
+  "tech_lead_reported_speedup_geomean": 2.4378,
+  "validation_status": "accepted",
+  "correctness": "pass",
+  "per_case": [
+    {"name": "1", "baseline_ms": 0.3531, "optimized_ms": 0.0522, "speedup": 6.7644},
+    {"name": "64", "baseline_ms": 0.3774, "optimized_ms": 0.0713, "speedup": 5.2931},
+    {"name": "15360", "baseline_ms": 5.6996, "optimized_ms": 4.1425, "speedup": 1.3759},
+    {"name": "16040", "baseline_ms": 6.0140, "optimized_ms": 4.6047, "speedup": 1.3061},
+    {"name": "16384", "baseline_ms": 6.1188, "optimized_ms": 4.6269, "speedup": 1.3224}
+  ],
+  "applied_to_original": "false",
+  "arbitration_note": "Independently reproduced from a fresh validation_workspace built from KERNEL_PATH_ORIG (author-mode: meta.json+unittest.py only) with final_patch.diff applied cleanly. Stock baseline (no overlay) reproduced the recorded baseline_timing (M=16384 ~6.12ms). Overlay engaged via PYTHONPATH=kernel_src (sitecustomize.py auto-import); '[flydsl-overlay] bound' + graph-replay KEEP for decode confirmed. All 5 cases PASS correctness (rel_err 0.0 vs oracle; oracle confirmed vs independent fp32 dequant->matmul HP reference, oracle_vs_hp_err<=0.007). Candidate optimized_ms = per-case median of 3 overlay runs; speedup computed vs recorded stock baseline_timing.json. Director geomean 2.432x is within 0.24% of TechLead's 2.4378x (inside 10% band) -> accepted. Decode buckets non-regressing (6.76x/5.29x). APPLY_TO_ORIGINAL=false -> original left untouched.",
+  "final_patch": "/wekafs/zihao/2026/geak_cc/PerfSkills/exp/e2e_Qwen-Qwen3.5-27B-FP8_20260613_195618_371691_18852/kernels/_exp/team_h1_gemm_a8w8_blockscale_downproj_task_20260614_003016_3688330_24351/h1_gemm_a8w8_blockscale_downproj_task/final_patch.diff"
+}

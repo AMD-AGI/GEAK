@@ -119,21 +119,27 @@ Return JSON:
 ## PHASE=plan_milestone  (between milestones, decide what to do next / whether to stop)
 
 Inputs: `EVAL_DIR`, `ROUND`, `BUDGET_REMAINING`, `CURRENT_THROUGHPUT`, `BASELINE_THROUGHPUT`,
-`NOISE_BAND_PCT`, `MIN_KERNEL_TASKS`, `DISPATCHED_SO_FAR`, `BELOW_MIN_FLOOR` (bool), latest
-`PROFILE_TOPN` (re-profiled after the last accepted change), `HISTORY`, `SKILL_DIR`.
+`NOISE_BAND_PCT`, **`MILESTONE_MIN_PCT`** (the pct_gpu_time bar; default 5), `MIN_KERNEL_TASKS`,
+`DISPATCHED_SO_FAR`, `BELOW_MIN_FLOOR` (bool), latest `PROFILE_TOPN` (re-profiled after the last accepted
+change), `HISTORY`, `SKILL_DIR`.
 
 1. Re-read the latest profile — the bottleneck SHIFTS after each accepted change (e.g. once GEMM is
    tuned, a Triton norm or attention may now top the list).
-2. **Floor rule (overrides the stop rule):** if `BELOW_MIN_FLOOR` is true (`DISPATCHED_SO_FAR <
-   MIN_KERNEL_TASKS`), you **MUST** nominate enough fresh `kernel_candidates` to make progress toward
-   the floor — you may NOT set `stop=true` and may NOT return an empty list. Draw from the broad
-   editable pool, not just the current top entry: gated-delta sub-kernels (chunk_h / chunk_o /
-   recompute_w_u / kkt_solve / l2norm / conv1d / gating), rmsnorm(+quant), rope / qk-norm, layernorm,
-   activation, any editable Triton/custom kernel in the Top-N. Each is a real, distinct kernel.
-3. **Amdahl stop rule (only once the floor is met):** estimate remaining headroom = Σ over untouched
-   editable kernels of `(pct_gpu_time × plausible_speedup_fraction)`. If the best remaining candidate
-   can't plausibly move e2e beyond the noise band, set `stop=true`.
-4. Issue concrete directions: exact callable to extract (`module:attr`) + candidate backends, citing the
+2. **pct_gpu_time gate (HARD — overrides the floor):** ONLY nominate editable kernels with
+   `pct_gpu_time >= MILESTONE_MIN_PCT`, and **every candidate MUST carry its `pct_gpu_time`**. A kernel
+   below the bar can't move e2e past the noise band (Amdahl), so do NOT nominate it — **not even to meet
+   the floor**. If no editable kernel clears the bar, set `stop=true` with that reason (the floor does not
+   force sub-threshold work). The orchestrator also post-filters by this bar, so sub-threshold
+   nominations are dropped anyway — don't waste them.
+3. **Floor rule (only among above-bar kernels):** if `BELOW_MIN_FLOOR` is true AND there ARE editable
+   kernels `>= MILESTONE_MIN_PCT`, nominate enough of those fresh `kernel_candidates` to progress toward
+   the floor — draw from the broad above-bar editable pool (gated-delta sub-kernels chunk_h / chunk_o /
+   recompute_w_u / kkt_solve / l2norm / conv1d / gating, rmsnorm(+quant), rope / qk-norm, layernorm,
+   activation — whichever are above the bar in the Top-N). If none are above the bar, stop (rule 2 wins).
+4. **Amdahl stop rule:** estimate remaining headroom = Σ over untouched above-bar editable kernels of
+   `(pct_gpu_time × plausible_speedup_fraction)`. If the best remaining candidate can't plausibly move
+   e2e beyond the noise band, set `stop=true`.
+5. Issue concrete directions: exact callable to extract (`module:attr`) + candidate backends, citing the
    profile entry + pct_gpu_time. **Use HISTORY only to ORDER/diversify (deprioritize a direction that
    already showed no e2e gain THIS run, prefer a different kernel or a different mechanism) — NEVER as a
    permanent blocklist.** A past null may just mean it wasn't optimized well; if it's still the best

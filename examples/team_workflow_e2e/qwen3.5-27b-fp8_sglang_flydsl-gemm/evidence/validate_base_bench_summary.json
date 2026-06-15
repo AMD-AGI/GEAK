@@ -1,0 +1,11 @@
+{
+  "output_throughput_tok_s_median": 988.03,
+  "output_throughput_tok_s_spread_pct": 2.57,
+  "ttft_ms_median": 5267.856,
+  "tpot_ms_median": 59.737,
+  "runs": 2,
+  "all_throughput": [
+    975.3528193687359,
+    1000.706876643976
+  ]
+}

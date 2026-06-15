@@ -200,6 +200,35 @@ const VALIDATE_SCHEMA = obj({
 const cfg = (o) => Object.entries(o).map(([k, v]) =>
   `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
 
+// --- Hung-agent guard ------------------------------------------------------
+// An agent LLM call that HANGS (no response, no terminal error) blocks a
+// parallel()/pipeline() round-barrier forever (observed: engineer agents frozen
+// mid-turn wedged the whole optimize round for >30min). The harness resolves
+// terminal API errors to null but NOT an indefinite hang. So bound every agent()
+// call: if it has not returned after AGENT_TIMEOUT_MS, resolve it to null (which
+// every .filter(Boolean)/null-check downstream already tolerates) and let the
+// round proceed. VERY generous default (60min): a true hang never returns, so this only fires on a
+// hang, NEVER on a legitimately-long agent. Inner agents include benchmark/profile/verify that build
+// (hipcc/ninja) and run benches — minutes, well under 60min — plus the LLM-heavy optimize engineers
+// (the ones observed hanging). A too-short bound would kill legit long agents (e.g. a slow rocprof or
+// build), so keep it large. Real rejections are preserved (re-thrown). Cache keys (prompt, opts) are
+// unchanged so resume still works. Falls back to raw agent() if setTimeout is unavailable. args.agent_timeout_ms=0 disables.
+const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
+function agentT(p, o) {
+  if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return agent(p, o);
+  let to;
+  const guard = new Promise((resolve) => {
+    to = setTimeout(() => {
+      log(`  [hung-agent guard] ${o && o.label ? o.label : 'agent'} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
+      resolve(null);
+    }, AGENT_TIMEOUT_MS);
+  });
+  return Promise.race([
+    agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+    guard,
+  ]);
+}
+
 function roleAgent(role, phase, intro, inputs) {
   return `You are the ${role}. PHASE=${phase}.
 First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
@@ -216,7 +245,7 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // PHASE: Setup
 // ===========================================================================
 phase('Setup');
-const setup = await agent(
+const setup = await agentT(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
     KERNEL_PATH_ORIG, EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK, SKILL_DIR: WORKFLOW_DIR,
     MODE, TARGET_LANGUAGE, OP_SPEC,
@@ -238,7 +267,7 @@ log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
 // ===========================================================================
 if (MODE === 'author') {
   phase('Author');
-  const authored = await agent(
+  const authored = await agentT(
     roleAgent('author_engineer', 'author', 'Write the simplest correct baseline in the target language.', {
       TARGET_LANGUAGE, OP_SPEC, WORKSPACE: CANONICAL, TASK_DIR: KERNEL_PATH_ORIG,
       GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, KERNEL_KNOWLEDGE_DIR,
@@ -260,7 +289,7 @@ if (MODE === 'author') {
 // PHASE: Analyze + Roadmap (TechLead)
 // ===========================================================================
 phase('Analyze');
-const analysis = await agent(
+const analysis = await agentT(
   roleAgent('tech_lead', 'analyze', 'Analyze the kernel and write the roadmap.', {
     WORKSPACE: CANONICAL, EVAL_DIR, TASK, SKILL_DIR: WORKFLOW_DIR,
     KERNEL_KNOWLEDGE_DIR,
@@ -279,7 +308,7 @@ const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs
 // PHASE: Benchmark setup (Benchmark Engineer)
 // ===========================================================================
 phase('Benchmark');
-const bench = await agent(
+const bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0],
     ANALYSIS: analysis,
@@ -294,7 +323,7 @@ log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, 
 // PHASE: Baseline profile (Profile Engineer)
 // ===========================================================================
 phase('Profile');
-let profileSummary = await agent(
+let profileSummary = await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: 0,
     COMMANDMENT,
@@ -319,7 +348,7 @@ while (dispatched < BUDGET && noImprove < 2) {
   phase('Optimize');
 
   // --- (a) Plan the round (TechLead) ------------------------------------
-  const plan = await agent(
+  const plan = await agentT(
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).', {
       EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
       BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
@@ -363,7 +392,7 @@ while (dispatched < BUDGET && noImprove < 2) {
           `loop and push to the TARGET; keep the best correct version.`
         : `Then Read ${WORKFLOW_DIR}/roles/engineer.md and ${WORKFLOW_DIR}/knowledge/self_monitoring.md and the ` +
           `knowledge files for your specialty, and follow them.`;
-      return agent(
+      return agentT(
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
 First create YOUR private workspace, then optimize.
 \`\`\`bash
@@ -405,7 +434,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
       if (!eng || eng.status === 'failed' || !(eng.speedup_geomean > 1.0)) {
         return { d, eng, ver: null };
       }
-      return agent(
+      return agentT(
         roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
           CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
           GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
@@ -429,7 +458,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
   let integrate = null;
   if (verified.length >= 2) {
     phase('Merge');
-    integrate = await agent(
+    integrate = await agentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
         CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
@@ -456,7 +485,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
-    await agent(
+    await agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -483,7 +512,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     noImprove = 0;
 
     // --- (f) Re-profile the new best ------------------------------------
-    profileSummary = await agent(
+    profileSummary = await agentT(
       roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
         WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: round,
         COMMANDMENT, PREVIOUS_METRICS: profileSummary,
@@ -494,7 +523,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
   }
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
-  const mem = await agent(
+  const mem = await agentT(
     roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.', {
       EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR,
       ROUND_RESULTS: clean.map(r => ({ id: r.d.id, title: r.d.title, specialty: r.d.specialty,
@@ -528,7 +557,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
 // PHASE: Final report (TechLead)
 // ===========================================================================
 phase('Report');
-const report = await agent(
+const report = await agentT(
   roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.', {
     EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR,
     HISTORY: history, FINAL_WINNER: finalWinner, BASELINE_PER_CASE,
@@ -540,7 +569,7 @@ const report = await agent(
 // PHASE: Director validation + arbitration
 // ===========================================================================
 phase('Validate');
-const validation = await agent(
+const validation = await agentT(
   roleAgent('director', 'validate', 'Independently validate the final patch vs the TRUE baseline.', {
     KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0],
     APPLY_TO_ORIGINAL, COMMANDMENT,

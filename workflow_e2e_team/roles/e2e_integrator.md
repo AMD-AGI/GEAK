@@ -90,6 +90,46 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
      If the op's call site cannot be cleanly rebound (e.g. it is an inlined library call with no Python
      seam), report `gate:"rejected"` with reason `no_rebind_seam` — an authored kernel that can't be
      wired into the server is not a usable e2e win (record it so the Architect learns the seam is missing).
+
+   - **CUDA-graph-safe overlay — MANDATORY for any authored/JIT kernel on the decode path.** This is the
+     #1 reason a kernel wins isolated yet scores `e2e_delta=null, engagement_hits=0` ("hung on first
+     capture batch, never healthy, 0 forwards" → REJECT). sglang captures the decode path into a CUDA
+     graph; the rebound kernel MUST be capture-safe or the server hangs at capture and never serves.
+     Before measuring the CAND leg you MUST ensure all three:
+     1. **No host sync in the kernel hot path.** `.item()` / `.cpu()` / `.tolist()` / `.sum().item()` /
+        `torch.cuda.synchronize()` / a Python branch on a GPU scalar all DEADLOCK inside graph capture.
+        The classic offender is a per-call weight-fingerprint (`w_scale.sum().item()`) keying a weight
+        cache. The cache MUST be keyed by `weight.data_ptr()` (a host int; weights are persistent) with
+        all prep done ONCE at warmup. If the authored kernel still has a per-call sync, the seam must
+        provide a sync-free fast path (a `data_ptr -> prepped` table the warmup hook fills) — see the
+        template seam in [[../knowledge/templates/flydsl_overlay_sitecustomize.py]] (the working
+        reference: §"HOST-SYNC REMOVAL" + §"CUDA-GRAPH SAFETY").
+     2. **Precompile BEFORE capture.** No JIT/compile/dynamic-alloc may happen inside the captured
+        region. The overlay must expose `<impl>.flydsl_overlay_precompile(weight, weight_scale,
+        m_buckets=[1,2,4,8,16,32,64,128,256,512,1024,2048])` and it must run ONCE during warmup, before
+        capture, for each rebound weight (the template auto-installs this hook; trigger it from the
+        server warmup or by wrapping the capture entry — never rely on lazy first-call JIT).
+     3. **Launch the CAND with `--watchdog-timeout 600`** (append to its `EXTRA_SERVER_ARGS`): the first
+        prefill JIT can exceed sglang's default scheduler watchdog and kill the server before capture.
+     After the CAND launch, CONFIRM engagement from the server log (`[overlay] ... ENGAGED` / a >0 live
+     forward count). If `engagement_hits=0` or the server never became healthy, the kernel is NOT
+     capture-safe — do NOT report a number; fix the seam/kernel per (1)-(3) (host sync is the usual
+     cause), or if unfixable record `gate:"rejected"` reason `cuda_graph_capture_unsafe` honestly. Reuse
+     the template seam rather than re-deriving it; adapt only the target symbols and the impl module name.
+
+   - **Memory-footprint parity — measure the CAND at the SAME mem-fraction as the accepted REF.** A
+     capture-safe, faster kernel can STILL lose usable e2e if its persistent weight cache is large: at
+     fixed concurrency the KV-cache pool is a dominant throughput lever, so a kernel that forces
+     `--mem-fraction-static` down (to avoid OOM) starves KV and regresses net throughput even at a big
+     isolated win (observed: +24% GEMM at equal memory, but the kernel's 92.6GB bf16 weight cache forced
+     mf 0.85→0.45 → usable −9% vs the accepted server). Therefore: launch the CAND at the accepted
+     config's mem-fraction. If it OOMs there, do NOT silently drop mem-fraction and report the lower
+     number as the result — that compares unequal KV budgets. Instead record `gate:"rejected"` reason
+     `mem_footprint_starves_kv` with both the equal-memory delta (informative: the kernel is faster) and
+     the usable-vs-accepted delta (the gate basis), and tell the kernel layer to shrink the footprint:
+     use the fused-fp8 path (no bf16 re-materialization; compact fp8/preshuffled cache) and/or route
+     only the tuned target (N,K) through the seam (pass other shapes to stock). Never accept a net
+     usable regression (do-no-harm).
 3. **Measure e2e with the TIGHT 2-launch protocol.** Do NOT edit the shared `scripts/bench_e2e.sh` —
    drive it from the eval dir. `bench_e2e.sh` already does N timed repeats **on ONE server** (its
    `REPEATS` knob), so launch only TWO servers — a reference block then a candidate block, back-to-back

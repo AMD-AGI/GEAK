@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Strategize', detail: 'System Architect routes kernels by Amdahl (config vs kernel vs host)' },
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
     { title: 'HeadKernel', detail: 'highest-%GPU ops (GEMM/attn): extract_op -> backend bake-off (incl. FlyDSL) + aiter-DB/author tune -> e2e gate' },
-    { title: 'Milestone', detail: 'loop: plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
+    { title: 'Milestone', detail: 'loop over editable kernels ABOVE milestone_min_pct% GPU (default 5): plan -> extract -> recursive kernel optimize -> overlay -> e2e gate -> reprofile' },
     { title: 'Finalize', detail: 'e2e Integrator assembles the overlay + patch + launch bundle' },
     { title: 'Report', detail: 'System Architect writes the throughput report + grows the playbook' },
     { title: 'Validate', detail: 'e2e Director independently re-measures throughput + arbitrates' },
@@ -47,6 +47,11 @@ const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);       // max kerne
 // MIN floor: dispatch at LEAST this many editable-kernel tasks before the loop may stop on no-improve /
 // empty queue (prompt-tunable). Prevents the milestone track from never firing. Capped by BUDGET.
 const MIN_KERNEL_TASKS = Math.min(parseInt(A.min_kernel_tasks != null ? A.min_kernel_tasks : 4, 10), BUDGET);
+// Milestone only optimizes editable kernels whose profiled share is worth it: skip any candidate with
+// pct_gpu_time below this threshold (Amdahl — a kernel a few % of GPU can't move e2e past the noise band).
+// Configurable via args.milestone_min_pct (default 5). This OVERRIDES the MIN_KERNEL_TASKS floor: if no
+// candidate clears the bar, the milestone stops rather than grinding low-value kernels.
+const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_min_pct : 5);
 const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : 6, 10); // budget passed DOWN per kernel
 const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true') === 'true';
 // Head-kernel track (GEMM/attention) — the highest-pct_gpu_time ops, optimized regardless of edit flag.
@@ -77,7 +82,9 @@ const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC };
 const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
 // Repeats per timed e2e measurement (the integrator/validator pass this to bench_e2e.sh; the shared
 // bench script is NOT edited — interleaving is driven from the eval dir). Prompt-tunable.
-const E2E_REPEATS = parseInt(A.e2e_repeats != null ? A.e2e_repeats : 7, 10);
+// Default 2: with <0.5% spreads, 2 reps + the non-overlap (cand_min>ref_max) check is sufficient to
+// judge a win; 7 was overkill and ~3x slower. Bump via args.e2e_repeats for a noisy box.
+const E2E_REPEATS = parseInt(A.e2e_repeats != null ? A.e2e_repeats : 2, 10);
 const TASK = A.task || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
@@ -235,11 +242,37 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
 // must NOT kill a multi-hour run. Retry a few times, then DEGRADE to null so the caller's existing
 // null-guards skip/continue gracefully (critical phases like setup re-throw on null themselves).
+// Bound each attempt: an agent LLM call that HANGS (no response, no terminal error) would block this
+// await forever — the harness resolves terminal errors to null but not an indefinite hang. Race the
+// call against a VERY generous timeout that resolves null, which the loop below treats as a failed
+// attempt (retry, then degrade). A true hang never returns, so a generous bound still catches it while
+// NEVER killing a legitimately-long agent. The OUTER e2e agents orchestrate the serving stack (Director
+// launches sglang + runs the baseline bench ~30min; ConfigTuner does multiple server-launch+bench
+// cycles; the head e2e gate overlays + launches + A/B benches) — these run far longer than a kernel
+// agent, so the bound must be large (default 120min). Too-short a bound here causes the long setup
+// agent to be killed and retried, spawning duplicate exp dirs. args.agent_timeout_ms=0 disables;
+// falls back to raw agent() if setTimeout is unavailable.
+const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 7200000, 10);
+function agentBounded(prompt, opts) {
+  if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return agent(prompt, opts);
+  let to;
+  const guard = new Promise((resolve) => {
+    to = setTimeout(() => {
+      log(`  [hung-agent guard] ${(opts && opts.label) || 'agent'} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — treating as a failed attempt.`);
+      resolve(null);
+    }, AGENT_TIMEOUT_MS);
+  });
+  return Promise.race([
+    agent(prompt, opts).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+    guard,
+  ]);
+}
+
 async function safeAgent(prompt, opts, tries = 3) {
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
-      const r = await agent(prompt, opts);
+      const r = await agentBounded(prompt, opts);
       if (r) return r;
       lastErr = 'null/empty result';
     } catch (e) { lastErr = String(e); }
@@ -403,6 +436,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH,
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
+        // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
+        // Pass the decode M explicitly (= running batch ≈ conc) so it is never dropped, plus a
+        // per-step M=1. See kernel_extractor.md "Shapes must span BOTH regimes".
+        REQUIRE_DECODE_BUCKET: true,
+        DECODE_M_BUCKETS: [1, CONC],
+        PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
       }),
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
@@ -462,17 +502,37 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     for (const ap of plan) {
       const lang = ap.language || 'triton';
       let al;
-      try {
-        al = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
-          kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
-          mode: ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
-          op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '' },
-          kernel_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
-          budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
-          task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${bake.best_known_ms || '?'} ms). ` + (TASK || ''),
-          apply_to_original: 'false',
-        });
-      } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
+      // Retry the nested author on a TRANSIENT/early failure (threw, or returned with no real
+      // optimization: no final_geomean) — a transient nested-workflow death must NOT silently drop a
+      // language (it dropped FlyDSL in the 2026-06-12 run). Do NOT retry a COMPLETED no-speedup
+      // (final_geomean present but <=1.0) — that's a real result, retrying just wastes budget.
+      const AUTHOR_TRIES = parseInt(A.head_author_tries != null ? A.head_author_tries : 2, 10);
+      for (let attempt = 1; attempt <= AUTHOR_TRIES; attempt++) {
+        try {
+          al = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+            kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
+            mode: ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
+            op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true },
+            kernel_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+            budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
+            task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${bake.best_known_ms || '?'} ms). ` +
+              `This kernel will be overlaid onto the LIVE sglang decode path, which is CUDA-graph captured: its STEADY-STATE hot ` +
+              `path (2nd call onward) MUST be host-sync-free — NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize() ` +
+              `and no Python branch on a GPU scalar (a host sync DEADLOCKS graph capture → 0 live forwards → e2e rejected). ` +
+              `Cache any weight prep (transpose/requant/preshuffle) by weight.data_ptr() done ONCE, not per call. ` +
+              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: the persistent weight cache is kept for ALL layers at once, so do NOT ` +
+              `re-materialize full bf16 weights (raw+preshuffled bf16 across every layer = tens of GB → forces mem-fraction ` +
+              `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). Use the FUSED fp8 path ` +
+              `(fold the block-scale into the operand scale, run ONE fp8 MFMA GEMM — the "kill the dequant" lever) and cache ` +
+              `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
+              `kernel MUST fit at the same mem-fraction the accepted config uses. ` + (TASK || ''),
+            apply_to_original: 'false',
+          });
+        } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
+        const transient = !al || al.validation_status === 'error' || (al.authored === false && al.final_geomean == null);
+        if (!transient || attempt === AUTHOR_TRIES) break;
+        log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
+      }
       if (al && al.authored !== false && al.final_geomean > 1.0 && al.final_patch) {
         headCands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: al.final_geomean });
@@ -563,17 +623,23 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
   const plan = (milestone === 1 && kernelQueue.length)
     ? { stop: false, kernel_candidates: kernelQueue }
     : await safeAgent(
-      roleAgent('system_architect', 'plan_milestone', 'Nominate next kernels (must nominate while below the min floor).', {
+      roleAgent('system_architect', 'plan_milestone', `Nominate next kernels — ONLY editable kernels with pct_gpu_time >= ${MILESTONE_MIN_PCT}% (below that, Amdahl says they can't move e2e; do not nominate them even to meet the floor). Each candidate MUST carry its pct_gpu_time.`, {
         EVAL_DIR, ROUND: milestone, BUDGET_REMAINING: remaining, CURRENT_THROUGHPUT: curTput,
-        BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
+        BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, MILESTONE_MIN_PCT,
         MIN_KERNEL_TASKS, DISPATCHED_SO_FAR: dispatched, BELOW_MIN_FLOOR: belowFloor,
         PROFILE_TOPN: profile ? profile.profile_topN_json : '', HISTORY: history, SKILL_DIR: WORKFLOW_DIR,
       }),
       { phase: 'Milestone', label: `architect:plan m${milestone}`, schema: PLAN_SCHEMA });
 
-  const planCands = (plan && plan.kernel_candidates) ? plan.kernel_candidates : [];
+  const planCandsRaw = (plan && plan.kernel_candidates) ? plan.kernel_candidates : [];
+  // pct_gpu_time gate: only optimize kernels above MILESTONE_MIN_PCT (a candidate missing pct is kept,
+  // not silently dropped — but logged). This gate OVERRIDES the min-floor: low-pct kernels are not worth it.
+  const planCands = planCandsRaw.filter(c => c.pct_gpu_time == null || c.pct_gpu_time >= MILESTONE_MIN_PCT);
+  const skipped = planCandsRaw.filter(c => c.pct_gpu_time != null && c.pct_gpu_time < MILESTONE_MIN_PCT);
+  if (skipped.length) log(`Milestone ${milestone}: skipped ${skipped.length} kernel(s) below ${MILESTONE_MIN_PCT}% GPU [${skipped.map(c => `${c.short_name || '?'}@${(+c.pct_gpu_time).toFixed(1)}%`).join(', ')}].`);
   if (!planCands.length) {
-    if (belowFloor) log(`Milestone ${milestone}: below floor (${dispatched}/${MIN_KERNEL_TASKS}) but Architect nominated nothing — cannot fabricate candidates; stopping.`);
+    if (planCandsRaw.length) log(`Milestone ${milestone}: stop — no remaining kernel clears the ${MILESTONE_MIN_PCT}% GPU bar (Amdahl: sub-threshold kernels can't move e2e). Floor is overridden by the pct gate.`);
+    else if (belowFloor) log(`Milestone ${milestone}: below floor (${dispatched}/${MIN_KERNEL_TASKS}) but Architect nominated nothing — cannot fabricate candidates; stopping.`);
     else log(`Milestone ${milestone}: stop (floor ${MIN_KERNEL_TASKS} met). ${plan ? plan.reasoning || '' : ''}`);
     break;
   }
