@@ -72,9 +72,16 @@ Record which trace sources are available; the Profiler reads this from `env_repo
 removed from the candidate list, not errors:
 ```bash
 python3 -c "import aiter; print('aiter ok')" 2>/dev/null || echo "no aiter"
+# FlyDSL (aiter's GEMM/attn DSL — SOTA author target for dense/quantized GEMM). It is NOT a top-level
+# module: probe via aiter.ops.flydsl.is_flydsl_available() (a function), NOT `import flydsl` /
+# `aiter.flydsl` (those raise ImportError even when FlyDSL is installed → false "no flydsl").
+python3 -c "import aiter.ops.flydsl as f; print('flydsl', f.installed_flydsl_version if f.is_flydsl_available() else 'unavailable')" 2>/dev/null || echo "no flydsl"
 command -v hipblaslt-bench || echo "no hipblaslt-bench (offline GEMM tune unavailable)"
 command -v ckProfiler   || echo "no ckProfiler (CK instance sweep unavailable)"
 ```
+When `is_flydsl_available()` is true, **flydsl MUST appear in `available_backends`** (it is reachable
+via the aiter per-shape DB tune `libtype=flydsl` AND as a Tier-C author target). Do not infer its
+absence from an `import flydsl` failure — only `is_flydsl_available()` is authoritative.
 
 **6. Tooling.** `curl`, `python3`, free disk under `EXP_ROOT`. Missing `curl` → adapters that health-
 check via curl must be adjusted (note it); low disk → `block` (traces + overlays need room).
@@ -100,7 +107,7 @@ Write `EVAL_DIR/env_report.md` (human) and `EVAL_DIR/env_report.json` (machine),
   "model": "/path", "model_arch_class": "hybrid_mamba_moe", "model_dtype": "bf16",
   "gfx": "gfx942", "gpu_ids": ["0"],
   "trace_sources": ["torch"],            // add "rocprofv3" if present
-  "available_backends": ["hipblaslt","triton"],   // aiter/ck removed if absent
+  "available_backends": ["aiter","hipblaslt","triton","flydsl"], // include "flydsl" iff aiter.ops.flydsl.is_flydsl_available(); aiter/ck/flydsl removed only if absent
   "port": 31037,                          // the auto-allocated port, if any
   "limitations": ["rocprofv3 absent: HW durations approximate; ranking from torch trace"],
   "verdict": "ok|degrade|block",
