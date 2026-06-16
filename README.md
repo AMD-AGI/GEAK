@@ -5,16 +5,14 @@ on-box card is auto-detected). Driven by Claude Code, orchestrated by determinis
 
 Two workflows ship here:
 
+| Workflow | Scope | What it optimizes |
+| --- | --- | --- |
+| **[e2e_workflow](e2e_workflow/)** ⭐ | Whole-model serving | End-to-end **sglang / vLLM throughput** of a full LLM |
+| [kernel_workflow](kernel_workflow/) | Single kernel | Latency / speedup of a single AMD GPU kernel (Triton, HIP, CK, FlyDSL, …) |
 
-| Workflow                                      | Scope               | What it optimizes                                                   |
-| --------------------------------------------- | ------------------- | ------------------------------------------------------------------- |
-| **[Team Workflow E2E](workflow_e2e_team/)** ⭐ | Whole-model serving | End-to-end **sglang / vLLM throughput** of a full LLM               |
-| [Team Workflow](workflows/)                   | Single kernel       | Latency / speedup of a single GPU kernel (Triton, HIP, CUDA, CK, …) |
-
-
-> **Team Workflow E2E is the headline.** It raises the serving throughput of a real model by triaging hot
-> kernels and pulling levers cheapest-first, then *recursively* calls the single-kernel Team Workflow to
-> author/optimize the kernels worth fixing. If you only want to speed up one kernel, use Team Workflow directly.
+> **e2e_workflow is the headline.** It raises the serving throughput of a real model by triaging hot
+> kernels and pulling levers cheapest-first, then *recursively* calls the single-kernel kernel_workflow to
+> author/optimize the kernels worth fixing. If you only want to speed up one kernel, use kernel_workflow directly.
 
 ---
 
@@ -23,9 +21,9 @@ Two workflows ship here:
 ### 1. Prerequisites
 
 - An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), **ROCm 6+**, a profiler (`rocprof-compute` /
-`rocprofv3` / `rocprof`), Python 3.8+.
+  `rocprofv3` / `rocprof`), Python 3.8+.
 - **Claude Code ≥ 2.1.177** — the workflows use the **dynamic Workflow** (JS orchestration) feature, which
-is only available from this version onward. Check with `claude --version`.
+  is only available from this version onward. Check with `claude --version`.
 - For E2E: a running-capable serving backend (`sglang` or `vllm`) and the model weights on disk.
 
 ### 2. Launch Claude Code in auto mode
@@ -51,35 +49,36 @@ invokes the `Workflow` tool for you.
 
 ---
 
-## Team Workflow E2E — whole-model serving throughput ⭐
+## e2e_workflow — whole-model serving throughput ⭐
 
-`workflow_e2e_team/` raises the **sglang / vLLM serving throughput** of a whole LLM. It is a *system layer*
-that wraps — and recursively calls — the single-kernel Team Workflow:
+`e2e_workflow/` raises the **sglang / vLLM serving throughput** of a whole LLM. It is a *system layer*
+that wraps — and recursively calls — the single-kernel kernel_workflow:
 
 1. **Preflight** the env (GPU arch, backend, model).
 2. **Profile** a running server on your exact workload.
 3. **Triage** hot kernels by **Amdahl** (`pct_gpu_time × achievable_speedup`).
 4. **Pull levers cheapest-first** — config/backend sweep → head GEMM/attention bake-off (aiter per-shape
-  tune + a Triton kernel *authored* via the recursive kernel layer) → editable-kernel milestone loop.
+   tune + a kernel *authored* via the recursive kernel layer, FlyDSL-first for GEMM) → editable-kernel
+   milestone loop.
 5. **Overlay** each accepted change back **reversibly**, gated on a measured warm-server throughput delta
-  (interleaved A/B, 0.5% band + engagement proof + output parity).
+   (interleaved A/B, 0.5% band + engagement proof + output parity).
 
-Every run writes a complete `**final_report.md`** (with a Phases tree + artifacts tree).
+Every run writes a complete **`final_report.md`** (with a Phases tree + artifacts tree).
 
 ### Example — natural language (recommended)
 
 ```
-use path/to/workflow_e2e_team to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
+use path/to/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
 ```
 
 ### Example — programmatic (`Workflow` tool)
 
 ```js
 Workflow({
-  scriptPath: "<PerfSkills>/workflow_e2e_team/team_workflow_e2e.js",
+  scriptPath: "<PerfSkills>/e2e_workflow/e2e_workflow.js",
   args: {
     model_path: "/models/Qwen3.5-27B-FP8",            // required (e2e mode)
-    workflow_dir: "<PerfSkills>/workflow_e2e_team",   // required
+    workflow_dir: "<PerfSkills>/e2e_workflow",        // required
     backend: "sglang",                                // sglang | vllm
     isl: 1024, osl: 1024, conc: 64,                   // workload (profile + bench use the SAME)
     gpu_ids: "0,1,2,3",                               // optimization-parallelism pool (serving stays TP=1)
@@ -92,36 +91,36 @@ Workflow({
 // Single-kernel pass-through (backward compatible): pass kernel_path instead of model_path.
 ```
 
-**Output** lands under `workflow_e2e_team/exp/e2e_<model>_<timestamp>/` — `final_report.md`,
+**Output** lands under `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`,
 `architect_report.md`, `final/` (overlay + patch + `final_launch.sh`), and per-stage artifacts.
-See a real run in `[examples/team_workflow_e2e/](examples/team_workflow_e2e/)`.
+See a real run in [`examples/e2e_workflow/`](examples/e2e_workflow/).
 
 ---
 
-## Team Workflow — single kernel
+## kernel_workflow — single kernel
 
-`workflows/` optimizes a single GPU kernel — Triton, HIP, CUDA, CK, or any GPU source: Director → TechLead → specialist engineers
-(algorithm / memory / compute / host_runtime), multi-round and budget-controlled, with each patch
-independently verified before it's accepted.
+`kernel_workflow/` optimizes a single AMD GPU kernel — Triton, HIP, CK, FlyDSL, or any AMD GPU source:
+Director → TechLead → specialist engineers (algorithm / memory / compute / host_runtime), multi-round and
+budget-controlled, with each patch independently verified before it's accepted.
 
 ### Example — natural language (recommended)
 
 ```
-use path/to/workflows to optimize /path/to/knn
+use path/to/kernel_workflow to optimize /path/to/knn, gpu 4
 ```
 
 ```
-use path/to/workflows to optimize /path/to/silu, budget 8, focus on wrapper overhead
+use path/to/kernel_workflow to optimize /path/to/silu, budget 8, focus on wrapper overhead
 ```
 
 ### Example — programmatic (`Workflow` tool)
 
 ```js
 Workflow({
-  scriptPath: "<PerfSkills>/workflows/team_workflow.js",
+  scriptPath: "<PerfSkills>/kernel_workflow/kernel_workflow.js",
   args: {
     kernel_path: "/abs/path/to/kernel/",        // required
-    workflow_dir: "<PerfSkills>/workflows/",    // required: dir containing team_workflow.js
+    workflow_dir: "<PerfSkills>/kernel_workflow/",    // required: dir containing kernel_workflow.js
     budget: 6,                                  // optional, default 6
     gpu_ids: "0",                               // optional, comma-separated, default "0"
     task: "focus on memory bandwidth",          // optional, natural-language steer
@@ -137,29 +136,23 @@ Spawn one agent per kernel with isolated GPU assignments; GPU access is serializ
 
 ---
 
-## Why Workflows (not prose skills)
+## Why Workflows
 
 Control flow — the budget loop, fan-out, verification, and stop conditions — is **deterministic JS** in
-`team_workflow.js` / `team_workflow_e2e.js`. LLM agents are called only for judgement (analysis, strategy,
-optimization). This makes runs reliable and reproducible. (Markdown-driven `skills/` also exist for
-reference, but the workflows are the recommended path.)
+`kernel_workflow.js` / `e2e_workflow.js`. LLM agents are called only for judgement (analysis, strategy,
+optimization). This makes runs reliable and reproducible.
 
 ## Results — single-kernel
 
 12 HIP kernels, measured on AMD MI300X (gfx942) (excluding mla_decode; FAIL counted as 1.0x):
 
+| Method | LLM | Geo Mean |
+| ------ | --- | -------- |
+| GEAK_v3 (baseline) | n/a | 1.90x |
+| **kernel_workflow** | **Opus 4.8** | **3.68x** |
 
-| Method            | LLM          | Geo Mean  |
-| ----------------- | ------------ | --------- |
-| GEAK_v3           | n/a          | 1.90x     |
-| GEAK Skill        | Sonnet 4.6   | 2.33x     |
-| Team Skill        | Opus 4.6     | 3.56x     |
-| Team Skill        | Opus 4.8     | 3.32x     |
-| **Team Workflow** | **Opus 4.8** | **3.68x** |
-
-
-> Team Skill and Team Workflow are measured with unified baselines (3 runs, median); GEAK_v3 / GEAK Skill
-> use each run's own baseline. Per-kernel breakdowns:
+> kernel_workflow is measured with unified baselines (3 runs, median); GEAK_v3 uses each run's own
+> baseline. Per-kernel breakdowns:
 > [original](examples/result/hip2hip_comparison.md) ·
 > [reproducibility](examples/result/hip2hip_repro_comparison.md).
 
@@ -167,35 +160,34 @@ reference, but the workflows are the recommended path.)
 
 ```
 PerfSkills/
-├── workflow_e2e_team/   # ⭐ End-to-end LLM serving-throughput optimizer (wraps workflows/)
-│   ├── team_workflow_e2e.js   # system-layer orchestration (config / head-GEMM / kernel tracks + e2e gate)
+├── e2e_workflow/        # ⭐ End-to-end LLM serving-throughput optimizer (wraps kernel_workflow/)
+│   ├── e2e_workflow.js   # system-layer orchestration (config / head-GEMM / kernel tracks + e2e gate)
 │   ├── roles/  knowledge/  scripts/   # adapters/{sglang,vllm}.sh, op_bench.py, parse_profile.py, …
 │   └── README.md / PLAN.md
-├── workflows/           # Single-kernel optimizer
-│   ├── team_workflow.js       # deterministic JS orchestration
+├── kernel_workflow/     # Single-kernel optimizer
+│   ├── kernel_workflow.js       # deterministic JS orchestration
 │   ├── roles/  knowledge/  scripts/   # gpu_lock.sh, profile_kernel.sh
 │   └── README.md
-├── skills/              # Markdown-driven skills (GEAK, Team) — reference
-├── examples/            # Example tasks, benchmark comparisons, a real e2e run
+├── perf_knowledge/      # AMD operator × backend SOTA knowledge base (REFERENCE ONLY)
+├── examples/            # Example kernel tasks, benchmark comparisons, real e2e runs
 └── exp/                 # Experiment outputs (timestamped per run)
 ```
 
 ## Approaches compared
 
-How the methods in this repo (and their predecessors) relate:
+How the workflows in this repo relate to the GEAK_v3 baseline:
 
-|                        | GEAK v3                                   | GEAK Skill                                 | Team Skill                                             | Team Workflow                                                      | E2E Workflow                                                       |
-| ---------------------- | ----------------------------------------- | ------------------------------------------ | ----------------------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------- |
-| **Target**             | Single kernel                             | Single kernel                              | Single kernel                                         | Single kernel                                                     | **Whole-model sglang/vLLM serving throughput**                    |
-| **Agent backend**      | miniswe                                   | Claude/Cursor                              | Claude/Cursor                                         | Claude                                                            | Claude                                                            |
-| **Origin**             | GEAK                                      | Refactored from GEAK_v3, reuses its logic  | Ground-up redesign                                    | Successor to Team Skill — JS control flow                         | System layer over Team Workflow (recursively calls it)            |
-| **Architecture**       | Orchestrator + parallel workers           | Orchestrator + parallel workers            | Hierarchical: Director → TechLead → Engineers → Merge | Same hierarchy, orchestration in JS, not LLM-interpreted prose    | e2e Director → System Architect → Profiler / Config Tuner / Kernel Extractor / e2e Integrator (wraps the kernel layer) |
-| **Iteration**          | Multi-round                               | Single round                               | Multi-round, budget-controlled                        | Multi-round, budget-controlled                                    | Multi-round, Amdahl-triaged, budget-controlled                    |
-| **Orchestration**      | Python                                    | LLM-driven                                 | LLM-driven                                            | **Deterministic JS** — loop/parallelism/verification in code     | **Deterministic JS**                                              |
-| **Verification**       | Orchestrator verifies                     | Orchestrator verifies                      | Director independently re-benchmarks                  | **Pipelined** — each patch verified by a separate agent          | **Warm-server interleaved A/B** — throughput delta + engagement proof + output parity |
-| **Engineer types**     | Generic                                   | Generic                                    | Generic                                               | **Specialist**: algorithm, memory, compute, host_runtime         | System roles + the specialist kernel squad via the recursive layer |
-| **Cross-round memory** | miniswe-memory control                    | None                                       | Implicit (TechLead context)                           | **Explicit**: insight blackboard + hypothesis ledger             | **Explicit**: insight blackboard + per-backend knowledge          |
-| **Best for**           | Programmatic kernel optimization workflow | Single optimization direction suffices     | Complex kernels, multi-round gains                    | Single-kernel gains with high reliability/reproducibility        | **Raising end-to-end serving throughput of a full model**         |
+|                        | GEAK v3 (baseline)                        | kernel_workflow                                                  | e2e_workflow                                                       |
+| ---------------------- | ----------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------- |
+| **Target**             | Single kernel                             | Single kernel                                                   | **Whole-model sglang/vLLM serving throughput**                    |
+| **Agent backend**      | miniswe                                   | Claude                                                          | Claude                                                            |
+| **Architecture**       | Orchestrator + parallel workers           | Hierarchical: Director → TechLead → Engineers → Merge           | e2e Director → System Architect → Profiler / Config Tuner / Kernel Extractor / e2e Integrator (wraps the kernel layer) |
+| **Iteration**          | Multi-round                               | Multi-round, budget-controlled                                  | Multi-round, Amdahl-triaged, budget-controlled                    |
+| **Orchestration**      | Python                                    | **Deterministic JS** — loop/parallelism/verification in code   | **Deterministic JS**                                              |
+| **Verification**       | Orchestrator verifies                     | **Pipelined** — each patch verified by a separate agent        | **Warm-server interleaved A/B** — throughput delta + engagement proof + output parity |
+| **Engineer types**     | Generic                                   | **Specialist**: algorithm, memory, compute, host_runtime       | System roles + the specialist kernel squad via the recursive layer |
+| **Cross-round memory** | miniswe-memory control                    | **Explicit**: insight blackboard + hypothesis ledger           | **Explicit**: insight blackboard + per-backend knowledge          |
+| **Best for**           | Programmatic kernel optimization          | Single-kernel gains with high reliability/reproducibility      | **Raising end-to-end serving throughput of a full model**         |
 
 ## License
 
