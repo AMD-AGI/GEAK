@@ -1,5 +1,9 @@
 # GEAK
 
+[![Pytest](https://github.com/AMD-AGI/GEAK/actions/workflows/pytest.yaml/badge.svg)](https://github.com/AMD-AGI/GEAK/actions/workflows/pytest.yaml)
+[![Lint & Format](https://github.com/AMD-AGI/GEAK/actions/workflows/lint.yaml/badge.svg)](https://github.com/AMD-AGI/GEAK/actions/workflows/lint.yaml)
+[![Secret Scan](https://github.com/AMD-AGI/GEAK/actions/workflows/secret-scan.yaml/badge.svg)](https://github.com/AMD-AGI/GEAK/actions/workflows/secret-scan.yaml)
+
 GEAK is an agent-driven framework for end-to-end GPU kernel optimization in real codebases, producing reviewable patches backed by profiling, testing, and LLM-guided iteration. Supports **HIP**, **Triton**, and **FlyDSL** kernels.
 
 ---
