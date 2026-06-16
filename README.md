@@ -1,4 +1,4 @@
-# GEAK
+# GEAK v4
 
 Multi-agent GPU performance optimization for **AMD Instinct MI GPUs** (CDNA, e.g. gfx942 / gfx950 — the
 on-box card is auto-detected). Driven by Claude Code, orchestrated by deterministic JS **Workflows**.
@@ -40,7 +40,7 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions
 ### 3. Point it at this repo and ask
 
 ```bash
-git clone <this-repo> GEAK && cd GEAK
+git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
 IS_SANDBOX=1 claude --dangerously-skip-permissions
 ```
 
@@ -68,7 +68,7 @@ Every run writes a complete **`final_report.md`** (with a Phases tree + artifact
 ### Example
 
 ```
-use path/to/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
+use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
 ```
 
 **Output** lands under `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`,
@@ -86,11 +86,11 @@ budget-controlled, with each patch independently verified before it's accepted.
 ### Example
 
 ```
-use path/to/kernel_workflow to optimize /path/to/knn, gpu 4
+use path_to_GEAK/kernel_workflow to optimize /path/to/knn
 ```
 
 ```
-use path/to/kernel_workflow to optimize /path/to/silu, budget 8, focus on wrapper overhead
+use path_to_GEAK/kernel_workflow to optimize /path/to/silu, budget 8, focus on wrapper overhead
 ```
 
 ### Batch (many kernels at once)
