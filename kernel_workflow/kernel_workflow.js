@@ -33,7 +33,7 @@ if (!WORKFLOW_DIR) {
     'kernel_workflow.js, roles/, knowledge/, scripts/ (i.e. the dirname of this script).');
 }
 // EXP_ROOT = where timestamped run dirs are written. Default: a sibling "exp/" next to the
-// workflows dir (…/<parent>/workflows -> …/<parent>/exp). Override with args.exp_root.
+// kernel_workflow dir (…/<parent>/kernel_workflow -> …/<parent>/exp). Override with args.exp_root.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
 const KERNEL_PATH_ORIG = A.kernel_path;

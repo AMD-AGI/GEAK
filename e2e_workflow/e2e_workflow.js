@@ -24,9 +24,9 @@ if (!WORKFLOW_DIR) {
   throw new Error('args.workflow_dir is required: absolute path to the dir holding e2e_workflow.js, ' +
     'roles/, knowledge/, scripts/ (the dirname of this script).');
 }
-// The UNCHANGED single-kernel workflow. Default: sibling "workflows" dir next to this one.
+// The UNCHANGED single-kernel workflow. Default: sibling "kernel_workflow" dir next to this one.
 const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
-  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/workflows')).replace(/\/+$/, '');
+  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_workflow')).replace(/\/+$/, '');
 const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_workflow.js`;
 
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
