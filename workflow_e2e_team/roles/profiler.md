@@ -40,10 +40,20 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND`, `GPU_ID`, `WORKLOAD` (isl/osl/conc)
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/profile_r${ROUND}.log"
    ```
    The torch trace lands as a `*.json.gz` (or `*.json`) under `OUT_DIR/profile/`.
-2. (Optional, better) Also capture a rocprofv3 kernel trace for authoritative HW durations if
-   rocprofv3 is available — wrap a short bench run:
-   `rocprofv3 --kernel-trace --output-format csv -d <dir> -- <a short bench/replay>`. If that's
-   impractical against a live server, the torch trace alone is acceptable (note it in `notes`).
+2. (Optional bonus — STRICTLY TIME-BOUNDED) Also capture a rocprofv3 kernel trace for authoritative HW
+   durations IF it is cheap. **The torch trace from step 1 is the PRIMARY source and is sufficient for
+   routing** (it already ranks the top kernels by GPU time + carries op names/shapes). rocprofv3 is a
+   nice-to-have refinement, NOT a requirement.
+   ⚠️ EFFICIENCY RULE (do not violate — rocprof has repeatedly cost 15-20 min/profile): launching a
+   SEPARATE rocprofv3-INSTRUMENTED full vllm server is pathologically slow (instrumenting a 27B model
+   load can take 10-20 min to reach health, sometimes never). So:
+   - **Cap any rocprof health-wait at ~3 min total** (e.g. `for i in $(seq 1 36); do ... sleep 5; done`).
+     If the instrumented server is not healthy by then, **ABANDON rocprof and proceed with the torch
+     trace alone** (note it in `notes`). Do NOT re-launch the instrumented server.
+   - **Make AT MOST ONE rocprof attempt.** Never spin up multiple instrumented servers / retry loops.
+   - Prefer wrapping a SHORT replay over a full server when feasible; if not, skip rocprof entirely.
+   A torch-only profile that finishes in ~2 min beats a rocprof profile that costs 20 min — speed of the
+   optimization loop matters more than HW-timing precision for routing.
 3. Run the standardized parser:
    ```bash
    PDIR="$EVAL_DIR/profile/round_${ROUND}/profile"
