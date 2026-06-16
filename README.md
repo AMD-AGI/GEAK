@@ -115,8 +115,8 @@ optimization). This makes runs reliable and reproducible.
 
 | Method | LLM | Geo Mean |
 | ------ | --- | -------- |
-| GEAK_v3 (baseline) | n/a | 1.90x |
-| **kernel_workflow** | **Opus 4.8** | **3.68x** |
+| GEAK_v3 (baseline) | Opus 4.8 | 1.90x |
+| **kernel_workflow** | Opus 4.8 | **3.68x** |
 
 > kernel_workflow is measured with unified baselines (3 runs, median); GEAK_v3 uses each run's own
 > baseline. Per-kernel breakdowns:
