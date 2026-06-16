@@ -201,11 +201,17 @@ class AmdClaudeModel(AmdLlmModelBase):
             if system_message and "system" not in filtered_kwargs:
                 filtered_kwargs["system"] = system_message
 
-        return self.client.messages.create(
+        # Use the SDK streaming HTTP path and assemble a final ``Message``.
+        # Some Anthropic-compatible gateways reject non-streaming ``messages.create``
+        # when ``max_tokens`` is large (e.g. streaming required for long generations).
+        stream_kwargs = dict(filtered_kwargs)
+        stream_kwargs.pop("stream", None)
+        with self.client.messages.stream(
             model=self.config.model_name,
             messages=anthropic_messages,
-            **filtered_kwargs,
-        )
+            **stream_kwargs,
+        ) as stream:
+            return stream.get_final_message()
 
     # ------------------------------------------------------------------
     # Response parsing
