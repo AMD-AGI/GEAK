@@ -1,4 +1,6 @@
-# GEAK v4
+<p align="center">
+  <img src="examples/images/logo.png" alt="GEAK v4" width="300">
+</p>
 
 Multi-agent GPU performance optimization for **AMD Instinct MI GPUs** (CDNA, e.g. gfx942 / gfx950 — the
 on-box card is auto-detected). Driven by Claude Code, orchestrated by deterministic JS **Workflows**.
