@@ -18,14 +18,36 @@ from minisweagent.run.planner.candidate_pool import CandidatePool, CandidateTask
 
 logger = logging.getLogger(__name__)
 
-# Dedicated, source-agnostic kernel-AUTHORING rewrite subagents. In mixed mode these
-# are always added to the candidate pool as extra fixed candidates, so every round
-# naturally tries a FlyDSL author and a TileLang author alongside the in-place
-# optimizer + planned strategies — best-of-N picks the winner. No env flags, no
-# per-target hardcoding: the agents are source-agnostic (they read the kernel
-# themselves) and author the optimized kernel (split-K/tiling/per-shape config),
-# matching AMD's real recipe rather than a narrow "<src>-to-<tgt>" API swap.
-_REWRITE_AUTHORING_SUBAGENTS = ("flydsl-kernel-rewrite", "tilelang-kernel-rewrite")
+# Dedicated, source-agnostic kernel-AUTHORING rewrite subagents.
+_REWRITE_FLYDSL = "flydsl-kernel-rewrite"
+_REWRITE_TILELANG = "tilelang-kernel-rewrite"
+
+# Adaptive op-type → best-fit rewrite DSL. Picks the DSL with the real edge on gfx942
+# for that op class, so we don't waste a slot on a rewrite that can't win:
+#   attention / FlashAttention / MLA  -> TileLang (FA ~1.5x Triton, MLA ~parity w/ asm)
+#   MoE / grouped-expert GEMM         -> FlyDSL  (fused-MoE is FlyDSL's strongest case)
+#   linear-attn / gated-delta decode  -> FlyDSL  (aiter flydsl_gdr_decode)
+#   norm / rmsnorm / elementwise      -> both (cheap, either can win)
+#   plain GEMM                        -> both (DSL edge small on blockscale; let both try)
+_OPTYPE_REWRITE_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("attention", "attn", "flash", "mla", "sdpa", "fmha"), (_REWRITE_TILELANG,)),
+    (("moe", "expert", "fused_moe", "grouped"), (_REWRITE_FLYDSL,)),
+    (("gated_delta", "linear_attn", "recurrent", "gdn", "gdr"), (_REWRITE_FLYDSL,)),
+)
+
+
+def _select_rewrite_subagents(kernel_name: str, function_names: list[str] | None) -> tuple[str, ...]:
+    """Pick the op-appropriate authoring rewrite subagent(s) by name signal.
+
+    Matches the kernel name + function names against op-class keywords and returns the
+    DSL(s) with the real edge for that op on gfx942. Defaults to trying BOTH when the op
+    is GEMM/norm/unknown (DSL edge is small/ambiguous there, so let best-of-N decide).
+    """
+    hay = " ".join([str(kernel_name or "")] + [str(f) for f in (function_names or [])]).lower()
+    for needles, agents in _OPTYPE_REWRITE_RULES:
+        if any(n in hay for n in needles):
+            return agents
+    return (_REWRITE_FLYDSL, _REWRITE_TILELANG)
 
 
 class TaskPlanner:
@@ -93,13 +115,17 @@ class TaskPlanner:
             num_gpus=num_gpus,
         )
 
-        # Source-agnostic authoring rewrite candidates (FlyDSL + TileLang). Added to the
-        # pool as extra fixed candidates so every mixed-mode round tries a backend-rewrite
-        # author alongside the in-place optimizer and the planned strategies — best-of-N
-        # selects the winner. Only included when those subagents are registered.
+        # Adaptive authoring-rewrite candidates: pick the DSL(s) that actually win for
+        # this kernel's op-type (attention->TileLang, MoE/linear-attn->FlyDSL, GEMM/norm->
+        # both). Added as extra fixed candidates so the round tries the right rewrite
+        # alongside the in-place optimizer + planned strategies; best-of-N selects the winner.
         rewrite_candidates: list[CandidateTask] = []
         registered = set(self._subagent_registry.list_names()) if self._subagent_registry else set()
-        for sa in _REWRITE_AUTHORING_SUBAGENTS:
+        _chosen = _select_rewrite_subagents(
+            str(self._kernel_meta.get("kernel_name") or ""),
+            self._kernel_meta.get("function_names"),
+        )
+        for sa in _chosen:
             if sa in registered:
                 rewrite_candidates.append(
                     CandidateTask(
@@ -114,7 +140,7 @@ class TaskPlanner:
                 )
         if rewrite_candidates:
             logger.info(
-                "TaskPlanner: added %d authoring-rewrite candidates: %s",
+                "TaskPlanner: added %d op-adaptive authoring-rewrite candidate(s): %s",
                 len(rewrite_candidates),
                 [c.agent_name for c in rewrite_candidates],
             )
