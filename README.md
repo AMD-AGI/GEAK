@@ -87,7 +87,7 @@ budget-controlled, with each patch independently verified before it's accepted.
 ### Example
 
 ```
-use path_to_GEAK/kernel_workflow to optimize /path/to/knn
+use path_to_GEAK/kernel_workflow to optimize path_to_GEAK/examples/tasks/knn
 ```
 
 ```
