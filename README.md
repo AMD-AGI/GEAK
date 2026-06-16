@@ -41,6 +41,7 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions
 
 ```bash
 git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
+git checkout GEAK_v4
 IS_SANDBOX=1 claude --dangerously-skip-permissions
 ```
 
