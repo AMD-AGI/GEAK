@@ -11,12 +11,49 @@ contains only the canonical fixed entry.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 from minisweagent.run.planner.candidate_pool import CandidatePool, CandidateTask
 
 logger = logging.getLogger(__name__)
+
+# Optimized backend-rewrite targets (FlyDSL/TileLang are always >= CK/Triton/HIP
+# on gfx942). When ``GEAK_FIXED_REWRITE_TARGET`` is set to one of these, the
+# canonical fixed-mode task is routed through the matching ``<source>-to-<target>``
+# rewrite subagent instead of the default in-place optimizer — so in mixed mode the
+# fixed half attempts a backend rewrite while the planned half does in-place tuning.
+_REWRITE_TARGETS = ("flydsl", "tilelang")
+# Map the detected kernel_language to the rewrite subagent's source token.
+_LANG_TO_REWRITE_SOURCE = {
+    "triton": "triton",
+    "hip": "hip",
+    "hip_cpp": "hip",
+    "cuda": "hip",
+    "ck": "ck",
+    "python": "pytorch",
+    "pytorch": "pytorch",
+    "tilelang": "tilelang",
+    "flydsl": "flydsl",
+}
+
+
+def _fixed_rewrite_agent_name(kernel_language: str) -> str | None:
+    """Return the rewrite subagent name for the fixed slot, or None for default.
+
+    Controlled by ``GEAK_FIXED_REWRITE_TARGET`` (``flydsl``|``tilelang``). Returns
+    ``None`` when unset, the target is invalid, or the source already equals the
+    target (no-op rewrite) — in which case the caller keeps the default in-place
+    ``general-kernel-optimization`` agent.
+    """
+    target = (os.environ.get("GEAK_FIXED_REWRITE_TARGET") or "").strip().lower()
+    if target not in _REWRITE_TARGETS:
+        return None
+    source = _LANG_TO_REWRITE_SOURCE.get(str(kernel_language or "").strip().lower())
+    if not source or source == target:
+        return None
+    return f"{source}-to-{target}"
 
 
 class TaskPlanner:
@@ -74,11 +111,22 @@ class TaskPlanner:
                 kernel_language=kernel_language,
             )
         )
+        # Default fixed-mode agent is the in-place optimizer. When the operator
+        # opts into backend rewrites (GEAK_FIXED_REWRITE_TARGET=flydsl|tilelang),
+        # route the fixed slot through the matching rewrite subagent instead.
+        _fixed_agent = _fixed_rewrite_agent_name(kernel_language) or "general-kernel-optimization"
+        if _fixed_agent != "general-kernel-optimization":
+            logger.info(
+                "TaskPlanner: fixed slot routed to rewrite subagent %r "
+                "(GEAK_FIXED_REWRITE_TARGET) for kernel_language=%s",
+                _fixed_agent,
+                kernel_language,
+            )
         canonical_fixed = CandidateTask(
             label="fixed-canonical",
             body=composed_body,
             kind="fixed",
-            agent_name="general-kernel-optimization",
+            agent_name=_fixed_agent,
             priority=5,
             kernel_language=kernel_language,
             num_gpus=num_gpus,
