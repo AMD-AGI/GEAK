@@ -629,7 +629,23 @@ def main(
             harness_spec = promoted
             logger.info("[bold cyan]Promoted test command to validated harness: %s[/bold cyan]", promoted)
 
-    _target_language = "flydsl" if kernel_type in {"pytorch2flydsl", "flydsl"} else None
+    # Map the requested kernel_type to a translation TARGET language. Targets are
+    # the optimized DSLs (FlyDSL, TileLang); the source is auto-detected by the
+    # TranslationRegistry from the kernel file. ``<src>2<tgt>`` or a bare target
+    # name both work (e.g. "triton2flydsl", "ck2tilelang", "flydsl", "tilelang").
+    def _resolve_target_language(kt: str | None) -> str | None:
+        if not kt:
+            return None
+        kt = kt.strip().lower()
+        if kt in {"flydsl", "tilelang"}:
+            return kt
+        if kt.endswith("2flydsl") or kt.endswith("_to_flydsl"):
+            return "flydsl"
+        if kt.endswith("2tilelang") or kt.endswith("_to_tilelang"):
+            return "tilelang"
+        return None
+
+    _target_language = _resolve_target_language(kernel_type)
     # Scoring signal precedence: explicit --target > GEAK_SCORE_TARGET env > "wall".
     # ``kernel`` scores GPU-only kernel time (torch.profiler CUDA events), which
     # excludes host dispatch + DVFS jitter — the ±1% wall-time noise that drowns
