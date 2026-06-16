@@ -25,6 +25,22 @@ LOCK_DIR="/tmp/team_gpu_locks"
 mkdir -p "$LOCK_DIR"
 LOCK_FILE="${LOCK_DIR}/gpu_${GPU_ID}.lock"
 
+# (0) Reap ORPHANED hung rocm_agent_enumerator procs before running. aiter's import spawns one such
+# subprocess per Python process for gfx detection; under GPU/KFD contention they HANG instead of
+# exiting (<1s normally). With many parallel kernel jobs they pile up by the hundreds -> kernel
+# task-count explosion -> whole-box hang (observed: 561 enumerators / 37k tasks on a swap=0 box).
+# We kill ONLY ppid==1 (parent already dead) AND >60s old -> a live, in-use enumerator is never
+# touched. Best-effort; must never fail the wrapper (set -e). Opt out with KERNEL_ENV_SKIP_ENUM_REAP=1.
+if [ "${KERNEL_ENV_SKIP_ENUM_REAP:-0}" != "1" ]; then
+    for _p in $(pgrep -f rocm_agent_enumerator 2>/dev/null || true); do
+        _pp="$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ' || true)"
+        _et="$(ps -o etimes= -p "$_p" 2>/dev/null | tr -d ' ' || true)"
+        if [ "${_pp:-0}" = "1" ] && [ -n "${_et:-}" ] && [ "${_et:-0}" -gt 60 ] 2>/dev/null; then
+            kill -9 "$_p" 2>/dev/null || true
+        fi
+    done
+fi
+
 # (2) Per-workspace torch extension build cache (default: a hidden dir in the current workspace).
 : "${TORCH_EXTENSIONS_DIR:=$PWD/.torch_ext}"
 export TORCH_EXTENSIONS_DIR
