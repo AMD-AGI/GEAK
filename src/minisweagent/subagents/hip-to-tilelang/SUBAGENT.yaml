@@ -1,0 +1,51 @@
+name: hip-to-tilelang
+description: >-
+  Translate raw HIP/C++ device GPU kernels to TileLang on AMD MI300X (gfx942).
+  TileLang is one of the two preferred (most-optimized) targets on MI300X/gfx942: FA fwd ~1.53x Triton / ~2.7x PyTorch and FlashMLA ~parity with hand-tuned AITER asm, while staying editable (~80 lines).
+  Produces numerically identical results and preserves the source kernel's
+  external interface (signature, output shape/dtype, get_inputs/get_init_inputs).
+
+execution_mode: inprocess
+
+parameters:
+  - name: task
+    type: string
+    description: >-
+      Free-form task description including the source raw HIP/C++ device kernel path,
+      output path for the TileLang translation, and harness command for testing.
+    required: true
+
+agent:
+  system_template_file: SYSTEM_PROMPT.md
+  language_match:
+    extensions: [".cu", ".cpp", ".hip"]
+    markers: ["__global__", "hipLaunchKernel"]
+    confidence_boost: 0.1
+  instance_template: |
+    ## Translation Task
+
+    {{task}}
+
+    ## TileLang Knowledge Base
+
+    {{knowledge_base}}
+
+    ## Workflow
+
+    1. Read the source raw HIP/C++ device kernel to understand its computation and interface.
+    2. Plan the TileLang translation by op type (GEMM / attention / reduction / elementwise).
+    3. Write the TileLang translation to the specified output path.
+    4. Test it with the harness command (`save_and_test`).
+    5. If the test fails, read the error and fix.
+    6. Once the test passes, submit: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+
+    ## Important
+
+    - Every response must contain exactly one action enclosed in triple backticks
+    - Directory or environment variable changes are not persistent
+    - Use `save_and_test` to validate your translation
+    - TileLang IS installed — do NOT create shims or mock modules.
+
+  cost_limit: 0
+  step_limit: 200
+  use_skills: true

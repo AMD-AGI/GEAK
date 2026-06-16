@@ -48,6 +48,9 @@ class TranslationPair:
     self_review: bool = False
     review_triggers_retry: bool = False
     review_retry_on_efficiency: bool = False
+    # Skill-docs directory (under skills/) that holds this pair's KB files.
+    # Defaults to the pytorch->flydsl skill for back-compat.
+    kb_skill_dir: str = "pytorch2flydsl-translation"
 
 
 def _noop_env_setup(_repo_root: Path) -> dict[str, str]:
@@ -72,6 +75,75 @@ def _detect_pytorch_module(kernel_path: Path) -> bool:
     has_torch = "import torch" in text
     has_module = bool(re.search(r"class\s+\w+\s*\(\s*(?:nn\.Module|torch\.nn\.Module)\s*\)", text))
     return has_torch and has_module
+
+
+def _detect_triton(kernel_path: Path) -> bool:
+    """Return True if *kernel_path* is a Triton kernel (``@triton.jit``)."""
+    if kernel_path.suffix.lower() != ".py":
+        return False
+    try:
+        text = kernel_path.read_text(errors="replace")
+    except OSError:
+        return False
+    has_triton = "import triton" in text or "from triton" in text
+    has_jit = "@triton.jit" in text or "tl.program_id" in text or "triton.language" in text
+    return has_triton and has_jit
+
+
+def _detect_tilelang(kernel_path: Path) -> bool:
+    """Return True if *kernel_path* is a TileLang kernel."""
+    if kernel_path.suffix.lower() != ".py":
+        return False
+    try:
+        text = kernel_path.read_text(errors="replace")
+    except OSError:
+        return False
+    has_tl = "import tilelang" in text or "from tilelang" in text
+    has_prim = "T.Kernel" in text or "tilelang.language" in text or "@tilelang.jit" in text
+    return has_tl and has_prim
+
+
+def _detect_ck(kernel_path: Path) -> bool:
+    """Return True if *kernel_path* is a Composable Kernel (CK) source (.cu/.cpp/.hip).
+
+    CK usage often lives in ``.cuh`` headers while the top-level ``.cu`` only
+    ``#include``s them, so we also key off CK include names and the canonical
+    ``ck_gemm_*`` / ``ck_*`` path segments, not just inline ``ck::`` tokens.
+    """
+    if kernel_path.suffix.lower() not in {".cu", ".cpp", ".hip", ".cc", ".cxx", ".cuh", ".hpp", ".h"}:
+        return False
+    pstr = str(kernel_path).lower()
+    if "/ck_gemm" in pstr or "/ck_" in pstr or "composable_kernel" in pstr or "/ck/" in pstr:
+        return True
+    try:
+        text = kernel_path.read_text(errors="replace")
+    except OSError:
+        return False
+    markers = ("ck::", "ck_tile", "composable_kernel", '"ck/', "<ck/", "ck_gemm", "blockscale_common.cuh")
+    return any(m in text for m in markers)
+
+
+def _detect_hip(kernel_path: Path) -> bool:
+    """Return True if *kernel_path* is a raw HIP/C++ device kernel (not CK)."""
+    if kernel_path.suffix.lower() not in {".cu", ".cpp", ".hip", ".cc", ".cxx"}:
+        return False
+    try:
+        text = kernel_path.read_text(errors="replace")
+    except OSError:
+        return False
+    has_hip = "__global__" in text or "hip_runtime" in text or "hipLaunchKernel" in text
+    return has_hip and not _detect_ck(kernel_path)
+
+
+def _detect_flydsl(kernel_path: Path) -> bool:
+    """Return True if *kernel_path* is a FlyDSL kernel."""
+    if kernel_path.suffix.lower() != ".py":
+        return False
+    try:
+        text = kernel_path.read_text(errors="replace")
+    except OSError:
+        return False
+    return "flydsl" in text and ("@flyc.kernel" in text or "flydsl.compiler" in text or "@flyc.jit" in text)
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +253,32 @@ def _flydsl_env_setup(repo_root: Path, flydsl_repo: Path | None = None) -> dict[
     return overrides
 
 
+def _tilelang_env_setup(repo_root: Path, flydsl_repo: Path | None = None) -> dict[str, str]:
+    """Env overrides for running TileLang kernels.
+
+    TileLang ships as an installed package (``import tilelang``) with a dev
+    build root under ``/opt/tilelang/build`` on the standard image. We surface
+    that build root on PYTHONPATH when present; otherwise rely on the installed
+    package. ``flydsl_repo`` is accepted (and ignored) so the registry can call
+    every ``env_setup`` with a uniform signature.
+    """
+    overrides: dict[str, str] = {}
+    candidates = [
+        os.environ.get("TILELANG_HOME"),
+        "/opt/tilelang/build",
+        "/opt/tilelang",
+    ]
+    for c in candidates:
+        if not c:
+            continue
+        p = Path(c)
+        if p.is_dir():
+            existing = os.environ.get("PYTHONPATH", "")
+            overrides["PYTHONPATH"] = f"{p}:{existing}" if existing else str(p)
+            break
+    return overrides
+
+
 # ---------------------------------------------------------------------------
 # KB content loading
 # ---------------------------------------------------------------------------
@@ -219,7 +317,7 @@ def load_translation_kb(
        - Translation guide (PyTorch op mapping, structural patterns, pitfalls)
        - Category-specific guides (reductions, GEMM, attention)
     """
-    kb_root = get_data_dir("skills") / "pytorch2flydsl-translation" / "docs"
+    kb_root = get_data_dir("skills") / pair.kb_skill_dir / "docs"
     native_pure_root = kb_root / "native-pure"
     native_root = kb_root / "native"
     sections: list[str] = []
@@ -304,11 +402,101 @@ _PYTORCH_TO_FLYDSL = TranslationPair(
 )
 
 
+# ---------------------------------------------------------------------------
+# Additional pairs — targets are the two OPTIMIZED DSLs (FlyDSL, TileLang).
+# We convert the less-optimized sources (pytorch, triton, ck, hip) TOWARD these
+# targets; FlyDSL and TileLang are always >= CK/Triton/HIP in achievable perf on
+# gfx942, so the valuable rewrite direction is *into* them.
+# Adding a pair requires only a TranslationPair entry (zero pipeline changes).
+# ---------------------------------------------------------------------------
+
+# FlyDSL-target pairs reuse the FlyDSL skill KB (target API is identical; only
+# the source language differs, which the per-pair config/subagent prompt covers).
+_FLYDSL_KB_BASE = ["flydsl_translation_api_reference.md"]
+_FLYDSL_KB_TRANSLATION = ["flydsl_translation_guide.md"]
+_FLYDSL_KB_CATEGORY = {
+    "gemm": "flydsl_translation_gemm.md",
+    "reductions": "flydsl_translation_reductions.md",
+    "attention": "flydsl_translation_attention.md",
+    "conv_pool_bn": "flydsl_translation_conv_pool_bn.md",
+}
+
+# TileLang-target pairs share the tilelang-translation skill KB.
+_TILELANG_KB_BASE = ["tilelang_translation_api_reference.md"]
+_TILELANG_KB_TRANSLATION = ["tilelang_translation_guide.md"]
+
+
+def _flydsl_pair(source: str, detect: Callable[[Path], bool]) -> TranslationPair:
+    return TranslationPair(
+        source=source,
+        target="flydsl",
+        detect_source=detect,
+        config_name="mini_kernel_pytorch_to_flydsl",
+        harness_config_name="mini_unit_test_agent_pytorch_translation",
+        harness_candidate_flag="--flydsl-kernel",
+        candidate_filename_fn=lambda stem: f"{stem}_flydsl.py",
+        kb_base_files=list(_FLYDSL_KB_BASE),
+        kb_translation_files=list(_FLYDSL_KB_TRANSLATION),
+        kb_category_files=dict(_FLYDSL_KB_CATEGORY),
+        env_setup=_flydsl_env_setup,
+        kb_skill_dir="pytorch2flydsl-translation",
+        max_attempts=3,
+    )
+
+
+def _tilelang_pair(source: str, detect: Callable[[Path], bool]) -> TranslationPair:
+    return TranslationPair(
+        source=source,
+        target="tilelang",
+        detect_source=detect,
+        config_name="mini_kernel_to_tilelang",
+        harness_config_name="mini_unit_test_agent_pytorch_translation",
+        harness_candidate_flag="--tilelang-kernel",
+        candidate_filename_fn=lambda stem: f"{stem}_tilelang.py",
+        kb_base_files=list(_TILELANG_KB_BASE),
+        kb_translation_files=list(_TILELANG_KB_TRANSLATION),
+        kb_category_files={},
+        env_setup=_tilelang_env_setup,
+        kb_skill_dir="tilelang-translation",
+        max_attempts=3,
+    )
+
+
+# Sources we convert toward FlyDSL.
+_TRITON_TO_FLYDSL = _flydsl_pair("triton", _detect_triton)
+_CK_TO_FLYDSL = _flydsl_pair("ck", _detect_ck)
+_HIP_TO_FLYDSL = _flydsl_pair("hip", _detect_hip)
+
+# Sources we convert toward TileLang.
+_PYTORCH_TO_TILELANG = _tilelang_pair("pytorch", _detect_pytorch_module)
+_TRITON_TO_TILELANG = _tilelang_pair("triton", _detect_triton)
+_CK_TO_TILELANG = _tilelang_pair("ck", _detect_ck)
+_HIP_TO_TILELANG = _tilelang_pair("hip", _detect_hip)
+
+# Cross-conversion between the two top-tier DSLs (one may win per-op / per-arch).
+_TILELANG_TO_FLYDSL = _flydsl_pair("tilelang", _detect_tilelang)
+_FLYDSL_TO_TILELANG = _tilelang_pair("flydsl", _detect_flydsl)
+
+
 class TranslationRegistry:
     """Registry of supported translation pairs."""
 
     def __init__(self) -> None:
-        self._pairs: list[TranslationPair] = [_PYTORCH_TO_FLYDSL]
+        self._pairs: list[TranslationPair] = [
+            # pytorch -> flydsl is the original, detection-priority-first entry.
+            _PYTORCH_TO_FLYDSL,
+            # -> FlyDSL (optimized target)
+            _TRITON_TO_FLYDSL,
+            _CK_TO_FLYDSL,
+            _HIP_TO_FLYDSL,
+            _TILELANG_TO_FLYDSL,
+            # -> TileLang (optimized target)
+            _PYTORCH_TO_TILELANG,
+            _TRITON_TO_TILELANG,
+            _CK_TO_TILELANG,
+            _HIP_TO_TILELANG,
+            _FLYDSL_TO_TILELANG,
+        ]
 
     def detect(
         self,
