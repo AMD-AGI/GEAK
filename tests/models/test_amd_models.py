@@ -80,21 +80,36 @@ class TestAmdClaudePerCallToolsOverride:
     def _model_with_tools(self):
         model = _make_claude_model()
         model.tools = [{"function": {"name": "bash", "description": "run", "parameters": {"type": "object"}}}]
-        model.client = MagicMock()
-        model.client.messages.create.return_value = SimpleNamespace(
+        final = SimpleNamespace(
             content=[SimpleNamespace(type="text", text="ok")], usage=None, stop_reason="end_turn"
         )
+        stream_inner = MagicMock()
+        stream_inner.get_final_message.return_value = final
+
+        def stream_side_effect(*_args, **kwargs):
+            # ``side_effect`` runs when production code calls ``messages.stream(**kwargs)``.
+            # Relying on ``MagicMock.call_args`` alone was flaky in CI (NoneType.kwargs).
+            model._last_messages_stream_kwargs = kwargs
+            cm = MagicMock()
+            cm.__enter__.return_value = stream_inner
+            cm.__exit__.return_value = False
+            return cm
+
+        model.client = MagicMock()
+        model.client.messages.stream.side_effect = stream_side_effect
         return model
 
     def test_explicit_empty_tools_overrides_default(self):
         model = self._model_with_tools()
         model.query([{"role": "user", "content": "hi"}], tools=[])
-        assert model.client.messages.create.call_args.kwargs["tools"] == []
+        assert model.client.messages.stream.call_count >= 1
+        assert model._last_messages_stream_kwargs["tools"] == []
 
     def test_default_tools_used_when_no_override(self):
         model = self._model_with_tools()
         model.query([{"role": "user", "content": "hi"}])
-        sent = model.client.messages.create.call_args.kwargs["tools"]
+        assert model.client.messages.stream.call_count >= 1
+        sent = model._last_messages_stream_kwargs["tools"]
         assert [t["name"] for t in sent] == ["bash"]
 
 
