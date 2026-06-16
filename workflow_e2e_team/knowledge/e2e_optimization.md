@@ -77,7 +77,7 @@ Accepted work is durable on disk independently of the orchestrator: the config w
 gate-accepted kernel overlay + its `integrate_result.json`, and the baseline all persist. If a long run
 is interrupted (crash/timeout) after the head wins have landed, **do not resume to grind the remaining
 low-pct_gpu_time milestone kernels** — finish with a direct **same-session Validate of the accepted
-stack vs the true baseline** (single GPU, a couple of reps, + greedy parity). That recovers the official
+stack vs the true baseline** (the run-wide serving config TP=SERVING_TP GPU=SERVING_GPU, a couple of reps, + greedy parity). That recovers the official
 number quickly without re-doing hours of low-value work.
 
 ## Measurement discipline (e2e is noisy)
@@ -88,7 +88,8 @@ number quickly without re-doing hours of low-value work.
 - Always check **output parity** (greedy/temp=0, fixed seed) vs baseline — a faster wrong server is
   a regression.
 - **Isolation (do this or the delta is fiction).** Measure baseline vs candidate **sequentially on the
-  same single GPU, same session** (tear one server fully down before launching the next). Do NOT run two
+  same serving config (TP=SERVING_TP GPU=SERVING_GPU), same session** (tear one server fully down before
+  launching the next). Do NOT run two
   servers concurrently on one node for the headline ratio: shared-resource contention drags the baseline
   leg down and **inflates the ratio into a false win**. Trust a delta only when run spreads are tight and
   the two legs' run ranges are **non-overlapping**.

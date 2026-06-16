@@ -43,6 +43,15 @@ const LAUNCH_SCRIPT = A.launch_script || '';
 const BACKEND = String(A.backend != null ? A.backend : 'sglang').trim() || 'sglang';  // serving adapter
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
+// Serving tensor-parallel: TP size + the GPU set used for EVERY e2e SERVING launch (baseline, config
+// sweep, integrate ref/cand, validation, profiler). This is DISTINCT from GPU_LIST (the
+// optimization-parallelism pool used for isolated op benchmarks + the recursive kernel layer). For TP>1
+// the SAME (TP, GPU set) must be used for every e2e measurement or deltas are incomparable. Default
+// TP=1 on GPU_LIST[0] (backward compatible). args.tp (or args.serving_tp) sets TP; args.serving_gpu
+// overrides the GPU set (default = first TP ids of GPU_LIST, comma-joined).
+const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serving_tp : 1), 10);
+const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
+  : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);       // max kernel-optimization tasks
 // MIN floor: dispatch at LEAST this many editable-kernel tasks before the loop may stop on no-improve /
 // empty queue (prompt-tunable). Prevents the milestone track from never firing. Capped by BUDGET.
@@ -218,7 +227,7 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
-  const inall = { BACKEND, ...inputs };
+  const inall = { BACKEND, SERVING_TP, SERVING_GPU, ...inputs };
   return `You are the ${role}. PHASE=${phase}.
 First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
 Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.
@@ -226,12 +235,18 @@ Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 When you invoke bench_e2e.sh, pass BACKEND=${BACKEND} in its env so the correct serving adapter is used.
 
 ## SERVING CONFIG INVARIANT (do not violate — all e2e numbers must be comparable)
-Every e2e benchmark in this run (baseline, config sweep, integrate ref/cand, validation) MUST use the
-SAME serving config: tensor-parallel TP=1 on a SINGLE GPU. GPU_IDS=${GPU_IDS} is the
-OPTIMIZATION-PARALLELISM pool (spread recursive kernel/head optimization across GPUs) — it is NOT the
-serving tensor-parallel size. Launch every serving server on ONE GPU (a single id from the pool) with
-TP=1 (the bench_e2e.sh default). NEVER set TP>1 or GPU=0,1,2,3 for a serving launch — a TP=4 baseline
-vs a TP=1 candidate makes every delta meaningless.
+Every e2e SERVING benchmark in this run (baseline, config sweep, integrate ref/cand, validation,
+profiler trace) MUST use the SAME serving config: tensor-parallel TP=${SERVING_TP} on the GPU set
+GPU=${SERVING_GPU}. Whenever you invoke bench_e2e.sh for a SERVING throughput/profile measurement, pass
+exactly these in its env:
+    BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}
+NEVER change TP or the GPU set between the baseline, a candidate, and validation — a TP/GPU mismatch
+makes every delta meaningless. (If SERVING_TP=1, GPU=${SERVING_GPU} is a single id; if SERVING_TP>1 it
+is a comma-separated set spanning exactly TP GPUs.)
+GPU_IDS=${GPU_IDS} is a SEPARATE OPTIMIZATION-PARALLELISM pool: it is used ONLY for single-GPU isolated
+work (op_bench bake-offs, shape-capture, the recursive kernel layer), where each task pins ONE id from
+the pool via GPU_ID. Do NOT use the serving TP/GPU set for that isolated work, and do NOT use a single
+optimization-pool id for a serving launch — keep the two separate.
 
 ## Inputs
 ${cfg(inall)}

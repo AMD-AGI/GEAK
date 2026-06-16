@@ -64,12 +64,14 @@ Steps:
    (amd-smi list 2>/dev/null || rocminfo 2>/dev/null | grep -m1 gfx) >> "$EVAL_DIR/env_info.txt" || true
    ```
 5. **Record the TRUE baseline throughput** with a WARM server (this is the number every later gain
-   is measured against). **Serving is TP=1 on a SINGLE GPU** (the first id in `GPU_IDS`). `GPU_IDS` is
-   the optimization-parallelism pool, NOT serving tensor-parallel — do NOT launch the baseline (or any
-   serving server) with TP>1 / `GPU=0,1,2,3`. Every later e2e measurement (sweep, integrate, validate)
-   must match this exact TP=1 single-GPU config, or deltas are meaningless. Use the copied bench script:
+   is measured against). **Serving is TP=`SERVING_TP` on the GPU set `SERVING_GPU`** (both passed in your
+   inputs / the SERVING CONFIG INVARIANT block of your prompt). `GPU_IDS` is the optimization-parallelism
+   pool, NOT the serving tensor-parallel size; the serving config is `TP=SERVING_TP GPU=SERVING_GPU`.
+   Every later e2e measurement (sweep, integrate, validate) MUST match this exact `TP=SERVING_TP
+   GPU=SERVING_GPU` config, or deltas are meaningless. Use the copied bench script (substitute the actual
+   SERVING_TP / SERVING_GPU values from your inputs):
    ```bash
-   BACKEND="<backend>" OUT_DIR="$EVAL_DIR/baseline" GPU="<first gpu id, e.g. 0>" TP=1 MODEL="$MODEL_PATH" \
+   BACKEND="<backend>" OUT_DIR="$EVAL_DIR/baseline" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
    ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=3 PROFILE=0 \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/baseline_bench.log"
    ```
@@ -114,12 +116,13 @@ TRUE baseline with the tight 2-block protocol and decide if the COMBINED result 
    (stack/stack-default = the TRUE baseline config, i.e. NO overlay/flags) and a final block (full
    overlay + flags), each `E2E_REPEATS` (default 7) timed repeats on ONE server:
    ```bash
-   # fresh TRUE-baseline block (no overlay, no accepted flags) — re-measured NOW to cancel box drift
-   BACKEND="<backend>" OUT_DIR="$EVAL_DIR/validation/base" GPU="$GPU_ID" MODEL="$MODEL_PATH" \
+   # fresh TRUE-baseline block (no overlay, no accepted flags) — re-measured NOW to cancel box drift.
+   # Serving config MUST be the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
+   BACKEND="<backend>" OUT_DIR="$EVAL_DIR/validation/base" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
    REPEATS="${E2E_REPEATS:-7}" PROFILE=0 ISL=<isl> OSL=<osl> CONC=<conc> \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee -a "$EVAL_DIR/logs/validation_bench.log"
-   # final block (full overlay + flags + env)
-   BACKEND="<backend>" OUT_DIR="$EVAL_DIR/validation/final" GPU="$GPU_ID" MODEL="$MODEL_PATH" \
+   # final block (full overlay + flags + env), SAME TP=SERVING_TP GPU=SERVING_GPU
+   BACKEND="<backend>" OUT_DIR="$EVAL_DIR/validation/final" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
    OVERLAY_PYTHONPATH="$FINAL_OVERLAY" EXTRA_SERVER_ARGS="<final flags>" EXTRA_ENV="<final env>" \
    REPEATS="${E2E_REPEATS:-7}" PROFILE=0 ISL=<isl> OSL=<osl> CONC=<conc> \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee -a "$EVAL_DIR/logs/validation_bench.log"

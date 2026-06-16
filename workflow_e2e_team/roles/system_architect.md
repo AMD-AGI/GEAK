@@ -73,6 +73,19 @@ Inputs: `EVAL_DIR`, `PROFILE_TOPN` (path to profile_topN.json + inline top entri
    - **config fast path** — service-level env/flag with no op isolation: `--attention-backend` swap,
      `--quantization fp8`, cuda-graph, torch-compile, kv-cache-dtype, scheduling/mem knobs → Config
      Tuner, FIRST. **GEMM tuning is NOT a config axis** (it's a head-track op now).
+     - **SPECULATIVE DECODING (check the model config — this is the single highest-ROI decode lever).**
+       A decode-bound serving workload (small OSL-per-step, conc-batched, high TPOT share) is throughput-
+       capped by the per-token forward, which speculative decoding multiplies by the acceptance rate ×
+       tokens/step — frequently a **1.3–1.9× e2e** gain that NO kernel tune can match, and **lossless
+       under greedy** (the target verifies every proposed token, so parity holds exactly). ALWAYS inspect
+       `MODEL_PATH/config.json` (and `text_config`) for built-in speculative capability and, when present,
+       propose enabling it as the **FIRST, highest-priority** config direction:
+         - `mtp_num_hidden_layers` / `num_nextn_predict_layers` > 0  → **MTP** (this model: qwen3_5 has
+           `mtp_num_hidden_layers=1`). vllm flag: `--speculative-config '{"method":"mtp","num_speculative_tokens":N}'`
+           (N≈mtp layers; try N=1, also probe 2–3). vllm has `qwen3_5_mtp` support.
+         - an EAGLE/EAGLE3/draft head present → method `eagle`/`eagle3` with the draft path.
+       Mark `parity` expectation = pass (greedy). This is a CONFIG direction (no op isolation), and on a
+       decode-bound run it should be ranked ABOVE every head-GEMM/attention candidate by Amdahl.
    - **head track** (`pct_gpu_time ≥ HEAD_THRESHOLD_PCT`, GEMM or attention, **any edit flag**) →
      `extract_op` + Op Benchmarker (per-backend tune via aiter DB for GEMM + ALWAYS author triton). For
      each, give op_kind, the profiled shapes+dtype, the ranked candidate backends (aiter/hipblaslt/

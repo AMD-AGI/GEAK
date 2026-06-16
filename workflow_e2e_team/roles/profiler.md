@@ -32,7 +32,9 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND`, `GPU_ID`, `WORKLOAD` (isl/osl/conc)
 1. Capture a trace with a warm server using the shared bench script (the adapter sets the stack's
    torch-profiler dir and runs the bounded `--profile` bench):
    ```bash
-   BACKEND="<backend>" OUT_DIR="$EVAL_DIR/profile/round_${ROUND}" GPU="$GPU_ID" MODEL="$MODEL_PATH" \
+   # SERVING config MUST match the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs),
+   # so the profiled shapes reflect the deployed tensor-parallel sharding.
+   BACKEND="<backend>" OUT_DIR="$EVAL_DIR/profile/round_${ROUND}" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
    ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=1 PROFILE=1 PROFILE_NUM_STEPS=5 \
    OVERLAY_PYTHONPATH="$OVERLAY_PYTHONPATH" EXTRA_SERVER_ARGS="<flags>" EXTRA_ENV="<env>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/profile_r${ROUND}.log"

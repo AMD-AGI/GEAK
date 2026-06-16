@@ -36,11 +36,14 @@ adapter_bench() {
   local res_json="$PROFILE_DIR/.vllm_bench_$$_${RANDOM}.json"
   local extra=()
   [ "$PROF" = "1" ] && extra=(--profile)
+  # GREEDY (--temperature 0) + --ignore-eos: deterministic, fixed-length OSL output. This is the
+  # correct protocol for optimization work — it makes throughput reproducible, output parity byte-exact,
+  # and speculative-decoding (MTP/EAGLE) acceptance meaningful (recent vllm dropped the temp==0 default).
   vllm bench serve \
     --backend vllm --base-url "$BASE_URL" --model "$MODEL" \
     --dataset-name random --random-input-len "$ISL" --random-output-len "$OSL" \
     --num-prompts "$NUMP" --max-concurrency "$MAXC" \
-    --seed "$SEED" \
+    --seed "$SEED" --temperature 0 --ignore-eos \
     --save-result --result-filename "$res_json" "${extra[@]}"
   # vllm writes ONE result object (keys: output_throughput, median_ttft_ms, median_tpot_ms, ...).
   # Append it as a single jsonl line into the dispatcher's canonical results file.

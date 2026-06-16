@@ -137,13 +137,14 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
    too slow):
    ```bash
    CB="$EVAL_DIR/overlay/cand_<short>"
+   # BOTH blocks MUST use the run-wide serving invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
    # reference block: current accepted config, E2E_REPEATS timed repeats on one server
-   BACKEND="<backend>" OUT_DIR="$CB/ref" GPU="$GPU_ID" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
+   BACKEND="<backend>" OUT_DIR="$CB/ref" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
      REPEATS="${E2E_REPEATS:-7}" PROFILE=0 OVERLAY_PYTHONPATH="$CURRENT_OVERLAY" \
      EXTRA_SERVER_ARGS="<cur flags>" EXTRA_ENV="<cur env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
-   # candidate block: + this one change, E2E_REPEATS timed repeats on one server
-   BACKEND="<backend>" OUT_DIR="$CB/cand" GPU="$GPU_ID" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
+   # candidate block: + this one change, E2E_REPEATS timed repeats on one server (SAME TP/GPU)
+   BACKEND="<backend>" OUT_DIR="$CB/cand" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" ISL=<isl> OSL=<osl> CONC=<conc> \
      REPEATS="${E2E_REPEATS:-7}" PROFILE=0 OVERLAY_PYTHONPATH="<CAND or empty>" \
      EXTRA_SERVER_ARGS="<cand flags>" EXTRA_ENV="<cand env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
