@@ -1,0 +1,34 @@
+name: asm-kernel-rewrite
+description: >-
+  Rewrite a hot GPU kernel into hand-tuned MFMA assembly for AMD MI300X/gfx942 — the
+  highest-performance tier (the ceiling under CK/Triton/TileLang/FlyDSL). Source-agnostic.
+  Three sub-levels: MFMA intrinsics (__builtin_amdgcn_mfma_*, the default), inline
+  `asm volatile` micro-loops, and raw .s micro-kernels. Prefer the real aiter asm ops
+  (gemm_a8w8_asm, flatmm_a8w8_blockscale_asm, asm MLA decode) where they exist. Reserve for
+  high-value kernels where DSL/library leaves the last 10-20% on the table, or a fused op no
+  template expresses. Parity-gated; watch VGPR/AGPR/LDS occupancy (the #1 MFMA pitfall).
+
+execution_mode: inprocess
+
+parameters:
+  - name: task
+    type: string
+    description: >-
+      Free-form task: source kernel path, output path, harness/benchmark command, goal,
+      shapes/dtype if known.
+    required: true
+
+agent:
+  system_template_file: SYSTEM_PROMPT.md
+  language_match:
+    extensions: [".py", ".cu", ".cuh", ".cpp", ".hip", ".s"]
+    markers: ["@triton.jit", "__global__", "ck::", "mfma", "__builtin_amdgcn", "import torch"]
+    confidence_boost: 0.05
+  instance_template: |
+    Rewrite/author an optimized MFMA-assembly kernel for this goal: {{task}}
+
+    Validate parity with `save_and_test` after every change; only a correct, faster kernel counts.
+    Submit when correctness passes AND it beats baseline: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+  cost_limit: 0
+  step_limit: 200
+  use_skills: true

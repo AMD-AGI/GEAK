@@ -21,18 +21,23 @@ logger = logging.getLogger(__name__)
 # Dedicated, source-agnostic kernel-AUTHORING rewrite subagents.
 _REWRITE_FLYDSL = "flydsl-kernel-rewrite"
 _REWRITE_TILELANG = "tilelang-kernel-rewrite"
+_REWRITE_ASM = "asm-kernel-rewrite"  # highest-perf tier (the ceiling under the DSLs)
 
-# Adaptive op-type → best-fit rewrite DSL. Picks the DSL with the real edge on gfx942
-# for that op class, so we don't waste a slot on a rewrite that can't win:
+# Adaptive op-type → best-fit rewrite backend(s). Picks the backend(s) with the real edge
+# on gfx942 for that op class, so we don't waste a slot on a rewrite that can't win:
 #   attention / FlashAttention / MLA  -> TileLang (FA ~1.5x Triton, MLA ~parity w/ asm)
-#   MoE / grouped-expert GEMM         -> FlyDSL  (fused-MoE is FlyDSL's strongest case)
-#   linear-attn / gated-delta decode  -> FlyDSL  (aiter flydsl_gdr_decode)
-#   norm / rmsnorm / elementwise      -> both (cheap, either can win)
-#   plain GEMM                        -> both (DSL edge small on blockscale; let both try)
+#   MoE / grouped-expert GEMM         -> FlyDSL + ASM (fused-MoE; asm recovers last 10-20%)
+#   linear-attn / gated-delta decode  -> FlyDSL (aiter flydsl_gdr_decode)
+#   norm / rmsnorm / elementwise      -> both DSLs (cheap, either can win)
+#   plain GEMM                        -> FlyDSL + ASM (DSL edge small on blockscale; asm wins ceiling)
+# ASM is only added to compute-heavy classes (GEMM/MoE) where it has historically beaten the
+# DSLs; it is intentionally NOT added to norm/elementwise (not worth hand-asm) nor stacked on
+# attention (TileLang ≈ asm there) — keeping the candidate pool focused.
 _OPTYPE_REWRITE_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("attention", "attn", "flash", "mla", "sdpa", "fmha"), (_REWRITE_TILELANG,)),
-    (("moe", "expert", "fused_moe", "grouped"), (_REWRITE_FLYDSL,)),
+    (("moe", "expert", "fused_moe", "grouped"), (_REWRITE_FLYDSL, _REWRITE_ASM)),
     (("gated_delta", "linear_attn", "recurrent", "gdn", "gdr"), (_REWRITE_FLYDSL,)),
+    (("gemm", "matmul", "mm_", "_mm", "linear"), (_REWRITE_FLYDSL, _REWRITE_ASM)),
 )
 
 
@@ -40,8 +45,9 @@ def _select_rewrite_subagents(kernel_name: str, function_names: list[str] | None
     """Pick the op-appropriate authoring rewrite subagent(s) by name signal.
 
     Matches the kernel name + function names against op-class keywords and returns the
-    DSL(s) with the real edge for that op on gfx942. Defaults to trying BOTH when the op
-    is GEMM/norm/unknown (DSL edge is small/ambiguous there, so let best-of-N decide).
+    backend(s) with the real edge for that op on gfx942. ASM (the highest-perf tier) is added
+    only for compute-heavy GEMM/MoE classes. Defaults to both DSLs for norm/unknown ops where
+    the edge is ambiguous and hand-asm isn't worth it — best-of-N decides.
     """
     hay = " ".join([str(kernel_name or "")] + [str(f) for f in (function_names or [])]).lower()
     for needles, agents in _OPTYPE_REWRITE_RULES:
