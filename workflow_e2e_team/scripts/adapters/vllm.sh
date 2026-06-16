@@ -14,8 +14,11 @@
 adapter_default_port() { echo 8000; }
 
 adapter_launch() {
+  # Pin GPU_ARCHS so aiter's JIT skips rocm_agent_enumerator/_detect_native (see sglang.sh / gpu_lock.sh).
+  local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
   # shellcheck disable=SC2086
   env $EXTRA_ENV \
+    ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \

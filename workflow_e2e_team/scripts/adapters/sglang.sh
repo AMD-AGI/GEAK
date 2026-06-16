@@ -16,8 +16,14 @@ adapter_launch() {
     *" --watchdog-timeout "*) _wd="" ;;
     *) [ -n "${WATCHDOG_TIMEOUT:-600}" ] && _wd="--watchdog-timeout ${WATCHDOG_TIMEOUT:-600}" ;;
   esac
+  # Pin GPU_ARCHS so aiter's JIT (chip_info.get_gfx_list) takes the env branch instead of
+  # _detect_native() — the latter shells to rocm_agent_enumerator -> rocminfo PER cold-build worker
+  # (~77 per import), which hang under GPU/KFD contention and pile up into a box-degrading storm
+  # (observed: 561 procs, e2e throughput halved). Detect once here; honor a caller-set value.
+  local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
   # shellcheck disable=SC2086
   env $EXTRA_ENV \
+    ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     SGLANG_TORCH_PROFILER_DIR="$PROFILE_DIR" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \

@@ -52,6 +52,13 @@ mkdir -p "$TORCH_EXTENSIONS_DIR" 2>/dev/null || true
 if [ "${KERNEL_ENV_KEEP_ARCH:-0}" != "1" ]; then
     _ARCH="$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)"
     [ -n "${_ARCH:-}" ] && export PYTORCH_ROCM_ARCH="$_ARCH"
+    # Also pin GPU_ARCHS so aiter's JIT (chip_info.get_gfx_list) takes the env branch instead of
+    # _detect_native(), which shells to rocm_agent_enumerator -> rocminfo PER cold-build worker
+    # (~77 per cold aiter import). Under the parallel bake-off (isolated per-workspace build caches =>
+    # many cold builds) those rocminfo calls hang on the contended KFD driver and pile up by the
+    # hundreds -> kernel task-count explosion + ~2x serving-throughput degradation. Setting GPU_ARCHS
+    # eliminates the spawn at the source (the reap above is now just a backstop). Honor a caller value.
+    [ -n "${_ARCH:-}" ] && export GPU_ARCHS="${GPU_ARCHS:-$_ARCH}"
 fi
 
 (

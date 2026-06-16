@@ -24,6 +24,14 @@ if [ "${KERNEL_ENV_SKIP_ENUM_REAP:-0}" != "1" ]; then
     done
 fi
 
+# Pin GPU_ARCHS so aiter's JIT (chip_info.get_gfx_list) uses the env instead of _detect_native(),
+# which shells to rocm_agent_enumerator -> rocminfo per cold-build worker (~77 per cold import) and
+# storms the box under contention. Detect once; honor a caller-set value.
+if [ -z "${GPU_ARCHS:-}" ]; then
+    _ARCH="$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)"
+    [ -n "${_ARCH:-}" ] && export GPU_ARCHS="$_ARCH"
+fi
+
 (
     flock -x -w 600 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 600s"; exit 1; }
     export HIP_VISIBLE_DEVICES="$GPU_ID"
