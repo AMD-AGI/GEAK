@@ -214,50 +214,89 @@ kernel changes, `MILESTONES`, `BUDGET_USED`, `BUDGET`, `MIN_KERNEL_TASKS`, `PROF
 
 Write TWO files:
 
-**(a) `EVAL_DIR/architect_report.md`** — the concise English summary (baseline vs final, accepted
-config + kernels, remaining headroom). Keep it short.
+> **HOUSE TEMPLATE (reproduce this format on every run).** The two reports below follow a fixed,
+> polished template — match its structure, tables, emoji, and the timed/aligned phase tree exactly so
+> every run's report looks the same. The OFFICIAL headline number is ALWAYS the Director's same-session
+> validation (`EVAL_DIR/director_e2e_validation.json` → `director_verified_throughput_tok_s` /
+> `throughput_speedup`), NOT the Finalize-bundle sanity bench — if they differ, quote the Director value
+> and note the finalize bench in parentheses. Read REAL files for every number; never invent.
 
-**(b) `EVAL_DIR/final_report.md`** — the COMPLETE English timeline report (the headline deliverable).
-Information must be COMPLETE, keeping every attempt whether it worked or not. REQUIRED sections, in order:
-- **Run overview**: model/architecture, serving stack, workload (ISL/OSL/conc), GPU, date, and a one-line
-  final conclusion.
-- **Phases tree**: a `tree`-style (`├──/└──`) module — MANDATORY. Two trees in fenced code blocks:
-  1. **Phases tree**: one node per phase (Setup→Validate); under ConfigSweep/HeadKernel/Milestone list each
-     attempt as a child leaf with `✔/✘`, the lever, iso speedup, e2e delta%, and verdict. End with a
-     legend (✔ accepted · ✘ rejected · STACK) and a one-line conclusion (what entered the final stack).
-     Example shape:
+**(a) `EVAL_DIR/architect_report.md`** — the concise English summary. Its **Headline MUST quote the
+OFFICIAL Director-validated result** (`director_verified_throughput_tok_s`, `throughput_speedup`,
+`output_parity`); if the Finalize bundle bench read higher, add one line stating the conservative Director
+number is official. Then list the accepted stack (config + each kernel with its per-item e2e %), and the
+remaining headroom. Keep it short.
+
+**(b) `EVAL_DIR/final_report.md`** — the COMPLETE timeline report (the headline deliverable). Keep EVERY
+attempt, win or not. REQUIRED sections, in order:
+
+1. **Run overview** — model/architecture, serving stack, workload (ISL/OSL/conc), GPU + serving invariant,
+   date, and a one-line **final conclusion that quotes the OFFICIAL Director number** (e.g.
+   `1581.4 → 2058.8 tok/s, 1.300× (+30.0%), parity pass`). If the finalize-bundle bench was higher, add a
+   parenthetical that the conservative Director value is official.
+
+2. **Phases tree + timeline (wall-clock)** — MANDATORY, one timed fenced tree (NOT a plain tree). Rules:
+   - Derive each phase's wall-clock from artifact mtimes (`t0` = eval-dir / `model_path.txt` mtime; phase
+     boundaries from the relevant `*.log` / `*_summary.json` / `_exp/*` dir mtimes).
+   - Every phase node ends with **`[ Δ<step> · <cum> ]`** (step duration + cumulative elapsed since t0);
+     sub-step nodes show **`[ Δ<step> ]`** only, padded to the SAME closing column.
+   - **Color = emoji** (the only thing that renders colored inside a code fence): `✅` done/accepted ·
+     `❌` rejected/no-win · `⭐` entered the final stack (a real win) · `🔧` a work phase · `🏁` the
+     official validation/total · `⚠️` a caveat. Inside descriptions use the NARROW marks **`✓` / `✘`**
+     (width-1), never `✅/❌`, so the time column stays aligned.
+   - **Align the time column**: pad each line by VISUAL width — count emoji (`✅❌⭐🔧🏁🔥⚠`) as 2 cells and
+     `├└│✓✘→·×–` as 1 — so every `[` starts at the same column (a tiny Python padder is fine). Keep lines
+     **≤ ~96 cols**; push long detail to the per-op deep-dive below, not into the tree.
+   - One node per phase that actually ran (Setup→Validate). Under **HeadKernel**, show each head op (h0/h1…)
+     as a child, and under each op its sub-steps (extract / bake-off+tune / each author language / integrate),
+     each with its own `[ Δ ]`.
+   - Below the fence: a blockquote with **`🏁 TOTAL ≈ <wall-clock>`**, a **`🔥 top costs`** line, and any
+     **`⚠️`** caveats; then a **Legend** line and a one-line **Final stack + official speedup**.
+   - Reference shape (reproduce emoji + alignment):
      ```
-     Phases
-     ├── ✔ 1 Setup        baseline = <tok/s> (TP=1)
-     ├── ✔ 4 ConfigSweep
-     │   ├── ✔ cfg0 <flag>   e2e +X%  → accepted
-     │   └── ✘ cfg1 <flag>   e2e −Y%  → rejected
-     ├── ✔ 5 HeadKernel
-     │   ├── ✘ aiter DB tune  iso 1.0Zx → <engage?>
-     │   └── ✘ Triton GEMM    iso 0.9Wx
-     ├── ✔ 6 Milestone
-     │   ├── ✘ <kernel> iso 1.1x → e2e +0.1% (n.nn%gpu)
-     │   └── ...
-     └── ✔ 9 Validate     <tok/s>, +X%, accepted, parity pass
+     Phases                                                   [  step · cum  ]
+     ✅ 1  Setup        preflight + TRUE baseline <tok/s>      [ Δ17m  · 0:17 ]
+     ✅ 3  ConfigSweep  MTP ✘−X% · ⭐ aiter +Y% · cuda-graph ✓ [ Δ45m  · 1:49 ]
+     🔧 5  HeadKernel   extract+bake-off+author+integrate      [ Δ5h41m· 8:13 ]
+        ❌ h0 GEMM   <pct>%GPU — already optimal               [ Δ2h03m       ]
+           └ ✘ Triton  0.60× (prefill ✓ / decode ✘)           [ Δ1h24m       ]
+        ⭐ h1 attn    <pct>%GPU — ACCEPTED +Z%                 [ Δ3h39m       ]
+           └ ⭐ integrate  A/B <ref>→<cand> = +Z% · parity ✓   [ Δ27m         ]
+     🏁 9  Validate    Director A/B <base>→<final> = +W% (<x>×) [ Δ37m  · 9:43 ]
      ```
-  2. **Artifacts tree**: `tree -L 2 -I "__pycache__|*.pyc|.git|*.so"` of the eval dir, annotating which
-     phase produced each path (e.g. `[P1]…[P9]`). Run the actual `tree` command on `EVAL_DIR` to get it real.
-- **Baseline phase**: full report — baseline throughput (median + spread + each repeat), TTFT/TPOT, and the
-  **profile breakdown** (read the Top-N from `PROFILE_TOPN` / `EVAL_DIR/profile/round_0/profile_topN.md`:
-  per kernel — %gpu, call count, total ms, shape, backend, whether editable). Read
-  `EVAL_DIR/baseline/bench_summary.json` for the real numbers.
-- **Per-phase timeline**: for each phase (ConfigSweep / each HeadKernel op / each Milestone) write: which
-  attempts were made (attempt 1, attempt 2 …), each attempt's isolated effect + e2e effect (give concrete
-  tok/s and % + whether it passed the 0.5% gate + whether the engine actually engaged) + the decision
-  (accept/reject and why). **Keep BOTH the wins and the no-ops.** Data sources: `HISTORY.ledger`,
-  `config/sweep_results.json`, each `overlay/*/bench_summary.json`, and the recursive `kernels/_exp/*` results.
-- **Summary table**: one table of all attempts (lever | isolated | e2e | verdict | root cause).
-- **⚠️ FLAGGED dominant heads** (from `FLAGGED_HEADS`): a MANDATORY section if non-empty. For each flagged
-  head list its `pct_gpu_time`, the stage it failed at (extract / bakeoff / no_candidate), whether it was a
-  `harness_error` (the bake-off could not measure — NOT a real no-win), and the `reason`. State plainly that
-  these dominant ops were NOT optimized and carry the LARGEST remaining headroom — they are the top "next
-  direction". Never bury a flagged head in the no-ops; it is a workflow gap, not a benign negative result.
-- **Final deliverable + measurement caveats (box drift → trust only same-session A/B) + next directions to explore.**
+
+3. **Head-kernel deep-dive** (the centerpiece) — for EACH head op a `####` sub-section titled
+   `<id> — <op> (<pct>% GPU) — RESULT: <ACCEPTED +X% | no win | flagged>`, containing:
+   - **GPU-time-share table**: rows `stock baseline` vs `accepted config`; columns `live kernel | backend |
+     %GPU | calls` — shows how the accepted config (e.g. aiter) already re-routed the op and its %GPU on the
+     final stack (stock from `profile/round_0`, accepted-stack from `profile/round_config`).
+   - **Original backend** line: dtype/quant, transpose/bias, and the live kernel on stock vs accepted.
+   - **Weight-shape table** (GEMM: the distinct (N,K) served + the M-buckets).
+   - **Directions table** — one row per direction tried: `# | direction (cost tier) | what it did | result`.
+     Cover Tier-A backend bake-off, Tier-B per-shape tune, and Tier-C author **per language** — EVERY
+     direction incl. any that died on an infra/API error (say so explicitly; don't omit it).
+   - For a **rejected authored kernel**: a **per-(N,K) × M speedup table** vs the baseline (from the recursive
+     run's `director_validation.json` `per_case`) to expose the prefill-win/decode-loss split; end with geomean
+     + the reject decision + root cause.
+   - For the **accepted** op: the e2e integrate numbers (REF→CAND tok/s, delta%, non-overlap proof, engagement
+     hits, parity) from `overlay/cand_*/integrate_result.json`.
+
+4. **Artifacts tree**: `tree -L 2 -I "__pycache__|*.pyc|.git|*.so"` of the eval dir, annotating `[P#]` per path.
+
+5. **Summary table** of all attempts (lever | isolated | e2e | verdict | root cause).
+
+6. **⚠️ FLAGGED dominant heads** (from `FLAGGED_HEADS`): MANDATORY if non-empty. For each, list `pct_gpu_time`,
+   the stage it failed at (extract / bakeoff / no_candidate), whether it was a `harness_error` (bake-off could
+   not measure — NOT a real no-win), and the `reason`. State plainly these dominant ops were NOT optimized and
+   carry the LARGEST remaining headroom (top "next direction"). Never bury a flagged head in the no-ops.
+
+7. **Final deliverable + measurement caveats** (box drift → trust ONLY same-session A/B; the official number
+   is the Director's same-session value) **+ next directions to explore.**
+
+Data sources (read the ACTUAL files, never invent): `director_e2e_validation.json`,
+`final/bench/bench_summary.json`, `config/sweep_results.json`, `overlay/cand_*/integrate_result.json`,
+`kernels/_exp/*/*/director_validation.json`, `kernels/*/opbench_result.json`,
+`profile/round_*/profile_topN.{md,json}`, and artifact mtimes for the timeline.
 Read the actual files under `EVAL_DIR` for real numbers; do not invent. Return JSON (report_path points
 to architect_report.md; also mention `final_report.md` in `note` if the schema lacks a field):
 ```json
