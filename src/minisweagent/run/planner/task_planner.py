@@ -39,18 +39,26 @@ _LANG_TO_REWRITE_SOURCE = {
 }
 
 
-def _fixed_rewrite_agent_name(kernel_language: str) -> str | None:
+def _fixed_rewrite_agent_name(kernel_language: str, kernel_type: str = "") -> str | None:
     """Return the rewrite subagent name for the fixed slot, or None for default.
 
     Controlled by ``GEAK_FIXED_REWRITE_TARGET`` (``flydsl``|``tilelang``). Returns
     ``None`` when unset, the target is invalid, or the source already equals the
     target (no-op rewrite) — in which case the caller keeps the default in-place
     ``general-kernel-optimization`` agent.
+
+    Source selection prefers ``kernel_type`` (the precise triton/hip/ck/flydsl
+    classifier from ``_infer_kernel_type``) over ``kernel_language`` (which coarsely
+    reports ``python`` for Triton ``.py`` files) so a Triton kernel routes to
+    ``triton-to-<target>`` rather than ``pytorch-to-<target>``.
     """
     target = (os.environ.get("GEAK_FIXED_REWRITE_TARGET") or "").strip().lower()
     if target not in _REWRITE_TARGETS:
         return None
-    source = _LANG_TO_REWRITE_SOURCE.get(str(kernel_language or "").strip().lower())
+    source = (
+        _LANG_TO_REWRITE_SOURCE.get(str(kernel_type or "").strip().lower())
+        or _LANG_TO_REWRITE_SOURCE.get(str(kernel_language or "").strip().lower())
+    )
     if not source or source == target:
         return None
     return f"{source}-to-{target}"
@@ -114,7 +122,8 @@ class TaskPlanner:
         # Default fixed-mode agent is the in-place optimizer. When the operator
         # opts into backend rewrites (GEAK_FIXED_REWRITE_TARGET=flydsl|tilelang),
         # route the fixed slot through the matching rewrite subagent instead.
-        _fixed_agent = _fixed_rewrite_agent_name(kernel_language) or "general-kernel-optimization"
+        _kernel_type = str(self._kernel_meta.get("kernel_type") or "")
+        _fixed_agent = _fixed_rewrite_agent_name(kernel_language, _kernel_type) or "general-kernel-optimization"
         if _fixed_agent != "general-kernel-optimization":
             logger.info(
                 "TaskPlanner: fixed slot routed to rewrite subagent %r "

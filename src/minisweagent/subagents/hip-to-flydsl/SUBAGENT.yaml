@@ -26,10 +26,6 @@ agent:
 
     {{task}}
 
-    ## FlyDSL Knowledge Base
-
-    {{knowledge_base}}
-
     ## Workflow
 
     1. Read the source raw HIP/C++ device kernel to understand its computation and interface.

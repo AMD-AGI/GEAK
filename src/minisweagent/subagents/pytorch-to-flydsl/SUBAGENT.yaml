@@ -24,7 +24,7 @@ agent:
 
     ## FlyDSL Knowledge Base
 
-    {{knowledge_base}}
+    {{ knowledge_base | default("", true) }}
 
     ## Workflow
 
