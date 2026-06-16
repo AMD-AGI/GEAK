@@ -11,7 +11,6 @@ contains only the canonical fixed entry.
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -19,65 +18,14 @@ from minisweagent.run.planner.candidate_pool import CandidatePool, CandidateTask
 
 logger = logging.getLogger(__name__)
 
-# Optimized backend-rewrite targets (FlyDSL/TileLang are always >= CK/Triton/HIP
-# on gfx942). When ``GEAK_FIXED_REWRITE_TARGET`` is set to one of these, the
-# canonical fixed-mode task is routed through the matching ``<source>-to-<target>``
-# rewrite subagent instead of the default in-place optimizer — so in mixed mode the
-# fixed half attempts a backend rewrite while the planned half does in-place tuning.
-_REWRITE_TARGETS = ("flydsl", "tilelang")
-# Map the detected kernel_language to the rewrite subagent's source token.
-_LANG_TO_REWRITE_SOURCE = {
-    "triton": "triton",
-    "hip": "hip",
-    "hip_cpp": "hip",
-    "cuda": "hip",
-    "ck": "ck",
-    "python": "pytorch",
-    "pytorch": "pytorch",
-    "tilelang": "tilelang",
-    "flydsl": "flydsl",
-}
-
-
-# Dedicated, source-agnostic authoring subagents (the preferred rewrite path):
-# they author an optimized kernel targeting the DSL (split-K/tiling/per-shape config),
+# Dedicated, source-agnostic kernel-AUTHORING rewrite subagents. In mixed mode these
+# are always added to the candidate pool as extra fixed candidates, so every round
+# naturally tries a FlyDSL author and a TileLang author alongside the in-place
+# optimizer + planned strategies — best-of-N picks the winner. No env flags, no
+# per-target hardcoding: the agents are source-agnostic (they read the kernel
+# themselves) and author the optimized kernel (split-K/tiling/per-shape config),
 # matching AMD's real recipe rather than a narrow "<src>-to-<tgt>" API swap.
-_REWRITE_DEDICATED = {
-    "flydsl": "flydsl-kernel-rewrite",
-    "tilelang": "tilelang-kernel-rewrite",
-}
-
-
-def _fixed_rewrite_agent_name(kernel_language: str, kernel_type: str = "") -> str | None:
-    """Return the rewrite subagent name for the fixed slot, or None for default.
-
-    Controlled by ``GEAK_FIXED_REWRITE_TARGET`` (``flydsl``|``tilelang``). Returns
-    ``None`` when unset or the target is invalid — caller keeps the default in-place
-    ``general-kernel-optimization`` agent.
-
-    Default: route to the dedicated source-agnostic authoring subagent
-    (``flydsl-kernel-rewrite`` / ``tilelang-kernel-rewrite``). Set
-    ``GEAK_REWRITE_USE_PAIR_SUBAGENTS=1`` to instead use the legacy ``<source>-to-<target>``
-    pair subagents (source preferred from ``kernel_type``, then ``kernel_language``).
-    """
-    target = (os.environ.get("GEAK_FIXED_REWRITE_TARGET") or "").strip().lower()
-    if target not in _REWRITE_TARGETS:
-        return None
-
-    use_pairs = (os.environ.get("GEAK_REWRITE_USE_PAIR_SUBAGENTS") or "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
-    if not use_pairs:
-        return _REWRITE_DEDICATED.get(target)
-
-    # Legacy pair-subagent path.
-    source = (
-        _LANG_TO_REWRITE_SOURCE.get(str(kernel_type or "").strip().lower())
-        or _LANG_TO_REWRITE_SOURCE.get(str(kernel_language or "").strip().lower())
-    )
-    if not source or source == target:
-        return None
-    return f"{source}-to-{target}"
+_REWRITE_AUTHORING_SUBAGENTS = ("flydsl-kernel-rewrite", "tilelang-kernel-rewrite")
 
 
 class TaskPlanner:
@@ -135,27 +83,41 @@ class TaskPlanner:
                 kernel_language=kernel_language,
             )
         )
-        # Default fixed-mode agent is the in-place optimizer. When the operator
-        # opts into backend rewrites (GEAK_FIXED_REWRITE_TARGET=flydsl|tilelang),
-        # route the fixed slot through the matching rewrite subagent instead.
-        _kernel_type = str(self._kernel_meta.get("kernel_type") or "")
-        _fixed_agent = _fixed_rewrite_agent_name(kernel_language, _kernel_type) or "general-kernel-optimization"
-        if _fixed_agent != "general-kernel-optimization":
-            logger.info(
-                "TaskPlanner: fixed slot routed to rewrite subagent %r "
-                "(GEAK_FIXED_REWRITE_TARGET) for kernel_language=%s",
-                _fixed_agent,
-                kernel_language,
-            )
         canonical_fixed = CandidateTask(
             label="fixed-canonical",
             body=composed_body,
             kind="fixed",
-            agent_name=_fixed_agent,
+            agent_name="general-kernel-optimization",
             priority=5,
             kernel_language=kernel_language,
             num_gpus=num_gpus,
         )
+
+        # Source-agnostic authoring rewrite candidates (FlyDSL + TileLang). Added to the
+        # pool as extra fixed candidates so every mixed-mode round tries a backend-rewrite
+        # author alongside the in-place optimizer and the planned strategies — best-of-N
+        # selects the winner. Only included when those subagents are registered.
+        rewrite_candidates: list[CandidateTask] = []
+        registered = set(self._subagent_registry.list_names()) if self._subagent_registry else set()
+        for sa in _REWRITE_AUTHORING_SUBAGENTS:
+            if sa in registered:
+                rewrite_candidates.append(
+                    CandidateTask(
+                        label=sa,
+                        body=composed_body,
+                        kind="fixed",
+                        agent_name=sa,
+                        priority=5,
+                        kernel_language=kernel_language,
+                        num_gpus=num_gpus,
+                    )
+                )
+        if rewrite_candidates:
+            logger.info(
+                "TaskPlanner: added %d authoring-rewrite candidates: %s",
+                len(rewrite_candidates),
+                [c.agent_name for c in rewrite_candidates],
+            )
 
         if mode == "fixed" or num_parallel <= 1:
             logger.info(
@@ -187,6 +149,9 @@ class TaskPlanner:
                     num_gpus=task.num_gpus,
                 )
             )
+
+        # Add the FlyDSL + TileLang authoring rewrite candidates so they compete every round.
+        candidates.extend(rewrite_candidates)
 
         # Always inject canonical_fixed so pool.fixed is never empty.
         # The dispatcher's fill/pad paths rely on this body to top up
