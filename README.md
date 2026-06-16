@@ -1,4 +1,4 @@
-# PerfSkills
+# GEAK
 
 Multi-agent GPU performance optimization for **AMD Instinct MI GPUs** (CDNA, e.g. gfx942 / gfx950 — the
 on-box card is auto-detected). Driven by Claude Code, orchestrated by deterministic JS **Workflows**.
@@ -40,7 +40,7 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions
 ### 3. Point it at this repo and ask
 
 ```bash
-git clone <this-repo> PerfSkills && cd PerfSkills
+git clone <this-repo> GEAK && cd GEAK
 IS_SANDBOX=1 claude --dangerously-skip-permissions
 ```
 
@@ -123,7 +123,7 @@ optimization). This makes runs reliable and reproducible.
 ## Repository layout
 
 ```
-PerfSkills/
+GEAK/
 ├── e2e_workflow/        # ⭐ End-to-end LLM serving-throughput optimizer (wraps kernel_workflow/)
 │   ├── e2e_workflow.js   # system-layer orchestration (config / head-GEMM / kernel tracks + e2e gate)
 │   ├── roles/  knowledge/  scripts/   # adapters/{sglang,vllm}.sh, op_bench.py, parse_profile.py, …

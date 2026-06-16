@@ -116,7 +116,7 @@ accuracy gate**. Treat the multipliers above as the vendor floor to beat, and ga
 - aiter backend: [`../../backends/aiter/overview.md`](../../backends/aiter/overview.md)
 
 ## Sources
-- fp8/MXFP4 serving recipe, AITER switches, FNUZ/OCP, containers, JIT warmup, ~3× MoE / ~17× MLA: https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html and `PerfSkills/perf_knowledge/quantization/deployment_recipes.md`.
+- fp8/MXFP4 serving recipe, AITER switches, FNUZ/OCP, containers, JIT warmup, ~3× MoE / ~17× MLA: https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html and `GEAK/perf_knowledge/quantization/deployment_recipes.md`.
 - SGLang AMD fp8/Quark methods, `SGLANG_USE_AITER`: https://docs.sglang.io/platforms/amd_gpu.html and https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/quantization.md.
 - Quark fp8 load (`quantization='quark'`, `*-FP8-KV`): https://docs.vllm.ai/en/stable/features/quantization/quark/.
 - Norm+quant 1–6% e2e: https://github.com/sgl-project/sglang/issues/18466.

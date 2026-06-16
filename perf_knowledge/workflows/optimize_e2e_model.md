@@ -6,10 +6,10 @@ regimes: [prefill, decode, both]
 status: sota
 updated: 2026-06-08
 sources:
-  - PerfSkills/e2e_workflow/README.md
-  - PerfSkills/e2e_workflow/PLAN.md
-  - PerfSkills/e2e_workflow/roles/e2e_integrator.md
-  - PerfSkills/e2e_workflow/roles/op_benchmarker.md
+  - GEAK/e2e_workflow/README.md
+  - GEAK/e2e_workflow/PLAN.md
+  - GEAK/e2e_workflow/roles/e2e_integrator.md
+  - GEAK/e2e_workflow/roles/op_benchmarker.md
 ---
 
 # Optimize an e2e model (serving throughput)
@@ -20,7 +20,7 @@ achievable_speedup`), tuning the cheap config knobs first, then optimizing hot k
 the single-kernel layer and **overlaying them back reversibly**. Every change must
 **engage the live path** and clear the **>0.5% e2e gate** (or **stack** if sub-threshold
 and non-regressing). This is the `e2e_workflow` workflow
-([`PerfSkills/e2e_workflow/`](../../e2e_workflow/)) made into a checklist.
+([`GEAK/e2e_workflow/`](../../e2e_workflow/)) made into a checklist.
 
 ## The invariants (do not break)
 - **TP=1** for the tuning runs — single-GPU, deterministic Amdahl accounting and stable
@@ -124,10 +124,10 @@ tune banked **+2.23% e2e** through the full flow above. Full recipe + traps:
 - Wire-in: [`integrating_a_new_kernel.md`](integrating_a_new_kernel.md)
 - Bring-up: [`model_bringup_checklist.md`](model_bringup_checklist.md)
 - Profiling: [`../profiling/`](../profiling/) · Optimization: [`../optimization/`](../optimization/)
-- Skill: [`PerfSkills/e2e_workflow/`](../../e2e_workflow/)
+- Skill: [`GEAK/e2e_workflow/`](../../e2e_workflow/)
 
 ## Sources
-- Phases, roles, fractal two-altitude design: `PerfSkills/e2e_workflow/README.md`, `PerfSkills/e2e_workflow/PLAN.md`.
-- The gate, three verdicts, tight 2-launch protocol, engagement proof: `PerfSkills/e2e_workflow/roles/e2e_integrator.md`.
-- Head-op ladder + author_plan: `PerfSkills/e2e_workflow/roles/op_benchmarker.md`.
+- Phases, roles, fractal two-altitude design: `GEAK/e2e_workflow/README.md`, `GEAK/e2e_workflow/PLAN.md`.
+- The gate, three verdicts, tight 2-launch protocol, engagement proof: `GEAK/e2e_workflow/roles/e2e_integrator.md`.
+- Head-op ladder + author_plan: `GEAK/e2e_workflow/roles/op_benchmarker.md`.
 - aiter default backend / config levers: https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html

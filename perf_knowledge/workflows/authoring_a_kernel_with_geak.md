@@ -7,8 +7,8 @@ status: sota
 updated: 2026-06-08
 sources:
   - GEAK (AMD-AGI/GEAK) README
-  - PerfSkills/kernel_workflow/roles/author_engineer.md
-  - PerfSkills/e2e_workflow/roles/op_benchmarker.md
+  - GEAK/kernel_workflow/roles/author_engineer.md
+  - GEAK/e2e_workflow/roles/op_benchmarker.md
 ---
 
 # Authoring a kernel with GEAK / kernel_workflow
@@ -107,9 +107,9 @@ call site (`target_callable`) to the authored entry. If there's no Python seam �
 - Ladder context: [`optimize_single_kernel.md`](optimize_single_kernel.md)
 - Wire-in: [`integrating_a_new_kernel.md`](integrating_a_new_kernel.md)
 - GEMM author target: [`gemm_tuning_workflow.md`](gemm_tuning_workflow.md), [`../languages/flydsl/`](../languages/flydsl/)
-- Kernel layer: [`PerfSkills/kernel_workflow/`](../../kernel_workflow/) · GEAK: https://github.com/AMD-AGI/GEAK
+- Kernel layer: [`GEAK/kernel_workflow/`](../../kernel_workflow/) · GEAK: https://github.com/AMD-AGI/GEAK
 
 ## Sources
 - GEAK capabilities (HIP/Triton/FlyDSL, closed loop, L3, multi-agent): GEAK (AMD-AGI/GEAK) README, https://github.com/AMD-AGI/GEAK
-- Author mode, FlyDSL-GEMM baseline reuse, correctness-first, immutable oracle: `PerfSkills/kernel_workflow/roles/author_engineer.md`.
-- author_plan for head ops, best-of {tuned, authored}: `PerfSkills/e2e_workflow/roles/op_benchmarker.md`.
+- Author mode, FlyDSL-GEMM baseline reuse, correctness-first, immutable oracle: `GEAK/kernel_workflow/roles/author_engineer.md`.
+- author_plan for head ops, best-of {tuned, authored}: `GEAK/e2e_workflow/roles/op_benchmarker.md`.

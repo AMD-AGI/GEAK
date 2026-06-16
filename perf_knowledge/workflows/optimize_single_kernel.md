@@ -7,8 +7,8 @@ regimes: [prefill, decode, both]
 status: sota
 updated: 2026-06-08
 sources:
-  - PerfSkills/e2e_workflow/roles/op_benchmarker.md
-  - PerfSkills/kernel_workflow/  (single-kernel kernel_workflow)
+  - GEAK/e2e_workflow/roles/op_benchmarker.md
+  - GEAK/kernel_workflow/  (single-kernel kernel_workflow)
   - https://github.com/ROCm/aiter
 ---
 
@@ -21,7 +21,7 @@ author/rewrite code via the kernel `kernel_workflow` → verify correctness AND 
 oracle → **bank the win**. Never start by writing code; start by measuring what already
 exists. The ladder mirrors the Op-Benchmarker role
 ([`op_benchmarker.md`](../../e2e_workflow/roles/op_benchmarker.md)) and the kernel
-layer ([`PerfSkills/kernel_workflow/`](../../kernel_workflow/)).
+layer ([`GEAK/kernel_workflow/`](../../kernel_workflow/)).
 
 ## Preconditions
 - You know the operator family → see [`choosing_a_backend.md`](choosing_a_backend.md) and
@@ -90,7 +90,7 @@ tolerance) AND is faster.
 
 ## Step 4 — Tier C: author or rewrite code (editable languages only)
 Only if the winner is editable and there's headroom. Hand the op to the **kernel
-`kernel_workflow`** ([`PerfSkills/kernel_workflow/`](../../kernel_workflow/)) which enforces the
+`kernel_workflow`** ([`GEAK/kernel_workflow/`](../../kernel_workflow/)) which enforces the
 immutable unittest. Two modes:
 - **rewrite** (`mode=optimize`) — an editable impl already exists → optimize it.
 - **author** (`mode=author`, `target_language=<lang>`) — no editable impl → write a fresh
@@ -143,6 +143,6 @@ an e2e win** until it engages on the live path and clears the Amdahl gate.
 - Routing priors: [`../index/decision_trees.md`](../index/decision_trees.md)
 
 ## Sources
-- The ladder (Tier A–D), `best_known_ms` bar, immutable-oracle discipline, FlyDSL dual path: `PerfSkills/e2e_workflow/roles/op_benchmarker.md`.
-- Kernel layer contract (author/optimize modes): `PerfSkills/kernel_workflow/`, `PerfSkills/e2e_workflow/README.md`.
+- The ladder (Tier A–D), `best_known_ms` bar, immutable-oracle discipline, FlyDSL dual path: `GEAK/e2e_workflow/roles/op_benchmarker.md`.
+- Kernel layer contract (author/optimize modes): `GEAK/kernel_workflow/`, `GEAK/e2e_workflow/README.md`.
 - aiter as default ROCm kernel backend: https://github.com/ROCm/aiter ; https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html

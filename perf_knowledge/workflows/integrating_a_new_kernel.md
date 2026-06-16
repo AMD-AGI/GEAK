@@ -5,8 +5,8 @@ gens: [gfx942, gfx950]
 status: sota
 updated: 2026-06-08
 sources:
-  - PerfSkills/e2e_workflow/roles/e2e_integrator.md
-  - PerfSkills/perf_knowledge/backends/aiter/integration.md
+  - GEAK/e2e_workflow/roles/e2e_integrator.md
+  - GEAK/perf_knowledge/backends/aiter/integration.md
   - https://docs.vllm.ai/en/stable/design/custom_op/
 ---
 
@@ -118,6 +118,6 @@ Full protocol: [`optimize_e2e_model.md`](optimize_e2e_model.md).
 - aiter integration card: [`../backends/aiter/integration.md`](../backends/aiter/integration.md)
 
 ## Sources
-- Overlay seams, four winner kinds, `no_rebind_seam`, the gate: `PerfSkills/e2e_workflow/roles/e2e_integrator.md`.
-- aiter custom-op registration, rebind targets, env table: `PerfSkills/perf_knowledge/backends/aiter/integration.md`; ROCm/aiter@a6bb499 `aiter/jit/utils/torch_guard.py`.
+- Overlay seams, four winner kinds, `no_rebind_seam`, the gate: `GEAK/e2e_workflow/roles/e2e_integrator.md`.
+- aiter custom-op registration, rebind targets, env table: `GEAK/perf_knowledge/backends/aiter/integration.md`; ROCm/aiter@a6bb499 `aiter/jit/utils/torch_guard.py`.
 - vLLM CustomOp dispatch / direct_register_custom_op: https://docs.vllm.ai/en/stable/design/custom_op/

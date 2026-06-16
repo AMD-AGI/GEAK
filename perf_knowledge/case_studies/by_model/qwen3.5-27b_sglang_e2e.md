@@ -9,10 +9,10 @@ regimes: [prefill, decode]
 status: sota
 updated: 2026-06-08
 sources:
-  - PerfSkills/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md
-  - PerfSkills/examples/e2e_workflow/qwen3.5-27b_sglang_gemm-tuning-win/final_report.md
-  - PerfSkills/e2e_workflow/knowledge/aiter_gemm_tuning.md
-  - PerfSkills/e2e_workflow/knowledge/gemm_attention_backends.md
+  - GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md
+  - GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_gemm-tuning-win/final_report.md
+  - GEAK/e2e_workflow/knowledge/aiter_gemm_tuning.md
+  - GEAK/e2e_workflow/knowledge/gemm_attention_backends.md
 ---
 
 # Qwen3.5-27B / sglang / MI300X — full e2e run (the flagship)
@@ -155,8 +155,8 @@ accepted. Parity safe (same bf16 math; tuner gated every row at `err_ratio < 0.0
 - Backend: [`../../backends/aiter/tuned_gemm.md`](../../backends/aiter/tuned_gemm.md)
 
 ## Sources
-- iter1 (config win +4.15/+4.44%, editable-kernel cluster, the bias-mismatch GEMM reject): `PerfSkills/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md`.
-- iter2 (the +2.23% GEMM win, 246 engagement hits, the process-storm stop): `PerfSkills/examples/e2e_workflow/qwen3.5-27b_sglang_gemm-tuning-win/final_report.md`.
-- Cross-run provenance ledger (+~5% attn, +1.2–2.4% GEMM ceiling, bias-from-server rule): `PerfSkills/e2e_workflow/knowledge/{aiter_gemm_tuning.md,gemm_attention_backends.md}`.
+- iter1 (config win +4.15/+4.44%, editable-kernel cluster, the bias-mismatch GEMM reject): `GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md`.
+- iter2 (the +2.23% GEMM win, 246 engagement hits, the process-storm stop): `GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_gemm-tuning-win/final_report.md`.
+- Cross-run provenance ledger (+~5% attn, +1.2–2.4% GEMM ceiling, bias-from-server rule): `GEAK/e2e_workflow/knowledge/{aiter_gemm_tuning.md,gemm_attention_backends.md}`.
 
 <!-- MANIFEST: Qwen3.5-27B sglang MI300X flagship e2e — measured triton-attn config win (+4.15–4.44%) stacked with bias-correct aiter GEMM DB tune (+2.23%, 246 hits) ≈ +6% cumulative; editable FLA/mamba cluster all carry-forward by Amdahl. -->

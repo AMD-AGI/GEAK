@@ -9,8 +9,8 @@ regimes: [prefill, decode]
 status: sota
 updated: 2026-06-08
 sources:
-  - PerfSkills/e2e_workflow/knowledge/aiter_gemm_tuning.md
-  - PerfSkills/perf_knowledge/backends/aiter/tuned_gemm.md
+  - GEAK/e2e_workflow/knowledge/aiter_gemm_tuning.md
+  - GEAK/perf_knowledge/backends/aiter/tuned_gemm.md
   - ROCm/aiter@a6bb499:aiter/tuned_gemm.py
   - ROCm/aiter@a6bb499:gradlib/gradlib/gemm_tuner.py
 ---
@@ -157,6 +157,6 @@ block-scaled MXFP8/MXFP6/MXFP4 (FP6 at FP4 rate). See [`../quantization/`](../qu
 - e2e flow: [`optimize_e2e_model.md`](optimize_e2e_model.md) · Wire-in: [`integrating_a_new_kernel.md`](integrating_a_new_kernel.md)
 
 ## Sources
-- Full recipe, both traps, the +1.22%/+2.23% Qwen3.5-27B wins, all gotchas: `PerfSkills/e2e_workflow/knowledge/aiter_gemm_tuning.md`.
-- Dispatch + key construction: `PerfSkills/perf_knowledge/backends/aiter/tuned_gemm.md`; ROCm/aiter@a6bb499 `aiter/tuned_gemm.py`, `gradlib/gradlib/gemm_tuner.py`.
+- Full recipe, both traps, the +1.22%/+2.23% Qwen3.5-27B wins, all gotchas: `GEAK/e2e_workflow/knowledge/aiter_gemm_tuning.md`.
+- Dispatch + key construction: `GEAK/perf_knowledge/backends/aiter/tuned_gemm.md`; ROCm/aiter@a6bb499 `aiter/tuned_gemm.py`, `gradlib/gradlib/gemm_tuner.py`.
 - aiter as default ROCm backend: https://github.com/ROCm/aiter

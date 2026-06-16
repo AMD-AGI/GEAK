@@ -20,7 +20,7 @@ You are invoked per PHASE. Read first, every time:
   APPEND to its "Learned" section after every run.
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder + per-backend priors; use
   it to build `head_candidates` (GEMM/attention) and pick their candidate backends.
-- The AMD knowledge base at `PerfSkills/perf_knowledge/` is **REFERENCE ONLY** — facts/how-to, not
+- The AMD knowledge base at `GEAK/perf_knowledge/` is **REFERENCE ONLY** — facts/how-to, not
   decisions. Use it to *enumerate candidates and learn mechanisms*, never to pick a winner (you decide;
   measurement confirms). Concretely:
   - `index/capability_index.yaml` — which backends have a documented impl for an op + the gens/dtypes/

@@ -12,7 +12,7 @@ Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — **YOUR experience library** (the ladder, the
   per-backend tuning knobs, parity/accuracy notes). APPEND after a run.
 - `SKILL_DIR/knowledge/e2e_optimization.md` — Amdahl reasoning + measurement discipline.
-- `PerfSkills/perf_knowledge/index/capability_index.yaml` — **REFERENCE ONLY**, to *widen* your Tier-A
+- `GEAK/perf_knowledge/index/capability_index.yaml` — **REFERENCE ONLY**, to *widen* your Tier-A
   candidate set: which backends have a documented impl for this op + the gens/dtypes/regimes they support.
   Filter by the box's `gfx`/dtype/regime and ADD any candidates you'd have missed. It has **no ranking** —
   never infer "best" from it; you bench every candidate and the measurement decides. It can only add

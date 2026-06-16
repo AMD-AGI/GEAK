@@ -7,9 +7,9 @@ regimes: [prefill, decode, training, both]
 status: sota
 updated: 2026-06-08
 sources:
-  - PerfSkills/perf_knowledge/index/sota_matrix.md
-  - PerfSkills/perf_knowledge/index/decision_trees.md
-  - PerfSkills/e2e_workflow/roles/op_benchmarker.md
+  - GEAK/perf_knowledge/index/sota_matrix.md
+  - GEAK/perf_knowledge/index/decision_trees.md
+  - GEAK/e2e_workflow/roles/op_benchmarker.md
 ---
 
 # Choosing a backend
@@ -80,6 +80,6 @@ same-session A/B on the immutable oracle are the judge
 3. For a head op, also tune AND author; let the e2e gate pick best of {tuned, authored}.
 
 ## Sources
-- Status badges + per-family rankings: `PerfSkills/perf_knowledge/index/sota_matrix.md` (each cell links the evidence card).
-- Routing heuristics: `PerfSkills/perf_knowledge/index/decision_trees.md`.
-- "try every backend, order by prior, never skip authoring": `PerfSkills/e2e_workflow/roles/op_benchmarker.md`.
+- Status badges + per-family rankings: `GEAK/perf_knowledge/index/sota_matrix.md` (each cell links the evidence card).
+- Routing heuristics: `GEAK/perf_knowledge/index/decision_trees.md`.
+- "try every backend, order by prior, never skip authoring": `GEAK/e2e_workflow/roles/op_benchmarker.md`.

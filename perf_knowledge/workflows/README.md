@@ -5,9 +5,9 @@ gens: [gfx942, gfx950]
 status: sota
 updated: 2026-06-08
 sources:
-  - PerfSkills/e2e_workflow/roles/op_benchmarker.md
-  - PerfSkills/e2e_workflow/roles/e2e_integrator.md
-  - PerfSkills/perf_knowledge/index/decision_trees.md
+  - GEAK/e2e_workflow/roles/op_benchmarker.md
+  - GEAK/e2e_workflow/roles/e2e_integrator.md
+  - GEAK/perf_knowledge/index/decision_trees.md
 ---
 
 # Workflows
@@ -21,8 +21,8 @@ A *workflow* answers **"I want to make X faster — what do I do, in what order,
 do I know it worked?"** Operator/backend cards answer "what is the SOTA impl"; workflows
 answer "how do I get there and bank the win." Every workflow ties to the **validated
 facts** captured by the recursive e2e optimization workflow
-(`PerfSkills/e2e_workflow/`) and its single-kernel kernel layer
-(`PerfSkills/kernel_workflow/`).
+(`GEAK/e2e_workflow/`) and its single-kernel kernel layer
+(`GEAK/kernel_workflow/`).
 
 ## The two altitudes
 - **Single kernel** — make one operator (a GEMM, an attention, a norm) faster in
@@ -68,6 +68,6 @@ format is the one in [`../index/conventions.md`](../index/conventions.md).
    (anti-cheating); re-hash before trusting any result.
 
 ## Sources
-- e2e doctrine, Amdahl gate, three verdicts: `PerfSkills/e2e_workflow/roles/e2e_integrator.md`, `PerfSkills/e2e_workflow/README.md`.
-- The cheapest-first ladder: `PerfSkills/e2e_workflow/roles/op_benchmarker.md`.
+- e2e doctrine, Amdahl gate, three verdicts: `GEAK/e2e_workflow/roles/e2e_integrator.md`, `GEAK/e2e_workflow/README.md`.
+- The cheapest-first ladder: `GEAK/e2e_workflow/roles/op_benchmarker.md`.
 - Routing priors: [`../index/decision_trees.md`](../index/decision_trees.md).
