@@ -1,0 +1,33 @@
+name: tilelang-kernel-rewrite
+description: >-
+  Rewrite a hot GPU kernel into an optimized TileLang implementation for AMD MI300X/gfx942.
+  Source-agnostic (Triton / PyTorch / HIP / CK input). Author a TileLang tile program
+  (T.gemm / FlashAttention / reductions) with @tilelang.autotune over block shapes,
+  num_stages, k_pack, GemmWarpPolicy, coalesced_width. Strongest on attention/FlashMLA
+  (TileLang ~1.5x Triton, ~parity with AITER asm). Parity-gated. Use for high-%GPU
+  editable kernels where a TileLang author can beat the stock kernel.
+
+execution_mode: inprocess
+
+parameters:
+  - name: task
+    type: string
+    description: >-
+      Free-form task: source kernel path, output path, harness/benchmark command, goal,
+      and shapes/dtype if known.
+    required: true
+
+agent:
+  system_template_file: SYSTEM_PROMPT.md
+  language_match:
+    extensions: [".py", ".cu", ".cuh", ".cpp", ".hip"]
+    markers: ["@triton.jit", "tl.program_id", "__global__", "ck::", "import torch"]
+    confidence_boost: 0.05
+  instance_template: |
+    Rewrite/author an optimized TileLang kernel for this goal: {{task}}
+
+    Validate parity with `save_and_test` after every change; only a correct, faster kernel counts.
+    Submit when correctness passes AND it beats baseline: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+  cost_limit: 0
+  step_limit: 200
+  use_skills: true

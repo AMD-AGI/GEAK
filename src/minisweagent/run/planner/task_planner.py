@@ -39,22 +39,38 @@ _LANG_TO_REWRITE_SOURCE = {
 }
 
 
+# Dedicated, source-agnostic authoring subagents (the preferred rewrite path):
+# they author an optimized kernel targeting the DSL (split-K/tiling/per-shape config),
+# matching AMD's real recipe rather than a narrow "<src>-to-<tgt>" API swap.
+_REWRITE_DEDICATED = {
+    "flydsl": "flydsl-kernel-rewrite",
+    "tilelang": "tilelang-kernel-rewrite",
+}
+
+
 def _fixed_rewrite_agent_name(kernel_language: str, kernel_type: str = "") -> str | None:
     """Return the rewrite subagent name for the fixed slot, or None for default.
 
     Controlled by ``GEAK_FIXED_REWRITE_TARGET`` (``flydsl``|``tilelang``). Returns
-    ``None`` when unset, the target is invalid, or the source already equals the
-    target (no-op rewrite) — in which case the caller keeps the default in-place
+    ``None`` when unset or the target is invalid — caller keeps the default in-place
     ``general-kernel-optimization`` agent.
 
-    Source selection prefers ``kernel_type`` (the precise triton/hip/ck/flydsl
-    classifier from ``_infer_kernel_type``) over ``kernel_language`` (which coarsely
-    reports ``python`` for Triton ``.py`` files) so a Triton kernel routes to
-    ``triton-to-<target>`` rather than ``pytorch-to-<target>``.
+    Default: route to the dedicated source-agnostic authoring subagent
+    (``flydsl-kernel-rewrite`` / ``tilelang-kernel-rewrite``). Set
+    ``GEAK_REWRITE_USE_PAIR_SUBAGENTS=1`` to instead use the legacy ``<source>-to-<target>``
+    pair subagents (source preferred from ``kernel_type``, then ``kernel_language``).
     """
     target = (os.environ.get("GEAK_FIXED_REWRITE_TARGET") or "").strip().lower()
     if target not in _REWRITE_TARGETS:
         return None
+
+    use_pairs = (os.environ.get("GEAK_REWRITE_USE_PAIR_SUBAGENTS") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if not use_pairs:
+        return _REWRITE_DEDICATED.get(target)
+
+    # Legacy pair-subagent path.
     source = (
         _LANG_TO_REWRITE_SOURCE.get(str(kernel_type or "").strip().lower())
         or _LANG_TO_REWRITE_SOURCE.get(str(kernel_language or "").strip().lower())
