@@ -35,7 +35,7 @@ BACKEND=${BACKEND:-sglang}
 ADAPTER="${ADAPTER:-$HERE/adapters/${BACKEND}.sh}"
 if [ ! -f "$ADAPTER" ]; then
   echo "!!! No adapter for BACKEND='$BACKEND' at $ADAPTER" >&2
-  echo "    Available: $(ls "$HERE/adapters" 2>/dev/null | sed 's/\.sh$//' | tr '\n' ' ')" >&2
+  echo "    Available: $(ls "$HERE"/adapters/*.sh 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.sh$//' | tr '\n' ' ')" >&2
   exit 3
 fi
 # shellcheck disable=SC1090
@@ -45,6 +45,34 @@ for fn in adapter_launch adapter_health adapter_bench; do
     echo "!!! Adapter $ADAPTER does not define $fn()" >&2; exit 3
   fi
 done
+
+# ---- optional bench-CLIENT override (server stack stays the BACKEND above) ----
+# The serving server is always launched by the backend adapter (sglang/vllm).
+# BENCH_CLIENT swaps ONLY the client that drives the benchmark, so a run can use
+# the EXACT same client as another harness. BENCH_CLIENT=inferencex => Hyperloom/
+# Magpie's own InferenceX benchmark_serving.py (口径-identical client). Default
+# 'native' keeps each backend's built-in bench (sglang.bench_serving / vllm).
+BENCH_CLIENT=${BENCH_CLIENT:-native}
+copy_function() {  # copy_function SRC DST — clone a shell function under a new name
+  declare -F "$1" >/dev/null || return 1
+  eval "${2}() $(declare -f "$1" | sed '1d')"
+}
+if [ "$BENCH_CLIENT" != "native" ]; then
+  CLIENT_ADAPTER="${CLIENT_ADAPTER:-$HERE/adapters/clients/${BENCH_CLIENT}.sh}"
+  if [ ! -f "$CLIENT_ADAPTER" ]; then
+    echo "!!! No bench client '$BENCH_CLIENT' at $CLIENT_ADAPTER" >&2
+    echo "    Available: $(ls "$HERE/adapters/clients" 2>/dev/null | sed 's/\.sh$//' | tr '\n' ' ')" >&2
+    exit 3
+  fi
+  # Preserve the backend's native bench so the client can delegate profiling
+  # (server-side trace hooks live in the native bench, not the portable client).
+  copy_function adapter_bench adapter_bench_native
+  # shellcheck disable=SC1090
+  source "$CLIENT_ADAPTER"   # MUST redefine adapter_bench (the timed client)
+  if ! declare -F adapter_bench >/dev/null; then
+    echo "!!! Client adapter $CLIENT_ADAPTER must define adapter_bench()" >&2; exit 3
+  fi
+fi
 
 # ---- model / server ----
 # MODEL is REQUIRED. No rig-specific default — a wrong-but-silent default benches the wrong target.
@@ -82,7 +110,31 @@ fi
 ISL=${ISL:-1024}
 OSL=${OSL:-1024}
 CONC=${CONC:-64}
-NUM_PROMPTS=${NUM_PROMPTS:-$((CONC * 5))}
+# NUM_PROMPTS default.
+#  * native client (standalone GEAK default): keep the original CONC*5 default so
+#    standalone behaviour is byte-identical to before the inferencex integration.
+#  * inferencex client (Hyperloom口径 alignment): mirror Hyperloom's ADAPTIVE
+#    factor — the number of timed prompts scales DOWN as the per-request sequence
+#    cost (ISL+OSL) grows so each repeat stays bounded.
+#    factor = {<=1024:10, <=4096:5, <=16384:3, else 2}.
+# Override NUM_PROMPTS to pin a fixed count regardless of client.
+if [ -z "${NUM_PROMPTS:-}" ]; then
+  if [ "$BENCH_CLIENT" = "inferencex" ]; then
+    _seq_cost=$((ISL + OSL))
+    if   [ "$_seq_cost" -le 1024 ];  then _factor=10
+    elif [ "$_seq_cost" -le 4096 ];  then _factor=5
+    elif [ "$_seq_cost" -le 16384 ]; then _factor=3
+    else _factor=2; fi
+    NUM_PROMPTS=$(( CONC * _factor > CONC ? CONC * _factor : CONC ))
+  else
+    NUM_PROMPTS=$((CONC * 5))
+  fi
+fi
+# Client-side warmup prompts (口径 alignment with Hyperloom's materialize default
+# NUM_WARMUPS=min(CONC,8)). Consumed by the inferencex client adapter; the native
+# adapters use their own warmup round instead.
+NUM_WARMUPS=${NUM_WARMUPS:-$(( CONC < 8 ? CONC : 8 ))}
+RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-1}   # fixed sequence lengths (matches Hyperloom)
 REPEATS=${REPEATS:-3}                 # repeat the bench this many times; report median + spread
 SEED=${SEED:-0}                       # fixed seed for reproducibility / parity
 
@@ -102,6 +154,7 @@ RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 # export everything the adapter reads
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
+export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
 
 echo "Backend:      $BACKEND  (adapter: $ADAPTER)"
 echo "Model:        $MODEL"
@@ -193,6 +246,8 @@ summ = {
     "tpot_ms_median": round(med(tpot), 3) if tpot else None,
     "runs": len(tps),
     "all_throughput": tps,
+    # Aggregate output tok/s (NOT divided by TP) — matches Hyperloom/Magpie output_throughput 口径.
+    "metric_basis": "aggregate_output_tok_s",
 }
 with open(out_path, "w") as fh: json.dump(summ, fh, indent=2)
 print(f"E2E_SUMMARY output_tok_s={summ['output_throughput_tok_s_median']} "

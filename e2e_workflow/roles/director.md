@@ -32,7 +32,9 @@ driven through `bench_e2e.sh` with `BACKEND=<backend>` so the stack stays a swap
 
 Inputs: `LAUNCH_SCRIPT` (path to a bench/launch script; may be empty), `MODEL_PATH`, `BACKEND`
 (sglang|vllm; default sglang), `EXP_ROOT`, `EVAL_DIR_OVERRIDE` (may be empty), `MODEL_NAME_HINT`,
-`TASK`, `SKILL_DIR`, `GPU_IDS`, `WORKLOAD` (ISL/OSL/conc).
+`TASK`, `SKILL_DIR`, `GPU_IDS`, `SERVING_TP`/`SERVING_GPU` (serving config invariant), `WORKLOAD`
+(ISL/OSL/conc), `INIT_FLAGS` (seed `--server` flags from the caller's best config; may be empty),
+`INIT_ENV` (seed `KEY=VAL` env from the caller's best config; may be empty).
 
 Steps:
 1. Collision-proof run id: `TS=$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}`.
@@ -68,14 +70,22 @@ Steps:
    inputs / the SERVING CONFIG INVARIANT block of your prompt). `GPU_IDS` is the optimization-parallelism
    pool, NOT the serving tensor-parallel size; the serving config is `TP=SERVING_TP GPU=SERVING_GPU`.
    Every later e2e measurement (sweep, integrate, validate) MUST match this exact `TP=SERVING_TP
-   GPU=SERVING_GPU` config, or deltas are meaningless. Use the copied bench script (substitute the actual
-   SERVING_TP / SERVING_GPU values from your inputs):
+   GPU=SERVING_GPU` config, or deltas are meaningless.
+   **Seed config**: if `INIT_FLAGS`/`INIT_ENV` are given (the caller's already-searched best config),
+   the baseline MUST be measured ON them (pass `EXTRA_SERVER_ARGS`/`EXTRA_ENV`), so PerfSkills' baseline
+   == the caller's best config and later kernel gains compound on top of it. Use the copied bench script
+   (substitute the actual SERVING_TP / SERVING_GPU values from your inputs):
    ```bash
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/baseline" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
    ISL=<isl> OSL=<osl> CONC=<conc> REPEATS=3 PROFILE=0 \
+   EXTRA_SERVER_ARGS="<INIT_FLAGS>" EXTRA_ENV="<INIT_ENV>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/baseline_bench.log"
    ```
    Parse `EVAL_DIR/baseline/bench_summary.json` for `output_throughput_tok_s_median` + spread.
+   **Prove engagement**: grep `EVAL_DIR/logs/baseline_bench.log` / `server.log` to confirm the seed
+   flags/env actually took effect (e.g. the chosen attention backend / env var appears in the server
+   banner). If a seed flag did not engage, record it loudly in `notes` — a baseline measured on a
+   silently-ignored config corrupts every later gain.
 6. If baseline spread > ~5%, re-run — a noisy baseline poisons every later comparison. Set
    `noise_band_pct = 0.5` (the default accept threshold): the Integrator gates with a TIGHT protocol
    (interleaved A/B, E2E_REPEATS per leg, non-overlap + engagement proof) that makes 0.5% trustworthy.
@@ -91,7 +101,9 @@ Return JSON:
   "baseline_spread_pct": 0.0,
   "noise_band_pct": 0.5,
   "baseline_summary_path": "<EVAL_DIR>/baseline/bench_summary.json",
-  "server_flags": {"...": "..."},
+  "server_flags": {"extra": "<resolved server flags, incl. INIT_FLAGS>"},
+  "server_env": "<resolved KEY=VAL env, incl. INIT_ENV>",
+  "tp": 1,
   "workload": {"isl": 1024, "osl": 1024, "conc": 64},
   "bench_script": "<EVAL_DIR>/bench_e2e.sh",
   "notes": "sglang version, anything unusual"
@@ -115,10 +127,14 @@ TRUE baseline with the tight 2-block protocol and decide if the COMBINED result 
 1. Measure baseline AND final **same-session, tight** (2 launches, not per-repeat): a reference block
    (stack/stack-default = the TRUE baseline config, i.e. NO overlay/flags) and a final block (full
    overlay + flags), each `E2E_REPEATS` (default 7) timed repeats on ONE server:
+   The TRUE-baseline block MUST reproduce the seed config the baseline was measured on (the caller's
+   best config = the recorded `baseline` flags/env, i.e. the same `INIT_FLAGS`/`INIT_ENV`) — NOT
+   `FINAL_FLAGS` minus PerfSkills' kernel wins. Use the same `TP=SERVING_TP GPU=SERVING_GPU` as setup.
    ```bash
-   # fresh TRUE-baseline block (no overlay, no accepted flags) — re-measured NOW to cancel box drift.
+   # fresh TRUE-baseline block (baseline seed flags/env, NO kernel overlay) — re-measured NOW for drift.
    # Serving config MUST be the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/validation/base" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
+   EXTRA_SERVER_ARGS="<baseline seed flags>" EXTRA_ENV="<baseline seed env>" \
    REPEATS="${E2E_REPEATS:-7}" PROFILE=0 ISL=<isl> OSL=<osl> CONC=<conc> \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee -a "$EVAL_DIR/logs/validation_bench.log"
    # final block (full overlay + flags + env), SAME TP=SERVING_TP GPU=SERVING_GPU

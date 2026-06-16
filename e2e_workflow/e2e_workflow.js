@@ -86,6 +86,12 @@ const ISL = parseInt(A.isl != null ? A.isl : 1024, 10);
 const OSL = parseInt(A.osl != null ? A.osl : 1024, 10);
 const CONC = parseInt(A.conc != null ? A.conc : 64, 10);
 const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC };
+// Seed config: when an external orchestrator (e.g. Hyperloom) already did
+// config/param search, it passes its accepted best flags/env so the PerfSkills
+// baseline is measured ON that config (fair engagement start), not the stack
+// default. Serving TP/GPU are handled by SERVING_TP / SERVING_GPU above.
+const INIT_FLAGS = String(A.initial_extra_server_args || '');
+const INIT_ENV = String(A.initial_extra_env || '');
 // Acceptance noise band (%). Tight measurement (interleaved A/B, E2E_REPEATS repeats, non-overlap +
 // engagement proof — see e2e_integrator) makes a 0.5% default trustworthy. Prompt-tunable.
 const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
@@ -122,7 +128,8 @@ const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, model_name: { type: 'string' },
   baseline_throughput_tok_s: { type: 'number' }, baseline_spread_pct: { type: 'number' },
   noise_band_pct: { type: 'number' }, baseline_summary_path: { type: 'string' },
-  server_flags: { type: 'object', additionalProperties: true }, workload: { type: 'object', additionalProperties: true },
+  server_flags: { type: 'object', additionalProperties: true }, server_env: { type: 'string' },
+  tp: { type: 'number' }, workload: { type: 'object', additionalProperties: true },
   bench_script: { type: 'string' }, notes: { type: 'string' },
 }, ['eval_dir', 'baseline_throughput_tok_s']);
 
@@ -332,7 +339,7 @@ if (want('setup')) {
   const setup = await safeAgent(
     roleAgent('director', 'setup', 'Build the isolated e2e eval dir and record the baseline throughput.', {
       LAUNCH_SCRIPT, MODEL_PATH, EXP_ROOT, EVAL_DIR_OVERRIDE, MODEL_NAME_HINT, TASK,
-      GPU_IDS, WORKLOAD, SKILL_DIR: WORKFLOW_DIR,
+      GPU_IDS, WORKLOAD, INIT_FLAGS, INIT_ENV, SKILL_DIR: WORKFLOW_DIR,
     }),
     { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
   if (!setup || !setup.eval_dir) throw new Error('Setup failed: no eval_dir');
@@ -340,8 +347,10 @@ if (want('setup')) {
   MODEL_NAME = setup.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = setup.baseline_throughput_tok_s;
   NOISE_BAND = setup.noise_band_pct || NOISE_BAND_DEFAULT;
-  curFlags = (setup.server_flags && setup.server_flags.extra) || '';
-  curEnv = '';
+  // Seed flags/env win when provided (baseline was measured on them); else fall
+  // back to whatever the director resolved.
+  curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
+  curEnv = INIT_ENV || (setup.server_env || '');
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
 
   phase('Profile');

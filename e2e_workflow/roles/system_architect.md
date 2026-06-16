@@ -283,7 +283,10 @@ attempt, win or not. REQUIRED sections, in order:
 
 4. **Artifacts tree**: `tree -L 2 -I "__pycache__|*.pyc|.git|*.so"` of the eval dir, annotating `[P#]` per path.
 
-5. **Summary table** of all attempts (lever | isolated | e2e | verdict | root cause).
+5. **Summary table** of all attempts (lever | what changed | isolated | e2e | verdict | root cause).
+   For every attempt record **WHAT optimization was applied and exactly WHICH params changed** (e.g.
+   backend swap triton→flydsl, tile/block sizes, num_warps, dtype, fused epilogue, the flag/env value),
+   not just the verdict — so the report explains *how* each gain/no-op happened.
 
 6. **⚠️ FLAGGED dominant heads** (from `FLAGGED_HEADS`): MANDATORY if non-empty. For each, list `pct_gpu_time`,
    the stage it failed at (extract / bakeoff / no_candidate), whether it was a `harness_error` (bake-off could
@@ -291,7 +294,10 @@ attempt, win or not. REQUIRED sections, in order:
    carry the LARGEST remaining headroom (top "next direction"). Never bury a flagged head in the no-ops.
 
 7. **Final deliverable + measurement caveats** (box drift → trust ONLY same-session A/B; the official number
-   is the Director's same-session value) **+ next directions to explore.**
+   is the Director's same-session value) **+ next directions to explore.** Quote the FINAL serving numbers
+   from `EVAL_DIR/validation/final/bench_summary.json` — throughput (median + spread), **TTFT and TPOT** —
+   next to the baseline numbers, so the report shows the full E2E throughput / TTFT / TPOT delta (not just
+   throughput).
 
 Data sources (read the ACTUAL files, never invent): `director_e2e_validation.json`,
 `final/bench/bench_summary.json`, `config/sweep_results.json`, `overlay/cand_*/integrate_result.json`,
@@ -304,8 +310,13 @@ to architect_report.md; also mention `final_report.md` in `note` if the schema l
   "baseline_throughput_tok_s": 0.0,
   "final_throughput_tok_s": 0.0,
   "throughput_speedup": 1.0,
+  "baseline_ttft_ms": 0.0, "baseline_tpot_ms": 0.0,
+  "final_ttft_ms": 0.0, "final_tpot_ms": 0.0,
   "accepted_config": {"flags": "...", "env": "..."},
-  "accepted_kernels": [{"short_name": "...", "backend": "...", "e2e_delta_pct": 0.0}],
+  "accepted_kernels": [
+    {"short_name": "...", "backend": "...", "optimization": "what was done",
+     "changed_params": {"...": "..."}, "isolated_speedup": 1.0, "e2e_delta_pct": 0.0}
+  ],
   "milestones": 0,
   "report_path": "<EVAL_DIR>/architect_report.md"
 }
