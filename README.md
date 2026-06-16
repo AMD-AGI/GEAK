@@ -65,30 +65,10 @@ that wraps — and recursively calls — the single-kernel kernel_workflow:
 
 Every run writes a complete **`final_report.md`** (with a Phases tree + artifacts tree).
 
-### Example — natural language (recommended)
+### Example
 
 ```
 use path/to/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
-```
-
-### Example — programmatic (`Workflow` tool)
-
-```js
-Workflow({
-  scriptPath: "<PerfSkills>/e2e_workflow/e2e_workflow.js",
-  args: {
-    model_path: "/models/Qwen3.5-27B-FP8",            // required (e2e mode)
-    workflow_dir: "<PerfSkills>/e2e_workflow",        // required
-    backend: "sglang",                                // sglang | vllm
-    isl: 1024, osl: 1024, conc: 64,                   // workload (profile + bench use the SAME)
-    gpu_ids: "0,1,2,3",                               // optimization-parallelism pool (serving stays TP=1)
-    budget: 6, min_kernel_tasks: 4, kernel_budget: 6,
-    head_budget: 3, head_author_max: 2,               // head GEMM/attn bake-off + author
-    e2e_repeats: 7, config_tune: "true",              // tight A/B; Tier-0 sweep on
-    apply_to_original: "false"
-  }
-})
-// Single-kernel pass-through (backward compatible): pass kernel_path instead of model_path.
 ```
 
 **Output** lands under `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`,
@@ -103,7 +83,7 @@ See a real run in [`examples/e2e_workflow/`](examples/e2e_workflow/).
 Director → TechLead → specialist engineers (algorithm / memory / compute / host_runtime), multi-round and
 budget-controlled, with each patch independently verified before it's accepted.
 
-### Example — natural language (recommended)
+### Example
 
 ```
 use path/to/kernel_workflow to optimize /path/to/knn, gpu 4
@@ -111,22 +91,6 @@ use path/to/kernel_workflow to optimize /path/to/knn, gpu 4
 
 ```
 use path/to/kernel_workflow to optimize /path/to/silu, budget 8, focus on wrapper overhead
-```
-
-### Example — programmatic (`Workflow` tool)
-
-```js
-Workflow({
-  scriptPath: "<PerfSkills>/kernel_workflow/kernel_workflow.js",
-  args: {
-    kernel_path: "/abs/path/to/kernel/",        // required
-    workflow_dir: "<PerfSkills>/kernel_workflow/",    // required: dir containing kernel_workflow.js
-    budget: 6,                                  // optional, default 6
-    gpu_ids: "0",                               // optional, comma-separated, default "0"
-    task: "focus on memory bandwidth",          // optional, natural-language steer
-    apply_to_original: "false"                  // optional, write the patch back to kernel_path
-  }
-})
 ```
 
 ### Batch (many kernels at once)
