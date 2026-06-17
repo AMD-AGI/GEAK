@@ -20,8 +20,8 @@ Always try flags+env FIRST (Config Tuner, Tier 0) — they are reversible and re
 - `--chunked-prefill-size`, `--max-prefill-tokens`, `--schedule-conservativeness` — prefill/decode
   interleave.
 - `--tp-size / --dp-size / --ep-size`, `--mem-fraction-static` — parallelism + KV budget.
-- `--speculative-algorithm {EAGLE, NEXTN, ...}` + draft model — decode boost; this model has MTP
-  layers so NEXTN-style is plausible.
+- `--speculative-algorithm {EAGLE, NEXTN, ...}` + draft model — decode boost (only if the served model
+  ships a draft/speculative head; verify against its config, do not assume).
 - `--enable-flashinfer-mla`, MoE flags (`--enable-ep-moe`, etc.) when the arch matches.
 
 ### Env vars (set before launching the server)
