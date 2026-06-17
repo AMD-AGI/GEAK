@@ -79,6 +79,17 @@ const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
 const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
+// Expert skills = human-authored, validated optimization recipes (perf_knowledge/expert_skills/). They
+// are ADVISORY priors: a matched `validated` skill is a HIGH-PRIOR candidate that routing/integration
+// roles reproduce, then gate by the usual on-box A/B — it NEVER overrides measurement and NEVER reduces
+// a result below the measured baseline. Default OFF (opt-in): pass use_expert_skills="true" to enable.
+// When OFF (the default) NOTHING is injected into any role prompt -> the prompt (and thus the whole run)
+// is byte-identical to a build without this feature. The flag + dir are passed DOWN to the kernel layer.
+const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
+  (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
+// Only routing/bake-off/integration roles consult skills; every other role gets no injection.
+const EXPERT_SKILL_ROLES = new Set(['system_architect', 'op_benchmarker', 'e2e_integrator']);
 const GEMM_SYNTH = String(A.gemm_synth != null ? A.gemm_synth : 'true');     // synth GEMM inputs (cheap)
 const ENABLE_FP8 = String(A.enable_fp8 != null ? A.enable_fp8 : 'false');    // Tier-D quant (parity-breaking)
 const FAST_PATH_FIRST = String(A.fast_path_first != null ? A.fast_path_first : 'true') === 'true';
@@ -231,11 +242,24 @@ const VALIDATE_SCHEMA = obj({
 const cfg = (o) => Object.entries(o).map(([k, v]) =>
   `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
 
+// Expert-skills prompt injection. PURELY ADDITIVE: returns '' whenever the feature is OFF or the role
+// is not a skills consumer, so roleAgent's output is byte-identical to the pre-feature build in those
+// cases. When ON, it appends a short advisory pointer that tells the agent to Read the fragment file
+// and query the skills index. (Workflow scripts have no fs access; the agent does the reading.)
+function expertSkillsBlock(role) {
+  if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role)) return '';
+  return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
+    `Also Read ${WORKFLOW_DIR}/roles/_fragments/expert_skills.md and follow it: query ` +
+    `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits the current bottleneck/op and whose ` +
+    `validation_status is \`validated\`, and treat each as a HIGH-PRIOR candidate to reproduce — advisory ` +
+    `only, never overriding your on-box A/B, never reducing a result below the measured baseline.`;
+}
+
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
   const inall = { BACKEND, SERVING_TP, SERVING_GPU, ...inputs };
-  return `You are the ${role}. PHASE=${phase}.
+  const base = `You are the ${role}. PHASE=${phase}.
 First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
 Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
@@ -259,6 +283,7 @@ optimization-pool id for a serving launch — keep the two separate.
 ${cfg(inall)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
+  return base + expertSkillsBlock(role);
 }
 
 // Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
@@ -316,6 +341,7 @@ if (!MODEL_PATH && KERNEL_PATH) {
   try {
     const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
       kernel_path: KERNEL_PATH, workflow_dir: KERNEL_WF_DIR,
+      use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       budget: KERNEL_BUDGET, gpu_ids: GPU_IDS, task: TASK, exp_root: EXP_ROOT,
       apply_to_original: APPLY_TO_ORIGINAL,
     });
@@ -538,6 +564,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             mode: ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
             op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+            use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
             budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
             task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${bake.best_known_ms || '?'} ms). ` +
               `This kernel will be overlaid onto the LIVE sglang decode path, which is CUDA-graph captured: its STEADY-STATE hot ` +
@@ -694,6 +721,7 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
     try {
       const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
+        use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + (TASK || ''),

@@ -71,6 +71,16 @@ const TARGET_LANGUAGE = String(A.target_language != null ? A.target_language : '
 const OP_SPEC = A.op_spec || {};
 const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge' : '')).replace(/\/+$/, '');
+// Expert skills = human-authored, validated kernel recipes (perf_knowledge/expert_skills/). ADVISORY
+// priors only: a matched `validated` skill is a HIGH-PRIOR author/optimize candidate the planning/author
+// roles reproduce, then gate by the isolated A/B vs the oracle — it NEVER overrides measurement. Default
+// OFF (opt-in: pass use_expert_skills="true"). When OFF (the default) NOTHING is injected -> byte-identical
+// to a build without this feature. When invoked by the e2e layer the flag + dir are passed down.
+const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
+  (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
+// Only planning + authoring roles consult skills; every other role gets no injection.
+const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
 
 // ---------------------------------------------------------------------------
 // Reusable JSON-schema fragments.
@@ -229,8 +239,21 @@ function agentT(p, o) {
   ]);
 }
 
+// Expert-skills injection. PURELY ADDITIVE: '' when OFF or the role is not a skills consumer, so
+// roleAgent is byte-identical to the pre-feature build in those cases. When ON, appends an advisory
+// pointer telling the agent to Read the fragment + query the skills index (scripts have no fs access).
+function expertSkillsBlock(role) {
+  if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role) || !EXPERT_SKILLS_DIR) return '';
+  return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
+    `Also Read ${WORKFLOW_DIR}/roles/_fragments/expert_skills.md and follow it: query ` +
+    `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits this op (operator/dtype/regime, and ` +
+    `from_backend->to_backend for migration skills) and whose validation_status is \`validated\`, and ` +
+    `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
+    `A/B vs the oracle, never reducing a result below the measured baseline.`;
+}
+
 function roleAgent(role, phase, intro, inputs) {
-  return `You are the ${role}. PHASE=${phase}.
+  const base = `You are the ${role}. PHASE=${phase}.
 First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
 Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
@@ -239,6 +262,7 @@ Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 ${cfg(inputs)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
+  return base + expertSkillsBlock(role);
 }
 
 // ===========================================================================
