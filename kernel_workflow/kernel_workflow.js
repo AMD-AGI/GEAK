@@ -221,22 +221,47 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // hang, NEVER on a legitimately-long agent. Inner agents include benchmark/profile/verify that build
 // (hipcc/ninja) and run benches — minutes, well under 60min — plus the LLM-heavy optimize engineers
 // (the ones observed hanging). A too-short bound would kill legit long agents (e.g. a slow rocprof or
-// build), so keep it large. Real rejections are preserved (re-thrown). Cache keys (prompt, opts) are
-// unchanged so resume still works. Falls back to raw agent() if setTimeout is unavailable. args.agent_timeout_ms=0 disables.
+// build), so keep it large. Cache keys (prompt, opts) are unchanged so resume still works. Falls back
+// to raw agent() if setTimeout is unavailable. args.agent_timeout_ms=0 disables.
+// API-FAULT TOLERANCE: a transient API failure (gateway 4xx/5xx, rate-limit, dropped connection, the
+// model API going down mid-run) must NOT crash the whole workflow. agentT retries the call up to
+// AGENT_RETRIES times on a thrown API/agent error, then resolves to null (every .filter(Boolean)/
+// null-check downstream — incl. the Director validate + final report — already degrades on null rather
+// than exiting). A timeout (hang) resolves null immediately and is NOT retried (a real hang would just
+// burn another full timeout window). args.agent_retries tunes the count. If the failure is PERSISTENT
+// (e.g. an auth/header requirement the client doesn't send), retries are exhausted then the run
+// degrades — re-run with Workflow({resumeFromRunId}) once the client/API is fixed; cached agent results
+// make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
-function agentT(p, o) {
-  if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return agent(p, o);
-  let to;
-  const guard = new Promise((resolve) => {
-    to = setTimeout(() => {
-      log(`  [hung-agent guard] ${o && o.label ? o.label : 'agent'} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
-      resolve(null);
-    }, AGENT_TIMEOUT_MS);
-  });
-  return Promise.race([
-    agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
-    guard,
-  ]);
+const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+async function agentT(p, o) {
+  const label = (o && o.label) ? o.label : 'agent';
+  for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
+    try {
+      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return await agent(p, o);
+      let to;
+      const guard = new Promise((resolve) => {
+        to = setTimeout(() => {
+          log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
+          resolve(null);
+        }, AGENT_TIMEOUT_MS);
+      });
+      // A timeout resolves null (returned as-is, no retry). An API/agent error rejects -> caught below.
+      return await Promise.race([
+        agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+        guard,
+      ]);
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e).slice(0, 200);
+      if (attempt < AGENT_RETRIES) {
+        log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} hit an API/agent error (${msg}) — retrying so a transient outage doesn't kill the run.`);
+        continue;
+      }
+      log(`  [api-fault guard] ${label} still failing after ${AGENT_RETRIES} attempts (${msg}) — resolving null so the workflow degrades gracefully instead of exiting.`);
+      return null;
+    }
+  }
+  return null;
 }
 
 // Expert-skills injection. PURELY ADDITIVE: '' when OFF or the role is not a skills consumer, so
