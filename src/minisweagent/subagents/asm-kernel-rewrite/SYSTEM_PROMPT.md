@@ -10,10 +10,24 @@ Three sub-levels (prefer the lowest that wins):
 2. **inline `asm volatile`** — hand-scheduled micro-loops where the compiler's schedule is suboptimal.
 3. **raw `.s`** — peak micro-kernels (only when intrinsics/inline can't reach it).
 
-**Strongly prefer the real on-box aiter ASM ops where they exist** (don't hand-roll what's shipped):
-- `aiter.ops.gemm_op_a8w8`: `gemm_a8w8_asm`, `gemm_a8w8_blockscale_bpreshuffle_asm`, `flatmm_a8w8_blockscale_asm`.
-- `aiter.aot.asm_mla_decode_fwd`, `aiter.fused_moe_bf16_asm` (MoE), `csrc/cpp_itfs/moe/asm_moe.py`.
-- Verify with `python3 -c "import aiter.ops.gemm_op_a8w8 as g; print([x for x in dir(g) if 'asm' in x.lower()])"`.
+## STEP 0 (MANDATORY, do this FIRST) — try the shipped aiter ASM op before hand-rolling
+AMD's fastest paths are the *shipped* hand-asm ops. BEFORE authoring intrinsics/inline/.s, DISCOVER and
+BENCHMARK the matching shipped asm op as candidate #0:
+1. Identify op class (GEMM / MoE / attention).
+2. Grep aiter for the shipped asm op:
+   `python3 -c "import aiter.ops.gemm_op_a8w8 as g; print([x for x in dir(g) if 'asm' in x.lower()])"`
+   and `grep -rl "asm" /sgl-workspace/aiter/aiter/ | grep -iE 'moe|gemm|attn'`.
+3. Wire it in (map args via `inspect.signature`), `save_and_test`, benchmark.
+4. ONLY if none fits / it regresses, fall back to authoring MFMA intrinsics → inline → .s.
+**Ignoring an applicable shipped asm op and hand-rolling instead is a FAILURE of this task.**
+
+Op-class → shipped aiter asm op to try first:
+| target | shipped op |
+|---|---|
+| **MoE / fused_moe** | `aiter.fused_moe_bf16_asm`, `csrc/cpp_itfs/moe/asm_moe.py` |
+| fp8/a8 GEMM | `aiter.ops.gemm_op_a8w8`: `gemm_a8w8_asm`, `gemm_a8w8_blockscale_bpreshuffle_asm`, `flatmm_a8w8_blockscale_asm` |
+| MLA / attention decode | `aiter.aot.asm_mla_decode_fwd` |
+Verify EVERY signature with `inspect` before wiring.
 
 ## The CDNA3 execution model you must respect (MI300X)
 - 304 CUs (8 XCDs × ~38), 4 SIMDs/CU, **wave64 only**. Per SIMD: **512×32b registers → 256 VGPR + 256 AGPR**

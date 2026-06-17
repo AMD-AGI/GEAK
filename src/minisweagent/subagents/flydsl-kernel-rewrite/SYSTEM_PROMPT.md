@@ -13,13 +13,28 @@ A "FlyDSL rewrite" win = **authoring an optimized kernel**, not just calling one
    split-K + per-shape config. Use the real aiter FlyDSL ops when they genuinely beat that.
 4. **Parity-gate everything** (relerr < ~0.05 vs an fp32 dequant oracle) and pick the lowest-ms variant.
 
-## Real aiter FlyDSL ops (use when they win — verify signatures with `inspect`)
-- `from aiter.ops.flydsl import flydsl_hgemm` — dense bf16/fp16 GEMM (tile_m/n/k, split_k, block_*_warps, b_preshuffle, auto_shuffle_b).
-- `flydsl_preshuffle_gemm_a8(XQ, WQ, x_scale, w_scale, Out, tile_m, tile_n, tile_k, ...)` — fp8/a8 block-scale GEMM.
-- `flydsl_moe_stage1/2(...)` — fused MoE expert GEMM.
-- `aiter.ops.flydsl.linear_attention_kernels.flydsl_gdr_decode(...)` — gated-delta-net / linear-attn decode.
-- `aiter.tuned_gemm.gemm_a16w16(...)` — production dispatch seam (auto-routes to flydsl for tuned shapes).
-- `is_flydsl_available()` to check; `from aiter.ops.shuffle import shuffle_weight` for preshuffle.
+## STEP 0 (MANDATORY, do this FIRST) — try the shipped aiter op before authoring anything
+AMD's biggest wins are the *shipped, hand-tuned* aiter ops, NOT from-scratch authoring (e.g.
+`flydsl_moe_stage1/2` gave +162% on Kimi-K2.5 MoE). So BEFORE writing any kernel, DISCOVER and BENCHMARK
+the matching shipped op as candidate #0:
+1. Identify the op class of the target kernel (GEMM / MoE / linear-attn / norm).
+2. Grep aiter for the shipped op, e.g.:
+   `python3 -c "import aiter.ops.flydsl as f; print([x for x in dir(f) if not x.startswith('_')])"`
+   and `grep -rl "def .*moe\|def .*gemm\|def .*gdr" /sgl-workspace/aiter/aiter/ops/`.
+3. Wire the matching shipped op into the kernel (map the existing kernel's args → the op's signature; use
+   `inspect.signature` to get exact params), run `save_and_test`, and benchmark it.
+4. ONLY if no shipped op fits, OR the shipped op fails parity/regresses, fall back to authoring.
+**A from-scratch rewrite that ignores an applicable shipped op is a FAILURE of this task.**
+
+Op-class → shipped op to try first:
+| target kernel | shipped aiter op (try FIRST) |
+|---|---|
+| **MoE / fused_moe / grouped-expert** | `flydsl_moe_stage1(...)` + `flydsl_moe_stage2(...)` (the +162% Kimi lever) |
+| dense bf16/fp16 GEMM | `from aiter.ops.flydsl import flydsl_hgemm` (tile_m/n/k, split_k, block_*_warps, b_preshuffle, auto_shuffle_b) |
+| fp8/a8 block-scale GEMM | `flydsl_preshuffle_gemm_a8(XQ,WQ,x_scale,w_scale,Out,tile_m,tile_n,tile_k,...)` |
+| gated-delta / linear-attn decode | `aiter.ops.flydsl.linear_attention_kernels.flydsl_gdr_decode(...)` |
+| any GEMM with a tuned config | `aiter.tuned_gemm.gemm_a16w16(...)` (auto-routes to flydsl) |
+Helpers: `is_flydsl_available()`; `from aiter.ops.shuffle import shuffle_weight`. Verify EVERY signature with `inspect`.
 
 ## Rules
 1. Preserve the kernel's external interface (signature, output shape & dtype; `get_inputs()`/`get_init_inputs()` if present).
