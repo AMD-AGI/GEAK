@@ -97,10 +97,18 @@ PORT=${PORT:-}
 if [ -z "$PORT" ]; then
   if declare -F adapter_default_port >/dev/null; then PORT="$(adapter_default_port)"; fi
   PORT=${PORT:-0}
-  # 0 (or a busy port) -> ask the OS for a free one.
+  # 0 (or a busy port) -> ask the OS for a free one. MUST stay <= 55535: sglang derives a gRPC
+  # port = PORT + 10000 and rejects it if > 65535 (an OS ephemeral bind() can return >55535 and
+  # crash the server at launch). So pick a random free port in a bounded safe range, not bind(0).
   FREE_PORT=$(python3 - <<'PY' 2>/dev/null || true
-import socket
-s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()
+import socket, random
+cands = list(range(20000, 55001)); random.shuffle(cands)  # PORT+10000 <= 65001 < 65535
+for p in cands:
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", p)); print(p); s.close(); break
+    except OSError:
+        s.close()
 PY
 )
   [ -n "$FREE_PORT" ] && PORT="$FREE_PORT"
