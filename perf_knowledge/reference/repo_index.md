@@ -26,7 +26,7 @@ consolidates the most-used ones. Grow as cards are added (P2–P4).
 - Dao-AILab/flash-attention — https://github.com/dao-ailab/flash-attention
 - tile-ai/tilelang — https://github.com/tile-ai/tilelang
 - HazyResearch/HipKittens — https://arxiv.org/html/2511.08083v1
-- AMD-AGI/GEAK — https://github.com/AMD-AGI/GEAK
+- AMD-AGI/GEAK — https://github.com/AMD-AGI/GEAK (FlyDSL authoring docs ingested into `languages/flydsl/authoring_*` + `debugging.md` @ `c0a1f937` from `src/minisweagent/skills/flydsl/docs/`; re-sync on upstream change)
 - sgl-project/sglang — https://github.com/sgl-project/sglang
 - vllm-project/vllm — https://github.com/vllm-project/vllm
 - deepseek-ai/DeepEP — https://github.com/deepseek-ai/DeepEP

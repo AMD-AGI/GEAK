@@ -4,7 +4,7 @@ kind: reference
 updated: 2026-06-09
 ---
 
-# Sources index — 497 unique URLs across 620 docs
+# Sources index — 498 unique URLs across 630 docs
 
 Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources.py`). Each doc keeps its own inline `## Sources`.
 
@@ -194,6 +194,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/NVIDIA/TransformerEngine
 - https://github.com/NVIDIA/cudnn-frontend
 - https://github.com/NVIDIA/cutlass
+- https://github.com/NVIDIA/cutlass/blob/main/media/docs/cute/00_quickstart.md
 - https://github.com/NVIDIA/tilus
 - https://github.com/NVlabs/GatedDeltaNet
 - https://github.com/ROCm/AMDMIGraphX/issues/2717

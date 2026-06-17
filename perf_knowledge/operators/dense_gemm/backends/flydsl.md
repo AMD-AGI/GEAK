@@ -96,7 +96,7 @@ AITER_CONFIG_GEMM_BF16=/tmp/fly.csv AITER_LOG_TUNED_CONFIG=1 <launch> ; grep 'li
 [[operators/dense_gemm/backends/aiter]] (dispatch + deploy) · [[operators/dense_gemm/backends/triton]]
 (easier to author, lower ceiling) · [[operators/dense_gemm/backends/hipblaslt]] (library default) ·
 [[operators/dense_gemm/backends/ck]] (the fallback) · [[operators/grouped_gemm_moe/backends/aiter]]
-(FlyDSL MoE) · language deep-dive `languages/flydsl/` (P1).
+(FlyDSL MoE) · language deep-dive `languages/flydsl/` (P1) · authoring how-to: [[languages/flydsl/authoring_gemm_levers]] (tiling / LDS / MFMA-loop / epilogue when writing a GEMM `@flyc.kernel`) + [[languages/flydsl/authoring_tile_programming]].
 
 ## Sources
 - On-box: `/sgl-workspace/aiter/aiter/ops/flydsl/gemm_kernels.py` (`flydsl_hgemm` signature),
