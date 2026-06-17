@@ -33,7 +33,7 @@ FM_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.S)
 
 
 def load(skill_id):
-    path = os.path.join(SKILLS_DIR, f"{skill_id}.md")
+    path = os.path.join(SKILLS_DIR, skill_id, "skill.md")
     if not os.path.exists(path):
         sys.exit(f"ERROR: no such skill: {path}")
     txt = open(path).read()

@@ -23,7 +23,7 @@ validation:
   gpu: gfx942/MI300X
   model: Qwen-Qwen3.5-27B-FP8
   measured: {isolated: "2.432x (down-proj h1)", e2e_pct: "+67.4", parity: "pass (greedy)"}
-  artifact: ../../../examples/e2e_workflow/qwen3.5-27b-fp8_sglang_flydsl-downproj-autointegrate/
+  artifact: ../../../../examples/e2e_workflow/qwen3.5-27b-fp8_sglang_flydsl-downproj-autointegrate/
 role: advisory_prior
 supersedes: []
 ---

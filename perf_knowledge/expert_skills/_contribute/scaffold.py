@@ -45,16 +45,19 @@ def known_operators():
 def reindex():
     ops = known_operators()
     entries = []
-    for fn in sorted(os.listdir(SKILLS_DIR)) if os.path.isdir(SKILLS_DIR) else []:
-        if not fn.endswith(".md"):
+    # Each skill is a SUBDIRECTORY skills/<id>/ with a main skill.md (plus any extra files it needs).
+    for sub in (sorted(os.listdir(SKILLS_DIR)) if os.path.isdir(SKILLS_DIR) else []):
+        sub_path = os.path.join(SKILLS_DIR, sub)
+        skill_md = os.path.join(sub_path, "skill.md")
+        if not os.path.isdir(sub_path) or sub.startswith("_") or not os.path.exists(skill_md):
             continue
-        fm, _, _ = read_frontmatter(os.path.join(SKILLS_DIR, fn))
+        fm, _, _ = read_frontmatter(skill_md)
         op = (fm.get("match") or {}).get("operator")
         if ops is not None and op not in ops:
-            print(f"  WARN: {fn}: operator '{op}' not in capability_index.yaml", file=sys.stderr)
+            print(f"  WARN: {sub}/skill.md: operator '{op}' not in capability_index.yaml", file=sys.stderr)
         entries.append({
             "id": fm["id"],
-            "file": f"skills/{fn}",
+            "file": f"skills/{sub}/skill.md",
             "scope": fm.get("scope", "kernel"),
             "match": fm.get("match", {}),
             "expects": fm.get("expects", {}),
@@ -80,10 +83,11 @@ def create(args):
         sys.exit(f"ERROR: operator '{args.operator}' is not in capability_index.yaml. "
                  f"Use an existing operator name so the selector can match. Known e.g.: "
                  f"{', '.join(sorted(list(ops))[:8])} ...")
-    dest = os.path.join(SKILLS_DIR, f"{args.id}.md")
+    skill_dir = os.path.join(SKILLS_DIR, args.id)
+    dest = os.path.join(skill_dir, "skill.md")
     if os.path.exists(dest):
         sys.exit(f"ERROR: {dest} already exists.")
-    os.makedirs(SKILLS_DIR, exist_ok=True)
+    os.makedirs(skill_dir, exist_ok=True)
     fm, body, _ = read_frontmatter(TEMPLATE)
     fm["id"] = args.id
     fm["title"] = args.title or fm["title"]

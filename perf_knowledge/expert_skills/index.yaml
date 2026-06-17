@@ -7,7 +7,7 @@ schema: {id, file, scope, match, expects, validation_status}
 
 skills:
 - id: flydsl_fp8_gemm_playbook
-  file: skills/flydsl_fp8_gemm_playbook.md
+  file: skills/flydsl_fp8_gemm_playbook/skill.md
   scope: e2e
   match:
     operator: dense_gemm
@@ -29,7 +29,7 @@ skills:
     parity: required
   validation_status: validated
 - id: mla_tilelang_to_triton
-  file: skills/mla_tilelang_to_triton.md
+  file: skills/mla_tilelang_to_triton/skill.md
   scope: kernel
   match:
     operator: mla_attention

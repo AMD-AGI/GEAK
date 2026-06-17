@@ -17,7 +17,7 @@ for a in "$@"; do [ "$a" = "--allow-draft" ] && ALLOW_DRAFT=1; done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"                 # expert_skills/
-SKILL="$ROOT/skills/$ID.md"
+SKILL="$ROOT/skills/$ID/skill.md"
 [ -f "$SKILL" ] || { echo "no such skill: $SKILL"; exit 2; }
 
 echo "==> static validation"
@@ -42,7 +42,7 @@ fi
 cd "$ROOT"
 BRANCH="expert-skill/$ID"
 git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
-git add "skills/$ID.md" index.yaml
+git add "skills/$ID" index.yaml
 git commit -m "expert_skills: add $ID ($STATUS)" || { echo "nothing to commit"; }
 git push -u origin "$BRANCH" 2>&1 || { echo "push failed (check remote/auth)"; exit 1; }
 

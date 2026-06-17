@@ -25,10 +25,16 @@ indexed, and **validated to actually move e2e (or an isolated kernel) without re
 expert_skills/
 ├── README.md                  # this file (the contract)
 ├── index.yaml                 # machine-queryable selector + validation status (AUTO-MAINTAINED)
-├── skills/<id>.md             # one file per skill (frontmatter selector + body recipe)
+├── skills/<id>/               # one SUBDIRECTORY per skill
+│   ├── skill.md               #   the main recipe (frontmatter selector + body) — REQUIRED
+│   └── ...                    #   optional extra files: reference kernels, configs, validation manifest
 ├── _template/                 # SKILL_TEMPLATE.md + validation_manifest.yaml
 └── _contribute/               # the "add a skill to GEAK" skill: scaffold / validate / make_pr / SKILL.md
 ```
+
+Each skill lives in its own directory `skills/<id>/` so a skill that needs more than prose — a reference
+kernel, tuned config JSONs, a custom validation manifest — can carry those files alongside its
+`skill.md`. The selector (`index.yaml`) always points at `skills/<id>/skill.md`.
 
 ## How a skill is selected by the workflows
 
@@ -70,7 +76,7 @@ See [`_contribute/SKILL.md`](_contribute/SKILL.md). Short version:
 
 ```
 python _contribute/scaffold.py --id <slug> --operator <op> --scope <kernel|e2e>   # make skeleton + register
-$EDITOR skills/<slug>.md                                                           # fill Procedure/Mechanism/Do-no-harm
+$EDITOR skills/<slug>/skill.md                                                           # fill Procedure/Mechanism/Do-no-harm
 bash   _contribute/make_pr.sh <slug>                                               # validate (by scope) → set status → open PR
 ```
 

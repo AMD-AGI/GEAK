@@ -25,10 +25,10 @@ python _contribute/scaffold.py --id <slug> --operator <op> --scope <kernel|e2e> 
   it). The scaffolder rejects unknown operators.
 - `--scope kernel` → validated by `kernel_workflow` (isolated A/B vs the oracle), consumed by the kernel
   layer. `--scope e2e` → validated by `e2e_workflow` (Director same-session A/B), consumed by routing.
-- This writes `skills/<slug>.md` (status: `draft`) and regenerates `index.yaml`.
+- This writes `skills/<slug>/skill.md` (status: `draft`) and regenerates `index.yaml`.
 
 ### 2. Fill the recipe
-Edit `skills/<slug>.md`. The body sections are required and must be non-empty:
+Edit `skills/<slug>/skill.md`. The body sections are required and must be non-empty:
 - **When to use** — the exact bottleneck/shape/arch.
 - **Mechanism** — *why* it works (hardware/numerics/scheduling) so it transfers.
 - **Procedure** — the regulated steps an author-agent reproduces: entrypoints, kernel structure, the
