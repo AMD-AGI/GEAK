@@ -1,0 +1,33 @@
+name: ck-kernel-rewrite
+description: >-
+  Rewrite a hot GPU kernel into an optimized Composable-Kernel (CK / ck_tile) implementation for AMD
+  MI300X/gfx942. Source-agnostic (Triton / PyTorch / HIP / FlyDSL input). Follows AMD's real recipe:
+  prefer the shipped aiter CK ops (ck_moe_stage1/2, batched_gemm_*_CK, flatmm_a8w8_blockscale) where they
+  win, then tune the CK 2-stage instance config (tile/blockscale via gemm_moe_tune.py / gen_instances.py),
+  and only author a new ck_tile program from the example templates as a last resort. Parity-gated. Use for
+  compute-heavy editable kernels (GEMM, MoE) where the CK template/codegen path can beat the stock kernel.
+
+execution_mode: inprocess
+
+parameters:
+  - name: task
+    type: string
+    description: >-
+      Free-form task: the source kernel path, output path, harness/benchmark command, and the optimization
+      goal. Shapes (M,N,K) / experts / topk and dtype if known.
+    required: true
+
+agent:
+  system_template_file: SYSTEM_PROMPT.md
+  language_match:
+    extensions: [".py", ".cu", ".cuh", ".cpp", ".hip"]
+    markers: ["ck::", "ck_tile", "composable_kernel", "ck_moe", "__global__"]
+    confidence_boost: 0.05
+  instance_template: |
+    Rewrite/author an optimized Composable-Kernel (CK / ck_tile) kernel for this goal: {{task}}
+
+    Validate parity with `save_and_test` after every change; only a correct, faster kernel counts.
+    Submit when correctness passes AND it beats baseline: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+  cost_limit: 0
+  step_limit: 200
+  use_skills: true

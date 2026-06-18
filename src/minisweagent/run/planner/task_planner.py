@@ -22,22 +22,31 @@ logger = logging.getLogger(__name__)
 _REWRITE_FLYDSL = "flydsl-kernel-rewrite"
 _REWRITE_TILELANG = "tilelang-kernel-rewrite"
 _REWRITE_ASM = "asm-kernel-rewrite"  # highest-perf tier (the ceiling under the DSLs)
+_REWRITE_CK = "ck-kernel-rewrite"    # CK 2-stage / ck_tile codegen (shipped ck_moe / batched_gemm_*_CK)
 
 # Adaptive op-type → best-fit rewrite backend(s). Picks the backend(s) with the real edge
 # on gfx942 for that op class, so we don't waste a slot on a rewrite that can't win:
 #   attention / FlashAttention / MLA  -> TileLang (FA ~1.5x Triton, MLA ~parity w/ asm)
 #   MoE / grouped-expert GEMM         -> FlyDSL + ASM (fused-MoE; asm recovers last 10-20%)
 #   linear-attn / gated-delta decode  -> FlyDSL (aiter flydsl_gdr_decode)
-#   norm / rmsnorm / elementwise      -> both DSLs (cheap, either can win)
+#   norm / rmsnorm / elementwise      -> FlyDSL + TileLang + ASM (DSLs were regressing vs baseline
+#                                        norm; add asm as a 3rd parallel attempt so best-of-N has a
+#                                        hand-tuned fallback when both DSLs lose)
 #   plain GEMM                        -> FlyDSL + ASM (DSL edge small on blockscale; asm wins ceiling)
-# ASM is only added to compute-heavy classes (GEMM/MoE) where it has historically beaten the
-# DSLs; it is intentionally NOT added to norm/elementwise (not worth hand-asm) nor stacked on
-# attention (TileLang ≈ asm there) — keeping the candidate pool focused.
+# ASM is added to compute-heavy classes (GEMM/MoE) where it has historically beaten the DSLs, and now
+# also to norm/elementwise because the DSL-only pool produced sub-1.0x (regressing) rewrites there —
+# the asm tier gives best-of-N a hand-scheduled candidate. Still NOT stacked on attention
+# (TileLang ≈ asm there) — keeping that pool focused.
+#   plain GEMM / MoE                 -> + CK (shipped ck_moe_stage1/2, batched_gemm_*_CK, instance tuning)
+# CK is added to the compute-heavy GEMM/MoE classes only (its codegen 2-stage instances target exactly
+# those); best-of-N + the parity gate discard a losing CK attempt, so adding the lane cannot regress
+# results. CK is not added to attention/norm (no shipped CK edge there vs TileLang/asm).
 _OPTYPE_REWRITE_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("attention", "attn", "flash", "mla", "sdpa", "fmha"), (_REWRITE_TILELANG,)),
-    (("moe", "expert", "fused_moe", "grouped"), (_REWRITE_FLYDSL, _REWRITE_ASM)),
+    (("moe", "expert", "fused_moe", "grouped"), (_REWRITE_FLYDSL, _REWRITE_ASM, _REWRITE_CK, _REWRITE_TILELANG)),
     (("gated_delta", "linear_attn", "recurrent", "gdn", "gdr"), (_REWRITE_FLYDSL,)),
-    (("gemm", "matmul", "mm_", "_mm", "linear"), (_REWRITE_FLYDSL, _REWRITE_ASM)),
+    (("gemm", "matmul", "mm_", "_mm", "linear"), (_REWRITE_FLYDSL, _REWRITE_ASM, _REWRITE_CK)),
+    (("norm", "rmsnorm", "layernorm", "elementwise", "quant"), (_REWRITE_FLYDSL, _REWRITE_TILELANG, _REWRITE_ASM)),
 )
 
 

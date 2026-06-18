@@ -119,9 +119,14 @@ system_prompt: |
       return [configs[round(i * (n - 1) / (count - 1))] for i in range(count)]
   ```
   - Positional. The ordered full case stream is part of the determinism contract.
-  - `--full-benchmark` → all configs
-  - `--benchmark`, `--correctness` → `_pick(configs, 25)`
-  - `--profile` → `_pick(configs, 5)`
+  - `--benchmark` AND `--full-benchmark` → THE SAME config set (both run `_cap(all configs)` —
+    see the shape budget below; uncapped that is all configs for both). This is MANDATORY for
+    EVERY language/backend: `--benchmark` is the optimization signal best-of-N selects on, and
+    `--full-benchmark` is the final verification — if they score different shapes, a kernel can
+    win the benchmark shapes but lose the verification shapes (a false winner). They MUST be
+    identical. Do NOT subsample `--benchmark` to a different count than `--full-benchmark`.
+  - `--correctness` → `_pick(configs, 25)` (validity gate, may subsample independently)
+  - `--profile` → `_pick(configs, 5)` (profiling only, may subsample independently)
   - All four modes sample from the SAME ordered case stream.
 
   MANDATORY shape budget (keeps harness validation bounded). Read the env

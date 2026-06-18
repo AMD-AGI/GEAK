@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from minisweagent.run.utils.generated_artifacts import (
+    baseline_jit_cache_env,
     is_jit_cache_artifact,
     jit_cache_diff_basename_excludes,
     jit_cache_env,
@@ -160,6 +161,42 @@ def test_jit_cache_env_base_override(tmp_path: Path) -> None:
 @pytest.mark.parametrize("falsy", [None, "", 0])
 def test_jit_cache_env_empty_for_falsy_workdir(falsy) -> None:
     assert jit_cache_env(falsy) == {}
+
+
+# ---------------------------------------------------------------------------
+# baseline_jit_cache_env — persistent, repo-keyed cache for the baseline path
+# ---------------------------------------------------------------------------
+def test_baseline_jit_cache_env_keys_and_nesting(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = baseline_jit_cache_env(repo)
+    # Adds AITER_JIT_DIR on top of the two jit_cache_env keys.
+    assert set(env) == {"GEAK_JIT_CACHE_DIR", "TRITON_CACHE_DIR", "AITER_JIT_DIR"}
+    # Lives under a dedicated "baseline" subtree so it never collides with the
+    # per-worktree slot caches.
+    assert "/baseline/" in env["GEAK_JIT_CACHE_DIR"]
+    assert env["TRITON_CACHE_DIR"].startswith(env["GEAK_JIT_CACHE_DIR"])
+    assert env["TRITON_CACHE_DIR"].endswith("/triton")
+    assert env["AITER_JIT_DIR"].endswith("/aiter")
+
+
+def test_baseline_jit_cache_env_keyed_by_repo_not_worktree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Stable per repo (warm-up, verifier, collect_baseline all share it).
+    assert baseline_jit_cache_env(repo) == baseline_jit_cache_env(repo)
+    # Distinct from the per-worktree keying so a baseline cache is never confused
+    # with a patched per-slot cache.
+    assert baseline_jit_cache_env(repo)["GEAK_JIT_CACHE_DIR"] != jit_cache_env(repo)["GEAK_JIT_CACHE_DIR"]
+
+
+def test_baseline_jit_cache_env_base_override_and_falsy(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    base = tmp_path / "root"
+    env = baseline_jit_cache_env(repo, base=base)
+    assert env["GEAK_JIT_CACHE_DIR"].startswith(str(base))
+    assert baseline_jit_cache_env(None) == {}
 
 
 # ---------------------------------------------------------------------------

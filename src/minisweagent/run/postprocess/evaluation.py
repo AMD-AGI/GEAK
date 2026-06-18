@@ -1368,7 +1368,20 @@ def evaluate_round_best(
             harness_path=harness_path,
             gpu_ids=eval_gpu_ids,
         )
-        run_profile(eval_worktree, eval_env, commandment_path, pp_dir, round_eval, round_num, results_dir)
+        # Profiling is ADVISORY (roofline context only) — a slow or failing
+        # profile must NOT crash the round and discard a verified benchmark win.
+        # The post-round profiler can stall/time out on heavy shapes (e.g. large-E
+        # fp8 MoE under rocprofv3 x replays); treat any failure as non-fatal and
+        # carry on with the benchmark result we already have.
+        try:
+            run_profile(eval_worktree, eval_env, commandment_path, pp_dir, round_eval, round_num, results_dir)
+        except CommandmentExecutionError as exc:
+            logger.warning(
+                "Round %d post-eval PROFILE failed (non-fatal, advisory) — keeping benchmark result: %s",
+                round_num,
+                exc,
+            )
+            round_eval.setdefault("profile_comparison", {"error": str(exc)})
     finally:
         cleanup_eval_worktree(repo_root, eval_worktree)
 

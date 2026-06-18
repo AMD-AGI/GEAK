@@ -21,9 +21,16 @@ Extract the following information (return null if not found):
    the user explicitly provides a file path or URL in the task text. Do NOT guess or fabricate
    paths. Return null if the task does not contain an explicit kernel file path/URL.
    If extracted, it MUST end in a file extension (e.g. ``.py``, ``.hip``, ``.cu``, ``.flydsl``).
-3. kernel_type: Kernel type, strictly one of "hip", "triton", "pytorch2flydsl", "flydsl", or "other".
-   Use "pytorch2flydsl" when the task mentions translating PyTorch code to FlyDSL, converting PyTorch to FlyDSL, or pytorch2flydsl translation.
-   Use "flydsl" when the task is about optimizing existing FlyDSL code (not translating from PyTorch).
+3. kernel_type: Kernel type. One of the in-place types ("hip", "triton", "flydsl", "tilelang", "other")
+   OR a backend-REWRITE type of the form "<source>2<target>" where source is one of
+   pytorch/triton/ck/hip/tilelang/flydsl and target is one of flydsl/tilelang
+   (e.g. "pytorch2flydsl", "triton2flydsl", "ck2tilelang", "hip2flydsl", "triton2tilelang").
+   Use a "<source>2<target>" rewrite type when the task asks to TRANSLATE/CONVERT/REWRITE a kernel from
+   one language to another (e.g. "rewrite this Triton kernel to FlyDSL" -> "triton2flydsl";
+   "convert CK to TileLang" -> "ck2tilelang"). Preserve the exact "<source>2<target>" string if the task
+   states it literally.
+   Use a bare in-place type ("triton"/"hip"/"flydsl"/"tilelang") when the task is about optimizing
+   existing code in that same language (no language change).
 4. repo: The repository path mentioned in the task (absolute path or relative path)
 5. test_command: The command to run tests or benchmarks
 6. metric: The performance metric to measure (e.g., "bandwidth in GB/s", "latency in ms", "throughput")
@@ -39,7 +46,7 @@ Return ONLY a valid JSON object with these keys. Example:
 {{
   "kernel_name": "matmul",
   "kernel_url": "https://github.com/org/repo/blob/main/kernel.py",
-  "kernel_type": "triton",  // one of: "hip", "triton", "pytorch2flydsl", "flydsl", "other"
+  "kernel_type": "triton",  // in-place: "hip"|"triton"|"flydsl"|"tilelang"|"other"; or rewrite "<src>2<tgt>" e.g. "triton2flydsl","ck2tilelang"
   "repo": "/path/to/repo",
   "test_command": "python test.py",
   "metric": "Extract throughput in GFLOPS",

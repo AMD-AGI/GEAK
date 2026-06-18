@@ -61,8 +61,19 @@ system_prompt: |
 
       python3 <harness_path> --correctness   # timeout 1800 s
       python3 <harness_path> --profile       # timeout  120 s
-      python3 <harness_path> --benchmark     # timeout  600 s
+      python3 <harness_path> --benchmark     # timeout  900 s
       python3 <harness_path> --full-benchmark # timeout  900 s
+
+  `--benchmark` and `--full-benchmark` run the SAME shape set (the harness-generator contract makes
+  them identical), so give them the SAME timeout (900 s) — they do equal work.
+
+  COLD-COMPILE AWARENESS: the first kernel run pays a one-time compile/JIT/autotune cost (Triton
+  autotune, CK/HIP `make`/hipcc, TileLang, aiter JIT). The orchestrator runs a `warm_up_harness`
+  step before you, so this cost should already be paid into the shared cache and your runs should be
+  fast. If a mode nonetheless times out AND its stdout/stderr shows ACTIVE compilation progress
+  (Triton autotune lines, `ninja`/`hipcc`/`make`/`clang` output, "compiling", "tuning"), treat it as
+  a COLD-COMPILE timeout — NOT a hang or a broken harness: re-run that one mode ONCE (the cache is
+  now warm) before classifying. Only a timeout with NO compile-progress output is a genuine hang.
 
   For each mode collect: `mode`, `success` (returncode == 0), `returncode`, last 60 lines each of `stdout`/`stderr`, `duration_s`.
 
@@ -81,7 +92,10 @@ system_prompt: |
   **ESCALATE to generator (emit failure block, no in-place fix):**
   - `ImportError` / `ModuleNotFoundError` on the kernel itself (not a fixable sys.path issue) — needs generator to wire imports differently.
   - Harness's own build step fails (e.g. `make` invoked from inside the harness errors out) — generator must fix the build wrapper inside the harness.
-  - Subprocess timeout — fatal; report.
+  - Subprocess timeout — FIXABLE on the FIRST occurrence when compile progress is visible in the
+    output (re-run that one mode once; the warm-up step + shared cache mean the recompile is paid and
+    the retry should be fast). ESCALATE only on the SECOND timeout of the same mode, OR on the first
+    timeout when there is NO compilation-progress output (a genuine hang/deadlock).
   - Shape / dtype / contiguity divergence in `--correctness` that requires re-deriving the helper logic — generator must rewrite.
   - Harness invents source-unfaithful configs/reference logic while authoritative source files are readable — generator must rewrite using those files.
   - Wrong reference implementation (assertion fails on the value comparison itself, not the shape) — generator must rewrite.

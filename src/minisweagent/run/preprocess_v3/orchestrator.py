@@ -184,7 +184,7 @@ For Case B and C: discovery/ATD has only two states: AUTHORITATIVE or IRRELEVANT
 
 ## Step 2 — translate (conditional)
 
-If ``source_language != target_language`` and ``target_language == "flydsl"``, call ``translate_to_flydsl`` once. The translated kernel path becomes the new ``kernel_path`` for downstream steps. Otherwise skip.
+If ``source_language != target_language`` (target is one of flydsl | tilelang), call ``translate_to_flydsl`` once, passing ``target_language`` exactly as given in the context above. The translated kernel path becomes the new ``kernel_path`` for downstream steps. Otherwise skip.
 
 ## Step 3 — harness generation + verification (LLM subagents)
 
@@ -203,6 +203,8 @@ The subagent's final message contains exactly one structured line:
 That is the ENTIRE handoff. The harness owns the four CLI modes (``--correctness``, ``--profile``, ``--benchmark``, ``--full-benchmark``) and any build step it needs (e.g. a HIP harness invokes ``make`` internally). Do NOT look for or parse ``COMMANDMENT_<MODE>:`` lines — they no longer exist in the contract; deterministic Python renders the COMMANDMENT in Step 5 from ``harness_path`` alone.
 
 The dispatcher auto-populates ``harness_path`` for you from the subagent's output, so you do not need to extract it manually.
+
+**Step 3a.5 — warm up (deterministic, call once per new harness).** Immediately after ``harness-generator`` returns ``HARNESS_PATH`` and BEFORE Step 3b, call ``warm_up_harness`` with that ``harness_path``. It runs the harness once in ``--correctness`` (1-shape capped) to pay the one-time cold compile / JIT / autotune into the persistent baseline cache, so the verifier's timed modes hit a WARM cache and never misclassify a slow first compile as a broken harness. This is NON-FATAL and advisory: proceed to Step 3b regardless of its result. Skip it only for the Path-A short-circuit (no generated harness). If Step 3b's repair loop regenerates the harness, call ``warm_up_harness`` again on the new path.
 
 **Step 3b.** Verify by dispatching ``harness-verifier`` via ``dispatch_subagent``. Pass only ``harness_path`` in the context. The verifier runs the four CLI modes against the harness directly and returns either ``HARNESS_VERIFIED=true`` (possibly after applying its own in-place mechanical fixes) or a structured correction directive.
 
@@ -253,11 +255,12 @@ After ``finish_preprocess`` returns (cleanly or via the escape hatch), the orche
 2. ``codebase_explore`` — deterministic legacy codebase context only; compatibility fallback if ``run_discovery`` fails before writing context.
 3. ``translate_to_flydsl`` — deterministic; step 2 (conditional, Path B only).
 4. ``dispatch_subagent`` — LLM dispatch. ``name`` argument must be ``harness-generator`` or ``harness-verifier``. Path B steps 3a and 3b only.
-5. ``collect_baseline`` — deterministic; **MUST be called for both Path A and Path B**. Accepts either ``harness_path`` (runs ``python harness --benchmark``) or ``eval_command`` (runs the command directly). At least one is required.
-6. ``collect_profile`` — deterministic; step 4 (Path A when harness is available, and Path B).
-7. ``render_commandment`` — deterministic; Path B step 5.
-8. ``commandment_from_user_command`` — Path A short-circuit. Mutually exclusive with ``dispatch_subagent("harness-generator", ...)``.
-9. ``finish_preprocess`` — completion sentinel; terminates the loop when final invariants pass, OR immediately when called with a non-empty ``errors`` list (escape hatch for unrecoverable blockers).
+5. ``warm_up_harness`` — deterministic; Step 3a.5 (Path B). Call once after harness-generator and before harness-verifier to prime the compile cache. Non-fatal/advisory.
+6. ``collect_baseline`` — deterministic; **MUST be called for both Path A and Path B**. Accepts either ``harness_path`` (runs ``python harness --benchmark``) or ``eval_command`` (runs the command directly). At least one is required.
+7. ``collect_profile`` — deterministic; step 4 (Path A when harness is available, and Path B).
+8. ``render_commandment`` — deterministic; Path B step 5.
+9. ``commandment_from_user_command`` — Path A short-circuit. Mutually exclusive with ``dispatch_subagent("harness-generator", ...)``.
+10. ``finish_preprocess`` — completion sentinel; terminates the loop when final invariants pass, OR immediately when called with a non-empty ``errors`` list (escape hatch for unrecoverable blockers).
 
 Begin by classifying the task into Case A, B, or C. For Case A, skip discovery and go directly to ``commandment_from_user_command``. For Case B or C, call ``run_discovery`` first, then follow the case-specific action above.
 """

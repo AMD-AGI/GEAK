@@ -77,7 +77,7 @@ from minisweagent.run.preprocess_v3.orchestrator import (
     PreprocessOrchestratorAgent,
 )
 from minisweagent.run.preprocess_v3.registry import SubagentRegistry, SubagentSpec
-from minisweagent.run.preprocess_v3.translate import TranslationResult, translate_to_flydsl
+from minisweagent.run.preprocess_v3.translate import TranslationResult, translate_kernel
 from minisweagent.run.section_builders import (
     build_benchmark_body,
     build_correctness_body,
@@ -356,7 +356,25 @@ def _ensure_preprocess_subagent_sandbox(agent: PreprocessOrchestratorAgent) -> t
         "GEAK_WORK_DIR": str(sandbox_root.resolve()),
         "GEAK_GPU_DEVICE": gpu_id,
         "HIP_VISIBLE_DEVICES": gpu_id,
+        # Preprocess subagents (harness-generator self-tests + harness-verifier
+        # runtime modes) only need to confirm a mode RUNS and emits the right
+        # markers — they are not the authoritative timing. The real timing is the
+        # deterministic ``collect_baseline`` (its own iteration count) and the
+        # optimization A/B. Cap subagent self-test iterations low so a
+        # ``--benchmark`` / ``--full-benchmark`` self-test is a few seconds, not
+        # minutes (200 iters x N shapes). The harness honors this env var. Only
+        # set a default — a caller/env override still wins.
+        "GEAK_BENCHMARK_ITERATIONS": os.environ.get("GEAK_SUBAGENT_SELFTEST_ITERATIONS", "5"),
     }
+    # Point the preprocess subagents (esp. harness-verifier's runtime modes) at the
+    # PERSISTENT baseline JIT cache keyed by repo identity, so they hit the warm
+    # cache primed by the warm-up step instead of cold-compiling per verifier
+    # retry. Safe: this sandbox runs the UNPATCHED baseline source only (the patch
+    # diff is never captured here), so a shared content-addressed cache cannot leak
+    # JIT blobs into a round patch. See baseline_jit_cache_env() for the rationale.
+    from minisweagent.run.utils.generated_artifacts import baseline_jit_cache_env
+
+    env.update(baseline_jit_cache_env(repo_root))
     return sandbox_root.resolve(), env
 
 
@@ -748,15 +766,20 @@ def _schema_translate_to_flydsl() -> dict[str, Any]:
         "name": "translate_to_flydsl",
         "type": "function",
         "description": (
-            "Step 2 — translate a PyTorch kernel to FlyDSL. Call ONLY when "
-            "source_language != target_language and target_language == 'flydsl'. "
+            "Step 2 — translate the source kernel to the run's target_language. Call ONLY when "
+            "source_language != target_language. Pass target_language exactly as given in the task "
+            "context (e.g. 'flydsl', 'tilelang'); it defaults to 'flydsl' if omitted. "
             "Wraps run_translation; not idempotent."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "source_path": {"type": "string", "description": "Source kernel (e.g. PyTorch nn.Module file)."},
-                "output_dir": {"type": "string", "description": "Where the candidate FlyDSL kernel is written."},
+                "output_dir": {"type": "string", "description": "Where the candidate translated kernel is written."},
+                "target_language": {
+                    "type": "string",
+                    "description": "Target backend to translate INTO (flydsl | tilelang). Use the run's target_language.",
+                },
             },
             "required": ["source_path", "output_dir"],
         },
@@ -1094,10 +1117,11 @@ def _make_tool_codebase_explore(
 def _make_tool_translate_to_flydsl(
     agent: PreprocessOrchestratorAgent,
 ) -> Callable[..., dict[str, Any]]:
-    def _impl(source_path: str, output_dir: str) -> dict[str, Any]:
-        result: TranslationResult = translate_to_flydsl(
+    def _impl(source_path: str, output_dir: str, target_language: str = "flydsl") -> dict[str, Any]:
+        result: TranslationResult = translate_kernel(
             source_path=Path(source_path),
             output_dir=Path(output_dir),
+            target_language=(target_language or "flydsl").strip().lower(),
             gpu_id=agent.config.gpu_id,
             model=agent.model,
             repo=agent.config.repo,
@@ -1205,6 +1229,95 @@ def _make_tool_dispatch_subagent(
     return _impl
 
 
+def _schema_warm_up_harness() -> dict[str, Any]:
+    return {
+        "name": "warm_up_harness",
+        "type": "function",
+        "description": (
+            "Step 3 part 1.5 — deterministic. Call ONCE right after harness-generator returns "
+            "HARNESS_PATH and BEFORE dispatching harness-verifier. Runs the harness a single time "
+            "in --correctness mode with a 1-shape cap to pay the one-time cold compile/JIT/autotune "
+            "into the persistent baseline cache, so the verifier's timed modes hit a WARM cache and "
+            "do not misclassify a slow first compile as a broken harness. Backend-agnostic (the "
+            "harness owns its own build). NON-FATAL: if warm-up times out or errors, proceed to the "
+            "verifier anyway."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "harness_path": {
+                    "type": "string",
+                    "description": "Absolute path to the harness returned by harness-generator.",
+                },
+                "gpu_id": {"type": "integer", "description": "HIP_VISIBLE_DEVICES value.", "default": 0},
+            },
+            "required": ["harness_path"],
+        },
+    }
+
+
+def _make_tool_warm_up_harness(
+    agent: PreprocessOrchestratorAgent,
+) -> Callable[..., dict[str, Any]]:
+    def _impl(
+        harness_path: str | None = None,
+        gpu_id: int | None = None,
+        **_extra_ignored: Any,
+    ) -> dict[str, Any]:
+        if _extra_ignored:
+            logger.debug("warm_up_harness ignored extra kwargs: %s", list(_extra_ignored))
+        if not harness_path:
+            return {"ok": False, "error": "warm_up_harness requires harness_path"}
+        hp = Path(harness_path)
+        if not hp.is_file():
+            return {"ok": False, "error": f"warm_up_harness: harness not found: {hp}"}
+
+        resolved_gpu = gpu_id if gpu_id is not None else agent.config.gpu_id
+        # Run against the same source repo + persistent baseline cache the verifier
+        # and collect_baseline use, so the compile this primes is reused downstream.
+        repo = Path(agent.config.repo) if agent.config.repo else None
+        from minisweagent.run.utils.generated_artifacts import baseline_jit_cache_env
+
+        extra_env = baseline_jit_cache_env(repo) if repo else {}
+        # Warm the FULL config superset, NOT a single shape: compilers (Triton,
+        # CK, ...) produce a SEPARATE artifact per shape/config, so warming one
+        # shape leaves the rest cold and the verifier would still cold-compile
+        # them. ``--full-benchmark`` runs every config (and, per the generator
+        # contract, the same set ``--benchmark`` uses), so this primes the cache
+        # for every shape the verifier + optimization will hit. ``--correctness``
+        # / ``--profile`` subsample the SAME stream, so they're warmed too. We do
+        # NOT cap shapes here — the whole point is full coverage; the one-time
+        # cost is bounded by GEAK_WARMUP_TIMEOUT_S instead.
+        timeout_s = int(os.environ.get("GEAK_WARMUP_TIMEOUT_S", "1800"))
+        from minisweagent.run.preprocess_v3.baseline import _run_benchmark_once
+
+        result = _run_benchmark_once(
+            hp,
+            work_dir=repo,
+            gpu_id=resolved_gpu,
+            timeout_s=timeout_s,
+            flag="--full-benchmark",
+            extra_env=extra_env,
+        )
+        ok = result["returncode"] == 0
+        agent._collected["warmup"] = {"ok": ok, "duration_s": result["duration_s"]}
+        if not ok:
+            logger.warning(
+                "warm_up_harness: non-fatal warm-up did not complete cleanly "
+                "(rc=%s, duration=%ss) — proceeding to verifier anyway.",
+                result["returncode"],
+                result["duration_s"],
+            )
+        return {
+            "ok": ok,
+            "duration_s": result["duration_s"],
+            "returncode": result["returncode"],
+            "note": "warm-up is advisory; verifier runs regardless of this result",
+        }
+
+    return _impl
+
+
 def _make_tool_collect_baseline(
     agent: PreprocessOrchestratorAgent,
 ) -> Callable[..., dict[str, Any]]:
@@ -1250,12 +1363,22 @@ def _make_tool_collect_baseline(
         else:
             resolved_work_dir = None
 
+        # Reuse the persistent baseline JIT cache (warmed by warm_up_harness) so
+        # the baseline benchmark doesn't re-pay the cold compile. Keyed by repo
+        # identity; baseline source only, never a patched worktree.
+        from minisweagent.run.utils.generated_artifacts import baseline_jit_cache_env
+
+        _baseline_cache_env = (
+            baseline_jit_cache_env(resolved_work_dir) if resolved_work_dir is not None else {}
+        )
+
         if harness_path:
             baseline: BaselineMetrics = collect_baseline_metrics(
                 Path(harness_path),
                 repeats=repeats,
                 work_dir=resolved_work_dir,
                 gpu_id=resolved_gpu,
+                extra_env=_baseline_cache_env,
             )
             agent._collected["baseline"] = baseline
 
@@ -1265,6 +1388,7 @@ def _make_tool_collect_baseline(
                 Path(harness_path),
                 work_dir=resolved_work_dir,
                 gpu_id=resolved_gpu,
+                extra_env=_baseline_cache_env,
             )
             if fb_stdout:
                 agent._collected["full_benchmark_stdout"] = fb_stdout
@@ -1943,6 +2067,11 @@ def register_default_tools(
         "dispatch_subagent",
         _schema_dispatch_subagent(),
         _make_tool_dispatch_subagent(agent, dispatcher),
+    )
+    agent.register_tool(
+        "warm_up_harness",
+        _schema_warm_up_harness(),
+        _make_tool_warm_up_harness(agent),
     )
     agent.register_tool(
         "collect_baseline",

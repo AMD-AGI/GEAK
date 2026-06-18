@@ -192,11 +192,32 @@ _KERNEL_FILENAME_GUESSES: tuple[str, ...] = (
     "kernel.cu",
     "kernel.flydsl",
 )
+# Source-language file extensions, used to locate the kernel file inside a repo dir.
+_SOURCE_EXT: dict[str, tuple[str, ...]] = {
+    "pytorch": (".py",),
+    "triton": (".py",),
+    "tilelang": (".py",),
+    "flydsl": (".flydsl", ".py"),
+    "hip": (".hip", ".cu", ".cpp"),
+    "ck": (".cu", ".cuh", ".cpp", ".hip"),
+}
+
+# Backend-rewrite kernel_types ``<source>2<target>`` (target in {flydsl, tilelang} —
+# the fully-wired translation targets; CK is an authoring backend + translation source,
+# not a translation target, so no ``*2ck`` token here).
+_REWRITE_TARGETS = ("flydsl", "tilelang")
+_REWRITE_KERNEL_TYPES = frozenset(
+    f"{s}2{t}" for s in _SOURCE_EXT for t in _REWRITE_TARGETS if s != t
+)
+
 _KERNEL_TYPE_TO_EXT: dict[str, tuple[str, ...]] = {
     "triton": (".py",),
     "hip": (".hip", ".cu", ".cpp"),
     "flydsl": (".flydsl", ".py"),
+    "tilelang": (".py",),
     "pytorch2flydsl": (".py",),
+    # Rewrite types resolve to their SOURCE language's extensions.
+    **{kt: _SOURCE_EXT[kt.split("2", 1)[0]] for kt in _REWRITE_KERNEL_TYPES},
 }
 
 
@@ -324,7 +345,8 @@ def _normalize_parsed_task_info(parsed: dict) -> dict:
     kernel_type = str(raw_kernel_type or "").strip().lower()
     logger.info("parse_task_info: kernel_type: %s", kernel_type)
 
-    if kernel_type not in {"hip", "triton", "pytorch2flydsl", "flydsl", "other"}:
+    _valid_kernel_types = {"hip", "triton", "pytorch2flydsl", "flydsl", "tilelang", "other"} | _REWRITE_KERNEL_TYPES
+    if kernel_type not in _valid_kernel_types:
         if raw_kernel_type not in (None, ""):
             logger.warning(
                 "parse_task_info: invalid kernel_type %r; normalizing to 'other'.",

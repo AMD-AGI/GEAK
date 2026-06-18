@@ -41,14 +41,14 @@ def resolve_num_parallel(
     """Default subagent count from allocated GPUs: max(min_workers, workers_per_gpu * gpu_count)."""
     if min_workers is None:
         try:
-            min_workers = int(os.environ.get("GEAK_MIN_PARALLEL_WORKERS", "4") or "4")
+            min_workers = int(os.environ.get("GEAK_MIN_PARALLEL_WORKERS", "8") or "8")
         except ValueError:
-            min_workers = 4
+            min_workers = 8
     if workers_per_gpu is None:
         try:
-            workers_per_gpu = int(os.environ.get("GEAK_WORKERS_PER_GPU", "3") or "3")
+            workers_per_gpu = int(os.environ.get("GEAK_WORKERS_PER_GPU", "4") or "4")
         except ValueError:
-            workers_per_gpu = 3
+            workers_per_gpu = 4
     min_workers = max(1, min_workers)
     workers_per_gpu = max(1, workers_per_gpu)
     if gpu_count <= 0:
