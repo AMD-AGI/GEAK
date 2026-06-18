@@ -28,6 +28,31 @@ skills:
     e2e_delta_min_pct: 1.0
     parity: required
   validation_status: validated
+- id: flydsl_rewrite_quantized_moe
+  file: skills/flydsl_rewrite_quantized_moe/skill.md
+  scope: kernel
+  match:
+    operator: fused_moe_grouped_gemm
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - int4_w4a16
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    from_backend: triton
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: ''
+      min_pct_gpu: 0.0
+  expects:
+    isolated_speedup_min: 1.5
+    e2e_delta_min_pct: 1.0
+    parity: required
+  validation_status: validated
 - id: mla_tilelang_to_triton
   file: skills/mla_tilelang_to_triton/skill.md
   scope: kernel
