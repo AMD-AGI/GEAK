@@ -23,6 +23,9 @@ Discovery: the installer should export `PERFSKILLS_E2E_RUNNER` pointing at this
 file (`$PERFSKILLS_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
 
+The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
+(`baseline/`, `validation/final/`, `final/` bundle, `director_e2e_validation.json`).
+
 ## `handoff.json` (caller → workflow)
 
 ```jsonc
@@ -40,11 +43,26 @@ hard-coded handle.
   "raw_baseline_tput": 1485.4,           // caller's official raw baseline (carried for reference)
   "exp_root": "/work/perfskills_exp",    // where the timestamped run dir is created
   "bench_client": "auto",                // auto|inferencex|native — see口径 alignment below
-  "inferencex_path": "/opt/InferenceX"   // optional; else taken from $INFERENCEX_PATH
+  "inferencex_path": "/opt/InferenceX",  // optional; else taken from $INFERENCEX_PATH
+  "bench_protocol": {                    // optional; caller's measurement 口径 (see below)
+    "random_range_ratio": 0,             //   fixed(1) vs variable(0) sequence lengths
+    "num_prompts": 192,
+    "num_warmups": 8,
+    "seed": 0
+  }
 }
 ```
 
 Required: `model_path`, `exp_root`. Everything else has a default.
+
+`bench_protocol` is optional and **partial-friendly**: only the keys present are
+applied. Omit it entirely (standalone PerfSkills, no external orchestrator) and
+`bench_e2e.sh` keeps its own defaults unchanged. When the caller (Hyperloom)
+supplies it, those values are the EXACT knobs the caller's official baseline was
+measured with — forwarding them is what makes the workflow's numbers
+cross-harness comparable (the `random_range_ratio` mismatch — caller `0`
+variable-length vs the standalone `1` fixed-length default — is otherwise a
+silent ~10-15% 口径 gap).
 
 ### How handoff maps to the workflow (owned by `run_e2e.py:map_args`)
 
@@ -60,6 +78,7 @@ Required: `model_path`, `exp_root`. Everything else has a default.
 | `launch_recipe` | `launch_script` | optional |
 | `exp_root` | `exp_root` | run dir root |
 | `bench_client` / `inferencex_path` | env `BENCH_CLIENT` + `INFERENCEX_PATH` | exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
+| `bench_protocol.{random_range_ratio,num_prompts,num_warmups,seed}` | env `RANDOM_RANGE_RATIO` / `NUM_PROMPTS` / `NUM_WARMUPS` / `SEED` | `run_e2e.py:apply_bench_protocol` exports ONLY the provided keys, overriding `bench_e2e.sh` standalone defaults; absent ⇒ defaults kept (not a JS arg) |
 | — | `config_tune="false"` | caller already did config search; never double-run |
 | — | `apply_to_original="true"` | so `final/final_launch.sh` + overlay are emitted for sweep reuse |
 
@@ -112,10 +131,10 @@ The workflow must measure on the **same口径** as the caller's official baselin
 |---|---|
 | primary metric | aggregate `output_throughput` (output tok/s, **not** per-GPU) |
 | latency | `ttft_ms` / `tpot_ms` median |
-| dataset | `random`, `random-range-ratio 1.0` (fixed lengths) |
-| workload | same `ISL/OSL/CONC`; `NUM_PROMPTS = max(CONC*factor, CONC)` |
-| warmups | `NUM_WARMUPS = min(CONC, 8)` (matches Hyperloom's materialize default) |
-| seed | fixed `SEED` |
+| dataset | `random`; `random-range-ratio` from `handoff.bench_protocol.random_range_ratio` (caller-driven: `0`=variable, `1`=fixed), else standalone default `1.0` |
+| workload | same `ISL/OSL/CONC`; `NUM_PROMPTS` from `bench_protocol.num_prompts`, else `max(CONC*factor, CONC)` |
+| warmups | `NUM_WARMUPS` from `bench_protocol.num_warmups`, else `min(CONC, 8)` (the materialize default) |
+| seed | `SEED` from `bench_protocol.seed`, else fixed `0` |
 | TP | same tensor-parallel as the caller (no TP=1 lock) |
 | parity | greedy / temp=0 fixed-seed output diff vs baseline |
 | **bench client** | `BENCH_CLIENT=inferencex` → the **exact same** `benchmark_serving.py` as Hyperloom |

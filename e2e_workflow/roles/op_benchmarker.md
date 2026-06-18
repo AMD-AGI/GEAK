@@ -28,7 +28,22 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
 - **Tier A — backend select / DISCOVER** (no source): bench every available backend on the immutable
   oracle; record per-backend ms + whether an existing editable impl exists + `best_known_ms`.
 - **Tier B — per-backend tune** (no source): tune each promising backend to its best.
-  - **For GEMM the tuning lever is aiter's per-shape DB** (`AITER_TUNE_GEMM=1` capture → gradlib
+  - **int4_w4a16 fused-MoE (vLLM) — DO THIS FIRST, it is the memory-free win.** vLLM ships NO
+    tuned Triton config for an unseen int4 fused-MoE shape, so the expert grouped-GEMM (often the
+    single biggest chunk of GPU time on an int4 MoE model) runs on a slow default fallback (server log:
+    "Using default MoE config"). Follow `SKILL_DIR/knowledge/moe_int4_tuning.md`: it derives the per-rank
+    shape from the model config (+TP) and gives a generic, env-driven driver you **write into
+    `$EVAL_DIR/config/` and run** (per the same convention as the aiter-GEMM recipe — NOT a shared
+    `scripts/` file). It sweeps per M bucket against the faithful `fused_experts` int4_w4a16 path
+    (`override_config`, parity rel<1e-2) and writes `E=…,N=…,int4_w4a16.json`. Return it as a
+    `winner_kind=env` direct_light winner with `apply_env=VLLM_TUNED_CONFIG_FOLDER=<dir>`, and recommend
+    `--max-num-batched-tokens ≈2·ISL` (clamp 8192..32768) so prefill M-buckets dominate. This costs
+    **ZERO extra HBM** (tile/scheduling only), so it sails through the Integrator's memory gate. **Prefer
+    it over a quant/fp8 rewrite of the same op**: an fp8-fold rewrite caches a second fp8 weight copy and,
+    at memory parity, OOMs at KV-cache init (op-level 1.5x but e2e-undeployable — the Integrator rejects
+    it `mem_footprint_starves_kv`). Only pursue the fp8/quant author route (Tier C/D) when
+    `ENABLE_FP8=true` AND it passes that memory-footprint gate.
+  - **For dense GEMM the tuning lever is aiter's per-shape DB** (`AITER_TUNE_GEMM=1` capture → gradlib
     `gemm_tuner.py` → `AITER_CONFIG_GEMM_BF16` deploy; gradlib itself races hipBLASLt/asm/triton/skinny
     solutions per shape, so one aiter tune covers per-backend GEMM tuning). Full recipe + gotchas:
     `SKILL_DIR/knowledge/aiter_gemm_tuning.md`. **Do NOT use PyTorch TunableOp / `HIPBLASLT_TUNING_FILE`** —

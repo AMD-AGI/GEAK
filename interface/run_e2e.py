@@ -126,6 +126,50 @@ def apply_bench_client(h: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Bench-protocol 口径 alignment (measurement knobs, not the client).
+# ---------------------------------------------------------------------------
+# handoff.bench_protocol key -> bench_e2e.sh / client-adapter env var.
+_BENCH_PROTOCOL_ENV = {
+    "random_range_ratio": "RANDOM_RANGE_RATIO",
+    "num_prompts": "NUM_PROMPTS",
+    "num_warmups": "NUM_WARMUPS",
+    "seed": "SEED",
+}
+
+
+def apply_bench_protocol(h: dict) -> dict:
+    """Export the caller's measurement 口径 so workflow bench_e2e.sh inherits it.
+
+    ``handoff.bench_protocol`` carries the EXACT bench knobs the external
+    orchestrator (Hyperloom) measured with — chiefly ``random_range_ratio``
+    (fixed vs variable sequence lengths), ``num_prompts``, ``num_warmups`` and
+    ``seed``. We export each PROVIDED key into the environment (same mechanism
+    as :func:`apply_bench_client`), so every ``bench_e2e.sh`` invocation the
+    agents make overrides its built-in default with the orchestrator's value.
+
+    IMPORTANT: only keys actually present in the handoff are exported. When
+    ``bench_protocol`` is absent (e.g. PerfSkills run standalone, no external
+    orchestrator), nothing is exported and ``bench_e2e.sh`` keeps its own
+    defaults — so the standalone path is unchanged.
+
+    Returns the dict of {env_var: value} it exported (for --dry-run / logging).
+    """
+    protocol = h.get("bench_protocol") or {}
+    exported: dict[str, str] = {}
+    if not isinstance(protocol, dict):
+        return exported
+    for key, env_var in _BENCH_PROTOCOL_ENV.items():
+        if key not in protocol:
+            continue
+        val = protocol[key]
+        if val is None or str(val).strip() == "":
+            continue
+        os.environ[env_var] = str(val)
+        exported[env_var] = str(val)
+    return exported
+
+
+# ---------------------------------------------------------------------------
 # Invocation: SDK preferred, CLI fallback.
 # ---------------------------------------------------------------------------
 def _invoke_via_sdk(prompt: str, timeout_s: int) -> str:
@@ -141,10 +185,15 @@ def _invoke_via_sdk(prompt: str, timeout_s: int) -> str:
             cwd=str(E2E_DIR),
         )
         last = ""
-        async for msg in query(prompt=prompt, options=opts):
-            text = getattr(msg, "text", None)
-            if getattr(msg, "type", "") == "assistant" and text:
-                last = text
+        # Enforce the orchestrator's budget INSIDE the SDK path so we self-stop
+        # before Hyperloom's outer kill_timeout SIGKILLs us (a SIGKILL would
+        # skip result.json flushing entirely). anyio raises TimeoutError on
+        # expiry, which main() maps to error_class="timeout".
+        with anyio.fail_after(timeout_s):
+            async for msg in query(prompt=prompt, options=opts):
+                text = getattr(msg, "text", None)
+                if getattr(msg, "type", "") == "assistant" and text:
+                    last = text
         return last
 
     return anyio.run(_run)
@@ -190,6 +239,10 @@ def invoke_workflow(prompt: str, timeout_s: int) -> dict:
     return _parse_last_json_line(raw)
 
 
+class WorkflowParseError(RuntimeError):
+    """The agent output carried no parseable workflow return (no ``eval_dir``)."""
+
+
 def _parse_last_json_line(raw: str) -> dict:
     for line in reversed([ln for ln in (raw or "").splitlines() if ln.strip()]):
         try:
@@ -198,10 +251,30 @@ def _parse_last_json_line(raw: str) -> dict:
                 return obj
         except json.JSONDecodeError:
             continue
-    raise RuntimeError(
+    raise WorkflowParseError(
         "Could not parse a JSON workflow return (with eval_dir) from the agent "
         f"output. Last 2000 chars:\n{(raw or '')[-2000:]}"
     )
+
+
+def _classify_error(exc: BaseException) -> str:
+    """Map an internal failure onto a stable ``error_class`` for Hyperloom.
+
+    Hyperloom's session-breakdown PerfSkills collector reads ``error_class`` to
+    attribute *why* an e2e run missed. Keep these values stable; unknown
+    failures fall back to ``runner_error``.
+    """
+    # anyio.fail_after raises builtins.TimeoutError on budget expiry.
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, WorkflowParseError):
+        return "workflow_parse_error"
+    if isinstance(exc, ImportError):
+        return "sdk_import_failed"
+    msg = str(exc)
+    if "claude CLI failed" in msg:
+        return "cli_failed"
+    return "runner_error"
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +357,7 @@ def main(argv: list[str]) -> int:
         )
         return 2
     handoff_path, result_path = Path(args[0]), Path(args[1])
-    timeout_s = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "21600"))  # 6h
+    timeout_s = int(os.environ.get("PERFSKILLS_E2E_TIMEOUT_S", "43200"))  # 12h
 
     h = _read_json(handoff_path)
     if not h:
@@ -293,10 +366,12 @@ def main(argv: list[str]) -> int:
 
     ps_args = map_args(h)
     bench_client = apply_bench_client(h)
+    bench_protocol = apply_bench_protocol(h)
     prompt = build_prompt(ps_args)
 
     if "--dry-run" in flags:
         print(json.dumps({"mapped_args": ps_args, "bench_client": bench_client,
+                          "bench_protocol": bench_protocol,
                           "inferencex_path": os.environ.get("INFERENCEX_PATH", ""),
                           "prompt": prompt, "e2e_script": str(E2E_SCRIPT)}, indent=2))
         return 0
@@ -304,12 +379,21 @@ def main(argv: list[str]) -> int:
     try:
         wf = invoke_workflow(prompt, timeout_s)
         out = normalize_result(h, wf)
-    except Exception as e:  # crash: status=error + nonzero exit (caller distinguishes)
+    except Exception as e:  # crash/timeout: always flush a classified result.json
+        error_class = _classify_error(e)
+        # Surface timeouts as their own status so the caller can tell a
+        # budget-capped run apart from a hard crash (both still exit nonzero).
+        status = "timeout" if error_class == "timeout" else "error"
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_text(json.dumps(
-            {"schema_version": SCHEMA_VERSION, "status": "error", "error": str(e)},
+            {
+                "schema_version": SCHEMA_VERSION,
+                "status": status,
+                "error_class": error_class,
+                "error": str(e),
+            },
             indent=2), encoding="utf-8")
-        sys.stderr.write(f"PerfSkills e2e failed: {e}\n")
+        sys.stderr.write(f"PerfSkills e2e failed [{error_class}]: {e}\n")
         return 1
 
     result_path.parent.mkdir(parents=True, exist_ok=True)

@@ -149,6 +149,13 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
      EXTRA_SERVER_ARGS="<cand flags>" EXTRA_ENV="<cand env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
    ```
+   **Do NOT set the measurement-口径 knobs (`RANDOM_RANGE_RATIO` / `NUM_PROMPTS` /
+   `NUM_WARMUPS` / `SEED`) in these blocks.** When an external orchestrator drives the run it has
+   already exported its exact 口径 into the environment (`run_e2e.py:apply_bench_protocol` from
+   `handoff.bench_protocol`); `bench_e2e.sh` inherits those and falls back to its standalone defaults
+   otherwise. Hard-coding them here would silently override the caller's 口径 and make the A/B
+   incomparable to the caller's baseline (e.g. fixed vs variable sequence lengths). Only vary
+   `OVERLAY_PYTHONPATH` / `EXTRA_SERVER_ARGS` / `EXTRA_ENV` between the two legs.
    Read ALL per-repeat throughputs from `$CB/ref/bench_runs.jsonl` and `$CB/cand/bench_runs.jsonl`
    (each has E2E_REPEATS rows). Compute `ref_med`, `cand_med`, `ref_max`, `cand_min`, and
    `delta% = (cand_med - ref_med)/ref_med*100`. The two blocks run within ~30 min back-to-back, so box
