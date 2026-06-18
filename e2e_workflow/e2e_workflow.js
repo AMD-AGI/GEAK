@@ -103,6 +103,25 @@ const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC };
 // default. Serving TP/GPU are handled by SERVING_TP / SERVING_GPU above.
 const INIT_FLAGS = String(A.initial_extra_server_args || '');
 const INIT_ENV = String(A.initial_extra_env || '');
+// CUDA/HIP-graph deployment requirement (general; derived from the serving config, NOT hardcoded).
+// vllm/sglang capture the steady-state decode path into a FULL CUDA graph UNLESS --enforce-eager is set.
+// A kernel that wins only via its OWN per-call graph-capture+replay wrapper falls back to eager inside the
+// server's graph, so the isolated win evaporates e2e (observed on M3: MoE 1.22x isolated -> 0% e2e). When
+// graphs are on we inject an EXPLICIT requirement into every kernel-optimize task: the win must be intrinsic
+// and graph-capture-safe. Detection is config-driven, so it auto-disables for an enforce-eager run.
+const CUDA_GRAPH_DEPLOY = (BACKEND === 'vllm' || BACKEND === 'sglang') && !/enforce[-_]eager/i.test(INIT_FLAGS);
+const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
+  ' DEPLOYMENT REQUIREMENT — the server captures the steady-state decode path into a FULL CUDA/HIP graph, ' +
+  'so this kernel runs INSIDE that captured graph. Your speedup MUST be INTRINSIC: better tiles/algorithm, ' +
+  'fused quant (one fp8 MFMA, kill the dequant), or fewer ops/launches that reduce work INSIDE the captured ' +
+  'region. Do NOT rely on a per-call CUDA/HIP-graph capture+replay WRAPPER for the speedup — inside the ' +
+  "server's graph that wrapper falls back to eager and the win vanishes, and the e2e integrate gate WILL " +
+  'reject a wrapper-only win (this already happened: a 1.22x isolated MoE GEMM gave 0% e2e because only its ' +
+  'static tile change survived the graph). The steady-state decode call must be graph-capture-safe: ' +
+  'host-sync-free (no .item()/.cpu()/.tolist()/.synchronize(), no Python branch on a GPU scalar), shape-stable, ' +
+  'and prep/compile ONCE (cache by data_ptr) so the captured region only LAUNCHES the kernel. VERIFY your ' +
+  'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
+) : '';
 // Acceptance noise band (%). Tight measurement (interleaved A/B, E2E_REPEATS repeats, non-overlap +
 // engagement proof — see e2e_integrator) makes a 0.5% default trustworthy. Prompt-tunable.
 const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
@@ -576,7 +595,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). Use the FUSED fp8 path ` +
               `(fold the block-scale into the operand scale, run ONE fp8 MFMA GEMM — the "kill the dequant" lever) and cache ` +
               `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
-              `kernel MUST fit at the same mem-fraction the accepted config uses. ` + (TASK || ''),
+              `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',
           });
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
@@ -724,7 +743,7 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
-          ' for this kernel; pick the fastest that passes the immutable unittest. ' + (TASK || ''),
+          ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
       });
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
