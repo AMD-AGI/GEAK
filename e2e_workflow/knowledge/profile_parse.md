@@ -47,54 +47,72 @@ are given, HW durations come from rocprofv3 and shapes are enriched from the tor
 5. **High call-count tiny kernels** (e.g. elementwise at 1000s of calls) signal dispatch overhead →
    host_runtime fusion / cuda-graph.
 
-## ⚠️ De-inflate busy-wait collectives BEFORE you Amdahl-rank (do this every multi-rank trace)
-A synchronizing collective — vLLM custom all-reduce (`cross_device_reduce*`), NCCL/RCCL
-(`ncclDevKernel*`, `*all_reduce*`, `*all_gather*`, `*reduce_scatter*`), barriers — **busy-waits on the
-GPU for peer ranks to arrive, and rocprofv3 counts that idle spin as kernel GPU time.** So its summed
-`total_ms`/`pct_gpu_time` in the Top-N is NOT its optimizable cost — it is mostly peer-wait bubble.
-Real MiniMax-M3 TP=4 trace: `cross_device_reduce_1stage` had a *median* call of ~12µs but a P99 of
-~12ms (mean/median skew ≈ **18×**), inflating it to **~51%** of GPU when its intrinsic transfer cost is
-**~8%**. Left raw, this **buries the editable GEMM heads** (MoE + dense mxfp8 GEMM) and sends the
-Architect chasing a ~50% "comm" target that is mostly synchronization slack at fixed TP.
+## ⚠️ Per-call distribution sanity — fix misleading `total_ms`/`pct_gpu_time` BEFORE you Amdahl-rank
+The Top-N's `total_ms`/`pct_gpu_time` is a **sum of per-call durations**. For several kinds of kernel
+that sum is NOT the steady-state optimizable cost you want to route on — so check the per-call
+*distribution* of any top kernel before trusting its `pct`. This is **not just communication kernels**;
+the same sampling + judgment applies to any suspicious entry.
 
-**This is a JUDGMENT recipe, not a hard pipeline step — apply it with graceful degradation, never let it
-crash or block the Top-N.** For each collective-class kernel in the top entries with `pct_gpu_time` ≳ 5%:
+**When to look:** any top-N kernel you're about to route on whose `avg_us` is surprising for its class,
+or whose `pct_gpu_time` is large, or that you suspect from its name/role. **This is a JUDGMENT recipe,
+not a hard pipeline step — apply with graceful degradation, never let it crash or block the Top-N.**
 
-1. **Decide if it is actually spin-inflated** (a plain transfer is fine; a spinning barrier is not).
-   Best-effort: sample its per-call durations from the rocprofv3 per-call trace and compare mean vs
-   median. A healthy compute kernel has mean/median ≈ 1; a spin-inflated collective is ≫ 3 (M3 was 18).
-   ```bash
-   # one rank's per-call trace is enough (distribution is rank-invariant); robust to huge files.
-   python3 - "$ROCPROF_DIR" 'cross_device_reduce_1stage' <<'PY' 2>/dev/null || true
-   import csv,glob,os,sys,statistics as st
-   d,core=sys.argv[1],sys.argv[2]
-   f=sorted(glob.glob(os.path.join(d,'**','*kernel_trace*.csv'),recursive=True))
-   if not f: sys.exit()
-   ds=[]
-   with open(f[0],newline='') as fh:
-       r=csv.reader(fh); h=next(r); kn=h.index('Kernel_Name'); s=h.index('Start_Timestamp'); e=h.index('End_Timestamp')
-       for row in r:
-           if len(row)>e and core in row[kn]:
-               try: ds.append(int(row[e])-int(row[s]))
-               except: pass
-   if len(ds)>50:
-       m=st.median(ds); mean=sum(ds)/len(ds)
-       print(f"median={m/1000:.1f}us mean={mean/1000:.1f}us skew={mean/m:.1f}x n={len(ds)}")
-   PY
-   ```
-2. **If skew > ~3 → de-inflate.** Report a robust **effective** cost = median-cap winsorize: clip each
-   call at ~10×median, then sum (≈ `median × calls` is a fine shortcut). Put the EFFECTIVE %gpu in
-   `pct_gpu_time` so the Architect Amdahl-ranks on it, and **keep the raw** in a `raw_pct_gpu_time` /
-   `notes` field + say it was spin-deinflated Nx. Nothing hidden.
-3. **Route it as a CONFIG lever, not a kernel rewrite.** The clipped time is comm-overlap / load-
-   imbalance bubble → Config Tuner (AR backend/quant, comm-compute overlap, NCCL channels), never the
-   kernel squad. The editable GEMM heads it was hiding are the real source-rewrite targets.
-4. **GRACEFUL DEGRADATION (the point of doing this as a recipe, not rigid code):** if the per-call
-   trace is missing / a different rocprofv3 schema / too large to sample — do NOT fail. Fall back to a
-   *qualitative* flag: when a collective-class kernel shows a high `avg_us` AND a huge `calls` count AND
-   tops the list, note in `notes`/`opt_hint` that its %gpu is "likely spin-inflated — discount in Amdahl
-   routing; comm-config lever, not a rewrite" and let the Architect treat the editable heads beneath it
-   as the real targets. A qualitative flag is better than a crashed profile or a wrong 50% target.
+**How to look (one cheap sample of the per-call trace; works for ANY kernel name — pass its core token):**
+```bash
+# one rank's per-call trace is enough (distribution is rank-invariant); robust to huge files.
+python3 - "$ROCPROF_DIR" 'cross_device_reduce_1stage' <<'PY' 2>/dev/null || true
+import csv,glob,os,sys,statistics as st
+d,core=sys.argv[1],sys.argv[2]
+f=sorted(glob.glob(os.path.join(d,'**','*kernel_trace*.csv'),recursive=True))
+if not f: sys.exit()
+ds=[]
+with open(f[0],newline='') as fh:
+    r=csv.reader(fh); h=next(r); kn=h.index('Kernel_Name'); s=h.index('Start_Timestamp'); e=h.index('End_Timestamp')
+    for row in r:
+        if len(row)>e and core in row[kn]:
+            try: ds.append(int(row[e])-int(row[s]))
+            except: pass
+if len(ds)>20:
+    ds.sort(); n=len(ds); q=lambda p: ds[min(n-1,int(n*p))]
+    m=ds[n//2]; mean=sum(ds)/n
+    print(f"n={n} median={m/1000:.1f}us mean={mean/1000:.1f}us skew={mean/m:.1f}x "
+          f"p10={q(.10)/1000:.1f} p90={q(.90)/1000:.1f} p99={q(.99)/1000:.1f} max={ds[-1]/1000:.1f}us")
+PY
+```
+Read the shape (skew = mean/median; one-tail vs two-cluster vs uniform) and diagnose the cause —
+different causes get different handling:
+
+1. **Busy-wait / synchronization** (collective all-reduce/NCCL/RCCL `cross_device_reduce*`,
+   `ncclDevKernel*`, `*all_reduce*`, `*all_gather*`, `*reduce_scatter*`, barriers — or ANY kernel whose
+   job is to *wait* on peers/host). Heavy right tail, skew ≫ 3 (M3 `cross_device_reduce`: median 12µs,
+   P99 12ms, skew **18×** → shown as ~51% GPU when intrinsic transfer is ~8%). The tail is peer-wait
+   spin, not work. → report a robust **effective** `pct_gpu_time` = median-cap winsorize (clip each call
+   at ~10×median then sum; `median×calls` is a fine shortcut), **keep the raw** in
+   `raw_pct_gpu_time`/`notes`, and route it as a comm-overlap/load-imbalance **CONFIG** lever (AR
+   backend/quant, comm-compute overlap, NCCL channels) — never a kernel rewrite.
+
+2. **One-time warmup / JIT / autotune / graph-capture outliers** (Triton/Inductor JIT-compile +
+   autotune on first launch; HIP-graph capture; first-touch allocation). Signature: a *handful* of giant
+   first-calls, the rest tight — high skew but the tail is a few calls, not a fixed fraction. → use the
+   **steady-state** estimate (median×calls, or drop the first-K outliers) for the optimization ranking;
+   the giant first-calls are real but ONE-TIME, not what a rewrite/tune changes. Note it; keep raw.
+
+3. **Bimodal = two regimes under one name** (prefill large-M + decode small-M; or context-len buckets).
+   Signature: **two clusters**, not a single tail (e.g. p10 and p90 differ by ~10×+ with a gap). This is
+   REAL compute in both — do **NOT** de-inflate. → instead **split** it into per-regime entries (carry
+   each regime's `shapes`) so the Extractor builds regime-specific unittests and the **decode** regime
+   (steady-state, e2e-critical) is ranked on its own rather than averaged away. (See the "Same name,
+   many shapes" note above.)
+
+4. **Healthy / honest** — skew ≈ 1, uniform. Use the summed `pct_gpu_time` as-is.
+
+**Always KEEP the raw value** (annotate, don't overwrite silently). **GRACEFUL DEGRADATION (the point of
+a recipe over rigid code):** if the per-call trace is missing / a renamed rocprofv3 schema / too large to
+sample — do NOT fail. Fall back to a *qualitative* flag from the Top-N alone, e.g. "collective with high
+`avg_us` + huge `calls` → likely spin-inflated, discount in Amdahl routing; comm-config lever"; "Triton
+kernel with one giant first-call → likely JIT/autotune warmup, discount that call"; "same name at both
+large-M and small-M `avg` → split prefill vs decode". A qualitative flag beats a crashed profile or a
+wrong routing target.
 
 ## Reliability notes
 - Profile with the SAME ISL/OSL/concurrency as the throughput benchmark, after warmup.

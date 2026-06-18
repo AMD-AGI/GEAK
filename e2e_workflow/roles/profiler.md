@@ -74,14 +74,18 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND`, `GPU_ID`, `WORKLOAD` (isl/osl/conc)
    the `short_name` under the serving-stack package dir (sglang/vllm, from `env_info.txt`) to identify
    it, and note the correct class in `notes` so the Architect routes it right. Flag same-named kernels appearing with BOTH large-M and small-M shapes
    (one kernel serving prefill + decode → different regimes).
-5. **De-inflate busy-wait collectives** (any top all-reduce/NCCL/RCCL/barrier) per
-   `knowledge/profile_parse.md` §"De-inflate busy-wait collectives" — its summed `pct_gpu_time` counts
-   peer-wait spin as GPU time and will bury the editable GEMM heads. Best-effort sample its per-call
-   median vs mean from the rocprofv3 per-call trace; if skew > ~3, report the robust **effective**
-   `pct_gpu_time` (median-cap) so the Architect Amdahl-ranks on it, keep the **raw** in
-   `raw_pct_gpu_time`/`notes`, and route it as a comm-CONFIG lever (not a kernel rewrite). If the trace
-   can't be sampled, degrade to a qualitative "likely spin-inflated — discount in routing" note — never
-   fail or block the Top-N on this.
+5. **Per-call distribution sanity** on the top entries you'll route on, per `knowledge/profile_parse.md`
+   §"Per-call distribution sanity" — a kernel's summed `pct_gpu_time` can be a misleading optimization
+   signal, and **not only for comm kernels**. Best-effort sample its per-call durations from the
+   rocprofv3 per-call trace and diagnose the shape: (a) **busy-wait/sync** (collective all-reduce/NCCL/
+   barrier, skew ≫ 3) → report robust median-cap **effective** `pct_gpu_time`, keep **raw**, route as a
+   comm-CONFIG lever not a rewrite; (b) **one-time warmup/JIT/autotune/graph-capture outliers** (a few
+   giant first-calls) → rank on the steady-state (median×calls), note the one-time cost; (c) **bimodal
+   prefill+decode under one name** → split into per-regime entries (don't de-inflate), so decode is
+   ranked on its own. Always keep the raw in `raw_pct_gpu_time`/`notes`. If the trace can't be sampled,
+   degrade to a qualitative flag (high avg+calls collective → "likely spin-inflated, discount"; one giant
+   first-call → "JIT warmup, discount"; large-M+small-M same name → "split regimes") — never fail or
+   block the Top-N on this.
 
 Return JSON:
 ```json
