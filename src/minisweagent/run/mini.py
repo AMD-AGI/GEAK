@@ -79,6 +79,21 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+# Backend-rewrite kernel_types: ``<source>2<target>`` where target is a fully-wired
+# translation target (flydsl, tilelang — both have a TranslationRegistry pair + config +
+# KB). Passed through verbatim so the downstream ``_resolve_target_language`` can route
+# them to a TranslationPhase (and the matching rewrite subagent), instead of collapsing
+# to "other" (in-place tuning). NOTE: CK is a first-class AUTHORING backend
+# (ck-kernel-rewrite) and a translation SOURCE (ck-to-flydsl/tilelang), but NOT a
+# translation TARGET here — a ``*2ck`` route would need a CK translation config/KB that
+# does not exist, so it is intentionally excluded to avoid a dead route.
+_REWRITE_SOURCES = ("pytorch", "triton", "ck", "hip", "tilelang", "flydsl")
+_REWRITE_TARGETS = ("flydsl", "tilelang")
+_REWRITE_KERNEL_TYPES = frozenset(
+    f"{s}2{t}" for s in _REWRITE_SOURCES for t in _REWRITE_TARGETS if s != t
+)
+
+
 def _normalize_kernel_type(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text == "triton":
@@ -89,6 +104,12 @@ def _normalize_kernel_type(value: Any) -> str:
         return "pytorch2flydsl"
     if text == "flydsl":
         return "flydsl"
+    if text == "tilelang":
+        return "tilelang"
+    # Backend-rewrite request (e.g. "triton2flydsl", "ck2tilelang"): pass through
+    # so _resolve_target_language can select the rewrite TranslationPhase.
+    if text in _REWRITE_KERNEL_TYPES:
+        return text
     return "other"
 
 
@@ -464,7 +485,10 @@ def main(
     kernel_type = _normalize_kernel_type(parsed_config.get("kernel_type"))
     logger.info("Normalized kernel_type from task content: %s", kernel_type)
 
-    if kernel_url:
+    # Do NOT let source-language auto-detection clobber an explicit backend-rewrite
+    # request (``<src>2<tgt>``): for a rewrite, kernel_type encodes the TARGET, and
+    # the source is detected separately by the TranslationRegistry.
+    if kernel_url and kernel_type not in _REWRITE_KERNEL_TYPES:
         kp = Path(kernel_url)
         if kp.exists() and kp.is_file():
             from minisweagent.agents.heterogeneous.task_generator import _infer_kernel_type
@@ -637,12 +661,13 @@ def main(
         if not kt:
             return None
         kt = kt.strip().lower()
-        if kt in {"flydsl", "tilelang"}:
+        # Data-driven over _REWRITE_TARGETS: a bare target ("flydsl") or a
+        # ``<src>2<tgt>`` / ``<src>_to_<tgt>`` token resolves to its target backend.
+        if kt in _REWRITE_TARGETS:
             return kt
-        if kt.endswith("2flydsl") or kt.endswith("_to_flydsl"):
-            return "flydsl"
-        if kt.endswith("2tilelang") or kt.endswith("_to_tilelang"):
-            return "tilelang"
+        for tgt in _REWRITE_TARGETS:
+            if kt.endswith(f"2{tgt}") or kt.endswith(f"_to_{tgt}"):
+                return tgt
         return None
 
     _target_language = _resolve_target_language(kernel_type)

@@ -26,6 +26,7 @@ from minisweagent.run.postprocess.benchmark_parsing import (
     parse_shape_latencies_ms,
 )
 from minisweagent.run.utils.generated_artifacts import (
+    baseline_jit_cache_env,
     generated_helper_excludes,
     jit_cache_diff_basename_excludes,
     jit_cache_env,
@@ -507,6 +508,22 @@ class SaveAndTestTool:
         # env_vars; the sanitized harness (R5) defers to GEAK_JIT_CACHE_DIR.
         if ctx and ctx.cwd:
             test_env.update(jit_cache_env(ctx.cwd))
+            # Warm-cache reuse across slots: point this slot at the PERSISTENT
+            # baseline JIT cache (keyed by repo identity, primed once by the
+            # preprocess warm-up step) so unchanged kernels + all the heavy
+            # dependency compiles are already warm. This is safe — the cache
+            # lives OUTSIDE every worktree (never swept into a round git-diff)
+            # and Triton/compilers are content-addressed by SOURCE, so a patched
+            # candidate simply writes a NEW entry rather than colliding with the
+            # baseline; concurrent identical-source compiles are guarded by the
+            # compiler's own file locks. Set as TRITON_CACHE_DIR so every slot
+            # shares the one warm tree (overrides the per-slot dir for the cache
+            # READ path); GEAK_JIT_CACHE_DIR stays per-slot for any toolchain that
+            # writes non-content-addressed artifacts under it.
+            if ctx.base_repo_path:
+                base_cache = baseline_jit_cache_env(ctx.base_repo_path)
+                if base_cache:
+                    test_env["TRITON_CACHE_DIR"] = base_cache["TRITON_CACHE_DIR"]
         return test_env
 
     @staticmethod

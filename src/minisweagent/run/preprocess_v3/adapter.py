@@ -150,8 +150,14 @@ def run_preprocess_v3(
     # the harness-GENERATOR) or simply fail to converge, burning the whole
     # preprocess budget without ever producing a baseline. Run the deterministic
     # sequence directly and skip the LLM entirely. Opt-out: GEAK_NO_PREVALIDATED_BYPASS=1.
+    #
+    # IMPORTANT: a backend-REWRITE request (target_language differs from the detected
+    # source) is NOT a no-op — the TranslationPhase must run to produce the rewritten
+    # kernel. The pre-validated harness only attests the SOURCE kernel, so the bypass
+    # must be skipped whenever a rewrite is requested.
+    _is_rewrite = bool(target_language) and target_lang_name != source_language.lower()
     _bypass_disabled = os.environ.get("GEAK_NO_PREVALIDATED_BYPASS", "").strip().lower() in ("1", "true", "yes", "on")
-    if harness and not translate_only and not _bypass_disabled and Path(harness).is_file():
+    if harness and not translate_only and not _bypass_disabled and not _is_rewrite and Path(harness).is_file():
         t0 = time.monotonic()
         result = _run_prevalidated_path_a(
             harness=Path(harness),

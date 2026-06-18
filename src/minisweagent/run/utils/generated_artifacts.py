@@ -467,6 +467,50 @@ def jit_cache_env(
     }
 
 
+def baseline_jit_cache_env(
+    repo_root: str | Path | None,
+    *,
+    base: str | Path | None = None,
+) -> dict[str, str]:
+    """Return a PERSISTENT, shared JIT/compile cache env for the UNPATCHED baseline path.
+
+    Unlike :func:`jit_cache_env` (keyed per worktree, so each parallel slot gets
+    its own cache), this is keyed by ``SHA1(resolved repo_root)`` so the three
+    consumers of the *baseline* (unpatched) source — the preprocess warm-up step,
+    the harness-verifier's runtime modes, and ``collect_baseline_metrics`` — all
+    share ONE warm cache. The first cold compile is then paid exactly once per
+    kernel-geometry instead of being re-paid by every verifier retry / regen.
+
+    This is correct *only* for the baseline path: the unpatched source never
+    changes during preprocess, and Triton is content-addressed by source, so the
+    shared cache can never serve a stale or wrong-source artifact. It is
+    deliberately NOT used for patched per-slot worktrees — those keep
+    :func:`jit_cache_env`'s per-SHA1(worktree) isolation, because the round patch
+    is captured with ``git diff`` inside the worktree and a shared cache there
+    would sweep JIT blobs into the patch and pin the A/B speedup at 1.0x (the bug
+    :func:`jit_cache_env` exists to prevent).
+
+    Sets the same keys as :func:`jit_cache_env` plus ``AITER_JIT_DIR`` (aiter's
+    build-output dir) so aiter-backed baselines also share the warm cache. Returns
+    ``{}`` when *repo_root* is falsy. ``base`` overrides the parent dir (test
+    hook); it defaults to ``$TMPDIR/geak_jit_cache``.
+    """
+    if not repo_root:
+        return {}
+    rr = Path(repo_root).resolve()
+    if base is not None:
+        root = Path(base)
+    else:
+        root = Path(tempfile.gettempdir()) / "geak_jit_cache"
+    slot = hashlib.sha1(str(rr).encode("utf-8")).hexdigest()[:16]
+    cache_root = root / "baseline" / slot
+    return {
+        "GEAK_JIT_CACHE_DIR": str(cache_root),
+        "TRITON_CACHE_DIR": str(cache_root / "triton"),
+        "AITER_JIT_DIR": str(cache_root / "aiter"),
+    }
+
+
 def _section_is_pure_addition(section_lines: list[str]) -> bool:
     """True when a diff section creates a brand-new file (``new file mode``)."""
 

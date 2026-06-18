@@ -129,3 +129,57 @@ def test_capture_scoped_to_source_is_source_only(tmp_path):
     assert "fused_moe.py" in patch and "BLOCK_SIZE_M" in patch
     for forbidden in (".triton_cache_geak", ".hsaco", "__pycache__", "common_ops.so"):
         assert forbidden not in patch
+
+
+def test_build_test_env_points_slots_at_shared_baseline_cache(tmp_path):
+    """Q2: each optimization slot's test env must (a) keep a per-slot,
+    out-of-worktree GEAK_JIT_CACHE_DIR (diff-safety) AND (b) point
+    TRITON_CACHE_DIR at the PERSISTENT baseline cache keyed by repo identity so
+    the warmed JIT is reused across slots. The shared cache must live outside the
+    worktree so its blobs are never swept into a round git-diff."""
+    from minisweagent.run.utils.generated_artifacts import baseline_jit_cache_env
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    worktree = tmp_path / "worktrees" / "task_3"
+    worktree.mkdir(parents=True)
+
+    tool = SaveAndTestTool()
+    tool.set_context(
+        SaveAndTestContext(
+            cwd=str(worktree),
+            test_command="python harness.py --benchmark",
+            timeout=60,
+            patch_output_dir=str(tmp_path / "patch"),
+            base_repo_path=repo,
+        )
+    )
+    env = tool._build_test_env()
+
+    wt_resolved = str(worktree.resolve())
+    # (a) per-slot generic cache root, outside the worktree.
+    assert not env["GEAK_JIT_CACHE_DIR"].startswith(wt_resolved)
+    # (b) Triton cache is the SHARED baseline cache (repo-keyed), also outside the worktree.
+    expected = baseline_jit_cache_env(repo)["TRITON_CACHE_DIR"]
+    assert env["TRITON_CACHE_DIR"] == expected
+    assert not env["TRITON_CACHE_DIR"].startswith(wt_resolved)
+
+
+def test_build_test_env_without_base_repo_keeps_per_slot_cache(tmp_path):
+    """When base_repo_path is absent, fall back to the per-slot cache (no shared
+    baseline cache to reuse) — must not crash and must stay out of the worktree."""
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    tool = SaveAndTestTool()
+    tool.set_context(
+        SaveAndTestContext(
+            cwd=str(worktree),
+            test_command="python harness.py --benchmark",
+            timeout=60,
+            patch_output_dir=str(tmp_path / "patch"),
+            base_repo_path=None,
+        )
+    )
+    env = tool._build_test_env()
+    assert "TRITON_CACHE_DIR" in env
+    assert not env["TRITON_CACHE_DIR"].startswith(str(worktree.resolve()))

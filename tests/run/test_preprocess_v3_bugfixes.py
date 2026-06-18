@@ -15,10 +15,12 @@ from minisweagent.run.preprocess_v3.orchestrator import (
     PreprocessOrchestratorConfig,
 )
 from minisweagent.run.preprocess_v3.tools import (
+    _ensure_preprocess_subagent_sandbox,
     _make_tool_collect_baseline,
     _make_tool_commandment_from_user_command,
     _make_tool_dispatch_subagent,
     _make_tool_finish_preprocess,
+    _make_tool_warm_up_harness,
 )
 
 
@@ -255,8 +257,9 @@ def test_collect_baseline_defaults_work_dir_to_source_repo(tmp_path: Path, monke
 
     captured: dict[str, object] = {}
 
-    def fake_collect_baseline_metrics(harness_path, *, repeats, work_dir, gpu_id):
+    def fake_collect_baseline_metrics(harness_path, *, repeats, work_dir, gpu_id, extra_env=None):
         captured["work_dir"] = work_dir
+        captured["extra_env"] = extra_env
         return SimpleNamespace(
             success=True,
             median_ms=1.0,
@@ -563,3 +566,89 @@ def test_prevalidated_bypass_opt_out_env(tmp_path: Path, monkeypatch) -> None:
             repo=str(repo),
         )
     assert called["bypass"] is False
+
+
+def test_warm_up_harness_runs_once_with_baseline_cache(tmp_path, monkeypatch):
+    """warm_up_harness runs the harness once in --correctness with the persistent
+    baseline cache + a 1-shape cap, and is non-fatal on failure."""
+    import minisweagent.run.preprocess_v3.tools as tools_module
+    import minisweagent.run.preprocess_v3.baseline as baseline_module
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "harness.py"
+    harness.write_text("# harness\n")
+
+    seen = {}
+
+    def fake_run_once(hp, *, work_dir, gpu_id, timeout_s, flag, extra_env=None):
+        seen["flag"] = flag
+        seen["work_dir"] = work_dir
+        seen["extra_env"] = extra_env or {}
+        seen["timeout_s"] = timeout_s
+        return {"returncode": 0, "stdout": "", "stderr": "", "duration_s": 1.2, "latency_ms": None}
+
+    monkeypatch.setattr(baseline_module, "_run_benchmark_once", fake_run_once)
+
+    agent = PreprocessOrchestratorAgent(
+        model=object(),
+        config=PreprocessOrchestratorConfig(repo=repo),
+    )
+    tool = _make_tool_warm_up_harness(agent)
+    result = tool(harness_path=str(harness))
+
+    assert result["ok"] is True
+    # Warm the FULL config superset (--full-benchmark), not a single shape — each
+    # shape compiles a separate artifact, so 1-shape warming leaves the rest cold.
+    assert seen["flag"] == "--full-benchmark"
+    assert seen["work_dir"] == repo
+    # No shape cap: full coverage is the point (cost bounded by the timeout).
+    assert "GEAK_MAX_BENCHMARK_SHAPES" not in seen["extra_env"]
+    # The persistent baseline cache env is passed through.
+    assert "/baseline/" in seen["extra_env"].get("GEAK_JIT_CACHE_DIR", "")
+    assert "TRITON_CACHE_DIR" in seen["extra_env"]
+
+
+def test_warm_up_harness_non_fatal_on_failure(tmp_path, monkeypatch):
+    import minisweagent.run.preprocess_v3.baseline as baseline_module
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "harness.py"
+    harness.write_text("# harness\n")
+
+    def fake_run_once(hp, *, work_dir, gpu_id, timeout_s, flag, extra_env=None):
+        return {"returncode": -1, "stdout": "", "stderr": "TIMEOUT", "duration_s": 9.0, "latency_ms": None}
+
+    monkeypatch.setattr(baseline_module, "_run_benchmark_once", fake_run_once)
+
+    agent = PreprocessOrchestratorAgent(
+        model=object(),
+        config=PreprocessOrchestratorConfig(repo=repo),
+    )
+    tool = _make_tool_warm_up_harness(agent)
+    # Must NOT raise; ok=False but the run continues.
+    result = tool(harness_path=str(harness))
+    assert result["ok"] is False
+    assert "advisory" in result["note"]
+
+
+def test_preprocess_sandbox_env_carries_baseline_cache(tmp_path):
+    """The preprocess subagent (verifier) env includes the persistent baseline
+    JIT cache so its compiles hit the warm cache."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "kernel.py").write_text("# kernel\n")
+    output_dir = tmp_path / "out"
+    agent = PreprocessOrchestratorAgent(
+        model=object(),
+        config=PreprocessOrchestratorConfig(repo=repo),
+    )
+    agent._extra_template_vars = {
+        "repo_root": str(repo),
+        "output_dir": str(output_dir),
+        "gpu_id": 0,
+    }
+    _sandbox, env = _ensure_preprocess_subagent_sandbox(agent)
+    assert "/baseline/" in env["GEAK_JIT_CACHE_DIR"]
+    assert "TRITON_CACHE_DIR" in env and "AITER_JIT_DIR" in env

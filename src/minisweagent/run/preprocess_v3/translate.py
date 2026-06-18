@@ -141,10 +141,11 @@ def _project(raw: dict[str, Any], elapsed_s: float) -> TranslationResult:
     )
 
 
-def translate_to_flydsl(
+def translate_kernel(
     *,
     source_path: Path,
     output_dir: Path,
+    target_language: str = TARGET_LANGUAGE,
     gpu_id: int = 0,
     model: Any = None,
     model_factory: Any = None,
@@ -210,7 +211,7 @@ def translate_to_flydsl(
         kernel_path=source_path,
         output_dir=output_dir,
         gpu_id=gpu_id,
-        target_language=TARGET_LANGUAGE,
+        target_language=target_language,
         model=model,
         model_factory=model_factory,
         repo=repo,
@@ -221,15 +222,45 @@ def translate_to_flydsl(
 
     if not isinstance(raw, dict):
         raise TypeError(
-            f"translate_to_flydsl: run_translation returned {type(raw).__name__}, "
+            f"translate_kernel: run_translation returned {type(raw).__name__}, "
             f"expected dict (legacy contract violated)"
         )
 
     return _project(raw, elapsed_s)
 
 
+def translate_to_flydsl(
+    *,
+    source_path: Path,
+    output_dir: Path,
+    gpu_id: int = 0,
+    model: Any = None,
+    model_factory: Any = None,
+    repo: Path | None = None,
+    flydsl_repo: Path | None = None,
+    console: Any = None,
+) -> TranslationResult:
+    """Back-compat alias: translate to FlyDSL. Delegates to :func:`translate_kernel`.
+
+    Preserved so existing callers (and any pinned-FlyDSL path) keep working unchanged
+    while new callers pass an explicit ``target_language`` to ``translate_kernel``.
+    """
+    return translate_kernel(
+        source_path=source_path,
+        output_dir=output_dir,
+        target_language="flydsl",
+        gpu_id=gpu_id,
+        model=model,
+        model_factory=model_factory,
+        repo=repo,
+        flydsl_repo=flydsl_repo,
+        console=console,
+    )
+
+
 __all__ = [
     "TARGET_LANGUAGE",
     "TranslationResult",
+    "translate_kernel",
     "translate_to_flydsl",
 ]

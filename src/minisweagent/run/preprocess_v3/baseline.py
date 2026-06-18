@@ -255,6 +255,7 @@ def capture_full_benchmark_stdout(
     *,
     work_dir: Path | None = None,
     gpu_id: int = 0,
+    extra_env: dict[str, str] | None = None,
 ) -> str | None:
     """Run the harness once in ``--full-benchmark`` mode and return stdout.
 
@@ -270,6 +271,7 @@ def capture_full_benchmark_stdout(
         gpu_id=gpu_id,
         timeout_s=_BENCHMARK_TIMEOUT_S,
         flag="--full-benchmark",
+        extra_env=extra_env,
     )
     stdout = (result.get("stdout") or "").strip()
     if result["returncode"] != 0 or not stdout:
@@ -295,6 +297,7 @@ def _run_benchmark_once(
     gpu_id: int,
     timeout_s: int,
     flag: str = "--benchmark",
+    extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the harness once in the given benchmark mode and capture output.
 
@@ -308,7 +311,7 @@ def _run_benchmark_once(
     import time as _time
 
     cmd = _benchmark_command(harness_path, flag=flag)
-    env = _build_env(work_dir, gpu_id=gpu_id)
+    env = _build_env(work_dir, gpu_id=gpu_id, extra=extra_env)
     cwd = str(work_dir) if work_dir is not None else None
 
     t0 = _time.monotonic()
@@ -358,6 +361,7 @@ def collect_baseline_metrics(
     repeats: int = 5,
     work_dir: Path | None = None,
     gpu_id: int = 0,
+    extra_env: dict[str, str] | None = None,
 ) -> BaselineMetrics:
     """Run the harness ``repeats`` times in ``--benchmark`` mode.
 
@@ -419,6 +423,7 @@ def collect_baseline_metrics(
             gpu_id=gpu_id,
             timeout_s=_CORRECTNESS_GATE_TIMEOUT_S,
             flag="--correctness",
+            extra_env=extra_env,
         )
         if gate["returncode"] != 0:
             logger.warning(
@@ -447,6 +452,7 @@ def collect_baseline_metrics(
             work_dir=work_dir,
             gpu_id=gpu_id,
             timeout_s=_BENCHMARK_TIMEOUT_S,
+            extra_env=extra_env,
         )
         raw_outputs.append(result)
         if result["latency_ms"] is not None:
