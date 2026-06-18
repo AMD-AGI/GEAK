@@ -106,6 +106,17 @@ different causes get different handling:
 
 4. **Healthy / honest** — skew ≈ 1, uniform. Use the summed `pct_gpu_time` as-is.
 
+**🔴 RECOMPUTE THE WHOLE TABLE after any de-inflation — do NOT discount one kernel in isolation.**
+De-inflating a kernel shrinks `total_gpu_time`, so EVERY kernel's `pct_gpu_time` must be re-expressed
+against the NEW (de-inflated) total. The editable heads MUST rise correspondingly. Worked example (M3
+TP=4): comm `cross_device_reduce` 51%→~8% means the total drops ~52% → MoE GEMM **16%→~31%** and dense
+GEMM **11%→~21%**. A Top-N that shows the collective discounted to ~1.5% but leaves the GEMMs at their
+raw 16%/11% is **INCONSISTENT and WRONG** — the displayed `%gpu` no longer sums against one total, and
+the Architect will under-rank the real targets (a "+8% ceiling" instead of the true ~+17%). Concretely:
+`effective_total = Σ effective_ms` (de-inflated where flagged, raw elsewhere); then every row's
+`pct_gpu_time = 100 * effective_ms / effective_total`. The editable GEMM heads becoming the clear #1/#2
+is the SIGNAL that you did it right.
+
 **Always KEEP the raw value** (annotate, don't overwrite silently). **GRACEFUL DEGRADATION (the point of
 a recipe over rigid code):** if the per-call trace is missing / a renamed rocprofv3 schema / too large to
 sample — do NOT fail. Fall back to a *qualitative* flag from the Top-N alone, e.g. "collective with high

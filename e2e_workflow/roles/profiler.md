@@ -82,10 +82,14 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND`, `GPU_ID`, `WORKLOAD` (isl/osl/conc)
    comm-CONFIG lever not a rewrite; (b) **one-time warmup/JIT/autotune/graph-capture outliers** (a few
    giant first-calls) → rank on the steady-state (median×calls), note the one-time cost; (c) **bimodal
    prefill+decode under one name** → split into per-regime entries (don't de-inflate), so decode is
-   ranked on its own. Always keep the raw in `raw_pct_gpu_time`/`notes`. If the trace can't be sampled,
-   degrade to a qualitative flag (high avg+calls collective → "likely spin-inflated, discount"; one giant
-   first-call → "JIT warmup, discount"; large-M+small-M same name → "split regimes") — never fail or
-   block the Top-N on this.
+   ranked on its own. Always keep the raw in `raw_pct_gpu_time`/`notes`. **🔴 After ANY de-inflation,
+   RECOMPUTE the whole table**: `effective_total = Σ effective_ms` and every row's `pct_gpu_time =
+   100*effective_ms/effective_total` — do NOT discount the collective in isolation while leaving the GEMM
+   heads at their raw %. The editable GEMM heads MUST rise (M3: comm 51%→~8% ⇒ MoE 16%→~31%, dense
+   11%→~21%) and become the clear #1/#2; a Top-N that shows comm at 1.5% but GEMMs still at 16/11% is
+   inconsistent and will under-rank the real targets. If the trace can't be sampled, degrade to a
+   qualitative flag (high avg+calls collective → "likely spin-inflated, discount"; one giant first-call →
+   "JIT warmup, discount"; large-M+small-M same name → "split regimes") — never fail or block the Top-N.
 
 Return JSON:
 ```json
