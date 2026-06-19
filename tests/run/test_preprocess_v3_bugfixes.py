@@ -10,9 +10,11 @@ from minisweagent.run.preprocess_v3.orchestrator import (
     PreprocessOrchestratorConfig,
 )
 from minisweagent.run.preprocess_v3.tools import (
+    _make_tool_collect_baseline,
     _make_tool_commandment_from_user_command,
     _make_tool_dispatch_subagent,
     _make_tool_finish_preprocess,
+    _make_tool_translate_to_flydsl,
 )
 
 
@@ -233,3 +235,304 @@ def test_legacy_context_recovers_harness_path_from_promoted_command(tmp_path: Pa
     assert ctx["full_benchmark_baseline"] == str(output_dir / "full_benchmark_baseline.txt")
     assert (output_dir / "benchmark_baseline.txt").read_text() == "GEAK_RESULT_LATENCY_MS=1.25\n"
     assert ctx["v3_path_taken"] == "A"
+
+
+@pytest.mark.parametrize(
+    "translation, expected_skip",
+    [
+        (SimpleNamespace(success=True), True),    # translation validated -> skip gate
+        (SimpleNamespace(success=False), False),  # translation failed -> keep gate
+        (None, False),                            # user-supplied harness -> keep gate
+    ],
+)
+def test_collect_baseline_skips_gate_only_on_translation_success(
+    monkeypatch, tmp_path: Path, translation, expected_skip
+) -> None:
+    """The baseline correctness gate is skipped iff a translation succeeded.
+
+    Translation runs its own correctness + perf-regression check, so re-gating
+    on the stricter harness-generator harness discards already-validated kernels
+    (the FAIL_PREPROCESS-on-translation bug). The skip must stay scoped to
+    translation runs: user-supplied harnesses (no translation, or a failed one)
+    must still be gated.
+    """
+    import minisweagent.run.preprocess_v3.tools as tools_module
+
+    harness = tmp_path / "harness.py"
+    harness.write_text("print('GEAK_RESULT_LATENCY_MS=1.0')\n")
+
+    captured: dict[str, object] = {}
+
+    def fake_collect_baseline_metrics(harness_path, *, repeats, work_dir, gpu_id, skip_correctness_gate=False):
+        captured["skip_correctness_gate"] = skip_correctness_gate
+        return SimpleNamespace(
+            success=True, median_ms=1.0, samples_ms=[1.0], stdev_ms=0.0,
+            repeats=repeats, harness_path=harness_path, command="",
+        )
+
+    monkeypatch.setattr(tools_module, "collect_baseline_metrics", fake_collect_baseline_metrics)
+    import minisweagent.run.preprocess_v3.baseline as baseline_module
+
+    monkeypatch.setattr(baseline_module, "capture_full_benchmark_stdout", lambda *a, **k: None)
+
+    agent = PreprocessOrchestratorAgent(
+        model=object(),
+        config=PreprocessOrchestratorConfig(repo=tmp_path),
+    )
+    if translation is not None:
+        agent._collected["translation"] = translation
+
+    tool = _make_tool_collect_baseline(agent)
+    tool(harness_path=str(harness), repeats=1)
+
+    assert captured["skip_correctness_gate"] is expected_skip
+
+
+def test_dispatch_subagent_injects_deterministic_kernel_path(monkeypatch, tmp_path: Path) -> None:
+    """The orchestrator hands the harness subagents the exact worktree-relative
+    kernel path so they never have to guess it from the source tree."""
+    import minisweagent.run.preprocess_v3.tools as tools_module
+
+    # Keep the test focused on injection — no real sandbox copy.
+    monkeypatch.setattr(tools_module, "_ensure_preprocess_subagent_sandbox", lambda agent: (None, {}))
+
+    repo = tmp_path / "repo"
+    (repo / "level3").mkdir(parents=True)
+    kernel = repo / "level3" / "1_MLP.py"
+    kernel.write_text("# kernel\n")
+
+    captured: dict[str, object] = {}
+
+    def fake_dispatcher(*, name, task, model, cwd=None, context=None):
+        captured["context"] = context
+        return {"name": name, "success": True, "output": "HARNESS_PATH: /tmp/harness.py"}
+
+    agent = PreprocessOrchestratorAgent(model=object(), config=PreprocessOrchestratorConfig(repo=repo))
+    agent._extra_template_vars = {"kernel_path": str(kernel), "repo_root": str(repo)}
+
+    tool = _make_tool_dispatch_subagent(agent, fake_dispatcher)
+    tool(name="harness-generator", task="make a harness")
+
+    assert captured["context"]["kernel_relpath"] == "level3/1_MLP.py"
+    assert captured["context"]["kernel_path"] == str(kernel)
+
+
+def _failed_baseline(stderr: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        success=False, median_ms=None, samples_ms=[], stdev_ms=None,
+        repeats=0, command="cmd", raw_outputs=[{"stderr": stderr, "stdout": ""}],
+    )
+
+
+def test_detect_kernel_resolution_failure() -> None:
+    from minisweagent.run.preprocess_v3.baseline import detect_kernel_resolution_failure
+
+    raw = [{"stderr": "Traceback\nFileNotFoundError: [Errno 2] No such file or directory: '/x/k.py'\n", "stdout": ""}]
+    msg = detect_kernel_resolution_failure(raw)
+    assert msg is not None and "/x/k.py" in msg and "FileNotFoundError" in msg
+    assert detect_kernel_resolution_failure([{"stderr": "TIMEOUT after 600s", "stdout": ""}]) is None
+
+
+def test_collect_baseline_fail_closed_after_retry_budget(monkeypatch, tmp_path: Path) -> None:
+    """An empty baseline after the generator retry budget is exhausted terminates
+    the run with a precise error instead of spinning / running on a broken harness."""
+    import minisweagent.run.preprocess_v3.tools as tools_module
+    from minisweagent.run.preprocess_v3.orchestrator import FinishedSuccessfully
+
+    harness = tmp_path / "harness.py"
+    harness.write_text("x")
+    monkeypatch.setattr(
+        tools_module, "collect_baseline_metrics",
+        lambda *a, **k: _failed_baseline("FileNotFoundError: No such file or directory: '/x/k.py'"),
+    )
+
+    agent = PreprocessOrchestratorAgent(model=object(), config=PreprocessOrchestratorConfig(repo=tmp_path))
+    agent._collected["_harness_generator_attempts"] = 3
+    tool = _make_tool_collect_baseline(agent)
+
+    with pytest.raises(FinishedSuccessfully) as exc_info:
+        tool(harness_path=str(harness), repeats=1)
+    assert "/x/k.py" in exc_info.value.payload["errors"][0]
+
+
+def test_collect_baseline_returns_precise_error_within_budget(monkeypatch, tmp_path: Path) -> None:
+    """Before the retry budget is exhausted, an empty baseline returns ok=False
+    with the precise kernel-resolution reason (so the generator can be retried)."""
+    import minisweagent.run.preprocess_v3.tools as tools_module
+
+    harness = tmp_path / "harness.py"
+    harness.write_text("x")
+    monkeypatch.setattr(
+        tools_module, "collect_baseline_metrics",
+        lambda *a, **k: _failed_baseline("FileNotFoundError: No such file or directory: '/x/k.py'"),
+    )
+
+    agent = PreprocessOrchestratorAgent(model=object(), config=PreprocessOrchestratorConfig(repo=tmp_path))
+    agent._collected["_harness_generator_attempts"] = 1
+    tool = _make_tool_collect_baseline(agent)
+
+    res = tool(harness_path=str(harness), repeats=1)
+    assert res["ok"] is False
+    assert "/x/k.py" in res["error"]
+
+
+def test_translate_retargets_preprocess_state_to_opt_repo(monkeypatch, tmp_path: Path) -> None:
+    """After translation, the orchestrator's kernel_path/repo_root point at the
+    per-run _opt_repo (where optimization runs), not the source repo — so the
+    harness sandbox + baseline resolve the translated kernel."""
+    import minisweagent.run.preprocess_v3.tools as tools_module
+    from minisweagent.run.preprocess_v3.translate import TranslationResult
+
+    src_repo = tmp_path / "src"
+    src_repo.mkdir()
+    orig = src_repo / "k.py"
+    orig.write_text("# orig\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    cand_dir = tmp_path / "cand"
+    cand_dir.mkdir()
+    cand_file = cand_dir / "k_flydsl.py"
+    cand_file.write_text("# flydsl\n")
+
+    result = TranslationResult(
+        success=True, target_language="flydsl", translated_kernel_path=cand_file,
+        speedup=None, self_review="", errors=[], elapsed_s=0.0, raw={},
+    )
+    monkeypatch.setattr(tools_module, "translate_to_flydsl", lambda **k: result)
+
+    agent = PreprocessOrchestratorAgent(model=object(), config=PreprocessOrchestratorConfig(repo=src_repo))
+    agent._extra_template_vars = {"kernel_path": str(orig), "repo_root": str(src_repo)}
+
+    tool = _make_tool_translate_to_flydsl(agent)
+    tool(source_path=str(orig), output_dir=str(out))
+
+    opt_repo = (out / "_opt_repo").resolve()
+    assert agent._extra_template_vars["repo_root"] == str(opt_repo)
+    assert agent._extra_template_vars["kernel_path"] == str((opt_repo / "k_flydsl.py").resolve())
+
+
+def test_collect_baseline_defaults_work_dir_to_effective_repo_root(monkeypatch, tmp_path: Path) -> None:
+    """collect_baseline runs the harness with work_dir = the effective repo root
+    (retargeted to _opt_repo after translation) so the kernel is resolvable."""
+    import minisweagent.run.preprocess_v3.baseline as baseline_module
+    import minisweagent.run.preprocess_v3.tools as tools_module
+
+    captured: dict[str, object] = {}
+
+    def fake_collect_baseline_metrics(harness_path, *, repeats, work_dir, gpu_id, skip_correctness_gate=False):
+        captured["work_dir"] = work_dir
+        return SimpleNamespace(
+            success=True, median_ms=1.0, samples_ms=[1.0], stdev_ms=0.0,
+            repeats=repeats, harness_path=harness_path, command="", raw_outputs=[],
+        )
+
+    monkeypatch.setattr(tools_module, "collect_baseline_metrics", fake_collect_baseline_metrics)
+    monkeypatch.setattr(baseline_module, "capture_full_benchmark_stdout", lambda *a, **k: None)
+
+    harness = tmp_path / "h.py"
+    harness.write_text("x")
+    opt_repo = tmp_path / "_opt_repo"
+    opt_repo.mkdir()
+
+    agent = PreprocessOrchestratorAgent(model=object(), config=PreprocessOrchestratorConfig(repo=tmp_path / "src"))
+    agent._extra_template_vars = {"repo_root": str(opt_repo)}
+
+    tool = _make_tool_collect_baseline(agent)
+    res = tool(harness_path=str(harness), repeats=1)
+
+    assert res["ok"] is True
+    assert captured["work_dir"] == opt_repo
+
+
+def test_copy_repo_sandbox_copies_repo_living_under_output_dir(tmp_path: Path) -> None:
+    """When the repo to sandbox is the per-run _opt_repo (which lives UNDER
+    output_dir), its own files must be copied — not ignored by the output-dir
+    recursion guard (which would leave an empty sandbox)."""
+    from minisweagent.run.preprocess_v3.tools import _copy_repo_sandbox
+
+    output_dir = tmp_path / "out"
+    opt_repo = output_dir / "_opt_repo"
+    opt_repo.mkdir(parents=True)
+    (opt_repo / "1_MLP_flydsl.py").write_text("# flydsl\n")
+    (opt_repo / "1_MLP.py").write_text("# ref\n")
+    sandbox = output_dir / "_preprocess_subagent_worktree"
+
+    _copy_repo_sandbox(opt_repo, sandbox, output_dir)
+
+    assert (sandbox / "1_MLP_flydsl.py").is_file()
+    assert (sandbox / "1_MLP.py").is_file()
+
+
+def test_copy_repo_sandbox_still_skips_nested_output_dir(tmp_path: Path) -> None:
+    """The recursion guard still fires when output_dir lives INSIDE the repo:
+    the output tree must not be copied into the sandbox."""
+    from minisweagent.run.preprocess_v3.tools import _copy_repo_sandbox
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "kernel.py").write_text("# k\n")
+    output_dir = repo / "optimization_logs" / "run1"
+    output_dir.mkdir(parents=True)
+    (output_dir / "log.txt").write_text("noise\n")
+    sandbox = tmp_path / "sandbox"
+
+    _copy_repo_sandbox(repo, sandbox, output_dir)
+
+    assert (sandbox / "kernel.py").is_file()
+    assert not (sandbox / "optimization_logs" / "run1" / "log.txt").exists()
+
+
+def test_verifier_backstop_marks_verified_when_correctness_passes(monkeypatch, tmp_path: Path) -> None:
+    """If the LLM verifier fails to confirm but the harness passes --correctness,
+    the deterministic backstop marks it HARNESS_VERIFIED so the orchestrator
+    proceeds to baseline instead of looping the generator."""
+    import minisweagent.run.preprocess_v3.baseline as baseline_module
+    import minisweagent.run.preprocess_v3.tools as tools_module
+
+    monkeypatch.setattr(tools_module, "_ensure_preprocess_subagent_sandbox", lambda agent: (None, {}))
+    monkeypatch.setattr(
+        baseline_module, "_run_benchmark_once",
+        lambda *a, **k: {"returncode": 0, "stdout": "", "stderr": "", "duration_s": 1.0, "latency_ms": None},
+    )
+
+    def fake_dispatcher(*, name, task, model, cwd=None, context=None):
+        return {"name": name, "success": False, "output": "could not confirm"}
+
+    harness = tmp_path / "harness.py"
+    harness.write_text("x")
+    agent = PreprocessOrchestratorAgent(model=object(), config=PreprocessOrchestratorConfig(repo=tmp_path))
+    agent._collected["harness_path"] = str(harness)
+    agent._extra_template_vars = {"repo_root": str(tmp_path)}
+
+    tool = _make_tool_dispatch_subagent(agent, fake_dispatcher)
+    res = tool(name="harness-verifier", task="verify")
+
+    assert res["success"] is True
+    assert "HARNESS_VERIFIED=true" in res["output"]
+
+
+def test_verifier_backstop_no_false_positive_when_correctness_fails(monkeypatch, tmp_path: Path) -> None:
+    """The backstop must NOT mark a harness verified when --correctness fails."""
+    import minisweagent.run.preprocess_v3.baseline as baseline_module
+    import minisweagent.run.preprocess_v3.tools as tools_module
+
+    monkeypatch.setattr(tools_module, "_ensure_preprocess_subagent_sandbox", lambda agent: (None, {}))
+    monkeypatch.setattr(
+        baseline_module, "_run_benchmark_once",
+        lambda *a, **k: {"returncode": 1, "stdout": "", "stderr": "FileNotFoundError", "duration_s": 1.0, "latency_ms": None},
+    )
+
+    def fake_dispatcher(*, name, task, model, cwd=None, context=None):
+        return {"name": name, "success": False, "output": "nope"}
+
+    harness = tmp_path / "harness.py"
+    harness.write_text("x")
+    agent = PreprocessOrchestratorAgent(model=object(), config=PreprocessOrchestratorConfig(repo=tmp_path))
+    agent._collected["harness_path"] = str(harness)
+    agent._extra_template_vars = {"repo_root": str(tmp_path)}
+
+    tool = _make_tool_dispatch_subagent(agent, fake_dispatcher)
+    res = tool(name="harness-verifier", task="verify")
+
+    assert res["success"] is False
+    assert "HARNESS_VERIFIED=true" not in (res.get("output") or "")

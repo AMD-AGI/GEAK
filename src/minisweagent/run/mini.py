@@ -894,6 +894,16 @@ def main(
             test_command = preprocess_ctx["test_command"]
         if preprocess_ctx.get("repo_root") and repo is None:
             repo = Path(preprocess_ctx["repo_root"])
+        elif preprocess_ctx.get("repo_root"):
+            # A PyTorch->FlyDSL translation retargets the optimization root to the
+            # per-run ``_opt_repo`` (where the translated kernel + staged reference
+            # live). Honor that even when ``--repo`` was passed, otherwise
+            # optimization/preflight root at the source repo (which has NO
+            # translated kernel) and the harness fails to import it.
+            _pp_root = Path(preprocess_ctx["repo_root"])
+            if _pp_root.name == "_opt_repo" and (repo is None or Path(repo).resolve() != _pp_root.resolve()):
+                logger.info("Using per-run _opt_repo as optimization root (translation run): %s", _pp_root)
+                repo = _pp_root
 
         # Resolve max_rounds via the documented precedence chain:
         # CLI --max-rounds (if any future flag added) > config (mode preset) >

@@ -88,7 +88,17 @@ Instructions:
                 config = copy.deepcopy(self.config.model_config)
                 self._model = get_model(config=config)
             else:
-                self._model = get_model()
+                # No explicit model config: load the GEAK gateway model (honors
+                # model_class, e.g. ``amd_llm``). A bare ``get_model()`` defaults
+                # to a provider-less ``LitellmModel`` that 400s on
+                # gateway-routed names like ``claude-opus-4.6`` ("LLM Provider
+                # NOT provided"), which would crash the calling agent.
+                try:
+                    from minisweagent.run.pipeline_helpers import load_geak_model
+
+                    self._model = load_geak_model(None)
+                except Exception:  # noqa: BLE001 — last-resort fallback
+                    self._model = get_model()
             model_impl = getattr(self._model, "_impl", self._model)
             if hasattr(model_impl, "tools"):
                 model_impl.tools = []
@@ -116,9 +126,16 @@ Instructions:
 
         logger.debug("RAG postprocessor processing %d chars", len(rag_result))
 
-        response = self.model.query(
-            [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}]
-        )
+        # RAG post-processing is advisory polish on retrieved knowledge — it
+        # must NEVER crash the calling agent. On any model/transport failure,
+        # fall back to the raw retrieval result.
+        try:
+            response = self.model.query(
+                [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}]
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("RAG postprocessor LLM call failed (%s); returning raw retrieval result", exc)
+            return rag_result
 
         result = response["content"]
         logger.debug("RAG postprocessor output %d chars", len(result))
