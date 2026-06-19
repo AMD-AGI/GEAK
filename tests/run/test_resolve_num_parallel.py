@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from minisweagent.run.utils.parallel_helpers import resolve_num_parallel
 
 
 def test_resolve_num_parallel_gpu_counts() -> None:
-    assert resolve_num_parallel(0) == 4
-    assert resolve_num_parallel(1) == 4
-    assert resolve_num_parallel(2) == 6
-    assert resolve_num_parallel(4) == 12
+    # Defaults: min_workers=8, workers_per_gpu=4 -> max(8, 4*gpu).
+    assert resolve_num_parallel(0) == 8
+    assert resolve_num_parallel(1) == 8
+    assert resolve_num_parallel(2) == 8
+    assert resolve_num_parallel(4) == 16
 
 
 def test_resolve_num_parallel_explicit_knobs() -> None:
@@ -29,4 +28,5 @@ def test_resolve_num_parallel_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_resolve_num_parallel_empty_env_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GEAK_MIN_PARALLEL_WORKERS", "")
     monkeypatch.setenv("GEAK_WORKERS_PER_GPU", "")
-    assert resolve_num_parallel(4) == 12
+    # Empty env falls back to defaults min=8, wpg=4 -> max(8, 4*4)=16.
+    assert resolve_num_parallel(4) == 16
