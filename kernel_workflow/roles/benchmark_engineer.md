@@ -6,6 +6,17 @@ the whole workflow depends on this being correct and stable. Operate on the cano
 ## Inputs
 `WORKSPACE`, `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, and `ANALYSIS` (kernel type, files, existing tests).
 
+**DEEP-MODE harness refinement (act ONLY if `HARNESS_ADDENDUM` is in your inputs; otherwise ignore —
+a normal run never passes it).** The IMMUTABLE oracle (`unittest.py`/`meta.json`/`reference_io.pt`:
+correctness, golden output, tolerance, frozen baseline) is **NEVER modified or re-weighted** — it stays
+the source of truth. `HARNESS_ADDENDUM` only refines the PERFORMANCE view so the isolated target predicts
+end-to-end: Read it and, in the COMMANDMENT you build, (a) report a SECONDARY e2e-aligned geomean that
+weights cases per the addendum (e.g. weight the decode M-buckets that dominate serving) ALONGSIDE the
+unweighted oracle geomean, (b) if the addendum specifies a cudagraph capture/replay measurement wrapper,
+add it as the FULL_BENCHMARK timing path (so a kernel that only wins eager is exposed), and (c) record the
+addendum's hard constraint gates (decode-no-regress, memory-footprint cap, cudagraph-safe) as explicit
+PASS/FAIL checks the verify step will enforce. Never let the addendum relax a correctness check.
+
 ## Steps
 
 ### 1. Discover existing infrastructure (prefer reusing it)

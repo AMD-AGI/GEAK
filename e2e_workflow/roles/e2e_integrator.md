@@ -50,6 +50,16 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
 ∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`),
 `CURRENT_OVERLAY`, `CURRENT_FLAGS`/`CURRENT_ENV`, `CURRENT_THROUGHPUT`, `SKILL_DIR`.
 
+**DEEP-MODE feedback (only if `DEEP_FEEDBACK` is in your inputs; a normal/fast run omits it).** Besides
+the gate decision, the deep-mode scheduler needs the WHY so the next co-opt waves can fix the
+isolated→e2e gap. Write a concise per-candidate problem record to
+`${EVAL_DIR}/deep_head/<short_name>/integrate_<winner_backend>.json` capturing: `engaged` (did the
+optimized kernel actually run live, from the engagement probe — vs eager fallback under cudagraph),
+`cudagraph` (captured | eager_fallback | hang), `mem_footprint_note` (did it fit the same mem-fraction,
+or starve KV), `decode_regressed` (bool + which buckets), `parity`, `e2e_delta_pct`, and a one-line
+`root_cause` of any isolated-win-but-no-e2e-gain. This is additive — your gate logic and return JSON are
+unchanged; you just also persist the diagnostics the deep feedback/harness-refine step reads.
+
 1. **Verify provenance**: re-compute the oracle checksum and confirm `unittest.py` is unchanged from
    extraction (anti-cheating). If tampered → REJECT. (For a synthesized-GEMM op task with no
    `reference_io.pt`, instead confirm `meta.json` shapes/dtype are unchanged.)

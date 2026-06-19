@@ -109,6 +109,21 @@ Inputs: `EVAL_DIR`, `ROUND` (1-based), `BUDGET_REMAINING` (hard cap on direction
 prior rounds — see below). Also the current best per-case table. Plus `KERNEL_KNOWLEDGE_DIR`,
 `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` (the kk pointer resolved in analyze; may be empty).
 
+**DEEP-MODE hooks (act on these ONLY if present in your inputs; otherwise ignore — a normal run never
+passes them):**
+- `SHARED_KB` — a cross-backend blackboard file (techniques that worked / dead-ends / cross-backend
+  insights / directed "borrow X" assignments from the curator). **Read it first** and prefer directions
+  it recommends for your backend; do NOT re-explore anything its Dead-ends section already disproved for
+  your backend; if it assigned you a borrow ("backend A's split-K helped decode → you try the equivalent"),
+  make that a direction this round.
+- `E2E_FEEDBACK` — path to the latest end-to-end A/B result + problems from e2e_workflow (e2e delta,
+  engaged?, cudagraph eager-fallback?, mem footprint, decode regression, parity). **Read it and let
+  ground-truth override isolated intuition**: if a prior isolated win did NOT move e2e (e.g. eager
+  fallback under cudagraph, or KV-pool starved by a big weight cache), prioritize directions that fix
+  the INTEGRATION cause, not just more isolated speedup.
+- `HARNESS_ADDENDUM` — path to an e2e-refined harness addendum (which cases to weight, a cudagraph-capture
+  wrapper, hard constraint gates). Plan toward the addendum's weighted target.
+
 Your job: decide this round's directions (or stop). Re-read `geomean_levers.md` and the relevant
 optimization knowledge first.
 
@@ -219,6 +234,28 @@ them as JSON so the script can thread them into the next `plan_round`:
 - **Hypothesis ledger**: one row per direction tried — expected vs actual speedup, verdict
   (confirmed / partial / dead-end), and a one-line lesson. Re-planning must avoid confirmed
   dead-ends.
+
+**DEEP-MODE persistence + sharing (do these ONLY if the named input is present; a normal run passes
+none of them, so skip this whole block then):**
+- `STATE_DIR` (+ `CANONICAL`, `CUMULATIVE_SPEEDUP`, `BEST_PER_CASE`): persist this wave's progress so a
+  re-invocation CONTINUES instead of restarting. After updating the blackboard, run:
+  ```bash
+  mkdir -p "$STATE_DIR"
+  # sync the cumulative-best workspace (code + immutable oracle) to STATE_DIR/best (tar-pipe, exclude
+  # .git/build/__pycache__/.torch_ext/*.so) so the next wave's director seeds from it.
+  rm -rf "$STATE_DIR/best.tmp"; mkdir -p "$STATE_DIR/best.tmp"
+  ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/build' --exclude='*/__pycache__' \
+      --exclude='*/.torch_ext' --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$STATE_DIR/best.tmp" && tar -xf - )
+  rm -rf "$STATE_DIR/best"; mv "$STATE_DIR/best.tmp" "$STATE_DIR/best"
+  ```
+  Then write `$STATE_DIR/STATE.json` = `{cumulative: <CUMULATIVE_SPEEDUP>, insights, ledger,
+  bottleneck_now, best_per_case: <BEST_PER_CASE>, last_round: <ROUND>}` (the full carried-forward state).
+  Do this EVERY round (even non-improving) so a kill mid-wave never loses the ledger; only refresh
+  `best/` when the cumulative best actually advanced this wave.
+- `SHARED_KB` (+ `TARGET_LANGUAGE`): APPEND this wave's distilled, EVIDENCE-BACKED findings for your
+  backend into the shared blackboard file so the OTHER backends learn from you next wave — each entry:
+  technique → measured effect (Xx on which shape class) → your backend → and dead-ends with evidence.
+  Keep it concise; do not dump raw logs. (A separate curator compresses it; you only append your wave's net new findings.)
 
 Return JSON:
 ```json

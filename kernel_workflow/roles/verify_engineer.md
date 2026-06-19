@@ -10,6 +10,11 @@ absolute per-case latencies. The script trusts only your numbers.
 - `PATCH` — path to the candidate's `best_patch.diff` (generated relative to `CANONICAL`'s git HEAD).
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
+- **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
+  the oracle correctness + unweighted geomean, also re-measure and report the addendum's e2e-aligned
+  weighted geomean and ENFORCE its hard gates (decode-no-regress, memory-footprint cap, cudagraph-safe);
+  mark the candidate failed if it violates a gate even when the unweighted geomean improved. Never relax
+  the immutable oracle's correctness/tolerance.
 
 ## Steps
 1. Build a clean copy and apply the patch:

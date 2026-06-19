@@ -83,6 +83,37 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
 
 // ---------------------------------------------------------------------------
+// DEEP-MODE continuation + cross-backend / e2e-feedback hooks. ALL OPTIONAL.
+// When none are passed (every normal/fast e2e run, and every standalone run) these are '' / the
+// current defaults and are NEVER threaded into a prompt — so behavior is byte-identical to the
+// pre-feature build. They are set ONLY by e2e_workflow's deep_mode head scheduler.
+//   STATE_DIR        a STABLE dir for THIS (kernel,backend) ACROSS deep waves. When set the run
+//                    RESUMES: director seeds the canonical from STATE_DIR/best (the cumulative-best
+//                    code) and returns prior_state (cumulative + history) so re-invocation CONTINUES
+//                    instead of restarting (no lost experience, no re-explored directions). The frozen
+//                    oracle baseline (immutable unittest.py/meta.json) stays the reference, so speedups
+//                    remain comparable to the TRUE baseline across waves. update_memory writes STATE.json
+//                    + syncs best/ each round.
+//   SHARED_KB        cross-backend blackboard file (read by plan+engineers, appended by update_memory).
+//   E2E_FEEDBACK     path to the latest end-to-end A/B result + problems from e2e_workflow (engaged?,
+//                    cudagraph behavior, mem footprint, decode regression, e2e delta) — steers planning.
+//   HARNESS_ADDENDUM path to an e2e-refined harness addendum (timing-weight / cudagraph-capture / hard
+//                    constraint gates). The IMMUTABLE oracle is NEVER touched; this only refines what the
+//                    perf bench emphasizes so the isolated target aligns with e2e.
+//   MAX_NO_IMPROVE   consecutive non-improving rounds before stopping (default 2 = current behavior).
+const STATE_DIR = String(A.state_dir || '').replace(/\/+$/, '');
+const SHARED_KB = String(A.shared_kb || '').trim();
+const E2E_FEEDBACK = String(A.e2e_feedback || '').trim();
+const HARNESS_ADDENDUM = String(A.harness_addendum || '').trim();
+const MAX_NO_IMPROVE = Math.max(1, parseInt(A.max_no_improve != null ? A.max_no_improve : 2, 10));
+// Conditional inputs: spreading {} adds NOTHING to a prompt (byte-identical) when a hook is unset.
+const KB_INPUTS = {
+  ...(SHARED_KB ? { SHARED_KB } : {}),
+  ...(E2E_FEEDBACK ? { E2E_FEEDBACK } : {}),
+  ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+};
+
+// ---------------------------------------------------------------------------
 // Reusable JSON-schema fragments.
 // ---------------------------------------------------------------------------
 const perCase = {
@@ -103,6 +134,15 @@ const obj = (props, required) => ({ type: 'object', properties: props, required:
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
   kernel_name: { type: 'string' }, source_files: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
+  // DEEP-MODE resume only: populated by the director ONLY when STATE_DIR was provided AND a prior best
+  // exists there. Lets a continued wave restore its cumulative speedup + insight/ledger history so it
+  // does not re-explore dead directions. Absent (undefined) on a fresh run -> no behavior change.
+  resumed: { type: 'boolean' },
+  prior_state: obj({
+    cumulative: { type: 'number' }, insights: { type: 'array', items: { type: 'string' } },
+    ledger: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    bottleneck_now: { type: 'string' }, best_per_case: perCase,
+  }, []),
 }, ['eval_dir', 'workspace', 'kernel_name']);
 
 const AUTHOR_SCHEMA = obj({
@@ -298,6 +338,7 @@ const setup = await agentT(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
     KERNEL_PATH_ORIG, EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK, SKILL_DIR: WORKFLOW_DIR,
     MODE, TARGET_LANGUAGE, OP_SPEC,
+    ...(STATE_DIR ? { STATE_DIR } : {}),
   }),
   { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
 if (!setup || !setup.eval_dir) throw new Error('Setup failed: director did not return an eval_dir');
@@ -361,6 +402,7 @@ const bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0],
     ANALYSIS: analysis,
+    ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
   }),
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
 if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
@@ -391,7 +433,20 @@ let bestPerCase = BASELINE_PER_CASE;
 let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source}
 const history = { insights: [], ledger: [], rounds: [], bottleneck_now: profileSummary ? profileSummary.bottleneck : 'unknown', suggest_next: '' };
 
-while (dispatched < BUDGET && noImprove < 2) {
+// DEEP-MODE resume: restore cumulative speedup + insight/ledger history from the prior wave so this
+// continuation builds ON the cumulative best (canonical was already seeded from STATE_DIR/best by the
+// director) and does not re-explore dead directions. No-op on a fresh run (prior_state undefined).
+if (setup.resumed && setup.prior_state) {
+  const ps = setup.prior_state;
+  if (Number.isFinite(ps.cumulative) && ps.cumulative > cumulative) cumulative = ps.cumulative;
+  if (Array.isArray(ps.insights)) history.insights = ps.insights;
+  if (Array.isArray(ps.ledger)) history.ledger = ps.ledger;
+  if (ps.bottleneck_now) history.bottleneck_now = ps.bottleneck_now;
+  if (Array.isArray(ps.best_per_case) && ps.best_per_case.length) bestPerCase = ps.best_per_case;
+  log(`RESUMED from STATE_DIR: cumulative=${cumulative.toFixed(3)}x, ${history.insights.length} insights, ${history.ledger.length} ledger entries carried forward.`);
+}
+
+while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   round++;
   const remaining = BUDGET - dispatched;
   phase('Optimize');
@@ -403,6 +458,7 @@ while (dispatched < BUDGET && noImprove < 2) {
       BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
       CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
       KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
+      ...KB_INPUTS,
     }),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
 
@@ -470,6 +526,7 @@ ${cfg({
         INSIGHTS: history.insights,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
         KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
+        ...KB_INPUTS,
       })}
 
 Return ONLY the worker_result.json structure as StructuredOutput.`,
@@ -487,6 +544,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
         roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
           CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
           GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+          ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}`, schema: VERIFY_SCHEMA }
       ).then((ver) => ({ d, eng, ver, patch }));
@@ -582,6 +640,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       INTEGRATE: integrate, WINNER: winner ? { source: winner.source, geomean: winner.geomean } : null,
       IMPROVED: improved, REPROFILE_SHIFT: profileSummary ? profileSummary.shift_note : '',
       PRIOR_HISTORY: history,
+      ...(STATE_DIR ? { STATE_DIR, CANONICAL, CUMULATIVE_SPEEDUP: cumulative, BEST_PER_CASE: bestPerCase } : {}),
+      ...(SHARED_KB ? { SHARED_KB, TARGET_LANGUAGE } : {}),
     }),
     { phase: 'Optimize', label: `tech_lead:memory r${round}`, schema: MEMORY_SCHEMA });
   if (mem) {

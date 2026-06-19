@@ -11,6 +11,13 @@ work in your OWN private workspace copy — total isolation, no coordination wit
 - `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
   `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds).
+- **DEEP-MODE (optional — act only if present in your inputs; a normal run omits all three):**
+  `SHARED_KB` (cross-backend blackboard — Read it and BORROW any technique that plausibly transfers to
+  your kernel; skip its disproved dead-ends), `E2E_FEEDBACK` (latest end-to-end result+problems — if a
+  prior isolated win didn't move e2e, fix the integration cause: stay cudagraph-capture-safe, no host
+  syncs on the steady decode path, keep any weight cache small + keyed by data_ptr), `HARNESS_ADDENDUM`
+  (e2e-refined timing weights / cudagraph-capture wrapper / hard constraint gates — optimize toward THAT
+  weighted target and never violate its gates, e.g. decode-no-regress or the memory cap).
 - `KERNEL_KNOWLEDGE_DIR` (may be empty), `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` — pointers into the
   AMD operator×backend SOTA base, resolved by the TechLead for THIS kernel (see the next section).
 

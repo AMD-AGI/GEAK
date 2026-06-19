@@ -30,6 +30,11 @@ coherent implementation, and iterate hard.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
   `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds — read
   them; do not re-walk confirmed dead-ends).
+- **DEEP-MODE (optional — act only if present; a normal run omits all three):** `SHARED_KB` (cross-backend
+  blackboard — borrow transferable techniques, skip its dead-ends), `E2E_FEEDBACK` (end-to-end ground
+  truth — if isolated wins didn't move e2e, make integration-fidelity part of your rewrite: cudagraph-
+  capture-safe, zero host syncs on steady decode, small data_ptr-keyed weight cache), `HARNESS_ADDENDUM`
+  (e2e-refined weighted target + hard gates — push toward it, never violate decode-no-regress / mem cap).
 - `KERNEL_KNOWLEDGE_DIR` (may be empty), `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` — pointers into the
   AMD operator×backend SOTA base (see the contract section).
 
