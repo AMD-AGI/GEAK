@@ -114,8 +114,8 @@ const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_
 // normal/fast are byte-identical. deep_mode is mutually exclusive with the fast parallel track.
 const DEEP_MODE = String(A.deep_mode != null ? A.deep_mode : 'false') === 'true';
 const DEEP_HEAD_BUDGET_MS = parseInt(A.deep_head_budget_ms != null ? A.deep_head_budget_ms : 72000000, 10); // 20h for the whole HeadKernel module
-const DEEP_WAVE_KERNEL_BUDGET = parseInt(A.deep_wave_kernel_budget != null ? A.deep_wave_kernel_budget : 4, 10); // direction-budget per backend per wave (a bounded burst, then a curator+maybe-e2e step)
-const DEEP_HEAD_WF_MS = parseInt(A.deep_head_workflow_ms != null ? A.deep_head_workflow_ms : 3600000, 10); // per-burst nested kernel_workflow time cap (bounds the per-wave barrier; default 60min)
+const DEEP_WAVE_KERNEL_BUDGET = parseInt(A.deep_wave_kernel_budget != null ? A.deep_wave_kernel_budget : 3, 10); // direction-budget per backend per wave (a bounded burst, then a curator+maybe-e2e step)
+const DEEP_HEAD_WF_MS = parseInt(A.deep_head_workflow_ms != null ? A.deep_head_workflow_ms : 6600000, 10); // per-burst nested kernel_workflow time cap (only a true-hang backstop; default 110min so a legit ~45min burst is never cut). Disk-truth harvest makes the scheduler robust even if a burst IS cut.
 const DEEP_E2E_GAIN_TRIGGER = parseFloat(A.deep_e2e_gain_trigger != null ? A.deep_e2e_gain_trigger : 0.08); // isolated-best improvement since last e2e gate that triggers a new (batched) gate
 const DEEP_E2E_MAX_INTERVAL_MS = parseInt(A.deep_e2e_max_interval_ms != null ? A.deep_e2e_max_interval_ms : 7200000, 10); // force an e2e gate at least this often when a new candidate exists (default 2h)
 const DEEP_PLATEAU_STREAK = parseInt(A.deep_plateau_streak != null ? A.deep_plateau_streak : 3, 10); // consecutive non-improving waves before a backend lane is parked (frees its GPU)
@@ -639,6 +639,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     const ISO = makeSem(GPU_LIST);
     const ROOFLINE_SCHEMA = { type: 'object', additionalProperties: true, properties: { roofline_note: { type: 'string' }, target_geomean: { type: 'number' } }, required: ['roofline_note'] };
     const OK_SCHEMA = { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean' }, summary: { type: 'string' }, feedback_path: { type: 'string' }, addendum_path: { type: 'string' } }, required: ['ok'] };
+    const HARVEST_SCHEMA = { type: 'object', additionalProperties: true, properties: { lanes: { type: 'array', items: { type: 'object', additionalProperties: true, properties: { backend: { type: 'string' }, has_state: { type: 'boolean' }, cumulative: { type: 'number' }, eval_dir: { type: 'string' }, patch: { type: 'string' } }, required: ['backend'] } } }, required: ['lanes'] };
     const dHeads = heads.slice().sort((a, b) => (b.pct_gpu_time || 0) - (a.pct_gpu_time || 0));
     const pctSum = dHeads.reduce((s, h) => s + (h.pct_gpu_time || 1), 0) || 1;
     log(`[deep-mode] cross-backend co-opt over ${dHeads.length} head op(s); GPU pool {${GPU_LIST.join(',')}}; serving slot {${SERVING_GPU}} TP=${SERVING_TP}; HeadKernel budget ${Math.round(DEEP_HEAD_BUDGET_MS / 3600000)}h.`);
@@ -744,12 +745,28 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           return { l, g: gm, evalDir: al && al.eval_dir ? al.eval_dir : '' };
         })));
 
-        // update lane bests + plateau-park (frees the GPU for the still-improving lanes)
-        for (const r of waveRes.filter(Boolean)) {
-          const l = r.l;
-          if (r.g != null && r.g > l.best * 1.001) { l.best = r.g; l.noImprove = 0; if (r.evalDir) l.lastEval = r.evalDir; }
-          else l.noImprove++;
-          if (l.noImprove >= DEEP_PLATEAU_STREAK) { l.active = false; log(`  [deep-mode] parking ${h.short_name}/${l.lang} (plateau at ${l.best.toFixed(3)}x) — GPU freed for active lanes.`); }
+        // HARVEST DISK TRUTH — authoritative per-lane best from STATE.json, NOT the workflow return.
+        // A burst can complete (writing STATE.json + best/) yet have its deepBoundedWorkflow return resolve
+        // to null if it brushed the time cap; relying on the return then loses the result and the e2e gate
+        // never fires. So read the persisted state instead: this makes l.best/l.lastEval/l.patch reflect
+        // what actually landed on disk, immune to the cap, and lets us detect a structurally-dead lane.
+        const harvest = await safeAgent(
+          `Deep co-opt WAVE ${wave} of ${h.short_name} just finished. Report the AUTHORITATIVE persisted state per ACTIVE backend lane (read from disk, do not guess). Lanes:\n` +
+          lanes.filter(l => l.active).map(l => `- ${l.lang}: STATE.json=${l.state_dir}/STATE.json (has {cumulative,...}); cumulative-best workspace=${l.state_dir}/best; newest finished run=newest ${deepDir}/runs/${l.lang}/team_*/*/ that contains final_patch.diff`).join('\n') + '\n' +
+          `For EACH active lane return: backend; has_state (does ${'$'}state_dir/STATE.json exist AND ${'$'}state_dir/best/kernel_src exist); cumulative (the STATE.json "cumulative" field = speedup vs the frozen oracle baseline, 1.0 if no STATE); eval_dir (the newest runs/<backend>/team_*/<op> dir containing a non-empty final_patch.diff, else ""); patch (that final_patch.diff path, else ""). Return {lanes:[{backend,has_state,cumulative,eval_dir,patch}]}.`,
+          { phase: 'HeadKernel', label: `harvest ${h.short_name} w${wave}`, schema: HARVEST_SCHEMA });
+        const hmap = {}; for (const e of (harvest && Array.isArray(harvest.lanes) ? harvest.lanes : [])) hmap[e.backend] = e;
+        for (const l of lanes) {
+          if (!l.active) continue;
+          const e = hmap[l.lang];
+          const g = e && Number.isFinite(e.cumulative) ? e.cumulative : null;
+          if (g != null && g > l.best * 1.001) { l.best = g; l.noImprove = 0; } else l.noImprove++;
+          if (e && e.eval_dir) l.lastEval = e.eval_dir;
+          if (e && e.patch) l.patch = e.patch;
+          // Park a structurally-dead lane (no STATE/best after a full wave → the backend can't produce on
+          // this op, e.g. no MXFP8-E8M0 primitive) immediately, freeing its GPU; otherwise the usual plateau cap.
+          if (e && e.has_state === false) { l.active = false; log(`  [deep-mode] parking ${h.short_name}/${l.lang} — no persisted result after wave ${wave} (backend can't optimize this op); GPU freed.`); }
+          else if (l.noImprove >= DEEP_PLATEAU_STREAK) { l.active = false; log(`  [deep-mode] parking ${h.short_name}/${l.lang} (plateau at ${l.best.toFixed(3)}x); GPU freed.`); }
         }
 
         // CURATOR (no GPU): distill the wave into SHARED_KB + assign directed cross-backend borrows.
@@ -779,7 +796,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
                       winner_kind: 'patch', winner_backend: c.lang,
                       target_callable: ext.target_callable || h.target_callable || '',
                       authored_language: c.lang, authored_kernel_eval_dir: c.lastEval,
-                      apply_env: '', apply_flags: '', code_patch: `${c.lastEval}/final_patch.diff`, tuning_artifact: '',
+                      apply_env: '', apply_flags: '', code_patch: c.patch || (c.lastEval ? `${c.lastEval}/final_patch.diff` : ''), tuning_artifact: '',
                       verified_isolated_speedup: c.best, pct_gpu_time: h.pct_gpu_time, parity_note: 'expected_close',
                     },
                     CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
