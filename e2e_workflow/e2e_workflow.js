@@ -639,7 +639,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     const ISO = makeSem(GPU_LIST);
     const ROOFLINE_SCHEMA = { type: 'object', additionalProperties: true, properties: { roofline_note: { type: 'string' }, target_geomean: { type: 'number' } }, required: ['roofline_note'] };
     const OK_SCHEMA = { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean' }, summary: { type: 'string' }, feedback_path: { type: 'string' }, addendum_path: { type: 'string' } }, required: ['ok'] };
-    const HARVEST_SCHEMA = { type: 'object', additionalProperties: true, properties: { lanes: { type: 'array', items: { type: 'object', additionalProperties: true, properties: { backend: { type: 'string' }, has_state: { type: 'boolean' }, cumulative: { type: 'number' }, eval_dir: { type: 'string' }, patch: { type: 'string' } }, required: ['backend'] } } }, required: ['lanes'] };
+    const HARVEST_SCHEMA = { type: 'object', additionalProperties: true, properties: { lanes: { type: 'array', items: { type: 'object', additionalProperties: true, properties: { backend: { type: 'string' }, has_state: { type: 'boolean' }, cumulative: { type: 'number' }, best_ms: { type: 'number' }, vs_live: { type: 'number' }, eval_dir: { type: 'string' }, patch: { type: 'string' } }, required: ['backend'] } } }, required: ['lanes'] };
     const dHeads = heads.slice().sort((a, b) => (b.pct_gpu_time || 0) - (a.pct_gpu_time || 0));
     const pctSum = dHeads.reduce((s, h) => s + (h.pct_gpu_time || 1), 0) || 1;
     log(`[deep-mode] cross-backend co-opt over ${dHeads.length} head op(s); GPU pool {${GPU_LIST.join(',')}}; serving slot {${SERVING_GPU}} TP=${SERVING_TP}; HeadKernel budget ${Math.round(DEEP_HEAD_BUDGET_MS / 3600000)}h.`);
@@ -692,6 +692,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         }
       }
       backends = backends.slice(0, Math.max(2, GPU_LIST.length));  // at most one lane per card
+      // The LIVE serving baseline = the op's frozen-oracle geomean ms (the bar an authored kernel must
+      // beat). CRITICAL for cross-backend ranking: a kernel_workflow's own "cumulative speedup" is
+      // SELF-RELATIVE (vs that lane's first port), so an author lane reporting 5x can still be 3x SLOWER
+      // than the live kernel. We rank/gate by speedup-VS-LIVE = liveBaselineMs / lane_best_ms instead.
+      const liveBaselineMs = (bake && Number.isFinite(bake.best_known_ms) && bake.best_known_ms > 0) ? bake.best_known_ms : 0;
       const deepDir = `${EVAL_DIR}/deep_head/${h.short_name}`;
       const sharedKb = `${deepDir}/SHARED_KB.md`;
       const opSpec = { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || 'both', cuda_graph_safe: true };
@@ -730,16 +735,19 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       // prior best, e.g. tilelang's 2.7x, immediately) and once after the loop for the final wave's bursts.
       const harvestAndGate = async (tag) => {
         const harvest = await safeAgent(
-          `Deep co-opt of ${h.short_name} (${ext.op_kind}): report the AUTHORITATIVE persisted state per ACTIVE backend lane (read from disk, do NOT guess). Lanes:\n` +
-          lanes.filter(l => l.active).map(l => `- ${l.lang}: STATE.json=${l.state_dir}/STATE.json (has {cumulative,...}); cumulative-best workspace=${l.state_dir}/best; newest finished run=newest ${deepDir}/runs/${l.lang}/team_*/*/ with a final_patch.diff`).join('\n') + '\n' +
-          `For EACH active lane return: backend; has_state (does ${'$'}state_dir/STATE.json exist AND ${'$'}state_dir/best/kernel_src exist); cumulative (STATE.json "cumulative" = speedup vs the frozen oracle baseline, 1.0 if none); eval_dir (newest runs/<backend>/team_*/<op> dir with a non-empty final_patch.diff, else ""); patch (that final_patch.diff path, else ""). Return {lanes:[{backend,has_state,cumulative,eval_dir,patch}]}.`,
+          `Deep co-opt of ${h.short_name} (${ext.op_kind}): report the AUTHORITATIVE persisted state per ACTIVE backend lane (read from disk, do NOT guess). ` +
+          `The LIVE serving baseline geomean for this op = ${liveBaselineMs || '?'} ms (the bar to beat; a lane's own "cumulative" is SELF-RELATIVE to its first port and is NOT comparable — you MUST compute speedup vs THIS live baseline). Lanes:\n` +
+          lanes.filter(l => l.active).map(l => `- ${l.lang}: STATE.json=${l.state_dir}/STATE.json; cumulative-best workspace=${l.state_dir}/best; newest finished run=newest ${deepDir}/runs/${l.lang}/team_*/*/ with a final_patch.diff (its baseline_timing.json + tech_lead_report.md give the OPTIMIZED absolute per-case ms)`).join('\n') + '\n' +
+          `For EACH active lane return: backend; has_state (does ${'$'}state_dir/STATE.json exist AND ${'$'}state_dir/best/kernel_src exist); best_ms (the ABSOLUTE geomean ms of this lane's cumulative-BEST kernel across the op's cases — read the lane's measured optimized per-case ms, NOT a relative number); vs_live (= ${liveBaselineMs || 0} / best_ms when both > 0, i.e. speedup vs the LIVE baseline; 1.0 if unknown); cumulative (the self-relative number, for reference); eval_dir (newest runs/<backend>/team_*/<op> dir with a non-empty final_patch.diff, else ""); patch (that final_patch.diff path, else ""). Return {lanes:[{backend,has_state,best_ms,vs_live,cumulative,eval_dir,patch}]}.`,
           { phase: 'HeadKernel', label: `harvest ${h.short_name} ${tag}`, schema: HARVEST_SCHEMA });
         const hmap = {}; for (const e of (harvest && Array.isArray(harvest.lanes) ? harvest.lanes : [])) hmap[e.backend] = e;
         const anyState = Object.values(hmap).some(e => e && e.has_state);   // some lane has produced a result
         for (const l of lanes) {
           if (!l.active) continue;
           const e = hmap[l.lang];
-          const g = e && Number.isFinite(e.cumulative) ? e.cumulative : null;
+          // Rank by speedup VS LIVE (comparable across backends), NOT the self-relative cumulative.
+          const g = e && Number.isFinite(e.vs_live) && e.vs_live > 0 ? e.vs_live
+                  : (e && Number.isFinite(e.cumulative) && !liveBaselineMs ? e.cumulative : null);
           if (g != null && g > l.best * 1.001) { l.best = g; l.noImprove = 0; } else if (anyState) l.noImprove++;
           if (e && e.eval_dir) l.lastEval = e.eval_dir;
           if (e && e.patch) l.patch = e.patch;
