@@ -35,7 +35,7 @@ the measurement wins (note it so the skill is later marked `stale`).
      an acceptance shortcut.
 4. **Never skip measurement.** Multiple matched skills all enter the candidate set (no ranking); the
    on-box A/B picks the winner. Do not re-route away from what the profile says just because a skill exists.
-5. **Close the loop.** When you grow `knowledge/backend_playbook.md` (update_experience phase), record
-   the skill id you used and its MEASURED result, so the skill's validation can be refreshed.
+5. **Close the loop.** When you curate `knowledge/learned/` (update_experience phase), record on the
+   relevant card the skill id you used and its MEASURED result, so the skill's validation can be refreshed.
 
 If no skill matches, proceed exactly as you would without this fragment.
