@@ -1368,9 +1368,7 @@ def _make_tool_collect_baseline(
         # identity; baseline source only, never a patched worktree.
         from minisweagent.run.utils.generated_artifacts import baseline_jit_cache_env
 
-        _baseline_cache_env = (
-            baseline_jit_cache_env(resolved_work_dir) if resolved_work_dir is not None else {}
-        )
+        _baseline_cache_env = baseline_jit_cache_env(resolved_work_dir) if resolved_work_dir is not None else {}
 
         if harness_path:
             baseline: BaselineMetrics = collect_baseline_metrics(

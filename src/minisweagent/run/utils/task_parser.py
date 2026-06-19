@@ -206,9 +206,7 @@ _SOURCE_EXT: dict[str, tuple[str, ...]] = {
 # the fully-wired translation targets; CK is an authoring backend + translation source,
 # not a translation target, so no ``*2ck`` token here).
 _REWRITE_TARGETS = ("flydsl", "tilelang")
-_REWRITE_KERNEL_TYPES = frozenset(
-    f"{s}2{t}" for s in _SOURCE_EXT for t in _REWRITE_TARGETS if s != t
-)
+_REWRITE_KERNEL_TYPES = frozenset(f"{s}2{t}" for s in _SOURCE_EXT for t in _REWRITE_TARGETS if s != t)
 
 _KERNEL_TYPE_TO_EXT: dict[str, tuple[str, ...]] = {
     "triton": (".py",),

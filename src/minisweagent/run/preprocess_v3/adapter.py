@@ -700,9 +700,7 @@ def _build_orchestrator_task(
         concrete = raw_arg_spec.get("concrete_inputs") or ""
         spec_lines = "\n".join(
             f"  - {label}: {val}"
-            for label, val in (
-                ("Input Dims", dims), ("Input type", types), ("Concrete Inputs", concrete)
-            )
+            for label, val in (("Input Dims", dims), ("Input type", types), ("Concrete Inputs", concrete))
             if val
         )
         if spec_lines:
