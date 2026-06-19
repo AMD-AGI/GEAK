@@ -89,9 +89,7 @@ def _as_int(value: Any) -> int | None:
 # does not exist, so it is intentionally excluded to avoid a dead route.
 _REWRITE_SOURCES = ("pytorch", "triton", "ck", "hip", "tilelang", "flydsl")
 _REWRITE_TARGETS = ("flydsl", "tilelang")
-_REWRITE_KERNEL_TYPES = frozenset(
-    f"{s}2{t}" for s in _REWRITE_SOURCES for t in _REWRITE_TARGETS if s != t
-)
+_REWRITE_KERNEL_TYPES = frozenset(f"{s}2{t}" for s in _REWRITE_SOURCES for t in _REWRITE_TARGETS if s != t)
 
 
 def _normalize_kernel_type(value: Any) -> str:

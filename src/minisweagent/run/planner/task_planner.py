@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _REWRITE_FLYDSL = "flydsl-kernel-rewrite"
 _REWRITE_TILELANG = "tilelang-kernel-rewrite"
 _REWRITE_ASM = "asm-kernel-rewrite"  # highest-perf tier (the ceiling under the DSLs)
-_REWRITE_CK = "ck-kernel-rewrite"    # CK 2-stage / ck_tile codegen (shipped ck_moe / batched_gemm_*_CK)
+_REWRITE_CK = "ck-kernel-rewrite"  # CK 2-stage / ck_tile codegen (shipped ck_moe / batched_gemm_*_CK)
 
 # Adaptive op-type → best-fit rewrite backend(s). Picks the backend(s) with the real edge
 # on gfx942 for that op class, so we don't waste a slot on a rewrite that can't win:

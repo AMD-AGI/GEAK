@@ -222,8 +222,7 @@ def translate_kernel(
 
     if not isinstance(raw, dict):
         raise TypeError(
-            f"translate_kernel: run_translation returned {type(raw).__name__}, "
-            f"expected dict (legacy contract violated)"
+            f"translate_kernel: run_translation returned {type(raw).__name__}, expected dict (legacy contract violated)"
         )
 
     return _project(raw, elapsed_s)
