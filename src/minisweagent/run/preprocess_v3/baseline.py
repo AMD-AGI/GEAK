@@ -696,6 +696,23 @@ def collect_profile(
         raise FileNotFoundError(f"collect_profile: harness not found: {harness_path}")
 
     command = _profile_command(harness_path.resolve())
+
+    # Profiling is advisory (roofline hint for the optimizer), never required for
+    # baseline/benchmark/correctness. On some kernels (e.g. paged-attention) the
+    # profiler-mcp roofline pass hangs and eats the whole harness-init budget via
+    # repeated timeouts. GEAK_SKIP_PROFILE short-circuits it: return a profile-less
+    # (but non-error) ProfileResult so the optimizer plans "blind" and proceeds to
+    # rounds instead of starving on the profiler.
+    if os.environ.get("GEAK_SKIP_PROFILE", "").strip().lower() in ("1", "true", "yes"):
+        logger.info("collect_profile: GEAK_SKIP_PROFILE set; skipping profiler-mcp (advisory)")
+        return ProfileResult(
+            harness_path=harness_path.resolve(),
+            command=command,
+            profile=None,
+            profile_path=None,
+            backend=backend,
+        )
+
     profile = _invoke_profiler_mcp(
         command,
         backend=backend,

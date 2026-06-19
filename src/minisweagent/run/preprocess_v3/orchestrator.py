@@ -219,6 +219,11 @@ Once the harness is verified:
 
 Both are deterministic subprocess calls; do not dispatch a subagent.
 
+**Profiler may be administratively skipped.** When ``GEAK_SKIP_PROFILE`` is set, ``collect_profile``
+returns immediately with an empty (``profile=None``) result — this is intentional and NON-FATAL. Do NOT
+retry it, do NOT treat the missing profile as a blocker, and do NOT call ``finish_preprocess`` with an
+error because of it. Proceed straight to Step 5; the optimizer plans without the roofline hint.
+
 **Idempotency + bounded retries (CRITICAL — avoid step-limit loops).** Call each of ``collect_baseline`` and ``collect_profile`` AT MOST twice. If a call fails, you may retry it ONCE; if it still fails on the second attempt, stop retrying — do NOT keep re-running it. ``collect_profile`` is advisory for the optimizer and a persistent profile failure is NON-FATAL: proceed without a successful profile. If a deterministic tool or the verifier keeps failing past its retry budget and you cannot clear the blocker, go straight to the escape hatch in the Final section rather than re-running the same tool until the step limit.
 
 ## Step 5 — render COMMANDMENT.md (deterministic)

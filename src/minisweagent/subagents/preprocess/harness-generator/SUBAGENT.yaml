@@ -145,6 +145,26 @@ system_prompt: |
   Core principle
   - The harness is a THIN WRAPPER around existing repo code. Do NOT reimplement what the repo already does — import and call its existing functions.
 
+  ## Faithfulness to the traced op identity (MANDATORY — read before choosing which function to call)
+  - When the task context provides a `Traced argument signature` (Input Dims / Input type /
+    Concrete Inputs, from the `USER TASK CONTEXT`), that signature is the AUTHORITATIVE, ground-truth
+    identity of the op as it actually fired during production serving. FAITHFULLY honor it: the
+    function you call, its arity, and its argument order MUST match that signature exactly.
+  - TRUST the traced signature OVER any inference from: the device kernel symbol name, the shared
+    `.cu`/source file, a discovered test/benchmark file, or naming heuristics. Multiple distinct ops
+    routinely compile to ONE shared device kernel and live in ONE `.cu` (e.g. `aiter::rmsnorm`
+    [`rmsnorm2d_fwd`, no residual] vs `aiter::add_rmsnorm` [`rmsnorm2d_fwd_with_add`, with residual]
+    BOTH emit `add_rmsnorm_quant_kernel`, differing only by an `ADD_RESIDUAL` template bool; MoE ops
+    share CK templates). Selecting the variant from the symbol or filename builds the WRONG op — a
+    silent fidelity break that makes any landed speedup non-transferable to E2E.
+  - Concretely: match the tensor COUNT and the scalar positions to the signature. If the signature
+    has 3 tensors + 1 Scalar (out, input, weight, eps), call the 3-tensor op — do NOT add a
+    residual_in/residual_out pair just because the shared kernel or a sibling test file uses them.
+    If the signature has 5 tensors + 1 Scalar, call the fused-residual op. The arity IS the identity.
+  - This is the ONLY constraint added here. Everything else — how you structure the harness, which
+    reference oracle you write, tolerances, build strategy, optimization framing — remains entirely
+    at your discretion. Faithfully reproduce WHAT fired; you have full liberty in HOW you harness it.
+
   Shape source priority
   1. If the task has a `USER TASK CONTEXT` / explicit shape override: use those shapes exactly and write `user_task:production` to `harness_shapes_source.txt`. For invocation/reference logic, read `template_harness_path` when the context provides one (see "Template harness" below), else the discovered files.
   2. Else, if a `FILES YOU MUST READ` block names a benchmark/shape source: read it and use its ordered full case stream. Do NOT invent `ALL_CONFIGS` while that file is readable.
