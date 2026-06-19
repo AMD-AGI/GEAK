@@ -105,9 +105,74 @@ silent ~10-15% 口径 gap).
   "accepted_kernels": [ /* what was optimized + how (per-kernel) */ ],
   "accepted_heads": [ /* head GEMM/attn winners */ ],
   "accepted_config": { "flags": "...", "env": "..." },
-  "report_path": ".../final_report.md"   // human report: per-kernel optimizations, changed params, TTFT/TPOT
+  "report_path": ".../final_report.md",  // human report: per-kernel optimizations, changed params, TTFT/TPOT
+  "kernel_journey_path": ".../kernel_journey.json",  // per-kernel journey contract (see below); absent if nothing accepted
+  "recovered_from_disk": true             // present+true only when the handoff was rebuilt from on-disk artifacts
 }
 ```
+
+## Handoff resilience (the workflow return is never the single point of failure)
+
+The workflow return (the JSON object carrying `eval_dir` + `accepted_*`) is the
+only value scraped from the agent transcript. A failed scrape used to discard
+the **entire** run as `workflow_parse_error` even though every artifact
+(`director_e2e_validation.json`, the `final/` bundle, the measured gain) is on
+disk. `run_e2e.py` now removes that fragility, layered:
+
+1. **Robust capture** — the SDK path accumulates the *full* transcript (every
+   text fragment from every message, incl. tool-result blocks), not just the
+   last assistant text.
+2. **Robust extraction** — the parser scans the whole transcript for the last
+   JSON object carrying `eval_dir` (tolerates compact single-line, ```json```
+   fences, pretty-printed multi-line, and trailing prose).
+3. **On-disk sentinel** — on success the parsed return is persisted to
+   `<eval_dir>/workflow_return.json`, so any later read never re-scrapes.
+4. **Disk recovery** — if capture/extraction still fails (or the run timed out
+   after the measured leg), the return is **rebuilt from on-disk artifacts**:
+   `workflow_return.json` if present, else reconstructed from
+   `director_e2e_validation.json` (throughput/speedup/parity/overlay/launch +
+   `accepted_config` from `serving_config`) with accepted-kernel names recovered
+   from the stable `overlay/cand_*` layout. A real win is therefore never lost
+   to a lost handoff line. Recovery returns nothing only when no completed
+   `eval_dir` exists (the run genuinely produced nothing). Recovered runs set
+   `result.recovered_from_disk = true`.
+
+These are general (no model/run-specific assumptions) and key only off the
+stable artifact layout the workflow always writes.
+
+## `kernel_journey.json` (per-kernel journey contract → orchestrator)
+
+Because GEAK-e2e is a whole-pipeline e2e optimizer (not a per-kernel backend),
+its authored kernels were invisible in the orchestrator's kernel-journey view
+(`KERNEL_JOURNEY_SCHEMA.md`), which only saw upstream `tracelens` discovery.
+`run_e2e.py` now emits `<eval_dir>/kernel_journey.json` (path echoed in
+`result.kernel_journey_path`). It is self-contained and its per-kernel
+sub-objects are shaped EXACTLY as the orchestrator recorder's
+`record_kernel_{dispatch,backend_result,e2e}` inputs, so the orchestrator
+replays them verbatim — all mapping lives here, once.
+
+```jsonc
+{
+  "schema_version": 1,
+  "producer": "kernel-agent",
+  "eval_dir": ".../e2e_<model>_<ts>",
+  "versions": { "geak": { "tool": "geak", "root_dir": "...", "commit": "<sha>", "version": "<sha>" } },
+  "kernels": [
+    {
+      "kernel_id": "int4_w4a16_fused_moe_grouped_gemm",
+      "name": "int4_w4a16_fused_moe_grouped_gemm",
+      "gpu_pct": 0.57,
+      "dispatch":       { "dispatched": true, "backends": ["geak"], "skip_reason": "", "task_group": null },
+      "backend_result": { "kernel_id": "...", "run_id": "...", "attempts": [ { "backend": "geak", "attempt_id": "...", "status": "succeeded", "decision": "KEEP", "micro_speedup": 1.6316, "compile_passed": true, "correctness_passed": true, "optimized_path": ".../final_patch.diff", "error": null, "error_type": null } ], "verification": { "micro_speedup": 1.6316, "best_attempt_id": "...", "best_backend": "geak" }, "metadata": { "root_dir": "...", "version": "<sha>" } },
+      "e2e":            { "integrated": true, "e2e_gain_pct": 12.21, "validated": true, "decision": "KEEP", "patch_path": ".../final_patch.diff", "target_file": null, "extra_server_args": "--kv-cache-dtype fp8" }
+    }
+  ]
+}
+```
+
+On the recovery path, per-kernel `micro_speedup` may be `null` (it only existed
+in the scraped return) — never fabricated; but when exactly one kernel was
+accepted it is credited with the whole measured e2e delta (sound attribution).
 
 ## Reusing the deliverables for a workload sweep
 

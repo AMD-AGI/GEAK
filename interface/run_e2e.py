@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 SCHEMA_VERSION = 1
 
@@ -172,6 +173,51 @@ def apply_bench_protocol(h: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Invocation: SDK preferred, CLI fallback.
 # ---------------------------------------------------------------------------
+def _iter_message_text(msg: Any) -> list[str]:
+    """Best-effort extraction of every text fragment from one SDK message.
+
+    The workflow return (the JSON object carrying ``eval_dir``) can surface in
+    different places across SDK versions / message shapes: the assistant's
+    final text, a ``text`` content block, or the ``Workflow`` tool's
+    ``tool_result`` payload. Collecting from ALL of them (instead of only the
+    last assistant ``.text``) makes the handoff capture robust to the agent
+    ending its turn on a tool/result block rather than a plain text echo.
+
+    Returns every string fragment found on the message (never raises).
+    """
+    out: list[str] = []
+
+    def _take(v: Any) -> None:
+        if isinstance(v, str) and v.strip():
+            out.append(v)
+
+    # 1) Flat ``.text`` / ``.result`` attributes.
+    _take(getattr(msg, "text", None))
+    _take(getattr(msg, "result", None))
+    # 2) Structured ``.content`` blocks (assistant text + tool_result content).
+    content = getattr(msg, "content", None)
+    if isinstance(content, str):
+        _take(content)
+    elif isinstance(content, (list, tuple)):
+        for block in content:
+            _take(getattr(block, "text", None))
+            if isinstance(block, dict):
+                _take(block.get("text"))
+                inner = block.get("content")
+                if isinstance(inner, str):
+                    _take(inner)
+                elif isinstance(inner, (list, tuple)):
+                    for ib in inner:
+                        _take(getattr(ib, "text", None))
+                        if isinstance(ib, dict):
+                            _take(ib.get("text"))
+    # 3) Dict-shaped messages (some SDK builds yield plain dicts).
+    if isinstance(msg, dict):
+        _take(msg.get("text"))
+        _take(msg.get("result"))
+    return out
+
+
 def _invoke_via_sdk(prompt: str, timeout_s: int) -> str:
     import anyio
     from claude_agent_sdk import ClaudeAgentOptions, query
@@ -184,17 +230,19 @@ def _invoke_via_sdk(prompt: str, timeout_s: int) -> str:
             extra_args={"effort": CLAUDE_EFFORT},
             cwd=str(E2E_DIR),
         )
-        last = ""
+        # Accumulate the FULL transcript (every text fragment from every
+        # message), not just the last assistant text — the workflow-return JSON
+        # is then recoverable wherever the agent emitted it. _parse_last_json_line
+        # scans the whole transcript for the last JSON object carrying eval_dir.
+        chunks: list[str] = []
         # Enforce the orchestrator's budget INSIDE the SDK path so we self-stop
         # before Hyperloom's outer kill_timeout SIGKILLs us (a SIGKILL would
         # skip result.json flushing entirely). anyio raises TimeoutError on
         # expiry, which main() maps to error_class="timeout".
         with anyio.fail_after(timeout_s):
             async for msg in query(prompt=prompt, options=opts):
-                text = getattr(msg, "text", None)
-                if getattr(msg, "type", "") == "assistant" and text:
-                    last = text
-        return last
+                chunks.extend(_iter_message_text(msg))
+        return "\n".join(chunks)
 
     return anyio.run(_run)
 
@@ -243,14 +291,75 @@ class WorkflowParseError(RuntimeError):
     """The agent output carried no parseable workflow return (no ``eval_dir``)."""
 
 
-def _parse_last_json_line(raw: str) -> dict:
-    for line in reversed([ln for ln in (raw or "").splitlines() if ln.strip()]):
+def _iter_json_objects(raw: str):
+    """Yield every parseable top-level JSON object in ``raw`` (in order).
+
+    Robust to the workflow return arriving as: a single compact line, a value
+    fenced in a ```json block, or a pretty-printed multi-line object possibly
+    followed by trailing prose. Uses a brace-matching scan (string/escape
+    aware) so multi-line objects are recovered, then also tries each physical
+    line for the common single-line case. Never raises.
+    """
+    text = raw or ""
+    # 1) Brace-matched scan: find balanced {...} spans and try to parse each.
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    span = text[start : i + 1]
+                    try:
+                        obj = json.loads(span)
+                    except json.JSONDecodeError:
+                        obj = None
+                    if isinstance(obj, dict):
+                        yield obj
+                    start = -1
+    # 2) Per-line fallback (cheap; catches compact single-line returns the scan
+    #    above already covers, but keeps behaviour stable on odd inputs).
+    for line in (text.splitlines()):
+        s = line.strip()
+        if not (s.startswith("{") and s.endswith("}")):
+            continue
         try:
-            obj = json.loads(line.strip())
-            if isinstance(obj, dict) and obj.get("eval_dir"):
-                return obj
+            obj = json.loads(s)
         except json.JSONDecodeError:
             continue
+        if isinstance(obj, dict):
+            yield obj
+
+
+def _parse_last_json_line(raw: str) -> dict:
+    """Extract the workflow return (last JSON object carrying ``eval_dir``).
+
+    Scans the whole transcript (not just the last line) so the handoff is
+    recovered regardless of where/how the agent emitted it. Raises
+    :class:`WorkflowParseError` only when no eval_dir-bearing object exists.
+    """
+    found: dict | None = None
+    for obj in _iter_json_objects(raw):
+        if obj.get("eval_dir"):
+            found = obj  # keep scanning: the LAST one wins
+    if found is not None:
+        return found
     raise WorkflowParseError(
         "Could not parse a JSON workflow return (with eval_dir) from the agent "
         f"output. Last 2000 chars:\n{(raw or '')[-2000:]}"
@@ -346,6 +455,299 @@ def normalize_result(h: dict, wf: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Handoff resilience: persist + disk-recover the workflow return.
+#
+# The workflow return (carrying eval_dir + accepted_kernels/config) is the ONE
+# fragile link — it is scraped from the agent transcript. When that scrape
+# fails the whole run was historically discarded as ``workflow_parse_error``
+# even though the optimizer's artifacts (director_e2e_validation.json, final/
+# bundle, +gain) are all on disk. These helpers (a) persist the parsed return
+# next to the artifacts so a re-run/recovery never re-scrapes, and (b) rebuild
+# it from the on-disk artifacts when the scrape failed. Both are GENERAL: no
+# model/run-specific assumptions — they key only off the stable artifact
+# layout the workflow always writes.
+# ---------------------------------------------------------------------------
+WORKFLOW_RETURN_FILE = "workflow_return.json"
+KERNEL_JOURNEY_FILE = "kernel_journey.json"
+
+
+def _git_short_sha(root: Path) -> str:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _discover_eval_dir(exp_root: Path) -> Path | None:
+    """Find the workflow's eval_dir under ``exp_root`` without the scraped return.
+
+    The workflow always creates ``<exp_root>/e2e_*`` and writes
+    ``director_e2e_validation.json`` (Validate phase) / a ``final/`` bundle into
+    it. Pick the most-recently-modified ``e2e_*`` dir that carries one of those
+    completion markers; fall back to the newest ``e2e_*`` dir.
+    """
+    if not exp_root.is_dir():
+        return None
+    cands = sorted(
+        (p for p in exp_root.glob("e2e_*") if p.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not cands:
+        return None
+    for p in cands:
+        if (p / "director_e2e_validation.json").is_file() or (p / "final").is_dir():
+            return p
+    return cands[0]
+
+
+def _enumerate_overlay_kernels(eval_dir: Path) -> list[str]:
+    """Recover accepted authored-kernel names from the stable overlay layout.
+
+    Each accepted authored kernel leaves an ``overlay/cand_<name>`` directory;
+    this is a deterministic on-disk enumeration usable when the scraped return
+    (the only structured ``accepted_kernels`` source) was lost.
+    """
+    names: list[str] = []
+    for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
+        if not base.is_dir():
+            continue
+        for d in sorted(base.glob("cand_*")):
+            if d.is_dir():
+                name = d.name[len("cand_"):]
+                if name and name not in names:
+                    names.append(name)
+    return names
+
+
+def _recover_workflow_return(exp_root: Path) -> dict | None:
+    """Rebuild the workflow return from on-disk artifacts (scrape-independent).
+
+    Returns ``None`` when no completed eval_dir is discoverable (e.g. the run
+    died before Validate, so there is genuinely nothing to keep). Otherwise
+    returns a workflow-return-shaped dict good enough for
+    :func:`normalize_result` (which itself reads most numbers from disk).
+    """
+    eval_dir = _discover_eval_dir(exp_root)
+    if eval_dir is None:
+        return None
+    # Prefer a previously-persisted authoritative return (full structured data).
+    persisted = _read_json(eval_dir / WORKFLOW_RETURN_FILE)
+    if persisted.get("eval_dir"):
+        return persisted
+    validation = _read_json(eval_dir / "director_e2e_validation.json")
+    if not validation:
+        # No completion marker => the optimizer did not finish a measured leg.
+        return None
+    serving = validation.get("serving_config") or {}
+    accepted_config = {
+        "flags": serving.get("final_flags") or serving.get("baseline_flags") or "",
+        "env": serving.get("final_env") or serving.get("baseline_env") or "",
+    }
+
+    # The director records throughput/speedup in NESTED blocks (the top-level
+    # keys normalize_result would otherwise read don't exist here). Pull them
+    # from the known blocks with general fallbacks; never fabricate.
+    def _first(*vals: Any) -> Any:
+        for v in vals:
+            if isinstance(v, (int, float)) and v:
+                return float(v)
+        return None
+
+    vs_base = validation.get("vs_provided_baseline") or {}
+    arb = validation.get("arbitration") or {}
+    drift = validation.get("drift_corrected_same_session") or {}
+    final_block = validation.get("final_block") or {}
+    base_block = validation.get("base_block") or {}
+    baseline_tput = _first(
+        vs_base.get("baseline_throughput_tok_s"),
+        base_block.get("warm_median_tok_s"),
+    )
+    final_tput = _first(
+        arb.get("director_verified_throughput_tok_s"),
+        vs_base.get("final_warm_median_tok_s"),
+        final_block.get("warm_median_tok_s"),
+    )
+    speedup = _first(vs_base.get("speedup"), drift.get("speedup_warm"))
+    if speedup is None and baseline_tput and final_tput:
+        speedup = final_tput / baseline_tput
+    overall_delta_pct = _first(vs_base.get("delta_pct"), drift.get("delta_pct_warm"))
+    if overall_delta_pct is None and speedup is not None:
+        overall_delta_pct = (speedup - 1.0) * 100.0
+
+    # accepted_kernels structured data only lived in the scraped return; recover
+    # names from the overlay layout so the kernel_journey still names what landed.
+    names = _enumerate_overlay_kernels(eval_dir)
+    accepted_kernels = [
+        {"short_name": n, "kind": "authored", "backend": "geak"} for n in names
+    ]
+    # Sound general attribution: when EXACTLY one kernel was accepted it is, by
+    # definition, responsible for the whole measured e2e delta — credit it.
+    # With >1 we cannot split, so leave per-kernel gain null (the headline gain
+    # still folds via the perfskills section + cumulative_gain).
+    if len(accepted_kernels) == 1 and overall_delta_pct is not None:
+        accepted_kernels[0]["e2e_delta_pct"] = overall_delta_pct
+
+    return {
+        "eval_dir": str(eval_dir),
+        "throughput_speedup": speedup,
+        "baseline_throughput_tok_s": baseline_tput,
+        "final_throughput_tok_s": final_tput,
+        "output_parity": validation.get("output_parity"),
+        "validation_status": validation.get("validation_status"),
+        "final_overlay": validation.get("final_overlay"),
+        "final_launch_script": validation.get("final_launch_script"),
+        "accepted_config": accepted_config,
+        "accepted_kernels": accepted_kernels,
+        "accepted_heads": [],
+        "recovered_from_disk": True,
+    }
+
+
+def _persist_workflow_return(eval_dir: Path, wf: dict) -> None:
+    """Persist the authoritative workflow return beside the artifacts (best-effort)."""
+    try:
+        (eval_dir / WORKFLOW_RETURN_FILE).write_text(
+            json.dumps(wf, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# kernel_journey contract (KERNEL_JOURNEY_SCHEMA.md producer side).
+#
+# GEAK-e2e is a whole-pipeline e2e optimizer, so it never went through the
+# per-kernel SDK recorder path — its authored kernels were invisible in the
+# orchestrator's kernel_journey (only tracelens discovery showed). We emit a
+# self-contained kernel_journey.json whose per-kernel sub-objects are shaped
+# EXACTLY as the recorder's record_kernel_{dispatch,backend_result,e2e} inputs,
+# so the orchestrator can replay them verbatim (all mapping lives here, once).
+# ---------------------------------------------------------------------------
+_BACKEND_ENUM = {"geak", "claude", "codex", "forge"}
+
+
+def _norm_backend(b: Any) -> str:
+    b = str(b or "").strip().lower()
+    return b if b in _BACKEND_ENUM else "geak"
+
+
+def _parity_passed(parity: Any) -> bool | None:
+    """Normalize the workflow's output_parity into a correctness bool (or None)."""
+    if isinstance(parity, dict):
+        parity = parity.get("status")
+    s = str(parity or "").strip().lower()
+    if s in ("pass", "passed", "ok", "identical", "true"):
+        return True
+    if s in ("fail", "failed", "mismatch", "false"):
+        return False
+    return None
+
+
+def build_kernel_journey(wf: dict, normalized: dict) -> dict:
+    """Build the schema-shaped kernel_journey contract from a workflow return.
+
+    One entry per accepted kernel/head; each carries ``dispatch`` /
+    ``backend_result`` / ``e2e`` sub-objects ready to feed the recorder. Empty
+    ``kernels`` when nothing was accepted (still valid — the orchestrator then
+    records nothing). General: iterates whatever the optimizer accepted.
+    """
+    eval_dir = str(normalized.get("eval_dir") or wf.get("eval_dir") or "")
+    final_patch = normalized.get("final_patch") or ""
+    parity = _parity_passed(wf.get("output_parity") or normalized.get("output_parity"))
+    geak_sha = _git_short_sha(PERFSKILLS_ROOT)
+    versions = {
+        "geak": {
+            "tool": "geak",
+            "root_dir": str(PERFSKILLS_ROOT),
+            "commit": geak_sha,
+            "version": geak_sha,
+        }
+    }
+
+    accepted = list(wf.get("accepted_kernels") or []) + list(wf.get("accepted_heads") or [])
+    kernels: list[dict] = []
+    for idx, k in enumerate(accepted):
+        if not isinstance(k, dict):
+            continue
+        name = str(k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}")
+        kernel_id = name
+        backend = _norm_backend(k.get("backend") or k.get("source"))
+        isolated = k.get("isolated") or k.get("micro_speedup") or k.get("verified_isolated_speedup")
+        e2e_delta = k.get("e2e_delta_pct")
+        gpu_pct = k.get("pct_gpu_time")
+        patch = k.get("final_patch") or final_patch or None
+        attempt_id = f"{kernel_id}-{backend}-{idx}"
+        attempt = {
+            "backend": backend,
+            "attempt_id": attempt_id,
+            "status": "succeeded",
+            "decision": "KEEP",
+            "micro_speedup": isolated,
+            "compile_passed": True,
+            "correctness_passed": parity,
+            "optimized_path": patch,
+            "error": None,
+            "error_type": None,
+        }
+        kernels.append({
+            "kernel_id": kernel_id,
+            "name": name,
+            "gpu_pct": gpu_pct,
+            "dispatch": {
+                "dispatched": True,
+                "backends": [backend],
+                "skip_reason": "",
+                "task_group": None,
+            },
+            # Shape == record_kernel_backend_result's ``result`` input.
+            "backend_result": {
+                "kernel_id": kernel_id,
+                "run_id": str(k.get("kernel_eval_dir") or eval_dir),
+                "attempts": [attempt],
+                "verification": {
+                    "micro_speedup": isolated,
+                    "best_attempt_id": attempt_id,
+                    "best_backend": backend,
+                },
+                "metadata": {"root_dir": str(PERFSKILLS_ROOT), "version": geak_sha},
+            },
+            # Shape == record_kernel_e2e's keyword inputs.
+            "e2e": {
+                "integrated": True,
+                "e2e_gain_pct": e2e_delta,
+                "validated": True,
+                "decision": "KEEP",
+                "patch_path": patch,
+                "target_file": k.get("target_file") or k.get("target_callable"),
+                "extra_server_args": str((wf.get("accepted_config") or {}).get("flags") or ""),
+            },
+        })
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "producer": "kernel-agent",
+        "eval_dir": eval_dir,
+        "versions": versions,
+        "kernels": kernels,
+    }
+
+
+def _write_kernel_journey(eval_dir: Path, wf: dict, normalized: dict) -> str:
+    """Write kernel_journey.json into eval_dir; return its path ("" on failure)."""
+    try:
+        journey = build_kernel_journey(wf, normalized)
+        path = eval_dir / KERNEL_JOURNEY_FILE
+        path.write_text(json.dumps(journey, indent=2), encoding="utf-8")
+        return str(path)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main(argv: list[str]) -> int:
@@ -376,25 +778,49 @@ def main(argv: list[str]) -> int:
                           "prompt": prompt, "e2e_script": str(E2E_SCRIPT)}, indent=2))
         return 0
 
+    recovered = False
     try:
         wf = invoke_workflow(prompt, timeout_s)
-        out = normalize_result(h, wf)
-    except Exception as e:  # crash/timeout: always flush a classified result.json
+    except Exception as e:  # scrape/crash/timeout: try a disk recovery first.
         error_class = _classify_error(e)
-        # Surface timeouts as their own status so the caller can tell a
-        # budget-capped run apart from a hard crash (both still exit nonzero).
-        status = "timeout" if error_class == "timeout" else "error"
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text(json.dumps(
-            {
-                "schema_version": SCHEMA_VERSION,
-                "status": status,
-                "error_class": error_class,
-                "error": str(e),
-            },
-            indent=2), encoding="utf-8")
-        sys.stderr.write(f"PerfSkills e2e failed [{error_class}]: {e}\n")
-        return 1
+        # The optimizer's artifacts (director_e2e_validation.json + final/
+        # bundle + gain) are on disk even when the transcript scrape failed;
+        # rebuild the return from them so a real win is never discarded over a
+        # lost handoff line. Recovery yields None only when no completed
+        # eval_dir exists (the run genuinely produced nothing to keep).
+        wf = _recover_workflow_return(Path(h.get("exp_root") or ""))
+        if wf is None:
+            status = "timeout" if error_class == "timeout" else "error"
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            result_path.write_text(json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "status": status,
+                    "error_class": error_class,
+                    "error": str(e),
+                },
+                indent=2), encoding="utf-8")
+            sys.stderr.write(f"PerfSkills e2e failed [{error_class}]: {e}\n")
+            return 1
+        recovered = True
+        sys.stderr.write(
+            f"PerfSkills e2e: transcript handoff failed [{error_class}]; "
+            f"recovered the workflow return from disk artifacts "
+            f"({wf.get('eval_dir')}).\n"
+        )
+
+    out = normalize_result(h, wf)
+
+    # Persist the authoritative return + the kernel_journey contract beside the
+    # artifacts so (a) a future recovery never re-scrapes and (b) the
+    # orchestrator can replay the per-kernel journey into its breakdown.
+    eval_dir = Path(out["eval_dir"])
+    _persist_workflow_return(eval_dir, wf)
+    kj_path = _write_kernel_journey(eval_dir, wf, out)
+    if kj_path:
+        out["kernel_journey_path"] = kj_path
+    if recovered:
+        out["recovered_from_disk"] = True
 
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(out, indent=2), encoding="utf-8")

@@ -549,7 +549,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). Use the FUSED fp8 path ` +
               `(fold the block-scale into the operand scale, run ONE fp8 MFMA GEMM — the "kill the dequant" lever) and cache ` +
               `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
-              `kernel MUST fit at the same mem-fraction the accepted config uses. ` + (TASK || ''),
+              `kernel MUST fit at the same mem-fraction the accepted config uses. ` +
+              `BOUNDED CACHES ONLY: any per-shape CUDA-graph / side-stream / scratch-buffer cache you create MUST be bounded ` +
+              `(small fixed-capacity LRU, or keyed by the M-bucket of a data-ptr-stable buffer captured INSIDE vLLM's region) — ` +
+              `an unbounded data_ptr()-keyed graph cache mints a fresh CUDAGraph + warmup buffers for every distinct input address ` +
+              `during the bench warmup ramp and transiently exhausts HBM (observed warmup OOM → engine killed). Never let any cache ` +
+              `grow without a cap. ` + (TASK || ''),
             apply_to_original: 'false',
           });
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
