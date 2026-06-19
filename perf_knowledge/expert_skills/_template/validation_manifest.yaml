@@ -1,0 +1,27 @@
+# validation_manifest.yaml — per-skill validation recipe consumed by _contribute/validate_skill.py.
+# Copy next to a skill as <id>.validation.yaml ONLY if the skill needs non-default validation inputs
+# (model path, shapes, launch script). Otherwise validate_skill.py derives everything from the skill's
+# match/expects + the caller-provided --model / --gpu.
+
+skill_id: REPLACE
+
+# Which harness runs the gate. Derived from skill.scope if omitted (kernel->kernel_workflow, e2e->e2e_workflow).
+harness: auto            # auto | kernel_workflow | e2e_workflow
+
+# Efficacy run: a model/shape the skill SHOULD help. Required to claim status: validated.
+efficacy:
+  model_path: ""         # e2e scope: serving model. kernel scope: leave empty, use shapes.
+  shapes: {}             # kernel scope: {M:[...], N:..., K:...} for the isolated unittest
+  gpu: gfx942/MI300X
+  backend: sglang        # e2e scope
+  workload: {isl: 1024, osl: 1024, conc: 64}
+  expect_min: auto       # auto = skill.expects (isolated_speedup_min or e2e_delta_min_pct)
+
+# Do-no-harm: a CONTROL scenario the skill must NOT degrade.
+do_no_harm:
+  # (e2e scope) a model whose profile does NOT match the selector -> skill must stay inert.
+  control_model_path: ""
+  # tolerance: |e2e_delta| on the control must be within the noise band.
+  noise_band_pct: 0.5
+  # boundary reproductions to assert the gate rejects (e.g. apply a decode-only-bad config to decode).
+  boundary_checks: []

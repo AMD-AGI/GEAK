@@ -71,10 +71,18 @@ gfx (`..._gfx942`). Key arch behavior baked into aiter's wrappers:
 - ROCDL exposes both FNUZ and OCP MFMA + block-scaled `mfma_scale_f32_16x16x128_f8f6f4` (CDNA4 MXFP).
 
 ## Deep-dive map
+
+**Using the library** (aiter's built-in flydsl GEMM primitives):
 - [deep.md](deep.md) — FLIR layout algebra, the ROCDL intrinsic surface, compile/JIT flow, LDS/sched.
 - [patterns.md](patterns.md) — `flydsl_hgemm` usage, preshuffle, split-K, small-M, the sched pipeline.
 - [knobs.md](knobs.md) — the full `flydsl_hgemm` knob set (verified against source) + autotune.
 - [kernel_families.md](kernel_families.md) — HGEMM / small-M / preshuffle / 2-stage MoE / GDR decode.
+
+**Authoring your own `@flyc.kernel`** (ingested from the FlyDSL authoring skill — reference how-to):
+- [authoring_tile_programming.md](authoring_tile_programming.md) — write a first correct kernel (CuTe-style tile model, the 4 patterns, MFMA reference).
+- [authoring_optimization.md](authoring_optimization.md) — structure-first optimization workflow (fusion → LDS → MFMA-loop → tuning).
+- [authoring_gemm_levers.md](authoring_gemm_levers.md) — GEMM-specific levers (tiling / LDS staging / swizzle / epilogue).
+- [debugging.md](debugging.md) — correctness/stability/hang triage (NaN / zeros / mismatch / compile / hang).
 
 ## Sources
 - Kimi-K2.5 optimization with FlyDSL (FLIR, instruction-level control, +162% throughput): https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html

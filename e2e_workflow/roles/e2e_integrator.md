@@ -68,6 +68,21 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
        --patch "<KERNEL_RESULT.code_patch>" --src-file "<installed source file to patch>"
      PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module "<dotted.module>"
      ```
+     **When `final_patch.diff` paths point at a LIVE installed file** (e.g. `a/aiter/ops/triton/...`,
+     i.e. the kernel layer optimized the installed module in place, so the diff does NOT apply inside the
+     task `ws` — `git apply` in `ws` fails): this IS the **patch** case, not authored. Do NOT improvise by
+     editing the live tree. Resolve the real installed file (`python3 -c "import <mod>; print(<mod>.__file__)"`;
+     note the seam may be a **lazy alias** — `aiter.ops.triton.gemm_a8w8_blockscale` is remapped via a
+     meta-path/`__getattr__` finder to `aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale`, whose body lives
+     under `_triton_kernels/...`; shadow the file the alias actually resolves to), then
+     `cp` that live file into `$CAND/<dotted/module/path>.py`, apply the diff to the COPY, and `check`
+     engagement via PYTHONPATH. The overlay shadows the install at import time — the live tree is never edited.
+   - **HARD RULE — never mutate site-packages.** The overlay is the ONLY integration mechanism; editing
+     `/sgl-workspace/aiter` (or any installed package) in place is forbidden (non-reversible; corrupts the
+     baseline leg since both legs then import the edit; contaminates other sessions on the box). Before AND
+     after every gate leg, assert the install is clean: `git -C /sgl-workspace/aiter status --porcelain`
+     (ignoring `*/flydsl_cache/`) MUST be empty. If you edited it while exploring, `git -C /sgl-workspace/aiter
+     checkout -- <file>` to restore before measuring. A win that only exists as a live-tree edit is `rejected`.
    - **authored** (a from-scratch NEW implementation written by the kernel layer's author mode — there
      is NO installed source file to patch; instead we REBIND the op's call site to the new kernel):
      the authored implementation + its final patch live under

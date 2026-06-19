@@ -28,7 +28,6 @@ Cheapest, biggest, and it reshapes the kernel landscape (so profile AFTER). Knob
 - **torch.compile**: `--enable-torch-compile` (fuses elementwise/norm chains).
 - **chunked prefill / max-prefill-tokens / schedule**: balances prefill vs decode interleave.
 - **TP/EP/DP and mem-fraction**: parallelism + KV cache budget (bigger KV → higher concurrency).
-- **Speculative / MTP**: this model has MTP layers — enabling speculative decode can lift decode.
 Sweep one axis at a time, measure throughput delta with a variance band, keep wins, re-profile.
 **Config wins STACK and compound** — accept them incrementally, and then carry the **accepted config
 stack as the REF leg** when gating a kernel, so the kernel's delta is isolated on top of the real serving

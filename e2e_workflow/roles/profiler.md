@@ -40,20 +40,28 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND`, `GPU_ID`, `WORKLOAD` (isl/osl/conc)
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/profile_r${ROUND}.log"
    ```
    The torch trace lands as a `*.json.gz` (or `*.json`) under `OUT_DIR/profile/`.
-2. (Optional bonus — STRICTLY TIME-BOUNDED) Also capture a rocprofv3 kernel trace for authoritative HW
-   durations IF it is cheap. **The torch trace from step 1 is the PRIMARY source and is sufficient for
-   routing** (it already ranks the top kernels by GPU time + carries op names/shapes). rocprofv3 is a
-   nice-to-have refinement, NOT a requirement.
-   ⚠️ EFFICIENCY RULE (do not violate — rocprof has repeatedly cost 15-20 min/profile): launching a
-   SEPARATE rocprofv3-INSTRUMENTED full vllm server is pathologically slow (instrumenting a 27B model
-   load can take 10-20 min to reach health, sometimes never). So:
-   - **Cap any rocprof health-wait at ~3 min total** (e.g. `for i in $(seq 1 36); do ... sleep 5; done`).
-     If the instrumented server is not healthy by then, **ABANDON rocprof and proceed with the torch
-     trace alone** (note it in `notes`). Do NOT re-launch the instrumented server.
-   - **Make AT MOST ONE rocprof attempt.** Never spin up multiple instrumented servers / retry loops.
-   - Prefer wrapping a SHORT replay over a full server when feasible; if not, skip rocprof entirely.
-   A torch-only profile that finishes in ~2 min beats a rocprof profile that costs 20 min — speed of the
-   optimization loop matters more than HW-timing precision for routing.
+2. (Recommended refinement) Also capture a rocprofv3 kernel trace for authoritative HW durations.
+   **Priority is UNCHANGED: the torch trace from step 1 is the PRIMARY routing source** (it ranks the
+   top kernels by GPU time + carries op names/shapes); rocprofv3 refines the HW timings.
+   FAULT TOLERANCE (do NOT skip — a missing or partial trace silently corrupts every downstream
+   Amdahl/routing decision):
+   - **If step 1's torch profiler is unavailable in this build (it produced no `*.json[.gz]`), rocprofv3
+     is NOT optional — it becomes the REQUIRED source.** Never proceed on a guess just because the
+     primary source was absent.
+   - rocprofv3 finalization is SLOW on multi-rank serving (TP>1): on shutdown the multiprocessing
+     `resource_tracker` reaps the vLLM TP workers' leaked shm/semaphores, and the CSV is flushed only
+     AFTER that — this routinely takes **8–20 min. That is normal, not a hang.**
+   - So after the bench: stop the server with SIGINT/`kill` (NEVER `kill -9` the rocprofv3 parent) and
+     **WAIT PATIENTLY for the CSV to flush — poll for `*kernel*trace*.csv` / `*kernel*stats*.csv` to
+     appear, up to ~25 min, and only then continue. Do NOT abandon at 3–5 min.** (The instrumented
+     server's health-wait may stay bounded at ~10 min, since a genuinely stuck load is a real failure;
+     it is the POST-bench flush wait that must be patient.)
+   - One attempt is enough; don't spin retry loops. Prefer wrapping a SHORT replay when feasible.
+   SANITY GATE (mandatory, whichever source you used): a valid serving trace at **TP>1 MUST contain a
+   collective/all-reduce kernel** (e.g. `cross_device_reduce*`, `ncclDevKernel*`, `*all_reduce*`). If the
+   resulting Top-N has NO comm kernel, the trace is INCOMPLETE/INVALID — re-capture (wait longer) or fail
+   loudly. **NEVER fall back to an "evidence-based"/estimated Top-N** to keep the loop moving: a guessed
+   Top-N (missing comm, library GEMMs mislabeled non-editable) yields wrong Amdahl routing.
 3. Run the standardized parser:
    ```bash
    PDIR="$EVAL_DIR/profile/round_${ROUND}/profile"
@@ -66,6 +74,22 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND`, `GPU_ID`, `WORKLOAD` (isl/osl/conc)
    the `short_name` under the serving-stack package dir (sglang/vllm, from `env_info.txt`) to identify
    it, and note the correct class in `notes` so the Architect routes it right. Flag same-named kernels appearing with BOTH large-M and small-M shapes
    (one kernel serving prefill + decode → different regimes).
+5. **Per-call distribution sanity** on the top entries you'll route on, per `knowledge/profile_parse.md`
+   §"Per-call distribution sanity" — a kernel's summed `pct_gpu_time` can be a misleading optimization
+   signal, and **not only for comm kernels**. Best-effort sample its per-call durations from the
+   rocprofv3 per-call trace and diagnose the shape: (a) **busy-wait/sync** (collective all-reduce/NCCL/
+   barrier, skew ≫ 3) → report robust median-cap **effective** `pct_gpu_time`, keep **raw**, route as a
+   comm-CONFIG lever not a rewrite; (b) **one-time warmup/JIT/autotune/graph-capture outliers** (a few
+   giant first-calls) → rank on the steady-state (median×calls), note the one-time cost; (c) **bimodal
+   prefill+decode under one name** → split into per-regime entries (don't de-inflate), so decode is
+   ranked on its own. Always keep the raw in `raw_pct_gpu_time`/`notes`. **🔴 After ANY de-inflation,
+   RECOMPUTE the whole table**: `effective_total = Σ effective_ms` and every row's `pct_gpu_time =
+   100*effective_ms/effective_total` — do NOT discount the collective in isolation while leaving the GEMM
+   heads at their raw %. The editable GEMM heads MUST rise (M3: comm 51%→~8% ⇒ MoE 16%→~31%, dense
+   11%→~21%) and become the clear #1/#2; a Top-N that shows comm at 1.5% but GEMMs still at 16/11% is
+   inconsistent and will under-rank the real targets. If the trace can't be sampled, degrade to a
+   qualitative flag (high avg+calls collective → "likely spin-inflated, discount"; one giant first-call →
+   "JIT warmup, discount"; large-M+small-M same name → "split regimes") — never fail or block the Top-N.
 
 Return JSON:
 ```json

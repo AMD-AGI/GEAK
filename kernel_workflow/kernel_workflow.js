@@ -71,6 +71,16 @@ const TARGET_LANGUAGE = String(A.target_language != null ? A.target_language : '
 const OP_SPEC = A.op_spec || {};
 const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge' : '')).replace(/\/+$/, '');
+// Expert skills = human-authored, validated kernel recipes (perf_knowledge/expert_skills/). ADVISORY
+// priors only: a matched `validated` skill is a HIGH-PRIOR author/optimize candidate the planning/author
+// roles reproduce, then gate by the isolated A/B vs the oracle — it NEVER overrides measurement. Default
+// OFF (opt-in: pass use_expert_skills="true"). When OFF (the default) NOTHING is injected -> byte-identical
+// to a build without this feature. When invoked by the e2e layer the flag + dir are passed down.
+const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
+  (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
+// Only planning + authoring roles consult skills; every other role gets no injection.
+const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
 
 // ---------------------------------------------------------------------------
 // Reusable JSON-schema fragments.
@@ -211,26 +221,64 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // hang, NEVER on a legitimately-long agent. Inner agents include benchmark/profile/verify that build
 // (hipcc/ninja) and run benches — minutes, well under 60min — plus the LLM-heavy optimize engineers
 // (the ones observed hanging). A too-short bound would kill legit long agents (e.g. a slow rocprof or
-// build), so keep it large. Real rejections are preserved (re-thrown). Cache keys (prompt, opts) are
-// unchanged so resume still works. Falls back to raw agent() if setTimeout is unavailable. args.agent_timeout_ms=0 disables.
+// build), so keep it large. Cache keys (prompt, opts) are unchanged so resume still works. Falls back
+// to raw agent() if setTimeout is unavailable. args.agent_timeout_ms=0 disables.
+// API-FAULT TOLERANCE: a transient API failure (gateway 4xx/5xx, rate-limit, dropped connection, the
+// model API going down mid-run) must NOT crash the whole workflow. agentT retries the call up to
+// AGENT_RETRIES times on a thrown API/agent error, then resolves to null (every .filter(Boolean)/
+// null-check downstream — incl. the Director validate + final report — already degrades on null rather
+// than exiting). A timeout (hang) resolves null immediately and is NOT retried (a real hang would just
+// burn another full timeout window). args.agent_retries tunes the count. If the failure is PERSISTENT
+// (e.g. an auth/header requirement the client doesn't send), retries are exhausted then the run
+// degrades — re-run with Workflow({resumeFromRunId}) once the client/API is fixed; cached agent results
+// make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
-function agentT(p, o) {
-  if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return agent(p, o);
-  let to;
-  const guard = new Promise((resolve) => {
-    to = setTimeout(() => {
-      log(`  [hung-agent guard] ${o && o.label ? o.label : 'agent'} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
-      resolve(null);
-    }, AGENT_TIMEOUT_MS);
-  });
-  return Promise.race([
-    agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
-    guard,
-  ]);
+const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+async function agentT(p, o) {
+  const label = (o && o.label) ? o.label : 'agent';
+  for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
+    try {
+      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return await agent(p, o);
+      let to;
+      const guard = new Promise((resolve) => {
+        to = setTimeout(() => {
+          log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
+          resolve(null);
+        }, AGENT_TIMEOUT_MS);
+      });
+      // A timeout resolves null (returned as-is, no retry). An API/agent error rejects -> caught below.
+      return await Promise.race([
+        agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+        guard,
+      ]);
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e).slice(0, 200);
+      if (attempt < AGENT_RETRIES) {
+        log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} hit an API/agent error (${msg}) — retrying so a transient outage doesn't kill the run.`);
+        continue;
+      }
+      log(`  [api-fault guard] ${label} still failing after ${AGENT_RETRIES} attempts (${msg}) — resolving null so the workflow degrades gracefully instead of exiting.`);
+      return null;
+    }
+  }
+  return null;
+}
+
+// Expert-skills injection. PURELY ADDITIVE: '' when OFF or the role is not a skills consumer, so
+// roleAgent is byte-identical to the pre-feature build in those cases. When ON, appends an advisory
+// pointer telling the agent to Read the fragment + query the skills index (scripts have no fs access).
+function expertSkillsBlock(role) {
+  if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role) || !EXPERT_SKILLS_DIR) return '';
+  return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
+    `Also Read ${WORKFLOW_DIR}/roles/_fragments/expert_skills.md and follow it: query ` +
+    `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits this op (operator/dtype/regime, and ` +
+    `from_backend->to_backend for migration skills) and whose validation_status is \`validated\`, and ` +
+    `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
+    `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
 
 function roleAgent(role, phase, intro, inputs) {
-  return `You are the ${role}. PHASE=${phase}.
+  const base = `You are the ${role}. PHASE=${phase}.
 First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
 Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
@@ -239,6 +287,7 @@ Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 ${cfg(inputs)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
+  return base + expertSkillsBlock(role);
 }
 
 // ===========================================================================

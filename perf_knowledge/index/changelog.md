@@ -60,3 +60,11 @@
 - Matrix generator: authoring langs (gluon/hipkittens/…) now column-grouped after core 6. Matrix+registry regenerated: 225 cards, 225 entries, YAML-valid; gluon/hipkittens columns live in GEMM/attention/norm families.
 - **CDNA wave-scheduling prior** added to optimization/mfma_scheduling.md: wave-specialization underperforms on CDNA3/4 → 8-wave ping-pong / 4-wave interleave (HipKittens; adopted in AMD CDNA4 GEMM blogs).
 - Number refresh (34 files): GEMM (hipBLASLt 2750/3130 bar beaten by 8-wave 3204), attention (concrete ROCM_AITER_FA 3.6-4.4x, MLA 1.33-1.52x + gfx942/gfx950 nuance), MoE (FlyDSL 1.6x, Kimi +162%, MoRI 2.56x BW), collectives (3-way adaptive + QuickReduce 3x), norm/quant (PTPC-FP8 2.5x), hardware (MLPerf v6.0 MI355X parity-to-win vs B300).
+
+## FlyDSL authoring docs ingested (2026-06-17)
+- Ingested the FlyDSL authoring knowledge from the GEAK FlyDSL **skill** (`AMD-AGI/GEAK@c0a1f937:src/minisweagent/skills/flydsl/docs/`) into perf_knowledge as **reference** (NOT as a skill; the skill's SKILL.md router was deliberately not ingested):
+  - `languages/flydsl/authoring_tile_programming.md` — write a first correct `@flyc.kernel` (CuTe tile model, 4 patterns, MFMA ref).
+  - `languages/flydsl/authoring_optimization.md` — structure-first optimization workflow (fusion→LDS→MFMA-loop→tuning).
+  - `languages/flydsl/authoring_gemm_levers.md` — GEMM authoring levers (tiling/LDS/swizzle/epilogue).
+  - `languages/flydsl/debugging.md` — correctness/NaN/zeros/mismatch/compile/hang triage (fills a prior gap).
+- Complementary to the existing `languages/flydsl/` (which covers *using* aiter's built-in flydsl GEMM library). Frontmatter records `source_commit` for one-way re-sync; skill-orchestration phrasing neutralized; each file ends with `## Sources`. Cross-linked from overview.md deep-dive map + the dense_gemm flydsl card. sources_index regenerated (630 docs).

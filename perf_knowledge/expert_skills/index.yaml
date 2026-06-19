@@ -1,0 +1,75 @@
+# index.yaml — expert_skills selector (AUTO-MAINTAINED by _contribute/scaffold.py + validate_skill.py).
+# Regenerate with:  python _contribute/scaffold.py --reindex
+# NOT a ranking. Filter by (operator, gen, arch_class, [from->to], status==validated) -> MEASURE.
+# Only 'validated' skills are auto-applied by the workflows (advisory priors, never override A/B).
+
+schema: {id, file, scope, match, expects, validation_status}
+
+skills:
+- id: flydsl_fp8_gemm_playbook
+  file: skills/flydsl_fp8_gemm_playbook/skill.md
+  scope: e2e
+  match:
+    operator: dense_gemm
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: gemm_a8w8_blockscale|down_proj
+      min_pct_gpu: 10.0
+  expects:
+    e2e_delta_min_pct: 1.0
+    parity: required
+  validation_status: validated
+- id: flydsl_rewrite_quantized_moe
+  file: skills/flydsl_rewrite_quantized_moe/skill.md
+  scope: kernel
+  match:
+    operator: fused_moe_grouped_gemm
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - int4_w4a16
+    - fp8_e4m3_fnuz
+    regimes:
+    - prefill
+    - decode
+    from_backend: triton
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: ''
+      min_pct_gpu: 0.0
+  expects:
+    isolated_speedup_min: 1.5
+    e2e_delta_min_pct: 1.0
+    parity: required
+  validation_status: validated
+- id: mla_tilelang_to_triton
+  file: skills/mla_tilelang_to_triton/skill.md
+  scope: kernel
+  match:
+    operator: mla_attention
+    arch_class:
+    - deepseek_mla
+    gens:
+    - gfx942
+    dtypes:
+    - bf16
+    - fp8_e4m3_fnuz
+    regimes:
+    - decode
+    from_backend: tilelang
+    to_backend: triton
+  expects:
+    isolated_speedup_min: 1.15
+    parity: required
+  validation_status: draft

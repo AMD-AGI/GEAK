@@ -63,24 +63,9 @@ authored Triton GEMM, etc.) has MOVED to the HEAD-KERNEL track (Op Benchmarker) 
 Likewise PyTorch TunableOp / `HIPBLASLT_TUNING_FILE` are not your job (and on sglang/aiter they don't
 even engage the live GEMM path). Your axes:
 - **attention backend**: `--attention-backend {triton,aiter,ck,fa3}` (and prefill/decode split flags).
-- **speculative decoding (HIGHEST-ROI decode lever — try it FIRST if the Architect nominated it).**
-  For a decode-bound serving workload this is usually the biggest single win and is **lossless under
-  greedy** (target verifies every proposed token → byte parity holds). vllm form:
-  `--speculative-config '{"method":"mtp","num_speculative_tokens":1}'` for a model with built-in MTP
-  (this model: qwen3_5, `mtp_num_hidden_layers=1`); also probe `num_speculative_tokens` 2 and 3. For an
-  EAGLE/draft model use `{"method":"eagle3",...}`. **Verify it actually engaged**: the server log prints
-  a Speculative/drafter init banner at load and the bench/metrics report a non-trivial **acceptance
-  rate** (grep server log / `/metrics` for `accept` / `spec_decode` / `draft`); acceptance≈0 or "spec
-  disabled" → it did NOT engage (fix the config, don't report a null). **Parity gate with greedy**
-  (`--temperature 0`, fixed seed, ≥10 prompts): MTP/EAGLE under greedy MUST match the no-spec server
-  byte-for-byte; if it diverges, something is wrong (reject). Keep only if faster AND parity holds.
-  NOTE: the throughput bench dataset is `random`; with speculative decoding ON, also confirm the
-  acceptance rate is realistic (random tokens have LOW acceptance, which understates the real gain — if
-  acceptance looks poor on random, re-probe with a short coherent prompt set to confirm the mechanism
-  works, then report the random-workload e2e delta as the conservative number).
 - **cuda-graph / torch.compile**: `--enable-torch-compile`, cuda-graph batch-size knobs (if not already on).
 - **scheduling / memory knobs** that don't change numerics: `--chunked-prefill-size`, `--kv-cache-dtype`
-  (auto vs fp8 — fp8 is an accuracy-gated change), `--mem-fraction-static`, speculative/NEXTN toggles.
+  (auto vs fp8 — fp8 is an accuracy-gated change), `--mem-fraction-static`.
 - **backend env toggles**: `SGLANG_USE_AITER` and similar stack-level switches.
 - **FP8 quant** (only if `ENABLE_FP8=true`; **parity BREAKS by design**): `--quantization fp8` /
   `--kv-cache-dtype fp8_e4m3`. Do NOT use byte parity here — run a small task-accuracy probe

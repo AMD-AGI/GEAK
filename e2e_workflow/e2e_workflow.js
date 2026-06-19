@@ -79,6 +79,17 @@ const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
 const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
+// Expert skills = human-authored, validated optimization recipes (perf_knowledge/expert_skills/). They
+// are ADVISORY priors: a matched `validated` skill is a HIGH-PRIOR candidate that routing/integration
+// roles reproduce, then gate by the usual on-box A/B — it NEVER overrides measurement and NEVER reduces
+// a result below the measured baseline. Default OFF (opt-in): pass use_expert_skills="true" to enable.
+// When OFF (the default) NOTHING is injected into any role prompt -> the prompt (and thus the whole run)
+// is byte-identical to a build without this feature. The flag + dir are passed DOWN to the kernel layer.
+const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
+  (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
+// Only routing/bake-off/integration roles consult skills; every other role gets no injection.
+const EXPERT_SKILL_ROLES = new Set(['system_architect', 'op_benchmarker', 'e2e_integrator']);
 const GEMM_SYNTH = String(A.gemm_synth != null ? A.gemm_synth : 'true');     // synth GEMM inputs (cheap)
 const ENABLE_FP8 = String(A.enable_fp8 != null ? A.enable_fp8 : 'false');    // Tier-D quant (parity-breaking)
 const FAST_PATH_FIRST = String(A.fast_path_first != null ? A.fast_path_first : 'true') === 'true';
@@ -92,6 +103,25 @@ const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC };
 // default. Serving TP/GPU are handled by SERVING_TP / SERVING_GPU above.
 const INIT_FLAGS = String(A.initial_extra_server_args || '');
 const INIT_ENV = String(A.initial_extra_env || '');
+// CUDA/HIP-graph deployment requirement (general; derived from the serving config, NOT hardcoded).
+// vllm/sglang capture the steady-state decode path into a FULL CUDA graph UNLESS --enforce-eager is set.
+// A kernel that wins only via its OWN per-call graph-capture+replay wrapper falls back to eager inside the
+// server's graph, so the isolated win evaporates e2e (observed on M3: MoE 1.22x isolated -> 0% e2e). When
+// graphs are on we inject an EXPLICIT requirement into every kernel-optimize task: the win must be intrinsic
+// and graph-capture-safe. Detection is config-driven, so it auto-disables for an enforce-eager run.
+const CUDA_GRAPH_DEPLOY = (BACKEND === 'vllm' || BACKEND === 'sglang') && !/enforce[-_]eager/i.test(INIT_FLAGS);
+const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
+  ' DEPLOYMENT REQUIREMENT — the server captures the steady-state decode path into a FULL CUDA/HIP graph, ' +
+  'so this kernel runs INSIDE that captured graph. Your speedup MUST be INTRINSIC: better tiles/algorithm, ' +
+  'fused quant (one fp8 MFMA, kill the dequant), or fewer ops/launches that reduce work INSIDE the captured ' +
+  'region. Do NOT rely on a per-call CUDA/HIP-graph capture+replay WRAPPER for the speedup — inside the ' +
+  "server's graph that wrapper falls back to eager and the win vanishes, and the e2e integrate gate WILL " +
+  'reject a wrapper-only win (this already happened: a 1.22x isolated MoE GEMM gave 0% e2e because only its ' +
+  'static tile change survived the graph). The steady-state decode call must be graph-capture-safe: ' +
+  'host-sync-free (no .item()/.cpu()/.tolist()/.synchronize(), no Python branch on a GPU scalar), shape-stable, ' +
+  'and prep/compile ONCE (cache by data_ptr) so the captured region only LAUNCHES the kernel. VERIFY your ' +
+  'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
+) : '';
 // Acceptance noise band (%). Tight measurement (interleaved A/B, E2E_REPEATS repeats, non-overlap +
 // engagement proof — see e2e_integrator) makes a 0.5% default trustworthy. Prompt-tunable.
 const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
@@ -231,11 +261,24 @@ const VALIDATE_SCHEMA = obj({
 const cfg = (o) => Object.entries(o).map(([k, v]) =>
   `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
 
+// Expert-skills prompt injection. PURELY ADDITIVE: returns '' whenever the feature is OFF or the role
+// is not a skills consumer, so roleAgent's output is byte-identical to the pre-feature build in those
+// cases. When ON, it appends a short advisory pointer that tells the agent to Read the fragment file
+// and query the skills index. (Workflow scripts have no fs access; the agent does the reading.)
+function expertSkillsBlock(role) {
+  if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role)) return '';
+  return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
+    `Also Read ${WORKFLOW_DIR}/roles/_fragments/expert_skills.md and follow it: query ` +
+    `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits the current bottleneck/op and whose ` +
+    `validation_status is \`validated\`, and treat each as a HIGH-PRIOR candidate to reproduce — advisory ` +
+    `only, never overriding your on-box A/B, never reducing a result below the measured baseline.`;
+}
+
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
   const inall = { BACKEND, SERVING_TP, SERVING_GPU, ...inputs };
-  return `You are the ${role}. PHASE=${phase}.
+  const base = `You are the ${role}. PHASE=${phase}.
 First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
 Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
@@ -259,6 +302,7 @@ optimization-pool id for a serving launch — keep the two separate.
 ${cfg(inall)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
+  return base + expertSkillsBlock(role);
 }
 
 // Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
@@ -316,6 +360,7 @@ if (!MODEL_PATH && KERNEL_PATH) {
   try {
     const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
       kernel_path: KERNEL_PATH, workflow_dir: KERNEL_WF_DIR,
+      use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       budget: KERNEL_BUDGET, gpu_ids: GPU_IDS, task: TASK, exp_root: EXP_ROOT,
       apply_to_original: APPLY_TO_ORIGINAL,
     });
@@ -538,6 +583,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             mode: ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
             op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+            use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
             budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
             task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${bake.best_known_ms || '?'} ms). ` +
               `This kernel will be overlaid onto the LIVE sglang decode path, which is CUDA-graph captured: its STEADY-STATE hot ` +
@@ -549,12 +595,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). Use the FUSED fp8 path ` +
               `(fold the block-scale into the operand scale, run ONE fp8 MFMA GEMM — the "kill the dequant" lever) and cache ` +
               `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
-              `kernel MUST fit at the same mem-fraction the accepted config uses. ` +
-              `BOUNDED CACHES ONLY: any per-shape CUDA-graph / side-stream / scratch-buffer cache you create MUST be bounded ` +
-              `(small fixed-capacity LRU, or keyed by the M-bucket of a data-ptr-stable buffer captured INSIDE vLLM's region) — ` +
-              `an unbounded data_ptr()-keyed graph cache mints a fresh CUDAGraph + warmup buffers for every distinct input address ` +
-              `during the bench warmup ramp and transiently exhausts HBM (observed warmup OOM → engine killed). Never let any cache ` +
-              `grow without a cap. ` + (TASK || ''),
+              `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',
           });
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
@@ -699,9 +740,10 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
     try {
       const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
+        use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
-          ' for this kernel; pick the fastest that passes the immutable unittest. ' + (TASK || ''),
+          ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
       });
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
