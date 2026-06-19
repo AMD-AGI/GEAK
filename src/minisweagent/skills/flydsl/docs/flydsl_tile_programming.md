@@ -40,11 +40,12 @@ Based on the pattern, generate the appropriate skeleton. Every FlyDSL kernel has
 import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.expr import gpu
 
 @flyc.kernel
 def my_kernel(A: fx.Tensor, B: fx.Tensor, ...):
-    tid = fx.thread_idx.x
-    bid = fx.block_idx.x
+    tid = gpu.thread_id("x")        # preferred current spelling
+    bid = gpu.block_id("x")
     # ... kernel body ...
 
 @flyc.jit
@@ -57,6 +58,14 @@ def my_launch(A: fx.Tensor, B: fx.Tensor, ...,
     )
 ```
 
+> **API spelling**: new code should use `gpu.thread_id("x")` / `gpu.block_id("x")`, the typed
+> wrappers `fx.Vector` / `fx.Float32` / `fx.Int32` / `fx.Index`, and Python operators (`a * b`,
+> `a + b`, `-a`, `a.maximumf(b)`) for arithmetic. The older spelling `fx.thread_idx.x`,
+> `fx.block_idx.x`, and raw `arith.mulf(...)` / `arith.addf(...)` still appears in some kernels — note
+> that `arith.mulf` / `arith.addf` / `arith.negf` are **not** functions in `flydsl.expr.arith`; use the
+> operators or `fx.Vector` methods instead. `arith` does expose `constant`, `constant_vector`, `select`,
+> `cmpf`, `cmpi`, `sitofp`, `trunc_f`, `index`, `unwrap`.
+
 ### Pattern A: Elementwise Kernel
 
 The simplest pattern. Each thread processes `VEC_WIDTH` elements independently.
@@ -67,11 +76,11 @@ The simplest pattern. Each thread processes `VEC_WIDTH` elements independently.
 import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith
-from flydsl._mlir.ir import VectorType
+from flydsl.expr import gpu
 
 BLOCK_DIM = 256
 VEC_WIDTH = 4
+Vec = fx.Vector
 
 @flyc.kernel
 def elementwise_kernel(
@@ -80,8 +89,8 @@ def elementwise_kernel(
     BLOCK_DIM: fx.Constexpr[int],
     VEC_WIDTH: fx.Constexpr[int],
 ):
-    bid = fx.block_idx.x
-    tid = fx.thread_idx.x
+    bid = gpu.block_id("x")
+    tid = gpu.thread_id("x")
 
     # === Step 1: Divide global tensor into block-sized tiles ===
     tile_size = BLOCK_DIM * VEC_WIDTH
@@ -96,23 +105,18 @@ def elementwise_kernel(
     tA = fx.logical_divide(tA, fx.make_layout(VEC_WIDTH, 1))
     tOut = fx.logical_divide(tOut, fx.make_layout(VEC_WIDTH, 1))
 
-    # === Step 4: Allocate register and set up copy atom ===
-    copy_bits = VEC_WIDTH * 32
-    MemTy = fx.MemRefType.get(
-        fx.T.f32(),
-        fx.LayoutType.get(VEC_WIDTH, 1),
-        fx.AddressSpace.Register
-    )
+    # === Step 4: Allocate register tiles and set up copy atom ===
+    copy_bits = VEC_WIDTH * 32            # 128-bit vectorized copy
     copy_atom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
-    rA = fx.memref_alloca(MemTy, fx.make_layout(VEC_WIDTH, 1))
-    rOut = fx.memref_alloca(MemTy, fx.make_layout(VEC_WIDTH, 1))
+    rA = fx.make_rmem_tensor(VEC_WIDTH, fx.Float32)
+    rOut = fx.make_rmem_tensor(VEC_WIDTH, fx.Float32)
 
     # === Step 5: Load -> Compute -> Store ===
     fx.copy_atom_call(copy_atom, fx.slice(tA, (None, tid)), rA)
 
-    vA = fx.memref_load_vec(rA)
+    vA = Vec(fx.memref_load_vec(rA))
     # --- YOUR COMPUTE HERE ---
-    vOut = arith.mulf(vA, vA)  # example: square
+    vOut = vA * vA                         # example: square (Python operator)
     # --- END COMPUTE ---
     fx.memref_store_vec(vOut, rOut)
 
@@ -291,37 +295,39 @@ def buffer_kernel(A: fx.Tensor, B: fx.Tensor, N: fx.Constexpr[int]):
 
 ## Step 3: Fill in the Compute Logic
 
-Common compute recipes (all work on vectors):
+Common compute recipes, using the `fx.Vector` wrapper + Python operators (the current style — raw
+`arith.mulf` / `arith.addf` / `arith.maximumf` / `arith.negf` do **not** exist as `arith.*` functions):
 
 ```python
-from flydsl.expr import arith
-from flydsl._mlir.ir import VectorType
-
-vec_ty = VectorType.get([VEC_WIDTH], fx.T.f32())
+Vec = fx.Vector
+vA = Vec(fx.memref_load_vec(rA))      # vector<VEC_WIDTHxf32> -> Vector
+vB = Vec(fx.memref_load_vec(rB))
 
 # Scale: C = A * scalar
-scale = arith.constant_vector(2.0, vec_ty)
-vC = arith.mulf(vA, scale)
+scale = Vec.filled(VEC_WIDTH, 2.0, fx.Float32)
+vC = vA * scale
 
 # Add: C = A + B
-vC = arith.addf(vA, vB)
+vC = vA + vB
 
 # FMA: D = A * B + C
-vC = arith.addf(arith.mulf(vA, vB), vC)
+vC = vA * vB + Vec(fx.memref_load_vec(rC))
 
 # ReLU: C = max(A, 0)
-zero = arith.constant_vector(0.0, vec_ty)
-vC = arith.maximumf(vA, zero)
+zero = Vec.filled(VEC_WIDTH, 0.0, fx.Float32)
+vC = vA.maximumf(zero)
 
-# Abs: C = |A| (no arith.absf -- use this pattern)
-neg = arith.negf(vA)
-is_neg = arith.cmpf(vA, arith.constant_vector(0.0, vec_ty), predicate="olt")
-vC = arith.select(is_neg, neg, vA)
+# Abs: C = |A| (no arith.absf -- build from neg + compare + select)
+neg = -vA
+is_neg = vA < zero
+vC = is_neg.select(neg, vA)
 
-# Type conversion
-vC = arith.sitofp(vI32, fx.T.f32())   # int -> float
-vC = arith.trunc_f(vF32, fx.T.f16())  # f32 -> f16
+# Type conversion (Vector / Numeric .to method)
+vC = vA.to(fx.BFloat16)               # f32 -> bf16
 ```
+
+For raw MLIR boundaries only, `arith` exposes `constant`, `constant_vector`, `select`, `cmpf`,
+`cmpi`, `sitofp`, `trunc_f`, `index`, `index_cast`, and `unwrap` (no `mulf`/`addf`/`negf`/`maximumf`).
 
 ---
 
@@ -363,21 +369,20 @@ if bid == 0:
 
 ```python
 # Workgroup barrier (__syncthreads)
-fx.gpu.barrier()
+gpu.barrier()
 
-# Fine-grained waitcnt (CDNA3)
-fx.rocdl.s_waitcnt(0)
-
-# Fine-grained waitcnt (CDNA4 / gfx950)
-fx.rocdl.s_wait_loadcnt(0)
-fx.rocdl.s_wait_storecnt(0)
-fx.rocdl.s_wait_dscnt(0)
+# Wait-count intrinsics (verified rocdl surface)
+fx.rocdl.s_waitcnt(0)              # legacy combined waitcnt
+fx.rocdl.s_wait_dscnt(0)           # wait on LDS (DS) ops
+fx.rocdl.s_wait_asynccnt(0)        # wait on async-to-LDS copies (gfx950)
+# (note: there is no s_wait_loadcnt / s_wait_storecnt in the rocdl surface)
 
 # Scheduling hints
 fx.rocdl.sched_mfma(N)     # schedule N MFMA before next barrier
 fx.rocdl.sched_vmem(N)     # schedule N VMEM reads
 fx.rocdl.sched_dsrd(N)     # schedule N DS reads
 fx.rocdl.sched_dswr(N)     # schedule N DS writes
+fx.rocdl.sched_barrier(0)  # hard scheduling fence
 ```
 
 ---

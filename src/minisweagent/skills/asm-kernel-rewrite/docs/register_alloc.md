@@ -37,6 +37,20 @@ the budget collapses occupancy. HipKittens works around HIPCC's inability to fee
   assignment so the developer controls scheduling/lifetimes — recovering peak (seq 4096: HK 855 →
   HK-Pinned 1024 TFLOPS, vs AITER 1018; arXiv 2511.08083, Table 1).
 
+## Occupancy math (gfx942, per SIMD)
+Resident waves/SIMD = the **min** across every resource limiter; you want ≥2 (8 waves/CU) on most MFMA
+GEMMs. Hardware budget per SIMD: **512 VGPR/lane** (shared VGPR+AGPR pool, allocated in 16-reg granules),
+**up to 16 wave slots**, and **64 KB LDS/CU** (shared by the up-to-4 waves the CU's 4 SIMDs run).
+
+```
+waves_VGPR = floor(512 / round_up_16(vgpr_per_lane))     # AGPR counts against the same 512 pool
+waves_LDS  = floor(65536 / lds_bytes_per_workgroup)       # per CU, across resident workgroups
+occupancy  = min(waves_VGPR, waves_LDS, wave_slots)
+```
+Worked example: a kernel using 168 VGPR/lane → `round_up_16(168)=176` → `512/176 = 2` waves/SIMD. Bump
+to 172 (→176, same) is free; bump past 256 (→ ≤1 wave) **halves** occupancy. A 32 KB LDS workgroup caps
+LDS to 2 resident workgroups/CU. The **smallest binding limiter wins** — profile, don't assume it's VGPR.
+
 ## MFMA fragment layout
 Each MFMA instruction scatters A/B/C/D across the 64 lanes in a **fixed packed pattern with no guaranteed
 element order**. You must place data per the documented layout or the calculator, e.g. for

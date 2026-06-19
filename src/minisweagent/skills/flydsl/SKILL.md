@@ -128,3 +128,11 @@ The `docs/` subdirectory contains detailed guides:
 - `flydsl_optimization.md` — Optimization workflow, tier-by-tier strategies, correctness constraints, key APIs
 - `flydsl_gemm_optimization.md` — GEMM-specific tuning for tile strategy, LDS staging, MFMA-loop efficiency, and epilogue/store trade-offs
 - `flydsl_debug_kernel.md` — NaN/zeros debugging, mismatch triage, compilation errors, GPU hangs
+
+Deeper language reference under `docs/reference/` (FlyDSL as AMD's Python kernel DSL in aiter):
+
+- `reference/overview.md` — what FlyDSL is, FLIR layout algebra, ROCDL intrinsics, vs Triton
+- `reference/patterns.md` — authoring patterns (split-K, tiling, fused epilogue, software pipeline)
+- `reference/kernel_families.md` — GEMM / MoE / linear-attention kernel families and where each wins
+- `reference/knobs.md` — tile / split-K / num_stages / preshuffle / scheduling knobs
+- `reference/deep.md` — deep-dive on the on-box aiter FlyDSL ops and MFMA scheduling

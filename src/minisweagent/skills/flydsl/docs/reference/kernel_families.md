@@ -7,14 +7,15 @@ regimes: [prefill, decode, both]
 status: competitive
 updated: 2026-06-08
 sources:
-  - /sgl-workspace/aiter/aiter/ops/flydsl/
+  - aiter/ops/flydsl/ (https://github.com/ROCm/aiter)
   - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
 ---
 
 # FlyDSL — kernel families
 
-The shipped FlyDSL kernels in `ROCm/aiter@/sgl-workspace/aiter:aiter/ops/flydsl/`. Each family has a
-high-level API (the `*_kernels.py` wrapper) and a DSL body under `kernels/`.
+The shipped FlyDSL kernels in `aiter/ops/flydsl/` (https://github.com/ROCm/aiter). Each family has a
+high-level API (the `*_kernels.py` wrapper) and a DSL body under `kernels/`. All wrapper names below
+are verified against the on-box aiter source; prefer these shipped ops over re-authoring from scratch.
 
 ## 1. HGEMM (dense bf16/fp16) — `splitk_hgemm.py`
 - API: `flydsl_hgemm` (gemm_kernels.py); body `kernels/splitk_hgemm.py` (`compile_hgemm_kernel`).
@@ -59,8 +60,11 @@ high-level API (the `*_kernels.py` wrapper) and a DSL body under `kernels/`.
   512/2048/4096/16384 tokens. (CK reported gpu_fault/unsupported on large W4A16.)
 
 ## 5. Linear attention / GDR decode — `linear_attention_kernels.py`, `kernels/gdr_decode.py`
-- API: `flydsl_gdr_decode` (gated-delta-rule decode). Tuned configs in `gdr_decode_tuned.jsonl`
-  (`NUM_BLOCKS_PER_V_DIM`, `NUM_WARPS`, `WARP_THREADS_K`).
+- API: `flydsl_gdr_decode(query, key, value, a, b, dt_bias, A_log, indices, state, out,
+  use_qk_l2norm, need_shuffle_state, stream=...)` (gated-delta-rule decode). Implemented in
+  `linear_attention_kernels.py` but currently commented out of `aiter.ops.flydsl.__all__` — import it
+  from the submodule. Requires 16-byte-aligned, contiguous inputs. Tuned configs in
+  `gdr_decode_tuned.jsonl`.
 - Target: gated linear/delta attention decode (operator: `linear_attention_gated_delta`).
 
 ## 6. Fused activation+quant — `kernels/silu_and_mul_fq.py`, `kernels/reduce.py`
@@ -78,6 +82,6 @@ high-level API (the `*_kernels.py` wrapper) and a DSL body under `kernels/`.
 | silu_and_mul_fq | `act_and_mul_silu_gelu`, `fused_norm_quant` |
 
 ## Sources
-- File inventory & APIs: ROCm/aiter@/sgl-workspace/aiter:aiter/ops/flydsl/ (gemm_kernels.py, moe_kernels.py, linear_attention_kernels.py, kernels/*)
-- small-M / preshuffle / MoE bodies: same dir (kernels/small_m_hgemm.py, preshuffle_gemm.py, moe_gemm_2stage.py, mixed_moe_gemm_2stage.py)
+- File inventory & APIs: aiter/ops/flydsl/ (gemm_kernels.py, moe_kernels.py, linear_attention_kernels.py, kernels/*)
+- small-M / preshuffle / MoE bodies: same dir (kernels/small_m_hgemm.py, preshuffle_gemm.py, mfma_preshuffle_pipeline.py, moe_gemm_2stage.py, mixed_moe_gemm_2stage.py)
 - Kimi-K2.5 e2e + kernel perf (vendor, ROCm 7.2.0 / aiter 0.1.5.post5): https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
