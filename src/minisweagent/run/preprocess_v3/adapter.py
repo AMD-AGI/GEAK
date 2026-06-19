@@ -92,9 +92,6 @@ def run_preprocess_v3(
     state: Any = None,
     user_task: str | None = None,
     scoring_target: str = "wall",
-    reference_entry_point: Any = None,
-    input_shapes: Any = None,
-    input_dtypes: Any = None,
 ) -> dict[str, Any]:
     """Drop-in shim for ``run_preprocessor_via_orchestrator`` using v3.
 
@@ -198,90 +195,6 @@ def run_preprocess_v3(
             performance_command=performance_command,
         )
 
-    # Deterministic SYNTHESIS bypass for a reference callable + traced shapes.
-    #
-    # When HL hands us an importable launcher callable (e.g. aiter ck_moe_stage1_fwd)
-    # plus the exact per-arg traced shapes, the universal harness contract is fully
-    # determined — no LLM authoring is needed. Synthesize the harness directly and
-    # run the SAME deterministic Path-A sequence (baseline -> profile -> commandment
-    # + worktree-bypass gate) as a pre-validated harness. This avoids the LLM
-    # harness-generator burning the whole preprocess budget compiling a CK/.cu from
-    # scratch. Strictly additive: synth returns None on any miss -> LLM path runs.
-    # Skipped for translate/rewrite (the translated kernel is what must be harnessed)
-    # and when a usable harness was already provided. Opt-out: GEAK_NO_SYNTH_HARNESS=1.
-    _synth_disabled = os.environ.get("GEAK_NO_SYNTH_HARNESS", "").strip().lower() in ("1", "true", "yes", "on")
-    # Env fallback: HL sets these on the geak subprocess so the deterministic
-    # synthesis path needs no new CLI args threaded through parallel_e2e_runner /
-    # kernel_optimization. Explicit kwargs (e.g. direct Python callers) win.
-    if reference_entry_point is None:
-        reference_entry_point = os.environ.get("GEAK_REFERENCE_ENTRY_POINT") or None
-    if input_shapes is None:
-        _raw_shapes = os.environ.get("GEAK_INPUT_SHAPES_JSON")
-        if _raw_shapes:
-            try:
-                import json as _json
-
-                input_shapes = _json.loads(_raw_shapes)
-            except Exception:  # noqa: BLE001
-                input_shapes = None
-    if (
-        reference_entry_point
-        and input_shapes
-        and not harness
-        and not translate_only
-        and not _is_rewrite
-        and not _synth_disabled
-    ):
-        try:
-            from minisweagent.run.preprocess_v3.reference_harness import (
-                synthesize_reference_harness,
-            )
-
-            synth_path = synthesize_reference_harness(
-                reference_entry_point=reference_entry_point,
-                input_shapes=input_shapes,
-                output_dir=output_dir,
-            )
-        except Exception as exc:  # noqa: BLE001 — never let synthesis crash preprocess
-            synth_path = None
-            logger.debug("v3 preprocess: reference-harness synthesis errored (%s); using LLM path", exc)
-        if synth_path:
-            t0 = time.monotonic()
-            result = _run_prevalidated_path_a(
-                harness=Path(synth_path),
-                kernel_path=kernel_path,
-                repo_root=repo_root,
-                kernel_language=detected_language,
-                output_dir=output_dir,
-                gpu_id=gpu_id,
-                correctness_command=correctness_command,
-                performance_command=performance_command,
-            )
-            from dataclasses import replace as _dc_replace
-
-            result = _dc_replace(result, elapsed_s=time.monotonic() - t0)
-            if result.success or _can_proceed_despite_failure(result):
-                logger.info(
-                    "v3 preprocess (synthesized reference harness) completed in %.1fs (success=%s)",
-                    result.elapsed_s, result.success,
-                )
-                return _preprocess_result_to_legacy_context(
-                    result=result,
-                    repo_root=repo_root,
-                    output_dir=output_dir,
-                    kernel_path_input=kernel_path,
-                    harness=synth_path,
-                    eval_command=eval_command,
-                    correctness_command=correctness_command,
-                    performance_command=performance_command,
-                )
-            # Synthesized harness failed validation/baseline (e.g. tier-2 inputs
-            # invalid for an index-sensitive op) -> fall through to the LLM generator.
-            logger.info(
-                "v3 preprocess: synthesized harness did not validate (errors=%s); "
-                "falling back to LLM harness generator.", result.errors,
-            )
-
     config = PreprocessOrchestratorConfig(
         gpu_id=gpu_id,
         repo=Path(repo_root) if repo_root else None,
@@ -297,6 +210,7 @@ def run_preprocess_v3(
         performance_command=performance_command,
         benchmark_timeout=benchmark_timeout,
         translate_only=translate_only,
+        raw_arg_spec=_raw_arg_spec_from_env(),
     )
 
     t0 = time.monotonic()
@@ -697,6 +611,25 @@ def _resolve_kernel_language(kernel_path: Path, repo_root: str) -> KernelLanguag
 # ---------------------------------------------------------------------------
 
 
+def _raw_arg_spec_from_env() -> dict | None:
+    """Decode HL's verbatim traced arg signature (``GEAK_RAW_ARG_SPEC_JSON``).
+
+    The full ordered argument metadata (tensor dims + scalar values, in call
+    order) is forwarded by Hyperloom so the LLM harness builder can reconstruct
+    the exact call. Returns None when absent or unparseable — strictly additive.
+    """
+    raw = os.environ.get("GEAK_RAW_ARG_SPEC_JSON")
+    if not raw:
+        return None
+    try:
+        import json as _json
+
+        spec = _json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    return spec if isinstance(spec, dict) and any(spec.values()) else None
+
+
 def _build_orchestrator_task(
     *,
     user_task: str | None,
@@ -706,6 +639,7 @@ def _build_orchestrator_task(
     performance_command: str | list[str] | None,
     benchmark_timeout: int,
     translate_only: bool,
+    raw_arg_spec: dict | None = None,
 ) -> str:
     """Assemble the orchestrator's free-form task body from legacy kwargs.
 
@@ -760,6 +694,24 @@ def _build_orchestrator_task(
             "orchestrator does not yet support short-circuiting after translation. "
             "Run the full flow and surface translation artifacts in the result."
         )
+    if raw_arg_spec:
+        dims = raw_arg_spec.get("input_dims") or ""
+        types = raw_arg_spec.get("input_type") or ""
+        concrete = raw_arg_spec.get("concrete_inputs") or ""
+        spec_lines = "\n".join(
+            f"  - {label}: {val}"
+            for label, val in (
+                ("Input Dims", dims), ("Input type", types), ("Concrete Inputs", concrete)
+            )
+            if val
+        )
+        if spec_lines:
+            hints.append(
+                "- Traced argument signature (verbatim, in call order). Build the harness inputs to\n"
+                "  match this exact arity/order: tensor positions from their dims, `Scalar`\n"
+                "  positions using the concrete value verbatim (empty = tensor, not captured):\n"
+                f"{spec_lines}"
+            )
     if hints:
         lines.append("")
         lines.append("## Hints from the call site")
