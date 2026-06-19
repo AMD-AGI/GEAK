@@ -2,8 +2,8 @@
 key: mxfp8_microscale (dense linear + grouped MoE) · gfx950/CDNA4 · vLLM
 type: routing
 confidence: ★★★
-effect: iso tile-sweep 1.5–1.9× prefill, 1.0–1.4× decode (no regress); e2e NOT yet transferred ⚠
-confirms: 6
+effect: iso tile-sweep 1.5–1.6× prefill, 1.39–1.71× decode (no regress); e2e NOT yet transferred ⚠
+confirms: 8
 last_seen: 2026-06-19
 ---
 # MXFP8 (E8M0 1×32 microscale) GEMM → only lever is the Triton `tl.dot_scaled` rewrite
@@ -24,4 +24,4 @@ last_seen: 2026-06-19
 - ⚠ integration: vLLM serves decode under cudagraph_mode FULL_AND_PIECEWISE → a self-capturing wrapper
   falls back to eager and only the static tile change survives (prior 1.22× iso netted ~0 e2e). The
   kernel MUST be compile-once/shape-agnostic + PRE-WARMED for all decode buckets. See [[method-cudagraph-safe-integration]].
-- source: exp/e2e_*MiniMax-M3-MXFP8*/ bakeoff GPU4/GPU5 runs 2026-06-18 / 06-19 (6 consistent re-confirms)
+- source: exp/e2e_*MiniMax-M3-MXFP8*/ bakeoff GPU4/GPU5 runs 2026-06-18 / 06-19 (8 consistent re-confirms; dense-linear N,K∈{2560×6144,6144×2048,6144×6144,6144×3072}, geomean tune_sp 1.577× decode+prefill, max_rel_err≤0.004 vs tol 0.06)
