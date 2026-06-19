@@ -118,7 +118,11 @@ const DEEP_WAVE_KERNEL_BUDGET = parseInt(A.deep_wave_kernel_budget != null ? A.d
 const DEEP_HEAD_WF_MS = parseInt(A.deep_head_workflow_ms != null ? A.deep_head_workflow_ms : 4500000, 10); // per-burst nested kernel_workflow time cap (75min) — bounds the per-wave barrier. Harvest+gate run at the TOP of each wave on disk truth, so gate latency is decoupled from this; the cap only bounds how long a burst runs.
 const DEEP_E2E_GAIN_TRIGGER = parseFloat(A.deep_e2e_gain_trigger != null ? A.deep_e2e_gain_trigger : 0.08); // isolated-best improvement since last e2e gate that triggers a new (batched) gate
 const DEEP_E2E_MAX_INTERVAL_MS = parseInt(A.deep_e2e_max_interval_ms != null ? A.deep_e2e_max_interval_ms : 7200000, 10); // force an e2e gate at least this often when a new candidate exists (default 2h)
-const DEEP_PLATEAU_STREAK = parseInt(A.deep_plateau_streak != null ? A.deep_plateau_streak : 3, 10); // consecutive non-improving waves before a backend lane is parked (frees its GPU)
+const DEEP_PLATEAU_STREAK = parseInt(A.deep_plateau_streak != null ? A.deep_plateau_streak : 2, 10); // consecutive non-improving waves before a backend lane is parked (frees its GPU)
+// HARD per-head wave cap — a budget backstop. The harvest's vs_live is an LLM estimate (noisy), so the
+// noImprove-based plateau-park can fail to fire and a head would otherwise spin until its ~12h time-slice.
+// This bounds each head to a fixed number of co-opt waves regardless, then advances to the next head.
+const DEEP_MAX_WAVES_PER_HEAD = parseInt(A.deep_max_waves_per_head != null ? A.deep_max_waves_per_head : 4, 10);
 const DEEP_BACKENDS_OVERRIDE = String(A.deep_backends || '').trim(); // optional CSV "triton:optimize,hip:author,..."; default = derive from the bake-off
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
@@ -809,7 +813,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         harnessAddPath = (fb && fb.addendum_path) || `${deepDir}/HARNESS_ADDENDUM.md`;
       };
 
-      while (!DEEP_DEADLINE_HIT && !waveDeadlineHit && lanes.some(l => l.active)) {
+      while (!DEEP_DEADLINE_HIT && !waveDeadlineHit && wave < DEEP_MAX_WAVES_PER_HEAD && lanes.some(l => l.active)) {
         wave++;
         // (A) GATE FIRST on accumulated disk truth (prior bursts / resumed state) — decoupled from this
         // wave's slowest burst; on a resumed run this tests the prior best immediately.
