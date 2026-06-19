@@ -571,7 +571,6 @@ def test_prevalidated_bypass_opt_out_env(tmp_path: Path, monkeypatch) -> None:
 def test_warm_up_harness_runs_once_with_baseline_cache(tmp_path, monkeypatch):
     """warm_up_harness runs the harness once in --correctness with the persistent
     baseline cache + a 1-shape cap, and is non-fatal on failure."""
-    import minisweagent.run.preprocess_v3.tools as tools_module
     import minisweagent.run.preprocess_v3.baseline as baseline_module
 
     repo = tmp_path / "repo"
