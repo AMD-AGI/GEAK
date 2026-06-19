@@ -707,9 +707,17 @@ def _build_orchestrator_task(
         )
         if spec_lines:
             hints.append(
-                "- Traced argument signature (verbatim, in call order). Build the harness inputs to\n"
-                "  match this exact arity/order: tensor positions from their dims, `Scalar`\n"
-                "  positions using the concrete value verbatim (empty = tensor, not captured):\n"
+                "- Traced argument signature (verbatim, in call order) — this is the AUTHORITATIVE,\n"
+                "  GROUND-TRUTH identity of the op as it actually fired during serving. It is captured\n"
+                "  from the real trace; TRUST IT over any inference you might draw from the device\n"
+                "  kernel symbol, the shared `.cu` file, or the source-tree heuristics. Many distinct\n"
+                "  ops compile to ONE shared device kernel (e.g. `rmsnorm` vs fused `add_rmsnorm` both\n"
+                "  emit `add_rmsnorm_quant_kernel`, differing only by a template flag; many MoE ops\n"
+                "  share CK templates). Do NOT pick the op variant from the device symbol — pick it\n"
+                "  from THIS signature's arity/order. Build the harness inputs to match this exact\n"
+                "  arity/order: tensor positions from their dims, `Scalar` positions using the\n"
+                "  concrete value verbatim (empty = tensor, not captured). If the discovered test or\n"
+                "  benchmark file calls a DIFFERENT arity/op than this signature, this signature wins.\n"
                 f"{spec_lines}"
             )
     if hints:
