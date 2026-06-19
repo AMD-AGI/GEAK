@@ -33,19 +33,29 @@ flags — set `0,0,0` for plain GEMM. (For SMFMAC, `cbsz/abid` instead select th
 see [raw_asm.md](raw_asm.md) §SMFMAC.)
 
 ### CDNA3 dense MFMA table (LLM-relevant)
-| Intrinsic | M×N×K | A/B→C | cycles | A regs/lane | B | C | note |
+All builtins below are the `__builtin_amdgcn_mfma_*` prefix (omitted for width). The C accumulator
+vector width = C regs/lane (e.g. `f32x4` for 16×16, `f32x16` for 32×32). **bf16 names need the `_1k`
+suffix on gfx942** — the bare `..._32x32x8bf16` / `..._16x16x16bf16` are the *gfx908* 8-bit-K ops and
+are **undeclared** on gfx942 (verified: `error: use of undeclared identifier`). f16 names take *no*
+suffix.
+| Intrinsic | M×N×K | A/B→C | emits | A regs/lane | B | C | note |
 |---|---|---|---|---|---|---|---|
-| `..._f32_32x32x8f16` | 32×32×8 | f16→f32 | 32 | 4 (fp16x4) | 4 | 16 | |
-| `..._f32_16x16x16f16` | 16×16×16 | f16→f32 | 16 | 4 | 4 | 4 | **prefer** |
-| `..._f32_32x32x8bf16` | 32×32×8 | bf16→f32 | 32 | 4 | 4 | 16 | |
-| `..._f32_16x16x16bf16` | 16×16×16 | bf16→f32 | 16 | 4 | 4 | 4 | **prefer** |
-| `..._f32_32x32x16_fp8_fp8` | 32×32×16 | fp8→f32 | 32 | 8 (fp8x8) | 8 | 16 | 2× bf16 K-density |
-| `..._f32_16x16x32_fp8_fp8` | 16×16×32 | fp8→f32 | 16 | 8 | 8 | 4 | 2× bf16 K-density |
-| `..._i32_16x16x32_i8` | 16×16×32 | i8→i32 | 16 | 8 | 8 | 4 | int |
-| `..._f64_16x16x4f64` | 16×16×4 | f64→f64 | 64 | 1 | 1 | 4 | HPC |
+| `..._f32_32x32x8f16` | 32×32×8 | f16→f32 | `v_mfma_f32_32x32x8_f16` | 4 (fp16x4) | 4 | 16 | |
+| `..._f32_16x16x16f16` | 16×16×16 | f16→f32 | `v_mfma_f32_16x16x16_f16` | 4 | 4 | 4 | **prefer** |
+| `..._f32_32x32x8bf16_1k` | 32×32×8 | bf16→f32 | `v_mfma_f32_32x32x8_bf16` | 4 (bf16x4) | 4 | 16 | `_1k` required |
+| `..._f32_16x16x16bf16_1k` | 16×16×16 | bf16→f32 | `v_mfma_f32_16x16x16_bf16` | 4 | 4 | 4 | **prefer**; `_1k` required |
+| `..._f32_32x32x16_fp8_fp8` | 32×32×16 | fp8→f32 | `v_mfma_f32_32x32x16_fp8_fp8` | 8 (as `long`) | 8 | 16 | 2× bf16 K-density |
+| `..._f32_16x16x32_fp8_fp8` | 16×16×32 | fp8→f32 | `v_mfma_f32_16x16x32_fp8_fp8` | 8 (as `long`) | 8 | 4 | 2× bf16 K-density |
+| `..._i32_16x16x32_i8` | 16×16×32 | i8→i32 | `v_mfma_i32_16x16x32_i8` | 8 (as `long`) | 8 | 4 | int |
+| `..._i32_32x32x16_i8` | 32×32×16 | i8→i32 | `v_mfma_i32_32x32x16_i8` | 8 (as `long`) | 8 | 16 | int |
+| `..._f64_16x16x4f64` | 16×16×4 | f64→f64 | `v_mfma_f64_16x16x4_f64` | 1 | 1 | 4 | HPC |
 
-fp8 e4m3/e5m2 can be **mixed**: `..._fp8_bf8` / `..._bf8_fp8`. fp8 operands are cast to `long` (64-bit)
-for the intrinsic:
+> All ten builtins above were compile-verified on this box (ROCm 7.2.1 / amdclang 22,
+> `--offload-arch=gfx942`) and emit the listed `v_mfma_*` instruction. The cycle counts are
+> instruction-issue latencies from the CDNA3 ISA; confirm per-shape with the matrix calculator.
+
+fp8 e4m3/e5m2 can be **mixed**: `..._fp8_bf8` / `..._bf8_fp8`. The 8 fp8 operand bytes/lane are passed
+as a single `long` (64-bit) per the builtin signature:
 ```cpp
 c = __builtin_amdgcn_mfma_f32_32x32x16_fp8_fp8((long)a, (long)b, c, 0,0,0);
 ```

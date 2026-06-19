@@ -5,10 +5,11 @@ gens: [gfx90a, gfx942]
 dtypes: [fp16, bf16]
 regimes: [both]
 status: competitive
-updated: 2026-06-08
+updated: 2026-06-19
 sources:
-  - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
   - https://github.com/tile-ai/tilelang
+  - upstream tilelang 0.1.11 (examples/amd/, examples/gemm/)
+  - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
   - https://arxiv.org/abs/2511.08083
 ---
 
@@ -36,10 +37,21 @@ HipKittens documents.
    attention — all measured at specific shapes/versions. Re-measure on your stack.
 6. **GEMM is not the strong suit.** ~0.94–1.05× Triton and below AITER asm for dense GEMM — use it for
    attention iteration, not as your matmul backend.
-7. **LDS budget (64 KB on gfx942).** Deep `num_stages` or large `block_M×block_N` can overrun LDS; a
-   hand-set config (vs the autotuner) can silently spill.
-8. **Feature lag.** Some intrinsics / Tensor-Core acceleration are flagged "future" in AMD's blog —
-   coverage trails the NVIDIA path; check the example before assuming a primitive is AMD-validated.
+7. **LDS budget (64 KB per CU on gfx942).** Each `T.alloc_shared` tile costs
+   `rows*cols*dtype_bytes`; `T.Pipelined(num_stages=s)` roughly multiplies the staged shared buffers by
+   `s`. Sum the live shared tiles × stages and keep it under 64 KB. This is why upstream caps FA
+   `num_stages ∈ {0,1}` and GEMM `{0,1,2,3}`. A hand-set config (vs the autotuner) can silently spill to
+   VGPRs/global and tank perf. Quick check: `block_M*block_K*2 + block_N*block_K*2` (fp16) per stage for
+   GEMM A/B staging.
+8. **k_pack / MFMA mismatch.** CDNA3 (MI300X) uses `k_pack=2`; RDNA WMMA needs `k_pack=1` and
+   `block_M/N ≤ 32`. Wrong `k_pack` on RDNA gives incorrect results, not just slow ones.
+9. **GemmWarpPolicy divisibility.** `FullRow` requires M divisible by the warp factor, `FullCol` requires
+   N — let the autotuner sweep `{Square, FullRow, FullCol}` rather than hard-coding.
+10. **Parity before perf.** Always `profiler.assert_allclose(ref, rtol=0.01, atol=0.01)` (greedy/temp=0)
+    before quoting any speedup; a config that is fast but fails allclose is not a valid rewrite.
+11. **Feature lag.** Some intrinsics / Tensor-Core acceleration are flagged "future" in AMD's blog —
+    coverage trails the NVIDIA path; check the upstream example before assuming a primitive is
+    AMD-validated.
 
 ## Verify
 - Confirm the target arch is actually validated (MI250/MI300X) and re-tune for it.

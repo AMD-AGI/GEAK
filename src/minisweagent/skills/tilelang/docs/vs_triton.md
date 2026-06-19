@@ -5,10 +5,10 @@ gens: [gfx90a, gfx942]
 dtypes: [fp16, bf16]
 regimes: [both]
 status: competitive
-updated: 2026-06-08
+updated: 2026-06-19
 sources:
-  - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
   - https://github.com/tile-ai/tilelang
+  - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
   - https://arxiv.org/abs/2511.08083
 ---
 
@@ -39,7 +39,7 @@ attention iteration; Triton for portability/ecosystem; asm or AITER for the last
   "struggles with register lifetime tracking and lowering to the most performant intrinsics."
 
 ## Why asm/AITER still wins the ceiling
-- AITER's hot paths are **raw asm** hand-scheduled by experts — see [../asm_mfma/raw_asm.md](../asm_mfma/raw_asm.md).
+- AITER's hot paths are **raw asm** hand-scheduled by experts.
 - TileLang lacks abstractions for register-pressure-aware tile sizing, thread-block scheduling, and
   **cache-aware (XCD) grid ordering**, and uses **32×32×16 MFMA / `buffer_load_dwordx4` / XCD swizzle**
   less aggressively than peak AMD kernels (HipKittens) — so it is CDNA3-validated, not a CDNA4 peak path.

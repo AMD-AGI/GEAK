@@ -7,9 +7,9 @@ regimes: [both]
 status: competitive
 updated: 2026-06-08
 sources:
-  - /sgl-workspace/aiter/aiter/ops/flydsl/gemm_kernels.py
-  - /opt/venv/lib/python3.10/site-packages/flydsl/autotune.py
-  - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/splitk_hgemm.py
+  - aiter/ops/flydsl/gemm_kernels.py
+  - flydsl package: python/flydsl/autotune.py
+  - aiter/ops/flydsl/kernels/splitk_hgemm.py
 ---
 
 # FlyDSL — knobs
@@ -98,7 +98,7 @@ disk). In aiter, GEMM tuning instead uses an offline sweep that writes the per-s
 - Tuned config CSV is build-specific — re-tune per ROCm/aiter version.
 
 ## Sources
-- flydsl_hgemm signature, constraints, defaults, FIXED_STAGE/async/c_to_lds: ROCm/aiter@/sgl-workspace/aiter:aiter/ops/flydsl/gemm_kernels.py
-- search space (tile lists, warp variants, split-k options): same file (`get_flydsl_splitk_hgemm_kernels`)
-- FlyDSL autotuner Config/compiler_opts: flydsl 0.1.5 @ /opt/venv/lib/python3.10/site-packages/flydsl/autotune.py
-- preshuffle-a8 knobs: ROCm/aiter@/sgl-workspace/aiter:aiter/ops/flydsl/gemm_kernels.py (flydsl_preshuffle_gemm_a8)
+- flydsl_hgemm signature, constraints, defaults, FIXED_STAGE/async/c_to_lds: aiter/ops/flydsl/gemm_kernels.py
+- search space (tile lists, warp variants, split-k options): same file (`get_flydsl_splitk_hgemm_kernels`, HGEMM_TILE_*_OPTIONS, KERNEL_CONFIG_VARIANTS)
+- FlyDSL autotuner Config/compiler_opts/do_bench: flydsl package python/flydsl/autotune.py
+- preshuffle-a8 knobs: aiter/ops/flydsl/gemm_kernels.py (flydsl_preshuffle_gemm_a8)

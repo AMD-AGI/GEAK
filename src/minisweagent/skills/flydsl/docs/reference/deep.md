@@ -8,8 +8,8 @@ status: competitive
 updated: 2026-06-08
 sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
-  - /sgl-workspace/aiter/aiter/ops/flydsl/kernels/splitk_hgemm.py
-  - /opt/venv/lib/python3.10/site-packages/flydsl/expr/rocdl/
+  - https://github.com/ROCm/aiter (aiter/ops/flydsl/kernels/splitk_hgemm.py)
+  - flydsl package: python/flydsl/expr/rocdl/ (__init__.py, cdna4.py, cluster.py, universal.py, inline_asm.py, tdm_ops.py)
 ---
 
 # FlyDSL — deep dive
@@ -22,7 +22,7 @@ still lower to tight ROCDL. The MLIR pipeline runs canonicalization + CSE and a 
 lowering to produce AMDGCN. (Per AMD's Kimi-K2.5 write-up.)
 
 ## 2. The DSL surface (what you import)
-From a real kernel (`kernels/splitk_hgemm.py`):
+The exact import block from a real kernel (`aiter/ops/flydsl/kernels/splitk_hgemm.py`):
 ```python
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -32,23 +32,32 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr, const_expr, rocdl, vector
 from flydsl.expr.typing import T                      # T.f32, T.i16, T.vec(n, T.f32), T.f32x4
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from flydsl.runtime.device import get_rocm_arch       # 'gfx942' / 'gfx950'
 ```
-- `arith`, `vector`, `math` — element/vector ops; `vector.bitcast(T.vec(4,T.i16), frag)` etc.
-- `gpu` — `block_id`, `thread_id`, barriers (block/grid identifiers).
+- `flyc` — the compiler entry: `@flyc.kernel` (device function) and `@flyc.jit` (host launcher).
+- `arith`, `vector` — element/vector ops; `vector.bitcast(T.vec(4,T.i16), frag)` etc. (For new code,
+  prefer the `fx.Vector` / `fx.Float32` / `fx.Int32` typed wrappers — see overview.md / authoring.)
+- `gpu` — `gpu.thread_id("x")`, `gpu.block_id("x"/"y")`, `gpu.barrier()`.
 - `scf` / `range_constexpr` / `const_expr` — structured control flow and compile-time loops.
 - `rocdl` — **the hardware intrinsics** (see §3).
-- `SmemAllocator` — explicit LDS allocation (`allocator = SmemAllocator(None, arch=GPU_ARCH,
+- `SmemAllocator` — explicit LDS allocation (`SmemAllocator(None, arch=get_rocm_arch(),
   global_sym_name="smem")`), returns `SmemPtr` you index with swizzled offsets.
 - `T` (typing) — MLIR types incl. vector fragment types matching MFMA lane layouts.
 
 ## 3. The ROCDL intrinsic surface (the reason to use FlyDSL)
-`flydsl.expr.rocdl` exposes the CDNA hardware ops 1:1. The families that matter for kernel perf:
+`flydsl.expr.rocdl` exposes the CDNA hardware ops. The names below are **verified** against the flydsl
+`expr/rocdl/` package and against actual `rocdl.*` usage in upstream FlyDSL + aiter perf kernels — use
+only these; do not invent variants.
 
-**MFMA / SMFMAC (matrix core):**
-`mfma_f32_16x16x16f16`, `mfma_f32_16x16x16bf16_1k`, `mfma_f32_16x16x32_{f16,bf16}`,
-`mfma_f32_16x16x32_{fp8_fp8,fp8_bf8,bf8_bf8}`, `mfma_i32_16x16x32_i8`, the 32x32 variants, and
-CDNA4 **block-scaled** `mfma_scale_f32_16x16x128_f8f6f4` / `mfma_scale_f32_32x32x64_f8f6f4` (MXFP8/6/4),
-plus the sparse `smfmac_*`. Example wrapper from the source:
+**MFMA (matrix core), exact names exported by `rocdl`:**
+`mfma_f32_16x16x16f16`, `mfma_f32_16x16x16bf16_1k`, `mfma_f32_16x16x32_f16`, `mfma_f32_16x16x32_bf16`,
+`mfma_f32_16x16x32_fp8_fp8`, `mfma_i32_16x16x32_i8`, plus the 32×32 set
+(`mfma_f32_32x32x8f16`, `mfma_f32_32x32x8bf16_1k`, `mfma_f32_32x32x16_f16`, `mfma_f32_32x32x16_bf16`),
+and the CDNA4 **block-scaled** `mfma_scale_f32_16x16x128_f8f6f4` (MXFP8/6/4). WMMA variants also exist
+(`wmma_f32_16x16x128_fp8_fp8`, `wmma_scale_f32_16x16x128_f8f6f4`, `wmma_scale_f32_32x16x128_f4`).
+There is also a higher-level `rocdl.MFMA(m,n,k,elem_ty_ab[,elem_ty_acc])` atom factory (in
+`universal.py`) used by the layout-algebra `make_mma_atom` path. (No `smfmac_*` / `mfma_*_bf8_*` are
+exposed — do not use them.) Example wrapper from `splitk_hgemm.py`:
 ```python
 class WmmaHalf_m16n16k16:
     def __call__(self, a_frag, b_frag, c_frag):
@@ -59,14 +68,14 @@ class WmmaHalf_m16n16k16:
         return rocdl.mfma_f32_16x16x16f16(T.vec(4, T.f32), [a_frag, b_frag, c_frag, 0, 0, 0])
 ```
 The `[a, b, c, cbsz, abid, blgp]` operand list mirrors the raw MFMA builtin (broadcast controls = 0
-for standard GEMM). Fragment shapes (`A=4, B=4, C=4` values/lane for 16×16×16; `A=8,B=8,C=4` for
-×32) are the wavefront-distributed MFMA layout.
+for standard GEMM). Fragment shapes (`A=4, B=4, C=4` values/lane for 16×16×16; `A/B=8, C=4` for ×32)
+are the wavefront-distributed MFMA layout.
 
 **Memory (direct-to-LDS / async copy):**
-`raw_ptr_buffer_load_lds`, `raw_ptr_buffer_load_async_lds`, `global_load_lds`, `global_load_async_lds`,
-`global_load_async_to_lds_b{8,32,64,128}`, `cluster_load_async_to_lds_b*`, `load_to_lds`,
-`lds_transpose_load`, `tensor_load_to_lds` / `tensor_store_from_lds`. These move global→LDS bypassing
-VGPRs. In `splitk_hgemm.py` the load is issued as:
+`raw_ptr_buffer_load_lds` and `buffer_load_to_lds` (global→LDS, bypassing VGPRs),
+`raw_ptr_buffer_atomic_fadd` / `raw_ptr_buffer_atomic_fmax` (split-K / reduce accumulation),
+`lds_transpose_load`, and the cluster path `cluster_load_async_to_lds` (CDNA4 cluster). In
+`splitk_hgemm.py` the direct-to-LDS load is issued as:
 ```python
 lds_addr_ = rocdl.readfirstlane(lds_addr)             # scalarize the LDS base
 rocdl.raw_ptr_buffer_load_lds(...)                    # global -> LDS, no VGPR staging
@@ -74,20 +83,23 @@ rocdl.raw_ptr_buffer_load_lds(...)                    # global -> LDS, no VGPR s
 
 **Instruction scheduling (hand-built software pipeline):**
 `sched_mfma(n)`, `sched_vmem(n)`, `sched_dsrd(n)` (DS read), `sched_dswr(n)` (DS write),
-`sched_barrier(mask)`, `sched_group_barrier(...)`, `s_setprio`. The split-K HGEMM interleaves them to
-keep the matrix core fed while loads are in flight:
+`sched_barrier(mask)`, `sched_group_barrier(mask, cnt, 0)`, `s_setprio(n)`, `s_nop(n)`. The split-K
+HGEMM interleaves them to keep the matrix core fed while loads are in flight:
 ```python
-rocdl.sched_vmem(ldg_.consume(1))         # 1 global load
-rocdl.sched_mfma(mfma_.consume(avg_mfma_count))  # N MFMAs
-rocdl.sched_dswr(1)                        # 1 LDS write (stage next tile)
-rocdl.sched_barrier(0)                     # hard scheduling fence
+rocdl.sched_vmem(ldg_.consume(1))                 # 1 global load
+rocdl.sched_mfma(mfma_.consume(avg_mfma_count))   # N MFMAs
+rocdl.sched_dswr(1)                               # 1 LDS write (stage next tile)
+rocdl.sched_barrier(0)                            # hard scheduling fence
 ```
-These are the FlyDSL equivalent of the HIP `__builtin_amdgcn_sched_group_barrier`/`iglp_opt` machinery
-(see HIP [intrinsics.md](../hip_cpp/intrinsics.md)).
+These are the FlyDSL equivalent of the HIP `__builtin_amdgcn_sched_group_barrier` / `iglp_opt`
+machinery.
 
-**Sync / cross-lane:**
-`s_waitcnt`, `s_wait_asynccnt`, `s_barrier` (+ named-barrier variants `s_barrier_signal/_wait`),
-`ds_bpermute`, `ds_swizzle`, `readfirstlane`, `wait_asyncmark`.
+**Sync / cross-lane (verified usage):**
+`s_waitcnt(...)`, `s_wait_asynccnt(count)`, `s_wait_dscnt(0)`, `s_barrier()`,
+`s_barrier_signal(id)` / `s_barrier_wait(mask)`, `ds_bpermute(res, index, src)`, `permlane32_swap`,
+`perm_b32`, `ds_read_tr8_b64` / `ds_read_tr16_b64` / `ds_load_tr16_b128` (transpose LDS reads),
+`readfirstlane`, `readlane`, `ballot`. (There is no `ds_swizzle`, `s_wait_loadcnt`, `s_wait_storecnt`,
+or `wait_asyncmark` — those are not in the rocdl surface; use the names above.)
 
 ## 4. LDS allocation & swizzle
 LDS is managed explicitly via `SmemAllocator`, and bank conflicts are avoided with the standard
@@ -123,6 +135,6 @@ through `flydsl_preshuffle_gemm_a8` (separate path, `x_scale`/`w_scale`).
 
 ## Sources
 - FLIR / (Shape,Stride) / GPU-to-ROCDL pipeline / instruction-level control: https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
-- DSL body (imports, mfma wrappers, swizzle_xor16, sched_*, raw_ptr_buffer_load_lds, split-K semaphore): ROCm/aiter@/sgl-workspace/aiter:aiter/ops/flydsl/kernels/splitk_hgemm.py
-- ROCDL op list (mfma/smfmac/scale_f8f6f4, async-to-LDS, sched_*, ds_bpermute): flydsl 0.1.5 @ /opt/venv/lib/python3.10/site-packages/flydsl/expr/rocdl/
-- LDS budget / arch gating / lds estimate: ROCm/aiter@/sgl-workspace/aiter:aiter/ops/flydsl/{utils.py,gemm_kernels.py}
+- DSL body (imports, mfma wrappers, swizzle_xor16, sched_*, raw_ptr_buffer_load_lds, split-K semaphore): aiter/ops/flydsl/kernels/splitk_hgemm.py (https://github.com/ROCm/aiter)
+- ROCDL op list (mfma/scale_f8f6f4, buffer/cluster-to-LDS, sched_*, ds_bpermute, transpose reads): flydsl package python/flydsl/expr/rocdl/ (__init__.py + cdna4.py/cluster.py/universal.py/inline_asm.py)
+- LDS budget / arch gating / lds estimate: aiter/ops/flydsl/{utils.py,gemm_kernels.py}

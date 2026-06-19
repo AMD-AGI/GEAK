@@ -19,7 +19,7 @@ Parameter tuning alone yields marginal gains. **Prioritize structural optimizati
 
 ## Step 2: Classify the Bottleneck
 
-- Check the **target GPU arch** via `get_hip_arch()` — LDS size, MFMA variants, and wavefront width are arch-dependent (e.g. gfx942: 64 KB LDS, 304 CUs, wavefront 64)
+- Check the **target GPU arch** via `flydsl.runtime.device.get_rocm_arch()` (returns `'gfx942'` / `'gfx950'`; override with env `FLYDSL_GPU_ARCH`) — LDS size, MFMA variants, and wavefront width are arch-dependent (e.g. gfx942: 64 KB LDS, 304 CUs, wavefront 64)
 - **Memory-bound with cross-thread reuse** (e.g. tiled GEMM operands, attention K/V tiles) → LDS staging, prefetch, vectorization
 - **Memory-bound without cross-thread reuse** (e.g. pure elementwise ops, RoPE position encoding, cache-write-only passes) → vectorization and coalescing **only**; LDS staging adds overhead without benefit because each thread processes its own independent slice. Do not add LDS staging or structural rewrites to this class.
 - **Compute-bound** → improve instruction throughput (MFMA selection, software pipelining)
@@ -192,7 +192,7 @@ After an LDS-focused rewrite, verify all of these:
 ## Correctness Constraints
 
 Always verify after each patch — violations often cause silent corruption:
-- **LDS limit**: check `get_hip_arch()` for the arch-specific limit (e.g. 64 KB on gfx942) — exceeding it silently corrupts results
+- **LDS limit**: check `get_rocm_arch()` (or aiter's `addressable_lds_bytes_for_gfx`) for the arch-specific limit (64 KB on gfx942, 160 KB on gfx950) — exceeding it silently corrupts results
 - **Tile divisibility**: `tile_k_bytes % 64 == 0`; `tile_m * tile_k * elem_bytes` divisible by thread count
 - **FP8 (E4M3FNUZ)**: value `0x80` is NaN — sanitize loads with byte AND `0x7F`
 - **f32→f16 truncation**: clamp to ±65504 first to avoid Inf

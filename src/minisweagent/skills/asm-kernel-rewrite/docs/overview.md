@@ -32,8 +32,8 @@ micro-kernels). See [mfma_intrinsics.md](mfma_intrinsics.md), [raw_asm.md](raw_a
 | **CU** | 304 | 4 SIMDs each |
 | **SIMD** | 4/CU | 64-lane; one wavefront issues per SIMD |
 | **Wavefront** | 64 lanes | CDNA is **wave64 only** (RDNA can be wave32) |
-| **VGPR** | 512 × 32-bit/lane/SIMD | drives occupancy; 16-granule alloc |
-| **AGPR** | 256 × 32-bit/lane | accumulation GPRs for MFMA (CDNA-specific) |
+| **VGPR+AGPR** | 512 × 32-bit/lane/SIMD total | one shared pool; drives occupancy; 16-granule alloc |
+| **AGPR** | up to 256 of the 512 | accumulation GPRs for MFMA (CDNA-specific) |
 | **LDS** | 64 KB/CU (gfx942); 160 KB (gfx950) | 32 banks × 4B |
 | **Matrix cores** | per-SIMD MFMA units | the XDL engines |
 
@@ -59,6 +59,26 @@ for the async load queue (HipKittens). CDNA memory ops are **asynchronous**; ove
 `sched_group_barrier` to *guide* the compiler rather than replace it. AITER ships raw asm because the
 last few percent at scale is worth a hand-maintained kernel; HipKittens argues a tile DSL recovers most of
 that with far less brittleness.
+
+## Try the shipped aiter hand-asm op FIRST
+Before writing any assembly, check whether aiter already ships a hand-tuned asm kernel for this op — these
+are the *exact* artifacts a from-scratch rewrite is competing against, and calling one is almost always the
+better move. Verified on-box at `/usr/local/lib/python3.12/dist-packages/aiter/` (ROCm 7.2.1):
+
+| Op (call this) | Module | Signature (key args) |
+|---|---|---|
+| `gemm_a8w8_asm` | `aiter.ops.gemm_op_a8w8` | `(XQ[M,K]i8, WQ[N,K]i8 shuffle(32,16), x_scale[M,1]f32, w_scale[1,N]f32, Out[M,N]bf16, kernelName, bias, bpreshuffle=True, splitK=None)` |
+| `flatmm_a8w8_blockscale_asm` | `aiter.ops.gemm_op_a8w8` | `(XQ, WQ, x_scale, w_scale, out)` |
+| `gemm_a8w8_blockscale_bpreshuffle_asm` | `aiter.ops.gemm_op_a8w8` | `(A, B, out, A_scale, B_scale, bias=None, splitK=None, kernelName=None, bpreshuffle=True)` |
+| `asm_moe` | `aiter.fused_moe_bf16_asm` | `(hidden_states, w1[E,inter*2,dim], w2[E,dim,inter], topk_weight, topk_ids, fc1_scale, fc2_scale, fc1/fc2_smooth_scale, a16=False, activation=Silu, ...)` |
+| `mla_decode_stage1_asm_fwd` | `aiter.ops.attention` | `(Q, KV, qo_indptr, kv_indptr, kv_page_indices, kv_last_page_lens, ..., softmax_scale, splitData, splitLse, output, q_scale, kv_scale)` |
+
+These wrap prebuilt `.co`/HSACO asm kernels (`@compile_ops`, e.g. `module_gemm_a8w8_asm`). Note the
+**preshuffled weight layout** (`shuffle(32,16)` / `bpreshuffle`) the asm GEMMs require — match it or the
+result is wrong. Inspect signatures live: `python -c "import inspect,aiter.ops.gemm_op_a8w8 as m;
+print(inspect.signature(m.gemm_a8w8_asm))"`.
+> The task brief's paths (`/sgl-workspace/aiter`, `aiter/aot/asm_mla_decode_fwd`, `csrc/.../asm_moe.py`)
+> do **not** match this box — use the verified modules above.
 
 ## Pitfalls (summary — full list in [pitfalls.md](pitfalls.md))
 - Hand-written MFMA in inline asm is **not recognized by `SchedGroupMask`** → defeats the SW pipeliner.
