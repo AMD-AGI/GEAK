@@ -29,6 +29,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,22 @@ BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
 CLAUDE_EFFORT = os.environ.get("PERFSKILLS_CLAUDE_EFFORT", "ultracode")
 CLAUDE_MODEL = os.environ.get("PERFSKILLS_CLAUDE_MODEL", "claude-opus-4-8")
 ALLOWED_TOOLS = ["Workflow", "Bash", "Read", "Write"]
+
+# Public claude builds (>=2.1.x) REJECT "--effort ultracode". The Workflow /
+# parallel / phase primitives that e2e_workflow.js needs are instead gated behind
+# the `enableWorkflows` + `ultracode` settings keys (the highest-priority "flag
+# settings" layer, == CLI `--settings`). Inject them so the Workflow tool truly
+# executes the JS pipeline instead of the agent merely "backgrounding" it.
+VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+WORKFLOW_SETTINGS = os.environ.get(
+    "PERFSKILLS_CLAUDE_SETTINGS",
+    json.dumps({"enableWorkflows": True, "ultracode": True}),
+)
+# Override which claude binary the SDK drives. The claude_agent_sdk otherwise
+# prefers its OWN bundled CLI (claude_agent_sdk/_bundled/claude) over $PATH, so
+# swapping the system claude alone has no effect on the SDK path. Set
+# PERFSKILLS_CLAUDE_BIN to pin a specific build (e.g. an older native version).
+CLAUDE_BIN = os.environ.get("PERFSKILLS_CLAUDE_BIN", "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +95,18 @@ def map_args(h: dict) -> dict:
     }
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
+    # Pin ONE EVAL_DIR for the whole run (workflow reads A.eval_dir ->
+    # EVAL_DIR_OVERRIDE). Without it, every PHASE=setup invocation mints a fresh
+    # timestamped dir, so a re-entered setup leaves an abandoned preflight-only
+    # scaffold beside the authoritative run. Honor an explicit handoff/env
+    # override first (resume); otherwise mint a single fresh dir here so BOTH
+    # the preflight smoke and the real baseline/profile/kernel land under it.
+    eval_dir = str(h.get("eval_dir") or os.environ.get("PERFSKILLS_EVAL_DIR", "")).strip()
+    if not eval_dir:
+        model_name = Path(h["model_path"]).name
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        eval_dir = str(Path(h["exp_root"]) / f"e2e_{model_name}_{ts}")
+    ps_args["eval_dir"] = eval_dir
     return ps_args
 
 
@@ -218,33 +247,140 @@ def _iter_message_text(msg: Any) -> list[str]:
     return out
 
 
-def _invoke_via_sdk(prompt: str, timeout_s: int) -> str:
-    import anyio
-    from claude_agent_sdk import ClaudeAgentOptions, query
+def _workflow_done_on_disk(eval_dir: str | None) -> bool:
+    """True once the workflow has written a TERMINAL completion marker.
 
-    async def _run() -> str:
-        opts = ClaudeAgentOptions(
+    The Validate phase writes ``director_e2e_validation.json`` last, and the
+    Finalize phase emits ``final/final_launch.sh``. Either is an authoritative
+    "the optimizer finished a measured leg" signal that is independent of HOW
+    the agent ran the workflow (in-turn vs background task). The pinned
+    ``eval_dir`` (see :func:`map_args`) is what makes this a deterministic,
+    single-path check rather than a guess.
+    """
+    if not eval_dir:
+        return False
+    p = Path(eval_dir)
+    return (p / "director_e2e_validation.json").is_file() or (
+        p / "final" / "final_launch.sh"
+    ).is_file()
+
+
+def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) -> str:
+    """Drive the JS workflow through the SDK, version-robustly.
+
+    Why not a one-shot ``query()``? Newer Claude Code builds (CLI >=2.1.183)
+    route a ``Workflow`` invocation to a NON-BLOCKING *background task*: the
+    main agent turn ends almost immediately ("...running in the background"),
+    so ``query()``'s async iterator completes and the runner used to return —
+    tearing the still-running workflow down with it. Older builds (<=2.1.181)
+    run the same workflow synchronously inside the turn. Pinning an SDK version
+    papers over this; it does not survive the next update.
+
+    This implementation does NOT depend on whether the workflow blocks the
+    turn. It uses the persistent ``ClaudeSDKClient`` (keeping the CLI process —
+    and therefore any background workflow — alive) and consumes the FULL
+    message stream, driving completion off the SDK's documented background-task
+    lifecycle (``TaskStartedMessage`` -> ``TaskNotificationMessage``) plus the
+    workflow's own on-disk terminal marker. It returns the joined transcript so
+    the existing ``_parse_last_json_line`` scrape still works; when the return
+    JSON is not in the transcript (the background path surfaces it via the
+    task's ``output_file``/``summary``, which we append), main() falls back to
+    the scrape-independent on-disk recovery against the same pinned eval_dir.
+    """
+    import anyio
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    try:
+        from claude_agent_sdk import ClaudeSDKClient
+    except ImportError:  # very old SDK without the streaming client
+        ClaudeSDKClient = None  # type: ignore[assignment]
+
+    def _opts() -> "ClaudeAgentOptions":
+        extra: dict = {}
+        if CLAUDE_EFFORT in VALID_EFFORTS:
+            extra["effort"] = CLAUDE_EFFORT
+        return ClaudeAgentOptions(
             model=CLAUDE_MODEL,
             allowed_tools=ALLOWED_TOOLS,
             permission_mode="bypassPermissions",
-            extra_args={"effort": CLAUDE_EFFORT},
+            settings=WORKFLOW_SETTINGS,
+            extra_args=extra,
             cwd=str(E2E_DIR),
+            **({"cli_path": CLAUDE_BIN} if CLAUDE_BIN else {}),
         )
+
+    async def _run_client() -> str:
         # Accumulate the FULL transcript (every text fragment from every
-        # message), not just the last assistant text — the workflow-return JSON
-        # is then recoverable wherever the agent emitted it. _parse_last_json_line
-        # scans the whole transcript for the last JSON object carrying eval_dir.
+        # message) so the workflow-return JSON is recoverable wherever it
+        # surfaced. Track background tasks by class NAME (the Task* message
+        # types exist in both old and new SDKs, so name-matching keeps one code
+        # path working across versions without import coupling).
         chunks: list[str] = []
+        pending: set[str] = set()   # started-but-unfinished background tasks
+        bg_started = False          # did the workflow ever background a task?
+        terminal_task = False       # saw a TaskNotification (completed/failed)
+        saw_result = False          # the main turn's ResultMessage arrived
         # Enforce the orchestrator's budget INSIDE the SDK path so we self-stop
         # before Hyperloom's outer kill_timeout SIGKILLs us (a SIGKILL would
         # skip result.json flushing entirely). anyio raises TimeoutError on
         # expiry, which main() maps to error_class="timeout".
         with anyio.fail_after(timeout_s):
-            async for msg in query(prompt=prompt, options=opts):
+            async with ClaudeSDKClient(options=_opts()) as client:
+                await client.query(prompt)
+                async for msg in client.receive_messages():
+                    chunks.extend(_iter_message_text(msg))
+                    name = type(msg).__name__
+                    if name == "TaskStartedMessage":
+                        tid = getattr(msg, "task_id", None)
+                        if tid:
+                            pending.add(tid)
+                            bg_started = True
+                    elif name == "TaskNotificationMessage":
+                        terminal_task = True
+                        pending.discard(getattr(msg, "task_id", None))
+                        # The background path surfaces the workflow return via
+                        # the task's output_file / summary rather than the main
+                        # transcript — fold them in so the scrape can find it.
+                        of = getattr(msg, "output_file", None)
+                        if of:
+                            try:
+                                chunks.append(Path(of).read_text(encoding="utf-8"))
+                            except OSError:
+                                pass
+                        summ = getattr(msg, "summary", None)
+                        if isinstance(summ, str) and summ.strip():
+                            chunks.append(summ)
+                    elif name == "ResultMessage":
+                        saw_result = True
+
+                    # ---- completion gate (independent of turn blocking) ----
+                    # Never stop while a background task is still running.
+                    if pending:
+                        continue
+                    # Authoritative: the optimizer wrote its terminal marker.
+                    if _workflow_done_on_disk(eval_dir):
+                        break
+                    # Background path concluded (success OR failure): stop and
+                    # let downstream disk-recovery/normalize judge the result.
+                    if terminal_task and saw_result:
+                        break
+                    # Pure synchronous path: the turn ended and no background
+                    # task was ever spawned — the workflow ran in-turn.
+                    if saw_result and not bg_started:
+                        break
+        return "\n".join(chunks)
+
+    async def _run_query() -> str:
+        # Legacy fallback for SDKs lacking ClaudeSDKClient. Behaves like the
+        # original one-shot query (works for the synchronous in-turn path).
+        from claude_agent_sdk import query
+        chunks: list[str] = []
+        with anyio.fail_after(timeout_s):
+            async for msg in query(prompt=prompt, options=_opts()):
                 chunks.extend(_iter_message_text(msg))
         return "\n".join(chunks)
 
-    return anyio.run(_run)
+    return anyio.run(_run_client if ClaudeSDKClient is not None else _run_query)
 
 
 def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
@@ -252,11 +388,13 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
     cmd = [
         claude, "-p", prompt,
         "--output-format", "json",
-        "--effort", CLAUDE_EFFORT,
+        "--settings", WORKFLOW_SETTINGS,
         "--model", CLAUDE_MODEL,
         "--allowed-tools", ",".join(ALLOWED_TOOLS),
         "--permission-mode", "auto",
     ]
+    if CLAUDE_EFFORT in VALID_EFFORTS:
+        cmd += ["--effort", CLAUDE_EFFORT]
     env = dict(os.environ, IS_SANDBOX="1")
     proc = subprocess.run(
         cmd, cwd=str(E2E_DIR), env=env, capture_output=True, text=True,
@@ -277,11 +415,11 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
     return out
 
 
-def invoke_workflow(prompt: str, timeout_s: int) -> dict:
+def invoke_workflow(prompt: str, timeout_s: int, eval_dir: str | None = None) -> dict:
     """Run the JS workflow and return its parsed JSON return value."""
     try:
         import claude_agent_sdk  # noqa: F401
-        raw = _invoke_via_sdk(prompt, timeout_s)
+        raw = _invoke_via_sdk(prompt, timeout_s, eval_dir)
     except ImportError:
         raw = _invoke_via_cli(prompt, timeout_s)
     return _parse_last_json_line(raw)
@@ -489,7 +627,14 @@ def _discover_eval_dir(exp_root: Path) -> Path | None:
     ``director_e2e_validation.json`` (Validate phase) / a ``final/`` bundle into
     it. Pick the most-recently-modified ``e2e_*`` dir that carries one of those
     completion markers; fall back to the newest ``e2e_*`` dir.
+
+    A pinned ``PERFSKILLS_EVAL_DIR`` (set by main() from the single eval_dir
+    map_args minted for this run) short-circuits the glob/guess: recovery then
+    targets EXACTLY the dir this run used, never a sibling from another run.
     """
+    pinned = os.environ.get("PERFSKILLS_EVAL_DIR", "").strip()
+    if pinned and Path(pinned).is_dir():
+        return Path(pinned)
     if not exp_root.is_dir():
         return None
     cands = sorted(
@@ -558,24 +703,51 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
                 return float(v)
         return None
 
+    # The director schema has evolved across workflow versions. Read it
+    # SCHEMA-ROBUSTLY so the recovered numbers (and the kernel_journey e2e
+    # attribution below) survive a schema change:
+    #   * current (VALIDATE_SCHEMA, flat): baseline_throughput_tok_s,
+    #     director_verified_throughput_tok_s, throughput_speedup
+    #   * 20260615-era (flat, different names): provided_baseline_throughput,
+    #     final.median / drift_corrected_baseline.median, delta_pct_drift_corrected
+    #   * earlier (nested blocks): vs_provided_baseline.*, base_block.*, etc.
+    # Take the FIRST present (never fabricate). _nest() reads a nested median.
+    def _nest(key: str) -> Any:
+        v = validation.get(key)
+        return v.get("median") if isinstance(v, dict) else None
+
     vs_base = validation.get("vs_provided_baseline") or {}
     arb = validation.get("arbitration") or {}
     drift = validation.get("drift_corrected_same_session") or {}
     final_block = validation.get("final_block") or {}
     base_block = validation.get("base_block") or {}
     baseline_tput = _first(
-        vs_base.get("baseline_throughput_tok_s"),
+        validation.get("baseline_throughput_tok_s"),       # current flat
+        validation.get("provided_baseline_throughput"),    # 20260615 flat
+        _nest("drift_corrected_baseline"),
+        vs_base.get("baseline_throughput_tok_s"),           # nested (legacy)
         base_block.get("warm_median_tok_s"),
     )
     final_tput = _first(
-        arb.get("director_verified_throughput_tok_s"),
+        validation.get("director_verified_throughput_tok_s"),  # current flat
+        _nest("final"),                                        # 20260615 flat
+        validation.get("claimed_throughput"),
+        arb.get("director_verified_throughput_tok_s"),         # nested (legacy)
         vs_base.get("final_warm_median_tok_s"),
         final_block.get("warm_median_tok_s"),
     )
-    speedup = _first(vs_base.get("speedup"), drift.get("speedup_warm"))
+    speedup = _first(
+        validation.get("throughput_speedup"),               # current + 20260615 flat
+        vs_base.get("speedup"),
+        drift.get("speedup_warm"),
+    )
     if speedup is None and baseline_tput and final_tput:
         speedup = final_tput / baseline_tput
-    overall_delta_pct = _first(vs_base.get("delta_pct"), drift.get("delta_pct_warm"))
+    overall_delta_pct = _first(
+        validation.get("delta_pct_drift_corrected"),        # 20260615 flat
+        vs_base.get("delta_pct"),
+        drift.get("delta_pct_warm"),
+    )
     if overall_delta_pct is None and speedup is not None:
         overall_delta_pct = (speedup - 1.0) * 100.0
 
@@ -670,6 +842,12 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
 
     accepted = list(wf.get("accepted_kernels") or []) + list(wf.get("accepted_heads") or [])
     kernels: list[dict] = []
+    # Discovery-shape projection (KERNEL_JOURNEY_SCHEMA.md §3/§5). GEAK-e2e
+    # profiles via rocprofv3 (not tracelens), so the discovery ROUTE is
+    # ``bypass``. The assembler backfills each kernel's discovery-sourced fields
+    # (name / gpu_pct / bound_type / source_file) from these hot_kernels — they
+    # are dropped otherwise, since dispatch/backend_result/e2e don't carry them.
+    hot_kernels: list[dict] = []
     for idx, k in enumerate(accepted):
         if not isinstance(k, dict):
             continue
@@ -681,6 +859,15 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
         gpu_pct = k.get("pct_gpu_time")
         patch = k.get("final_patch") or final_patch or None
         attempt_id = f"{kernel_id}-{backend}-{idx}"
+        hot_kernels.append({
+            "kernel_id": kernel_id,
+            "name": name,
+            "gpu_pct": gpu_pct,
+            "bound_type": str(k.get("bound_type") or k.get("op_kind") or ""),
+            "source_file": k.get("target_file") or k.get("target_callable"),
+            "recommended_backends": [backend],
+            "selected_for_optimization": True,
+        })
         attempt = {
             "backend": backend,
             "attempt_id": attempt_id,
@@ -732,6 +919,17 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
         "producer": "kernel-agent",
         "eval_dir": eval_dir,
         "versions": versions,
+        # Stage-1 discovery substream (schema §3) so Hyperloom's recorder can
+        # backfill the discovery-sourced kernel fields. Empty when nothing was
+        # accepted (still valid).
+        "discovery_runs": [
+            {
+                "source": "bypass",
+                "status": "success",
+                "scan": {"candidates_path": f"perfskills:{eval_dir}"},
+                "hot_kernels": hot_kernels,
+            }
+        ] if hot_kernels else [],
         "kernels": kernels,
     }
 
@@ -767,6 +965,10 @@ def main(argv: list[str]) -> int:
         return 2
 
     ps_args = map_args(h)
+    # Pin the single eval_dir into the environment so BOTH the live completion
+    # check (_workflow_done_on_disk) and the scrape-independent disk recovery
+    # (_discover_eval_dir) target EXACTLY this run's dir, deterministically.
+    os.environ["PERFSKILLS_EVAL_DIR"] = ps_args["eval_dir"]
     bench_client = apply_bench_client(h)
     bench_protocol = apply_bench_protocol(h)
     prompt = build_prompt(ps_args)
@@ -780,7 +982,7 @@ def main(argv: list[str]) -> int:
 
     recovered = False
     try:
-        wf = invoke_workflow(prompt, timeout_s)
+        wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"])
     except Exception as e:  # scrape/crash/timeout: try a disk recovery first.
         error_class = _classify_error(e)
         # The optimizer's artifacts (director_e2e_validation.json + final/
