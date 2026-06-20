@@ -810,7 +810,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
                 CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
               }),
               { phase: 'HeadKernel', label: `integrate ${h.short_name}/${c.key} g${e2eGateCount}`, schema: INTEGRATE_SCHEMA });
-            if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+            // Belt-and-suspenders: never accept a parity-failing candidate even if the gate says so —
+            // this is what let cumulative MXFP8 drift ride through before (7/12 diverged vs true baseline).
+            if (integ && integ.output_parity === 'fail') {
+              log(`  [deep-mode] ${h.short_name}/${c.key}: REJECTED — output_parity=fail vs true baseline (no cumulative drift allowed).`);
+              history.ledger.push({ direction: `${h.short_name}/${c.key}`, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
+            } else if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
               curOverlay = integ.accepted_overlay || curOverlay;
               curTput = integ.e2e_throughput_tok_s;
               acceptedHeads.push({ short_name: h.short_name, op_kind: ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', e2e_delta_pct: integ.e2e_delta_pct, isolated: c.best });
