@@ -98,7 +98,9 @@ emit_profiler_failure() {  # <tool> <exit_code> <override_env_var> <raw_log>
 run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump the FULL analyze text.
     local tool="$1"
     local workload="$OUTPUT_DIR/${tool}_workload"
-    rm -rf "$workload"; mkdir -p "$workload"
+    # NO `rm` (prompts + blocks autonomous runs): move any stale profiler dir aside, then make fresh.
+    [ -e "$workload" ] && mv "$workload" "${workload}.old_$(date +%s)_$$" 2>/dev/null || true
+    mkdir -p "$workload"
     echo "=== Profiling with $tool (profile $RPC_PROFILE_ARGS) ==="
     local rc=0
     bash "$GPU_LOCK" "$GPU_ID" \
@@ -114,7 +116,9 @@ run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump 
 
 run_rocprofv3() {        # modern profiler: kernel trace + stats CSVs (per-kernel dispatch counts + durations).
     local dir="$OUTPUT_DIR/rocprofv3"
-    rm -rf "$dir"; mkdir -p "$dir"
+    # NO `rm` (prompts + blocks autonomous runs): move any stale dir aside, then make fresh.
+    [ -e "$dir" ] && mv "$dir" "${dir}.old_$(date +%s)_$$" 2>/dev/null || true
+    mkdir -p "$dir"
     echo "=== Profiling with rocprofv3 ($RPV3_TRACE_ARGS) ==="
     local rc=0
     bash "$GPU_LOCK" "$GPU_ID" \

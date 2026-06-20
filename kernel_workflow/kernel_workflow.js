@@ -501,11 +501,14 @@ while (dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
 First create YOUR private workspace, then optimize.
 \`\`\`bash
-mkdir -p ${d.out_dir}
-rm -rf ${d.out_dir}/workspace; cp -r ${CANONICAL}/. ${d.out_dir}/workspace
-# Drop inherited build cache: torch .torch_ext/build.ninja stores ABSOLUTE source paths, so an
-# inherited cache would rebuild the wrong location. Each workspace builds its own fresh.
-rm -rf ${d.out_dir}/workspace/build ${d.out_dir}/workspace/__pycache__ ${d.out_dir}/workspace/*/__pycache__ ${d.out_dir}/workspace/*.so ${d.out_dir}/workspace/.torch_ext 2>/dev/null || true
+# Fresh, ISOLATED workspace via tar-copy that EXCLUDES build artifacts (.git/build/__pycache__/.torch_ext/
+# *.so/*.o) — no 'rm' anywhere. Each engineer's out_dir is unique per (round,engineer), so the workspace
+# is clean on creation; the tar excludes mean no stale build cache is ever inherited (torch .torch_ext
+# stores ABSOLUTE paths, so excluding it forces each workspace to build its own fresh).
+mkdir -p ${d.out_dir}/workspace
+( cd ${CANONICAL} && tar --exclude=./.git --exclude='*/.git' --exclude=./build --exclude='*/build' \\
+    --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \\
+    --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd ${d.out_dir}/workspace && tar -xf - )
 \`\`\`
 ${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section

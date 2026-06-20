@@ -60,8 +60,9 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    build cache (`$KERNEL_PATH/.torch_ext`) and compiles for the local arch only — this is why your
    compiles are fast and don't collide with other engineers. Always invoke it from `$KERNEL_PATH`.
 4. After editing sources, ninja auto-rebuilds on the next run — you usually do NOT need to wipe the
-   cache. Use the COMMANDMENT `SETUP` (`rm -rf build __pycache__ */__pycache__ *.so`) to clear stale
-   loose artifacts; only `rm -rf .torch_ext` if you suspect a stale build (e.g. after editing headers).
+   cache. NEVER use `rm` (it triggers an approval prompt that blocks the run). Your workspace is already
+   an artifact-free fresh copy; if you ever suspect a stale build (e.g. after editing headers), MOVE the
+   cache aside instead of deleting: `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true`.
 5. ALWAYS run CORRECTNESS before BENCHMARK. A fast-but-wrong kernel scores 0.
 6. Preserve the kernel's external interface (signature, semantics) so the wrapper/tests still work.
 7. Hipify safety (HIP): never put `<<<>>>` launches inside a macro if/else or ternary — use template

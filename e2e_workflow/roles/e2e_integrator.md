@@ -53,7 +53,8 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
 **DEEP-MODE feedback (only if `DEEP_FEEDBACK` is in your inputs; a normal/fast run omits it).** Besides
 the gate decision, the deep-mode scheduler needs the WHY so the next co-opt waves can fix the
 isolated→e2e gap. Write a concise per-candidate problem record to
-`${EVAL_DIR}/deep_head/<short_name>/integrate_<winner_backend>.json` capturing: `engaged` (did the
+`${EVAL_DIR}/deep_head/<short_name>/integrate_<lane>.json` (use `KERNEL_RESULT.lane` for the filename —
+it is unique per lane, so multiple triton lanes don't collide; fall back to `<winner_backend>` if absent) capturing: `engaged` (did the
 optimized kernel actually run live, from the engagement probe — vs eager fallback under cudagraph),
 `cudagraph` (captured | eager_fallback | hang), `mem_footprint_note` (did it fit the same mem-fraction,
 or starve KV), `decode_regressed` (bool + which buckets), `parity`, `e2e_delta_pct`, and a one-line

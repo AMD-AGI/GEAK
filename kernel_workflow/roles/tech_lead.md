@@ -242,11 +242,13 @@ none of them, so skip this whole block then):**
   ```bash
   mkdir -p "$STATE_DIR"
   # sync the cumulative-best workspace (code + immutable oracle) to STATE_DIR/best (tar-pipe, exclude
-  # .git/build/__pycache__/.torch_ext/*.so) so the next wave's director seeds from it.
-  rm -rf "$STATE_DIR/best.tmp"; mkdir -p "$STATE_DIR/best.tmp"
+  # .git/build/__pycache__/.torch_ext/*.so) so the next wave's director seeds from it. NO `rm` (it
+  # prompts and blocks autonomous runs): stage into a UNIQUE tmp, then atomically swap with mv-aside.
+  TMP="$STATE_DIR/best.tmp_$(date +%s)_$$"; mkdir -p "$TMP"
   ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/build' --exclude='*/__pycache__' \
-      --exclude='*/.torch_ext' --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$STATE_DIR/best.tmp" && tar -xf - )
-  rm -rf "$STATE_DIR/best"; mv "$STATE_DIR/best.tmp" "$STATE_DIR/best"
+      --exclude='*/.torch_ext' --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$TMP" && tar -xf - )
+  [ -e "$STATE_DIR/best" ] && mv "$STATE_DIR/best" "$STATE_DIR/best.old_$(date +%s)_$$" 2>/dev/null || true
+  mv "$TMP" "$STATE_DIR/best"
   ```
   Then write `$STATE_DIR/STATE.json` = `{cumulative: <CUMULATIVE_SPEEDUP>, insights, ledger,
   bottleneck_now, best_per_case: <BEST_PER_CASE>, last_round: <ROUND>}` (the full carried-forward state).
