@@ -31,6 +31,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,19 @@ WORKFLOW_SETTINGS = os.environ.get(
 # swapping the system claude alone has no effect on the SDK path. Set
 # PERFSKILLS_CLAUDE_BIN to pin a specific build (e.g. an older native version).
 CLAUDE_BIN = os.environ.get("PERFSKILLS_CLAUDE_BIN", "").strip()
+
+# Background-task completion race (see _invoke_via_sdk completion gate):
+# when the SDK turn "looks done" (a background task notified terminal + the
+# main turn produced a ResultMessage) but the workflow has NOT yet written its
+# authoritative on-disk terminal marker, the workflow may still be finishing a
+# DETACHED leg (e.g. the integrate A/B reference/candidate bench). Tearing the
+# runner down here orphans that leg and discards a still-completing measurement.
+# Instead we keep the persistent SDK client open (which keeps the CLI + the
+# backgrounded workflow alive) and poll the disk for the terminal marker for a
+# BOUNDED grace window. The outer anyio.fail_after(timeout_s) is the ultimate
+# backstop, so this can never exceed the run's hard budget.
+DONE_GRACE_S = float(os.environ.get("PERFSKILLS_DONE_GRACE_S", "1800"))
+DONE_POLL_S = float(os.environ.get("PERFSKILLS_DONE_POLL_S", "15"))
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +315,11 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
         extra: dict = {}
         if CLAUDE_EFFORT in VALID_EFFORTS:
             extra["effort"] = CLAUDE_EFFORT
+        sdk_env: dict[str, str] = {}
+        # Claude Code refuses bypassPermissions under root unless it is running
+        # in an explicit sandbox. Scope this to the SDK child process only.
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            sdk_env["IS_SANDBOX"] = "1"
         return ClaudeAgentOptions(
             model=CLAUDE_MODEL,
             allowed_tools=ALLOWED_TOOLS,
@@ -308,6 +327,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
             settings=WORKFLOW_SETTINGS,
             extra_args=extra,
             cwd=str(E2E_DIR),
+            env=sdk_env,
             **({"cli_path": CLAUDE_BIN} if CLAUDE_BIN else {}),
         )
 
@@ -360,16 +380,47 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                     if pending:
                         continue
                     # Authoritative: the optimizer wrote its terminal marker.
+                    # This is the ONLY hard "the workflow finished a measured
+                    # leg" signal and is independent of HOW the agent ran it.
                     if _workflow_done_on_disk(eval_dir):
                         break
-                    # Background path concluded (success OR failure): stop and
-                    # let downstream disk-recovery/normalize judge the result.
-                    if terminal_task and saw_result:
-                        break
                     # Pure synchronous path: the turn ended and no background
-                    # task was ever spawned — the workflow ran in-turn.
+                    # task was EVER spawned — the workflow ran fully in-turn, so
+                    # the turn's ResultMessage is itself terminal. (A missing
+                    # marker here means an in-turn crash; disk-recovery judges.)
                     if saw_result and not bg_started:
                         break
+                    # Background path "looks done": a task notified terminal AND
+                    # the main turn produced a ResultMessage — BUT the workflow
+                    # has not yet written its on-disk terminal marker. It may
+                    # still be finishing a DETACHED leg (the integrate A/B
+                    # reference/candidate bench is launched as a child process
+                    # and outlives the task notification). Returning now would
+                    # orphan that bench and discard a still-completing A/B. Stop
+                    # consuming messages, but DO NOT close the client yet: fall
+                    # through to the bounded grace poll below, which keeps the
+                    # CLI (and the backgrounded workflow) alive while waiting for
+                    # the authoritative marker to land.
+                    if terminal_task and saw_result:
+                        break
+
+                # Grace window: we exited the message loop on the weak
+                # background signal without an on-disk terminal marker. Keep the
+                # persistent client open (so the detached integrate/Validate leg
+                # keeps running) and poll the disk until the marker appears or
+                # the bounded grace expires. The enclosing fail_after(timeout_s)
+                # still caps total time, so this can never exceed the hard budget.
+                if (
+                    terminal_task
+                    and saw_result
+                    and bg_started
+                    and not _workflow_done_on_disk(eval_dir)
+                ):
+                    deadline = time.monotonic() + DONE_GRACE_S
+                    while time.monotonic() < deadline:
+                        if _workflow_done_on_disk(eval_dir):
+                            break
+                        await anyio.sleep(DONE_POLL_S)
         return "\n".join(chunks)
 
     async def _run_query() -> str:

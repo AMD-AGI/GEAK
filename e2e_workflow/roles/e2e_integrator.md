@@ -173,7 +173,14 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
    `OVERLAY_PYTHONPATH` / `EXTRA_SERVER_ARGS` / `EXTRA_ENV` between the two legs.
    Read ALL per-repeat throughputs from `$CB/ref/bench_runs.jsonl` and `$CB/cand/bench_runs.jsonl`
    (each has E2E_REPEATS rows). Compute `ref_med`, `cand_med`, `ref_max`, `cand_min`, and
-   `delta% = (cand_med - ref_med)/ref_med*100`. The two blocks run within ~30 min back-to-back, so box
+   `delta% = (cand_med - ref_med)/ref_med*100`.
+   **CHECKPOINT each leg as it finishes** — after the reference block completes write the partial result
+   to `$CB/integrate_result.json` (at minimum `{short_name, ref_med, gate:"incomplete", ab_complete:false}`),
+   then update it after the candidate block (adding `cand_med`, the final `gate`, `ab_complete:true`,
+   `e2e_throughput_tok_s`, `e2e_delta_pct`). This makes a cut-off A/B RECOVERABLE: if you run out of time
+   after only the reference leg, the orchestrator keeps the candidate as a *pending* verified-isolated win
+   (NOT a rejection) and can finish the A/B later, instead of silently discarding a real isolated speedup.
+   The two blocks run within ~30 min back-to-back, so box
    drift between them is negligible (the box drifts over hours, not minutes). If you want extra drift
    robustness on a borderline result, run a second ref block after the cand block and pool the ref
    repeats — but do NOT relaunch per repeat.
@@ -182,11 +189,17 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
    or a same-dtype swap that diverges), run a small task-accuracy probe (gsm8k/translation) and accept
    only if quality holds; otherwise REJECT (or `flagged` for the Director to arbitrate).
 5. Emit the verdict: `accepted` (strong standalone win), `stack` (parity-safe, engaged, non-negative,
-   sub-threshold → carry forward to compound), or `rejected` (parity-fail / no-engagement / regression).
+   sub-threshold → carry forward to compound), `rejected` (parity-fail / no-engagement / regression), or
+   `incomplete` (you could NOT measure BOTH legs — out of time, hung launch, harness fault mid-A/B).
    For `accepted` or `stack`, fold the change into the carried overlay/config and report the measured
    throughput. For `rejected`, keep the previous. Always report the full numbers (engagement hits,
    delta%, ref/cand medians + min/max overlap) for the timeline report. Do not dismiss small-but-real
    gains — emit `stack` so they can compound; the Director's final combined gate decides the headline.
+   **NEVER report `rejected` for a measurement you did not actually complete.** A reject means a *measured*
+   loss/parity-fail; if both legs did not run to completion, emit `gate:"incomplete"` with `ab_complete:false`
+   (plus whatever partial `ref_med`/`cand_med` you have). `incomplete` is treated as a *pending* verified
+   win to be finished later — reporting a false `rejected` would discard a real isolated speedup.
+   Set `ab_complete:true` ONLY when BOTH the reference and candidate legs were measured to completion.
 
 Return JSON:
 ```json
@@ -197,10 +210,13 @@ Return JSON:
   "pct_gpu_time": 0.0,
   "e2e_throughput_tok_s": 0.0,
   "e2e_delta_pct": 0.0,
+  "ref_med": 0.0,
+  "cand_med": 0.0,
+  "ab_complete": true,
   "output_parity": "pass|fail",
-  "gate": "accepted|rejected",
+  "gate": "accepted|stack|rejected|incomplete",
   "accepted_overlay": "<path to the overlay to carry forward>",
-  "reason": "why accepted/rejected (cite Amdahl + measured delta vs noise band)"
+  "reason": "why accepted/rejected/incomplete (cite Amdahl + measured delta vs noise band)"
 }
 ```
 

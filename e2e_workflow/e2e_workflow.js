@@ -225,7 +225,14 @@ const INTEGRATE_SCHEMA = obj({
   short_name: { type: 'string' }, provenance_ok: { type: 'boolean' },
   isolated_speedup: { type: 'number' }, pct_gpu_time: { type: 'number' },
   e2e_throughput_tok_s: { type: 'number' }, e2e_delta_pct: { type: 'number' },
-  output_parity: { type: 'string' }, gate: { type: 'string' },
+  // A/B completion signals: the integrator MUST set ab_complete=true ONLY when
+  // BOTH the reference and candidate serving legs were measured. When it ran out
+  // of time / hung mid-gate it returns gate:'incomplete' (ab_complete=false) with
+  // whatever partial legs it has (ref_med / cand_med) — that is NOT a rejection.
+  ref_med: { type: 'number' }, cand_med: { type: 'number' },
+  ab_complete: { type: 'boolean' },
+  output_parity: { type: 'string' },
+  gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' },
 }, ['gate', 'e2e_throughput_tok_s']);
 
@@ -482,6 +489,11 @@ let milestone = 0;
 let noImprove = 0;
 const acceptedKernels = (ST.accepted_kernels || []).slice();
 const acceptedHeads = (ST.accepted_heads || []).slice();
+// Verified-isolated wins whose e2e A/B did NOT complete (integrate agent timed
+// out / hung / degraded to null mid-gate). These are NOT rejections — keep them
+// so Finalize can finish the best one's A/B (Fix C) and so a real isolated win
+// is surfaced (return.pending_integrations) instead of being silently dropped.
+const pendingIntegrations = (ST.pending_integrations || []).slice();
 const flaggedHeads = (ST.flagged_heads || []).slice();   // dominant heads that could NOT be optimized (loudly surfaced, never silently skipped)
 let headDispatched = 0;
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
@@ -629,23 +641,33 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     log(`  ${h.short_name}: best candidate=${cand.source} (${(cand.isolated || 0).toFixed(2)}x, ${cand.kind}). Integrating to e2e.`);
 
     // (h3) e2e gate on the chosen candidate. direct_light env/flag → config; authored/patch → overlay.
+    // Build inputs ONCE so Fix C can re-issue the SAME A/B for a pending win at Finalize.
+    const headIntegrateInputs = {
+      EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+      KERNEL_RESULT: { short_name: h.short_name, task_dir: ext.task_dir, op_kind: ext.op_kind,
+        winner_kind: cand.winner_kind, winner_backend: cand.source,
+        target_callable: ext.target_callable || h.target_callable || '',
+        authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
+        apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
+        code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
+        verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
+        parity_note: cand.parity_note || 'expected_close' },
+      CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+      CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
+    };
     const integ = await safeAgent(
-      roleAgent('e2e_integrator', 'integrate', 'Apply the head-op winner; gate on e2e throughput.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
-        KERNEL_RESULT: { short_name: h.short_name, task_dir: ext.task_dir, op_kind: ext.op_kind,
-          winner_kind: cand.winner_kind, winner_backend: cand.source,
-          target_callable: ext.target_callable || h.target_callable || '',
-          authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
-          apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
-          code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
-          verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
-          parity_note: cand.parity_note || 'expected_close' },
-        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
-        CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
-      }),
+      roleAgent('e2e_integrator', 'integrate', 'Apply the head-op winner; gate on e2e throughput.', headIntegrateInputs),
       { phase: 'HeadKernel', label: `integrate ${h.short_name}`, schema: INTEGRATE_SCHEMA });
 
-    if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+    // Three-state gate: an integrate that did NOT complete its A/B (null /
+    // gate:'incomplete' / ab_complete!==true) is NOT a rejection — keep it as a
+    // pending verified-isolated win so Finalize (Fix C) can finish/surface it.
+    // Backward-compatible: treat the return as a COMPLETED A/B unless it is null
+    // (timeout/hang/degrade — the actual incident cause) or EXPLICITLY flags
+    // itself incomplete (gate:'incomplete' or ab_complete===false). A legacy
+    // integrator that omits ab_complete still accepts/rejects exactly as before.
+    const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
+    if (abDone && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
       // a head winner may be carried as overlay (authored/patch) AND/OR config (env/flag) — capture both.
       curOverlay = integ.accepted_overlay || curOverlay;
       if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
@@ -654,9 +676,17 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       acceptedHeads.push({ short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: cand.winner_kind, e2e_delta_pct: integ.e2e_delta_pct, isolated: cand.isolated });
       log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
       history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
+    } else if (!abDone) {
+      pendingIntegrations.push({ track: 'head', short_name: h.short_name, isolated: cand.isolated || 0,
+        pct_gpu_time: h.pct_gpu_time, inputs: headIntegrateInputs,
+        winner_kind: cand.winner_kind, apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
+        op_kind: ext.op_kind, backend: cand.source,
+        partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
+      log(`  ${h.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
+      history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
     } else {
-      log(`  ${h.short_name}: REJECTED at e2e gate (${integ ? integ.reason || integ.gate : 'none'}).`);
-      history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ ? integ.e2e_delta_pct : 0, verdict: 'dead_end', lesson: integ ? integ.reason || 'no e2e gain' : 'integrate failed' });
+      log(`  ${h.short_name}: REJECTED at e2e gate (${integ.reason || integ.gate}).`);
+      history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: integ.reason || 'no e2e gain' });
     }
   }
   // Head wins reshape the profile massively (GEMM mass shrinks) — re-profile before the kernel loop.
@@ -772,27 +802,39 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
       continue;
     }
     log(`  ${c.short_name}: kernel layer ${kl.final_geomean.toFixed(2)}x isolated. Integrating to e2e.`);
+    // Build inputs ONCE so Fix C can re-issue the SAME A/B for a pending win at Finalize.
+    const mileIntegrateInputs = {
+      EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+      KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
+        source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
+        final_patch: kl.final_patch, verified_isolated_speedup: kl.final_geomean, pct_gpu_time: c.pct_gpu_time },
+      CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+      CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
+    };
     const integ = await safeAgent(
-      roleAgent('e2e_integrator', 'integrate', 'Overlay the optimized kernel back; gate on e2e throughput.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
-        KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
-          source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
-          final_patch: kl.final_patch, verified_isolated_speedup: kl.final_geomean, pct_gpu_time: c.pct_gpu_time },
-        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
-        CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
-      }),
+      roleAgent('e2e_integrator', 'integrate', 'Overlay the optimized kernel back; gate on e2e throughput.', mileIntegrateInputs),
       { phase: 'Milestone', label: `integrate ${c.short_name}`, schema: INTEGRATE_SCHEMA });
 
-    if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+    // Three-state gate (see head track): incomplete A/B => PENDING, not rejected.
+    // Backward-compatible: null (timeout/hang/degrade) or an explicit incomplete
+    // flag => not done; a legacy return without ab_complete behaves as before.
+    const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
+    if (abDone && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       curTput = integ.e2e_throughput_tok_s;
       acceptedKernels.push({ short_name: c.short_name, backend: kl.note || '', e2e_delta_pct: integ.e2e_delta_pct, isolated: kl.final_geomean });
       milestoneImproved = true;
       log(`  ${c.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
       history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
+    } else if (!abDone) {
+      pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: kl.final_geomean,
+        pct_gpu_time: c.pct_gpu_time, inputs: mileIntegrateInputs, backend: kl.note || '',
+        partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
+      log(`  ${c.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
     } else {
-      log(`  ${c.short_name}: REJECTED at e2e gate (${integ ? integ.reason || integ.gate : 'none'}).`);
-      history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ ? integ.e2e_delta_pct : 0, verdict: 'dead_end', lesson: integ ? integ.reason || 'no e2e gain' : 'integrate failed' });
+      log(`  ${c.short_name}: REJECTED at e2e gate (${integ.reason || integ.gate}).`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: integ.reason || 'no e2e gain' });
     }
   }
 
@@ -829,9 +871,54 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
 // ===========================================================================
 // PHASE: Finalize + Report + Validate  (gated)
 // ===========================================================================
-const allAccepted = acceptedHeads.concat(acceptedKernels);
+let allAccepted = acceptedHeads.concat(acceptedKernels);
 let finalize = null, report = null, validation = null;
 let finalTput = curTput, finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
+
+// --- Fix C: finish the best PENDING A/B before finalizing ------------------
+// A pendingIntegrations entry is a VERIFIED isolated win whose e2e A/B was cut
+// off (integrate agent timed out/hung/degraded mid-gate) — NOT a rejection. If
+// no integrate completed a clean A/B but such pending wins exist, finishing the
+// best one's A/B here is what turns a real isolated speedup into a banked e2e
+// gain (instead of finalizing an empty overlay -> no_gain). Bounded by the
+// integrate agent's own agentBounded guard + the outer runner budget.
+if (want('final') && !acceptedHeads.length && !acceptedKernels.length && pendingIntegrations.length) {
+  pendingIntegrations.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
+  const p = pendingIntegrations[0];
+  log(`Finalize-gate: no completed A/B, but ${pendingIntegrations.length} verified-isolated win(s) pending; ` +
+    `finishing the best one's A/B (${p.short_name}, ${(p.isolated || 0).toFixed(2)}x isolated) before finalizing.`);
+  const integ = await safeAgent(
+    roleAgent('e2e_integrator', 'integrate',
+      'Finish the e2e A/B for the best pending verified-isolated win. Run BOTH legs (reference + candidate) to completion and only then return accepted/rejected; if you still cannot complete both legs, return gate:"incomplete".',
+      // Re-issue with the SAME inputs captured at dispatch time, but pin the
+      // CURRENT carried overlay/flags/env/throughput so the A/B is measured
+      // against the latest accepted baseline.
+      { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput }),
+    { phase: 'Finalize', label: `finish-integrate ${p.short_name}`, schema: INTEGRATE_SCHEMA });
+  const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
+  if (abDone && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+    curOverlay = integ.accepted_overlay || curOverlay;
+    if (p.track === 'head') {
+      if (p.winner_kind === 'env' && p.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + p.apply_env;
+      if (p.winner_kind === 'flag' && p.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + p.apply_flags;
+      acceptedHeads.push({ short_name: p.short_name, op_kind: p.op_kind, backend: p.backend, kind: p.winner_kind, e2e_delta_pct: integ.e2e_delta_pct, isolated: p.isolated });
+    } else {
+      acceptedKernels.push({ short_name: p.short_name, backend: p.backend || '', e2e_delta_pct: integ.e2e_delta_pct, isolated: p.isolated });
+    }
+    curTput = integ.e2e_throughput_tok_s;
+    finalTput = curTput; finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
+    pendingIntegrations.splice(0, 1);
+    log(`Finalize-gate: pending win ${p.short_name} ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
+    history.ledger.push({ direction: p.short_name, isolated_speedup: p.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: 'finished at finalize-gate' });
+  } else if (abDone) {
+    pendingIntegrations.splice(0, 1);   // A/B completed and genuinely lost — drop it
+    log(`Finalize-gate: pending win ${p.short_name} REJECTED after a completed A/B (${integ.reason || integ.gate}).`);
+    history.ledger.push({ direction: p.short_name, isolated_speedup: p.isolated, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: integ.reason || 'no e2e gain' });
+  } else {
+    log(`Finalize-gate: pending win ${p.short_name} A/B STILL incomplete (${integ ? integ.reason || integ.gate : 'null/timeout'}); surfacing it in the return for a follow-up sweep.`);
+  }
+}
+allAccepted = acceptedHeads.concat(acceptedKernels);   // refresh after Fix C may have banked a pending win
 if (want('final')) {
   phase('Finalize');
   finalize = await safeAgent(
@@ -875,7 +962,11 @@ const carryState = {
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
-  headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels, history,
+  headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
+  // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a
+  // resumed phase run can finish their A/B instead of re-discovering them.
+  pending_integrations: pendingIntegrations,
+  history,
 };
 
 return {
@@ -892,6 +983,13 @@ return {
   accepted_config: { flags: curFlags, env: curEnv },
   accepted_kernels: acceptedKernels,
   accepted_heads: acceptedHeads,
+  // Verified-isolated wins whose e2e A/B never completed (timeout/hang mid-gate).
+  // A REAL isolated speedup that simply ran out of A/B time — surfaced (slim) so
+  // the caller can resume/finish it, never silently discarded as a rejection.
+  pending_integrations: pendingIntegrations.map(p => ({
+    short_name: p.short_name, track: p.track, isolated: p.isolated,
+    pct_gpu_time: p.pct_gpu_time, partial: p.partial || null,
+  })),
   flagged_heads: flaggedHeads,   // dominant heads surfaced but not optimized (harness/extract/no-candidate) — never silently dropped
   config_tune_enabled: CONFIG_TUNE_ENABLED,
   head_budget: HEAD_BUDGET,
