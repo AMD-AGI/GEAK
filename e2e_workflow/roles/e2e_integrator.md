@@ -62,6 +62,19 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
 ∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`),
 `CURRENT_OVERLAY`, `CURRENT_FLAGS`/`CURRENT_ENV`, `CURRENT_THROUGHPUT`, `SKILL_DIR`.
 
+**ACCURACY GATE (only if `ACCURACY_GATE=gsm8k` is in your inputs; else use the normal parity gate).**
+For a QUANTIZED kernel, byte-exact greedy parity is the WRONG bar (a within-tolerance kernel rounds
+differently → flips borderline argmaxes → over-rejects valid kernels). Instead, score TASK ACCURACY:
+- Launch a FRESH TRUE-baseline server (no overlay) and the CAND server (with the candidate overlay), each
+  greedy/temp=0, and run `python3 $GSM8K_EVAL_SCRIPT --base-url http://127.0.0.1:<port>/v1 --model <MODEL_PATH>
+  --limit $ACCURACY_LIMIT --out <dir>/gsm8k_<tag>.json` against each (it prints `GSM8K_EXACT_MATCH=<s>`).
+  The script samples the SAME fixed gsm8k subset for both (seed-pinned), so the scores are comparable.
+- ACCEPT the candidate iff `cand_score >= baseline_score - $ACCURACY_TOL` (quality preserved); otherwise
+  `rejected` with reason `accuracy_regression` (record both scores). This REPLACES byte-parity for the
+  quant gate — a byte-divergent kernel that holds gsm8k accuracy is a LEGITIMATE win. Still apply the
+  throughput + engagement + memory gates as usual. (You can reuse the same two servers for the throughput
+  A/B to avoid extra launches.)
+
 **DEEP-MODE feedback (only if `DEEP_FEEDBACK` is in your inputs; a normal/fast run omits it).** Besides
 the gate decision, the deep-mode scheduler needs the WHY so the next co-opt waves can fix the
 isolated→e2e gap. Write a concise per-candidate problem record to

@@ -124,6 +124,19 @@ const DEEP_PLATEAU_STREAK = parseInt(A.deep_plateau_streak != null ? A.deep_plat
 // This bounds each head to a fixed number of co-opt waves regardless, then advances to the next head.
 const DEEP_MAX_WAVES_PER_HEAD = parseInt(A.deep_max_waves_per_head != null ? A.deep_max_waves_per_head : 4, 10);
 const DEEP_BACKENDS_OVERRIDE = String(A.deep_backends || '').trim(); // optional CSV "triton:optimize,hip:author,..."; default = derive from the bake-off
+// ---- ACCURACY GATE (opt-in switch) ------------------------------------------------------------------
+// For QUANTIZED kernels (MXFP8/fp8) byte-exact e2e parity is the WRONG bar — a kernel within the unittest
+// tolerance rounds differently and flips borderline greedy argmaxes, so byte-parity over-rejects valid
+// kernels. The RIGHT bar is TASK ACCURACY. When accuracy_gate=gsm8k, the e2e_integrator scores the
+// candidate vs the true baseline on a sampled gsm8k subset (scripts/gsm8k_eval.py, 5-shot greedy
+// exact_match, InferenceX-style) and accepts iff cand_score >= baseline_score - accuracy_tol — instead of
+// (over-strict) byte-parity. Default 'none' => unchanged byte/greedy parity (normal/fast untouched).
+const ACCURACY_GATE = String(A.accuracy_gate || 'none').trim();          // 'none' | 'gsm8k'
+const ACCURACY_LIMIT = parseInt(A.accuracy_limit != null ? A.accuracy_limit : 200, 10); // sampled gsm8k subset size
+const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01);        // allowed absolute exact_match drop vs baseline
+const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
+  ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
+  : {};
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
@@ -808,6 +821,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
                 },
                 CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
                 CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
+                ...ACCURACY_INPUTS,
               }),
               { phase: 'HeadKernel', label: `integrate ${h.short_name}/${c.key} g${e2eGateCount}`, schema: INTEGRATE_SCHEMA });
             // Belt-and-suspenders: never accept a parity-failing candidate even if the gate says so —
