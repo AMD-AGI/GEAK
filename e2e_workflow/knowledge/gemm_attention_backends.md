@@ -174,6 +174,144 @@ e2e parity**; if it fails on a non-quant change, flag it for an accuracy eval (s
 6. **Record results in Learned below** (newest first), with model, shape, dtype, gfx, measured ms.
 
 
+## Learned — 2026-06-20 (re-confirm #8, PHASE=bakeoff GPU0) MiniMax-M3-MXFP8 / gfx950 / vLLM TP=4 — _mxfp8_linear_kernel (DENSE HEAD, 22.02% GPU time)
+- 8th RE-CONFIRM of the dense-linear routing (18d/18f/re-confirm-1/-2/06-19/06-19#6/06-20#7). This run: PCT_GPU_TIME=22.02%,
+  candidate_backends=[triton], GPU_ID=0, ENABLE_FP8=false. EVAL_DIR e2e_MiniMax-M3-MXFP8_20260620_182208_1063564_22422.
+  Provenance CLEAN: meta synthesized:true, reference_io_sha256="" + NO reference_io.pt + unittest_sha256
+  5623b474…==meta (NOT tamper — GEMM_SYNTH oracle). Op: dense MXFP8 linear, native CDNA4 tl.dot_scaled (E4M3 + E8M0/uint8
+  per-32 block scale, transpose_b, no bias), N=K=6144 (gate_up_proj dense MLP), decode M∈{1,32} + prefill M∈{512,8192},
+  out bf16. Live seam vllm.model_executor.kernels.linear.mxfp8.rocm_native:_mxfp8_dot_scaled_linear (NOT aiter.tuned_gemm).
+- op_bench dense/blockscale path can't represent grouped E8M0 MXFP8 → ran the IMMUTABLE unittest.py DIRECTLY (synth oracle,
+  no reference_io). All 4 cases PASS (err 0.0065–0.0069 ≪ 6e-2 tol), self-speedup 1.0 (entry==baseline). best_known_ms
+  per-case: decode_m1 0.0703, decode_m32 0.0777, prefill_m512 0.1157, prefill_m8192 0.8392; geomean ≈ 0.1376ms
+  (the bar an authored kernel must beat). isolated_speedup=1.0 (only correct backend).
+- Tier-A/B RE-CONFIRMED LIVE this run (GPU0): arch gfx950:sramecc+:xnack-; `[a for a in dir(aiter) if mxfp8/e8m0/mx_]==[]`
+  (no MXFP8-E8M0 dense primitive); aiter.ops.triton.utils.arch_info MISSING → is_flydsl probe N/A and FlyDSL has no E8M0 MX
+  primitive regardless; AITER_CONFIG_GEMM_BF16 = wrong lever (live path is vLLM Triton dot_scaled, not aiter gemm_a16w16 →
+  0 engagement). NO env/flag winner.
+- Kernel HARDCODES BLOCK_M=64,BLOCK_N=128,BLOCK_K=128,num_warps=8, NO autotune/num_stages/split-K (kernel_src/rocm_native.py
+  L92-117) = the Tier-C headroom.
+- FRESH isolated TILE SWEEP this run (GPU0, $EVAL_DIR/config/tile_sweep_mxfp8_linear.py wraps the immutable _synth_case+oracle,
+  sweeps BM∈{64,128,256}×BN∈{64,128}×BK∈{128,256}×nw∈{4,8}×ns∈{1,2} on the SAME dot_scaled body), ALL cases correct (err
+  unchanged), NO decode regression: decode_m1 → (BM64,BN64,BK256,nw4,ns2)=**1.18x (GAIN)**; decode_m32 → same=**1.29x (GAIN)**;
+  prefill_m512 → (BM256,BN64,BK256,nw8,ns2)=1.47x; prefill_m8192 → (BM256,BN128,BK256,nw8,ns2)=**1.94x (dominant case)**.
+  Geomean of tile-only speedups ≈ 1.45x; prefill-ms-weighted higher (M8192 dominates). Dominant lever = BLOCK_K=256+num_stages=2
+  (helps every case) + small BLOCK_N=64/num_warps=4 for skinny-M decode + large BLOCK_M=256 for prefill. BM=64+ns1+BK=128
+  (the current hardcode) is a real anti-tune.
+- DECISION: gate=author_recommended, recommend_tier_c=true, author_plan=[{triton, rewrite}] ONLY (drop flydsl/hip/ck:
+  no MXFP8-E8M0 path on gfx950). Lever = per-shape autotune BLOCK_M/N/K + num_warps∈{4,8} + num_stages∈{1,2} + waves_per_eu +
+  matrix_instr_nonkdim + split-K for tiny-M decode; BK=256+ns2 everywhere, small BN=64+nw4 for decode, BM=256 for prefill.
+  MUST NOT regress decode M∈{1,32}. At 22.02% GPU, prefill-weighted ~1.5-1.9x iso → Amdahl ceiling ~+7-9% e2e.
+  parity=expected_close (mxfp8 numeric, tol 6e-2).
+- CRITICAL integration carry-over (Integrator's job, flag it): vLLM serves decode under cudagraph_mode FULL_AND_PIECEWISE;
+  a self-capturing wrapper falls back to eager (only static tile changes survive → ~0 e2e). Authored kernel MUST be
+  compile-once/shape-agnostic and ALL decode buckets PRE-WARMED at warmup so the captured region only LAUNCHES the cached
+  kernel; key any weight cache by data_ptr, zero host syncs on steady decode.
+
+## Learned — 2026-06-20 (re-confirm #5, PHASE=bakeoff GPU0) MiniMax-M3-MXFP8 / gfx950 / vLLM TP=4 — _mxfp8_grouped_gemm_kernel (DOMINANT HEAD, 33.11% GPU time)
+- 5th+ RE-CONFIRM of the grouped-MoE-GEMM routing. This run: PCT_GPU_TIME=33.11%, candidate_backends=[triton,hip,aiter],
+  GPU_ID=0, ENABLE_FP8=false. EVAL_DIR e2e_MiniMax-M3-MXFP8_20260620_182208_1063564_22422. Provenance CLEAN:
+  unittest_sha256 9faa1d43…==meta, reference_io_sha256="" + NO reference_io.pt + synthesized:true → nothing to tamper
+  (GEMM_SYNTH oracle, NOT tamper). Op: grouped MoE-expert GEMM, native CDNA4 tl.dot_scaled (E4M3 + E8M0 1x32 block
+  scale, transpose_b, no bias). TP=4: GEMM1 w13 N=1536,K=6144,a_div=top_k,mul_weight=False; GEMM2 w2 N=6144,K=768,
+  a_div=1,mul_weight=True. decode T∈{1,32}→routed M∈{4,128}; prefill T=8192.
+  Seam target_callable vllm...fused_moe.experts.mxfp8_native_moe:_grouped_gemm_mxfp8 (monkeypatchable).
+- op_bench dense/blockscale path CANNOT represent grouped-MoE + E8M0 1x32 + symbolic M → ran the IMMUTABLE unittest.py
+  DIRECTLY (self-contained synth+oracle+median timing). All 6 cases PASS (max_rel_err 0.0002–0.007 ≪ 6e-2 tol).
+  best_known_ms (steady-state, current=baseline so self-speedup=1.0): gemm1 decode_M4 0.0606 / decode_M128 0.2279 /
+  prefill_M8192 1.2115; gemm2 decode_M4 0.0340 / decode_M128 0.1190 / prefill_M8192 0.7385. total=2.3915, geomean=0.1577.
+  isolated_speedup=1.0 (only correct backend).
+- Tier-A/B RE-CONFIRMED LIVE this run (GPU0): arch gfx950:sramecc+; aiter mxfp8/e8m0/mx_ symbols == [] (no E8M0
+  grouped primitive); aiter.ops.triton.utils.arch_info missing → is_flydsl probe N/A and FlyDSL has no E8M0 MX
+  primitive regardless; AITER_CONFIG_GEMM_BF16 = wrong lever (live path is vLLM Triton dot_scaled, not aiter
+  gemm_a16w16 → 0 engagement). NO env/flag winner.
+- Kernel HARDCODES BLOCK_N=128, BLOCK_K=128, num_warps=8, caller block_m=64, NO autotune/num_stages/split-K
+  (kernel_src/mxfp8_native_moe.py L152-187, L210) = the Tier-C headroom.
+- FRESH isolated TILE SWEEP this run (GPU0, $EVAL_DIR/config/tile_sweep_grouped_gemm2.py, per-(case,cfg) SUBPROCESS so
+  an illegal-access can't poison context; BLOCK_M PINNED to alignment block_m=64 since moe_align_block_size pads
+  sorted_ids to block_m — cannot vary BM in this harness; swept BN∈{64,128,256}×BK∈{128,256}×nw∈{4,8}×ns∈{1,2}),
+  ALL cfgs correct (err unchanged), NO decode regression: gemm1 decode_M4 → (BN64,BK256,nw4,ns2)=**1.23x (GAIN)**;
+  gemm1 decode_M128 → same=**1.23x (GAIN)**; gemm1 prefill_M8192 → (BN128,BK128,nw8,ns2)=1.01x (flat — prefill win
+  needs BM>64, blocked by the pinned alignment block in THIS probe); gemm2 decode_M4 → (BN128,BK256,nw8,ns2)=1.00x;
+  gemm2 decode_M128 → (BN64,BK128,nw4,ns2)=1.05x; gemm2 prefill_M8192 → (BN256,BK128,nw4,ns1)=1.08x.
+  Aggregate sum-ms **1.05x**, geomean **1.09x** from BN/BK/nw/ns ALONE (prefill capped by BM=64 pin). Dominant tile
+  lever for decode = BLOCK_N=64+num_warps=4+BK=256+ns2. The bigger prefill headroom (prior full-author runs saw
+  1.3-1.5x) requires lifting BLOCK_M / alignment block + per-shape split-K, which only the AUTHOR route can change.
+- DECISION: gate=author_recommended, recommend_tier_c=true, author_plan=[{triton, rewrite}] ONLY (drop flydsl/hip/aiter:
+  no MXFP8-E8M0 grouped path on gfx950 in any of them). Lever = per-shape autotune BLOCK_M/N/K + num_warps∈{4,8} +
+  num_stages∈{1,2} + waves_per_eu + matrix_instr_nonkdim + split-K for tiny-M decode, AND lift the MoE alignment
+  block_m so prefill can use BM≥128/256+ns2. BK=256+ns2 + small BN=64+nw4 for decode. MUST NOT regress decode M∈{4,128}.
+  At 33.11% GPU (DOMINANT head), ~1.05x iso (tiles-only, BM-capped) but author route unlocks the ~1.3-1.5x prefill →
+  Amdahl ceiling ~+5-9% e2e (the single biggest e2e lever). parity=expected_close (mxfp8 numeric, tol 6e-2).
+- CRITICAL integration carry-over (Integrator's job, flag it): vLLM serves decode under cudagraph_mode
+  FULL_AND_PIECEWISE; a self-capturing wrapper falls back to eager (only static tile changes survive → ~0 e2e).
+  Authored kernel MUST be compile-once/shape-agnostic and ALL decode buckets PRE-WARMED at warmup so the captured
+  region only LAUNCHES the cached kernel; key any weight cache by data_ptr, zero host syncs on steady decode.
+
+## Learned — 2026-06-20 (re-confirm #7, PHASE=bakeoff GPU0) MiniMax-M3-MXFP8 / gfx950 / vLLM TP=4 — _mxfp8_linear_kernel (DENSE HEAD, 21.99% GPU time)
+- 7th RE-CONFIRM of the dense-linear routing (18d/18f/re-confirm-1/-2/06-19/06-19#6). This run: PCT_GPU_TIME=21.99%,
+  candidate_backends=[triton,flydsl,aiter], GPU_ID=0, ENABLE_FP8=false. Provenance CLEAN: meta synthesized:true,
+  reference_io null + reference_io_sha256="" + NO reference_io.pt + no stored unittest/kernel sha → nothing to tamper
+  (GEMM_SYNTH oracle, NOT tamper). Op: dense MXFP8 linear, native CDNA4 tl.dot_scaled (E4M3 + E8M0/uint8 per-32 block
+  scale, transpose_b, no bias), N=K=6144 (gate_up_proj dense MLP), decode M∈{1,32} + prefill M∈{512,8192}, out bf16.
+  Live seam vllm.model_executor.kernels.linear.mxfp8.rocm_native:_mxfp8_dot_scaled_linear (NOT aiter.tuned_gemm).
+- Ran the IMMUTABLE unittest.py DIRECTLY (op_bench dense/blockscale path can't represent E8M0 MXFP8 per meta note;
+  synth oracle, no reference_io). All 4 cases PASS (err 0.0035–0.0036 ≪ 6e-2 tol), self-speedup 1.0 (entry==baseline).
+  best_known_ms per-case: decode M1 0.0712, decode M32 0.0782, prefill M512 0.1175, prefill M8192 0.8393;
+  geomean ≈ 0.1376ms (the bar an authored kernel must beat). isolated_speedup=1.0 (only correct backend).
+- Tier-A/B RE-CONFIRMED LIVE this run (GPU0): arch gfx950:sramecc+; `[a for a in dir(aiter) if mxfp8/e8m0/mx_]==[]`
+  (no MXFP8-E8M0 dense primitive); is_flydsl_available()=True but FlyDSL has no E8M0 MX primitive → N/A;
+  AITER_CONFIG_GEMM_BF16 = wrong lever (live path is vLLM Triton dot_scaled, not aiter gemm_a16w16 → 0 engagement).
+  NO env/flag winner.
+- Kernel HARDCODES BLOCK_M=64,BLOCK_N=128,BLOCK_K=128,num_warps=8, NO autotune/num_stages/split-K
+  (kernel_src/.../mxfp8/rocm_native.py L92-117) = the Tier-C headroom.
+- FRESH isolated TILE SWEEP this run (GPU0, $EVAL_DIR/config/tile_sweep_mxfp8_linear.py wraps the immutable
+  _make_case+oracle, sweeps tile/warp/stages on the SAME dot_scaled body), ALL cases correct (err ~0.0036), NO
+  decode regression: decode M1 → (BM64,BN64,BK256,nw4,ns2)=**1.54x (GAIN)**; decode M32 → same=**1.56x (GAIN)**;
+  prefill M512 → (128,128,256,8,ns2)=1.52x; prefill M8192 → (256,128,256,8,ns2)=**2.05x (dominant case)**.
+  Aggregate (sum-ms) **1.88x** from tiles alone (stronger than prior runs' 1.5-1.6x). Dominant lever =
+  BLOCK_K=256+num_stages=2 (helps every case) + small BLOCK_N=64/num_warps=4 for skinny-M decode + large
+  BLOCK_M=256 for prefill M=8192. BM=64+no-pipeline(ns1) is a real anti-tune.
+- DECISION: gate=author_recommended, recommend_tier_c=true, author_plan=[{triton, rewrite}] ONLY (drop flydsl/hip/ck:
+  no MXFP8-E8M0 path on gfx950). Lever = per-shape autotune BLOCK_M/N/K + num_warps∈{4,8} + num_stages∈{1,2} +
+  waves_per_eu + matrix_instr_nonkdim + split-K for tiny-M decode; BK=256+ns2 everywhere, small BN=64+nw4 for decode,
+  BM=256 for prefill M8192. MUST NOT regress decode M∈{1,32}. At 21.99% GPU, prefill-weighted ~1.5-1.9x iso →
+  Amdahl ceiling ~+7-9% e2e. parity=expected_close (mxfp8 numeric, tol 6e-2).
+- CRITICAL integration carry-over (Integrator's job, flag it): vLLM serves decode under cudagraph_mode
+  FULL_AND_PIECEWISE; a self-capturing wrapper falls back to eager (only static tile changes survive → ~0 e2e).
+  Authored kernel MUST be compile-once/shape-agnostic and ALL decode buckets PRE-WARMED at warmup so the captured
+  region only LAUNCHES the cached kernel; key any weight cache by data_ptr, zero host syncs on steady decode.
+
+## Learned — 2026-06-20 (re-confirm #4, PHASE=bakeoff GPU0) MiniMax-M3-MXFP8 / gfx950 / vLLM TP=4 — _mxfp8_grouped_gemm_kernel (DOMINANT HEAD, 33.24% GPU time)
+- 4th+ RE-CONFIRM of the grouped-MoE-GEMM routing below. This run: PCT_GPU_TIME=33.24%, candidate_backends=[triton],
+  GPU_ID=0, ENABLE_FP8=false. Provenance CLEAN: unittest_sha256 a473da35…==meta, kernel_src_sha256 367b8844…,
+  reference_io_sha256="" + NO reference_io.pt + synthesized:true → nothing to tamper (NOT tamper).
+- op_bench.py dense/blockscale path CANNOT represent grouped-MoE + E8M0 1x32 + symbolic M (meta op_bench_compatible
+  =false) → ran the IMMUTABLE unittest.py DIRECTLY (self-contained synth+oracle+timing). All 6 cases PASS
+  (max_rel_err 0.0004–0.0037 ≪ 2e-2 tol). best_known_ms (steady-state, current=baseline so self-speedup=1.0):
+  gemm1 decode_M4 0.0607 / decode_M128 0.2311 / prefill_M8192 0.4447; gemm2 decode_M4 0.0348 / decode_M128 0.1224 /
+  prefill_M8192 0.2606. total=1.1543, geomean=0.1322. isolated_speedup=1.0 (only backend).
+- Tier-A/B RE-CONFIRMED live: aiter mxfp8/e8m0 symbols=[] (no E8M0 grouped primitive); is_flydsl_available()=True but
+  FlyDSL has no E8M0 MX primitive → N/A; AITER_CONFIG_GEMM_BF16 = wrong lever (live path is vLLM Triton dot_scaled,
+  not aiter gemm_a16w16 → 0 engagement). NO env/flag winner.
+- Kernel HARDCODES BLOCK_N=128, BLOCK_K=128, num_warps=8, caller block_m=64, NO autotune/num_stages/split-K
+  (kernel_src/mxfp8_native_moe.py L152-186) = the Tier-C headroom.
+- FRESH isolated TILE SWEEP this run (GPU0, same dot_scaled JIT kernel, tile/warp/stages knobs only, reusing the
+  immutable _build_case+oracle) quantifies it, ALL cases correct, NO regression: gemm1 decode_M4 → (BM64,BN64,BK256,
+  nw4,ns2)=**1.21x**; gemm1 decode_M128 → same=**1.29x (GAIN)**; gemm1 prefill_M8192 → (64,128,256,8,ns2)=1.09x;
+  gemm2 decode_M4 → (64,128,256,8,ns2)=1.01x; gemm2 decode_M128 → same=1.09x; gemm2 prefill_M8192 → same=1.10x.
+  Aggregate (sum-ms) **1.13x** from tiles alone. Dominant lever = BLOCK_K=256+num_stages=2 (helps every case),
+  + BLOCK_N=64/num_warps=4 for the small-N (N=1536) gemm1 decode. BK=128+no-pipeline is a real anti-tune.
+- DECISION: gate=author_recommended, recommend_tier_c=true, author_plan=[{triton, rewrite}] ONLY (drop flydsl/hip/ck:
+  no MXFP8-E8M0 path on gfx950). Lever = per-shape autotune BLOCK_M/N/K + num_warps∈{4,8} + num_stages∈{1,2} +
+  waves_per_eu + matrix_instr_nonkdim + split-K for tiny-M decode; BK=256+ns2 everywhere, small BN+nw4 for gemm1
+  decode. MUST NOT regress decode M∈{4,128}. At 33.24% GPU (DOMINANT head), ~1.13x iso (tiles alone, more via
+  full autotune+split-K) → Amdahl ceiling ~+4-6% e2e (more if author exceeds the tile-only sweep). parity=expected_close.
+- INTEGRATION carry-over (Integrator's job, flag it): vLLM decode = cudagraph FULL_AND_PIECEWISE; self-capturing
+  wrapper falls back to eager (only static tile changes survive → ~0 e2e). Authored kernel MUST be compile-once/
+  shape-agnostic, ALL decode buckets PRE-WARMED at warmup so the captured region only LAUNCHES the cached kernel;
+  key any weight cache by data_ptr, zero host syncs on steady decode.
+
 ## Learned — 2026-06-19 (re-confirm #6, PHASE=bakeoff GPU5) MiniMax-M3-MXFP8 / gfx950 / vLLM TP=4 — _mxfp8_linear_kernel (DENSE HEAD, 22.32% GPU time)
 - 6th RE-CONFIRM of the dense-linear routing (18d/18f/re-confirm-1/-2/06-19). This run: PCT_GPU_TIME=22.32%,
   candidate_backends=[triton], GPU_ID=5. Provenance CLEAN: reference_io.pt PRESENT, sha256
@@ -206,6 +344,51 @@ e2e parity**; if it fails on a non-quant change, flag it for an accuracy eval (s
   FULL_AND_PIECEWISE; a self-capturing wrapper falls back to eager (only static tile changes survive → ~0 e2e).
   The authored kernel MUST be compile-once/shape-agnostic and PRE-WARMED during warmup (all decode M-buckets) so the
   captured region only LAUNCHES the cached kernel; key any weight cache by data_ptr, zero host syncs on steady decode.
+
+## Learned — 2026-06-19 (re-confirm #3, PHASE=bakeoff GPU0) MiniMax-M3-MXFP8 / gfx950 / vLLM TP=4 — _mxfp8_grouped_gemm_kernel (DOMINANT HEAD, 32.9% GPU time)
+- N-th RE-CONFIRM. PCT_GPU_TIME=32.9%, candidate_backends=[triton], GPU_ID=0, ENABLE_FP8=false. Provenance CLEAN:
+  kernel_src_sha256 367b8844…==meta, unittest_sha256 ebb0dbaf…==meta, reference_io null + synthesized:true → nothing
+  to tamper. op_bench_compatible=false → ran IMMUTABLE unittest.py DIRECTLY. All 6 cases PASS (maxrel 0.0–0.0075 ≪
+  4e-2/3e-2 tol). Per-case base_ms (steady-state baseline; the opt_ms/speedup cols this run were JIT-compile-polluted
+  first-call noise, IGNORED): g1_decode_T1 0.0325 / g1_decode_T32 0.1975 / g1_prefill_M8192 0.4206 / g2_decode_T1
+  0.0213 / g2_decode_T32 0.0920 / g2_prefill_M8192 0.2374. best_known_ms total=1.0013, geomean=0.10387. isolated_speedup=1.0.
+- Tier-A/B RE-CONFIRMED live: aiter mxfp8/e8m0 symbols=[] (no E8M0 grouped primitive); is_flydsl_available()=True but
+  FlyDSL has no E8M0 MX primitive → N/A; AITER_CONFIG_GEMM_BF16 = wrong lever (vLLM Triton dot_scaled, not gemm_a16w16
+  → 0 engagement). Kernel still HARDCODES BLOCK_N=128/BLOCK_K=128/num_warps=8/block_m=64, no autotune/ns/split-K
+  (kernel_src/mxfp8_native_moe.py L152-186) = the Tier-C headroom.
+- DECISION: gate=author_recommended, recommend_tier_c=true, author_plan=[{triton, rewrite}] ONLY (drop flydsl/hip/ck:
+  no MXFP8-E8M0 path on gfx950). Lever = per-shape autotune BLOCK_M/N/K + num_warps∈{4,8} + num_stages∈{1,2} +
+  waves_per_eu + matrix_instr_nonkdim; BM≥256/ns≥2 for prefill M=8192, small BLOCK_M + split_k for decode routed_M∈{4,128}.
+  MUST NOT regress decode. At 32.9% GPU (DOMINANT head), ~1.3–1.5x iso → Amdahl ceiling ~+8-11% e2e. parity=expected_close.
+- INTEGRATION carry-over: vLLM decode = cudagraph FULL_AND_PIECEWISE; self-capturing wrapper falls back to eager
+  (only static tile changes survive → ~0 e2e). Authored kernel MUST be compile-once/shape-agnostic, ALL decode buckets
+  pre-warmed so captured region only LAUNCHES cached kernel; key weight cache by data_ptr, zero host syncs on decode.
+
+## Learned — 2026-06-19 (re-confirm #2, PHASE=bakeoff GPU0) MiniMax-M3-MXFP8 / gfx950 / vLLM TP=4 — _mxfp8_grouped_gemm_kernel (DOMINANT HEAD, 32.9% GPU time)
+- N-th RE-CONFIRM of the entries below. This run: PCT_GPU_TIME=32.9%, candidate_backends=[triton], GPU_ID=0,
+  ENABLE_FP8=false. Provenance CLEAN: kernel_src_sha256 367b8844… == meta, unittest_sha256 ebb0dbaf… == meta,
+  reference_io_sha256="" + reference_io null + synthesized:true → nothing to tamper (NOT tamper).
+- op_bench.py dense/blockscale path CANNOT represent grouped-MoE + E8M0 1x32 + symbolic M (meta op_bench_compatible
+  =false, run_unittest_directly=true). Ran the IMMUTABLE unittest.py DIRECTLY (self-contained synth+oracle+timing).
+  All 6 cases PASS (maxrel 0.017–0.153 ≪ 4e-2/3e-2 tol; the 0.10–0.15 maxrel are single-elem microscale outliers,
+  allclose passes / bad-frac<1e-3). opt_ms per case: g1_decode_T1 0.0320 / g1_decode_T32 0.1934 /
+  g1_prefill_M8192 0.4137 / g2_decode_T1 0.0212 / g2_decode_T32 0.0908 / g2_prefill_M8192 0.2157.
+  best_known_ms total=0.9668, geomean=0.10102. isolated_speedup=1.0 (only backend; self-speedup 1.028 = box warmth).
+- Tier-A/B: NO env/flag winner (RE-CONFIRMED live this run): `[a for a in dir(aiter) if 'mxfp8'/'e8m0']==[]` (no
+  MXFP8-E8M0 grouped primitive); is_flydsl_available()=True but FlyDSL is dense/blockscale/A4W4 (no E8M0 MX) → N/A;
+  AITER_CONFIG_GEMM_BF16 = wrong lever (live path is vLLM Triton dot_scaled, not aiter gemm_a16w16 → 0 engagement).
+- Kernel still HARDCODES BLOCK_N=128, BLOCK_K=128, num_warps=8, caller block_m=64, NO autotune/num_stages/split-K
+  (kernel_src/mxfp8_native_moe.py L152-187, L210) = the Tier-C headroom.
+- DECISION: gate=author_recommended, recommend_tier_c=true, author_plan=[{triton, rewrite}] ONLY (drop flydsl/hip/ck:
+  no MXFP8-E8M0 path on this image). Lever = optimize the editable native Triton dot_scaled kernel: per-shape autotune
+  BLOCK_M/N/K + num_warps∈{4,8} + num_stages∈{1,2} + waves_per_eu + matrix_instr_nonkdim; larger tiles (BM≥256,ns≥2)
+  for prefill M=8192; small BLOCK_M + split_k for decode routed_M∈{4,128}. MUST NOT regress decode. At 32.9% GPU
+  (DOMINANT head), ~1.3–1.5x iso → Amdahl ceiling ~+8-11% e2e — the single biggest e2e lever. parity=expected_close
+  (mxfp8 numeric, tol 4e-2/3e-2).
+- CRITICAL integration carry-over (Integrator's job, flag it): vLLM serves decode under cudagraph_mode
+  FULL_AND_PIECEWISE; a self-capturing wrapper falls back to eager (only static tile changes survive → ~0 e2e).
+  The authored kernel MUST be compile-once/shape-agnostic and ALL decode buckets PRE-WARMED at warmup so the captured
+  region only LAUNCHES the cached kernel; key any weight cache by data_ptr, zero host syncs on steady decode.
 
 ## Learned — 2026-06-19 (re-confirm, PHASE=bakeoff GPU4) MiniMax-M3-MXFP8 / gfx950 / vLLM TP=4 — _mxfp8_grouped_gemm_kernel (DOMINANT HEAD, 32.45% GPU time)
 - N-th RE-CONFIRM of the 06-18 entries below. This run: PCT_GPU_TIME=32.45%, candidate_backends=[triton], GPU_ID=4.

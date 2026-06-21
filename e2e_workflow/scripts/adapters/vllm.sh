@@ -26,6 +26,7 @@ adapter_launch() {
       --host "$HOST" --port "$PORT" \
       --tensor-parallel-size "$TP" \
       --gpu-memory-utilization "$MEM_FRACTION" \
+      --trust-remote-code \
       $EXTRA_SERVER_ARGS \
       > "$LOG" 2>&1 &
   SERVER_PID=$!
@@ -43,9 +44,10 @@ adapter_bench() {
   # correct protocol for optimization work — it makes throughput reproducible, output parity byte-exact,
   # and speculative-decoding (MTP/EAGLE) acceptance meaningful (recent vllm dropped the temp==0 default).
   vllm bench serve \
-    --backend vllm --base-url "$BASE_URL" --model "$MODEL" \
+    --backend vllm --base-url "$BASE_URL" --model "$MODEL" --tokenizer "$MODEL" --trust-remote-code \
     --dataset-name random --random-input-len "$ISL" --random-output-len "$OSL" \
     --num-prompts "$NUMP" --max-concurrency "$MAXC" \
+    --random-range-ratio "${RANDOM_RANGE_RATIO:-0}" \
     --seed "$SEED" --temperature 0 --ignore-eos \
     --save-result --result-filename "$res_json" "${extra[@]}"
   # vllm writes ONE result object (keys: output_throughput, median_ttft_ms, median_tpot_ms, ...).
@@ -53,6 +55,6 @@ adapter_bench() {
   if [ -f "$res_json" ]; then
     python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))" "$res_json" \
       >> "$RESULT_JSONL" 2>/dev/null || cat "$res_json" >> "$RESULT_JSONL"
-    rm -f "$res_json"
+    mv "$res_json" "$res_json.consumed" 2>/dev/null || true   # no `rm` (approval prompt); move aside
   fi
 }

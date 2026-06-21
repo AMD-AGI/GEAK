@@ -84,7 +84,18 @@ fi
 HOST=${HOST:-127.0.0.1}
 TP=${TP:-1}
 GPU=${GPU:-0}
-MEM_FRACTION=${MEM_FRACTION:-0.85}
+MEM_FRACTION=${MEM_FRACTION:-0.9}    # match infer.sh (no --gpu-memory-utilization => vllm default 0.9)
+# GPU allow-list (only enforced when ALLOWED_GPUS is set → default behavior unchanged): refuse to launch
+# on any GPU id not in the comma-separated list, so a run pinned to GPUs 4-7 can't spill onto others.
+if [ -n "${ALLOWED_GPUS:-}" ] && [ "${REUSE_SERVER:-0}" != "1" ]; then
+  _allow=",$(echo "$ALLOWED_GPUS" | tr -d ' '),"
+  for _g in $(echo "$GPU" | tr ',' ' '); do
+    case "$_allow" in
+      *",$_g,"*) : ;;
+      *) echo "!!! GPU '$_g' not in ALLOWED_GPUS='$ALLOWED_GPUS' — refusing to launch (resource allow-list)." >&2; exit 5 ;;
+    esac
+  done
+fi
 EXTRA_SERVER_ARGS=${EXTRA_SERVER_ARGS:-}    # e.g. "--attention-backend triton"
 # EXTRA_ENV is applied to the SERVER launch line, space-separated KEY=VAL pairs:
 #   EXTRA_ENV="SGLANG_USE_AITER=1 HIPBLASLT_TUNING_FILE=/path/tune.dat"
@@ -93,24 +104,45 @@ EXTRA_ENV=${EXTRA_ENV:-}
 OVERLAY_PYTHONPATH=${OVERLAY_PYTHONPATH:-}
 
 # ---- port: auto-allocate a free one if not pinned (avoids 30000 collisions on shared boxes) ----
+# Constrained auto-allocation: pick a free port inside [PORT_BASE, PORT_BASE+PORT_SPAN) so a run can be
+# pinned to a required window (policy: "ports must start with 40"). Default base 40000. An explicit PORT
+# OUTSIDE the window is clamped (ignored + re-allocated) unless PORT_ENFORCE_RANGE=0. Port number does not
+# affect throughput, so this never changes optimization results.
+# RIG CONSTRAINT (deep_mode M3 run): every port MUST start with 30 -> window 30000..30999.
+PORT_BASE=${PORT_BASE:-30000}
+PORT_SPAN=${PORT_SPAN:-1000}
+PORT_ENFORCE_RANGE=${PORT_ENFORCE_RANGE:-1}
 PORT=${PORT:-}
+if [ -n "$PORT" ] && [ "$PORT_ENFORCE_RANGE" = "1" ]; then
+  if [ "$PORT" -lt "$PORT_BASE" ] || [ "$PORT" -ge "$((PORT_BASE+PORT_SPAN))" ] 2>/dev/null; then
+    echo "!!! PORT=$PORT outside required window ${PORT_BASE}..$((PORT_BASE+PORT_SPAN-1)); ignoring + auto-allocating in range."
+    PORT=""
+  fi
+fi
 if [ -z "$PORT" ]; then
-  if declare -F adapter_default_port >/dev/null; then PORT="$(adapter_default_port)"; fi
-  PORT=${PORT:-0}
-  # 0 (or a busy port) -> ask the OS for a free one. MUST stay <= 55535: sglang derives a gRPC
-  # port = PORT + 10000 and rejects it if > 65535 (an OS ephemeral bind() can return >55535 and
-  # crash the server at launch). So pick a random free port in a bounded safe range, not bind(0).
-  FREE_PORT=$(python3 - <<'PY' 2>/dev/null || true
-import socket, random
-cands = list(range(20000, 55001)); random.shuffle(cands)  # PORT+10000 <= 65001 < 65535
-for p in cands:
-    s = socket.socket()
+  # RIG CONSTRAINT (M3 run): scan [PORT_BASE, PORT_BASE+PORT_SPAN) = 2000..2099 (every port starts with
+  # 20). PORT+10000=12099 << 65535, so also safe for sglang's gRPC-port derivation that upstream guards.
+  FREE_PORT=$(PORT_BASE="$PORT_BASE" PORT_SPAN="$PORT_SPAN" python3 - <<'PY' 2>/dev/null || true
+import os, socket, random
+base=int(os.environ.get("PORT_BASE","40000")); span=int(os.environ.get("PORT_SPAN","1000"))
+order=list(range(span)); random.shuffle(order)
+for off in order:
+    p=base+off
+    s=socket.socket()
     try:
-        s.bind(("127.0.0.1", p)); print(p); s.close(); break
+        s.bind(("127.0.0.1", p)); s.close(); print(p); break
     except OSError:
-        s.close()
+        s.close(); continue
 PY
 )
+  if [ -z "$FREE_PORT" ]; then
+    echo "!!! No free port in ${PORT_BASE}..$((PORT_BASE+PORT_SPAN-1)); falling back to OS-assigned (may violate range)."
+    FREE_PORT=$(python3 - <<'PY' 2>/dev/null || true
+import socket
+s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()
+PY
+)
+  fi
   [ -n "$FREE_PORT" ] && PORT="$FREE_PORT"
 fi
 
@@ -142,7 +174,7 @@ fi
 # NUM_WARMUPS=min(CONC,8)). Consumed by the inferencex client adapter; the native
 # adapters use their own warmup round instead.
 NUM_WARMUPS=${NUM_WARMUPS:-$(( CONC < 8 ? CONC : 8 ))}
-RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-1}   # fixed sequence lengths (matches Hyperloom)
+RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0}   # 0 = fixed seq lengths (matches infer.sh --random-range-ratio 0)
 REPEATS=${REPEATS:-3}                 # repeat the bench this many times; report median + spread
 SEED=${SEED:-0}                       # fixed seed for reproducibility / parity
 

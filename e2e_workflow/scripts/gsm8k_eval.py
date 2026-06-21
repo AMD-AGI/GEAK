@@ -51,7 +51,14 @@ def ask(base_url, model, prompt, max_tokens, timeout=1800):
               "temperature": 0.0, "top_p": 1.0, "max_tokens": max_tokens, "seed": 0},
         timeout=timeout)
     r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+    msg = r.json()["choices"][0]["message"]
+    # MiniMax-M3 is a REASONING model: the chat response splits into `content` (final answer) and
+    # `reasoning_content` (the CoT), and `content` is often None when the answer falls inside the reasoning
+    # or the response is truncated. Combine BOTH (never None) so the "#### N" is found wherever it lands —
+    # this fixes the TypeError crash on None content and the truncation-driven accuracy decay.
+    # reasoning FIRST, content LAST: the final answer is in `content`, so the flexible "last number"
+    # fallback in extract_pred() must see content at the end.
+    return ((msg.get("reasoning_content") or "") + "\n" + (msg.get("content") or "")).strip()
 
 def main():
     ap = argparse.ArgumentParser()
@@ -59,7 +66,7 @@ def main():
     ap.add_argument("--model", required=True)               # served model name/path
     ap.add_argument("--limit", type=int, default=200)       # subset size (InferenceX-style --limit)
     ap.add_argument("--fewshot", type=int, default=5)
-    ap.add_argument("--max-tokens", type=int, default=512)
+    ap.add_argument("--max-tokens", type=int, default=1024)   # reasoning model needs room to finish CoT + answer
     ap.add_argument("--concurrency", type=int, default=32)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="")
