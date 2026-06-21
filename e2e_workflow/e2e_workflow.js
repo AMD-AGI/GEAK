@@ -52,6 +52,30 @@ const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serving_tp : 1), 10);
 const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
   : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
+// ---- FAST MODE (opt-in, default OFF) ----------------------------------------------------------------
+// A time-boxed run that takes ALL its optimization from the HeadKernel track: it SKIPS ConfigSweep AND
+// the editable-kernel Milestone loop, and completes within a wall-clock budget (default 5h). It exists
+// for "give me the best head-kernel wins you can in 5 hours" runs.
+// CRITICAL: when fast_mode is OFF (the default) NOTHING below changes the full pipeline — every fast-mode
+// knob is selected by a `FAST_MODE ? fast : original` ternary that resolves to the ORIGINAL value, and
+// the phase skips / deadline timers are gated on FAST_MODE — so a non-fast run is byte-identical (same
+// prompts, same budgets, same control flow) to a build without this feature. No default-mode regression.
+const FAST_MODE = String(A.fast_mode != null ? A.fast_mode : 'false') === 'true';
+// Total wall-clock budget for a fast run (default 5h). Enforced with setTimeout (Date.now() is NOT
+// available in workflow scripts): a global deadline flag stops dispatching NEW head ops, and each nested
+// head author-workflow is independently time-bounded so no single op can overrun the budget.
+const FAST_BUDGET_MS = parseInt(A.fast_budget_ms != null ? A.fast_budget_ms : 18000000, 10); // 5h
+// Stop STARTING new head ops after this point so the in-flight head + Finalize/Report/Validate still land
+// inside FAST_BUDGET_MS. Default 60% of the budget (3h at 5h) leaves ~40% for the last head to finish +
+// the deliverable/validation tail.
+const FAST_HEAD_DEADLINE_MS = parseInt(A.fast_head_deadline_ms != null ? A.fast_head_deadline_ms
+  : Math.floor(FAST_BUDGET_MS * 0.6), 10);
+// Per-head nested author/optimize workflow() bound (fast mode only): a single recursive kernel run can't
+// eat the whole budget. Default 90min. (Heads run in PARALLEL on exclusive GPU lanes, so this is a
+// per-lane wall-clock cap, not summed — 90min/lane + serial integrate + Finalize still lands inside the 5h
+// FAST_BUDGET_MS. 35min was too short: a non-trivial MXFP8 FlyDSL fused-fp8 author needs ~80min and was
+// being abandoned mid-flight — the head track got a null/empty patch even though the author later finished.)
+const FAST_HEAD_WF_MS = parseInt(A.fast_head_workflow_ms != null ? A.fast_head_workflow_ms : 5400000, 10);
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);       // max kernel-optimization tasks
 // MIN floor: dispatch at LEAST this many editable-kernel tasks before the loop may stop on no-improve /
 // empty queue (prompt-tunable). Prevents the milestone track from never firing. Capped by BUDGET.
@@ -61,14 +85,20 @@ const MIN_KERNEL_TASKS = Math.min(parseInt(A.min_kernel_tasks != null ? A.min_ke
 // Configurable via args.milestone_min_pct (default 5). This OVERRIDES the MIN_KERNEL_TASKS floor: if no
 // candidate clears the bar, the milestone stops rather than grinding low-value kernels.
 const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_min_pct : 5);
-const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : 6, 10); // budget passed DOWN per kernel
+const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : (FAST_MODE ? 3 : 6), 10); // budget passed DOWN per kernel (fewer rounds in fast mode)
 const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true') === 'true';
 // Head-kernel track (GEMM/attention) — the highest-pct_gpu_time ops, optimized regardless of edit flag.
 const HEAD_THRESHOLD_PCT = parseFloat(A.head_threshold_pct != null ? A.head_threshold_pct : 5);
-const HEAD_BUDGET = parseInt(A.head_budget != null ? A.head_budget : 3, 10); // max head-op bake-offs
+// max head-op bake-offs. FAST MODE: the head track is parallelized across the GPU pool (one exclusive
+// lane per card), so scale the default up to the lane count (>=3) to keep every card busy in opt-A.
+// Default mode is UNCHANGED (3).
+const HEAD_BUDGET = parseInt(A.head_budget != null ? A.head_budget : (FAST_MODE ? Math.max(3, GPU_LIST.length) : 3), 10);
 // Author route: how many languages to author per head op. The Op Benchmarker orders author_plan by ROI
 // (for a GEMM head: flydsl first — SOTA GEMM DSL — then triton). Default 2 covers flydsl+triton per head
 // while keeping the kernel-layer cost bounded; bump to try hip/ck too when the headroom justifies it.
+// FAST MODE used to drop this to 1 to bound the (serial) wall-clock. Now the head track runs author
+// directions in PARALLEL across the GPU pool, so a 2nd direction (e.g. flydsl + triton per op) is nearly
+// free in wall-clock — keep 2 in both modes so different optimization directions actually fan out.
 const HEAD_AUTHOR_MAX = parseInt(A.head_author_max != null ? A.head_author_max : 2, 10);
 // Dominant-head protection: an op whose pct_gpu_time >= this is NEVER silently skipped. If its bake-off
 // hits a harness fault / no-win / extraction failure, the orchestrator LOUDLY flags it (and still tries
@@ -108,7 +138,8 @@ const INIT_ENV = String(A.initial_extra_env || '');
 // A kernel that wins only via its OWN per-call graph-capture+replay wrapper falls back to eager inside the
 // server's graph, so the isolated win evaporates e2e (observed on M3: MoE 1.22x isolated -> 0% e2e). When
 // graphs are on we inject an EXPLICIT requirement into every kernel-optimize task: the win must be intrinsic
-// and graph-capture-safe. Detection is config-driven, so it auto-disables for an enforce-eager run.
+// and graph-capture-safe. Detection is config-driven (enforce-eager absent + graph-capable backend), so it
+// auto-disables for an enforce-eager run and applies to any future graph-capturing backend.
 const CUDA_GRAPH_DEPLOY = (BACKEND === 'vllm' || BACKEND === 'sglang') && !/enforce[-_]eager/i.test(INIT_FLAGS);
 const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   ' DEPLOYMENT REQUIREMENT — the server captures the steady-state decode path into a FULL CUDA/HIP graph, ' +
@@ -144,8 +175,13 @@ const MODEL_NAME_HINT = (MODEL_PATH || KERNEL_PATH).replace(/\/+$/, '').split('/
 // ---------------------------------------------------------------------------
 const PHASES = String(A.phases || 'all').split(',').map(s => s.trim()).filter(Boolean);
 const RUN_ALL = PHASES.includes('all');
-const want = (p) => RUN_ALL || PHASES.includes(p);
+// Fast mode SKIPS ConfigSweep ('config') and the editable-kernel Milestone ('kernel') so all optimization
+// comes from HeadKernel within the wall-clock budget. Default mode: FAST_SKIP is null → want() is the
+// original `RUN_ALL || PHASES.includes(p)`, unchanged.
+const FAST_SKIP = FAST_MODE ? new Set(['config', 'kernel']) : null;
+const want = (p) => (RUN_ALL || PHASES.includes(p)) && !(FAST_SKIP && FAST_SKIP.has(p));
 const ST = A.state || {};   // carried state from a prior phase invocation
+if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel-only; budget ${Math.round(FAST_BUDGET_MS / 60000)}min (stop new heads at ${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min, per-head workflow cap ${Math.round(FAST_HEAD_WF_MS / 60000)}min).`);
 
 // ---------------------------------------------------------------------------
 // Schema fragments.
@@ -325,7 +361,10 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // agent, so the bound must be large (default 120min). Too-short a bound here causes the long setup
 // agent to be killed and retried, spawning duplicate exp dirs. args.agent_timeout_ms=0 disables;
 // falls back to raw agent() if setTimeout is unavailable.
-const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 7200000, 10);
+// Default 120min (generous — outer e2e agents launch servers + run ~30min benches). Fast mode tightens
+// it to 45min so a single hung/slow agent can't blow the wall-clock budget (still ample for the director
+// baseline + the head e2e A/B). Default mode keeps 120min → unchanged.
+const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : (FAST_MODE ? 2700000 : 7200000), 10);
 function agentBounded(prompt, opts) {
   if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return agent(prompt, opts);
   let to;
@@ -353,6 +392,52 @@ async function safeAgent(prompt, opts, tries = 3) {
   }
   log(`agent[${(opts && opts.label) || '?'}] DEGRADED to null after ${tries} tries (${String(lastErr).slice(0, 120)})`);
   return null;
+}
+
+// --- FAST-MODE wall-clock control (no-op unless FAST_MODE) -------------------------------------------
+// Date.now()/new Date() are unavailable in workflow scripts (they would break resume), so the budget is
+// enforced with setTimeout: (1) a one-shot deadline flag that stops the head loop from STARTING new ops,
+// and (2) fastBoundedWorkflow() which races each nested kernel workflow against a per-head cap so the
+// in-flight op can't overrun. Both are inert when FAST_MODE is off → default path is byte-identical.
+let FAST_DEADLINE_HIT = false;
+if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) {
+  setTimeout(() => {
+    FAST_DEADLINE_HIT = true;
+    log(`[fast-mode] head-dispatch deadline (${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min) reached — no NEW head ops will start; finishing the in-flight head then proceeding to Finalize/Validate within the ${Math.round(FAST_BUDGET_MS / 60000)}min budget.`);
+  }, FAST_HEAD_DEADLINE_MS);
+}
+// Run a nested kernel workflow with a fast-mode time cap. When FAST_MODE is off it returns the raw
+// workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
+// existing null-guards treat it as "no kernel" and continue.
+function fastBoundedWorkflow(ref, wfArgs, label) {
+  const p = workflow(ref, wfArgs);
+  if (!FAST_MODE || typeof setTimeout !== 'function' || !(FAST_HEAD_WF_MS > 0)) return p;
+  let to;
+  const guard = new Promise((resolve) => {
+    to = setTimeout(() => {
+      log(`  [fast-mode] nested kernel workflow ${label || ''} exceeded ${Math.round(FAST_HEAD_WF_MS / 60000)}min — abandoning (null) to stay on budget.`);
+      resolve(null);
+    }, FAST_HEAD_WF_MS);
+  });
+  return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
+}
+
+// GPU semaphore (FAST MODE only — the default path never constructs one). Hands out EXCLUSIVE leases of
+// physical card ids from a pool so two concurrent isolated jobs never share a GPU -> their op-bench /
+// kernel-layer speed measurements never contend. Deadlock-free: a waiter holds 0 cards while queued and
+// acquires its full count atomically (no hold-and-wait). Uses only Promises/arrays (no Date.now/Math.random,
+// which the Workflow runtime forbids).
+function makeSem(ids) {
+  const free = ids.slice(); const waiters = [];
+  const pump = () => { while (waiters.length && waiters[0].n <= free.length) {
+    const w = waiters.shift(); w.resolve(free.splice(0, w.n)); } };
+  return {
+    size: ids.length,
+    acquire(n = 1) { if (n <= free.length) return Promise.resolve(free.splice(0, n));
+      return new Promise((resolve) => { waiters.push({ n, resolve }); }); },
+    release(got) { free.push(...got); pump(); },
+    async with(n, fn) { const g = await this.acquire(n); try { return await fn(g); } finally { this.release(g); } },
+  };
 }
 
 // ===========================================================================
@@ -510,7 +595,183 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     ...c, idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
     short_name: c.short_name || `${c.op_kind || 'op'}${i}`,
   }));
+  if (FAST_MODE && GPU_LIST.length > 1) {
+    // ========================= FAST-MODE PARALLEL HEAD TRACK (fast-mode only) =========================
+    // The default behavior is the byte-identical serial `else` branch below — this whole block only runs
+    // when FAST_MODE is on AND there is more than one card. Design (FAST_PLAN §4, STRICT timing):
+    //   opt-A  parallel: per-head extract + bake-off, each leasing ONE card exclusively
+    //   opt-B  parallel: ALL (operator × direction) author jobs in one pool, each leasing ONE card
+    //   BARRIER: every isolated job has released its card -> ISO pool fully idle
+    //   integrate SERIAL on the fixed serving slot {SERVING_GPU} (TP=SERVING_TP), one op at a time
+    // Why this satisfies the three requirements:
+    //   (1) operators AND optimization directions both fan out (flattened (head,language) job pool);
+    //   (2) the GPU semaphore gives every op-bench / kernel-layer job an EXCLUSIVE card, so no two
+    //       speed measurements ever share a GPU -> no timing contention while optimizing;
+    //   (3) integration happens only AFTER the barrier and SERIALLY on the serving slot (which itself
+    //       spans all TP cards), so no isolated work can preempt the e2e A/B -> the gate number is clean.
+    const ISO = makeSem(GPU_LIST);
+    log(`[fast-mode] PARALLEL head track: ISO lanes={${GPU_LIST.join(',')}} (${GPU_LIST.length}); ` +
+      `serving slot={${SERVING_GPU}} TP=${SERVING_TP} reserved for the serial e2e gate (hard barrier between).`);
+
+    // ---- opt-A: per-head extract + bake-off, parallel, exclusive 1-card lease each ----
+    const prepared = await parallel(heads.map((h) => async () => {
+      if (FAST_DEADLINE_HIT) return { h, dead: 'deadline' };
+      return ISO.with(1, async (g) => {
+        const gpu = g[0];
+        const ext = await safeAgent(
+          roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
+            EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH,
+            CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+            REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
+            PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
+          }),
+          { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
+        if (!ext || ext.smoke !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
+        const bake = await safeAgent(
+          roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
+            EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
+            CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
+            GPU_ID: gpu, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+          }),
+          { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
+        return { h, gpu, ext, bake };
+      });
+    }));
+
+    // ---- process opt-A: dominant-head flagging (never silently skip), seed direct_light + author jobs ----
+    const headState = new Map();   // short_name -> { h, ext, cands: [] }
+    const authorJobs = [];         // flattened (operator × direction) author directions
+    for (const p of prepared) {
+      if (!p) continue;
+      const h = p.h;
+      const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
+      if (p.dead === 'deadline') { log(`  [fast-mode] ${h.short_name}: skipped (dispatch deadline).`); continue; }
+      if (p.dead === 'extract' || !p.ext || !p.ext.task_dir) {
+        const why = p.ext ? p.ext.notes || p.ext.smoke : 'none';
+        if (isDominant) { log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head op extraction FAILED (${why}) — flagged, NOT skipped.`);
+          flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract', gate: 'extract_failed', reason: why }); }
+        else log(`  ${h.short_name}: op extraction failed (${why}); skipping.`);
+        history.ledger.push({ direction: h.short_name, verdict: isDominant ? 'flagged' : 'dead_end', lesson: `op extraction failed (${why})` });
+        continue;
+      }
+      const ext = p.ext, bake = p.bake;
+      const harness = !!(bake && (bake.gate === 'harness_error' || bake.harness_suspect));
+      const hasPlan = !!(bake && Array.isArray(bake.author_plan) && bake.author_plan.length);
+      if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {
+        if (isDominant || harness) {
+          log(`  ⚠️ FLAG ${h.short_name}: bake-off gate=${bake ? bake.gate : 'null'}${harness ? ' (HARNESS ERROR — not a real no-win)' : ''}.${hasPlan ? ' Proceeding to author route.' : ''}`);
+          flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'bakeoff', gate: bake ? bake.gate : 'null', harness_error: harness, had_author_plan: hasPlan, reason: bake ? bake.reason || bake.gate : 'bakeoff null' });
+          history.ledger.push({ direction: h.short_name, isolated_speedup: bake ? bake.isolated_speedup : 0, verdict: harness ? 'harness_error' : 'flagged', lesson: bake ? bake.reason || bake.gate : 'bakeoff null' });
+          if (!hasPlan) continue;
+        } else {
+          log(`  ${h.short_name}: no win and nothing worth authoring (${bake ? bake.reason || bake.gate : 'none'}); skipping.`);
+          history.ledger.push({ direction: h.short_name, isolated_speedup: bake ? bake.isolated_speedup : 0, verdict: 'dead_end', lesson: bake ? bake.reason || 'no op win' : 'bakeoff failed' });
+          continue;
+        }
+      }
+      const st = { h, ext, cands: [] };
+      headState.set(h.short_name, st);
+      if (bake && bake.gate === 'have_winner' && bake.isolated_speedup > 1.0)
+        st.cands.push({ kind: 'direct_light', source: bake.winner_backend, winner_kind: bake.winner_kind,
+          apply_env: bake.apply_env || '', apply_flags: bake.apply_flags || '', code_patch: bake.code_patch || '',
+          tuning_artifact: bake.tuning_artifact || '', isolated: bake.isolated_speedup, parity_note: bake.parity_note || 'expected_close' });
+      for (const ap of (bake && bake.author_plan ? bake.author_plan.slice(0, HEAD_AUTHOR_MAX) : []))
+        authorJobs.push({ short_name: h.short_name, h, ext, ap, best_known_ms: bake.best_known_ms });
+    }
+
+    // ---- opt-B: ALL (operator × direction) author jobs in ONE parallel pool, exclusive 1-card lease ----
+    log(`[fast-mode] author fan-out: ${authorJobs.length} (operator × direction) job(s) across ${GPU_LIST.length} GPU lanes.`);
+    const authored = await parallel(authorJobs.map((j) => async () => {
+      if (FAST_DEADLINE_HIT) return null;
+      return ISO.with(1, async (g) => {
+        const lang = j.ap.language || 'triton';
+        let al;
+        try {
+          al = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+            kernel_path: j.ext.task_dir, workflow_dir: KERNEL_WF_DIR,
+            mode: j.ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
+            op_spec: { op_kind: j.ext.op_kind, shapes: j.ext.shapes || {}, dtype: j.ext.dtype || 'bf16', regime: j.h.regime || '', cuda_graph_safe: true },
+            perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+            use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+            budget: KERNEL_BUDGET, gpu_ids: g[0], exp_root: `${EVAL_DIR}/kernels/_exp`,
+            task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${j.best_known_ms || '?'} ms). ` +
+              `This kernel will be overlaid onto the LIVE decode path (CUDA-graph captured): its STEADY-STATE hot path MUST be ` +
+              `host-sync-free (NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize(), no Python branch on a GPU scalar). ` +
+              `Cache any weight prep (transpose/requant/preshuffle) by weight.data_ptr() done ONCE, not per call. ` +
+              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: use the FUSED fp8 path (fold the block-scale into the operand scale, one fp8 MFMA ` +
+              `GEMM) and cache only COMPACT fp8/preshuffled weights (never a bf16 expansion); the integrated kernel MUST fit at the ` +
+              `accepted config's mem-fraction. ` + GRAPH_REQ + (TASK || ''),
+            apply_to_original: 'false',
+          }, `${j.short_name}:${lang}`);
+        } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
+        return { j, al };
+      });
+    }));
+    // ---- BARRIER: all isolated optimize done; ISO pool idle; serving slot now contention-free ----
+    for (const r of authored) {
+      if (!r || !r.al) continue;
+      const j = r.j, al = r.al, lang = j.ap.language || 'triton';
+      const st = headState.get(j.short_name); if (!st) continue;
+      if (al.authored !== false && al.final_geomean > 1.0 && al.final_patch) {
+        st.cands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
+          final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: al.final_geomean });
+        log(`  ${j.short_name}: authored ${lang} ${al.final_geomean.toFixed(2)}x (vs its own baseline).`);
+      } else {
+        log(`  ${j.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
+        history.ledger.push({ direction: `${j.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
+      }
+    }
+
+    // ---- integrate SERIAL on the fixed serving slot, in head order, ISO quiesced (no GPU preemption) ----
+    for (const h of heads) {
+      const st = headState.get(h.short_name); if (!st) continue;
+      const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
+      if (!st.cands.length) {
+        if (isDominant) { log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head produced NO candidate — flagged, NOT skipped.`);
+          if (!flaggedHeads.some((f) => f.short_name === h.short_name)) flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'no_candidate', gate: 'no_candidate', reason: 'bake-off + author route both empty' });
+          history.ledger.push({ direction: h.short_name, verdict: 'flagged', lesson: 'DOMINANT head: no candidate to integrate' }); }
+        else log(`  ${h.short_name}: no candidate to integrate; skipping.`);
+        continue;
+      }
+      st.cands.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
+      const cand = st.cands[0];
+      log(`  ${h.short_name}: best candidate=${cand.source} (${(cand.isolated || 0).toFixed(2)}x, ${cand.kind}). Integrating to e2e (serial, slot {${SERVING_GPU}}).`);
+      const integ = await safeAgent(
+        roleAgent('e2e_integrator', 'integrate', 'Apply the head-op winner; gate on e2e throughput.', {
+          EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
+          KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
+            winner_kind: cand.winner_kind, winner_backend: cand.source,
+            target_callable: st.ext.target_callable || h.target_callable || '',
+            authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
+            apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
+            code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
+            verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
+            parity_note: cand.parity_note || 'expected_close' },
+          CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+          CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
+        }),
+        { phase: 'HeadKernel', label: `integrate ${h.short_name}`, schema: INTEGRATE_SCHEMA });
+      if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
+        curOverlay = integ.accepted_overlay || curOverlay;
+        if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
+        if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
+        curTput = integ.e2e_throughput_tok_s;
+        acceptedHeads.push({ short_name: h.short_name, op_kind: st.ext.op_kind, backend: cand.source, kind: cand.winner_kind, e2e_delta_pct: integ.e2e_delta_pct, isolated: cand.isolated });
+        log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
+        history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
+      } else {
+        log(`  ${h.short_name}: REJECTED at e2e gate (${integ ? integ.reason || integ.gate : 'none'}).`);
+        history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ ? integ.e2e_delta_pct : 0, verdict: 'dead_end', lesson: integ ? integ.reason || 'no e2e gain' : 'integrate failed' });
+      }
+    }
+  } else {
   for (const h of heads) {
+    // Fast-mode budget guard: stop STARTING new head ops once the dispatch deadline has fired, so the
+    // in-flight work + Finalize/Validate still land inside the wall-clock budget. (No-op in default mode.)
+    if (FAST_MODE && FAST_DEADLINE_HIT) {
+      log(`[fast-mode] budget deadline reached — stopping head dispatch before ${h.short_name} (${headDispatched}/${heads.length} heads done).`);
+      break;
+    }
     headDispatched++;
     // (h1) Extract the op into a standalone immutable unittest (GEMM synth / attn capture).
     const ext = await safeAgent(
@@ -587,10 +848,10 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       // optimization: no final_geomean) — a transient nested-workflow death must NOT silently drop a
       // language (it dropped FlyDSL in the 2026-06-12 run). Do NOT retry a COMPLETED no-speedup
       // (final_geomean present but <=1.0) — that's a real result, retrying just wastes budget.
-      const AUTHOR_TRIES = parseInt(A.head_author_tries != null ? A.head_author_tries : 2, 10);
+      const AUTHOR_TRIES = parseInt(A.head_author_tries != null ? A.head_author_tries : (FAST_MODE ? 1 : 2), 10);
       for (let attempt = 1; attempt <= AUTHOR_TRIES; attempt++) {
         try {
-          al = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+          al = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
             kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
             mode: ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
             op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true },
@@ -609,7 +870,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
               `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',
-          });
+          }, `${h.short_name}:${lang}`);
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
         const transient = !al || al.validation_status === 'error' || (al.authored === false && al.final_geomean == null);
         if (!transient || attempt === AUTHOR_TRIES) break;
@@ -689,6 +950,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: integ.reason || 'no e2e gain' });
     }
   }
+  } // end serial head track (default path; runs for normal mode and fast-mode-single-GPU)
   // Head wins reshape the profile massively (GEMM mass shrinks) — re-profile before the kernel loop.
   if (acceptedHeads.length) {
     profile = await safeAgent(
@@ -853,7 +1115,7 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
 
   // --- (d) Update the persistent experience library + in-run memory -------
   const exp = await safeAgent(
-    roleAgent('system_architect', 'update_experience', 'Append durable findings to the backend playbook.', {
+    roleAgent('system_architect', 'update_experience', 'Curate knowledge/learned/ (merge/insert >=2-star / archive contradicted) per learned/README.md.', {
       ROUND: milestone, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
       MILESTONE_RESULTS: history.ledger.slice(-cands.length),
       REPROFILE_SHIFT: profile ? profile.shift_note : '', PRIOR_HISTORY: history,
@@ -971,6 +1233,7 @@ const carryState = {
 
 return {
   mode: 'e2e',
+  fast_mode: FAST_MODE,   // true => ConfigSweep + Milestone skipped; HeadKernel-only within the time budget
   backend: BACKEND,
   phases_run: PHASES,
   eval_dir: EVAL_DIR,

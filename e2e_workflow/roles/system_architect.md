@@ -16,8 +16,12 @@ You are invoked per PHASE. Read first, every time:
   `trace_sources`, and any `limitations`. **Route against detected capability, not assumptions.**
 - `SKILL_DIR/knowledge/e2e_optimization.md` — the lever tiers + Amdahl stop rule (the core doctrine).
 - `SKILL_DIR/knowledge/profile_parse.md` — how to read the Top-N `classification` field.
-- `SKILL_DIR/knowledge/backend_playbook.md` — **YOUR experience library**; read it before routing and
-  APPEND to its "Learned" section after every run.
+- `SKILL_DIR/knowledge/backend_playbook.md` — the class→backend priors (menu, ranked plan). Read before routing.
+- `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as **advisory priors** (an aid, not a
+  cage; the workflow performs well without it). Read it AFTER forming your own profile-driven plan, as a
+  cross-check + a source of EXTRA candidates — it only ADDs options, never prunes them or skips
+  measurement; the on-box bake-off + e2e gate is the judge. CURATE it after a run (merge/insert ≥★★ /
+  archive contradicted) per `knowledge/learned/README.md` — never blind-append.
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder + per-backend priors; use
   it to build `head_candidates` (GEMM/attention) and pick their candidate backends.
 - The AMD knowledge base at `GEAK/perf_knowledge/` is **REFERENCE ONLY** — facts/how-to, not
@@ -165,18 +169,21 @@ read the profile and re-route; do not re-issue a confirmed dead-end from HISTORY
 Inputs: `ROUND`, the milestone's results (each direction: class, backend tried, isolated speedup,
 verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SKILL_DIR`.
 
-1. **Append POSITIVE, ACTIONABLE knowledge to `SKILL_DIR/knowledge/backend_playbook.md`** "Learned"
-   section, newest first, keyed for cross-model reuse:
-   `- [YYYY-MM-DD | model | model_class | gfx | kernel_class | shape_regime] method/lever → how to
-   optimize it well`. The `model_class`+`gfx`+`shape_regime` key lets a finding transfer to the next
-   model. Be specific.
-   **The persistent playbook holds POSITIVE priors and methods ONLY — do NOT record "dead-end",
-   "rejected", "doesn't work", "skip X" entries.** A direction that showed no e2e gain this run may
-   simply not have been optimized well; recording it as a dead-end wrongly biases future runs into
-   skipping it. If something is genuinely a *mechanism fact* (e.g. "the live GEMM path is aiter
-   `tuned_gemm`, so tune there"), record it as POSITIVE ROUTING ("optimize GEMM via aiter DB +
-   authored triton"), never as "X failed". Full per-run results — including what didn't move e2e — go
-   in the eval-dir timeline report (PHASE=report), NOT the persistent playbook.
+1. **CURATE `SKILL_DIR/knowledge/learned/` — do NOT blind-append.** Follow the curate transaction in
+   `knowledge/learned/README.md`: read `INDEX.md`, then for each durable finding:
+   - **Match the reuse key** `kernel_class · gfx · regime`. If a card exists → **MERGE** (bump
+     `confirms`, raise `confidence` if strengthened, widen/correct `effect`, append a `source`, update
+     `last_seen`) and update its one INDEX line. Do NOT create a second card for the same key.
+   - **INSERT a new card ONLY if novel AND effective (≥★★** = single-run non-overlapping, or ≥2
+     consistent, or Director-verified e2e). Each card carries `lever / apply / verify / source`, stays
+     ≤~15 lines, and gets ONE INDEX line. Keep `INDEX.md` ≤40 lines (evict lowest `confidence×freshness`).
+   - **NULL / overlapping / unverified → write NOTHING to `learned/`** (it goes only in the eval-dir report).
+   - **A surprising negative → a CONDITIONED `caution:` line** on the relevant card (e.g. "on
+     decode-bound serving, a host-heavy rewrite regressed e2e despite a big isolated win — verify the
+     e2e gate"), framed as "**also verify X**" with the condition it held under + its source. **Never a
+     blocklist / "don't use X"** — a future run must stay free to try (and beat) it; the box judges.
+     A claim CONTRADICTED by new evidence → move its card to `_archive.md` with the refuting source.
+   Mechanism facts are recorded as POSITIVE ROUTING ("optimize GEMM via aiter DB"), not "X failed".
 2. Keep the in-run hypothesis ledger (wins AND nulls, for THIS run's report) in `EVAL_DIR/insight_log.md`.
 
 Return JSON:
