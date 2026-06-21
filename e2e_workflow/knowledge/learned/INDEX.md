@@ -16,6 +16,7 @@ Confidence (a hint strength, not authority): ★ noise/unverified · ★★ sing
 ## attention
 - [gfx942 · sglang hybrid prefill] `--attention-backend triton` cheap flag win ★★★ +~5% e2e — (attention-backend-triton-gfx942.md)
 - [gfx942 · vLLM decode, non-pow2 KV block] live = editable in-tree Triton paged kernel ★★ ~+1% — (paged-attn-nonpow2-gfx942.md)
+- [gfx950 · vLLM block-sparse NSA GQA prefill] custom kernel, no lib swap; live = editable in-tree Triton → Tier-C rewrite ★★ ~5.6% head — (sparse-attn-nsa-triton-gfx950.md)
 
 ## linear-attention / FLA / mamba (editable Triton)
 - [gfx942 · prefill-dominated hybrid] stack-and-compound cluster; Amdahl pre-dispatch screen ★★★ — (editable-triton-cluster-amdahl.md)
