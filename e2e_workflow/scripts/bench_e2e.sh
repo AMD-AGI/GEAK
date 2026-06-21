@@ -208,6 +208,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ---- serving-GPU mutex ----
+# TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
+# Profiler / config-sweep / integrate ref·cand / validation all share it, so
+# without a lock a reprofile can be starved indefinitely by a concurrent
+# integrate benchmark. Serialize every serving launch behind a per-GPU-set lock.
+# (Isolated op-bench uses the SEPARATE GPU_IDS pool and is unaffected.)
+if [ "${SERVING_GPU_LOCK_DISABLE:-0}" != "1" ] && [ "${REUSE_SERVER:-0}" != "1" ]; then
+  _gpu_key="${GPU:-0}"; _gpu_key="${_gpu_key//,/_}"
+  SERVING_LOCK="${SERVING_GPU_LOCK:-/tmp/geak_serving_gpu_${_gpu_key}.lock}"
+  exec {SERVING_LOCK_FD}>"$SERVING_LOCK"
+  echo ">>> Acquiring serving-GPU lock ($SERVING_LOCK) for GPU=$GPU ..."
+  if ! flock -w "${SERVING_LOCK_WAIT:-7200}" "$SERVING_LOCK_FD"; then
+    echo "!!! serving-GPU lock timeout (${SERVING_LOCK_WAIT:-7200}s) on GPU=$GPU" >&2
+    exit 4
+  fi
+  echo ">>> serving-GPU lock acquired."
+fi
+
 # ---- launch (unless reusing a warm server) ----
 if [ "$REUSE_SERVER" != "1" ]; then
   mkdir -p "$PROFILE_DIR"

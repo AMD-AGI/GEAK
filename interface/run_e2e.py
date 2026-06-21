@@ -24,9 +24,11 @@ path. See interface/run_e2e.md for the full contract.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -686,8 +688,10 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
         return persisted
     validation = _read_json(eval_dir / "director_e2e_validation.json")
     if not validation:
-        # No completion marker => the optimizer did not finish a measured leg.
-        return None
+        # No final Validate marker => the run died mid-pipeline. Before giving
+        # up, salvage the best gate==accepted intermediate (config/kernel
+        # integrate) so a real measured gain is never silently discarded.
+        return _recover_best_intermediate_win(eval_dir)
     serving = validation.get("serving_config") or {}
     accepted_config = {
         "flags": serving.get("final_flags") or serving.get("baseline_flags") or "",
@@ -777,6 +781,68 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
         "accepted_kernels": accepted_kernels,
         "accepted_heads": [],
         "recovered_from_disk": True,
+    }
+
+
+def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
+    """Salvage the best accepted intermediate win when the run died BEFORE Validate.
+
+    The whole-pipeline workflow records each accepted config/kernel integrate as
+    ``overlay/<cand>/integrate_result.json`` with a measured e2e delta + gate.
+    When no ``director_e2e_validation.json`` exists (the run was killed
+    mid-pipeline), pick the BEST ``gate=="accepted"``, positive-delta
+    intermediate so a real, parity-checked win is NEVER silently discarded.
+
+    Returns a workflow-return-shaped dict (status derived later by
+    :func:`normalize_result`) or ``None`` when nothing acceptable is on disk.
+    """
+    best: dict | None = None
+    best_tput = 0.0
+    for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
+        if not base.is_dir():
+            continue
+        for cand in sorted(base.glob("cand_*")):
+            ir = _read_json(cand / "integrate_result.json")
+            if not ir or ir.get("gate") != "accepted":
+                continue
+            try:
+                delta = float(ir.get("e2e_delta_pct") or 0.0)
+                tput = float(ir.get("e2e_throughput_tok_s") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if delta > 0.0 and tput > best_tput:
+                best_tput, best = tput, ir
+    if best is None:
+        return None
+
+    ref_med = float(best.get("ref_med") or 0.0)
+    final_tput = float(best.get("e2e_throughput_tok_s") or 0.0)
+    speedup = (final_tput / ref_med) if ref_med > 0 else (
+        1.0 + float(best.get("e2e_delta_pct") or 0.0) / 100.0)
+    name = str(best.get("short_name") or "")
+    # winner_kind in {"env","config","flags"} => config-only (no authored kernel).
+    is_kernel = best.get("winner_kind") not in ("env", "config", "flags")
+    return {
+        "eval_dir": str(eval_dir),
+        "throughput_speedup": speedup,
+        "baseline_throughput_tok_s": ref_med,
+        "final_throughput_tok_s": final_tput,
+        "output_parity": best.get("output_parity"),
+        "validation_status": "recovered_intermediate",
+        "final_overlay": "",                 # config-only: applied via env/flags
+        "final_launch_script": "",
+        "accepted_config": {
+            "flags": str(best.get("apply_flags") or ""),
+            "env": str(best.get("apply_env") or ""),
+        },
+        "accepted_kernels": (
+            [{"short_name": name, "kind": "authored", "backend": "geak",
+              "e2e_delta_pct": float(best.get("e2e_delta_pct") or 0.0)}]
+            if is_kernel and name else []
+        ),
+        "accepted_heads": [],
+        "recovered_from_disk": True,
+        "recovered_intermediate": True,
     }
 
 
@@ -980,55 +1046,119 @@ def main(argv: list[str]) -> int:
                           "prompt": prompt, "e2e_script": str(E2E_SCRIPT)}, indent=2))
         return 0
 
-    recovered = False
+    exp_root = Path(h.get("exp_root") or "")
+    eval_dir_hint = ps_args["eval_dir"]
+
+    # ── Guaranteed interface-file emission ──────────────────────────────────
+    # CONTRACT: as long as PerfSkills produced ANY measured E2E effect on disk,
+    # result.json (+ kernel_journey.json) MUST be written. No termination,
+    # timeout, signal, or exception may leave the interface files missing.
+    #   * idempotent (writes once), best-effort (never raises),
+    #   * ATOMIC write (tmp + os.replace) so a kill mid-write never yields a
+    #     partial/corrupt result.json,
+    #   * recovers from disk (incl. the best accepted intermediate win) when no
+    #     explicit workflow return is available.
+    _emit_state: dict[str, Any] = {"done": False, "out": {}}
+
+    def _emit(wf: dict | None = None, *, error: object = None,
+              error_class: str | None = None) -> dict:
+        if _emit_state["done"]:
+            return _emit_state["out"]
+        # A second SIGTERM must not interrupt the flush we are about to do.
+        try:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        except Exception:
+            pass
+        if wf is None:
+            try:
+                wf = _recover_workflow_return(exp_root)
+            except Exception:
+                wf = None
+        try:
+            if wf is not None:
+                out = normalize_result(h, wf)
+                eval_dir = Path(out.get("eval_dir") or eval_dir_hint)
+                try:
+                    _persist_workflow_return(eval_dir, wf)
+                except Exception:
+                    pass
+                try:
+                    kj_path = _write_kernel_journey(eval_dir, wf, out)
+                    if kj_path:
+                        out["kernel_journey_path"] = kj_path
+                except Exception:
+                    pass
+                if wf.get("recovered_from_disk"):
+                    out["recovered_from_disk"] = True
+            else:
+                out = {
+                    "schema_version": SCHEMA_VERSION,
+                    "status": "timeout" if error_class == "timeout" else "error",
+                    "error_class": error_class or "runner_error",
+                    "error": str(error or ""),
+                }
+        except Exception as norm_exc:  # normalize/journey blew up: still emit.
+            out = {
+                "schema_version": SCHEMA_VERSION,
+                "status": "error",
+                "error_class": "normalize_failed",
+                "error": f"{type(norm_exc).__name__}: {norm_exc}",
+            }
+        try:
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = result_path.with_name(result_path.name + ".tmp")
+            tmp.write_text(json.dumps(out, indent=2), encoding="utf-8")
+            os.replace(tmp, result_path)  # atomic
+            _emit_state.update(done=True, out=out)
+        except Exception:
+            try:  # last-ditch non-atomic write: never leave NOTHING behind.
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                result_path.write_text(json.dumps(out), encoding="utf-8")
+                _emit_state.update(done=True, out=out)
+            except Exception:
+                pass
+        return out
+
+    # Safety net: any exit path that somehow skipped _emit still leaves a file.
+    atexit.register(
+        lambda: None if _emit_state["done"]
+        else _emit(error="process exiting without an emit",
+                   error_class="interrupted")
+    )
+
+    # SIGTERM (the outer runner's graceful-stop) -> break out of the workflow
+    # wait as a TimeoutError so the finally below emits from on-disk artifacts.
+    def _on_term(signum, _frame):
+        raise TimeoutError(f"signal {signum}: self-stop to flush interface files")
+    signal.signal(signal.SIGTERM, _on_term)
+
+    out: dict = {}
+    wf: dict | None = None
+    err: object = None
+    err_class: str | None = None
     try:
         wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"])
-    except Exception as e:  # scrape/crash/timeout: try a disk recovery first.
-        error_class = _classify_error(e)
-        # The optimizer's artifacts (director_e2e_validation.json + final/
-        # bundle + gain) are on disk even when the transcript scrape failed;
-        # rebuild the return from them so a real win is never discarded over a
-        # lost handoff line. Recovery yields None only when no completed
-        # eval_dir exists (the run genuinely produced nothing to keep).
-        wf = _recover_workflow_return(Path(h.get("exp_root") or ""))
-        if wf is None:
-            status = "timeout" if error_class == "timeout" else "error"
-            result_path.parent.mkdir(parents=True, exist_ok=True)
-            result_path.write_text(json.dumps(
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "status": status,
-                    "error_class": error_class,
-                    "error": str(e),
-                },
-                indent=2), encoding="utf-8")
-            sys.stderr.write(f"PerfSkills e2e failed [{error_class}]: {e}\n")
-            return 1
-        recovered = True
-        sys.stderr.write(
-            f"PerfSkills e2e: transcript handoff failed [{error_class}]; "
-            f"recovered the workflow return from disk artifacts "
-            f"({wf.get('eval_dir')}).\n"
-        )
+    except Exception as e:  # scrape/crash/timeout/SIGTERM: recover from disk.
+        err = e
+        err_class = _classify_error(e)
+        try:
+            wf = _recover_workflow_return(exp_root)
+        except Exception:
+            wf = None
+        if wf is not None:
+            sys.stderr.write(
+                f"PerfSkills e2e: workflow handoff failed [{err_class}]; "
+                f"recovered from disk artifacts ({wf.get('eval_dir')}).\n"
+            )
+        else:
+            sys.stderr.write(f"PerfSkills e2e failed [{err_class}]: {e}\n")
+    finally:
+        out = _emit(wf=wf, error=err, error_class=err_class)
 
-    out = normalize_result(h, wf)
-
-    # Persist the authoritative return + the kernel_journey contract beside the
-    # artifacts so (a) a future recovery never re-scrapes and (b) the
-    # orchestrator can replay the per-kernel journey into its breakdown.
-    eval_dir = Path(out["eval_dir"])
-    _persist_workflow_return(eval_dir, wf)
-    kj_path = _write_kernel_journey(eval_dir, wf, out)
-    if kj_path:
-        out["kernel_journey_path"] = kj_path
-    if recovered:
-        out["recovered_from_disk"] = True
-
-    result_path.parent.mkdir(parents=True, exist_ok=True)
-    result_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
-    print(json.dumps({"status": out["status"], "result_json": str(result_path),
-                      "speedup": out["throughput_speedup"]}))
-    return 0 if out["status"] != "error" else 1
+    print(json.dumps({"status": out.get("status"),
+                      "result_json": str(result_path),
+                      "speedup": out.get("throughput_speedup")}))
+    return 0 if out.get("status") != "error" else 1
 
 
 if __name__ == "__main__":
