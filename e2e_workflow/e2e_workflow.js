@@ -1368,7 +1368,7 @@ while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS |
 
   // --- (d) Update the persistent experience library + in-run memory -------
   const exp = await safeAgent(
-    roleAgent('system_architect', 'update_experience', 'Append durable findings to the backend playbook.', {
+    roleAgent('system_architect', 'update_experience', 'Curate knowledge/learned/ (merge/insert >=2-star / archive contradicted) per learned/README.md.', {
       ROUND: milestone, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
       MILESTONE_RESULTS: history.ledger.slice(-cands.length),
       REPROFILE_SHIFT: profile ? profile.shift_note : '', PRIOR_HISTORY: history,
