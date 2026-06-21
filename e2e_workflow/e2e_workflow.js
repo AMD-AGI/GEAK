@@ -768,6 +768,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       return { h, ext, lanes, deepDir, sharedKb, liveBaselineMs };
     };
 
+    const dHeads = heads.slice().sort((a, b) => (b.pct_gpu_time || 0) - (a.pct_gpu_time || 0));   // dominant-Amdahl first
+    log(`[deep-v2] cross-kernel × cross-backend co-opt over ${dHeads.length} head op(s); GPU pool {${GPU_LIST.join(',')}}.`);
     headDispatched += dHeads.length;
     const preps = [];
     for (const h of dHeads) { if (DEEP_DEADLINE_HIT) break; const p = await prepHead(h); if (p) preps.push(p); }
