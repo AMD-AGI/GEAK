@@ -4,14 +4,8 @@ Read this first; open only the cards matching your run's `(kernel_class, gfx, re
 card, grouped by reuse key. Schema + curate rules: see `README.md`. **Cap: ≤40 card lines.**
 Confidence: ★ noise/unverified · ★★ single non-overlap or ≥2 consistent · ★★★ ≥2 non-overlap or verified e2e.
 
-> **deep_mode v2 — TEMPORARY M3 clear:** the gfx950 · vLLM MXFP8 E8M0 routing card
-> (`mxfp8-microscale-gemm-gfx950.md`, which asserted "Triton `tl.dot_scaled` only, no aiter/flydsl
-> primitive") was removed for THIS run so the M3 cross-backend exploration starts UNBIASED — do not
-> assume any backend is dead for MXFP8; let the on-box bake-off + isolated A/B decide. All other-arch
-> (gfx942) cards are kept (they don't match an M3 `gfx950` key, so no bias). After the v2 run, curate
-> the fresh, evidence-backed M3 findings back here per `README.md`.
-
 ## dense GEMM
+- [gfx950 · vLLM MXFP8 E8M0 decode-bound] dense-linear split-K/fused decode-tile Triton rewrite ★★★ **+21.8% e2e (verified, gsm8k-clean); decode-driven (converts only at high conc); grouped-MoE GEMM resists (~1.1× ceiling)** — (mxfp8-linear-decode-rewrite-gfx950.md)
 - [gfx942 · sglang bf16] aiter per-shape DB tune ★★★ **+2.23% e2e (verified)** — (aiter-bf16-tuned-gemm-gfx942.md)
 - [gfx942 · sglang fp8 a8w8 blockscale] per-(N,K) M-bucketed Triton config-JSON overlay ★★★ ~1.10× prefill — (fp8-a8w8-blockscale-overlay-gfx942.md)
 
