@@ -8,6 +8,7 @@ export const meta = {
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
     { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
+    { title: 'Research', detail: 'OPT-IN (args.dra_enabled): researcher fans research questions out in parallel via native WebSearch/WebFetch, writes a ranked-directions brief the planner seeds from' },
     { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist OR deep_explore engineers optimize, reprofile' },
     { title: 'Verify', detail: 'each candidate patch independently re-benchmarked' },
     { title: 'Merge', detail: 'integrator combines the round winners' },
