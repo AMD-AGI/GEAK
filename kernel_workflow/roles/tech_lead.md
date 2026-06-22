@@ -107,7 +107,9 @@ Inputs: `EVAL_DIR`, `ROUND` (1-based), `BUDGET_REMAINING` (hard cap on direction
 `CUMULATIVE_SPEEDUP` (best verified geomean so far, 1.0 at start), `BASELINE_GEOMEAN_MS`, the latest
 `PROFILE_SUMMARY` (path + inline), and `HISTORY` (the insight blackboard + hypothesis ledger from
 prior rounds — see below). Also the current best per-case table. Plus `KERNEL_KNOWLEDGE_DIR`,
-`KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` (the kk pointer resolved in analyze; may be empty).
+`KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` (the kk pointer resolved in analyze; may be empty). Plus
+`DEEP_SEARCH_BRIEF` — a path to the Deep Research Agent's compact ranked-directions brief
+(`EVAL_DIR/deep_search_brief.md`), or `''` when the DRA did not run / produced nothing.
 
 Your job: decide this round's directions (or stop). Re-read `geomean_levers.md` and the relevant
 optimization knowledge first.
@@ -141,6 +143,32 @@ Rules:
    set. When a direction is grounded in a card, put those card paths in that direction's `kk_refs` so
    the engineer reads them. Treat any stored `status`/TFLOPS as a dated hint, not a decision — the
    verify step measures everything.
+2b. **Seed from the Deep Research Agent brief when present (`DEEP_SEARCH_BRIEF`).** If
+   `DEEP_SEARCH_BRIEF` is a non-empty path, **Read it** (it is the compact ranked-directions brief —
+   `~2-4 KB`, just `Dk: title` + specialty + a short mechanism + expected upside + confidence; the
+   full evidence is in `EVAL_DIR/deep_search.md`, drill in only if a direction is unclear). It is the
+   product of a deep, web-grounded research pass and is a STRONG prior for what to try first. Seed
+   this round's `directions[]` from its ranked directions, mapping each chosen `Dk` to a concrete
+   engineer direction (its `specialty` maps directly; write a self-contained `prompt` from the `Dk`
+   mechanism). Carry the THREE DRA lessons (do not violate):
+   - **DIVERSIFY — spread, don't anchor.** Assign DIFFERENT ranked directions to different parallel
+     engineers, spread ACROSS the ranked list (e.g. a top `Dk` + a mid `Dk`), NOT several engineers
+     all on the same brief theme. Anchoring every engineer on one direction is a known failure mode
+     that hurt v3 — never do it. Always keep **at least one free / un-anchored explorer slot** each
+     round that is NOT taken from the brief (your own profile-driven idea), so the round can find what
+     the research missed. (If only 1 direction fits this round, alternate brief-seeded vs free across
+     rounds.)
+   - **HIGH-CEILING directions are FIRST-CLASS.** When the brief ranks a bold rewrite high (raw-HIP/
+     `load_inline`, CUDA/HIP graph capture / persistent kernels, algorithmic reformulation, a SOTA
+     method ported from a paper/CUDA), treat it as a first-class candidate — typically a
+     `deep_explore` direction (confirm `BUDGET_REMAINING ≥ DEEP_COST`) or a `host_runtime`/`algorithm`
+     specialist. Do NOT demote it to "later/secondary" just because it is ambitious; the research
+     surfaced it precisely because the safe tuning ceiling is lower.
+   - **Don't over-prescribe.** The brief gives the IDEA/mechanism, not an implementation. Keep your
+     direction `prompt` to the mechanism + why (cite the profile/per-case signal) + a target; do NOT
+     prescribe exact edits — finding "how" is the engineer's job (this de-prescription is deliberate).
+   The brief is a prior, never a cage: it never overrides the profile/per-case signal, the floor
+   rules below, or measurement. If it is `''` / unreadable, ignore it — behavior is unchanged.
 3. Use the data: look at the per-case table and `geomean_levers.md`. If several cases are
    overhead-bound (similar latency across sizes, or dispatch count > 1), you MUST include at least
    one `host_runtime` direction (dispatch collapse / native layout / wrapper). Target the WORST
