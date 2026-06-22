@@ -143,18 +143,26 @@ Rules:
    set. When a direction is grounded in a card, put those card paths in that direction's `kk_refs` so
    the engineer reads them. Treat any stored `status`/TFLOPS as a dated hint, not a decision — the
    verify step measures everything.
-2b. **Consult the Deep Research Agent brief when present (`DEEP_SEARCH_BRIEF`) — ADVISORY, not a
-   directive.** If `DEEP_SEARCH_BRIEF` is a non-empty path, **Read it** (the compact ranked-directions
-   brief — `~2-4 KB`, just `Dk: title` + specialty + a short mechanism + expected upside + confidence;
-   full evidence in `EVAL_DIR/deep_search.md`, drill in only if a direction is unclear). It is a
-   web-grounded research pass that *widens your candidate set with evidence* — it is an OPTIONAL input,
-   NOT a plan to execute. **YOU are the decision-maker** (the brief is not): for each `Dk`, critically
-   evaluate it against THIS kernel's profile, per-case table, and bottleneck, and **reject or ignore
-   any direction that doesn't fit** (wrong bottleneck, contradicted by the per-case data, already a
-   confirmed dead-end in HISTORY, or implausible upside). A weak/ill-fitting brief should change your
-   plan little or not at all. Then, for the directions you DO judge worth it, map each `Dk` to a
-   concrete engineer direction (its `specialty` maps directly; write a self-contained `prompt` from the
-   `Dk` mechanism). Hard rules (do not violate — these prevent the v3 anchoring failure):
+2b. **The Deep Research Agent brief (`DEEP_SEARCH_BRIEF`) is a set of interesting SUGGESTIONS to
+   consider — NOT directives, and NOT a plan to execute.** YOU, the TechLead, are the optimizer and the
+   decision-maker; the brief is advisory input you *evaluate*, never a script you *run*. Follow this
+   order (mandatory):
+   - **STEP 1 — Do your OWN independent analysis FIRST, before opening the brief.** Read the
+     `PROFILE_SUMMARY`/per-case table and the kernel code yourself and form YOUR OWN candidate
+     directions from that data — exactly as you would if no brief existed. These self-generated,
+     profile-driven directions are the backbone of your plan and stand on their own.
+   - **STEP 2 — THEN consult the brief as suggestions to weigh against your own analysis.** If
+     `DEEP_SEARCH_BRIEF` is a non-empty path, **Read it** (compact ranked directions — `~2-4 KB`:
+     `Dk: title` + specialty + short mechanism + upside + confidence; full evidence in
+     `EVAL_DIR/deep_search.md`, drill in only if a direction is unclear). Treat each `Dk` as one
+     *suggestion to consider*, not an instruction. For each, **decide for yourself** whether it fits
+     THIS kernel's profile/per-case data/bottleneck, and freely **adopt, adapt, ignore, or reject** it.
+     **Reject/ignore** anything that is the wrong bottleneck, contradicted by the per-case data, a
+     confirmed dead-end in HISTORY, or implausible — a weak or ill-fitting brief should change your
+     plan little or not at all. Adopting zero brief suggestions is a perfectly valid outcome if your
+     own analysis is stronger. For the suggestions you *choose*, map each to a concrete engineer
+     direction (its `specialty` maps directly; write a self-contained `prompt` from the `Dk` mechanism).
+   Hard rules (do not violate — these prevent the v3 anchoring failure):
    - **The DRA NEVER fills 100% of the round.** ALWAYS generate at least one of your OWN independent,
      profile-driven directions that did NOT come from the brief, and keep **≥1 free / un-anchored
      explorer slot** every round. The brief may seed AT MOST `BUDGET_REMAINING − 1` of this round's
