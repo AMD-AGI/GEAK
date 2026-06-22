@@ -143,32 +143,45 @@ Rules:
    set. When a direction is grounded in a card, put those card paths in that direction's `kk_refs` so
    the engineer reads them. Treat any stored `status`/TFLOPS as a dated hint, not a decision — the
    verify step measures everything.
-2b. **Seed from the Deep Research Agent brief when present (`DEEP_SEARCH_BRIEF`).** If
-   `DEEP_SEARCH_BRIEF` is a non-empty path, **Read it** (it is the compact ranked-directions brief —
-   `~2-4 KB`, just `Dk: title` + specialty + a short mechanism + expected upside + confidence; the
-   full evidence is in `EVAL_DIR/deep_search.md`, drill in only if a direction is unclear). It is the
-   product of a deep, web-grounded research pass and is a STRONG prior for what to try first. Seed
-   this round's `directions[]` from its ranked directions, mapping each chosen `Dk` to a concrete
-   engineer direction (its `specialty` maps directly; write a self-contained `prompt` from the `Dk`
-   mechanism). Carry the THREE DRA lessons (do not violate):
-   - **DIVERSIFY — spread, don't anchor.** Assign DIFFERENT ranked directions to different parallel
-     engineers, spread ACROSS the ranked list (e.g. a top `Dk` + a mid `Dk`), NOT several engineers
-     all on the same brief theme. Anchoring every engineer on one direction is a known failure mode
-     that hurt v3 — never do it. Always keep **at least one free / un-anchored explorer slot** each
-     round that is NOT taken from the brief (your own profile-driven idea), so the round can find what
-     the research missed. (If only 1 direction fits this round, alternate brief-seeded vs free across
-     rounds.)
-   - **HIGH-CEILING directions are FIRST-CLASS.** When the brief ranks a bold rewrite high (raw-HIP/
-     `load_inline`, CUDA/HIP graph capture / persistent kernels, algorithmic reformulation, a SOTA
-     method ported from a paper/CUDA), treat it as a first-class candidate — typically a
-     `deep_explore` direction (confirm `BUDGET_REMAINING ≥ DEEP_COST`) or a `host_runtime`/`algorithm`
-     specialist. Do NOT demote it to "later/secondary" just because it is ambitious; the research
-     surfaced it precisely because the safe tuning ceiling is lower.
+2b. **Consult the Deep Research Agent brief when present (`DEEP_SEARCH_BRIEF`) — ADVISORY, not a
+   directive.** If `DEEP_SEARCH_BRIEF` is a non-empty path, **Read it** (the compact ranked-directions
+   brief — `~2-4 KB`, just `Dk: title` + specialty + a short mechanism + expected upside + confidence;
+   full evidence in `EVAL_DIR/deep_search.md`, drill in only if a direction is unclear). It is a
+   web-grounded research pass that *widens your candidate set with evidence* — it is an OPTIONAL input,
+   NOT a plan to execute. **YOU are the decision-maker** (the brief is not): for each `Dk`, critically
+   evaluate it against THIS kernel's profile, per-case table, and bottleneck, and **reject or ignore
+   any direction that doesn't fit** (wrong bottleneck, contradicted by the per-case data, already a
+   confirmed dead-end in HISTORY, or implausible upside). A weak/ill-fitting brief should change your
+   plan little or not at all. Then, for the directions you DO judge worth it, map each `Dk` to a
+   concrete engineer direction (its `specialty` maps directly; write a self-contained `prompt` from the
+   `Dk` mechanism). Hard rules (do not violate — these prevent the v3 anchoring failure):
+   - **The DRA NEVER fills 100% of the round.** ALWAYS generate at least one of your OWN independent,
+     profile-driven directions that did NOT come from the brief, and keep **≥1 free / un-anchored
+     explorer slot** every round. The brief may seed AT MOST `BUDGET_REMAINING − 1` of this round's
+     directions; never let it crowd out your own analysis. (If only 1 direction fits this round, prefer
+     your own profile-driven pick, alternating with a brief-seeded one across rounds.)
+   - **DIVERSIFY — spread, don't anchor.** When you do take multiple brief directions, assign DIFFERENT
+     ranked `Dk` to different parallel engineers, spread ACROSS the ranked list (a top `Dk` + a mid
+     `Dk`), NEVER several engineers on the same brief theme. Converging the whole round on one direction
+     is the exact anchoring failure that hurt v3 — do not do it.
+   - **HIGH-CEILING directions are FIRST-CLASS (when they fit).** If the brief ranks a bold rewrite high
+     (raw-HIP/`load_inline`, CUDA/HIP graph capture / persistent kernels, algorithmic reformulation, a
+     SOTA method ported from a paper/CUDA) AND it fits the profile, treat it as a first-class candidate
+     — typically `deep_explore` (confirm `BUDGET_REMAINING ≥ DEEP_COST`) or a `host_runtime`/`algorithm`
+     specialist. Do NOT demote it to "later/secondary" just for being ambitious. (But it is still
+     subject to your fit-judgment above — ambition is not a reason to take a direction the profile
+     contradicts.)
+   - **FUSION.** An intra-kernel fusion direction from the brief (collapse dispatches / fold epilogue)
+     is a normal `algorithm`/`host_runtime`/`deep_explore` direction — dispatch it like any other. A
+     cross-kernel fusion flagged as an "e2e-level escalation" (merge with an adjacent op) is NOT
+     executable in this single-kernel layer (the engineers work this op's task against its own immutable
+     oracle) — do NOT turn it into an engineer direction; leave it as the researcher's escalation note.
    - **Don't over-prescribe.** The brief gives the IDEA/mechanism, not an implementation. Keep your
      direction `prompt` to the mechanism + why (cite the profile/per-case signal) + a target; do NOT
      prescribe exact edits — finding "how" is the engineer's job (this de-prescription is deliberate).
-   The brief is a prior, never a cage: it never overrides the profile/per-case signal, the floor
-   rules below, or measurement. If it is `''` / unreadable, ignore it — behavior is unchanged.
+   The brief is a prior, never a cage: it never overrides the profile/per-case signal, the floor rules
+   below, or measurement, and it never replaces your own directions. If it is `''` / unreadable, ignore
+   it — behavior is unchanged.
 3. Use the data: look at the per-case table and `geomean_levers.md`. If several cases are
    overhead-bound (similar latency across sizes, or dispatch count > 1), you MUST include at least
    one `host_runtime` direction (dispatch collapse / native layout / wrapper). Target the WORST
