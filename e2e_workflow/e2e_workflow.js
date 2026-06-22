@@ -146,6 +146,14 @@ const DEEP_E2E_TARGET = parseFloat(A.deep_e2e_target != null ? A.deep_e2e_target
 const DEEP_PLATEAU_STREAK_HIGH = parseInt(A.deep_plateau_streak_high != null ? A.deep_plateau_streak_high : 4, 10); // patience for HIGH-ceiling lanes (still far from their potential) before parking
 const DEEP_V2_GATE_BURST_MS = parseInt(A.deep_v2_gate_burst_ms != null ? A.deep_v2_gate_burst_ms : 1500000, 10); // shorter burst cap (25min) for co-opt bursts that share the serving slot, so a due gate waits at most one short burst
 const DEEP_V2_REPROFILE_GAIN = parseFloat(A.deep_v2_reprofile_gain != null ? A.deep_v2_reprofile_gain : 0.10); // cumulative e2e gain since last profile that triggers a re-profile (bottleneck moved)
+// DEPTH knobs (v2): the first runs were too SHALLOW — 10 parallel lanes split the budget so each lane
+// got only ~2 bursts, and the wave loop EXITED as soon as all lanes plateau-parked (abandoning most of
+// the 24h). v1 reached +31.5% by going DEEP: ~15h, stacking 4 generations on the winning kernel. Fix:
+//   (a) deeper bursts (more kernel_workflow rounds per burst);
+//   (b) RUN UNTIL THE BUDGET — when all lanes plateau, RE-SEED them with FRESH authoring directions
+//       (concentrated on the dominant-Amdahl head) instead of exiting, so depth keeps compounding.
+const DEEP_V2_WAVE_BUDGET = parseInt(A.deep_v2_wave_budget != null ? A.deep_v2_wave_budget : 6, 10); // kernel_workflow rounds per burst (deeper than the v1 default of 3)
+const DEEP_V2_MAX_RESEEDS = parseInt(A.deep_v2_max_reseeds != null ? A.deep_v2_max_reseeds : 12, 10); // max fresh-direction re-seeds per lane before it is truly exhausted (budget usually stops first)
 // ---- ACCURACY GATE (opt-in switch) ------------------------------------------------------------------
 // For QUANTIZED kernels (MXFP8/fp8) byte-exact e2e parity is the WRONG bar — a kernel within the unittest
 // tolerance rounds differently and flips borderline greedy argmaxes, so byte-parity over-rejects valid
@@ -897,11 +905,46 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     };
 
-    // ---- GLOBAL WAVE LOOP ---------------------------------------------------------------------------
+    // ---- DEPTH: fresh authoring directions to RE-SEED a plateaued lane (so it keeps going DEEPER) ----
+    // When a lane plateaus we don't abandon it (and its share of the budget) — we hand it a NEW direction
+    // it hasn't tried, biased to the dominant-Amdahl head, so the search compounds depth instead of exiting.
+    const DEEP_STEERS = {
+      triton: [
+        ' DIRECTION=persistent-kernel: a persistent / grid-stride kernel that keeps tiles resident and overlaps global load with MFMA.',
+        ' DIRECTION=warp-specialization: split warps into a producer (async global->LDS copy) and a consumer (MFMA) for software pipelining.',
+        ' DIRECTION=epilogue-fusion: fuse the scale/activation/cast epilogue into the GEMM to remove a memory round-trip.',
+        ' DIRECTION=mfma-layout: re-tune matrix_instr_nonkdim / kpack / LDS swizzle / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).',
+        ' DIRECTION=double-buffer: deepen num_stages and LDS double-buffering to hide HBM latency on the K loop.',
+        ' DIRECTION=split-K-atomic: split the K reduction across CUs with atomic accumulate for the large-M prefill shapes; non-split for small-M decode.',
+        ' DIRECTION=fresh-rewrite: abandon the current tiling and try a fundamentally different decomposition than your best so far.',
+      ],
+      _default: [
+        ' DIRECTION=new-decomposition: try a fundamentally different tiling/decomposition than your current best.',
+        ' DIRECTION=fuse-prologue-epilogue: fold the pre/post ops + scaling into the main compute kernel.',
+        ' DIRECTION=retune-shapes: per (N,K,M-bucket) re-search the launch-config space from scratch.',
+        ' DIRECTION=pipeline: add software pipelining / double buffering across the reduction loop.',
+      ],
+    };
+    const nextSteer = (l) => { const lib = DEEP_STEERS[l.lang] || DEEP_STEERS._default; const s = lib[(l.steerIdx || 0) % lib.length]; l.steerIdx = (l.steerIdx || 0) + 1; return s; };
+    // RE-SEED when all lanes parked but budget remains: revive lanes (dominant head first) with a FRESH
+    // direction so deep optimization uses the FULL budget instead of exiting at the first global plateau.
+    const reseedForDepth = () => {
+      let n = 0;
+      const order = allLanes.slice().sort((a, b) => (b.head.pct_gpu_time || 0) - (a.head.pct_gpu_time || 0) || b.best - a.best);
+      for (const l of order) {
+        if ((l.reseeds || 0) >= DEEP_V2_MAX_RESEEDS) continue;
+        l.active = true; l.noImprove = 0; l.reseeds = (l.reseeds || 0) + 1; l.steer = nextSteer(l); n++;
+      }
+      if (n) log(`[deep-v2] global plateau but budget remains -> RE-SEED ${n} lane(s) with fresh DEEP directions (depth pass; dominant head first). Keeps compounding until the ${Math.round(DEEP_HEAD_BUDGET_MS / 3600000)}h budget.`);
+      return n > 0;
+    };
+
+    // ---- GLOBAL WAVE LOOP (runs until the budget; re-seeds on plateau for depth) ---------------------
     let wave = 0, e2eGateCount = 0, lastE2eIsoBest = 1.0, lastReprofileTput = curTput, gateFeedbackPath = '', gateHarnessPath = '', e2eIntervalHit = false;
     const armInterval = () => { if (typeof setTimeout === 'function' && DEEP_E2E_MAX_INTERVAL_MS > 0) setTimeout(() => { e2eIntervalHit = true; }, DEEP_E2E_MAX_INTERVAL_MS); };
     armInterval();
-    while (!DEEP_DEADLINE_HIT && allLanes.some(l => l.active)) {
+    while (!DEEP_DEADLINE_HIT) {
+      if (!allLanes.some(l => l.active)) { if (!reseedForDepth()) break; continue; }   // depth: don't exit on plateau while budget remains
       wave++;
       const globalIsoBest = Math.max(1.0, ...allLanes.map(l => l.best));
       const gained = globalIsoBest / Math.max(lastE2eIsoBest, 1e-9) - 1;
@@ -918,7 +961,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         await deepBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
           kernel_path: l.ext.task_dir, workflow_dir: KERNEL_WF_DIR, mode: l.mode, target_language: l.lang, op_spec: l.opSpec,
           perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR, use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
-          budget: DEEP_WAVE_KERNEL_BUDGET, max_no_improve: DEEP_WAVE_KERNEL_BUDGET, gpu_ids: g[0],
+          budget: DEEP_V2_WAVE_BUDGET, max_no_improve: DEEP_V2_WAVE_BUDGET, gpu_ids: g[0],
           state_dir: l.state_dir, shared_kb: l.sharedKb, global_kb: GLOBAL_KB,
           ...(gateFeedbackPath ? { e2e_feedback: gateFeedbackPath } : {}),
           ...(gateHarnessPath ? { harness_addendum: gateHarnessPath } : {}),
