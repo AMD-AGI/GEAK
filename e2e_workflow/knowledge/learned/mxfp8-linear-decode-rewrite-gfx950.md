@@ -23,4 +23,4 @@ last_seen: 2026-06-22
   ceiling); over-deep bursts (6 rounds) *slow* exploration and underperform faster 3-round bursts.
 - dead-end: cross-backend (flydsl/aiter) self-reported 3-7× are SELF-RELATIVE-to-first-port inflation, not
   vs-live — the e2e gate correctly rejects them; rank only by vs-live / e2e.
-- source: GEAK/worktree/deep_v2/exp/e2e_MiniMax-M3-MXFP8_20260621_144547_3794_10149/overlay/accepted__mxfp8_linear_kernel/integrate_result.json
+- source: GEAK/worktree/deep/exp/e2e_MiniMax-M3-MXFP8_20260621_144547_3794_10149/overlay/accepted__mxfp8_linear_kernel/integrate_result.json
