@@ -152,7 +152,7 @@ const DEEP_V2_REPROFILE_GAIN = parseFloat(A.deep_v2_reprofile_gain != null ? A.d
 //   (a) deeper bursts (more kernel_workflow rounds per burst);
 //   (b) RUN UNTIL THE BUDGET — when all lanes plateau, RE-SEED them with FRESH authoring directions
 //       (concentrated on the dominant-Amdahl head) instead of exiting, so depth keeps compounding.
-const DEEP_V2_WAVE_BUDGET = parseInt(A.deep_v2_wave_budget != null ? A.deep_v2_wave_budget : 6, 10); // kernel_workflow rounds per burst (deeper than the v1 default of 3)
+const DEEP_V2_WAVE_BUDGET = parseInt(A.deep_v2_wave_budget != null ? A.deep_v2_wave_budget : 3, 10); // kernel_workflow rounds per burst. Was 6 but deeper-per-burst SLOWED exploration and underperformed; 3 = faster bursts + more waves (depth now comes from run-until-budget + reseed, not bigger bursts).
 const DEEP_V2_MAX_RESEEDS = parseInt(A.deep_v2_max_reseeds != null ? A.deep_v2_max_reseeds : 12, 10); // max fresh-direction re-seeds per lane before it is truly exhausted (budget usually stops first)
 // ---- ACCURACY GATE (opt-in switch) ------------------------------------------------------------------
 // For QUANTIZED kernels (MXFP8/fp8) byte-exact e2e parity is the WRONG bar — a kernel within the unittest
