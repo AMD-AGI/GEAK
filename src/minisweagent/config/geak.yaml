@@ -18,7 +18,11 @@ model:
   api_key: ""
   model_kwargs:
     temperature: 0.0
-    max_tokens: 32000
+    # Keep <=21333: the Anthropic SDK refuses non-streaming requests whose
+    # estimated time (3600 * max_tokens / 128000) exceeds 600s, and
+    # amd_claude._query_api does not enable streaming. 32000 -> 900s -> raises
+    # "Streaming is required ...". 16000 -> 450s, safe.
+    max_tokens: 16000
     # reasoning is only valid for gpt models, can be set to none, low, medium, high
     reasoning:
       effort: high
