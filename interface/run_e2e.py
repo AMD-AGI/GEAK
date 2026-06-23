@@ -1113,6 +1113,20 @@ def _canon_kid(s: Any) -> str:
     return str(s or "").lstrip("_")
 
 
+def _fuzzy_kid_key(s: Any) -> str:
+    """Stronger cross-source match key than :func:`_norm_kname`: in addition to
+    stripping the leading underscore and lowercasing, it drops the generic
+    ``kernel`` filler token. The profiler symbol (``_fwd_grouped_kernel_stage1``)
+    and the overlay dir short (``cand_fwd_grouped_stage1`` -> ``fwd_grouped_stage1``)
+    can differ by that INFIX token, not only the documented leading underscore;
+    without this they canonicalize to two different ids (``fwd_grouped_kernel_stage1``
+    vs ``fwd_grouped_stage1``) and the assembler splits ONE kernel into two journey
+    entries. Used ONLY to MATCH the two substreams — the emitted ``kernel_id`` stays
+    the profiler's :func:`_canon_kid` spelling so discovery and kernels[] fold into one."""
+    toks = [t for t in str(s or "").lstrip("_").lower().split("_") if t and t != "kernel"]
+    return "_".join(toks)
+
+
 def _journey_profile_topn(eval_dir: Path) -> dict:
     """Newest ``profile/round_*/profile_topN.json`` (rocprofv3 discovery), or {}."""
     pbase = eval_dir / "profile"
@@ -1125,13 +1139,19 @@ def _journey_profile_topn(eval_dir: Path) -> dict:
 
 
 def _journey_selected_names(eval_dir: Path) -> set[str]:
-    """Normalized short_names that had an optimization overlay built (= selected)."""
+    """Match keys (BOTH norm + fuzzy) for short_names that had an optimization
+    overlay built (= selected). Carrying the fuzzy key too lets the discovery
+    substream flag ``selected_for_optimization`` even when the overlay dir short
+    differs from the profiler symbol by the ``kernel`` infill (see
+    :func:`_fuzzy_kid_key`)."""
     sel: set[str] = set()
     for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
         if base.is_dir():
             for d in base.glob("cand_*"):
                 if d.is_dir():
-                    sel.add(_norm_kname(d.name[len("cand_"):]))
+                    short = d.name[len("cand_"):]
+                    sel.add(_norm_kname(short))
+                    sel.add(_fuzzy_kid_key(short))
     return sel
 
 
@@ -1149,7 +1169,7 @@ def _journey_discovery_runs(eval_dir: Path, selected: set[str]) -> list[dict]:
     seen_ids: dict[str, int] = {}
     for i, k in enumerate(tops):
         short = str(k.get("short_name") or k.get("name") or "")
-        sel = _norm_kname(short) in selected
+        sel = _norm_kname(short) in selected or _fuzzy_kid_key(short) in selected
         # kernel_id MUST be the SAME canonical token the kernels[] entries use
         # (the overlay dir name strips the profiler's leading underscore);
         # otherwise the orchestrator's assembler folds discovery and the
@@ -1195,7 +1215,8 @@ def _journey_discovery_runs(eval_dir: Path, selected: set[str]) -> list[dict]:
 
 def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
                            geak_sha: str, overall_parity: bool | None,
-                           gpu_pct_prof: Any, display_name: str | None = None) -> dict:
+                           gpu_pct_prof: Any, display_name: str | None = None,
+                           kernel_id_override: str | None = None) -> dict:
     """One ``kernels[]`` entry for an optimization overlay, driven by its
     integrate_result.json. Honest per gate state:
       * accepted/stack -> succeeded + KEEP + integrated e2e (config win routes its
@@ -1212,7 +1233,7 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
     The overlay dir name (``short``, underscore-stripped for filesystem safety)
     is only a fallback when the kernel was not in the profiler table.
     """
-    kernel_id = _canon_kid(short)
+    kernel_id = kernel_id_override or _canon_kid(short)
     name = display_name or short
     backend = "geak"
     gate = str(ir.get("gate") or "").lower() if isinstance(ir, dict) else ""
@@ -1292,13 +1313,16 @@ def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
 
 
 def _journey_return_entry(eval_dir: str, k: dict, idx: int, wf: dict,
-                          geak_sha: str, parity: bool | None) -> dict:
+                          geak_sha: str, parity: bool | None,
+                          kernel_id_override: str | None = None) -> dict:
     """One ``kernels[]`` entry from an accepted kernel named in the workflow return
     (used when there is no overlay on disk to read — e.g. the live path)."""
     name = str(k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}")
     # Canonical id (matches the discovery + overlay substreams); ``name`` keeps
     # the raw spelling so the assembler folds this kernel into a single entry.
-    kid = _canon_kid(name)
+    # An override adopts the profiler symbol's id when this kernel was fuzzy-matched
+    # to a discovery hot_kernel (infix/underscore divergence) — see build_kernel_journey.
+    kid = kernel_id_override or _canon_kid(name)
     backend = _norm_backend(k.get("backend") or k.get("source"))
     isolated = k.get("isolated") or k.get("micro_speedup") or k.get("verified_isolated_speedup")
     patch = k.get("final_patch") or None
@@ -1352,22 +1376,42 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
     selected = _journey_selected_names(eval_dir) if eval_dir else set()
     discovery_runs = _journey_discovery_runs(eval_dir, selected) if eval_dir else []
     prof = _journey_profile_topn(eval_dir) if eval_dir else {}
-    pct_by_name = {
-        _norm_kname(k.get("short_name") or k.get("name")): k.get("pct_gpu_time")
-        for k in (prof.get("top_kernels") or [])
-    }
-    # The profiler's real kernel symbol (underscores intact) keyed by the same
-    # match key the overlay dir resolves to, so a kernels[] entry can adopt the
-    # SAME display name as its discovery hot_kernel (name unified across substreams).
-    name_by_norm = {
-        _norm_kname(k.get("short_name") or k.get("name")):
-            str(k.get("name") or k.get("short_name") or "")
-        for k in (prof.get("top_kernels") or [])
-        if (k.get("name") or k.get("short_name"))
-    }
+    # Profiler index for cross-source matching. Each entry carries the canonical
+    # kernel_id DISCOVERY assigns (mirrors _journey_discovery_runs: bare canon on
+    # first sight, ``canon#rank`` on a repeat) plus the display name + gpu%. An
+    # overlay/return kernel resolves to its profiler symbol via _match_profiler:
+    # EXACT norm key first, then a UNIQUE fuzzy key (filler-token-insensitive).
+    # On a match the kernels[] entry ADOPTS the profiler's kernel_id/name/gpu% so
+    # discovery and kernels[] always fold into ONE journey entry — fixing both the
+    # leading-underscore and the ``kernel`` infix divergences.
+    prof_index: list[dict] = []
+    _seen_canon: dict[str, int] = {}
+    for i, k in enumerate(prof.get("top_kernels") or []):
+        sh = str(k.get("short_name") or k.get("name") or "")
+        if not sh:
+            continue
+        canon = _canon_kid(sh)
+        _seen_canon[canon] = _seen_canon.get(canon, 0) + 1
+        kid_p = canon if _seen_canon[canon] == 1 else f"{canon}#{k.get('rank') or i}"
+        prof_index.append({
+            "norm": _norm_kname(sh), "fuzzy": _fuzzy_kid_key(sh),
+            "kid": kid_p, "name": str(k.get("name") or sh),
+            "pct": k.get("pct_gpu_time"),
+        })
+
+    def _match_profiler(short: str) -> dict | None:
+        """Resolve an overlay/return short_name to its profiler symbol: exact norm
+        key first, then a UNIQUE fuzzy-key match (ambiguous fuzzy -> no match,
+        never guess)."""
+        nk, fk = _norm_kname(short), _fuzzy_kid_key(short)
+        exact = [p for p in prof_index if p["norm"] == nk]
+        if exact:
+            return exact[0]
+        fuzzy = [p for p in prof_index if p["fuzzy"] == fk]
+        return fuzzy[0] if len(fuzzy) == 1 else None
 
     kernels: list[dict] = []
-    seen: set[str] = set()
+    seen: set[str] = set()  # dedup on the FINAL emitted kernel_id
 
     # 1) Disk truth: one entry per optimization overlay, driven by integrate_result.
     if eval_dir:
@@ -1378,29 +1422,38 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
                 if not cand.is_dir():
                     continue
                 short = cand.name[len("cand_"):]
-                key = _norm_kname(short)
-                if not short or key in seen:
+                if not short:
                     continue
-                seen.add(key)
+                m = _match_profiler(short)
+                kid = m["kid"] if m else _canon_kid(short)
+                if kid in seen:
+                    continue
+                seen.add(kid)
                 ir = _read_json(cand / "integrate_result.json")
                 kernels.append(_journey_overlay_entry(
                     eval_dir, short, ir, wf, geak_sha, overall_parity,
-                    pct_by_name.get(key), name_by_norm.get(key)))
+                    m["pct"] if m else None, m["name"] if m else None,
+                    kernel_id_override=kid))
 
     # 2) Augment with accepted kernels named only in the workflow return (live path
-    #    / no overlay on disk), deduped against the overlay entries above.
+    #    / no overlay on disk), deduped against the overlay entries above (by id).
     accepted = list(wf.get("accepted_kernels") or []) + list(wf.get("accepted_heads") or [])
     synth_hot: list[dict] = []
     for idx, k in enumerate(accepted):
         if not isinstance(k, dict):
             continue
         name = str(k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}")
-        if _norm_kname(name) in seen:
+        m = _match_profiler(name)
+        kid = m["kid"] if m else _canon_kid(name)
+        if kid in seen:
             continue
-        seen.add(_norm_kname(name))
-        kernels.append(_journey_return_entry(eval_dir_str, k, idx, wf, geak_sha, overall_parity))
+        seen.add(kid)
+        kernels.append(_journey_return_entry(
+            eval_dir_str, k, idx, wf, geak_sha, overall_parity,
+            kernel_id_override=kid))
         synth_hot.append({
-            "kernel_id": _canon_kid(name), "name": name, "gpu_pct": k.get("pct_gpu_time"),
+            "kernel_id": kid, "name": (m["name"] if m else name),
+            "gpu_pct": k.get("pct_gpu_time"),
             "bound_type": str(k.get("bound_type") or k.get("op_kind") or ""),
             "source_file": k.get("target_file") or k.get("target_callable"),
             "recommended_backends": [_norm_backend(k.get("backend") or k.get("source"))],

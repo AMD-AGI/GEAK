@@ -2,8 +2,8 @@
 key: int4_w4a16 fused-MoE grouped GEMM · gfx942/MI300X · vLLM
 type: lever
 confidence: ★★★
-effect: per-shape Triton config tune (winner_kind=env, ZERO HBM) → +16-18% e2e VERIFIED (iso ~1.6×); 9 re-confirms on Kimi-K2.6 (TP=8 N=256 and TP=4 N=512; isl/osl/conc=8192/1024/64)
-last_seen: 2026-06-22
+effect: per-shape Triton config tune (winner_kind=env, ZERO HBM) → +11-18% e2e VERIFIED (iso ~1.25-1.6×); 10 re-confirms on Kimi-K2.6 (TP=8 N=256 and TP=4 N=512; isl/osl/conc=8192/1024/64)
+last_seen: 2026-06-23
 ---
 # int4 W4A16 fused-MoE grouped GEMM head → the memory-free vLLM config-tune lever
 - lever (try FIRST on an int4 MoE model): vLLM ships NO tuned Triton config for an unseen
@@ -39,7 +39,10 @@ last_seen: 2026-06-22
   server.log 'Using default MoE config' (lever unconsumed); fresh per-bucket subprocess sweep iso M=8192
   1.606× / M=4096 1.538× / M=16384 1.479× / M=2048 1.072×, decode no-regress M=1 1.061× / M=64 1.204×,
   all buckets rel_err=0. Oracle engagement re-verified: unittest.py loads tuned JSON ('Using configuration
-  from …int4_w4a16.json', tuned=true, pass=true). 8th confirm (e2e gate pending Integrator).
+  from …int4_w4a16.json', tuned=true, pass=true). **e2e gate PASSED 2026-06-23 (10th confirm): same-session
+  interleaved A/B REF 437.9 → CAND 486.2 tok/s = +11.33%, non-overlapping (cand_min 486.2 > ref_max 437.9),
+  parity pass, engagement banner in cand server.log. Lower e2e delta than prior runs here because baseline was
+  faster (436 vs ~500 tok/s) and integrate iso re-measured 1.2528× (subprocess ~1.6× @M8192).**
 - source: 2026-06-22 re-derive on Kimi-K2.6 at **TP=4** (eval e2e_..._20260622_160143; lookup N=512 since
   moe_intermediate=2048//4). Per-bucket subprocess sweep iso M=16384 1.713× / M=8192 1.668× / M=4096 1.599×,
   decode no-regress M=1 1.111× / M=64 1.095×, all rel_err pass. **e2e gate PASSED (Integrator cfg0): +17.66%
