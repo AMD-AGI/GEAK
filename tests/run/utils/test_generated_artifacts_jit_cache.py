@@ -241,3 +241,49 @@ def test_strip_excluded_sections_empty_excludes_is_noop() -> None:
     out, removed = strip_excluded_sections(patch, [])
     assert out == patch
     assert removed == []
+
+
+# ---------------------------------------------------------------------------
+# _section_is_binary / strip_generated_helper_sections — binary sections must
+# be dropped REGARDLESS of path, for BOTH git binary-diff markers. The default
+# ``git diff`` (no --binary) emits "Binary files a/.. and b/.. differ", which
+# ``git apply`` cannot apply; failing to strip it aborts the whole patch. This
+# is the name-agnostic backstop so new build/cache dirs don't each need adding
+# to the denylist.
+# ---------------------------------------------------------------------------
+def _binary_section(path: str, marker: str) -> str:
+    head = f"diff --git a/{path} b/{path}\nindex 1111111..2222222 100644\n"
+    if marker == "default":
+        return head + f"Binary files a/{path} and b/{path} differ\n"
+    return head + "GIT binary patch\nliteral 4\nzcmZ\n\n"
+
+
+@pytest.mark.parametrize("marker", ["default", "git_binary"])
+def test_section_is_binary_detects_both_markers(marker: str) -> None:
+    from minisweagent.run.utils.generated_artifacts import _section_is_binary
+
+    section = _binary_section("anything/at/all.bin", marker).splitlines(keepends=True)
+    assert _section_is_binary(section) is True
+
+
+def test_section_is_binary_false_for_source() -> None:
+    from minisweagent.run.utils.generated_artifacts import _section_is_binary
+
+    assert _section_is_binary(_section("kernel.py").splitlines(keepends=True)) is False
+
+
+@pytest.mark.parametrize("build_dir", ["_geak_build", "some_future_build_dir", ".new_cache"])
+def test_strip_generated_helper_drops_default_binary_any_path(build_dir: str) -> None:
+    """The actual regression: default-format binary artifacts in an unknown dir
+    are stripped while the real kernel source survives."""
+    from minisweagent.run.utils.generated_artifacts import strip_generated_helper_sections
+
+    patch = (
+        _section("src/ball_query.hip")
+        + _binary_section(f"{build_dir}/.ninja_deps", "default")
+        + _binary_section(f"{build_dir}/out.so", "default")
+    )
+    out, removed = strip_generated_helper_sections(patch)
+    assert "src/ball_query.hip" in out
+    assert build_dir not in out
+    assert set(removed) == {f"{build_dir}/.ninja_deps", f"{build_dir}/out.so"}
