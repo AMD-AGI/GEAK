@@ -817,10 +817,18 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           else if (l.ran > 0) { l.lastGain = 0; l.noImprove++; }
           if (e.eval_dir) l.lastEval = e.eval_dir;
           if (e.patch) l.patch = e.patch;
+          if (e.has_state) l.noStateStreak = 0;   // P3: produced a result -> not infeasible
           // ceiling-aware patience: lanes still far from their ceiling get MORE waves before parking.
           const farFromCeiling = (l.ceiling - l.best) > 0.3 * Math.max(l.ceiling, 1e-9);
           const streakCap = farFromCeiling ? DEEP_PLATEAU_STREAK_HIGH : DEEP_PLATEAU_STREAK;
-          if (e.has_state === false && anyState && l.ran > 0) { l.active = false; log(`  [deep] park ${l.uid} — no persisted result while peers produced.`); }
+          if (e.has_state === false && anyState && l.ran > 0) {
+            l.active = false; l.noStateStreak = (l.noStateStreak || 0) + 1;
+            // P3: 2 consecutive bursts with NO persisted result while peers produced => structurally
+            // infeasible backend\u00d7op (the backend has no primitive for this op, e.g. flydsl on grouped-MoE).
+            // Mark dead so reseed/revive never waste budget re-trying it.
+            if (l.noStateStreak >= 2) { l.dead = true; log(`  [deep] DEAD ${l.uid} \u2014 infeasible (no result ${l.noStateStreak}x while peers produced); won't reseed/revive.`); }
+            else log(`  [deep] park ${l.uid} \u2014 no persisted result while peers produced.`);
+          }
           else if (l.noImprove >= streakCap) { l.active = false; log(`  [deep] park ${l.uid} (plateau ${l.best.toFixed(3)}x, ceiling ${l.ceiling.toFixed(2)}x).`); }
         }
       }
@@ -842,16 +850,22 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       // freshly-curated cross-backend borrows — so an initially-poor high-ceiling backend is not abandoned.
       let revived = 0;
       for (const l of allLanes) {
-        if (l.active || (l.revives || 0) >= 2) continue;
+        if (l.active || l.dead || (l.revives || 0) >= 2) continue;
         if ((l.ceiling - l.best) > 0.4 * Math.max(l.ceiling, 1e-9)) { l.active = true; l.noImprove = 0; l.revives = (l.revives || 0) + 1; revived++; }
       }
       if (revived) log(`  [deep] revived ${revived} high-ceiling parked lane(s) with fresh borrows.`);
     };
 
     // ---- BATCHED serial e2e GATE on the serving slot (runs concurrently with co-opt on dedicated cards)
-    const runGate = async () => {
-      const cands = allLanes.filter(l => (l.lastEval || l.patch) && l.best > 1.0).sort((a, b) => b.best - a.best).slice(0, 2);
+    const runGate = async (opts = {}) => {
+      // P4: at FINALIZE, sweep ALL patched lanes (incl. isolated~1.0) onto the CUMULATIVE overlay \u2014 the
+      // e2e gate is the true arbiter, so a host-level / oracle-invisible win (isolated~1.0 but real e2e
+      // gain, e.g. fused_moe big-M coarsen) still gets banked. Per-wave gates keep the cheap top-2-by-iso.
+      const cands = opts.final
+        ? allLanes.filter(l => (l.lastEval || l.patch)).sort((a, b) => b.best - a.best)
+        : allLanes.filter(l => (l.lastEval || l.patch) && l.best > 1.0).sort((a, b) => b.best - a.best).slice(0, 2);
       if (!cands.length) return;
+      if (opts.final) log(`[deep] FINALIZE gate: sweeping ${cands.length} patched lane(s) onto the cumulative overlay (combined cross-kernel deliverable).`);
       e2eGateCount++;
       log(`[deep] E2E GATE #${e2eGateCount} on serving {${SERVING_GPU}} TP=${SERVING_TP}: [${cands.map(c => c.uid + ' ' + c.best.toFixed(3) + 'x').join(', ')}] (overlapping co-opt on dedicated cards).`);
       for (const c of cands) {
@@ -936,7 +950,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       let n = 0;
       const order = allLanes.slice().sort((a, b) => (b.head.pct_gpu_time || 0) - (a.head.pct_gpu_time || 0) || b.best - a.best);
       for (const l of order) {
-        if ((l.reseeds || 0) >= DEEP_MAX_RESEEDS) continue;
+        if (l.dead || (l.reseeds || 0) >= DEEP_MAX_RESEEDS) continue;
         l.active = true; l.noImprove = 0; l.reseeds = (l.reseeds || 0) + 1; l.steer = nextSteer(l); n++;
       }
       if (n) log(`[deep] global plateau but budget remains -> RE-SEED ${n} lane(s) with fresh DEEP directions (depth pass; dominant head first). Keeps compounding until the ${Math.round(DEEP_HEAD_BUDGET_MS / 3600000)}h budget.`);
@@ -995,7 +1009,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     } catch (e) { log(`[deep] wave loop aborted (${(e && e.message) || e}); proceeding to finalize so progress is still banked + reported.`); }
     // FINALIZE \u2014 always runs (convergence / agent-budget / deadline / throw all land here):
     await harvestLanes(allLanes.filter(l => l.lastEval || l.ran > 0), 'final');
-    await runGate();   // final gate on accumulated best
+    await runGate({ final: true });   // P4 FINALIZE: every patched lane -> cumulative overlay (the combined cross-kernel deliverable; banks oracle-invisible host/e2e wins like the manual +21.8%)
     log(`[deep] done after ${wave} wave(s), ${e2eGateCount} gate(s). e2e ${curTput} tok/s (${(curTput / Math.max(BASELINE_TPUT, 1e-9)).toFixed(3)}× baseline; target ×${DEEP_E2E_TARGET}). per-lane vs-live: ${allLanes.map(l => l.uid + '=' + l.best.toFixed(2) + 'x').join(', ')}.`);
   } else if (FAST_MODE && GPU_LIST.length > 1) {
     // ========================= FAST-MODE PARALLEL HEAD TRACK (fast-mode only) =========================
