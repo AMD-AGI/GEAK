@@ -174,23 +174,34 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
    Read ALL per-repeat throughputs from `$CB/ref/bench_runs.jsonl` and `$CB/cand/bench_runs.jsonl`
    (each has E2E_REPEATS rows). Compute `ref_med`, `cand_med`, `ref_max`, `cand_min`, and
    `delta% = (cand_med - ref_med)/ref_med*100`.
-   **CHECKPOINT each leg as it finishes** — after the reference block completes write the partial result
-   to `$CB/integrate_result.json` (at minimum `{short_name, ref_med, gate:"incomplete", ab_complete:false}`),
-   then update it after the candidate block (adding `cand_med`, the final `gate`, `ab_complete:true`,
-   `e2e_throughput_tok_s`, `e2e_delta_pct`). This makes a cut-off A/B RECOVERABLE: if you run out of time
-   after only the reference leg, the orchestrator keeps the candidate as a *pending* verified-isolated win
-   (NOT a rejection) and can finish the A/B later, instead of silently discarding a real isolated speedup.
-   The two blocks run within ~30 min back-to-back, so box
+   **MANDATORY — measure BOTH legs before returning a verdict. Completing only the reference leg is NOT
+   an acceptable stopping point and is NOT a valid result.** Checkpoint each leg as it finishes (for crash
+   recovery only): after the reference block completes write a partial
+   `$CB/integrate_result.json` (at minimum `{short_name, ref_med, gate:"incomplete", ab_complete:false}`),
+   then **ALWAYS run the candidate block** and update it (adding `cand_med`, the final `gate`,
+   `ab_complete:true`, `e2e_throughput_tok_s`, `e2e_delta_pct`). The checkpoint exists ONLY so a CRASH is
+   recoverable — it is NOT a licence to stop after the reference leg. If wall-clock is tight, SHRINK the
+   cost (drop `E2E_REPEATS` toward 1, even 1 repeat per leg) so that BOTH legs still run — never skip,
+   defer, or "leave for later" the candidate leg. The two blocks run within ~30 min back-to-back, so box
    drift between them is negligible (the box drifts over hours, not minutes). If you want extra drift
    robustness on a borderline result, run a second ref block after the cand block and pool the ref
    repeats — but do NOT relaunch per repeat.
+   **RESUME / finish a cut-off A/B (`RESUME_AB` is set in your inputs, OR `$CB/ref/bench_runs.jsonl`
+   already exists on disk):** do NOT re-run the reference leg — reuse the on-disk ref repeats and run ONLY
+   the MISSING candidate block, then gate. When `CAND_OVERLAY_DIR` is provided the candidate overlay is
+   already built — bench it directly (do not rebuild it). This is how the orchestrator forces every
+   incomplete A/B to completion; your job on resume is solely to produce the missing candidate
+   measurement and emit the final `accepted`/`stack`/`rejected` with `ab_complete:true`.
 4. **Parity / accuracy** vs the current accepted server (greedy/temp=0 fixed seed; use ≥10 prompts —
    a 5-prompt probe missed a real divergence once). If `parity_note=needs_accuracy_gate` (any quant,
    or a same-dtype swap that diverges), run a small task-accuracy probe (gsm8k/translation) and accept
    only if quality holds; otherwise REJECT (or `flagged` for the Director to arbitrate).
 5. Emit the verdict: `accepted` (strong standalone win), `stack` (parity-safe, engaged, non-negative,
    sub-threshold → carry forward to compound), `rejected` (parity-fail / no-engagement / regression), or
-   `incomplete` (you could NOT measure BOTH legs — out of time, hung launch, harness fault mid-A/B).
+   `incomplete` — reserved for a HARD fault that genuinely prevented measuring BOTH legs *even after
+   retrying* (a server that will not become healthy, a persistent harness/hardware fault). "Ran out of
+   time after the reference leg" is NOT a valid `incomplete`: shrink `E2E_REPEATS` so both legs still run.
+   Returning `incomplete` for a leg you simply chose not to run is a defect — both legs are mandatory.
    For `accepted` or `stack`, fold the change into the carried overlay/config and report the measured
    throughput. For `rejected`, keep the previous. Always report the full numbers (engagement hits,
    delta%, ref/cand medians + min/max overlap) for the timeline report. Do not dismiss small-but-real

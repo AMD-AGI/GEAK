@@ -111,6 +111,22 @@ def map_args(h: dict) -> dict:
     }
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
+    # Optional phase scoping / resume. Pass-through of the workflow's own
+    # phase-by-phase driving (args.phases): e.g. "final" re-enters only the
+    # Finalize gate against a pinned eval_dir, which (with the disk-reconstruct +
+    # finish-all-pending logic) drives every incomplete A/B on disk to a complete
+    # ref+cand measurement WITHOUT re-running Setup/Profile/Kernel. General: any
+    # subset of {setup,profile,config,head,kernel,final} (default unset => "all").
+    if h.get("phases"):
+        ps_args["phases"] = str(h["phases"])
+    # Optional A/B repeat count override (bounds the cost of a resume / finalize
+    # A/B — e.g. 1 repeat per leg is enough to PROVE both legs ran). General.
+    if h.get("e2e_repeats") is not None:
+        ps_args["e2e_repeats"] = int(h["e2e_repeats"])
+    # Carried cross-phase state (the prior workflow return's `state`), so a
+    # resume continues from where a previous phase invocation left off.
+    if h.get("state"):
+        ps_args["state"] = h["state"]
     # Pin ONE EVAL_DIR for the whole run (workflow reads A.eval_dir ->
     # EVAL_DIR_OVERRIDE). Without it, every PHASE=setup invocation mints a fresh
     # timestamped dir, so a re-entered setup leaves an abandoned preflight-only
@@ -127,17 +143,23 @@ def map_args(h: dict) -> dict:
 
 
 def build_prompt(ps_args: dict) -> str:
+    eval_dir = ps_args.get("eval_dir", "")
     return (
         "Invoke the Workflow tool exactly once with:\n"
         f'  scriptPath: "{E2E_SCRIPT}"\n'
         f"  args: {json.dumps(ps_args)}\n"
         "Run the full e2e pipeline (Setup -> Profile -> Strategize -> "
-        "HeadKernel -> Milestone -> Finalize -> Report -> Validate). When it "
-        "finishes, print EXACTLY ONE final line of compact JSON that is the "
-        "Workflow tool's full return value (it includes eval_dir, "
-        "baseline_throughput_tok_s, final_throughput_tok_s, throughput_speedup, "
-        "validation_status, output_parity, final_overlay, final_launch_script, "
-        "report_path, accepted_kernels, accepted_config). Print nothing after it."
+        "HeadKernel -> Milestone -> Finalize -> Report -> Validate). The workflow "
+        f'persists its full return value to "{eval_dir}/workflow_return.json" as '
+        "its final act; that file is the source of truth. When it finishes, print "
+        "EXACTLY ONE final line of compact JSON that is the Workflow tool's full "
+        "return value (it includes eval_dir, baseline_throughput_tok_s, "
+        "final_throughput_tok_s, throughput_speedup, validation_status, "
+        "output_parity, final_overlay, final_launch_script, report_path, "
+        "accepted_kernels, accepted_config). If for ANY reason "
+        f'"{eval_dir}/workflow_return.json" does not exist when the tool returns, '
+        "write that exact return value there yourself with the Write tool before "
+        "printing. Print nothing after the JSON line."
     )
 
 
@@ -264,20 +286,29 @@ def _iter_message_text(msg: Any) -> list[str]:
 
 
 def _workflow_done_on_disk(eval_dir: str | None) -> bool:
-    """True once the workflow has written a TERMINAL completion marker.
+    """True once the workflow wrote a TERMINAL marker (its very last on-disk act).
 
-    The Validate phase writes ``director_e2e_validation.json`` last, and the
-    Finalize phase emits ``final/final_launch.sh``. Either is an authoritative
-    "the optimizer finished a measured leg" signal that is independent of HOW
-    the agent ran the workflow (in-turn vs background task). The pinned
-    ``eval_dir`` (see :func:`map_args`) is what makes this a deterministic,
-    single-path check rather than a guess.
+    Two terminal markers, both written AT/AFTER the final Validate leg:
+      * ``workflow_return.json`` — the canonical schema-validated return the
+        workflow persists as its FINAL action (see e2e_workflow.js). This is the
+        authoritative "everything finished" signal and the file run_e2e.py reads
+        first. It is the LAST thing the workflow writes, so it is the ideal gate.
+      * ``director_e2e_validation.json`` — the Validate director's marker, written
+        just before. Kept as an alternative in case the canonical persist step
+        (an agent Write) failed.
+
+    ``final/final_launch.sh`` is intentionally NOT terminal: it is written by the
+    EARLIER Finalize phase, BEFORE Report/Validate. Treating it as done made the
+    SDK completion gate fire one or two phases early and SKIP the grace poll that
+    keeps the client (and the still-running, detached Validate leg) alive —
+    orphaning the director before it could write its json. Keying off the two
+    post-Validate markers is what lets the grace poll wait for the real last leg.
     """
     if not eval_dir:
         return False
     p = Path(eval_dir)
-    return (p / "director_e2e_validation.json").is_file() or (
-        p / "final" / "final_launch.sh"
+    return (p / WORKFLOW_RETURN_FILE).is_file() or (
+        p / "director_e2e_validation.json"
     ).is_file()
 
 
@@ -603,9 +634,25 @@ def normalize_result(h: dict, wf: dict) -> dict:
     )
     workload = h.get("workload") or {"isl": 1024, "osl": 1024, "conc": 64}
 
+    # Provenance of the numbers below, so Hyperloom can gauge confidence:
+    #   workflow_return        — the canonical schema-validated artifact / scraped
+    #                            return (full Validate-arbitrated result).
+    #   disk_director_validation — rebuilt from director_e2e_validation.json.
+    #   disk_intermediate_win  — best accepted integrate A/B (no final Validate).
+    #   disk_no_gain_synthesis — baseline measured, nothing accepted (do-no-harm).
+    if wf.get("recovered_no_gain"):
+        result_source = "disk_no_gain_synthesis"
+    elif wf.get("recovered_intermediate"):
+        result_source = "disk_intermediate_win"
+    elif wf.get("recovered_from_disk"):
+        result_source = "disk_director_validation"
+    else:
+        result_source = "workflow_return"
+
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status,
+        "result_source": result_source,
         "eval_dir": str(eval_dir),
         "baseline_throughput_tok_s": float(
             wf.get("baseline_throughput_tok_s")
@@ -619,9 +666,11 @@ def normalize_result(h: dict, wf: dict) -> dict:
         ),
         "throughput_speedup": speedup,
         "output_parity": wf.get("output_parity") or validation.get("output_parity") or "unknown",
-        # Latency口径 (median ms), aligned field names with Hyperloom.
-        "ttft_ms": final_summary.get("ttft_ms_median") or baseline_summary.get("ttft_ms_median"),
-        "tpot_ms": final_summary.get("tpot_ms_median") or baseline_summary.get("tpot_ms_median"),
+        # Latency口径 (median ms), aligned field names with Hyperloom. Prefer the
+        # value carried on the workflow return / recovered win (e.g. the accepted
+        # A/B's candidate leg), then the same-session final/baseline summaries.
+        "ttft_ms": wf.get("ttft_ms") or final_summary.get("ttft_ms_median") or baseline_summary.get("ttft_ms_median"),
+        "tpot_ms": wf.get("tpot_ms") or final_summary.get("tpot_ms_median") or baseline_summary.get("tpot_ms_median"),
         # Sweep-reuse handles (see interface/run_e2e.md).
         "final_launch_script": final_launch,
         "bench_script": str(eval_dir / "bench_e2e.sh"),
@@ -733,16 +782,31 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
     eval_dir = _discover_eval_dir(exp_root)
     if eval_dir is None:
         return None
-    # Prefer a previously-persisted authoritative return (full structured data).
+    # Prefer the WORKFLOW's own canonical artifact (e2e_workflow.js persists its
+    # schema-validated return to workflow_return.json as its final act; main()
+    # also persists a successfully-scraped live return there). Trust it ONLY when
+    # it is that authoritative artifact — i.e. it has NO recovery markers. A file
+    # we previously wrote from our OWN best-effort disk recovery (recovered_*
+    # flags) must be re-derived fresh here, otherwise a stale reconstruction would
+    # permanently shadow later recovery improvements (e.g. newly-extracted latency).
     persisted = _read_json(eval_dir / WORKFLOW_RETURN_FILE)
-    if persisted.get("eval_dir"):
+    if persisted.get("eval_dir") and not any(
+        persisted.get(k)
+        for k in ("recovered_from_disk", "recovered_intermediate", "recovered_no_gain")
+    ):
         return persisted
     validation = _read_json(eval_dir / "director_e2e_validation.json")
     if not validation:
-        # No final Validate marker => the run died mid-pipeline. Before giving
-        # up, salvage the best gate==accepted intermediate (config/kernel
-        # integrate) so a real measured gain is never silently discarded.
-        return _recover_best_intermediate_win(eval_dir)
+        # No final Validate marker => the director never synthesized its json
+        # (run killed mid-Validate, or torn down before it wrote). Recover in
+        # priority order so a COMPLETED run is NEVER discarded as a parse error:
+        #   1. the best gate==accepted intermediate win (a real measured gain),
+        #   2. else, if a baseline was measured but nothing was accepted, a
+        #      legitimate NO_GAIN run (the optimizer correctly did no harm).
+        win = _recover_best_intermediate_win(eval_dir)
+        if win is not None:
+            return win
+        return _recover_completed_no_gain(eval_dir)
     serving = validation.get("serving_config") or {}
     accepted_config = {
         "flags": serving.get("final_flags") or serving.get("baseline_flags") or "",
@@ -835,16 +899,53 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
     }
 
 
+def _ir_get(ir: dict, *keys: str) -> Any:
+    """Read a field from an ``integrate_result.json`` that may be FLAT or NESTED.
+
+    The e2e_integrator writes the measured numbers in either shape across
+    workflow versions:
+      * FLAT (older / test fixtures): ``e2e_delta_pct``, ``e2e_throughput_tok_s``,
+        ``ref_med``, ``cand_med``, ``apply_env``, ``apply_flags`` at top level.
+      * NESTED (current integrator output): the numbers live under an ``e2e``
+        block (``delta_pct``, ``cand_median_tok_s``, ``ref_median_tok_s``) and the
+        config under an ``accepted_config`` block (``apply_env`` / ``apply_flags``).
+    Reading both is what lets a real accepted win be recovered regardless of which
+    shape the integrator emitted (a nested-only result used to read as 0 delta /
+    0 tput and get silently skipped). Returns the first present non-None value.
+    """
+    sources: list[dict] = [ir]
+    for sub in ("e2e", "accepted_config"):
+        v = ir.get(sub)
+        if isinstance(v, dict):
+            sources.append(v)
+    for k in keys:
+        for src in sources:
+            val = src.get(k)
+            if val is not None:
+                return val
+    return None
+
+
+def _ir_float(ir: dict, *keys: str) -> float:
+    v = _ir_get(ir, *keys)
+    try:
+        return float(v) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
     """Salvage the best accepted intermediate win when the run died BEFORE Validate.
 
     The whole-pipeline workflow records each accepted config/kernel integrate as
     ``overlay/<cand>/integrate_result.json`` with a measured e2e delta + gate.
     When no ``director_e2e_validation.json`` exists (the run was killed
-    mid-pipeline), pick the BEST ``gate=="accepted"``, positive-delta
-    intermediate so a real, parity-checked win is NEVER silently discarded.
+    mid-pipeline), pick the BEST accepted, positive-delta intermediate so a real,
+    parity-checked win is NEVER silently discarded.
 
-    Returns a workflow-return-shaped dict (status derived later by
+    Schema-robust: the integrator's integrate_result.json may carry the numbers
+    flat or nested under ``e2e`` / ``accepted_config`` (see :func:`_ir_get`); both
+    are read. Returns a workflow-return-shaped dict (status derived later by
     :func:`normalize_result`) or ``None`` when nothing acceptable is on disk.
     """
     best: dict | None = None
@@ -854,25 +955,22 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
             continue
         for cand in sorted(base.glob("cand_*")):
             ir = _read_json(cand / "integrate_result.json")
-            if not ir or ir.get("gate") != "accepted":
+            if not ir or ir.get("gate") not in ("accepted", "stack"):
                 continue
-            try:
-                delta = float(ir.get("e2e_delta_pct") or 0.0)
-                tput = float(ir.get("e2e_throughput_tok_s") or 0.0)
-            except (TypeError, ValueError):
-                continue
+            delta = _ir_float(ir, "e2e_delta_pct", "delta_pct")
+            tput = _ir_float(ir, "e2e_throughput_tok_s", "cand_median_tok_s", "cand_med")
             if delta > 0.0 and tput > best_tput:
                 best_tput, best = tput, ir
     if best is None:
         return None
 
-    ref_med = float(best.get("ref_med") or 0.0)
-    final_tput = float(best.get("e2e_throughput_tok_s") or 0.0)
-    speedup = (final_tput / ref_med) if ref_med > 0 else (
-        1.0 + float(best.get("e2e_delta_pct") or 0.0) / 100.0)
+    ref_med = _ir_float(best, "ref_med", "ref_median_tok_s")
+    final_tput = best_tput
+    delta_pct = _ir_float(best, "e2e_delta_pct", "delta_pct")
+    speedup = (final_tput / ref_med) if ref_med > 0 else (1.0 + delta_pct / 100.0)
     name = str(best.get("short_name") or "")
     # winner_kind in {"env","config","flags"} => config-only (no authored kernel).
-    is_kernel = best.get("winner_kind") not in ("env", "config", "flags")
+    is_kernel = _ir_get(best, "winner_kind") not in ("env", "config", "flags")
     return {
         "eval_dir": str(eval_dir),
         "throughput_speedup": speedup,
@@ -880,20 +978,77 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
         "final_throughput_tok_s": final_tput,
         "output_parity": best.get("output_parity"),
         "validation_status": "recovered_intermediate",
+        # Latency from the candidate (accepted) A/B leg when the integrator recorded
+        # it (flat or nested) — so result.json carries real ttft/tpot even without a
+        # final Validate bench. None when absent (never fabricated).
+        "ttft_ms": _ir_get(best, "ttft_ms_cand", "ttft_ms_median", "cand_ttft_ms"),
+        "tpot_ms": _ir_get(best, "tpot_ms_cand", "tpot_ms_median", "cand_tpot_ms"),
         "final_overlay": "",                 # config-only: applied via env/flags
         "final_launch_script": "",
         "accepted_config": {
-            "flags": str(best.get("apply_flags") or ""),
-            "env": str(best.get("apply_env") or ""),
+            "flags": str(_ir_get(best, "apply_flags") or ""),
+            "env": str(_ir_get(best, "apply_env") or ""),
         },
         "accepted_kernels": (
             [{"short_name": name, "kind": "authored", "backend": "geak",
-              "e2e_delta_pct": float(best.get("e2e_delta_pct") or 0.0)}]
+              "e2e_delta_pct": delta_pct}]
             if is_kernel and name else []
         ),
         "accepted_heads": [],
         "recovered_from_disk": True,
         "recovered_intermediate": True,
+    }
+
+
+def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
+    """Synthesize a NO_GAIN return when a baseline was measured but nothing won.
+
+    A run that measured a baseline and then REJECTED / failed to e2e-accept
+    every candidate (e.g. the live op is already SOTA, or every integrate A/B
+    was cut off) is a LEGITIMATE ``no_gain`` outcome — the optimizer correctly
+    did no harm — NOT a runner error. The earlier recovery tiers only handle a
+    present ``director_e2e_validation.json`` or a ``gate==accepted`` intermediate,
+    so a clean no-win run used to fall through to ``None`` and get misreported as
+    ``workflow_parse_error`` even though every artifact (measured baseline, final
+    bundle, report) is on disk. This recovers the authoritative baseline so
+    result.json reports ``no_gain`` instead.
+
+    With NO accepted change the served path is unchanged, so final == baseline by
+    construction (do-no-harm); speedup 1.0 -> :func:`normalize_result` => no_gain.
+    Returns ``None`` only when no baseline throughput was ever measured (the run
+    genuinely produced nothing to keep).
+    """
+    official = _read_json(eval_dir / "baseline" / "baseline_official.json")
+    summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
+    baseline_tput = (
+        official.get("baseline_throughput_tok_s")
+        or official.get("plateau_median_tok_s")
+        or summary.get("output_throughput_tok_s_median")
+    )
+    if not baseline_tput:
+        return None
+    try:
+        baseline_tput = float(baseline_tput)
+    except (TypeError, ValueError):
+        return None
+    return {
+        "eval_dir": str(eval_dir),
+        "throughput_speedup": 1.0,
+        "baseline_throughput_tok_s": baseline_tput,
+        # No accepted overlay/config => served path unchanged => final == baseline.
+        "final_throughput_tok_s": baseline_tput,
+        "output_parity": "n/a",
+        "validation_status": "recovered_no_gain",
+        "final_overlay": "",
+        "final_launch_script": "",
+        "accepted_config": {
+            "flags": str(official.get("server_flags") or ""),
+            "env": str(official.get("server_env") or ""),
+        },
+        "accepted_kernels": [],
+        "accepted_heads": [],
+        "recovered_from_disk": True,
+        "recovered_no_gain": True,
     }
 
 
@@ -936,19 +1091,345 @@ def _parity_passed(parity: Any) -> bool | None:
     return None
 
 
-def build_kernel_journey(wf: dict, normalized: dict) -> dict:
-    """Build the schema-shaped kernel_journey contract from a workflow return.
+def _norm_kname(s: Any) -> str:
+    """Normalize a kernel short_name for cross-source matching. The profiler keeps
+    leading underscores (``_fwd_grouped_kernel_stage1``) that the overlay dir name
+    strips (``cand_fwd_grouped_kernel_stage1``); compare case/underscore-insensitively."""
+    return str(s or "").lstrip("_").lower()
 
-    One entry per accepted kernel/head; each carries ``dispatch`` /
-    ``backend_result`` / ``e2e`` sub-objects ready to feed the recorder. Empty
-    ``kernels`` when nothing was accepted (still valid — the orchestrator then
-    records nothing). General: iterates whatever the optimizer accepted.
+
+def _canon_kid(s: Any) -> str:
+    """Canonical ``kernel_id`` shared by the discovery and the kernels[] substreams.
+
+    The profiler keeps a leading underscore (``_fwd_grouped_kernel_stage1``) that
+    the overlay dir name strips (``cand_fwd_grouped_kernel_stage1`` ->
+    ``fwd_grouped_kernel_stage1``). If discovery emits the underscored id while the
+    kernels[] entry emits the stripped one, the orchestrator's assembler folds them
+    into TWO journey entries for ONE kernel (one ``discovered``-only, one
+    ``adopted``-without-discovery-fields). Emitting the SAME canonical id on both
+    sides is what keeps a kernel a single, fully-populated journey entry. We strip
+    leading underscores (the only documented divergence) and preserve case so the
+    human-readable ``name`` still carries the raw profiler spelling."""
+    return str(s or "").lstrip("_")
+
+
+def _journey_profile_topn(eval_dir: Path) -> dict:
+    """Newest ``profile/round_*/profile_topN.json`` (rocprofv3 discovery), or {}."""
+    pbase = eval_dir / "profile"
+    if pbase.is_dir():
+        for r in sorted(pbase.glob("round_*"), key=lambda p: p.name, reverse=True):
+            d = _read_json(r / "profile_topN.json")
+            if d.get("top_kernels"):
+                return d
+    return _read_json(pbase / "profile_topN.json")
+
+
+def _journey_selected_names(eval_dir: Path) -> set[str]:
+    """Normalized short_names that had an optimization overlay built (= selected)."""
+    sel: set[str] = set()
+    for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
+        if base.is_dir():
+            for d in base.glob("cand_*"):
+                if d.is_dir():
+                    sel.add(_norm_kname(d.name[len("cand_"):]))
+    return sel
+
+
+def _journey_discovery_runs(eval_dir: Path, selected: set[str]) -> list[dict]:
+    """Reconstruct the stage-1 discovery substream (schema §3/§5) from the on-disk
+    rocprofv3 ``profile_topN.json`` — the real hot-kernel table the optimizer saw.
+    Never fabricates: fields the profiler does not carry (roofline AI, source_file)
+    stay ``None``. ``source='bypass'`` because GEAK profiles via rocprofv3, not
+    tracelens."""
+    prof = _journey_profile_topn(eval_dir)
+    tops = prof.get("top_kernels") or []
+    if not tops:
+        return []
+    hot: list[dict] = []
+    seen_ids: dict[str, int] = {}
+    for i, k in enumerate(tops):
+        short = str(k.get("short_name") or k.get("name") or "")
+        sel = _norm_kname(short) in selected
+        # kernel_id MUST be the SAME canonical token the kernels[] entries use
+        # (the overlay dir name strips the profiler's leading underscore);
+        # otherwise the orchestrator's assembler folds discovery and the
+        # optimized kernel into TWO entries for one kernel. Canonicalize here;
+        # the raw profiler spelling (underscores intact) stays in ``name``.
+        canon = _canon_kid(short)
+        # The profiler can emit the SAME short_name for genuinely distinct kernels
+        # (e.g. two CK attention mask variants, two Tensile GEMM configs). Keep
+        # kernel_id UNIQUE (schema §1) by suffixing the real profiler rank on a
+        # repeat; the full unmangled name is preserved in ``name``.
+        seen_ids[canon] = seen_ids.get(canon, 0) + 1
+        kid = canon if seen_ids[canon] == 1 else f"{canon}#{k.get('rank') or i}"
+        hot.append({
+            "kernel_id": kid,
+            "name": str(k.get("name") or short),
+            "gpu_pct": k.get("pct_gpu_time"),
+            "time_ms": k.get("total_ms"),
+            "bound_type": "",                     # rocprofv3 carries no roofline bound; backfilled later
+            "arithmetic_intensity": None,
+            "flops_per_byte": None,
+            "efficiency_percent": None,
+            "reusable_native_kernel": bool(k.get("editable")),
+            "source_file": None,
+            # GEAK is the only optimization backend; recommend it only for the
+            # editable kernels it actually selected (overlay built).
+            "recommended_backends": ["geak"] if (sel and k.get("editable")) else [],
+            "selected_for_optimization": sel,
+            # schema §5 ❌ field the producer is asked to backfill (kernel class).
+            "kernel_category": k.get("classification"),
+        })
+    return [{
+        "source": "bypass",
+        "status": "success",
+        "duration_sec": None,
+        "scan": {"candidates_path": f"perfskills:{eval_dir}",
+                 "profiler": prof.get("source") or "rocprofv3",
+                 "num_distinct_kernels": prof.get("num_distinct_kernels")},
+        "hot_kernel_count": len(hot),
+        "hot_kernels": hot,
+        "error": None,
+    }]
+
+
+def _journey_overlay_entry(eval_dir: Path, short: str, ir: dict, wf: dict,
+                           geak_sha: str, overall_parity: bool | None,
+                           gpu_pct_prof: Any, display_name: str | None = None) -> dict:
+    """One ``kernels[]`` entry for an optimization overlay, driven by its
+    integrate_result.json. Honest per gate state:
+      * accepted/stack -> succeeded + KEEP + integrated e2e (config win routes its
+        flags into ``e2e.extra_server_args``, authored win into ``patch_path``),
+      * rejected       -> succeeded attempt but REVERT + e2e REJECTED (do-no-harm),
+      * incomplete A/B (no integrate_result) -> dispatch only, no e2e (outcome the
+        assembler computes is ``dispatched``); never fabricates a KEEP/FAIL it
+        cannot prove.
+
+    ``display_name`` is the profiler's real kernel symbol (with its leading
+    underscore intact) resolved from the discovery table; when given it is used
+    as ``name`` so the kernels[] entry, the discovery hot_kernel, and the
+    perfskills accepted-kernel backfill all carry the SAME human-readable name.
+    The overlay dir name (``short``, underscore-stripped for filesystem safety)
+    is only a fallback when the kernel was not in the profiler table.
     """
-    eval_dir = str(normalized.get("eval_dir") or wf.get("eval_dir") or "")
-    final_patch = normalized.get("final_patch") or ""
-    parity = _parity_passed(wf.get("output_parity") or normalized.get("output_parity"))
+    kernel_id = _canon_kid(short)
+    name = display_name or short
+    backend = "geak"
+    gate = str(ir.get("gate") or "").lower() if isinstance(ir, dict) else ""
+    gpu_pct = _ir_get(ir, "pct_gpu_time") if ir else None
+    if gpu_pct is None:
+        gpu_pct = gpu_pct_prof
+    micro = _ir_get(ir, "isolated_speedup", "micro_speedup", "speedup") if ir else None
+    delta = _ir_get(ir, "e2e_delta_pct", "delta_pct") if ir else None
+    winner_kind = str(_ir_get(ir, "winner_kind") or "").lower() if ir else ""
+    is_config = winner_kind in ("env", "config", "flags")
+    flags = str(_ir_get(ir, "apply_flags") or "") if ir else ""
+    tuned_file = _ir_get(ir, "tuned_config_file") if ir else None
+    patch = None if (is_config or not ir) else (_ir_get(ir, "final_patch", "patch_path"))
+    target_file = (tuned_file if is_config else _ir_get(ir, "target_file", "target_callable")) if ir else None
+    parity = (_parity_passed(ir.get("output_parity"))
+              if (ir and ir.get("output_parity") is not None) else overall_parity)
+
+    entry: dict = {
+        "kernel_id": kernel_id,
+        "name": name,
+        "gpu_pct": gpu_pct,
+        "micro_speedup": micro,
+        "dispatch": {
+            "dispatched": True,
+            "backends": [backend],
+            "skip_reason": "",
+            "orchestration_commit": "",
+            "task_group": None,
+        },
+    }
+    if not ir:
+        # Verified-isolated candidate whose e2e A/B never completed (cut off): it
+        # WAS dispatched, but no measured backend/e2e result exists. Record only
+        # what is true; leave attempts empty and emit no e2e (not KEEP, not FAIL).
+        entry["backend_result"] = {
+            "kernel_id": kernel_id, "run_id": str(eval_dir),
+            "attempts": [], "verification": {},
+            "metadata": {"root_dir": str(PERFSKILLS_ROOT), "version": geak_sha,
+                         "note": "e2e A/B incomplete (cut off before result)"},
+        }
+        entry["dispatch"]["task_group"] = "ab_incomplete"
+        return entry
+
+    accepted = gate in ("accepted", "stack")
+    attempt_id = f"{kernel_id}-{backend}-0"
+    entry["backend_result"] = {
+        "kernel_id": kernel_id, "run_id": str(eval_dir),
+        "attempts": [{
+            "backend": backend, "attempt_id": attempt_id,
+            "status": "succeeded",
+            "decision": "KEEP" if accepted else "REVERT",
+            "micro_speedup": micro,
+            # A config tune is not compiled -> null (not fabricated True); an
+            # authored kernel that reached the A/B did compile.
+            "compile_passed": None if is_config else True,
+            "correctness_passed": parity,
+            "optimized_files": [tuned_file] if (is_config and tuned_file)
+                               else ([patch] if patch else []),
+            "error": None, "error_type": None, "ts": None, "duration_sec": None,
+        }],
+        "verification": {"micro_speedup": micro, "best_attempt_id": attempt_id,
+                         "best_backend": backend},
+        "metadata": {"root_dir": str(PERFSKILLS_ROOT), "version": geak_sha},
+    }
+    entry["e2e"] = {
+        "kernel_id": kernel_id,
+        "integrated": accepted,
+        "e2e_gain_pct": delta,
+        "validated": True,                        # an A/B gate ran either way
+        "decision": "KEEP" if accepted else "REJECTED",
+        "patch_path": patch,
+        "target_file": target_file,
+        "extra_server_args": flags if accepted else "",
+        "ts": None,
+    }
+    return entry
+
+
+def _journey_return_entry(eval_dir: str, k: dict, idx: int, wf: dict,
+                          geak_sha: str, parity: bool | None) -> dict:
+    """One ``kernels[]`` entry from an accepted kernel named in the workflow return
+    (used when there is no overlay on disk to read — e.g. the live path)."""
+    name = str(k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}")
+    # Canonical id (matches the discovery + overlay substreams); ``name`` keeps
+    # the raw spelling so the assembler folds this kernel into a single entry.
+    kid = _canon_kid(name)
+    backend = _norm_backend(k.get("backend") or k.get("source"))
+    isolated = k.get("isolated") or k.get("micro_speedup") or k.get("verified_isolated_speedup")
+    patch = k.get("final_patch") or None
+    attempt_id = f"{kid}-{backend}-{idx}"
+    return {
+        "kernel_id": kid, "name": name, "gpu_pct": k.get("pct_gpu_time"),
+        "micro_speedup": isolated,
+        "dispatch": {"dispatched": True, "backends": [backend], "skip_reason": "",
+                     "orchestration_commit": "", "task_group": None},
+        "backend_result": {
+            "kernel_id": kid, "run_id": str(k.get("kernel_eval_dir") or eval_dir),
+            "attempts": [{
+                "backend": backend, "attempt_id": attempt_id, "status": "succeeded",
+                "decision": "KEEP", "micro_speedup": isolated, "compile_passed": True,
+                "correctness_passed": parity, "optimized_files": [patch] if patch else [],
+                "error": None, "error_type": None, "ts": None, "duration_sec": None,
+            }],
+            "verification": {"micro_speedup": isolated, "best_attempt_id": attempt_id,
+                             "best_backend": backend},
+            "metadata": {"root_dir": str(PERFSKILLS_ROOT), "version": geak_sha},
+        },
+        "e2e": {
+            "kernel_id": kid, "integrated": True, "e2e_gain_pct": k.get("e2e_delta_pct"),
+            "validated": True, "decision": "KEEP", "patch_path": patch,
+            "target_file": k.get("target_file") or k.get("target_callable"),
+            "extra_server_args": str((wf.get("accepted_config") or {}).get("flags") or ""),
+            "ts": None,
+        },
+    }
+
+
+def build_kernel_journey(wf: dict, normalized: dict) -> dict:
+    """Build the kernel_journey handoff (recorder-input shapes the orchestrator
+    replays through the SBD SDK — KERNEL_JOURNEY_SCHEMA.md §2).
+
+    Reconstructs the FULL journey the run actually produced, from disk truth:
+      * ``discovery_runs`` from rocprofv3 ``profile_topN.json`` (the real hot-kernel
+        table; ``selected_for_optimization`` set for kernels that got an overlay),
+      * one ``kernels[]`` entry PER optimization overlay (accepted / rejected /
+        incomplete A/B), so a CONFIG-only win (no authored patch) is still recorded
+        as the optimized hot kernel — its flags land in ``e2e.extra_server_args``.
+    Falls back to workflow-return-named kernels when no overlay/profile is on disk
+    (e.g. the live path or a unit fixture). Empty ``kernels``/``discovery_runs`` is
+    valid and honest only when nothing was discovered/attempted.
+    """
+    eval_dir_str = str(normalized.get("eval_dir") or wf.get("eval_dir") or "")
+    eval_dir = Path(eval_dir_str) if eval_dir_str else None
     geak_sha = _git_short_sha(PERFSKILLS_ROOT)
-    versions = {
+    overall_parity = _parity_passed(wf.get("output_parity") or normalized.get("output_parity"))
+
+    selected = _journey_selected_names(eval_dir) if eval_dir else set()
+    discovery_runs = _journey_discovery_runs(eval_dir, selected) if eval_dir else []
+    prof = _journey_profile_topn(eval_dir) if eval_dir else {}
+    pct_by_name = {
+        _norm_kname(k.get("short_name") or k.get("name")): k.get("pct_gpu_time")
+        for k in (prof.get("top_kernels") or [])
+    }
+    # The profiler's real kernel symbol (underscores intact) keyed by the same
+    # match key the overlay dir resolves to, so a kernels[] entry can adopt the
+    # SAME display name as its discovery hot_kernel (name unified across substreams).
+    name_by_norm = {
+        _norm_kname(k.get("short_name") or k.get("name")):
+            str(k.get("name") or k.get("short_name") or "")
+        for k in (prof.get("top_kernels") or [])
+        if (k.get("name") or k.get("short_name"))
+    }
+
+    kernels: list[dict] = []
+    seen: set[str] = set()
+
+    # 1) Disk truth: one entry per optimization overlay, driven by integrate_result.
+    if eval_dir:
+        for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
+            if not base.is_dir():
+                continue
+            for cand in sorted(base.glob("cand_*")):
+                if not cand.is_dir():
+                    continue
+                short = cand.name[len("cand_"):]
+                key = _norm_kname(short)
+                if not short or key in seen:
+                    continue
+                seen.add(key)
+                ir = _read_json(cand / "integrate_result.json")
+                kernels.append(_journey_overlay_entry(
+                    eval_dir, short, ir, wf, geak_sha, overall_parity,
+                    pct_by_name.get(key), name_by_norm.get(key)))
+
+    # 2) Augment with accepted kernels named only in the workflow return (live path
+    #    / no overlay on disk), deduped against the overlay entries above.
+    accepted = list(wf.get("accepted_kernels") or []) + list(wf.get("accepted_heads") or [])
+    synth_hot: list[dict] = []
+    for idx, k in enumerate(accepted):
+        if not isinstance(k, dict):
+            continue
+        name = str(k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}")
+        if _norm_kname(name) in seen:
+            continue
+        seen.add(_norm_kname(name))
+        kernels.append(_journey_return_entry(eval_dir_str, k, idx, wf, geak_sha, overall_parity))
+        synth_hot.append({
+            "kernel_id": _canon_kid(name), "name": name, "gpu_pct": k.get("pct_gpu_time"),
+            "bound_type": str(k.get("bound_type") or k.get("op_kind") or ""),
+            "source_file": k.get("target_file") or k.get("target_callable"),
+            "recommended_backends": [_norm_backend(k.get("backend") or k.get("source"))],
+            "selected_for_optimization": True,
+        })
+    # When there is no on-disk profiler discovery (live path), synthesize a minimal
+    # discovery run from the accepted kernels so they are not orphaned.
+    if not discovery_runs and synth_hot:
+        discovery_runs = [{
+            "source": "bypass", "status": "success", "duration_sec": None,
+            "scan": {"candidates_path": f"perfskills:{eval_dir_str}"},
+            "hot_kernel_count": len(synth_hot), "hot_kernels": synth_hot, "error": None,
+        }]
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "producer": "kernel-agent",
+        "eval_dir": eval_dir_str,
+        "versions": _geak_versions(),
+        "discovery_runs": discovery_runs,
+        "kernels": kernels,
+    }
+
+
+def _geak_versions() -> dict:
+    """The top-level ``versions`` section (schema §1) — GEAK's authoritative tool
+    version, shared by the full and the empty-kernels journey shapes."""
+    geak_sha = _git_short_sha(PERFSKILLS_ROOT)
+    return {
         "geak": {
             "tool": "geak",
             "root_dir": str(PERFSKILLS_ROOT),
@@ -957,109 +1438,51 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
         }
     }
 
-    accepted = list(wf.get("accepted_kernels") or []) + list(wf.get("accepted_heads") or [])
-    kernels: list[dict] = []
-    # Discovery-shape projection (KERNEL_JOURNEY_SCHEMA.md §3/§5). GEAK-e2e
-    # profiles via rocprofv3 (not tracelens), so the discovery ROUTE is
-    # ``bypass``. The assembler backfills each kernel's discovery-sourced fields
-    # (name / gpu_pct / bound_type / source_file) from these hot_kernels — they
-    # are dropped otherwise, since dispatch/backend_result/e2e don't carry them.
-    hot_kernels: list[dict] = []
-    for idx, k in enumerate(accepted):
-        if not isinstance(k, dict):
-            continue
-        name = str(k.get("short_name") or k.get("name") or k.get("op_kind") or f"kernel{idx}")
-        kernel_id = name
-        backend = _norm_backend(k.get("backend") or k.get("source"))
-        isolated = k.get("isolated") or k.get("micro_speedup") or k.get("verified_isolated_speedup")
-        e2e_delta = k.get("e2e_delta_pct")
-        gpu_pct = k.get("pct_gpu_time")
-        patch = k.get("final_patch") or final_patch or None
-        attempt_id = f"{kernel_id}-{backend}-{idx}"
-        hot_kernels.append({
-            "kernel_id": kernel_id,
-            "name": name,
-            "gpu_pct": gpu_pct,
-            "bound_type": str(k.get("bound_type") or k.get("op_kind") or ""),
-            "source_file": k.get("target_file") or k.get("target_callable"),
-            "recommended_backends": [backend],
-            "selected_for_optimization": True,
-        })
-        attempt = {
-            "backend": backend,
-            "attempt_id": attempt_id,
-            "status": "succeeded",
-            "decision": "KEEP",
-            "micro_speedup": isolated,
-            "compile_passed": True,
-            "correctness_passed": parity,
-            "optimized_path": patch,
-            "error": None,
-            "error_type": None,
-        }
-        kernels.append({
-            "kernel_id": kernel_id,
-            "name": name,
-            "gpu_pct": gpu_pct,
-            "dispatch": {
-                "dispatched": True,
-                "backends": [backend],
-                "skip_reason": "",
-                "task_group": None,
-            },
-            # Shape == record_kernel_backend_result's ``result`` input.
-            "backend_result": {
-                "kernel_id": kernel_id,
-                "run_id": str(k.get("kernel_eval_dir") or eval_dir),
-                "attempts": [attempt],
-                "verification": {
-                    "micro_speedup": isolated,
-                    "best_attempt_id": attempt_id,
-                    "best_backend": backend,
-                },
-                "metadata": {"root_dir": str(PERFSKILLS_ROOT), "version": geak_sha},
-            },
-            # Shape == record_kernel_e2e's keyword inputs.
-            "e2e": {
-                "integrated": True,
-                "e2e_gain_pct": e2e_delta,
-                "validated": True,
-                "decision": "KEEP",
-                "patch_path": patch,
-                "target_file": k.get("target_file") or k.get("target_callable"),
-                "extra_server_args": str((wf.get("accepted_config") or {}).get("flags") or ""),
-            },
-        })
 
+def _empty_journey(eval_dir: Path, normalized: dict) -> dict:
+    """A VALID, kernels-empty journey (schema-compliant: missing data is ``[]``,
+    never fabricated). Carries the run ``status``/``error`` so a consumer ALWAYS
+    finds a parseable file and can see WHY nothing landed — used on an error/
+    timeout/no-recovery run, or as the fallback when the full build raises."""
     return {
         "schema_version": SCHEMA_VERSION,
         "producer": "kernel-agent",
-        "eval_dir": eval_dir,
-        "versions": versions,
-        # Stage-1 discovery substream (schema §3) so Hyperloom's recorder can
-        # backfill the discovery-sourced kernel fields. Empty when nothing was
-        # accepted (still valid).
-        "discovery_runs": [
-            {
-                "source": "bypass",
-                "status": "success",
-                "scan": {"candidates_path": f"perfskills:{eval_dir}"},
-                "hot_kernels": hot_kernels,
-            }
-        ] if hot_kernels else [],
-        "kernels": kernels,
+        "eval_dir": str(eval_dir),
+        "versions": _geak_versions(),
+        # Diagnostic context (extra to schema's discovery_runs/kernels/versions):
+        # honest provenance for an empty journey, ignored by strict consumers.
+        "status": normalized.get("status"),
+        "error_class": normalized.get("error_class"),
+        "error": normalized.get("error"),
+        "discovery_runs": [],
+        "kernels": [],
     }
 
 
-def _write_kernel_journey(eval_dir: Path, wf: dict, normalized: dict) -> str:
-    """Write kernel_journey.json into eval_dir; return its path ("" on failure)."""
+def _write_kernel_journey(eval_dir: Path, wf: dict | None, normalized: dict) -> str:
+    """Write an HONEST kernel_journey.json into eval_dir; return its path.
+
+    GUARANTEED-EMIT (parallel to result.json): writes a parseable file in EVERY
+    case so a consumer always finds one:
+      * a FULL journey (one entry per accepted kernel/head) when a workflow
+        result was recovered (``wf`` is not None),
+      * else an EMPTY-kernels journey carrying the run status/error_class.
+    If building the full journey raises, fall back to the empty-kernels shape
+    rather than dropping the file (never fabricates kernels). Raises ONLY when the
+    filesystem write itself fails — the caller records that into result.json as
+    ``kernel_journey_error`` instead of letting it pass silently.
+    """
     try:
-        journey = build_kernel_journey(wf, normalized)
-        path = eval_dir / KERNEL_JOURNEY_FILE
-        path.write_text(json.dumps(journey, indent=2), encoding="utf-8")
-        return str(path)
-    except Exception:  # noqa: BLE001
-        return ""
+        journey = build_kernel_journey(wf, normalized) if wf is not None \
+            else _empty_journey(eval_dir, normalized)
+    except Exception:  # full build failed: degrade to a valid empty journey.
+        journey = _empty_journey(eval_dir, normalized)
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    path = eval_dir / KERNEL_JOURNEY_FILE
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(journey, indent=2), encoding="utf-8")
+    os.replace(tmp, path)  # atomic: a kill mid-write never yields a partial file
+    return str(path)
 
 
 # ---------------------------------------------------------------------------
@@ -1128,17 +1551,6 @@ def main(argv: list[str]) -> int:
         try:
             if wf is not None:
                 out = normalize_result(h, wf)
-                eval_dir = Path(out.get("eval_dir") or eval_dir_hint)
-                try:
-                    _persist_workflow_return(eval_dir, wf)
-                except Exception:
-                    pass
-                try:
-                    kj_path = _write_kernel_journey(eval_dir, wf, out)
-                    if kj_path:
-                        out["kernel_journey_path"] = kj_path
-                except Exception:
-                    pass
                 if wf.get("recovered_from_disk"):
                     out["recovered_from_disk"] = True
             else:
@@ -1148,13 +1560,31 @@ def main(argv: list[str]) -> int:
                     "error_class": error_class or "runner_error",
                     "error": str(error or ""),
                 }
-        except Exception as norm_exc:  # normalize/journey blew up: still emit.
+        except Exception as norm_exc:  # normalize blew up: still emit an error.
             out = {
                 "schema_version": SCHEMA_VERSION,
                 "status": "error",
                 "error_class": "normalize_failed",
                 "error": f"{type(norm_exc).__name__}: {norm_exc}",
             }
+        # kernel_journey.json is a GUARANTEED interface file too (same contract as
+        # result.json). Resolve eval_dir even on the error path (eval_dir_hint is
+        # this run's pinned dir) so the journey always has a home, persist the
+        # canonical workflow return when we have one, then ALWAYS write an honest
+        # journey. A build/write failure is surfaced into result.json rather than
+        # silently dropping the file.
+        eval_dir_str = str(out.get("eval_dir") or eval_dir_hint or "")
+        if eval_dir_str:
+            eval_dir = Path(eval_dir_str)
+            if wf is not None:
+                try:
+                    _persist_workflow_return(eval_dir, wf)
+                except Exception:
+                    pass
+            try:
+                out["kernel_journey_path"] = _write_kernel_journey(eval_dir, wf, out)
+            except Exception as kj_exc:
+                out["kernel_journey_error"] = f"{type(kj_exc).__name__}: {kj_exc}"
         try:
             result_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = result_path.with_name(result_path.name + ".tmp")
