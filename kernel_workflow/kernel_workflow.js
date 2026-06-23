@@ -108,6 +108,14 @@ const SHARED_KB = String(A.shared_kb || '').trim();
 const GLOBAL_KB = String(A.global_kb || '').trim();   // run-global cross-KERNEL technique blackboard (deep)
 const E2E_FEEDBACK = String(A.e2e_feedback || '').trim();
 const HARNESS_ADDENDUM = String(A.harness_addendum || '').trim();
+// P2 (deep continuation): on a RESUMED wave (STATE_DIR holds prior work) the cold re-derivation of
+// Analyze + baseline Profile is largely redundant. INCREMENTAL_RESUME tells those two ADVISORY agents to
+// load the prior roadmap/profile and return it with only delta updates instead of re-deriving from
+// scratch, so each burst spends its budget on optimization ROUNDS, not re-analysis. Benchmark is NEVER
+// incremental (it re-pins a fresh in-window baseline every wave \u2014 the matched-A/B correctness rail).
+// Unset (default/fast / first deep burst) => spreading {} adds nothing => byte-identical prompts.
+const INCREMENTAL = !!STATE_DIR && String(A.incremental_analyze || '') === 'true';
+const RESUME_INPUT = INCREMENTAL ? { INCREMENTAL_RESUME: '1' } : {};
 const MAX_NO_IMPROVE = Math.max(1, parseInt(A.max_no_improve != null ? A.max_no_improve : 2, 10));
 // Conditional inputs: spreading {} adds NOTHING to a prompt (byte-identical) when a hook is unset.
 const KB_INPUTS = {
@@ -387,6 +395,7 @@ const analysis = await agentT(
   roleAgent('tech_lead', 'analyze', 'Analyze the kernel and write the roadmap.', {
     WORKSPACE: CANONICAL, EVAL_DIR, TASK, SKILL_DIR: WORKFLOW_DIR,
     KERNEL_KNOWLEDGE_DIR,
+    ...RESUME_INPUT,
   }),
   { phase: 'Analyze', label: 'tech_lead:analyze', schema: ANALYZE_SCHEMA });
 log(`Analyze done. kernel_type=${analysis ? analysis.kernel_type : '?'}`);
@@ -422,6 +431,7 @@ let profileSummary = await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: 0,
     COMMANDMENT,
+    ...RESUME_INPUT,
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
 log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);

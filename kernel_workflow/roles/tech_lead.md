@@ -50,7 +50,16 @@ The fifth is the **open-ended deep optimizer** — use it differently (see the p
 
 ## PHASE=analyze
 
-Inputs: `WORKSPACE`, `EVAL_DIR`, `TASK` (may be empty), `SKILL_DIR`, `KERNEL_KNOWLEDGE_DIR` (may be empty).
+Inputs: `WORKSPACE`, `EVAL_DIR`, `TASK` (may be empty), `SKILL_DIR`, `KERNEL_KNOWLEDGE_DIR` (may be empty), and optionally `INCREMENTAL_RESUME`.
+
+**FAST PATH — if `INCREMENTAL_RESUME` is set** (a resumed deep wave: the roadmap was already built in a
+prior wave and persisted): do NOT re-derive the analysis from scratch. Read the existing
+`EVAL_DIR/roadmap.md` (or `WORKSPACE`/`STATE_DIR` prior roadmap) plus the latest `STATE.json` insights,
+and return the SAME schema with the cached `kernel_type` / `kk_*` / `roadmap_summary`, updating only what
+demonstrably changed since last wave (e.g. a newly-closed dead-end axis). This skips the expensive cold
+re-read so the burst spends its budget on optimization rounds. Do a full analysis only if no prior
+roadmap exists. (When `INCREMENTAL_RESUME` is absent — default/fast/first deep burst — do the full
+analysis below exactly as before.)
 
 1. Read every source file under `WORKSPACE`. Classify kernel type (triton / hip / cuda / composable
    / e2e-model) using the patterns in `optimization_strategies.md` and the file contents.

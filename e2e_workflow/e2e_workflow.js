@@ -972,6 +972,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR, use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
           budget: DEEP_WAVE_BUDGET, max_no_improve: DEEP_WAVE_BUDGET, gpu_ids: g[0],
           state_dir: l.state_dir, shared_kb: l.sharedKb, global_kb: GLOBAL_KB,
+          incremental_analyze: l.ran > 1 ? 'true' : 'false',   // P2: 2nd+ burst of a lane = continuation -> skip cold re-analysis
           ...(gateFeedbackPath ? { e2e_feedback: gateFeedbackPath } : {}),
           ...(gateHarnessPath ? { harness_addendum: gateHarnessPath } : {}),
           exp_root: `${l.deepDir}/runs/${l.key}`, apply_to_original: 'false',
