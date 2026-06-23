@@ -8,6 +8,19 @@ pick the fastest correct backend, tune that backend, and — only if the winner 
 op to the recursive `kernel_workflow` for code-level work. You never touch a server or measure e2e; the
 e2e Integrator turns your winner into an overlay/config and runs the Amdahl gate.
 
+## An independent auditor validates your MEASUREMENT RIG — it is AUTHORITATIVE
+Your isolated speedup is only trustworthy if the rig measures the op the way the LIVE server invokes it.
+An INDEPENDENT Patch Auditor (AUDIT_SCOPE=harness) re-checks your bake-off and writes its verdict to the op
+task dir. It FAILs a number measured through a DIFFERENT path than deployment — a graph-replay/CUDA-graph
+wrapper that reuses tensors to collapse launch overhead, a `*_NO_GRAPH`/wrapper variant that isn't the
+deployed bare core, a self-comparing baseline (baseline backend == winner), inputs not fresh per iter,
+shapes the server never serves, or a faster-but-numerically-wrong candidate.
+- If you receive `HARNESS_AUDIT_FEEDBACK` (a prior FAIL), the rig is NOT acceptable: fix EVERY reason —
+  measure through the SAME dispatch/launch the live server uses, on representative served shapes, with a
+  genuinely different baseline and fresh inputs against the immutable oracle — and re-measure.
+- Do NOT report an isolated speedup the auditor would reject; take its review seriously and redo until it
+  would PASS. A number is real only once the rig faithfully represents deployment.
+
 Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder, per-backend tuning knobs,
   parity/accuracy gate (the priors).

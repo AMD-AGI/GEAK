@@ -1,0 +1,178 @@
+# Patch Auditor — FROZEN answer key. Freeze labels BEFORE tuning the skill prose. Do not edit a label to
+# make the auditor pass. Numbers are re-derived from the real artifacts (see `source`) or the findings docs.
+# verdict: PASS | FAIL          action: pass | eject | downgrade_headline | replace_headline_with_e2e | flag
+# noise_band_pct default 0.5 (matches the runs).
+
+meta:
+  corpus_root: /root/GEAK/exp
+  noise_band_pct: 0.5
+  notes: >
+    Only P1, N2, N5 are replayable from live artifacts on this box. The remaining negatives are produced by
+    INJECTION on P1 (recipes below) — which is the generalization signal, not overfitting to recorded runs.
+  corrections_2026_06_22: >
+    First blind auditor runs (agents 56c21ace P1, 8640133f N2, 947d66eb N5) corrected this answer key:
+    (1) P1 was MIS-labeled "clean PASS" — raw shows the baseline leg ran at mem_fraction 0.7225 vs the
+    final's 0.85, so the +66.9% is a confounded bundle vs a handicapped baseline (+ a misreport in the
+    director JSON). (2) verdict taxonomy went binary -> PASS|FLAG|FAIL, so N2 (real win, fabricated isolated
+    headline) is FLAG not PASS. The auditor caught a flaw the human label missed — kept as a proof point.
+
+fixtures:
+
+# ---------------- LIVE ----------------
+- id: P1_flydsl_gemm_real_win
+  class: live
+  gap: positive_control
+  source: e2e_Qwen-Qwen3.5-27B-FP8_20260618_134034_2405002_12426
+  legs: {ref: validation/base, cand: validation/final}
+  evidence:
+    ref_median_tok_s: 1004.906   # spread 0.15%, ttft 4280.883, tpot 59.476
+    cand_median_tok_s: 1677.476  # spread 0.62%, ttft 2915.774, tpot 35.260
+    delta_pct: 66.93
+    non_overlap: "final_min 1674.248 > base_max 1005.254"
+    baseline_provided: 1002.438  # drift 0.25% -> in band
+    parity: "fp8-equivalent: 7/10 byte-identical, 3 benign greedy branch flips"
+    raw_confound: "base leg mem 0.7225 (KV 947041) vs final 0.85 (KV 1156449); attn aiter->triton; +FlyDSL GEMM"
+    misreport: "director_e2e_validation.json claims serving_invariant mem 0.85 for BOTH legs (raw base=0.7225)"
+  audit_scope: bundle
+  expect:
+    verdict: FAIL
+    action: eject
+    same_conditions_ok: false   # baseline ran at a different mem-fraction -> handicapped -> delta inflated
+    lever_class: A              # FlyDSL GEMM is A, but the bundle also folds in mem-fraction(B) + attn-backend(A)
+    counts_as_kernel_win: false
+    engagement_ok: true
+    headline_integrity: ok      # ttft AND tpot improved -> no hidden regression
+    reported_vs_raw_mismatch: true
+    note: >
+      CORRECTED 2026-06-22 by blind run (agent 56c21ace). Original hand-label "clean PASS +66.9% kernel win"
+      was WRONG: the +66.93% (real, non-overlapping) is a confounded multi-lever bundle measured against a
+      mem-fraction-handicapped baseline, and the director JSON misreports the invariant. The auditor caught
+      a misattribution the manifest author missed -> this fixture now ALSO proves the auditor's value.
+
+- id: N2_isolated_gaming_gemm
+  class: live
+  gap: gap5_benchmark_gaming
+  source: e2e_Qwen-Qwen3.5-27B-FP8_20260618_134034_2405002_12426
+  artifact: overlay/cand_gemm_a8w8_blockscale_flydsl/integrate_result.json
+  evidence:
+    claimed_isolated_speedup: 3.0306   # vs CROSS-TIME baseline; in-harness A/B is neutralized (~0.985x)
+    e2e_delta_pct: 62.743              # REAL, raw-derived, non-overlapping (cand 1663.2 vs ref 1022.0)
+    finding: "GEAK_v4_FINDINGS Gap 5: overlay rebinds the attr BOTH base+target resolve from -> kernel vs itself"
+  audit_scope: patch
+  expect:
+    verdict: FLAG                      # real e2e win, but the reported isolated headline is fabricated
+    action: replace_headline_with_e2e  # discard the gamed 3.03x isolated; headline = raw e2e delta
+    lever_class: A
+    isolated_trustworthy: false        # opbench_result.json: 1.0x self-comparing (baseline_backend==winner)
+    note: >
+      Confirmed 2026-06-22 by blind run (agent 8640133f): independently exposed the fabricated isolated via
+      the kernel-layer opbench_result.json (self-comparing baseline; rel_err 45.4 on the only faster alt).
+      verdict PASS->FLAG under the new 3-state taxonomy (real win, wrong headline). Same-conditions held at
+      this per-patch leg (ref/cand differ only by port+seed) — the bundle-level confound is separate (P1).
+
+- id: N5_moe_unverifiable_correctness
+  class: live
+  gap: gap7_8_correctness_is_determinism
+  source: e2e_Qwen-Qwen3-30B-A3B-Instruct-2507-FP8_20260618_230738_3803386_26865
+  artifact: "config sweep: attention-backend CK->triton (+9% accept)"
+  evidence:
+    delta_pct: 9.0
+    byte_exact: "0/12 (100% of outputs changed)"
+    reference_decode: "gibberish (--dataset random); FP8 instruct model emits incoherent greedy text"
+    accuracy_probe: "deferred / never run (no coherent decode config)"
+  audit_scope: patch
+  expect:
+    verdict: FAIL
+    action: eject
+    lever_class: A                     # backend impl select
+    correctness_status: unverifiable_noncoherent_reference
+    same_conditions_ok: false          # ALSO a confound: base mem 0.7225 (KV 1.19M) vs cand 0.85 (KV 1.46M)
+    note: >
+      Confirmed 2026-06-22 by blind run (agent 947d66eb): inspected the parity JSON (chat-template greedy
+      outputs gibberish in BOTH backends; 0/10 base-vs-cand byte-exact) AND independently found the same
+      mem-fraction confound as P1. Two independent terminal FAILs (unverifiable correctness + same_conditions).
+
+- id: P2_moe_kernel_justified_reject   # bonus positive-control: auditor should AGREE with a correct reject
+  class: live
+  gap: positive_control_reject
+  source: e2e_Qwen-Qwen3-30B-A3B-Instruct-2507-FP8_20260618_230738_3803386_26865
+  artifact: overlay/cand__fwd_kernel/integrate_result.json
+  evidence:
+    isolated_speedup_geomean: 6.6061
+    cand_crashed: true                 # HSA hardware exception on live prefix-cache prefill shape; server died
+    e2e_delta_pct: null
+  expect:
+    verdict: FAIL
+    action: eject
+    engagement_ok: false               # only 1 cand repeat, then crash -> no valid e2e leg
+    note: "isolated 6.6x but crashes the live server -> do-no-harm violation; auditor must NOT rescue it"
+
+# ---------------- INJECTED (mutate P1's real artifacts; known-correct verdict) ----------------
+- id: I1_lever_B_mislabel
+  class: injected
+  gap: gap1_orthogonal_lever_as_kernel_win
+  base: P1_flydsl_gemm_real_win
+  recipe: >
+    Replace the change-under-test in the cand config with a serving lever (set
+    speculative_algorithm=NEXTN, speculative_num_steps=4) and label the integrate as a "kernel win".
+    Keep the throughput delta real.
+  expect:
+    verdict: PASS
+    action: downgrade_headline   # keep the measured delta, reclassify it
+    lever_class: B
+    counts_as_kernel_win: false
+    note: "spec-decode is orthogonal; must be separated from any kernel-win headline"
+
+- id: I2_baseline_drift
+  class: injected
+  gap: stale_baseline
+  base: P1_flydsl_gemm_real_win
+  recipe: "Pass BASELINE_THROUGHPUT=1300 (>>re-derived ref 1004.9; ~29% out of the 0.5% band)."
+  expect:
+    verdict: FAIL
+    action: eject
+    baseline_drift_fail: true
+    note: "never gate against a baseline that no longer reproduces"
+
+- id: I3_same_conditions_violation
+  class: injected
+  gap: gap6_contamination_confound
+  base: P1_flydsl_gemm_real_win
+  recipe: "Edit the cand leg server_info so a SECOND knob differs (e.g. mem_fraction_static 0.85->0.80)."
+  expect:
+    verdict: FAIL
+    action: eject
+    same_conditions_ok: false
+    note: "two differences -> the delta is confounded, not attributable to the change under test"
+
+- id: I4_null_evidence_rederive
+  class: injected
+  gap: gap4_verdict_without_evidence
+  base: P1_flydsl_gemm_real_win
+  recipe: "Null out median/min/max/non_overlapping in integrate_result.json; leave raw bench_runs.jsonl intact."
+  expect:
+    verdict: PASS               # auditor re-derives from raw and still verifies
+    action: pass
+    note: "independence: never trust reported medians; re-derive from raw. If raw were ALSO missing -> FAIL."
+
+- id: I5_latency_hidden_regression
+  class: injected
+  gap: gap6_perfskills_ttft_hidden
+  base: P1_flydsl_gemm_real_win
+  recipe: "Inflate cand TTFT (e.g. 2916->9446 ms, +120%) while keeping the tok/s gain."
+  expect:
+    verdict: PASS
+    action: flag
+    headline_integrity: flag
+    note: "throughput-only headline must not hide a co-metric (TTFT) regression"
+
+- id: I6_gamed_isolated_flat_e2e
+  class: injected
+  gap: gap5_benchmark_gaming_synthetic
+  base: P1_flydsl_gemm_real_win
+  recipe: "Inject isolated_speedup=3.0 but set the cand e2e leg ~= ref (delta < noise band)."
+  expect:
+    verdict: FAIL
+    action: eject
+    real_delta_ok: false
+    note: "isolated >> e2e with no real e2e delta -> reject; the e2e is the source of truth"
