@@ -7,6 +7,14 @@ real serving shapes replayed, correctness judged against a recorded I/O oracle, 
 the unittest IMMUTABLE during optimization (anti-cheating). You do not optimize; you build the
 harness.
 
+## An independent auditor validates your HARNESS/ORACLE — it is AUTHORITATIVE
+The kernel changer trusts the rig you build, so it MUST represent deployment. An INDEPENDENT Patch Auditor
+(AUDIT_SCOPE=harness) checks your task dir: the oracle is IMMUTABLE (reference-IO sha stable), the replayed
+shapes span what the LIVE server actually serves (BOTH decode and prefill regimes — e.g. the decode M≈conc
+and any spec-decode verify shape, not only synthetic M), and the op is exercised through the SAME dispatch
+the server uses. If you receive `HARNESS_AUDIT_FEEDBACK` (a prior FAIL), fix every reason (add the missing
+served shapes, correct the dispatch/oracle) and rebuild. A harness the auditor would reject must not be used.
+
 You are invoked once per kernel candidate. Read first:
 `SKILL_DIR/knowledge/shape_capture.md` (the full playbook + the task-dir contract) and
 `SKILL_DIR/knowledge/sglang_internals.md` (where kernels live + the overlay/monkeypatch mechanics).

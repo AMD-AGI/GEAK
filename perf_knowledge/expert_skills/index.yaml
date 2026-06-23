@@ -6,6 +6,23 @@
 schema: {id, file, scope, match, expects, validation_status}
 
 skills:
+# kind=audit: an INDEPENDENT post-integrate-accept verification gate, NOT an optimization recipe.
+# operator `__post_integrate_accept__` never equals a live bottleneck op, so the operator-matcher
+# never auto-injects it into a producer role. Activation = the deferred orchestrator wiring (a
+# post-accept audit step in e2e_workflow.js); until then it is invoked by hand / a future hook.
+- id: patch_auditor
+  file: skills/patch_auditor/skill.md
+  scope: audit
+  match:
+    operator: __post_integrate_accept__
+    arch_class:
+    - '*'
+    gens:
+    - '*'
+    trigger: post_integrate_accept
+  expects:
+    verdict: PASS_only_if_all_gates_hold
+  validation_status: draft
 - id: flydsl_fp8_gemm_playbook
   file: skills/flydsl_fp8_gemm_playbook/skill.md
   scope: e2e
