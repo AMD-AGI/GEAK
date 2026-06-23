@@ -865,10 +865,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         ? allLanes.filter(l => (l.lastEval || l.patch)).sort((a, b) => b.best - a.best)
         : allLanes.filter(l => (l.lastEval || l.patch) && l.best > 1.0).sort((a, b) => b.best - a.best).slice(0, 2);
       if (!cands.length) return;
+      const bankedHeads = new Set();   // P4: one kernel per head in the combined overlay (same-head lanes edit the SAME module -> cannot stack; keep the first lane that converts e2e)
       if (opts.final) log(`[deep] FINALIZE gate: sweeping ${cands.length} patched lane(s) onto the cumulative overlay (combined cross-kernel deliverable).`);
       e2eGateCount++;
       log(`[deep] E2E GATE #${e2eGateCount} on serving {${SERVING_GPU}} TP=${SERVING_TP}: [${cands.map(c => c.uid + ' ' + c.best.toFixed(3) + 'x').join(', ')}] (overlapping co-opt on dedicated cards).`);
       for (const c of cands) {
+        if (opts.final && bankedHeads.has(c.head.short_name)) { log(`  [deep] FINALIZE: skip ${c.uid} -- head ${c.head.short_name} already banked (same module, cannot stack).`); continue; }
         const integ = await safeAgent(
           roleAgent('e2e_integrator', 'integrate', 'Apply a deep head candidate; gate on e2e throughput; report engagement/cudagraph/mem/decode for feedback.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
@@ -889,7 +891,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           log(`  [deep] ${c.uid}: REJECTED — output_parity=fail vs true baseline.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
         } else if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.e2e_throughput_tok_s > curTput) {
-          curOverlay = integ.accepted_overlay || curOverlay; curTput = integ.e2e_throughput_tok_s;
+          curOverlay = integ.accepted_overlay || curOverlay; curTput = integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
           acceptedHeads.push({ short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', e2e_delta_pct: integ.e2e_delta_pct, isolated: c.best });
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
