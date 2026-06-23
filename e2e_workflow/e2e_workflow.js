@@ -156,8 +156,9 @@ const DEEP_MAX_RESEEDS = parseInt(A.deep_max_reseeds != null ? A.deep_max_reseed
 // rather than burning cheap zero-winner waves into the runtime's hard agent cap (which throws and skips
 // finalize). DEEP_AGENT_BUDGET keeps projected nested-agent spend safely below that cap so finalize runs.
 const DEEP_CONVERGE_STREAK = parseInt(A.deep_converge_streak != null ? A.deep_converge_streak : 3, 10); // consecutive zero-gain waves before declaring convergence and finalizing
-const DEEP_AGENT_BUDGET = parseInt(A.deep_agent_budget != null ? A.deep_agent_budget : 700, 10); // stop STARTING new waves once projected nested-agent spend reaches this (margin under the runtime cap)
-const DEEP_AGENTS_PER_BURST = parseInt(A.deep_agents_per_burst != null ? A.deep_agents_per_burst : 16, 10); // conservative nested-agents-per-burst estimate for the budget projection
+const DEEP_AGENT_BUDGET = parseInt(A.deep_agent_budget != null ? A.deep_agent_budget : 820, 10); // stop STARTING new waves once projected nested-agent spend reaches this (~180 margin under the 1000 runtime cap for finalize)
+const DEEP_AGENTS_PER_BURST = parseInt(A.deep_agents_per_burst != null ? A.deep_agents_per_burst : 20, 10); // realistic nested-agents-per-burst (setup+bench[+analyze+profile if cold] + ~3 rounds*~7) for the budget projection
+const DEEP_FINAL_ACCURACY_LIMIT = parseInt(A.deep_final_accuracy_limit != null ? A.deep_final_accuracy_limit : 500, 10); // larger gsm8k sample at the FINALIZE gate so a boundary candidate (e.g. ~tol-1pt) is decided on signal, not n=200 noise
 // ---- ACCURACY GATE (opt-in switch) ------------------------------------------------------------------
 // For QUANTIZED kernels (MXFP8/fp8) byte-exact e2e parity is the WRONG bar — a kernel within the unittest
 // tolerance rounds differently and flips borderline greedy argmaxes, so byte-parity over-rejects valid
@@ -885,6 +886,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
             CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
             ...ACCURACY_INPUTS,
+            ...(opts.final && ACCURACY_GATE !== 'none' ? { ACCURACY_LIMIT: DEEP_FINAL_ACCURACY_LIMIT } : {}),   // de-noise the finalize accuracy decision
           }),
           { phase: 'HeadKernel', label: `integrate ${c.uid} g${e2eGateCount}`, schema: INTEGRATE_SCHEMA });
         if (integ && integ.output_parity === 'fail') {
@@ -967,7 +969,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     try {
     while (!DEEP_DEADLINE_HIT) {
       if (convergeStreak >= DEEP_CONVERGE_STREAK) { log(`[deep] CONVERGED \u2014 ${convergeStreak} consecutive zero-gain waves; stopping to finalize.`); break; }
-      if ((deepBurstsSpent + 1) * DEEP_AGENTS_PER_BURST >= DEEP_AGENT_BUDGET) { log(`[deep] agent budget reached (~${deepBurstsSpent * DEEP_AGENTS_PER_BURST}/${DEEP_AGENT_BUDGET}); stopping to finalize.`); break; }
+      const projAgents = (deepBurstsSpent + mainSlots + serveSlots) * DEEP_AGENTS_PER_BURST + wave * 6;   // project a FULL next wave of bursts + per-wave overhead (harvest/curate/gate)
+      if (projAgents >= DEEP_AGENT_BUDGET) { log(`[deep] agent budget reached (proj ~${projAgents}/${DEEP_AGENT_BUDGET}, ${deepBurstsSpent} bursts); stopping to finalize with margin for the cap.`); break; }
       if (!allLanes.some(l => l.active)) { if (!reseedForDepth()) break; continue; }   // depth: don't exit on plateau while budget remains
       wave++;
       const prevTput = curTput;
@@ -1009,9 +1012,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       convergeStreak = (curTput > prevTput * 1.001 || newIsoBest > globalIsoBest * 1.001) ? 0 : convergeStreak + 1;
     }
     } catch (e) { log(`[deep] wave loop aborted (${(e && e.message) || e}); proceeding to finalize so progress is still banked + reported.`); }
-    // FINALIZE \u2014 always runs (convergence / agent-budget / deadline / throw all land here):
-    await harvestLanes(allLanes.filter(l => l.lastEval || l.ran > 0), 'final');
-    await runGate({ final: true });   // P4 FINALIZE: every patched lane -> cumulative overlay (the combined cross-kernel deliverable; banks oracle-invisible host/e2e wins like the manual +21.8%)
+    // FINALIZE \u2014 always runs (convergence / agent-budget / deadline / throw all land here). Wrapped so
+    // that even if it hits the runtime cap mid-sweep, the overlay banked so far (curOverlay/curTput) holds.
+    try {
+      await harvestLanes(allLanes.filter(l => l.lastEval || l.ran > 0), 'final');
+      await runGate({ final: true });   // P4 FINALIZE: every patched lane -> cumulative overlay (the combined cross-kernel deliverable; banks oracle-invisible host/e2e wins like the manual +21.8%)
+    } catch (e) { log(`[deep] finalize partial (${(e && e.message) || e}); best banked overlay so far: e2e ${curTput} tok/s.`); }
     log(`[deep] done after ${wave} wave(s), ${e2eGateCount} gate(s). e2e ${curTput} tok/s (${(curTput / Math.max(BASELINE_TPUT, 1e-9)).toFixed(3)}× baseline; target ×${DEEP_E2E_TARGET}). per-lane vs-live: ${allLanes.map(l => l.uid + '=' + l.best.toFixed(2) + 'x').join(', ')}.`);
   } else if (FAST_MODE && GPU_LIST.length > 1) {
     // ========================= FAST-MODE PARALLEL HEAD TRACK (fast-mode only) =========================
