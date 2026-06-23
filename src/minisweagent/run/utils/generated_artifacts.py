@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 _ROOT_GENERATED_DIRS = {
     "build",
     "build_harness",
+    "_geak_build",
     ".aiter_jit",
     "_eval_worktree",
 }
@@ -97,6 +98,7 @@ def generated_helper_excludes(cwd: Path | None = None) -> list[str]:
         "run_harness.sh",
         "build",
         "build_harness",
+        "_geak_build",
         ".aiter_jit",
         "_eval_worktree",
         "test_harness.py",
@@ -131,8 +133,21 @@ def _parse_git_diff_paths(header: str) -> tuple[str, str] | None:
 
 
 def _section_is_binary(section_lines: list[str]) -> bool:
-    """True when a diff section contains a GIT binary patch (never source code)."""
-    return any("GIT binary patch" in line for line in section_lines[:10])
+    """True when a diff section is a binary diff (never source code).
+
+    Catches both formats git emits: ``GIT binary patch`` (with ``git diff
+    --binary``) and ``Binary files a/... and b/... differ`` (the default, when
+    ``--binary`` is absent). The latter cannot be applied by ``git apply`` at
+    all, so any section carrying it must be dropped regardless of path — this is
+    what makes binary-artifact filtering name-agnostic (build dirs, JIT caches,
+    ``.so``/``.ninja_*`` files, etc.) rather than dependent on a hardcoded list.
+    """
+    for line in section_lines[:10]:
+        if "GIT binary patch" in line:
+            return True
+        if line.startswith("Binary files ") and line.rstrip("\n").endswith(" differ"):
+            return True
+    return False
 
 
 def strip_generated_helper_sections(patch_text: str) -> tuple[str, list[str]]:
