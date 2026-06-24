@@ -147,7 +147,7 @@ args: { ...same..., accuracy_gate:"gsm8k", accuracy_limit:200, accuracy_tol:0.01
   gsm8k (5-shot, greedy, fixed seed), and accepts iff `cand_em >= baseline_em - accuracy_tol`.
 - `accuracy_limit` = #questions (default **200**; deep uses a larger sample at finalize to de-noise the
   boundary). `accuracy_tol` = allowed exact-match drop (default **0.01**).
-- Standalone A/B (no full run): `scripts/accuracy_ab.sh <model> <overlay_dir> <gpus> <port> <limit> <out>`.
+- The eval client is `scripts/gsm8k_eval.py` (model-agnostic; queries the OpenAI-compatible endpoint).
 - Leaving it unset (`"none"`) changes nothing vs before — the gate stays throughput + parity only.
 
 ## Output
