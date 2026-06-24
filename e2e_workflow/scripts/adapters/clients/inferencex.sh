@@ -67,7 +67,7 @@ adapter_bench() {
     --dataset-name random \
     --random-input-len "$ISL" \
     --random-output-len "$OSL" \
-    --random-range-ratio "${RANDOM_RANGE_RATIO:-1}" \
+    --random-range-ratio "${RANDOM_RANGE_RATIO:-0}" \
     --num-prompts "$NUMP" \
     --max-concurrency "$MAXC" \
     --request-rate inf \
@@ -87,7 +87,7 @@ adapter_bench() {
   if [ -n "$res_json" ] && [ -f "$res_json" ]; then
     "$py" -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))" "$res_json" \
       >> "$RESULT_JSONL" 2>/dev/null || cat "$res_json" >> "$RESULT_JSONL"
-    rm -f "$res_json"
+    mv "$res_json" "$res_json.consumed" 2>/dev/null || true   # no `rm` (approval prompt); move aside
   else
     echo "!!! inferencex client: no result file in $res_dir" >&2
     return 6

@@ -19,9 +19,9 @@ last_seen: 2026-06-15
     `triton_gemm_a8w8_blockscale` + `gemm_a8w8_blockscale_bpreshuffle`.
 - verify: honest in-process `config=` kwarg A/B, same synth fp8 operands held fixed, interleaved
   min-of-N; confirm engagement via live `_get_config(M,N,K)` (returns a (dict,use_persistent) tuple → [0]).
-- dead-end: a FLAT overlay (BM=256 for all M) tanks decode 0.6–0.7× — decode MUST stay generic.
-- dead-end: BN=256 + BM=256 together = LDS spill (0.29×) — widen only one dim.
-- dead-end: on the **vLLM CK live path** (not Triton) this overlay does NOT apply — live is CK
+- caution: a FLAT overlay (BM=256 for all M) tanks decode 0.6–0.7× — decode MUST stay generic.
+- caution: BN=256 + BM=256 together = LDS spill (0.29×) — widen only one dim.
+- caution: on the **vLLM CK live path** (not Triton) this overlay does NOT apply — live is CK
   xdl-cshuffle; the lever there is env `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<csv>`, but it yields ~1.00×
   (CK default heuristic already picks the optimal `256x128x128 intrawave_v3`). ALWAYS check which live
   path (CK vs Triton) is engaged BEFORE choosing the lever.

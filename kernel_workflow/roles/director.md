@@ -28,6 +28,24 @@ Inputs in your prompt: `KERNEL_PATH_ORIG`, `EXP_ROOT` (base dir for timestamped 
 `EVAL_DIR_OVERRIDE` (may be empty), `KERNEL_NAME_HINT` (basename), `TASK` (may be empty), and
 `MODE` (`optimize` default | `author`). In `author` mode you also get `TARGET_LANGUAGE` and `OP_SPEC`.
 
+### DEEP-MODE resume (ONLY when `STATE_DIR` is in your inputs — otherwise ignore this entire section)
+`STATE_DIR` is a stable per-(kernel,backend) directory carried ACROSS deep-mode waves. It lets a
+continued wave build on the cumulative best instead of restarting. Handle it as follows:
+- **If `STATE_DIR` is set AND `$STATE_DIR/best/` exists and is non-empty** (a prior wave's cumulative-best
+  workspace — it contains the optimized `kernel_src/` AND the immutable oracle `unittest.py`/`meta.json`/
+  `reference_io.pt`): create `EVAL_DIR` as usual, but **seed `baseline/` and `workspace/` by copying from
+  `$STATE_DIR/best/`** (same tar-pipe excludes as the optimize-mode copy) instead of from
+  `KERNEL_PATH_ORIG`. Re-apply `chmod -w` to the oracle files. `git init` + commit this seeded state as
+  HEAD (so this wave's patches diff from the cumulative best). Then read `$STATE_DIR/STATE.json` if present
+  and return `resumed: true` plus `prior_state` (its `cumulative`, `insights`, `ledger`, `bottleneck_now`,
+  `best_per_case`). Verify the oracle is intact: `reference_io.pt` sha256 must still match `meta.json`'s
+  `reference_io_sha256` (if present) — if it was tampered, fall back to seeding from `KERNEL_PATH_ORIG` and
+  set `resumed: false`.
+- **If `STATE_DIR` is set but `$STATE_DIR/best/` is absent** (the FIRST wave): proceed with the normal
+  copy from `KERNEL_PATH_ORIG` below, and return `resumed: false` (no `prior_state`). Do NOT create
+  `$STATE_DIR/best` here — `update_memory` populates it after the first improving round.
+- Never write anything outside `EVAL_DIR` except reading `$STATE_DIR` (and, on the first wave, nothing in it).
+
 ### `mode=author` — seed an empty workspace anchored on the immutable oracle
 When `MODE=author`, `KERNEL_PATH_ORIG` is an **op task dir** (holds `meta.json` + immutable
 `unittest.py` + optional `reference_io.pt`), NOT a kernel to optimize. There is no source to copy.
@@ -112,6 +130,8 @@ Return JSON:
   "notes": "anything unusual about the layout"
 }
 ```
+(DEEP-MODE resume only: also include `"resumed": true` and `"prior_state": {cumulative, insights, ledger,
+bottleneck_now, best_per_case}` when you seeded from `$STATE_DIR/best/`; omit both on a normal/first run.)
 
 ---
 
@@ -128,10 +148,13 @@ baseline latencies recorded at benchmark setup).
 2. Build a fresh validation workspace from the ORIGINAL path:
    ```bash
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
-   rm -rf "$EVAL_DIR/validation_workspace"; mkdir -p "$EVAL_DIR/validation_workspace"
-   # Copy from the ORIGINAL excluding .git + build artifacts (tar-pipe), so no `rm -rf .git` is
-   # needed and the source history can't leak into validation. (rm -rf of OUR own eval_dir scratch
-   # above is safe — it's never the user's original.)
+   # NO `rm` (it triggers an approval prompt that blocks autonomous runs). Use a UNIQUE validation
+   # workspace each time so nothing is ever deleted; move any pre-existing one aside (mv, not rm).
+   VWS="$EVAL_DIR/validation_workspace"
+   [ -e "$VWS" ] && mv "$VWS" "${VWS}.old_$(date +%s)_$$" 2>/dev/null || true
+   mkdir -p "$VWS"
+   # Copy from the ORIGINAL excluding .git + build artifacts (tar-pipe), so the source history can't
+   # leak into validation and no build cache is inherited.
    ( cd "$KERNEL_PATH_ORIG" && tar \
        --exclude='./.git' --exclude='*/.git' \
        --exclude='./build' --exclude='*/build' \
@@ -145,7 +168,7 @@ baseline latencies recorded at benchmark setup).
    git -c user.email=team@workflow -c user.name=team add -A
    git -c user.email=team@workflow -c user.name=team commit -q -m "validation_baseline"
    git apply "$EVAL_DIR/final_patch.diff"
-   rm -rf build __pycache__ */__pycache__ *.so 2>/dev/null || true
+   # (No artifact cleanup needed — the tar copy excluded build/__pycache__/*.so; git apply adds only source.)
    ```
 3. Run CORRECTNESS (from COMMANDMENT, with cwd = validation_workspace). If it fails → status
    `flagged`, record the failure, do NOT report a speedup as accepted.

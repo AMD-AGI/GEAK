@@ -84,7 +84,18 @@ fi
 HOST=${HOST:-127.0.0.1}
 TP=${TP:-1}
 GPU=${GPU:-0}
-MEM_FRACTION=${MEM_FRACTION:-0.85}
+MEM_FRACTION=${MEM_FRACTION:-0.9}    # match infer.sh (no --gpu-memory-utilization => vllm default 0.9)
+# GPU allow-list (only enforced when ALLOWED_GPUS is set → default behavior unchanged): refuse to launch
+# on any GPU id not in the comma-separated list, so a run pinned to GPUs 4-7 can't spill onto others.
+if [ -n "${ALLOWED_GPUS:-}" ] && [ "${REUSE_SERVER:-0}" != "1" ]; then
+  _allow=",$(echo "$ALLOWED_GPUS" | tr -d ' '),"
+  for _g in $(echo "$GPU" | tr ',' ' '); do
+    case "$_allow" in
+      *",$_g,"*) : ;;
+      *) echo "!!! GPU '$_g' not in ALLOWED_GPUS='$ALLOWED_GPUS' — refusing to launch (resource allow-list)." >&2; exit 5 ;;
+    esac
+  done
+fi
 EXTRA_SERVER_ARGS=${EXTRA_SERVER_ARGS:-}    # e.g. "--attention-backend triton"
 # EXTRA_ENV is applied to the SERVER launch line, space-separated KEY=VAL pairs:
 #   EXTRA_ENV="SGLANG_USE_AITER=1 HIPBLASLT_TUNING_FILE=/path/tune.dat"
@@ -93,24 +104,45 @@ EXTRA_ENV=${EXTRA_ENV:-}
 OVERLAY_PYTHONPATH=${OVERLAY_PYTHONPATH:-}
 
 # ---- port: auto-allocate a free one if not pinned (avoids 30000 collisions on shared boxes) ----
+# Constrained auto-allocation: pick a free port inside [PORT_BASE, PORT_BASE+PORT_SPAN) so a run can be
+# pinned to a required window (policy: "ports must start with 40"). Default base 40000. An explicit PORT
+# OUTSIDE the window is clamped (ignored + re-allocated) unless PORT_ENFORCE_RANGE=0. Port number does not
+# affect throughput, so this never changes optimization results.
+# RIG CONSTRAINT (deep_mode M3 run): every port MUST start with 30 -> window 30000..30999.
+PORT_BASE=${PORT_BASE:-30000}
+PORT_SPAN=${PORT_SPAN:-1000}
+PORT_ENFORCE_RANGE=${PORT_ENFORCE_RANGE:-1}
 PORT=${PORT:-}
+if [ -n "$PORT" ] && [ "$PORT_ENFORCE_RANGE" = "1" ]; then
+  if [ "$PORT" -lt "$PORT_BASE" ] || [ "$PORT" -ge "$((PORT_BASE+PORT_SPAN))" ] 2>/dev/null; then
+    echo "!!! PORT=$PORT outside required window ${PORT_BASE}..$((PORT_BASE+PORT_SPAN-1)); ignoring + auto-allocating in range."
+    PORT=""
+  fi
+fi
 if [ -z "$PORT" ]; then
-  if declare -F adapter_default_port >/dev/null; then PORT="$(adapter_default_port)"; fi
-  PORT=${PORT:-0}
-  # 0 (or a busy port) -> ask the OS for a free one. MUST stay <= 55535: sglang derives a gRPC
-  # port = PORT + 10000 and rejects it if > 65535 (an OS ephemeral bind() can return >55535 and
-  # crash the server at launch). So pick a random free port in a bounded safe range, not bind(0).
-  FREE_PORT=$(python3 - <<'PY' 2>/dev/null || true
-import socket, random
-cands = list(range(20000, 55001)); random.shuffle(cands)  # PORT+10000 <= 65001 < 65535
-for p in cands:
-    s = socket.socket()
+  # RIG CONSTRAINT (M3 run): scan [PORT_BASE, PORT_BASE+PORT_SPAN) = 2000..2099 (every port starts with
+  # 20). PORT+10000=12099 << 65535, so also safe for sglang's gRPC-port derivation that upstream guards.
+  FREE_PORT=$(PORT_BASE="$PORT_BASE" PORT_SPAN="$PORT_SPAN" python3 - <<'PY' 2>/dev/null || true
+import os, socket, random
+base=int(os.environ.get("PORT_BASE","40000")); span=int(os.environ.get("PORT_SPAN","1000"))
+order=list(range(span)); random.shuffle(order)
+for off in order:
+    p=base+off
+    s=socket.socket()
     try:
-        s.bind(("127.0.0.1", p)); print(p); s.close(); break
+        s.bind(("127.0.0.1", p)); s.close(); print(p); break
     except OSError:
-        s.close()
+        s.close(); continue
 PY
 )
+  if [ -z "$FREE_PORT" ]; then
+    echo "!!! No free port in ${PORT_BASE}..$((PORT_BASE+PORT_SPAN-1)); falling back to OS-assigned (may violate range)."
+    FREE_PORT=$(python3 - <<'PY' 2>/dev/null || true
+import socket
+s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()
+PY
+)
+  fi
   [ -n "$FREE_PORT" ] && PORT="$FREE_PORT"
 fi
 
@@ -142,9 +174,32 @@ fi
 # NUM_WARMUPS=min(CONC,8)). Consumed by the inferencex client adapter; the native
 # adapters use their own warmup round instead.
 NUM_WARMUPS=${NUM_WARMUPS:-$(( CONC < 8 ? CONC : 8 ))}
-RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-1}   # fixed sequence lengths (matches Hyperloom)
+# RANDOM_RANGE_RATIO / NUM_PROMPTS / NUM_WARMUPS / SEED are the measurement 口径.
+# These are STANDALONE defaults: when an external orchestrator (Hyperloom) drives
+# the run it exports its own values (interface/run_e2e.py:apply_bench_protocol from
+# handoff.bench_protocol) and they override these via the env. Do NOT hard-code a
+# value assuming the caller's 口径 — ratio=0 is fixed-length, ratio>0 is variable
+# (lengths sampled in [(1-ratio)*len, (1+ratio)*len]), and the caller may use
+# either. Standalone default = fixed-length (matches infer.sh --random-range-ratio 0).
+RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0}
 REPEATS=${REPEATS:-3}                 # repeat the bench this many times; report median + spread
 SEED=${SEED:-0}                       # fixed seed for reproducibility / parity
+
+# ---- client trust-remote-code (general, model-agnostic) ----
+# The benchmark CLIENT loads the model's tokenizer; for custom-tokenizer models
+# transformers raises ValueError unless trust_remote_code is allowed. Mirror the
+# SERVER's trust setting: if the server is launched with --trust-remote-code
+# (via EXTRA_SERVER_ARGS), the client measuring it must trust the same remote
+# code. Stays OFF (no implicit remote-code execution) for models that don't need
+# it, so standalone behaviour is unchanged. An explicit caller value always wins.
+if [ -z "${BENCH_TRUST_REMOTE_CODE:-}" ]; then
+  case "$EXTRA_SERVER_ARGS" in
+    *trust-remote-code*|*trust_remote_code*) BENCH_TRUST_REMOTE_CODE=1 ;;
+    *) BENCH_TRUST_REMOTE_CODE=0 ;;
+  esac
+fi
+# transformers / HF hub honor HF_HUB_TRUST_REMOTE_CODE for tokenizer auto-load.
+[ "$BENCH_TRUST_REMOTE_CODE" = "1" ] && HF_HUB_TRUST_REMOTE_CODE=${HF_HUB_TRUST_REMOTE_CODE:-1}
 
 # ---- modes ----
 REUSE_SERVER=${REUSE_SERVER:-0}       # 1 = a warm server is already up at HOST:PORT; don't launch/kill
@@ -163,6 +218,7 @@ RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
+export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
 echo "Backend:      $BACKEND  (adapter: $ADAPTER)"
 echo "Model:        $MODEL"
@@ -184,6 +240,24 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# ---- serving-GPU mutex ----
+# TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
+# Profiler / config-sweep / integrate ref·cand / validation all share it, so
+# without a lock a reprofile can be starved indefinitely by a concurrent
+# integrate benchmark. Serialize every serving launch behind a per-GPU-set lock.
+# (Isolated op-bench uses the SEPARATE GPU_IDS pool and is unaffected.)
+if [ "${SERVING_GPU_LOCK_DISABLE:-0}" != "1" ] && [ "${REUSE_SERVER:-0}" != "1" ]; then
+  _gpu_key="${GPU:-0}"; _gpu_key="${_gpu_key//,/_}"
+  SERVING_LOCK="${SERVING_GPU_LOCK:-/tmp/geak_serving_gpu_${_gpu_key}.lock}"
+  exec {SERVING_LOCK_FD}>"$SERVING_LOCK"
+  echo ">>> Acquiring serving-GPU lock ($SERVING_LOCK) for GPU=$GPU ..."
+  if ! flock -w "${SERVING_LOCK_WAIT:-7200}" "$SERVING_LOCK_FD"; then
+    echo "!!! serving-GPU lock timeout (${SERVING_LOCK_WAIT:-7200}s) on GPU=$GPU" >&2
+    exit 4
+  fi
+  echo ">>> serving-GPU lock acquired."
+fi
 
 # ---- launch (unless reusing a warm server) ----
 if [ "$REUSE_SERVER" != "1" ]; then

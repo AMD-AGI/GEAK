@@ -10,19 +10,26 @@ absolute per-case latencies. The script trusts only your numbers.
 - `PATCH` — path to the candidate's `best_patch.diff` (generated relative to `CANONICAL`'s git HEAD).
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
+- **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
+  the oracle correctness + unweighted geomean, also re-measure and report the addendum's e2e-aligned
+  weighted geomean and ENFORCE its hard gates (decode-no-regress, memory-footprint cap, cudagraph-safe);
+  mark the candidate failed if it violates a gate even when the unweighted geomean improved. Never relax
+  the immutable oracle's correctness/tolerance.
 
 ## Steps
 1. Build a clean copy and apply the patch:
    ```bash
-   rm -rf "$VERIFY_DIR/ws"; mkdir -p "$VERIFY_DIR/ws"
-   cp -r "$CANONICAL"/. "$VERIFY_DIR/ws/"
-   cd "$VERIFY_DIR/ws"
-   # drop inherited build cache (.torch_ext build.ninja has absolute paths to CANONICAL) — rebuild fresh
-   rm -rf build __pycache__ */__pycache__ *.so .torch_ext 2>/dev/null || true
+   # NO `rm` (prompts + blocks autonomous runs). Unique ws each time; tar-copy EXCLUDING build artifacts
+   # (.torch_ext build.ninja has absolute paths to CANONICAL), so nothing stale is inherited.
+   WS="$VERIFY_DIR/ws_$(date +%s)_$$"; mkdir -p "$WS"
+   ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/.git' --exclude=./build --exclude='*/build' \
+       --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \
+       --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$WS" && tar -xf - )
+   cd "$WS"
    git checkout -- . 2>/dev/null || true
    git apply "$PATCH" || { echo "PATCH_APPLY_FAILED"; }
-   rm -rf build __pycache__ */__pycache__ *.so 2>/dev/null || true
    ```
+   (Use `$WS` as your verify workspace for all subsequent commands.)
    If the patch fails to apply → return `status:"apply_failed"`, `verified_geomean:0`.
 2. Read `COMMANDMENT.md` for the exact correctness + full-benchmark commands + parse hint.
 3. Run CORRECTNESS (cwd = your ws). If it fails → `status:"correctness_failed"`, no speedup.

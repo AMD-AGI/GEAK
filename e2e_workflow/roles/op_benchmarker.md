@@ -11,8 +11,9 @@ e2e Integrator turns your winner into an overlay/config and runs the Amdahl gate
 Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder, per-backend tuning knobs,
   parity/accuracy gate (the priors).
-- `SKILL_DIR/knowledge/learned/INDEX.md` — **YOUR distilled experience library** (read INDEX, open only
-  the cards matching this run's `(kernel_class, gfx, regime)`). CURATE it after a run — never blind-append.
+- `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as **advisory priors** (an aid, not a
+  cage). Use the matching cards to ADD candidates to your bake-off, never to prune it or skip the e2e
+  gate — measurement is the judge. CURATE it after a run — never blind-append.
 - `SKILL_DIR/knowledge/e2e_optimization.md` — Amdahl reasoning + measurement discipline.
 - `GEAK/perf_knowledge/index/capability_index.yaml` — **REFERENCE ONLY**, to *widen* your Tier-A
   candidate set: which backends have a documented impl for this op + the gens/dtypes/regimes they support.
@@ -30,10 +31,25 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
 - **Tier A — backend select / DISCOVER** (no source): bench every available backend on the immutable
   oracle; record per-backend ms + whether an existing editable impl exists + `best_known_ms`.
 - **Tier B — per-backend tune** (no source): tune each promising backend to its best.
-  - **For GEMM the tuning lever is aiter's per-shape DB** (`AITER_TUNE_GEMM=1` capture → gradlib
+  - **int4_w4a16 fused-MoE (vLLM) — DO THIS FIRST, it is the memory-free win.** vLLM ships NO
+    tuned Triton config for an unseen int4 fused-MoE shape, so the expert grouped-GEMM (often the
+    single biggest chunk of GPU time on an int4 MoE model) runs on a slow default fallback (server log:
+    "Using default MoE config"). Follow `SKILL_DIR/knowledge/gemm_tuning/moe_int4_tuning.md`: it derives the per-rank
+    shape from the model config (+TP) and gives a generic, env-driven driver you **write into
+    `$EVAL_DIR/config/` and run** (per the same convention as the aiter-GEMM recipe — NOT a shared
+    `scripts/` file). It sweeps per M bucket against the faithful `fused_experts` int4_w4a16 path
+    (`override_config`, parity rel<1e-2) and writes `E=…,N=…,int4_w4a16.json`. Return it as a
+    `winner_kind=env` direct_light winner with `apply_env=VLLM_TUNED_CONFIG_FOLDER=<dir>`, and recommend
+    `--max-num-batched-tokens ≈2·ISL` (clamp 8192..32768) so prefill M-buckets dominate. This costs
+    **ZERO extra HBM** (tile/scheduling only), so it sails through the Integrator's memory gate. **Prefer
+    it over a quant/fp8 rewrite of the same op**: an fp8-fold rewrite caches a second fp8 weight copy and,
+    at memory parity, OOMs at KV-cache init (op-level 1.5x but e2e-undeployable — the Integrator rejects
+    it `mem_footprint_starves_kv`). Only pursue the fp8/quant author route (Tier C/D) when
+    `ENABLE_FP8=true` AND it passes that memory-footprint gate.
+  - **For dense GEMM the tuning lever is aiter's per-shape DB** (`AITER_TUNE_GEMM=1` capture → gradlib
     `gemm_tuner.py` → `AITER_CONFIG_GEMM_BF16` deploy; gradlib itself races hipBLASLt/asm/triton/skinny
     solutions per shape, so one aiter tune covers per-backend GEMM tuning). Full recipe + gotchas:
-    `SKILL_DIR/knowledge/aiter_gemm_tuning.md`. **Do NOT use PyTorch TunableOp / `HIPBLASLT_TUNING_FILE`** —
+    `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`. **Do NOT use PyTorch TunableOp / `HIPBLASLT_TUNING_FILE`** —
     on sglang/aiter they hook the PyTorch dispatch the live path bypasses (zero engagement). For attn,
     Tier-B is the `--attention-backend` swap (a server flag the Config Tuner owns).
   - Write any driver script you need into `$EVAL_DIR` (NOT the shared `scripts/`). Discover tool paths
@@ -145,7 +161,7 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    head can still be optimized via the author route even if the bake-off probe could not measure a baseline.
 
 3. **Tier B per-backend tune (direct_light)** — for GEMM, run the **aiter DB tune** (see
-   `SKILL_DIR/knowledge/aiter_gemm_tuning.md`). **The tune input MUST come from a live `AITER_TUNE_GEMM=1`
+   `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`). **The tune input MUST come from a live `AITER_TUNE_GEMM=1`
    capture, NOT synthesized/profile-derived shapes.** ⚠️ Critical: the runtime lookup key includes the
    **`bias` flag** (and exact M/N/K/dtype). sglang issues most of these dense GEMMs with **`bias=False`**
    (bias is applied separately); if you synthesize the untuned set from the profile and guess `bias=True`,
@@ -176,8 +192,9 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
 6. **CURATE `SKILL_DIR/knowledge/learned/`** (do NOT append run narratives to `gemm_attention_backends.md`).
    Per `knowledge/learned/README.md`: read `INDEX.md`; MERGE into the card matching this op's
    `(kernel_class, gfx, regime)` (bump `confirms`/`confidence`, widen `effect`, add `source`, update
-   `last_seen`); INSERT a new card ONLY if novel AND ≥★★; a scoped regression → a `dead-end:` line;
-   NULL/unverified → eval-dir report only. Keep `INDEX.md` ≤40 lines. Raw per-backend ms / `best_known_ms`
+   `last_seen`); INSERT a new card ONLY if novel AND ≥★★; a surprising regression → a CONDITIONED
+   `caution:` line ("also verify X", never a blocklist); NULL/unverified → eval-dir report only. Keep
+   `INDEX.md` ≤40 lines. Record the e2e-transfer note (did it move e2e, not just isolated). Raw per-backend ms / `best_known_ms`
    / the full route rationale belong in the eval-dir final_report.md, not the persistent card.
 
 Return JSON:

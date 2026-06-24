@@ -46,6 +46,9 @@ adapter_bench() {
   local res_json="$PROFILE_DIR/.vllm_bench_$$_${RANDOM}.json"
   local extra=()
   [ "$PROF" = "1" ] && extra=(--profile)
+  # Custom-tokenizer models (e.g. Kimi-K2.6) need the bench client to trust remote code to load
+  # the tokenizer; mirror the server's trust setting (BENCH_TRUST_REMOTE_CODE from the dispatcher).
+  [ "${BENCH_TRUST_REMOTE_CODE:-0}" = "1" ] && extra+=(--trust-remote-code)
   # GREEDY (--temperature 0) + --ignore-eos: deterministic, fixed-length OSL output. This is the
   # correct protocol for optimization work — it makes throughput reproducible, output parity byte-exact,
   # and speculative-decoding (MTP/EAGLE) acceptance meaningful (recent vllm dropped the temp==0 default).

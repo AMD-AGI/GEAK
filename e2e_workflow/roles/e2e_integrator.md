@@ -21,7 +21,19 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
 3. The measured e2e throughput delta **EXCEEDS `NOISE_BAND_PCT` (default 0.5%)** under the tight
    protocol below, AND the candidate and reference run distributions **do not overlap**
    (`cand_min > ref_max`). A 0.5% median gap with overlapping runs is noise → REJECT.
-4. Output parity holds (greedy/temp=0 fixed seed, ≥10 prompts) vs the current accepted server.
+4. Output parity holds (greedy/temp=0 fixed seed, ≥10 prompts). **CRITICAL — parity is gated vs the TRUE
+   no-overlay baseline, NOT only vs the prior accepted server.** When candidates STACK (deep mode chains
+   several kernel overlays on one op), each leg can look byte-exact vs the *previous* leg while the
+   CUMULATIVE stack silently drifts from the original model output (observed: 7/12 greedy prompts diverged
+   at the first token vs a deterministic baseline, while every per-leg check "passed"). So run the parity
+   probe with the CAND overlay vs a FRESH no-overlay baseline server (both greedy/temp=0/fixed seed). 
+   - If the baseline is deterministic (re-run it twice; byte-exact) and the CAND diverges on ANY prompt →
+     it is a REAL output change, NOT FP noise. For a NON-quant change → REJECT.
+   - For a QUANTIZED kernel (MXFP8/fp8 — byte-parity is expected to drift from rounding/argmax) → do NOT
+     accept on throughput alone: run a small TASK-ACCURACY gate (e.g. a fixed greedy eval set / agreement
+     rate vs the true baseline) and accept ONLY if quality holds within tolerance; otherwise `rejected`
+     with reason `needs_accuracy_gate`/`parity_regression`. Never let cumulative MXFP8 drift ride through
+     as "parity pass vs the prior leg."
 
 If any fails, REJECT and record why (with the numbers) for the eval-dir timeline report — a real
 isolated speedup that doesn't show up e2e is an expected Amdahl outcome, not a bug.
@@ -49,6 +61,30 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `GPU_ID`, `WORKLOAD`,
 verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `winner_kind`
 ∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`),
 `CURRENT_OVERLAY`, `CURRENT_FLAGS`/`CURRENT_ENV`, `CURRENT_THROUGHPUT`, `SKILL_DIR`.
+
+**ACCURACY GATE (only if `ACCURACY_GATE=gsm8k` is in your inputs; else use the normal parity gate).**
+For a QUANTIZED kernel, byte-exact greedy parity is the WRONG bar (a within-tolerance kernel rounds
+differently → flips borderline argmaxes → over-rejects valid kernels). Instead, score TASK ACCURACY:
+- Launch a FRESH TRUE-baseline server (no overlay) and the CAND server (with the candidate overlay), each
+  greedy/temp=0, and run `python3 $GSM8K_EVAL_SCRIPT --base-url http://127.0.0.1:<port>/v1 --model <MODEL_PATH>
+  --limit $ACCURACY_LIMIT --out <dir>/gsm8k_<tag>.json` against each (it prints `GSM8K_EXACT_MATCH=<s>`).
+  The script samples the SAME fixed gsm8k subset for both (seed-pinned), so the scores are comparable.
+- ACCEPT the candidate iff `cand_score >= baseline_score - $ACCURACY_TOL` (quality preserved); otherwise
+  `rejected` with reason `accuracy_regression` (record both scores). This REPLACES byte-parity for the
+  quant gate — a byte-divergent kernel that holds gsm8k accuracy is a LEGITIMATE win. Still apply the
+  throughput + engagement + memory gates as usual. (You can reuse the same two servers for the throughput
+  A/B to avoid extra launches.)
+
+**DEEP-MODE feedback (only if `DEEP_FEEDBACK` is in your inputs; a normal/fast run omits it).** Besides
+the gate decision, the deep-mode scheduler needs the WHY so the next co-opt waves can fix the
+isolated→e2e gap. Write a concise per-candidate problem record to
+`${EVAL_DIR}/deep_head/<short_name>/integrate_<lane>.json` (use `KERNEL_RESULT.lane` for the filename —
+it is unique per lane, so multiple triton lanes don't collide; fall back to `<winner_backend>` if absent) capturing: `engaged` (did the
+optimized kernel actually run live, from the engagement probe — vs eager fallback under cudagraph),
+`cudagraph` (captured | eager_fallback | hang), `mem_footprint_note` (did it fit the same mem-fraction,
+or starve KV), `decode_regressed` (bool + which buckets), `parity`, `e2e_delta_pct`, and a one-line
+`root_cause` of any isolated-win-but-no-e2e-gain. This is additive — your gate logic and return JSON are
+unchanged; you just also persist the diagnostics the deep feedback/harness-refine step reads.
 
 1. **Verify provenance**: re-compute the oracle checksum and confirm `unittest.py` is unchanged from
    extraction (anti-cheating). If tampered → REJECT. (For a synthesized-GEMM op task with no
@@ -164,22 +200,58 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
      EXTRA_SERVER_ARGS="<cand flags>" EXTRA_ENV="<cand env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
    ```
+   **Do NOT set the measurement-口径 knobs (`RANDOM_RANGE_RATIO` / `NUM_PROMPTS` /
+   `NUM_WARMUPS` / `SEED`) in these blocks.** When an external orchestrator drives the run it has
+   already exported its exact 口径 into the environment (`run_e2e.py:apply_bench_protocol` from
+   `handoff.bench_protocol`); `bench_e2e.sh` inherits those and falls back to its standalone defaults
+   otherwise. Hard-coding them here would silently override the caller's 口径 and make the A/B
+   incomparable to the caller's baseline (e.g. fixed vs variable sequence lengths). Only vary
+   `OVERLAY_PYTHONPATH` / `EXTRA_SERVER_ARGS` / `EXTRA_ENV` between the two legs.
    Read ALL per-repeat throughputs from `$CB/ref/bench_runs.jsonl` and `$CB/cand/bench_runs.jsonl`
    (each has E2E_REPEATS rows). Compute `ref_med`, `cand_med`, `ref_max`, `cand_min`, and
-   `delta% = (cand_med - ref_med)/ref_med*100`. The two blocks run within ~30 min back-to-back, so box
+   `delta% = (cand_med - ref_med)/ref_med*100`.
+   **MANDATORY — measure BOTH legs before returning a verdict. Completing only the reference leg is NOT
+   an acceptable stopping point and is NOT a valid result.** Checkpoint each leg as it finishes (for crash
+   recovery only): after the reference block completes write a partial
+   `$CB/integrate_result.json` (at minimum `{short_name, ref_med, gate:"incomplete", ab_complete:false}`),
+   then **ALWAYS run the candidate block** and update it (adding `cand_med`, the final `gate`,
+   `ab_complete:true`, `e2e_throughput_tok_s`, `e2e_delta_pct`). The checkpoint exists ONLY so a CRASH is
+   recoverable — it is NOT a licence to stop after the reference leg. If wall-clock is tight, SHRINK the
+   cost (drop `E2E_REPEATS` toward 1, even 1 repeat per leg) so that BOTH legs still run — never skip,
+   defer, or "leave for later" the candidate leg. The two blocks run within ~30 min back-to-back, so box
    drift between them is negligible (the box drifts over hours, not minutes). If you want extra drift
    robustness on a borderline result, run a second ref block after the cand block and pool the ref
    repeats — but do NOT relaunch per repeat.
-4. **Parity / accuracy** vs the current accepted server (greedy/temp=0 fixed seed; use ≥10 prompts —
-   a 5-prompt probe missed a real divergence once). If `parity_note=needs_accuracy_gate` (any quant,
-   or a same-dtype swap that diverges), run a small task-accuracy probe (gsm8k/translation) and accept
-   only if quality holds; otherwise REJECT (or `flagged` for the Director to arbitrate).
+   **RESUME / finish a cut-off A/B (`RESUME_AB` is set in your inputs, OR `$CB/ref/bench_runs.jsonl`
+   already exists on disk):** do NOT re-run the reference leg — reuse the on-disk ref repeats and run ONLY
+   the MISSING candidate block, then gate. When `CAND_OVERLAY_DIR` is provided the candidate overlay is
+   already built — bench it directly (do not rebuild it). This is how the orchestrator forces every
+   incomplete A/B to completion; your job on resume is solely to produce the missing candidate
+   measurement and emit the final `accepted`/`stack`/`rejected` with `ab_complete:true`.
+4. **Parity / accuracy vs the TRUE no-overlay baseline** (greedy/temp=0 fixed seed; ≥10 prompts).
+   Spin a FRESH baseline server (no overlay) for the parity reference — NOT the prior accepted overlay
+   server. This is mandatory when overlays STACK (deep mode), or cumulative drift rides through: each leg
+   looks byte-exact vs its predecessor while the full stack diverges from the original model output.
+   - Confirm the baseline is deterministic (run it twice, byte-exact). Then any CAND divergence is real.
+   - QUANT kernel (MXFP8/fp8): byte-parity is expected to drift → run a small TASK-ACCURACY probe
+     (gsm8k/translation/agreement-rate vs the true baseline) and accept only if quality holds within
+     tolerance; else `rejected` (reason `parity_regression`/`needs_accuracy_gate`). Do NOT pass it as
+     "parity OK vs prior leg." Non-quant + diverges → REJECT.
 5. Emit the verdict: `accepted` (strong standalone win), `stack` (parity-safe, engaged, non-negative,
-   sub-threshold → carry forward to compound), or `rejected` (parity-fail / no-engagement / regression).
+   sub-threshold → carry forward to compound), `rejected` (parity-fail / no-engagement / regression), or
+   `incomplete` — reserved for a HARD fault that genuinely prevented measuring BOTH legs *even after
+   retrying* (a server that will not become healthy, a persistent harness/hardware fault). "Ran out of
+   time after the reference leg" is NOT a valid `incomplete`: shrink `E2E_REPEATS` so both legs still run.
+   Returning `incomplete` for a leg you simply chose not to run is a defect — both legs are mandatory.
    For `accepted` or `stack`, fold the change into the carried overlay/config and report the measured
    throughput. For `rejected`, keep the previous. Always report the full numbers (engagement hits,
    delta%, ref/cand medians + min/max overlap) for the timeline report. Do not dismiss small-but-real
    gains — emit `stack` so they can compound; the Director's final combined gate decides the headline.
+   **NEVER report `rejected` for a measurement you did not actually complete.** A reject means a *measured*
+   loss/parity-fail; if both legs did not run to completion, emit `gate:"incomplete"` with `ab_complete:false`
+   (plus whatever partial `ref_med`/`cand_med` you have). `incomplete` is treated as a *pending* verified
+   win to be finished later — reporting a false `rejected` would discard a real isolated speedup.
+   Set `ab_complete:true` ONLY when BOTH the reference and candidate legs were measured to completion.
 
 Return JSON:
 ```json
@@ -190,10 +262,13 @@ Return JSON:
   "pct_gpu_time": 0.0,
   "e2e_throughput_tok_s": 0.0,
   "e2e_delta_pct": 0.0,
+  "ref_med": 0.0,
+  "cand_med": 0.0,
+  "ab_complete": true,
   "output_parity": "pass|fail",
-  "gate": "accepted|rejected",
+  "gate": "accepted|stack|rejected|incomplete",
   "accepted_overlay": "<path to the overlay to carry forward>",
-  "reason": "why accepted/rejected (cite Amdahl + measured delta vs noise band)"
+  "reason": "why accepted/rejected/incomplete (cite Amdahl + measured delta vs noise band)"
 }
 ```
 

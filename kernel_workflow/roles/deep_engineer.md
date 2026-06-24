@@ -30,6 +30,11 @@ coherent implementation, and iterate hard.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
   `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds — read
   them; do not re-walk confirmed dead-ends).
+- **DEEP-MODE (optional — act only if present; a normal run omits all three):** `SHARED_KB` (cross-backend
+  blackboard — borrow transferable techniques, skip its dead-ends), `E2E_FEEDBACK` (end-to-end ground
+  truth — if isolated wins didn't move e2e, make integration-fidelity part of your rewrite: cudagraph-
+  capture-safe, zero host syncs on steady decode, small data_ptr-keyed weight cache), `HARNESS_ADDENDUM`
+  (e2e-refined weighted target + hard gates — push toward it, never violate decode-no-regress / mem cap).
 - `KERNEL_KNOWLEDGE_DIR` (may be empty), `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` — pointers into the
   AMD operator×backend SOTA base (see the contract section).
 
@@ -79,8 +84,9 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
 4. ALWAYS run CORRECTNESS before BENCHMARK on every iteration. A fast-but-wrong kernel scores 0.
 5. Hipify safety (HIP): never put `<<<>>>` launches inside a macro if/else or ternary — use template
    dispatch functions (see `hip_optimization.md` → Hipify Safety Rules).
-6. After editing sources, ninja auto-rebuilds; only `rm -rf .torch_ext` when you suspect a stale build
-   (e.g. after editing headers). Use the COMMANDMENT `SETUP` to clear loose `build/__pycache__/*.so`.
+6. After editing sources, ninja auto-rebuilds. NEVER use `rm` (it prompts and blocks the run); your
+   workspace is a fresh artifact-free copy. If you suspect a stale build (e.g. after editing headers),
+   MOVE the cache aside: `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true`.
 
 ## Iteration protocol (you go deep — much longer than a specialist)
 1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record the

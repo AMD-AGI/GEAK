@@ -17,9 +17,11 @@ You are invoked per PHASE. Read first, every time:
 - `SKILL_DIR/knowledge/e2e_optimization.md` — the lever tiers + Amdahl stop rule (the core doctrine).
 - `SKILL_DIR/knowledge/profile_parse.md` — how to read the Top-N `classification` field.
 - `SKILL_DIR/knowledge/backend_playbook.md` — the class→backend priors (menu, ranked plan). Read before routing.
-- `SKILL_DIR/knowledge/learned/INDEX.md` — **YOUR distilled experience library** (read INDEX first,
-  then open only the cards matching this run's `(model_class, gfx, regime)`). CURATE it after a run
-  (merge/insert ≥★★ / archive contradicted) per `knowledge/learned/README.md` — never blind-append.
+- `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as **advisory priors** (an aid, not a
+  cage; the workflow performs well without it). Read it AFTER forming your own profile-driven plan, as a
+  cross-check + a source of EXTRA candidates — it only ADDs options, never prunes them or skips
+  measurement; the on-box bake-off + e2e gate is the judge. CURATE it after a run (merge/insert ≥★★ /
+  archive contradicted) per `knowledge/learned/README.md` — never blind-append.
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder + per-backend priors; use
   it to build `head_candidates` (GEMM/attention) and pick their candidate backends.
 - The AMD knowledge base at `GEAK/perf_knowledge/` is **REFERENCE ONLY** — facts/how-to, not
@@ -181,9 +183,11 @@ verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SK
      consistent, or Director-verified e2e). Each card carries `lever / apply / verify / source`, stays
      ≤~15 lines, and gets ONE INDEX line. Keep `INDEX.md` ≤40 lines (evict lowest `confidence×freshness`).
    - **NULL / overlapping / unverified → write NOTHING to `learned/`** (it goes only in the eval-dir report).
-   - **A scoped, reproducible negative is allowed as a `dead-end:` line on the relevant card** (e.g.
-     "tile BM=256 regresses decode 0.6×") — a precise, conditioned fact, never a blanket "X doesn't
-     work". A finding CONTRADICTED by new evidence → move its card to `_archive.md` with the refuting source.
+   - **A surprising negative → a CONDITIONED `caution:` line** on the relevant card (e.g. "on
+     decode-bound serving, a host-heavy rewrite regressed e2e despite a big isolated win — verify the
+     e2e gate"), framed as "**also verify X**" with the condition it held under + its source. **Never a
+     blocklist / "don't use X"** — a future run must stay free to try (and beat) it; the box judges.
+     A claim CONTRADICTED by new evidence → move its card to `_archive.md` with the refuting source.
    Mechanism facts are recorded as POSITIVE ROUTING ("optimize GEMM via aiter DB"), not "X failed".
 2. Keep the in-run hypothesis ledger (wins AND nulls, for THIS run's report) in `EVAL_DIR/insight_log.md`.
 
