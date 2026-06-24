@@ -174,9 +174,32 @@ fi
 # NUM_WARMUPS=min(CONC,8)). Consumed by the inferencex client adapter; the native
 # adapters use their own warmup round instead.
 NUM_WARMUPS=${NUM_WARMUPS:-$(( CONC < 8 ? CONC : 8 ))}
-RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0}   # 0 = fixed seq lengths (matches infer.sh --random-range-ratio 0)
+# RANDOM_RANGE_RATIO / NUM_PROMPTS / NUM_WARMUPS / SEED are the measurement 口径.
+# These are STANDALONE defaults: when an external orchestrator (Hyperloom) drives
+# the run it exports its own values (interface/run_e2e.py:apply_bench_protocol from
+# handoff.bench_protocol) and they override these via the env. Do NOT hard-code a
+# value assuming the caller's 口径 — ratio=0 is fixed-length, ratio>0 is variable
+# (lengths sampled in [(1-ratio)*len, (1+ratio)*len]), and the caller may use
+# either. Standalone default = fixed-length (matches infer.sh --random-range-ratio 0).
+RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0}
 REPEATS=${REPEATS:-3}                 # repeat the bench this many times; report median + spread
 SEED=${SEED:-0}                       # fixed seed for reproducibility / parity
+
+# ---- client trust-remote-code (general, model-agnostic) ----
+# The benchmark CLIENT loads the model's tokenizer; for custom-tokenizer models
+# transformers raises ValueError unless trust_remote_code is allowed. Mirror the
+# SERVER's trust setting: if the server is launched with --trust-remote-code
+# (via EXTRA_SERVER_ARGS), the client measuring it must trust the same remote
+# code. Stays OFF (no implicit remote-code execution) for models that don't need
+# it, so standalone behaviour is unchanged. An explicit caller value always wins.
+if [ -z "${BENCH_TRUST_REMOTE_CODE:-}" ]; then
+  case "$EXTRA_SERVER_ARGS" in
+    *trust-remote-code*|*trust_remote_code*) BENCH_TRUST_REMOTE_CODE=1 ;;
+    *) BENCH_TRUST_REMOTE_CODE=0 ;;
+  esac
+fi
+# transformers / HF hub honor HF_HUB_TRUST_REMOTE_CODE for tokenizer auto-load.
+[ "$BENCH_TRUST_REMOTE_CODE" = "1" ] && HF_HUB_TRUST_REMOTE_CODE=${HF_HUB_TRUST_REMOTE_CODE:-1}
 
 # ---- modes ----
 REUSE_SERVER=${REUSE_SERVER:-0}       # 1 = a warm server is already up at HOST:PORT; don't launch/kill
@@ -195,6 +218,7 @@ RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
+export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
 echo "Backend:      $BACKEND  (adapter: $ADAPTER)"
 echo "Model:        $MODEL"
@@ -216,6 +240,24 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# ---- serving-GPU mutex ----
+# TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
+# Profiler / config-sweep / integrate ref·cand / validation all share it, so
+# without a lock a reprofile can be starved indefinitely by a concurrent
+# integrate benchmark. Serialize every serving launch behind a per-GPU-set lock.
+# (Isolated op-bench uses the SEPARATE GPU_IDS pool and is unaffected.)
+if [ "${SERVING_GPU_LOCK_DISABLE:-0}" != "1" ] && [ "${REUSE_SERVER:-0}" != "1" ]; then
+  _gpu_key="${GPU:-0}"; _gpu_key="${_gpu_key//,/_}"
+  SERVING_LOCK="${SERVING_GPU_LOCK:-/tmp/geak_serving_gpu_${_gpu_key}.lock}"
+  exec {SERVING_LOCK_FD}>"$SERVING_LOCK"
+  echo ">>> Acquiring serving-GPU lock ($SERVING_LOCK) for GPU=$GPU ..."
+  if ! flock -w "${SERVING_LOCK_WAIT:-7200}" "$SERVING_LOCK_FD"; then
+    echo "!!! serving-GPU lock timeout (${SERVING_LOCK_WAIT:-7200}s) on GPU=$GPU" >&2
+    exit 4
+  fi
+  echo ">>> serving-GPU lock acquired."
+fi
 
 # ---- launch (unless reusing a warm server) ----
 if [ "$REUSE_SERVER" != "1" ]; then

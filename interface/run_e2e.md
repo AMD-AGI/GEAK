@@ -23,6 +23,9 @@ Discovery: the installer should export `PERFSKILLS_E2E_RUNNER` pointing at this
 file (`$PERFSKILLS_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
 
+The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
+(`baseline/`, `validation/final/`, `final/` bundle, `director_e2e_validation.json`).
+
 ## `handoff.json` (caller → workflow)
 
 ```jsonc
@@ -40,11 +43,28 @@ hard-coded handle.
   "raw_baseline_tput": 1485.4,           // caller's official raw baseline (carried for reference)
   "exp_root": "/work/perfskills_exp",    // where the timestamped run dir is created
   "bench_client": "auto",                // auto|inferencex|native — see口径 alignment below
-  "inferencex_path": "/opt/InferenceX"   // optional; else taken from $INFERENCEX_PATH
+  "inferencex_path": "/opt/InferenceX",  // optional; else taken from $INFERENCEX_PATH
+  "bench_protocol": {                    // optional; caller's measurement 口径 (see below)
+    "random_range_ratio": 0,             //   fixed(0) vs variable(>0) sequence lengths
+    "num_prompts": 192,
+    "num_warmups": 8,
+    "seed": 0
+  }
 }
 ```
 
 Required: `model_path`, `exp_root`. Everything else has a default.
+
+`bench_protocol` is optional and **partial-friendly**: only the keys present are
+applied. Omit it entirely (standalone PerfSkills, no external orchestrator) and
+`bench_e2e.sh` keeps its own defaults unchanged. When the caller (Hyperloom)
+supplies it, those values are the EXACT knobs the caller's official baseline was
+measured with — forwarding them is what makes the workflow's numbers
+cross-harness comparable. The `random_range_ratio` convention is `0`=fixed-length,
+`>0`=variable-length (lengths sampled in `[(1-ratio)*len, (1+ratio)*len]`); a
+silent mismatch between the caller's value and the standalone default is otherwise
+a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarded
+口径 agree unless the caller explicitly requests variable lengths.
 
 ### How handoff maps to the workflow (owned by `run_e2e.py:map_args`)
 
@@ -60,6 +80,7 @@ Required: `model_path`, `exp_root`. Everything else has a default.
 | `launch_recipe` | `launch_script` | optional |
 | `exp_root` | `exp_root` | run dir root |
 | `bench_client` / `inferencex_path` | env `BENCH_CLIENT` + `INFERENCEX_PATH` | exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
+| `bench_protocol.{random_range_ratio,num_prompts,num_warmups,seed}` | env `RANDOM_RANGE_RATIO` / `NUM_PROMPTS` / `NUM_WARMUPS` / `SEED` | `run_e2e.py:apply_bench_protocol` exports ONLY the provided keys, overriding `bench_e2e.sh` standalone defaults; absent ⇒ defaults kept (not a JS arg) |
 | — | `config_tune="false"` | caller already did config search; never double-run |
 | — | `apply_to_original="true"` | so `final/final_launch.sh` + overlay are emitted for sweep reuse |
 
@@ -86,9 +107,74 @@ Required: `model_path`, `exp_root`. Everything else has a default.
   "accepted_kernels": [ /* what was optimized + how (per-kernel) */ ],
   "accepted_heads": [ /* head GEMM/attn winners */ ],
   "accepted_config": { "flags": "...", "env": "..." },
-  "report_path": ".../final_report.md"   // human report: per-kernel optimizations, changed params, TTFT/TPOT
+  "report_path": ".../final_report.md",  // human report: per-kernel optimizations, changed params, TTFT/TPOT
+  "kernel_journey_path": ".../kernel_journey.json",  // per-kernel journey contract (see below); absent if nothing accepted
+  "recovered_from_disk": true             // present+true only when the handoff was rebuilt from on-disk artifacts
 }
 ```
+
+## Handoff resilience (the workflow return is never the single point of failure)
+
+The workflow return (the JSON object carrying `eval_dir` + `accepted_*`) is the
+only value scraped from the agent transcript. A failed scrape used to discard
+the **entire** run as `workflow_parse_error` even though every artifact
+(`director_e2e_validation.json`, the `final/` bundle, the measured gain) is on
+disk. `run_e2e.py` now removes that fragility, layered:
+
+1. **Robust capture** — the SDK path accumulates the *full* transcript (every
+   text fragment from every message, incl. tool-result blocks), not just the
+   last assistant text.
+2. **Robust extraction** — the parser scans the whole transcript for the last
+   JSON object carrying `eval_dir` (tolerates compact single-line, ```json```
+   fences, pretty-printed multi-line, and trailing prose).
+3. **On-disk sentinel** — on success the parsed return is persisted to
+   `<eval_dir>/workflow_return.json`, so any later read never re-scrapes.
+4. **Disk recovery** — if capture/extraction still fails (or the run timed out
+   after the measured leg), the return is **rebuilt from on-disk artifacts**:
+   `workflow_return.json` if present, else reconstructed from
+   `director_e2e_validation.json` (throughput/speedup/parity/overlay/launch +
+   `accepted_config` from `serving_config`) with accepted-kernel names recovered
+   from the stable `overlay/cand_*` layout. A real win is therefore never lost
+   to a lost handoff line. Recovery returns nothing only when no completed
+   `eval_dir` exists (the run genuinely produced nothing). Recovered runs set
+   `result.recovered_from_disk = true`.
+
+These are general (no model/run-specific assumptions) and key only off the
+stable artifact layout the workflow always writes.
+
+## `kernel_journey.json` (per-kernel journey contract → orchestrator)
+
+Because GEAK-e2e is a whole-pipeline e2e optimizer (not a per-kernel backend),
+its authored kernels were invisible in the orchestrator's kernel-journey view
+(`KERNEL_JOURNEY_SCHEMA.md`), which only saw upstream `tracelens` discovery.
+`run_e2e.py` now emits `<eval_dir>/kernel_journey.json` (path echoed in
+`result.kernel_journey_path`). It is self-contained and its per-kernel
+sub-objects are shaped EXACTLY as the orchestrator recorder's
+`record_kernel_{dispatch,backend_result,e2e}` inputs, so the orchestrator
+replays them verbatim — all mapping lives here, once.
+
+```jsonc
+{
+  "schema_version": 1,
+  "producer": "kernel-agent",
+  "eval_dir": ".../e2e_<model>_<ts>",
+  "versions": { "geak": { "tool": "geak", "root_dir": "...", "commit": "<sha>", "version": "<sha>" } },
+  "kernels": [
+    {
+      "kernel_id": "int4_w4a16_fused_moe_grouped_gemm",
+      "name": "int4_w4a16_fused_moe_grouped_gemm",
+      "gpu_pct": 0.57,
+      "dispatch":       { "dispatched": true, "backends": ["geak"], "skip_reason": "", "task_group": null },
+      "backend_result": { "kernel_id": "...", "run_id": "...", "attempts": [ { "backend": "geak", "attempt_id": "...", "status": "succeeded", "decision": "KEEP", "micro_speedup": 1.6316, "compile_passed": true, "correctness_passed": true, "optimized_path": ".../final_patch.diff", "error": null, "error_type": null } ], "verification": { "micro_speedup": 1.6316, "best_attempt_id": "...", "best_backend": "geak" }, "metadata": { "root_dir": "...", "version": "<sha>" } },
+      "e2e":            { "integrated": true, "e2e_gain_pct": 12.21, "validated": true, "decision": "KEEP", "patch_path": ".../final_patch.diff", "target_file": null, "extra_server_args": "--kv-cache-dtype fp8" }
+    }
+  ]
+}
+```
+
+On the recovery path, per-kernel `micro_speedup` may be `null` (it only existed
+in the scraped return) — never fabricated; but when exactly one kernel was
+accepted it is credited with the whole measured e2e delta (sound attribution).
 
 ## Reusing the deliverables for a workload sweep
 
@@ -112,10 +198,10 @@ The workflow must measure on the **same口径** as the caller's official baselin
 |---|---|
 | primary metric | aggregate `output_throughput` (output tok/s, **not** per-GPU) |
 | latency | `ttft_ms` / `tpot_ms` median |
-| dataset | `random`, `random-range-ratio 1.0` (fixed lengths) |
-| workload | same `ISL/OSL/CONC`; `NUM_PROMPTS = max(CONC*factor, CONC)` |
-| warmups | `NUM_WARMUPS = min(CONC, 8)` (matches Hyperloom's materialize default) |
-| seed | fixed `SEED` |
+| dataset | `random`; `random-range-ratio` from `handoff.bench_protocol.random_range_ratio` (caller-driven: `0`=fixed, `>0`=variable), else standalone default `0` (fixed) |
+| workload | same `ISL/OSL/CONC`; `NUM_PROMPTS` from `bench_protocol.num_prompts`, else `max(CONC*factor, CONC)` |
+| warmups | `NUM_WARMUPS` from `bench_protocol.num_warmups`, else `min(CONC, 8)` (the materialize default) |
+| seed | `SEED` from `bench_protocol.seed`, else fixed `0` |
 | TP | same tensor-parallel as the caller (no TP=1 lock) |
 | parity | greedy / temp=0 fixed-seed output diff vs baseline |
 | **bench client** | `BENCH_CLIENT=inferencex` → the **exact same** `benchmark_serving.py` as Hyperloom |

@@ -67,7 +67,7 @@ adapter_bench() {
     --dataset-name random \
     --random-input-len "$ISL" \
     --random-output-len "$OSL" \
-    --random-range-ratio "${RANDOM_RANGE_RATIO:-1}" \
+    --random-range-ratio "${RANDOM_RANGE_RATIO:-0}" \
     --num-prompts "$NUMP" \
     --max-concurrency "$MAXC" \
     --request-rate inf \

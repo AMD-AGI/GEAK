@@ -128,6 +128,31 @@ op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for a
    the default backend once, then times the current path and checks a candidate against `ref`
    (bf16 rtol=atol=2e-2). Same per-case/geomean print shape as the kernel-layer unittest.
 
+#### Quantized GEMM (int4/fp8 W*A16, compressed-tensors / GPTQ-AWQ / A4W4) — ANTI-CHEAT ORACLE CONTRACT (mandatory)
+For a **quantized-weight** head (e.g. the int4 W4A16 `fused_moe_kernel_gptq_awq` MoE GEMM), the naive
+dense oracle is **exploitable** and has produced fake wins (a candidate that just replays a precomputed
+bf16-dequant weight or the reference output, wrapped in a graph, "wins" isolated but does NO quantized
+compute and CANNOT be wired to the live packed-int4 path → rejected `no_rebind_seam`). The oracle MUST
+force real compact-operand compute:
+- **The case/inputs dict handed to the candidate contains ONLY the compact quantized operands** the LIVE
+  kernel receives: activations `A` (bf16), the **packed** quantized weights (e.g. `w_packed` uint8 int4
+  nibbles), the dequant **`scales`** (+ optional zero-points), and the shape/`group_size` metadata.
+  **NEVER put the dequantized `w_deq` (bf16) NOR the reference output `ref` in the dict the candidate
+  sees** — those are the cheat vectors. Keep `w_deq`/`ref` as harness-local variables only.
+- **The default/baseline candidate MUST reconstruct from the compact form** (unpack int4 nibbles → signed
+  codes → multiply per-group `scales` → bf16 → GEMM), NOT read a precomputed `w_deq`. This makes the
+  baseline reflect the live fused-dequant cost, so a real authored kernel competes against a realistic
+  number (not a free pre-dequantized matmul).
+- **The oracle `ref`** is computed once in the harness from a high-precision dequant and used ONLY by the
+  correctness check (`_correct(out, ref)`); it is never exposed to the candidate.
+- **Model the rebindable contract**, not a toy sub-op. If the live seam is `fused_experts` (full
+  g1u1: GEMM1 → silu/mul → GEMM2, grouped over E experts/topk), the unittest's candidate signature and
+  oracle SHOULD cover that fused structure (or the Integrator cannot rebind a single-GEMM author → parity
+  fail). At minimum, document in `meta.json:rebind_seam_note` exactly which signature the candidate must
+  satisfy, and prefer a candidate entry point that matches `target_callable`'s arguments.
+- The `CURRENT_GROUPED_GEMM=module:attr` (or analogous) value-swap env must pass the candidate the SAME
+  compact-only dict. Re-confirm a smoke run of the default path passes correctness from the packed form.
+
 ### Attention (hook the backend forward to capture q/k/v/kv-cache/meta)
 1. Resolve the attention backend's forward callable for the active `--attention-backend` (the
    `target_callable` from the Architect, e.g. the prefill/decode entry under

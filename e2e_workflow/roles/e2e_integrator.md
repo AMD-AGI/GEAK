@@ -200,12 +200,34 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      EXTRA_SERVER_ARGS="<cand flags>" EXTRA_ENV="<cand env>" \
      bash "$EVAL_DIR/bench_e2e.sh" >>"$EVAL_DIR/logs/integrate_<short>.log" 2>&1
    ```
+   **Do NOT set the measurement-口径 knobs (`RANDOM_RANGE_RATIO` / `NUM_PROMPTS` /
+   `NUM_WARMUPS` / `SEED`) in these blocks.** When an external orchestrator drives the run it has
+   already exported its exact 口径 into the environment (`run_e2e.py:apply_bench_protocol` from
+   `handoff.bench_protocol`); `bench_e2e.sh` inherits those and falls back to its standalone defaults
+   otherwise. Hard-coding them here would silently override the caller's 口径 and make the A/B
+   incomparable to the caller's baseline (e.g. fixed vs variable sequence lengths). Only vary
+   `OVERLAY_PYTHONPATH` / `EXTRA_SERVER_ARGS` / `EXTRA_ENV` between the two legs.
    Read ALL per-repeat throughputs from `$CB/ref/bench_runs.jsonl` and `$CB/cand/bench_runs.jsonl`
    (each has E2E_REPEATS rows). Compute `ref_med`, `cand_med`, `ref_max`, `cand_min`, and
-   `delta% = (cand_med - ref_med)/ref_med*100`. The two blocks run within ~30 min back-to-back, so box
+   `delta% = (cand_med - ref_med)/ref_med*100`.
+   **MANDATORY — measure BOTH legs before returning a verdict. Completing only the reference leg is NOT
+   an acceptable stopping point and is NOT a valid result.** Checkpoint each leg as it finishes (for crash
+   recovery only): after the reference block completes write a partial
+   `$CB/integrate_result.json` (at minimum `{short_name, ref_med, gate:"incomplete", ab_complete:false}`),
+   then **ALWAYS run the candidate block** and update it (adding `cand_med`, the final `gate`,
+   `ab_complete:true`, `e2e_throughput_tok_s`, `e2e_delta_pct`). The checkpoint exists ONLY so a CRASH is
+   recoverable — it is NOT a licence to stop after the reference leg. If wall-clock is tight, SHRINK the
+   cost (drop `E2E_REPEATS` toward 1, even 1 repeat per leg) so that BOTH legs still run — never skip,
+   defer, or "leave for later" the candidate leg. The two blocks run within ~30 min back-to-back, so box
    drift between them is negligible (the box drifts over hours, not minutes). If you want extra drift
    robustness on a borderline result, run a second ref block after the cand block and pool the ref
    repeats — but do NOT relaunch per repeat.
+   **RESUME / finish a cut-off A/B (`RESUME_AB` is set in your inputs, OR `$CB/ref/bench_runs.jsonl`
+   already exists on disk):** do NOT re-run the reference leg — reuse the on-disk ref repeats and run ONLY
+   the MISSING candidate block, then gate. When `CAND_OVERLAY_DIR` is provided the candidate overlay is
+   already built — bench it directly (do not rebuild it). This is how the orchestrator forces every
+   incomplete A/B to completion; your job on resume is solely to produce the missing candidate
+   measurement and emit the final `accepted`/`stack`/`rejected` with `ab_complete:true`.
 4. **Parity / accuracy vs the TRUE no-overlay baseline** (greedy/temp=0 fixed seed; ≥10 prompts).
    Spin a FRESH baseline server (no overlay) for the parity reference — NOT the prior accepted overlay
    server. This is mandatory when overlays STACK (deep mode), or cumulative drift rides through: each leg
@@ -216,11 +238,20 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      tolerance; else `rejected` (reason `parity_regression`/`needs_accuracy_gate`). Do NOT pass it as
      "parity OK vs prior leg." Non-quant + diverges → REJECT.
 5. Emit the verdict: `accepted` (strong standalone win), `stack` (parity-safe, engaged, non-negative,
-   sub-threshold → carry forward to compound), or `rejected` (parity-fail / no-engagement / regression).
+   sub-threshold → carry forward to compound), `rejected` (parity-fail / no-engagement / regression), or
+   `incomplete` — reserved for a HARD fault that genuinely prevented measuring BOTH legs *even after
+   retrying* (a server that will not become healthy, a persistent harness/hardware fault). "Ran out of
+   time after the reference leg" is NOT a valid `incomplete`: shrink `E2E_REPEATS` so both legs still run.
+   Returning `incomplete` for a leg you simply chose not to run is a defect — both legs are mandatory.
    For `accepted` or `stack`, fold the change into the carried overlay/config and report the measured
    throughput. For `rejected`, keep the previous. Always report the full numbers (engagement hits,
    delta%, ref/cand medians + min/max overlap) for the timeline report. Do not dismiss small-but-real
    gains — emit `stack` so they can compound; the Director's final combined gate decides the headline.
+   **NEVER report `rejected` for a measurement you did not actually complete.** A reject means a *measured*
+   loss/parity-fail; if both legs did not run to completion, emit `gate:"incomplete"` with `ab_complete:false`
+   (plus whatever partial `ref_med`/`cand_med` you have). `incomplete` is treated as a *pending* verified
+   win to be finished later — reporting a false `rejected` would discard a real isolated speedup.
+   Set `ab_complete:true` ONLY when BOTH the reference and candidate legs were measured to completion.
 
 Return JSON:
 ```json
@@ -231,10 +262,13 @@ Return JSON:
   "pct_gpu_time": 0.0,
   "e2e_throughput_tok_s": 0.0,
   "e2e_delta_pct": 0.0,
+  "ref_med": 0.0,
+  "cand_med": 0.0,
+  "ab_complete": true,
   "output_parity": "pass|fail",
-  "gate": "accepted|rejected",
+  "gate": "accepted|stack|rejected|incomplete",
   "accepted_overlay": "<path to the overlay to carry forward>",
-  "reason": "why accepted/rejected (cite Amdahl + measured delta vs noise band)"
+  "reason": "why accepted/rejected/incomplete (cite Amdahl + measured delta vs noise band)"
 }
 ```
 

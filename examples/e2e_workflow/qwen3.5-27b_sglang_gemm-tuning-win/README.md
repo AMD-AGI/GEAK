@@ -17,7 +17,7 @@ no-op.
 ## Honest caveat
 The run was **stopped during the Milestone stage**: the `recompute_w_u` recursive optimization wedged
 (~3h) and triggered a host fork-storm (hundreds of `rocm_agent_enumerator` procs — see finding #8 in
-`workflow_e2e_team/knowledge/aiter_gemm_tuning.md`), which blocked the milestone's parallel barrier. So
+`workflow_e2e_team/knowledge/gemm_tuning/aiter_gemm_tuning.md`), which blocked the milestone's parallel barrier. So
 the single-kernel cluster's **e2e stacking number was not obtained**, and there is no auto-generated
 Finalize/Validate (`final_report.md` here was compiled by hand from the run's artifacts).
 
@@ -27,4 +27,4 @@ input comes from a live bias-correct capture — correcting the earlier "GEMM tu
 See `final_report.md` for the per-stage 阶段树, the artifact 产物树, and the full A/B numbers.
 
 (The tuned CSV itself is intentionally **not** shipped — solution indices are ROCm/aiter-build-specific;
-regenerate per stack via the recipe in `workflow_e2e_team/knowledge/aiter_gemm_tuning.md`.)
+regenerate per stack via the recipe in `workflow_e2e_team/knowledge/gemm_tuning/aiter_gemm_tuning.md`.)

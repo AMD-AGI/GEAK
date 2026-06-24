@@ -11,7 +11,7 @@ updated: 2026-06-08
 sources:
   - GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md
   - GEAK/e2e_workflow/knowledge/gemm_attention_backends.md
-  - GEAK/e2e_workflow/knowledge/aiter_gemm_tuning.md
+  - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
   - https://www.amd.com/en/developer/resources/technical-articles/2026/day-0-support-for-qwen-3-5-on-amd-instinct-gpus.html
 ---
 
@@ -95,7 +95,7 @@ hybrid GDN path (vendor).
 
 ## Sources
 - The +4.15% / +4.44% measured win, engagement, parity, the chunked-prefill reject: `GEAK/examples/e2e_workflow/qwen3.5-27b_sglang_isl1024_osl1024_conc64/final_report.md`.
-- Cross-run +4.96% / "+~5%" ledger figure + the stack-with-GEMM note: `GEAK/e2e_workflow/knowledge/{gemm_attention_backends.md,aiter_gemm_tuning.md}`.
+- Cross-run +4.96% / "+~5%" ledger figure + the stack-with-GEMM note: `GEAK/e2e_workflow/knowledge/{gemm_attention_backends.md,gemm_tuning/aiter_gemm_tuning.md}`.
 - AMD Qwen3.5 day-0 (`--attention-backend triton` for hybrid GDN, vendor): https://www.amd.com/en/developer/resources/technical-articles/2026/day-0-support-for-qwen-3-5-on-amd-instinct-gpus.html
 
 <!-- MANIFEST: gated-delta hybrid backend swap on Qwen3.5-27B/MI300X — --attention-backend triton = +4.15–4.44% measured (+4.96% ledger), engaged + parity, opens editable Triton surface, stacks with GEMM tune to ~+6%. -->

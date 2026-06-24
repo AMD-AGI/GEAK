@@ -8,7 +8,7 @@ experience; treat the seed as priors, not gospel — the unittest is the judge.
 ## Backend menu (what each is good at on MI300X)
 - **aiter** — AMD's fused op library (GEMM, rmsnorm+quant, MoE, some attention). **On sglang/gfx942 it
   IS the live dense-GEMM dispatcher** (`tuned_gemm.py` → hipBLASLt `Cijk_*`/asm/triton/skinny). Tune
-  its per-shape DB (`bf16_tuned_gemm.csv`) — this is THE GEMM lever (see `aiter_gemm_tuning.md`).
+  its per-shape DB (`bf16_tuned_gemm.csv`) — this is THE GEMM lever (see `gemm_tuning/aiter_gemm_tuning.md`).
   Also fuses norm+quant; often wins skinny/decode GEMM.
 - **hipBLASLt / Tensile** — the kernels aiter actually executes for dense GEMM. NOT separately tunable
   via `HIPBLASLT_TUNING_FILE` on this stack (aiter bypasses the PyTorch/hipBLASLt C dispatch for its
@@ -24,7 +24,7 @@ experience; treat the seed as priors, not gospel — the unittest is the judge.
 ## Class → ranked backends (priors)
 | kernel class | try in this order | notes |
 |---|---|---|
-| dense GEMM (prefill, large M) | **tune aiter `bf16_tuned_gemm.csv`** (capture→gradlib→`AITER_CONFIG_GEMM_BF16`) | confirmed +1.22% (partial) on hybrid-dense gfx942; NOT TunableOp/HIPBLASLT_TUNING_FILE — see `aiter_gemm_tuning.md` |
+| dense GEMM (prefill, large M) | **tune aiter `bf16_tuned_gemm.csv`** (capture→gradlib→`AITER_CONFIG_GEMM_BF16`) | confirmed +1.22% (partial) on hybrid-dense gfx942; NOT TunableOp/HIPBLASLT_TUNING_FILE — see `gemm_tuning/aiter_gemm_tuning.md` |
 | skinny GEMM (decode, M=batch) | tune aiter DB (decode M-buckets) → skinny default | aiter dispatches skinny kernels; tune M=16/32/48/64 buckets |
 | paged/prefill attention | CK(ck_tile) → aiter → triton FA | `--attention-backend` swap is free to try |
 | mamba / gated-delta linear attn | triton (tune) → HIP | almost always Triton; tune tiling/scan |
