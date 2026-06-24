@@ -110,6 +110,46 @@ Workflow({
 // Single-kernel pass-through (backward compatible): pass kernel_path instead of model_path.
 ```
 
+## Modes: default · fast · deep
+One pipeline, three depths — selected by the `fast_mode` / `deep_mode` args (both default `false` =
+**default** mode; they are mutually exclusive, **deep takes precedence**). Only the HeadKernel depth and
+which phases run change; the throughput metric, the e2e gate, and the reversible-overlay contract are
+identical. With both off, the run is **byte-identical** to the original (every mode knob is gated).
+
+| Mode | arg | Phases | HeadKernel | Budget (default) | Use when |
+|---|---|---|---|---|---|
+| **default** | *(none)* | ConfigSweep + HeadKernel + **Milestone** | serial, 1 pass/head, ≤2 authored langs, single e2e gate | — | full pipeline incl. the editable-kernel Milestone loop |
+| **fast** | `fast_mode:true` | HeadKernel only (skips ConfigSweep + Milestone) | **parallel** head track (extract/bake/author fan out across GPUs), time-capped | `fast_budget_ms` = 5h | a quick HeadKernel-only win under a wall-clock cap |
+| **deep** | `deep_mode:true` | ConfigSweep + HeadKernel (skips Milestone) | **global cross-kernel×backend lane pool** — every (head op × backend) optimizes in parallel, many rounds via STATE_DIR + reseed, cross-pollination (per-op SHARED_KB + run-global GLOBAL_KB), convergence-stop + agent-budget backstop, finalize banks a **combined cross-kernel overlay** | `deep_head_budget_ms` = 24h | the deepest/broadest result: most backends, most rounds, hours available |
+
+```
+# default — full pipeline
+args: { model_path, workflow_dir, backend:"vllm", tp:4, gpu_ids:"0,1,2,3", isl:1024, osl:1024, conc:64 }
+# fast — HeadKernel-only, parallel, time-boxed
+args: { ...same..., fast_mode:true, fast_budget_ms: 18000000 }
+# deep — exhaustive, multi-backend, parallel (give it all GPUs + hours)
+args: { ...same..., deep_mode:true, gpu_ids:"0,1,2,3,4,5,6,7", deep_head_budget_ms: 64800000 }
+```
+Pick **fast** for a bounded quick pass, **default** for the standard run, **deep** to chase the best
+achievable number (it is broader = more backends, deeper = more/faster rounds, parallel = lanes co-opt
+spare GPUs while the e2e gate runs on the serving slot, with matched in-window A/B so parallelism never
+corrupts a measurement).
+
+## Accuracy gate (gsm8k) — OFF by default
+By default the e2e gate accepts a kernel on **throughput delta + greedy output parity**
+(`accuracy_gate:"none"`). For QUANTIZED kernels (MXFP8/fp8) byte-parity is too strict — a within-tolerance
+kernel rounds differently and flips a few borderline greedy argmaxes — so you can switch the bar to
+**task accuracy**:
+```
+args: { ...same..., accuracy_gate:"gsm8k", accuracy_limit:200, accuracy_tol:0.01 }
+```
+- `accuracy_gate:"gsm8k"` → the Integrator serves a fresh TRUE baseline vs the candidate, runs sampled
+  gsm8k (5-shot, greedy, fixed seed), and accepts iff `cand_em >= baseline_em - accuracy_tol`.
+- `accuracy_limit` = #questions (default **200**; deep uses a larger sample at finalize to de-noise the
+  boundary). `accuracy_tol` = allowed exact-match drop (default **0.01**).
+- Standalone A/B (no full run): `scripts/accuracy_ab.sh <model> <overlay_dir> <gpus> <port> <limit> <out>`.
+- Leaving it unset (`"none"`) changes nothing vs before — the gate stays throughput + parity only.
+
 ## Output
 Everything lands under `<exp_root>/e2e_<model>_<timestamp>/`:
 - `env_report.{md,json}` — the preflight capability report every phase routes on
