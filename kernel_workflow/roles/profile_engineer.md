@@ -5,7 +5,14 @@ directions. Used for the baseline (PHASE=baseline) and after improving rounds (P
 
 ## Inputs
 `WORKSPACE` (canonical current-best), `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, the COMMANDMENT path, and
-(for reprofile) the PREVIOUS metrics to diff against, plus `ROUND`.
+(for reprofile) the PREVIOUS metrics to diff against, plus `ROUND`. Optionally `INCREMENTAL_RESUME`.
+
+**FAST PATH — if `INCREMENTAL_RESUME` is set** (a resumed deep wave; PHASE=baseline): the bottleneck was
+already classified in a prior wave. Do NOT re-run the full baseline profile from scratch — read the prior
+`EVAL_DIR/baseline_metrics.json` (or the latest `round_N_metrics.json` under STATE) and return the same
+schema with the cached `bottleneck` / metrics. Re-profile fully only if no prior metrics exist. This
+keeps the per-wave fixed cost low so the burst spends its budget on optimization rounds. (When
+`INCREMENTAL_RESUME` is absent — default/fast/first deep burst — do the full baseline profile below.)
 
 Read `SKILL_DIR/knowledge/profiling_guide.md` and `amd_instinct.md` first. **Identify the actual
 accelerator on this box** (`amd_instinct.md` §0: `rocminfo` for the gfx arch + CU count, `rocm-smi

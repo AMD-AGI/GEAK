@@ -45,7 +45,7 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "bench_client": "auto",                // auto|inferencex|native — see口径 alignment below
   "inferencex_path": "/opt/InferenceX",  // optional; else taken from $INFERENCEX_PATH
   "bench_protocol": {                    // optional; caller's measurement 口径 (see below)
-    "random_range_ratio": 0,             //   fixed(1) vs variable(0) sequence lengths
+    "random_range_ratio": 0,             //   fixed(0) vs variable(>0) sequence lengths
     "num_prompts": 192,
     "num_warmups": 8,
     "seed": 0
@@ -60,9 +60,11 @@ applied. Omit it entirely (standalone PerfSkills, no external orchestrator) and
 `bench_e2e.sh` keeps its own defaults unchanged. When the caller (Hyperloom)
 supplies it, those values are the EXACT knobs the caller's official baseline was
 measured with — forwarding them is what makes the workflow's numbers
-cross-harness comparable (the `random_range_ratio` mismatch — caller `0`
-variable-length vs the standalone `1` fixed-length default — is otherwise a
-silent ~10-15% 口径 gap).
+cross-harness comparable. The `random_range_ratio` convention is `0`=fixed-length,
+`>0`=variable-length (lengths sampled in `[(1-ratio)*len, (1+ratio)*len]`); a
+silent mismatch between the caller's value and the standalone default is otherwise
+a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarded
+口径 agree unless the caller explicitly requests variable lengths.
 
 ### How handoff maps to the workflow (owned by `run_e2e.py:map_args`)
 
@@ -196,7 +198,7 @@ The workflow must measure on the **same口径** as the caller's official baselin
 |---|---|
 | primary metric | aggregate `output_throughput` (output tok/s, **not** per-GPU) |
 | latency | `ttft_ms` / `tpot_ms` median |
-| dataset | `random`; `random-range-ratio` from `handoff.bench_protocol.random_range_ratio` (caller-driven: `0`=variable, `1`=fixed), else standalone default `1.0` |
+| dataset | `random`; `random-range-ratio` from `handoff.bench_protocol.random_range_ratio` (caller-driven: `0`=fixed, `>0`=variable), else standalone default `0` (fixed) |
 | workload | same `ISL/OSL/CONC`; `NUM_PROMPTS` from `bench_protocol.num_prompts`, else `max(CONC*factor, CONC)` |
 | warmups | `NUM_WARMUPS` from `bench_protocol.num_warmups`, else `min(CONC, 8)` (the materialize default) |
 | seed | `SEED` from `bench_protocol.seed`, else fixed `0` |

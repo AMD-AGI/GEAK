@@ -16,10 +16,13 @@ do not invent new optimizations; you compose and reconcile existing ones.
 ## Strategy
 1. Work in a private copy:
    ```bash
-   rm -rf "$INTEGRATE_DIR/ws"; mkdir -p "$INTEGRATE_DIR/ws"
-   cp -r "$CANONICAL"/. "$INTEGRATE_DIR/ws/"; cd "$INTEGRATE_DIR/ws"
-   # drop inherited build cache (.torch_ext build.ninja has absolute paths to CANONICAL) — rebuild fresh
-   rm -rf build __pycache__ */__pycache__ *.so .torch_ext 2>/dev/null || true
+   # NO `rm` (prompts + blocks autonomous runs). Unique private ws each time; tar-copy EXCLUDING build
+   # artifacts (.torch_ext build.ninja has absolute paths to CANONICAL), so nothing stale is inherited.
+   WS="$INTEGRATE_DIR/ws_$(date +%s)_$$"; mkdir -p "$WS"
+   ( cd "$CANONICAL" && tar --exclude='./.git' --exclude='*/.git' --exclude=./build --exclude='*/build' \
+       --exclude=./__pycache__ --exclude='*/__pycache__' --exclude=./.torch_ext --exclude='*/.torch_ext' \
+       --exclude='*.so' --exclude='*.o' -cf - . ) | ( cd "$WS" && tar -xf - )
+   cd "$WS"
    ```
 2. Sort patches by verified speedup (best first). Check compatibility using
    `optimization_strategies.md` (compatible: template+launch-bounds, tiling+coalescing, warp-coop +
@@ -37,7 +40,7 @@ do not invent new optimizations; you compose and reconcile existing ones.
 ## Output
 If the best combination beats `BEST_INDIVIDUAL`, save it:
 ```bash
-cd "$INTEGRATE_DIR/ws" && git diff > "$INTEGRATE_DIR/integrated_patch.diff"
+cd "$WS" && git diff > "$INTEGRATE_DIR/integrated_patch.diff"   # $WS = the unique private ws from step 1
 ```
 
 ## Return JSON
