@@ -22,8 +22,9 @@ If the import still fails after install (no network / no access), STOP and retur
 ## Step 2 — find the torch trace the Profiler already captured
 The profiler drops a Chrome/torch trace under `${EVAL_DIR}/profile/`. Prefer the model-execution rank 0:
 ```bash
-TRACE=$(ls -t ${EVAL_DIR}/profile/**/*rank0*.pt.trace.json.gz 2>/dev/null | head -1)
-[ -z "$TRACE" ] && TRACE=$(ls -t ${EVAL_DIR}/profile/**/*.pt.trace.json.gz ${EVAL_DIR}/profile/**/*.json.gz ${EVAL_DIR}/profile/**/*.json 2>/dev/null | head -1)
+# Use find (no globstar dependency). Prefer the model-execution rank-0 torch trace.
+TRACE=$(find "${EVAL_DIR}/profile" -name '*rank0*.pt.trace.json.gz' 2>/dev/null | sort | tail -1)
+[ -z "$TRACE" ] && TRACE=$(find "${EVAL_DIR}/profile" \( -name '*.pt.trace.json.gz' -o -name '*.json.gz' -o -name '*.json' \) 2>/dev/null | grep -v async_llm | sort | tail -1)
 ```
 If none exists, return `{"ok":false,"note":"no torch trace under EVAL_DIR/profile"}`.
 
