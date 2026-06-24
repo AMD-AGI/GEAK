@@ -21,7 +21,19 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
 3. The measured e2e throughput delta **EXCEEDS `NOISE_BAND_PCT` (default 0.5%)** under the tight
    protocol below, AND the candidate and reference run distributions **do not overlap**
    (`cand_min > ref_max`). A 0.5% median gap with overlapping runs is noise → REJECT.
-4. Output parity holds (greedy/temp=0 fixed seed, ≥10 prompts) vs the current accepted server.
+4. Output parity holds (greedy/temp=0 fixed seed, ≥10 prompts). **CRITICAL — parity is gated vs the TRUE
+   no-overlay baseline, NOT only vs the prior accepted server.** When candidates STACK (deep mode chains
+   several kernel overlays on one op), each leg can look byte-exact vs the *previous* leg while the
+   CUMULATIVE stack silently drifts from the original model output (observed: 7/12 greedy prompts diverged
+   at the first token vs a deterministic baseline, while every per-leg check "passed"). So run the parity
+   probe with the CAND overlay vs a FRESH no-overlay baseline server (both greedy/temp=0/fixed seed). 
+   - If the baseline is deterministic (re-run it twice; byte-exact) and the CAND diverges on ANY prompt →
+     it is a REAL output change, NOT FP noise. For a NON-quant change → REJECT.
+   - For a QUANTIZED kernel (MXFP8/fp8 — byte-parity is expected to drift from rounding/argmax) → do NOT
+     accept on throughput alone: run a small TASK-ACCURACY gate (e.g. a fixed greedy eval set / agreement
+     rate vs the true baseline) and accept ONLY if quality holds within tolerance; otherwise `rejected`
+     with reason `needs_accuracy_gate`/`parity_regression`. Never let cumulative MXFP8 drift ride through
+     as "parity pass vs the prior leg."
 
 If any fails, REJECT and record why (with the numbers) for the eval-dir timeline report — a real
 isolated speedup that doesn't show up e2e is an expected Amdahl outcome, not a bug.
@@ -49,6 +61,30 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `GPU_ID`, `WORKLOAD`,
 verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `winner_kind`
 ∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`),
 `CURRENT_OVERLAY`, `CURRENT_FLAGS`/`CURRENT_ENV`, `CURRENT_THROUGHPUT`, `SKILL_DIR`.
+
+**ACCURACY GATE (only if `ACCURACY_GATE=gsm8k` is in your inputs; else use the normal parity gate).**
+For a QUANTIZED kernel, byte-exact greedy parity is the WRONG bar (a within-tolerance kernel rounds
+differently → flips borderline argmaxes → over-rejects valid kernels). Instead, score TASK ACCURACY:
+- Launch a FRESH TRUE-baseline server (no overlay) and the CAND server (with the candidate overlay), each
+  greedy/temp=0, and run `python3 $GSM8K_EVAL_SCRIPT --base-url http://127.0.0.1:<port>/v1 --model <MODEL_PATH>
+  --limit $ACCURACY_LIMIT --out <dir>/gsm8k_<tag>.json` against each (it prints `GSM8K_EXACT_MATCH=<s>`).
+  The script samples the SAME fixed gsm8k subset for both (seed-pinned), so the scores are comparable.
+- ACCEPT the candidate iff `cand_score >= baseline_score - $ACCURACY_TOL` (quality preserved); otherwise
+  `rejected` with reason `accuracy_regression` (record both scores). This REPLACES byte-parity for the
+  quant gate — a byte-divergent kernel that holds gsm8k accuracy is a LEGITIMATE win. Still apply the
+  throughput + engagement + memory gates as usual. (You can reuse the same two servers for the throughput
+  A/B to avoid extra launches.)
+
+**DEEP-MODE feedback (only if `DEEP_FEEDBACK` is in your inputs; a normal/fast run omits it).** Besides
+the gate decision, the deep-mode scheduler needs the WHY so the next co-opt waves can fix the
+isolated→e2e gap. Write a concise per-candidate problem record to
+`${EVAL_DIR}/deep_head/<short_name>/integrate_<lane>.json` (use `KERNEL_RESULT.lane` for the filename —
+it is unique per lane, so multiple triton lanes don't collide; fall back to `<winner_backend>` if absent) capturing: `engaged` (did the
+optimized kernel actually run live, from the engagement probe — vs eager fallback under cudagraph),
+`cudagraph` (captured | eager_fallback | hang), `mem_footprint_note` (did it fit the same mem-fraction,
+or starve KV), `decode_regressed` (bool + which buckets), `parity`, `e2e_delta_pct`, and a one-line
+`root_cause` of any isolated-win-but-no-e2e-gain. This is additive — your gate logic and return JSON are
+unchanged; you just also persist the diagnostics the deep feedback/harness-refine step reads.
 
 1. **Verify provenance**: re-compute the oracle checksum and confirm `unittest.py` is unchanged from
    extraction (anti-cheating). If tampered → REJECT. (For a synthesized-GEMM op task with no
@@ -170,10 +206,15 @@ verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `
    drift between them is negligible (the box drifts over hours, not minutes). If you want extra drift
    robustness on a borderline result, run a second ref block after the cand block and pool the ref
    repeats — but do NOT relaunch per repeat.
-4. **Parity / accuracy** vs the current accepted server (greedy/temp=0 fixed seed; use ≥10 prompts —
-   a 5-prompt probe missed a real divergence once). If `parity_note=needs_accuracy_gate` (any quant,
-   or a same-dtype swap that diverges), run a small task-accuracy probe (gsm8k/translation) and accept
-   only if quality holds; otherwise REJECT (or `flagged` for the Director to arbitrate).
+4. **Parity / accuracy vs the TRUE no-overlay baseline** (greedy/temp=0 fixed seed; ≥10 prompts).
+   Spin a FRESH baseline server (no overlay) for the parity reference — NOT the prior accepted overlay
+   server. This is mandatory when overlays STACK (deep mode), or cumulative drift rides through: each leg
+   looks byte-exact vs its predecessor while the full stack diverges from the original model output.
+   - Confirm the baseline is deterministic (run it twice, byte-exact). Then any CAND divergence is real.
+   - QUANT kernel (MXFP8/fp8): byte-parity is expected to drift → run a small TASK-ACCURACY probe
+     (gsm8k/translation/agreement-rate vs the true baseline) and accept only if quality holds within
+     tolerance; else `rejected` (reason `parity_regression`/`needs_accuracy_gate`). Do NOT pass it as
+     "parity OK vs prior leg." Non-quant + diverges → REJECT.
 5. Emit the verdict: `accepted` (strong standalone win), `stack` (parity-safe, engaged, non-negative,
    sub-threshold → carry forward to compound), or `rejected` (parity-fail / no-engagement / regression).
    For `accepted` or `stack`, fold the change into the carried overlay/config and report the measured

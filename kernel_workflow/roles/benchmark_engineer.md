@@ -6,6 +6,17 @@ the whole workflow depends on this being correct and stable. Operate on the cano
 ## Inputs
 `WORKSPACE`, `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, and `ANALYSIS` (kernel type, files, existing tests).
 
+**DEEP-MODE harness refinement (act ONLY if `HARNESS_ADDENDUM` is in your inputs; otherwise ignore —
+a normal run never passes it).** The IMMUTABLE oracle (`unittest.py`/`meta.json`/`reference_io.pt`:
+correctness, golden output, tolerance, frozen baseline) is **NEVER modified or re-weighted** — it stays
+the source of truth. `HARNESS_ADDENDUM` only refines the PERFORMANCE view so the isolated target predicts
+end-to-end: Read it and, in the COMMANDMENT you build, (a) report a SECONDARY e2e-aligned geomean that
+weights cases per the addendum (e.g. weight the decode M-buckets that dominate serving) ALONGSIDE the
+unweighted oracle geomean, (b) if the addendum specifies a cudagraph capture/replay measurement wrapper,
+add it as the FULL_BENCHMARK timing path (so a kernel that only wins eager is exposed), and (c) record the
+addendum's hard constraint gates (decode-no-regress, memory-footprint cap, cudagraph-safe) as explicit
+PASS/FAIL checks the verify step will enforce. Never let the addendum relax a correctness check.
+
 ## Steps
 
 ### 1. Discover existing infrastructure (prefer reusing it)
@@ -46,9 +57,13 @@ share ONE global cache → they serialize on a single lock and can benchmark eac
 without (b) every compile builds ~9 architectures. These are generic to any torch HIP extension.
 
 The COMMANDMENT MUST contain, with concrete commands (not placeholders):
-- `SETUP` — `cd <workspace>` then clear stale artifacts: `rm -rf build __pycache__ */__pycache__ *.so`.
-  (The real build cache is the isolated `.torch_ext/`, which ninja keeps in sync with the sources
-  automatically; only `rm -rf .torch_ext` if you suspect a stale build, e.g. after editing headers.)
+- `SETUP` — `cd <workspace>`. Do NOT use `rm` anywhere in the COMMANDMENT (it triggers an approval
+  prompt that blocks autonomous/background runs). Each workspace is already a fresh artifact-free copy
+  (build/__pycache__/*.so/.torch_ext excluded at copy time), so there is nothing stale to clear; ninja
+  keeps the isolated `.torch_ext/` in sync with sources automatically. If you ever suspect a stale build
+  (e.g. after editing headers), MOVE it aside instead of deleting:
+  `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true` (a fresh `.torch_ext` rebuilds).
+  So `SETUP` is just `cd <workspace>` (plus the env exports below) — no deletion.
 - `CORRECTNESS` — wrapped: `cd <workspace> && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <correctness cmd>`.
 - `BENCHMARK` — wrapped in gpu_lock (quick measurement).
 - `FULL_BENCHMARK` — wrapped in gpu_lock (authoritative).

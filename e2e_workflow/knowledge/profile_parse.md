@@ -86,7 +86,15 @@ different causes get different handling:
    `ncclDevKernel*`, `*all_reduce*`, `*all_gather*`, `*reduce_scatter*`, barriers — or ANY kernel whose
    job is to *wait* on peers/host). Heavy right tail, skew ≫ 3 (M3 `cross_device_reduce`: median 12µs,
    P99 12ms, skew **18×** → shown as ~51% GPU when intrinsic transfer is ~8%). The tail is peer-wait
-   spin, not work. → report a robust **effective** `pct_gpu_time` = median-cap winsorize (clip each call
+   spin, not work.
+   **🔴 DETERMINISTIC RULE — do NOT use judgment here:** ANY kernel whose name matches a collective/
+   barrier (`cross_device_reduce*`, `ncclDevKernel*`, `*all_reduce*`, `*all_gather*`, `*reduce_scatter*`,
+   `*barrier*`, `custom_all_reduce`, `one/two-stage reduce`) is busy-wait BY DEFINITION and **MUST be
+   de-inflated** whenever skew (mean/median) > 3 — regardless of how "steady" the call rate looks. NEVER
+   tag a collective as category-4 "healthy/steady" or leave its raw sum in the Amdahl total. A common
+   failure is de-inflating `*_2stage` but leaving `*_1stage` (or vice-versa) at its raw % — de-inflate
+   EVERY collective that crosses the skew bar, then recompute the table (step below).
+   → report a robust **effective** `pct_gpu_time` = median-cap winsorize (clip each call
    at ~10×median then sum; `median×calls` is a fine shortcut), **keep the raw** in
    `raw_pct_gpu_time`/`notes`, and route it as a comm-overlap/load-imbalance **CONFIG** lever (AR
    backend/quant, comm-compute overlap, NCCL channels) — never a kernel rewrite.

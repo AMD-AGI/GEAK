@@ -11,6 +11,13 @@ work in your OWN private workspace copy — total isolation, no coordination wit
 - `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
   `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds).
+- **DEEP-MODE (optional — act only if present in your inputs; a normal run omits all three):**
+  `SHARED_KB` (cross-backend blackboard — Read it and BORROW any technique that plausibly transfers to
+  your kernel; skip its disproved dead-ends), `E2E_FEEDBACK` (latest end-to-end result+problems — if a
+  prior isolated win didn't move e2e, fix the integration cause: stay cudagraph-capture-safe, no host
+  syncs on the steady decode path, keep any weight cache small + keyed by data_ptr), `HARNESS_ADDENDUM`
+  (e2e-refined timing weights / cudagraph-capture wrapper / hard constraint gates — optimize toward THAT
+  weighted target and never violate its gates, e.g. decode-no-regress or the memory cap).
 - `KERNEL_KNOWLEDGE_DIR` (may be empty), `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` — pointers into the
   AMD operator×backend SOTA base, resolved by the TechLead for THIS kernel (see the next section).
 
@@ -53,8 +60,9 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    build cache (`$KERNEL_PATH/.torch_ext`) and compiles for the local arch only — this is why your
    compiles are fast and don't collide with other engineers. Always invoke it from `$KERNEL_PATH`.
 4. After editing sources, ninja auto-rebuilds on the next run — you usually do NOT need to wipe the
-   cache. Use the COMMANDMENT `SETUP` (`rm -rf build __pycache__ */__pycache__ *.so`) to clear stale
-   loose artifacts; only `rm -rf .torch_ext` if you suspect a stale build (e.g. after editing headers).
+   cache. NEVER use `rm` (it triggers an approval prompt that blocks the run). Your workspace is already
+   an artifact-free fresh copy; if you ever suspect a stale build (e.g. after editing headers), MOVE the
+   cache aside instead of deleting: `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true`.
 5. ALWAYS run CORRECTNESS before BENCHMARK. A fast-but-wrong kernel scores 0.
 6. Preserve the kernel's external interface (signature, semantics) so the wrapper/tests still work.
 7. Hipify safety (HIP): never put `<<<>>>` launches inside a macro if/else or ternary — use template
