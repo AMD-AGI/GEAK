@@ -13,7 +13,7 @@ backends) **the kernel code itself** — cheapest first.
 > **On sglang/gfx942, dense-GEMM Tier-B = aiter's per-shape DB; Tier-C = an authored Triton GEMM.**
 > The live dense-GEMM path is aiter `tuned_gemm.py` (seam `aiter.tuned_gemm:gemm_a16w16`). Tune it via
 > `AITER_TUNE_GEMM=1` capture → `gradlib/gemm_tuner.py` → deploy `AITER_CONFIG_GEMM_BF16`, and verify
-> engagement with `AITER_LOG_TUNED_CONFIG=1`. Full recipe: **`aiter_gemm_tuning.md`**. (TunableOp /
+> engagement with `AITER_LOG_TUNED_CONFIG=1`. Full recipe: **`gemm_tuning/aiter_gemm_tuning.md`**. (TunableOp /
 > `HIPBLASLT_TUNING_FILE` hook the PyTorch dispatch, which this live path does not use — so they are not
 > the GEMM lever here; tune aiter / author Triton instead.)
 

@@ -34,7 +34,7 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
   - **int4_w4a16 fused-MoE (vLLM) — DO THIS FIRST, it is the memory-free win.** vLLM ships NO
     tuned Triton config for an unseen int4 fused-MoE shape, so the expert grouped-GEMM (often the
     single biggest chunk of GPU time on an int4 MoE model) runs on a slow default fallback (server log:
-    "Using default MoE config"). Follow `SKILL_DIR/knowledge/moe_int4_tuning.md`: it derives the per-rank
+    "Using default MoE config"). Follow `SKILL_DIR/knowledge/gemm_tuning/moe_int4_tuning.md`: it derives the per-rank
     shape from the model config (+TP) and gives a generic, env-driven driver you **write into
     `$EVAL_DIR/config/` and run** (per the same convention as the aiter-GEMM recipe — NOT a shared
     `scripts/` file). It sweeps per M bucket against the faithful `fused_experts` int4_w4a16 path
@@ -49,7 +49,7 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
   - **For dense GEMM the tuning lever is aiter's per-shape DB** (`AITER_TUNE_GEMM=1` capture → gradlib
     `gemm_tuner.py` → `AITER_CONFIG_GEMM_BF16` deploy; gradlib itself races hipBLASLt/asm/triton/skinny
     solutions per shape, so one aiter tune covers per-backend GEMM tuning). Full recipe + gotchas:
-    `SKILL_DIR/knowledge/aiter_gemm_tuning.md`. **Do NOT use PyTorch TunableOp / `HIPBLASLT_TUNING_FILE`** —
+    `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`. **Do NOT use PyTorch TunableOp / `HIPBLASLT_TUNING_FILE`** —
     on sglang/aiter they hook the PyTorch dispatch the live path bypasses (zero engagement). For attn,
     Tier-B is the `--attention-backend` swap (a server flag the Config Tuner owns).
   - Write any driver script you need into `$EVAL_DIR` (NOT the shared `scripts/`). Discover tool paths
@@ -161,7 +161,7 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    head can still be optimized via the author route even if the bake-off probe could not measure a baseline.
 
 3. **Tier B per-backend tune (direct_light)** — for GEMM, run the **aiter DB tune** (see
-   `SKILL_DIR/knowledge/aiter_gemm_tuning.md`). **The tune input MUST come from a live `AITER_TUNE_GEMM=1`
+   `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`). **The tune input MUST come from a live `AITER_TUNE_GEMM=1`
    capture, NOT synthesized/profile-derived shapes.** ⚠️ Critical: the runtime lookup key includes the
    **`bias` flag** (and exact M/N/K/dtype). sglang issues most of these dense GEMMs with **`bias=False`**
    (bias is applied separately); if you synthesize the untuned set from the profile and guess `bias=True`,

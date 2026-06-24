@@ -69,7 +69,7 @@ vLLM/SGLang ship **per-shape JSON** configs (`E=…,N=…,device_name=MI300X.jso
 > (the "Using default MoE config" warning). A per-M-bucket micro-sweep → `VLLM_TUNED_CONFIG_FOLDER`
 > (vLLM's env, NOT the sglang one above) gives **~1.5–1.6x** on the prefill-dominant buckets and only
 > changes Triton tile/scheduling, so it adds **no memory**. Proven: +16.4% e2e on Kimi-K2.6 (TP=8,
-> int4) with `--max-num-batched-tokens 16384`. Recipe + driver: `e2e_workflow/knowledge/moe_int4_tuning.md`.
+> int4) with `--max-num-batched-tokens 16384`. Recipe + driver: `e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md`.
 >
 > ⚠️ **Memory caveat for the quant path (§1) at e2e.** The fp8/CK block-scale path is the dominant
 > *latency* lever in isolation, but on an already-int4 model it caches a **second (fp8) weight copy** →

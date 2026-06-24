@@ -12,13 +12,13 @@ sources:
   - test_results/kimi_2.6_20260610/RESULTS.md
   - test_results/kimi_2.6_20260610/director_e2e_validation.json
   - test_results/kimi_2.6_20260610/kernels/moe_int4_tune/tune_report.md
-  - GEAK/e2e_workflow/knowledge/moe_int4_tuning.md
+  - GEAK/e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md
 ---
 
 # Kimi-K2.6 / vLLM / MI300X — int4 fused-MoE config tune (the reproducible +16%)
 
 > The model-specific numbers/shape live HERE; the *generic* recipe that reproduces
-> them lives in [`../../../e2e_workflow/knowledge/moe_int4_tuning.md`](../../../e2e_workflow/knowledge/moe_int4_tuning.md)
+> them lives in [`../../../e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md`](../../../e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md)
 > (shape derived from `config.json`+TP, prefill batch from the workload, gated by
 > the existing e2e Integrator) — nothing here is wired as bespoke per-model code.
 
@@ -75,7 +75,7 @@ a quant rewrite on a real HBM-footprint check at the run's `gpu_memory_utilizati
 
 ## How to reproduce (generic, framework-native)
 Driven through GEAK's normal e2e path: the **Op Benchmarker** routes the int4 fused-MoE
-head op to the [`moe_int4_tuning`](../../../e2e_workflow/knowledge/moe_int4_tuning.md)
+head op to the [`moe_int4_tuning`](../../../e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md)
 recipe (writes the shape-generic driver into `$EVAL_DIR`, sweeps, emits a
 `winner_kind=env` with `apply_env=VLLM_TUNED_CONFIG_FOLDER` + recommended mnbt), and the
 **e2e Integrator** runs the tight A/B (baseline vs +tuned-config+mnbt), the engagement
@@ -96,6 +96,6 @@ identical 口径**, so the +16% relative win holds even when the absolute baseli
 ## Cross-links
 - Operator tuning: [`../../operators/fused_moe_grouped_gemm/tuning.md`](../../operators/fused_moe_grouped_gemm/tuning.md)
 - Head-kernel routing: [`../../../e2e_workflow/roles/op_benchmarker.md`](../../../e2e_workflow/roles/op_benchmarker.md)
-- Reproduce: recipe [`../../../e2e_workflow/knowledge/moe_int4_tuning.md`](../../../e2e_workflow/knowledge/moe_int4_tuning.md) (driver written into `$EVAL_DIR` at runtime; gated by the e2e Integrator)
+- Reproduce: recipe [`../../../e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md`](../../../e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md) (driver written into `$EVAL_DIR` at runtime; gated by the e2e Integrator)
 
-<!-- MANIFEST: Kimi-K2.6 int4 w4a16 MoE on MI300X/vLLM — missing VLLM_TUNED_CONFIG_FOLDER int4 fused-MoE Triton config tuned per-M-bucket (1.53-1.59x prefill) + mnbt → +16.4% e2e, parity-preserved, ZERO extra HBM; fp8-fold rewrite OOMs at memory parity. Generic recipe (knowledge, no shipped scripts): e2e_workflow/knowledge/moe_int4_tuning.md, routed by op_benchmarker + gated by e2e_integrator. -->
+<!-- MANIFEST: Kimi-K2.6 int4 w4a16 MoE on MI300X/vLLM — missing VLLM_TUNED_CONFIG_FOLDER int4 fused-MoE Triton config tuned per-M-bucket (1.53-1.59x prefill) + mnbt → +16.4% e2e, parity-preserved, ZERO extra HBM; fp8-fold rewrite OOMs at memory parity. Generic recipe (knowledge, no shipped scripts): e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md, routed by op_benchmarker + gated by e2e_integrator. -->

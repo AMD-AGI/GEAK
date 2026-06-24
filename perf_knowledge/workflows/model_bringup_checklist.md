@@ -10,7 +10,7 @@ sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
   - https://rocm.blogs.amd.com/artificial-intelligence/scaling-ai-inference/README.html
   - https://github.com/vllm-project/vllm/issues/36337
-  - GEAK/e2e_workflow/knowledge/aiter_gemm_tuning.md
+  - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
 ---
 
 # Model bring-up checklist (MI300X / MI350X)
@@ -117,4 +117,4 @@ HeadKernel → Milestone → Finalize → Report → Validate). Profile with ROC
 - AITER master switch, TP/PP/DP topology, FP8/FP4 quant, pre-quantized Quark, env vars: https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
 - MI355X scaling / MoRI MoE: https://rocm.blogs.amd.com/artificial-intelligence/scaling-ai-inference/README.html
 - gfx950 MXFP4 ROCm 7.1→7.2 regression (accuracy-test-first lesson): https://github.com/vllm-project/vllm/issues/36337
-- GEMM DB +2.23%, port/fork-storm gotchas: `GEAK/e2e_workflow/knowledge/aiter_gemm_tuning.md`
+- GEMM DB +2.23%, port/fork-storm gotchas: `GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md`

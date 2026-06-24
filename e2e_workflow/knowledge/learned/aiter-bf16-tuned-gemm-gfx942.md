@@ -27,5 +27,5 @@ last_seen: 2026-06-08
   box-default hipBLASLt isolated); the lever is the **Tier-C author** route rebound at
   `rocm_unquantized_gemm_impl` (existing editable `aiter.ops.triton.gemm_a16w16` is a good baseline, but
   gated OFF for these shapes). [gfx942 · vLLM dense bf16, 2026-06-22 Qwen3-14B]
-- source: exp/e2e_*Qwen3.5-27B*/ 2026-06-08 (verified A/B, full recipe in `aiter_gemm_tuning.md`);
+- source: exp/e2e_*Qwen3.5-27B*/ 2026-06-08 (verified A/B, full recipe in `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`);
   vLLM-seam caution: exp/e2e_Qwen-Qwen3-14B_20260622 bake-off (seam-inspected, 0-engagement predicted)

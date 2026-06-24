@@ -10,7 +10,7 @@ updated: 2026-06-08
 sources:
   - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
-  - GEAK/e2e_workflow/knowledge/aiter_gemm_tuning.md
+  - GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md
 ---
 
 # Attention backend selection
@@ -111,4 +111,4 @@ the GEMM tune — they're orthogonal and compound (validated).
 ## Sources
 - 7 ROCm attention backends, names/flags, per-gen ranking, MLA/MHA routing: https://vllm.ai/blog/2026-02-27-rocm-attention-backend
 - CK default FA / `VLLM_USE_TRITON_FLASH_ATTN=0`, FlashInfer N/A on AMD: https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
-- Qwen3.5-27B `--attention-backend triton` +4.96% (gated-delta hybrid, sglang/gfx942): `GEAK/e2e_workflow/knowledge/aiter_gemm_tuning.md`.
+- Qwen3.5-27B `--attention-backend triton` +4.96% (gated-delta hybrid, sglang/gfx942): `GEAK/e2e_workflow/knowledge/gemm_tuning/aiter_gemm_tuning.md`.

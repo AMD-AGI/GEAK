@@ -10,7 +10,7 @@ last_seen: 2026-06-23
   `(E,N,int4_w4a16)` shape, so the expert grouped-GEMM (`fused_moe_kernel_gptq_awq`) — often the single
   biggest GPU-time chunk (~50–57% on Kimi-K2.6, per-rank E=384, N=moe_intermediate//TP=256, K=7168,
   topk=8, group_size=32) — falls back to a SLOW default tile. Tuning that one config is the #1 e2e lever.
-- apply: follow `SKILL_DIR/knowledge/moe_int4_tuning.md` — derive the per-rank shape from model config
+- apply: follow `SKILL_DIR/knowledge/gemm_tuning/moe_int4_tuning.md` — derive the per-rank shape from model config
   (+TP), sweep per M-bucket against the faithful `fused_experts` int4_w4a16 path (`override_config`,
   parity rel<1e-2), write `E=…,N=…,dtype=int4_w4a16.json`, deploy `winner_kind=env`
   `VLLM_TUNED_CONFIG_FOLDER=<dir>` paired with `--max-num-batched-tokens ≈2·ISL` (clamp 8192..32768).
@@ -29,7 +29,7 @@ last_seen: 2026-06-23
   7.54/14.84ms → tuned 4.67/9.82ms, rel_err=0). Trust the per-bucket subprocess sweep, not the merged run.
 - caution: **confirm the run's baseline did NOT already bank the config** — if baseline server.log already
   shows `Using configuration from …int4_w4a16.json`, the lever is consumed (no fresh e2e win this round).
-- source: GEAK/e2e_workflow/knowledge/moe_int4_tuning.md (+16.4% e2e, 514.55→598.98 tok/s, GSM8K 0.965→0.973).
+- source: GEAK/e2e_workflow/knowledge/gemm_tuning/moe_int4_tuning.md (+16.4% e2e, 514.55→598.98 tok/s, GSM8K 0.965→0.973).
 - source: perf_knowledge/case_studies/by_model/kimi_k2.6_int4_moe_mi300x.md; 2026-06-21 A/B ref med=461.3 vs
   cand med=535.4 = +16.05% e2e non-overlapping (cand_min>ref_max), Director-verified iso 1.59× (6 re-confirms).
 - source: 2026-06-22 re-derive on Kimi-K2.6 TP=8 (eval e2e_..._20260621T232601Z): same shape E=384/N=256/

@@ -216,5 +216,5 @@ HIP_VISIBLE_DEVICES=0 python3 "$EVAL_DIR/config/tune_moe_int4.py" \
 Kimi-K2.6 / vLLM / MI300X, TP=8, ISL/OSL=8192/1024 conc=64: tuned int4 fused-MoE config (M=8192 1.59x,
 4096/16384 1.53x kernel) + `--max-num-batched-tokens 16384` → **+16.4% e2e** (514.55 → 598.98 tok/s),
 parity preserved, **zero extra HBM**. Full write-up:
-[`../../perf_knowledge/case_studies/by_model/kimi_k2.6_int4_moe_mi300x.md`](../../perf_knowledge/case_studies/by_model/kimi_k2.6_int4_moe_mi300x.md).
-Operator background: [`../../perf_knowledge/operators/fused_moe_grouped_gemm/tuning.md`](../../perf_knowledge/operators/fused_moe_grouped_gemm/tuning.md).
+[`../../../perf_knowledge/case_studies/by_model/kimi_k2.6_int4_moe_mi300x.md`](../../../perf_knowledge/case_studies/by_model/kimi_k2.6_int4_moe_mi300x.md).
+Operator background: [`../../../perf_knowledge/operators/fused_moe_grouped_gemm/tuning.md`](../../../perf_knowledge/operators/fused_moe_grouped_gemm/tuning.md).
