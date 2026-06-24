@@ -16,6 +16,6 @@ last_seen: 2026-06-08
 - verify: `AITER_LOG_TUNED_CONFIG=1` → count `is tuned on cu_num` hits (>0 = engaged; the winning run
   had 246 hits). The capture's correct `bias=False` + full shape coverage is what makes it both ENGAGE
   and WIN — a bias-mismatched/partial tune reads ~0/−0.6% (superseded).
-- dead-end: NOT TunableOp / `HIPBLASLT_TUNING_FILE` — aiter bypasses the PyTorch/hipBLASLt C dispatch
+- caution: NOT TunableOp / `HIPBLASLT_TUNING_FILE` — aiter bypasses the PyTorch/hipBLASLt C dispatch
   for its tuned shapes, so those hooks don't touch the live path.
 - source: exp/e2e_*Qwen3.5-27B*/ 2026-06-08 (verified A/B, full recipe in `aiter_gemm_tuning.md`)

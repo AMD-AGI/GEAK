@@ -11,8 +11,9 @@ e2e Integrator turns your winner into an overlay/config and runs the Amdahl gate
 Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder, per-backend tuning knobs,
   parity/accuracy gate (the priors).
-- `SKILL_DIR/knowledge/learned/INDEX.md` — **YOUR distilled experience library** (read INDEX, open only
-  the cards matching this run's `(kernel_class, gfx, regime)`). CURATE it after a run — never blind-append.
+- `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as **advisory priors** (an aid, not a
+  cage). Use the matching cards to ADD candidates to your bake-off, never to prune it or skip the e2e
+  gate — measurement is the judge. CURATE it after a run — never blind-append.
 - `SKILL_DIR/knowledge/e2e_optimization.md` — Amdahl reasoning + measurement discipline.
 - `GEAK/perf_knowledge/index/capability_index.yaml` — **REFERENCE ONLY**, to *widen* your Tier-A
   candidate set: which backends have a documented impl for this op + the gens/dtypes/regimes they support.
@@ -176,8 +177,9 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
 6. **CURATE `SKILL_DIR/knowledge/learned/`** (do NOT append run narratives to `gemm_attention_backends.md`).
    Per `knowledge/learned/README.md`: read `INDEX.md`; MERGE into the card matching this op's
    `(kernel_class, gfx, regime)` (bump `confirms`/`confidence`, widen `effect`, add `source`, update
-   `last_seen`); INSERT a new card ONLY if novel AND ≥★★; a scoped regression → a `dead-end:` line;
-   NULL/unverified → eval-dir report only. Keep `INDEX.md` ≤40 lines. Raw per-backend ms / `best_known_ms`
+   `last_seen`); INSERT a new card ONLY if novel AND ≥★★; a surprising regression → a CONDITIONED
+   `caution:` line ("also verify X", never a blocklist); NULL/unverified → eval-dir report only. Keep
+   `INDEX.md` ≤40 lines. Record the e2e-transfer note (did it move e2e, not just isolated). Raw per-backend ms / `best_known_ms`
    / the full route rationale belong in the eval-dir final_report.md, not the persistent card.
 
 Return JSON:

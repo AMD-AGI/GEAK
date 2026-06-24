@@ -71,8 +71,11 @@ const FAST_BUDGET_MS = parseInt(A.fast_budget_ms != null ? A.fast_budget_ms : 18
 const FAST_HEAD_DEADLINE_MS = parseInt(A.fast_head_deadline_ms != null ? A.fast_head_deadline_ms
   : Math.floor(FAST_BUDGET_MS * 0.6), 10);
 // Per-head nested author/optimize workflow() bound (fast mode only): a single recursive kernel run can't
-// eat the whole budget. Default 35min.
-const FAST_HEAD_WF_MS = parseInt(A.fast_head_workflow_ms != null ? A.fast_head_workflow_ms : 2100000, 10);
+// eat the whole budget. Default 90min. (Heads run in PARALLEL on exclusive GPU lanes, so this is a
+// per-lane wall-clock cap, not summed — 90min/lane + serial integrate + Finalize still lands inside the 5h
+// FAST_BUDGET_MS. 35min was too short: a non-trivial MXFP8 FlyDSL fused-fp8 author needs ~80min and was
+// being abandoned mid-flight — the head track got a null/empty patch even though the author later finished.)
+const FAST_HEAD_WF_MS = parseInt(A.fast_head_workflow_ms != null ? A.fast_head_workflow_ms : 5400000, 10);
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);       // max kernel-optimization tasks
 // MIN floor: dispatch at LEAST this many editable-kernel tasks before the loop may stop on no-improve /
 // empty queue (prompt-tunable). Prevents the milestone track from never firing. Capped by BUDGET.
