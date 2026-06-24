@@ -26,6 +26,9 @@ Always try flags+env FIRST (Config Tuner, Tier 0) — they are reversible and re
 
 ### Env vars (set before launching the server)
 - `SGLANG_TORCH_PROFILER_DIR=<dir>` — turns on the profiler dump target (used by the Profiler).
+  The profiler MUST run with `record_shapes=True` so traces carry `Input Dims` for shape enrichment
+  (see `profile_parse.md` §"record_shapes"). Controlled by env `SGLANG_PROFILE_RECORD_SHAPES` which
+  defaults to `True` — no action needed unless explicitly disabled.
 - aiter toggles: `SGLANG_USE_AITER`, `SGLANG_AITER_MOE`, and friends (grep the installed tree:
   `grep -rEl "os.environ.get\\(.SGLANG_|os.getenv\\(.SGLANG_" $SGLANG_DIR`).
 - hipBLASLt / Tensile tuning DB: `HIPBLASLT_TUNING_FILE` / `TENSILE_*`; rocBLAS `ROCBLAS_TENSILE_*`.

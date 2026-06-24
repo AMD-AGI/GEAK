@@ -17,9 +17,9 @@
 - **Never edit the environment to make a check pass.** Don't pip-install, don't change site-packages,
   don't download weights. If something required is missing, that's a `block` with a clear remedy — the
   user fixes it, not the workflow.
-- **Adapt the plan to what you find.** Capability detected here flows downstream: no rocprofv3 →
-  Profiler runs torch-trace only; aiter absent → drop aiter from candidate backends; gfx unknown →
-  widen tuning search instead of trusting gfx942 priors.
+- **Adapt the plan to what you find.** Capability detected here flows downstream: TraceLens absent →
+  Profiler runs stdlib-only parsing (no roofline); aiter absent → drop aiter from candidate backends;
+  gfx unknown → widen tuning search instead of trusting gfx942 priors.
 
 ## What's a `block` vs a `degrade`
 | Condition | Verdict | Why |
@@ -28,7 +28,7 @@
 | chosen `BACKEND` import/CLI absent (no sglang / no `vllm`) | **block** (or switch backend if the other is present and the task allows) | can't launch the server |
 | requested GPU id not visible | **block** | benchmarks would run on the wrong/no device |
 | port busy | **degrade** | dispatcher auto-allocates a free port; just record it |
-| rocprofv3 absent | **degrade** | Profiler falls back to torch-trace (shapes kept, HW durations approximate) |
+| TraceLens absent + auto-install fails | **degrade** | Profiler uses stdlib-only parsing (shapes kept, no roofline metrics); `parse_profile.py` will attempt auto-install |
 | `amd-smi`/`rocminfo` absent | **degrade** | record gfx as "unknown"; widen tuning, don't trust gfx942 priors |
 | aiter / CK profiler / hipblaslt-bench absent | **degrade** | remove those rungs from the backend ladder; note it |
 | baseline bench spread > ~5% | **degrade→re-measure** | noisy box; re-run, raise the noise band, or pin clocks |
@@ -61,12 +61,13 @@ amd-smi list 2>/dev/null || rocm-smi --showid 2>/dev/null || rocminfo 2>/dev/nul
 ```
 Record gfx (e.g. `gfx942`). Unknown → `degrade` (don't apply gfx942-specific priors blindly).
 
-**4. Profiler capability (degrade-friendly).** Prefer rocprofv3 for authoritative HW durations, but
-never hard-require it:
+**4. Profiler capability (degrade-friendly).** Check for TraceLens (optional enhancement for
+roofline analysis and per-shape breakdown). `parse_profile.py` will auto-install TraceLens via pip
+if not found, so this probe is informational only:
 ```bash
-command -v rocprofv3 || command -v rocprof || echo "no rocprof — torch-trace only"
+python3 -c "import TraceLens; print('TraceLens', TraceLens.__version__)" 2>/dev/null || echo "no TraceLens pre-installed (parse_profile.py will auto-install)"
 ```
-Record which trace sources are available; the Profiler reads this from `env_report.json`.
+Record whether TraceLens is available; the Profiler reads this from `env_report.json`.
 
 **5. Tuning/backends present (shapes the ladder).** Probe the optional rungs; missing ones are simply
 removed from the candidate list, not errors:
@@ -106,10 +107,11 @@ Write `EVAL_DIR/env_report.md` (human) and `EVAL_DIR/env_report.json` (machine),
   "backend": "sglang", "backend_version": "0.5.11",
   "model": "/path", "model_arch_class": "hybrid_mamba_moe", "model_dtype": "bf16",
   "gfx": "gfx942", "gpu_ids": ["0"],
-  "trace_sources": ["torch"],            // add "rocprofv3" if present
+  "trace_sources": ["torch"],            // always torch; TraceLens enhances but doesn't add a source
   "available_backends": ["aiter","hipblaslt","triton","flydsl"], // include "flydsl" iff aiter.ops.flydsl.is_flydsl_available(); aiter/ck/flydsl removed only if absent
   "port": 31037,                          // the auto-allocated port, if any
-  "limitations": ["rocprofv3 absent: HW durations approximate; ranking from torch trace"],
+  "tracelens": false,                    // true if TraceLens importable
+  "limitations": ["TraceLens absent: no roofline metrics; stdlib-only parsing"],
   "verdict": "ok|degrade|block",
   "blockers": []                          // populated only on block, each with a remedy
 }

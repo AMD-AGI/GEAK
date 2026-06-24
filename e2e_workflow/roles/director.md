@@ -54,7 +54,7 @@ Steps:
      flags in `EVAL_DIR/config/baseline_flags.json`.
 4. **Preflight + pin the environment** — follow `SKILL_DIR/knowledge/preflight.md` (judgment guide,
    not a script). Confirm the chosen `BACKEND` stack imports/launches, `MODEL` resolves, the GPU(s)
-   are visible; detect gfx, trace sources (rocprofv3?), available op backends (aiter / flydsl via
+   are visible; detect gfx, TraceLens availability, available op backends (aiter / flydsl via
    `aiter.ops.flydsl.is_flydsl_available()` — NOT `import flydsl` / ckProfiler /
    hipblaslt-bench?), and the model's **arch class** from its `config.json`. Degrade gracefully
    (a missing OPTIONAL tool → record a limitation, don't abort); hard-stop ONLY on a true blocker

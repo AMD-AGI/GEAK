@@ -7,7 +7,8 @@
 #     equivalents are `python -m vllm.entrypoints.openai.api_server` and
 #     `python benchmarks/benchmark_serving.py` (needs the repo checkout).
 #   - `--gpu-memory-utilization` is the vllm analogue of sglang's `--mem-fraction-static`.
-#   - profiling is enabled by the VLLM_TORCH_PROFILER_DIR env + `--profile` on the bench.
+#   - profiling is enabled via --profiler-config at server launch + `--profile` on the bench.
+#     record_shapes=True is required for parse_profile.py shape enrichment (vllm defaults to False).
 # The Director's preflight step should smoke-test these two commands on the target image and record
 # any needed EXTRA_SERVER_ARGS BEFORE the run relies on them. This adapter targets the current CLI.
 
@@ -17,15 +18,21 @@ adapter_launch() {
   # Pin GPU_ARCHS so aiter's JIT skips rocm_agent_enumerator/_detect_native (see sglang.sh / gpu_lock.sh).
   local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
   # shellcheck disable=SC2086
+  # Build profiler-config flags: record_shapes is required for parse_profile.py shape enrichment.
+  local _prof_cfg=""
+  if [ -n "$PROFILE_DIR" ]; then
+    _prof_cfg="--profiler-config profiler=torch torch_profiler_dir=$PROFILE_DIR torch_profiler_record_shapes=true"
+  fi
+  # shellcheck disable=SC2086
   env $EXTRA_ENV \
     ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
-    VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     vllm serve "$MODEL" \
       --host "$HOST" --port "$PORT" \
       --tensor-parallel-size "$TP" \
       --gpu-memory-utilization "$MEM_FRACTION" \
+      $_prof_cfg \
       $EXTRA_SERVER_ARGS \
       > "$LOG" 2>&1 &
   SERVER_PID=$!

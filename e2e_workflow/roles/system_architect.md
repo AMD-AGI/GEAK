@@ -67,10 +67,15 @@ Inputs: `EVAL_DIR`, `PROFILE_TOPN` (path to profile_topN.json + inline top entri
    grouped/fused-MoE GEMM in the Top-N; hybrid-mamba → expect linear-attn Triton kernels; MLA → expect
    MLA decode). Restrict every `candidate_backends` list to `available_backends`. Gate playbook priors
    on `gfx`.
-1. Read the Top-N. For EACH top entry compute an Amdahl priority = `pct_gpu_time × plausible_speedup`
-   (use the backend playbook priors for plausible_speedup per class, keyed by `model_class`+`gfx` when
-   present). Note the regime each serves (large-M shape = prefill, small-M/batch = decode). **Dedupe
-   GEMMs by shape** — one bake-off per distinct (shape,dtype) covers all its launches.
+1. Read the Top-N. Use `pct_gpu_time` (the de-inflated value) for Amdahl ranking — it already
+   accounts for comm spin-wait and warmup outliers. For EACH top entry compute an Amdahl priority =
+   `pct_gpu_time × plausible_speedup` (use the backend playbook priors for plausible_speedup per
+   class, keyed by `model_class`+`gfx` when present). Note the regime each serves (large-M shape =
+   prefill, small-M/batch = decode; if `shape_breakdown` is present, use it to quantify regime
+   contribution instead of guessing). **Dedupe GEMMs by shape** — one bake-off per distinct
+   (shape,dtype) covers all its launches. When `roofline.pct_roofline > 85%`, the kernel is near
+   hardware peak — lower its `plausible_speedup` accordingly. When `roofline.bound == "MEMORY_BOUND"`,
+   route to fusion/memory-access optimizations rather than compute tuning.
 2. Partition the Top-N into FOUR routes (by what optimization the op admits, NOT by edit flag):
    - **config fast path** — service-level env/flag with no op isolation: `--attention-backend` swap,
      `--quantization fp8`, cuda-graph, torch-compile, kv-cache-dtype, scheduling/mem knobs → Config

@@ -32,8 +32,8 @@ throughput delta that exceeds the noise band. See `knowledge/e2e_optimization.md
 - **System Architect** = strategy: read the standardized Top-N, route by Amdahl into config/kernel/
   host tracks, per-milestone planning + stop rule, and the **persistent cross-run experience library**
   (`knowledge/backend_playbook.md`, grown after every run).
-- **Profiler** = warm-server trace (torch + optional rocprofv3) → ONE standardized Top-N artifact via
-  `scripts/parse_profile.py` (the "spec" contract).
+- **Profiler** = warm-server trace (torch profiler, optionally enhanced by TraceLens) → ONE
+  standardized Top-N artifact via `scripts/parse_profile.py` (the "spec" contract).
 - **Config Tuner** = Tier-0 flag/env/backend sweep, runs FIRST (default ON), no source rewrite.
 - **Kernel Extractor** = capture real shapes + a reference I/O oracle → an IMMUTABLE standalone
   unittest task dir the kernel layer consumes (anti-cheating).
