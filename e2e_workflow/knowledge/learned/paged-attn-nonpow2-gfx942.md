@@ -3,8 +3,8 @@ key: paged decode attention · gfx942 · vLLM (pow2 + non-pow2 KV block; incl. M
 type: routing
 confidence: ★★★
 effect: head ~8-21% GPU; decode-regime Triton/HIP rewrite → ~+1-4% e2e ceiling (modest, real); op-level backend bake-off is N/A (server-flag swap)
-confirms: 4
-last_seen: 2026-06-22
+confirms: 5
+last_seen: 2026-06-23
 ---
 # vLLM paged attention with a non-pow2 KV block → the live path is the editable in-tree Triton kernel
 - lever: when the KV `block_size` is non-pow2 (e.g. 784), `use_rocm_custom_paged_attention()` returns
@@ -45,4 +45,6 @@ last_seen: 2026-06-22
   (no host sync), in-place into o, no persistent HBM. Amdahl is modest here (7.52% head → ~+0.7% e2e at 1.1x).
 - source: exp/e2e_*Qwen3.5-27B-FP8*/ 2026-06-15 (non-pow2); e2e_Qwen-Qwen3-14B_20260622 (pow2 bk=16, 21% head);
   e2e_moonshotai-Kimi-K2.6_20260622 (MLA decode stage1 TRITON_MLA, 17.23% head, baseline decode M1=0.219ms/M64=0.265ms, oracle rel=0;
-  AND aiter `_ps` asm head h1 7.52%, baseline M1=0.062ms/M64=0.080ms/M64-long=0.312ms, oracle rel pass tol2e-2 → route=author triton)
+  AND aiter `_ps` asm head h1 7.52%, baseline M1=0.062ms/M64=0.080ms/M64-long=0.312ms, oracle rel pass tol2e-2 → route=author triton);
+  e2e_moonshotai-Kimi-K2.6_20260623 (re-confirm aiter `_ps` asm path, mla_a16w16_qh16..._ps.co loaded; 7.5% head, synth oracle PASS rel=0,
+  baseline M1=0.184ms/M64=0.438ms; no op-level env/flag win → author_plan triton FIRST then hip, gate=author_recommended)

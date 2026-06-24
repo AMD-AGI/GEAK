@@ -51,3 +51,12 @@ last_seen: 2026-06-23
   23.1 GiB no starvation @ mem=0.9.** 9th confirm; first TP=4/N=512 e2e-verified data point.
 - caution: **N is per-TP-rank (moe_intermediate//TP).** TP=8→N=256, TP=4→N=512; the lookup filename and the
   whole sweep change with TP. Re-derive from model config + the run's serving TP, never reuse a TP=8 JSON at TP=4.
+- source: 2026-06-23 Kimi-K2.6 TP=4 (eval e2e_..._20260623_092549): **lever already CONSUMED in the accepted
+  baseline** — baseline_flags seeded the prior TP=4/N=512 moe_tuned dir as VLLM_TUNED_CONFIG_FOLDER + mnbt=16384,
+  server.log shows 'Using configuration from …E=384,N=512,…int4_w4a16.json' and ZERO 'Using default MoE config'.
+  So the env config-tune gives NO fresh e2e win this round (no have_winner). For the dominant int4-MoE head
+  (pct_gpu_time=52) the next lever is the **FlyDSL author route** (is_flydsl_available True, flydsl 0.2.2;
+  reuse aiter/ops/flydsl moe_gemm_2stage / a4w4 grouped primitives) handed to kernel_workflow to beat the
+  already-tuned config. op_bench grouped probe: flydsl correct rel_err 0.0037, ck correct, aiter grouped
+  entrypoint signature-failed (per-backend no-win, harness OK). Confirms the 'verify baseline didn't already
+  bank the config' caution as a real, recurring gate.
