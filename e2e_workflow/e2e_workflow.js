@@ -191,6 +191,15 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
 // Only routing/bake-off/integration roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['system_architect', 'op_benchmarker', 'e2e_integrator']);
+// ---- Pluggable profile analysis (default ON; OFF => byte-identical) --------------------------------
+// After the Profiler captures a trace, an OPTIONAL analyzer (TraceLens by default) emits a canonical
+// top-kernel list + an LLM summary, injected as ADVISORY priors into Strategize + bake-off. The analyzer
+// is a markdown recipe under knowledge/analyzers/<name>.md (swap/extend without touching this JS); the
+// summary is written by the workflow's OWN agent LLM (no external API/key). profile_analysis=false =>
+// no analyzer agent runs and nothing is injected => byte-identical to a build without this feature.
+const PROFILE_ANALYSIS_ENABLED = String(A.profile_analysis != null ? A.profile_analysis : 'true') === 'true';
+const PROFILE_ANALYZER = String(A.profile_analyzer || 'tracelens').trim() || 'tracelens';
+const TRACELENS_INSTALL = String(A.tracelens_install || 'git+https://github.com/AMD-AGI/TraceLens.git').trim();
 const GEMM_SYNTH = String(A.gemm_synth != null ? A.gemm_synth : 'true');     // synth GEMM inputs (cheap)
 const ENABLE_FP8 = String(A.enable_fp8 != null ? A.enable_fp8 : 'false');    // Tier-D quant (parity-breaking)
 const FAST_PATH_FIRST = String(A.fast_path_first != null ? A.fast_path_first : 'true') === 'true';
@@ -286,6 +295,10 @@ const PROFILE_SCHEMA = obj({
   source: { type: 'string' }, total_gpu_time_ms: { type: 'number' }, top_kernels: arrObj,
   shift_note: { type: 'string' }, notes: { type: 'string' },
 }, ['profile_topN_json', 'top_kernels']);
+
+const ANALYSIS_SCHEMA = obj({
+  ok: { type: 'boolean' }, top_kernels_path: { type: 'string' }, summary_md_path: { type: 'string' }, note: { type: 'string' },
+}, ['ok']);
 
 const STRATEGY_SCHEMA = obj({
   regime_summary: { type: 'string' }, config_directions: arrObj,
@@ -610,6 +623,7 @@ if (!MODEL_PATH && KERNEL_PATH) {
 // PHASE: Setup + Baseline profile + Strategize  (gated; else load carried state)
 // ===========================================================================
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, profile, strategy, kernelQueue, headQueue;
+let ANALYSIS_INPUTS = {};   // advisory profile-analysis paths; {} when disabled/failed => byte-identical
 if (want('setup')) {
   phase('Setup');
   const setup = await safeAgent(
@@ -638,11 +652,33 @@ if (want('setup')) {
     { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
   log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
 
+  // Optional pluggable profile analysis (advisory). Fault-tolerant: any failure leaves ANALYSIS_INPUTS={}
+  // so the run proceeds exactly as if disabled.
+  if (PROFILE_ANALYSIS_ENABLED) {
+    try {
+      const an = await safeAgent(
+        roleAgent('profile_analyzer', 'run', 'Run the selected analyzer on the captured trace; emit canonical top_kernels.json + summary.md; be fault-tolerant.', {
+          EVAL_DIR, ANALYZER: PROFILE_ANALYZER, GPU_IDS, MODEL_NAME, TRACELENS_INSTALL, SKILL_DIR: WORKFLOW_DIR,
+        }),
+        { phase: 'Profile', label: `profile_analyzer:${PROFILE_ANALYZER}`, schema: ANALYSIS_SCHEMA }, 1);
+      if (an && an.ok) {
+        ANALYSIS_INPUTS = {
+          ...(an.top_kernels_path ? { ANALYSIS_TOPK: an.top_kernels_path } : {}),
+          ...(an.summary_md_path ? { ANALYSIS_SUMMARY: an.summary_md_path } : {}),
+        };
+        log(`[profile-analysis] ${PROFILE_ANALYZER}: topk=${an.top_kernels_path || '-'}, summary=${an.summary_md_path || '-'}`);
+      } else {
+        log(`[profile-analysis] ${PROFILE_ANALYZER}: skipped (${an ? an.note || 'no output' : 'agent failed'}); continuing as if disabled.`);
+      }
+    } catch (e) { log(`[profile-analysis] error (${(e && e.message) || e}); continuing without it.`); }
+  }
+
   phase('Strategize');
   strategy = await safeAgent(
     roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
       EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
       WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
+      ...ANALYSIS_INPUTS,
     }),
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
@@ -659,6 +695,7 @@ if (want('setup')) {
   curEnv = ST.env || '';
   profile = { profile_topN_json: ST.profile_topn_json || '' };
   strategy = { config_directions: ST.config_directions || [] };
+  ANALYSIS_INPUTS = ST.analysis_inputs || {};   // carry advisory analysis paths across phase-split invocations
   kernelQueue = ST.kernelQueue || [];
   headQueue = ST.headQueue || [];
   log(`Loaded carried state: EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT}, flags='${curFlags}', env='${curEnv}', ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
@@ -694,6 +731,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
         EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
         WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_INPUTS,
       }),
       { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
     if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
@@ -1110,6 +1148,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
             CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
             GPU_ID: gpu, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+            ...ANALYSIS_INPUTS,
           }),
           { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
         return { h, gpu, ext, bake };
@@ -1285,6 +1324,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
         CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
         GPU_ID: h.gpu_id, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+        ...ANALYSIS_INPUTS,
       }),
       { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
     if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {
@@ -1764,6 +1804,7 @@ const carryState = {
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
+  analysis_inputs: ANALYSIS_INPUTS,   // advisory profile-analysis paths carried across phases
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
   // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a
   // resumed phase run can finish their A/B instead of re-discovering them.
