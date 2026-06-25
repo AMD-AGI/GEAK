@@ -261,8 +261,8 @@ def main(
         "--total-budget-s",
         help="Override the mode's total wall-clock budget (seconds). Escape hatch for testing.",
     ),
-    scoring_target: str = typer.Option(
-        "wall",
+    scoring_target: str | None = typer.Option(
+        None,
         "--target",
         help=(
             "Which signal the harness reports as GEAK_RESULT_LATENCY_MS (the scoring metric "
@@ -270,7 +270,10 @@ def main(
             "triton.testing.do_bench (includes Python/dispatch overhead). 'kernel' = GPU-only "
             "kernel time via torch.profiler CUDA events (excludes dispatch). The dual-signal "
             "harness always reports BOTH (GEAK_RESULT_WALL_MS + GEAK_RESULT_KERNEL_MS) for "
-            "agent visibility; --target only chooses which becomes the scoring signal."
+            "agent visibility; --target only chooses which becomes the scoring signal. "
+            "Default None -> falls through to GEAK_SCORE_TARGET env -> 'kernel' (so the "
+            "documented env knob and the kernel default actually take effect; previously this "
+            "defaulted to 'wall' and silently overrode both)."
         ),
     ),
     debug: bool = typer.Option(
