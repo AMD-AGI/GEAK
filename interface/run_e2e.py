@@ -154,21 +154,14 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
 
 def build_prompt(ps_args: dict) -> str:
     eval_dir = ps_args.get("eval_dir", "")
-    # Advisory budget line (the hard enforcement lives in the JS via the
-    # time_budget_s arg's setTimeout deadlines; this only makes the agent aware so
-    # it does not, e.g., narrate an open-ended plan). Omitted when no budget.
-    budget_s = ps_args.get("time_budget_s")
-    budget_note = (
-        f"This run has a HARD wall-clock budget of ~{int(budget_s) // 3600}h "
-        f"({int(budget_s)}s); the workflow self-stops new work before then and "
-        "uses the remainder for Finalize/Report/Validate. Do not wait past it.\n"
-        if budget_s else ""
-    )
+    # NOTE: the wall-clock budget is NOT surfaced in this prompt. The top driver
+    # agent only invokes the Workflow tool once and waits, so it never acts on the
+    # budget; enforcement lives entirely in the JS (the time_budget_s arg drives the
+    # setTimeout deadlines), and the value is already passed via args.time_budget_s.
     return (
         "Invoke the Workflow tool exactly once with:\n"
         f'  scriptPath: "{E2E_SCRIPT}"\n'
         f"  args: {json.dumps(ps_args)}\n"
-        + budget_note +
         "Run the full e2e pipeline (Setup -> Profile -> Strategize -> "
         "HeadKernel -> Milestone -> Finalize -> Report -> Validate). The workflow "
         f'persists its full return value to "{eval_dir}/workflow_return.json" as '
