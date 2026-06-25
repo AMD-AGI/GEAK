@@ -736,8 +736,11 @@ def collect_profile(
     # repeated timeouts. GEAK_SKIP_PROFILE short-circuits it: return a profile-less
     # (but non-error) ProfileResult so the optimizer plans "blind" and proceeds to
     # rounds instead of starving on the profiler.
-    if os.environ.get("GEAK_SKIP_PROFILE", "").strip().lower() in ("1", "true", "yes"):
-        logger.info("collect_profile: GEAK_SKIP_PROFILE set; skipping profiler-mcp (advisory)")
+    # DEFAULT: skip (the advisory profiler is high-cost / hang-prone and the
+    # optimizer measures every change directly via FULL_BENCHMARK anyway). Opt back
+    # in by explicitly setting GEAK_SKIP_PROFILE to a falsy value (0/false/no).
+    if os.environ.get("GEAK_SKIP_PROFILE", "1").strip().lower() not in ("0", "false", "no"):
+        logger.info("collect_profile: GEAK_SKIP_PROFILE set (default on); skipping profiler-mcp (advisory)")
         return ProfileResult(
             harness_path=harness_path.resolve(),
             command=command,
