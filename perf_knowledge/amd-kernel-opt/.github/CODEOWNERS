@@ -1,0 +1,13 @@
+# CODEOWNERS — GitHub requests review from these owners on matching changes.
+# Docs: https://docs.github.com/articles/about-code-owners
+
+# Default owner for everything in the repo
+*                       @AMD-AGI/ai-algorithm
+
+# Distilled knowledge (patterns, anti-patterns, cases, methodology, catalog)
+/patterns/              @AMD-AGI/ai-algorithm
+/anti-patterns/         @AMD-AGI/ai-algorithm
+/cases/                 @AMD-AGI/ai-algorithm
+/methodology/           @AMD-AGI/ai-algorithm
+/catalog/               @AMD-AGI/ai-algorithm
+
