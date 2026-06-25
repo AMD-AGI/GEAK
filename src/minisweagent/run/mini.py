@@ -669,15 +669,18 @@ def main(
         return None
 
     _target_language = _resolve_target_language(kernel_type)
-    # Scoring signal precedence: explicit --target > GEAK_SCORE_TARGET env > "wall".
+    # Scoring signal precedence: explicit --target > GEAK_SCORE_TARGET env > "kernel".
     # ``kernel`` scores GPU-only kernel time (torch.profiler CUDA events), which
     # excludes host dispatch + DVFS jitter — the ±1% wall-time noise that drowns
     # sub-2% kernel gains and lets the agent over-report a noisy favorable draw.
-    # Keep ``wall`` the default (E2E-correlated, what most callers expect); the
-    # env knob lets an operator switch the whole fleet to the low-noise signal
-    # without editing per-run CLI. Generic: no per-kernel special-casing.
+    # DEFAULT is ``kernel``: wall-time scoring lets a patch "win" by collapsing
+    # kernel launches (removing host-dispatch overhead the production CUDA-graph'd /
+    # batched server already amortizes), so such wins do NOT transfer to end-to-end
+    # serving throughput. Scoring GPU kernel time keeps the optimization target
+    # aligned with what actually moves E2E. Override with --target wall /
+    # GEAK_SCORE_TARGET=wall when you specifically want the wall signal.
     scoring_target_norm = (
-        scoring_target or os.environ.get("GEAK_SCORE_TARGET") or "wall"
+        scoring_target or os.environ.get("GEAK_SCORE_TARGET") or "kernel"
     ).strip().lower()
     if scoring_target_norm not in {"wall", "kernel"}:
         logger.warning(
