@@ -52,6 +52,24 @@ const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serving_tp : 1), 10);
 const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
   : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
+// ---- WALL-CLOCK BUDGET (opt-in; default OFF when absent => byte-identical) ---------------------------
+// time_budget_s is the EXTERNAL orchestrator's HARD kill budget (run_e2e.py PERFSKILLS_E2E_TIMEOUT_S),
+// forwarded so GEAK can self-pace and FINISH (Finalize/Report/Validate + workflow_return flush) BEFORE
+// the SIGKILL — instead of being torn down mid-flight (the deep 24h-budget-vs-12h-kill failure). This is
+// the SINGLE place the orchestrator budget is interpreted. When the arg is ABSENT (GEAK invoked directly,
+// not via the interface) TIME_BUDGET_MS is null and EVERY budget branch below short-circuits, so the run
+// is byte-identical to a build without this feature. No model/run specifics; pure time arithmetic.
+const TIME_BUDGET_MS = A.time_budget_s != null ? parseInt(A.time_budget_s, 10) * 1000 : null;
+// Reserve a tail for the post-deadline finish: the in-flight wave/head completes, then Finalize + Report +
+// the final Validate bench + the workflow_return write must all land before the hard kill. Carve 8% (min
+// 20min) off the top here, ONCE, so every mode below shares one definition of "effective budget".
+const TIME_BUDGET_EFFECTIVE_MS = TIME_BUDGET_MS != null
+  ? Math.max(60000, TIME_BUDGET_MS - Math.max(1200000, Math.floor(TIME_BUDGET_MS * 0.08)))
+  : null;
+// Cap on the dispatch-deadline TAIL (budget − deadline). A flat 60% deadline reserves 40%, which is wasteful
+// on large budgets (24h → ~9h reserved though a few hours suffice). Deadlines below are max(60%, budget − this
+// cap): the 60% floor keeps small budgets unchanged; the cap bounds the reserve on large ones. Default 3h.
+const TIME_TAIL_CAP_MS = parseInt(A.time_tail_cap_s != null ? A.time_tail_cap_s : 10800, 10) * 1000; // 3h
 // ---- FAST MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A time-boxed run that takes ALL its optimization from the HeadKernel track: it SKIPS ConfigSweep AND
 // the editable-kernel Milestone loop, and completes within a wall-clock budget (default 5h). It exists
@@ -64,12 +82,16 @@ const FAST_MODE = String(A.fast_mode != null ? A.fast_mode : 'false') === 'true'
 // Total wall-clock budget for a fast run (default 5h). Enforced with setTimeout (Date.now() is NOT
 // available in workflow scripts): a global deadline flag stops dispatching NEW head ops, and each nested
 // head author-workflow is independently time-bounded so no single op can overrun the budget.
-const FAST_BUDGET_MS = parseInt(A.fast_budget_ms != null ? A.fast_budget_ms : 18000000, 10); // 5h
+let FAST_BUDGET_MS = parseInt(A.fast_budget_ms != null ? A.fast_budget_ms : 18000000, 10); // 5h
+// When the orchestrator passes a wall-clock budget it is the SOURCE OF TRUTH — use it directly (replace the
+// 5h default) so a fast run fills the granted time and still finalizes before the external SIGKILL. The 5h
+// default (and any explicit fast_budget_ms) applies only when time_budget_s is absent (direct invocation).
+if (TIME_BUDGET_EFFECTIVE_MS != null) FAST_BUDGET_MS = TIME_BUDGET_EFFECTIVE_MS;
 // Stop STARTING new head ops after this point so the in-flight head + Finalize/Report/Validate still land
 // inside FAST_BUDGET_MS. Default 60% of the budget (3h at 5h) leaves ~40% for the last head to finish +
 // the deliverable/validation tail.
 const FAST_HEAD_DEADLINE_MS = parseInt(A.fast_head_deadline_ms != null ? A.fast_head_deadline_ms
-  : Math.floor(FAST_BUDGET_MS * 0.6), 10);
+  : Math.max(Math.floor(FAST_BUDGET_MS * 0.6), FAST_BUDGET_MS - TIME_TAIL_CAP_MS), 10);
 // Per-head nested author/optimize workflow() bound (fast mode only): a single recursive kernel run can't
 // eat the whole budget. Default 90min. (Heads run in PARALLEL on exclusive GPU lanes, so this is a
 // per-lane wall-clock cap, not summed — 90min/lane + serial integrate + Finalize still lands inside the 5h
@@ -116,7 +138,12 @@ const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_
 // EVERY knob is `DEEP_MODE ? deep : original`-gated; with deep_mode off the whole block is dead code and
 // normal/fast are byte-identical. deep_mode is mutually exclusive with the fast parallel track.
 const DEEP_MODE = String(A.deep_mode != null ? A.deep_mode : 'false') === 'true';
-const DEEP_HEAD_BUDGET_MS = parseInt(A.deep_head_budget_ms != null ? A.deep_head_budget_ms : 86400000, 10); // 24h for the whole HeadKernel module (deep mode does deep exploration)
+let DEEP_HEAD_BUDGET_MS = parseInt(A.deep_head_budget_ms != null ? A.deep_head_budget_ms : 86400000, 10); // 24h for the whole HeadKernel module (deep mode does deep exploration)
+// When the orchestrator passes a wall-clock budget it is the SOURCE OF TRUTH — use it directly (replace the
+// 24h default) so deep fills the granted time and self-finalizes before the external SIGKILL (fixing the
+// deep 24h-budget-vs-real-kill failure where it was torn down mid-wave). The 24h default applies only when
+// time_budget_s is absent (direct invocation) => byte-identical to today.
+if (TIME_BUDGET_EFFECTIVE_MS != null) DEEP_HEAD_BUDGET_MS = TIME_BUDGET_EFFECTIVE_MS;
 const DEEP_HEAD_WF_MS = parseInt(A.deep_head_workflow_ms != null ? A.deep_head_workflow_ms : 4500000, 10); // per-burst nested kernel_workflow time cap (75min) — bounds the per-wave barrier. Harvest+gate run at the TOP of each wave on disk truth, so gate latency is decoupled from this; the cap only bounds how long a burst runs.
 const DEEP_E2E_GAIN_TRIGGER = parseFloat(A.deep_e2e_gain_trigger != null ? A.deep_e2e_gain_trigger : 0.08); // isolated-best improvement since last e2e gate that triggers a new (batched) gate
 const DEEP_E2E_MAX_INTERVAL_MS = parseInt(A.deep_e2e_max_interval_ms != null ? A.deep_e2e_max_interval_ms : 7200000, 10); // force an e2e gate at least this often when a new candidate exists (default 2h)
@@ -547,6 +574,22 @@ if (DEEP_MODE && typeof setTimeout === 'function' && DEEP_HEAD_BUDGET_MS > 0) {
     DEEP_DEADLINE_HIT = true;
     log(`[deep-mode] HeadKernel budget (${Math.round(DEEP_HEAD_BUDGET_MS / 3600000)}h) reached — no NEW co-opt waves will start; finishing the in-flight wave then proceeding to Finalize/Validate.`);
   }, DEEP_HEAD_BUDGET_MS);
+}
+// --- DEFAULT-MODE wall-clock control (no-op unless time_budget_s passed) -----------------------------
+// fast/deep have their own deadline flags (capped above); the DEFAULT pipeline had NO time awareness at
+// all — its Milestone editable-kernel loop and head bake-off track could run past the orchestrator's kill.
+// Mirror the fast/deep mechanism with ONE general flag: stop STARTING new head/milestone work after 60% of
+// the effective budget (same 60/40 carve as fast — leaves the tail for the in-flight task + Finalize/
+// Report/Validate). Active in ALL modes when time_budget_s is set (harmless for fast/deep, which stop even
+// earlier on their own flags); fully inert (never registered) when time_budget_s is absent => byte-identical.
+let TIME_DEADLINE_HIT = false;
+const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
+  ? Math.max(Math.floor(TIME_BUDGET_EFFECTIVE_MS * 0.6), TIME_BUDGET_EFFECTIVE_MS - TIME_TAIL_CAP_MS) : null;
+if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HEAD_DEADLINE_MS > 0) {
+  setTimeout(() => {
+    TIME_DEADLINE_HIT = true;
+    log(`[time-budget] dispatch deadline (${Math.round(TIME_HEAD_DEADLINE_MS / 60000)}min of ${Math.round(TIME_BUDGET_MS / 60000)}min budget) reached — no NEW head/milestone work will start; finishing in-flight then proceeding to Finalize/Report/Validate before the hard kill.`);
+  }, TIME_HEAD_DEADLINE_MS);
 }
 function deepBoundedWorkflow(ref, wfArgs, label) {
   const p = workflow(ref, wfArgs);
@@ -1244,10 +1287,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
   } else {
   for (const h of heads) {
-    // Fast-mode budget guard: stop STARTING new head ops once the dispatch deadline has fired, so the
-    // in-flight work + Finalize/Validate still land inside the wall-clock budget. (No-op in default mode.)
-    if (FAST_MODE && FAST_DEADLINE_HIT) {
-      log(`[fast-mode] budget deadline reached — stopping head dispatch before ${h.short_name} (${headDispatched}/${heads.length} heads done).`);
+    // Budget guard: stop STARTING new head ops once a dispatch deadline has fired, so the in-flight work +
+    // Finalize/Validate still land inside the wall-clock budget. FAST_DEADLINE_HIT covers fast mode;
+    // TIME_DEADLINE_HIT covers ALL modes when time_budget_s was passed (inert otherwise => no-op default).
+    if ((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT) {
+      log(`[budget] dispatch deadline reached — stopping head dispatch before ${h.short_name} (${headDispatched}/${heads.length} heads done).`);
       break;
     }
     headDispatched++;
@@ -1451,7 +1495,10 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
 // ===========================================================================
 // Floor: keep dispatching until >= MIN_KERNEL_TASKS editable-kernel tasks have run, THEN allow the
 // noImprove early-stop. While below the floor the loop never stops on no-improve / empty plan.
-while (want('kernel') && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS || noImprove < 2)) {
+// Budget: when time_budget_s was passed, TIME_DEADLINE_HIT stops STARTING new milestones (even below the
+// floor) so the in-flight work + Finalize/Validate finish before the orchestrator's hard kill. The guard
+// is inert when time_budget_s is absent (TIME_DEADLINE_HIT never set) => byte-identical default behavior.
+while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS || noImprove < 2)) {
   milestone++;
   const remaining = BUDGET - dispatched;
   const belowFloor = dispatched < MIN_KERNEL_TASKS;

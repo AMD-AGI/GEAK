@@ -83,7 +83,7 @@ DONE_POLL_S = float(os.environ.get("PERFSKILLS_DONE_POLL_S", "15"))
 # ---------------------------------------------------------------------------
 # handoff (stable)  ->  e2e_workflow.js args (volatile, owned here)
 # ---------------------------------------------------------------------------
-def map_args(h: dict) -> dict:
+def map_args(h: dict, timeout_s: int | None = None) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
     # gpu_ids is the optimization-parallelism pool AND the serving device set.
@@ -109,6 +109,16 @@ def map_args(h: dict) -> dict:
         "apply_to_original": "true",
         "exp_root": h["exp_root"],
     }
+    # Forward the orchestrator's HARD wall-clock budget (the same timeout_s this
+    # runner enforces via anyio.fail_after / subprocess timeout) so the JS
+    # workflow can self-pace and FINISH (Finalize/Report/Validate + workflow_return
+    # flush) BEFORE the SIGKILL, instead of being torn down mid-flight (the deep
+    # 24h-budget-vs-real-kill failure). The workflow treats this as the single
+    # source of its wall-clock budget and carves its own safety tail; we only
+    # forward the truth. Omitted when timeout_s is unknown => workflow stays
+    # budget-unaware (byte-identical to a direct, non-interface invocation).
+    if timeout_s is not None and timeout_s > 0:
+        ps_args["time_budget_s"] = int(timeout_s)
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Optional phase scoping / resume. Pass-through of the workflow's own
@@ -144,10 +154,21 @@ def map_args(h: dict) -> dict:
 
 def build_prompt(ps_args: dict) -> str:
     eval_dir = ps_args.get("eval_dir", "")
+    # Advisory budget line (the hard enforcement lives in the JS via the
+    # time_budget_s arg's setTimeout deadlines; this only makes the agent aware so
+    # it does not, e.g., narrate an open-ended plan). Omitted when no budget.
+    budget_s = ps_args.get("time_budget_s")
+    budget_note = (
+        f"This run has a HARD wall-clock budget of ~{int(budget_s) // 3600}h "
+        f"({int(budget_s)}s); the workflow self-stops new work before then and "
+        "uses the remainder for Finalize/Report/Validate. Do not wait past it.\n"
+        if budget_s else ""
+    )
     return (
         "Invoke the Workflow tool exactly once with:\n"
         f'  scriptPath: "{E2E_SCRIPT}"\n'
         f"  args: {json.dumps(ps_args)}\n"
+        + budget_note +
         "Run the full e2e pipeline (Setup -> Profile -> Strategize -> "
         "HeadKernel -> Milestone -> Finalize -> Report -> Validate). The workflow "
         f'persists its full return value to "{eval_dir}/workflow_return.json" as '
@@ -1557,7 +1578,7 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"empty/invalid handoff: {handoff_path}\n")
         return 2
 
-    ps_args = map_args(h)
+    ps_args = map_args(h, timeout_s)
     # Pin the single eval_dir into the environment so BOTH the live completion
     # check (_workflow_done_on_disk) and the scrape-independent disk recovery
     # (_discover_eval_dir) target EXACTLY this run's dir, deterministically.
