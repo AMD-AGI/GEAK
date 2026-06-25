@@ -4,6 +4,10 @@ agent:
 
     Your response must contain exactly ONE tool call.
     Include a THOUGHT section before your tool call where you explain your reasoning process.
+    If you choose the `bash` tool, its arguments MUST include a non-empty
+    `command` string, for example:
+    {"command": "python3 scripts/task_runner.py correctness"}.
+    Never call `bash` with `{}` or an empty command.
     
     Failure to follow these rules will cause your response to be rejected.
 
