@@ -27,7 +27,8 @@ Unlike CUDA/Triton where you use `input[idx]`, FlyDSL uses layout algebra:
 Identify the computational pattern:
 1. **Element-wise**: Each output depends only on corresponding input(s) → custom `@flyc.kernel`
 2. **Reduction**: Output has fewer elements (sum, mean, softmax) → manual reduction or pre-built kernel
-3. **GEMM/Linear**: Matrix multiplication → `compile_preshuffle_gemm_a8` + `shuffle_weight`
+3. **GEMM/Linear**: Fixed-weight matmul → `compile_preshuffle_gemm_a8` + `shuffle_weight`;
+   dynamic activation matmul (small M, decode) → `hgemm_splitk_` (see `flydsl_translation_gemm.md` § Split-K GEMM)
 4. **Normalization**: LayerNorm, RMSNorm → `build_layernorm_module` / `build_rmsnorm_module`
 5. **Convolution**: Conv2d → im2col (`F.unfold`) + `compile_preshuffle_gemm_a8` (fp16 cast)
 
@@ -59,7 +60,8 @@ See `flydsl_translation_conv_pool_bn.md` for the complete worked example.
 
 ### Pre-built FlyDSL kernels
 
-- **GEMM**: `compile_preshuffle_gemm_a8` — replaces `nn.Linear`, `torch.matmul`, `F.linear`
+- **GEMM (fixed weight)**: `compile_preshuffle_gemm_a8` — replaces `nn.Linear`, `F.linear`
+- **GEMM (dynamic activations)**: `hgemm_splitk_` — Q@K^T, attn@V when B is not preshufflable
 - **Flash Attention**: `build_flash_attn_func_module` — replaces `F.scaled_dot_product_attention`
 - **Softmax**: `build_softmax_module`
 - **LayerNorm/RMSNorm**: `build_layernorm_module` / `build_rmsnorm_module`
@@ -354,17 +356,20 @@ What operation type?
 ├── LayerNorm / RMSNorm
 │   └── Use build_layernorm_module() / build_rmsnorm_module()
 ├── GEMM / Linear / torch.matmul
-│   ├── fp32 inputs? Cast to fp16, use compile_preshuffle_gemm_a8() [NO torch.mm]
-│   └── fp16/bf16 → Use compile_preshuffle_gemm_a8() [NO torch.matmul / F.linear]
+│   ├── Fixed weight B → compile_preshuffle_gemm_a8() + shuffle_weight once [NO nn.Linear]
+│   ├── Both operands dynamic (activations) → hgemm_splitk_() [NO shuffle_weight per forward]
+│   └── fp32 inputs? Cast to fp16/bf16 before FlyDSL GEMM [NO torch.mm]
 ├── Batched matmul (torch.bmm)
-│   ├── Attention pattern (Q@K^T) → Use build_flash_attn_func_module()
-│   ├── Shared B-matrix → reshape (B,M,K) to (B*M,K), single preshuffle GEMM
-│   └── Varying B → reshape batch into M dim, preshuffle GEMM [NO torch.bmm]
+│   ├── Attention pattern (Q@K^T), flash fits → build_flash_attn_func_module()
+│   ├── Shared static B-matrix → reshape (B,M,K) to (B*M,K), single preshuffle GEMM
+│   └── Varying dynamic B → hgemm_splitk_ per slice or folded M [NO preshuffle on activations]
 ├── Attention (self-attention, SDPA, Flash)
 │   ├── Constraints met → Use build_flash_attn_func_module()
 │   ├── head_dim not %32 or <64 → Pad Q/K/V to next valid head_dim, flash attn, slice back
 │   ├── seq_len not %128 → Pad Q/K/V along seq dim, flash attn, slice back
-│   └── Both unmet → Decompose into preshuffle GEMM + build_softmax_module [NO F.scaled_dot_product_attention]
+│   └── Flash / fused decode infeasible → see flydsl_translation_attention.md § Decode Attention
+│       (nheads_q=16 decomposed path): batch gather, pre-scale Q, stacked M, f16 softmax
+│       then online/fused roadmap for higher tiers
 ├── Conv2d
 │   ├── F.unfold (im2col) to get patches (B, K_patch, L)
 │   ├── Transpose+reshape to (B*L, K_patch) = A matrix

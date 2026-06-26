@@ -1,8 +1,8 @@
 ---
 layer: "flydsl"
 category: "translation"
-tags: ["flydsl", "translation", "gemm", "matmul", "linear"]
-last_updated: 2026-03-23
+tags: ["flydsl", "translation", "gemm", "matmul", "linear", "hgemm", "splitk", "decode"]
+last_updated: 2026-06-09
 ---
 
 # FlyDSL Translation: GEMM / Matrix Multiplication
@@ -107,19 +107,25 @@ as separate operations after the GEMM:
 - **Fused bias+activation**: write a single `@flyc.kernel` that computes
   `output = max(0, gemm_output + bias)` in one pass
 
-### Alternative: hgemm_splitk (FP16 SplitK GEMM)
+### Alternative: hgemm_splitk (FP16/BF16 Split-K GEMM)
 
-For small M (e.g., batch_size=1 decode), standard tile configs may not
-fill the GPU. `hgemm_splitk` splits the K dimension across thread blocks:
+For **dynamic activation × activation** matmuls (especially **small M**, e.g.
+decode with `M = seqlen_q * num_heads`), use `hgemm_splitk_` instead of
+preshuffle GEMM. It does **not** require `shuffle_weight`; B can change every
+forward (paged KV, attention scores).
 
-```python
-from kernels.hgemm_splitk import compile_hgemm_splitk
-```
+Use when:
+- Both operands are activations (not a fixed weight to preshuffle once)
+- `M` is small and standard preshuffle `tile_m` under-fills the GPU
+- Flash attention does not apply (paged cache, MLA, non-BSHD layout)
 
-Use when M < tile_m and standard GEMM underperforms. Only available in
-newer FlyDSL versions — check availability before using.
+**Full API, constraints, tile guide, and attention examples** are documented in
+the [§ Split-K GEMM (hgemm_splitk)](#split-k-gemm-hgemm_splitk-dynamic-activations--small-m-decode)
+section below.
 
-### Constraints
+### Constraints (preshuffle GEMM only)
+
+The following apply to `compile_preshuffle_gemm_a8`, **not** to `hgemm_splitk_`:
 
 - `tile_k * elem_bytes` must be divisible by 64
 - `M` and `N` can be 0 (dynamic) — resolved at launch time
@@ -179,6 +185,195 @@ def get_inputs():
 def get_init_inputs():
     return [4096, 4096]
 ```
+
+## Split-K GEMM (hgemm_splitk): Dynamic Activations / Small-M Decode
+
+Use `hgemm_splitk` from `kernels.hgemm_splitk` when **both operands are dynamic
+activations** (not fixed weights) and preshuffle GEMM does not apply.
+
+| Scenario | Use |
+|----------|-----|
+| `nn.Linear`, fixed weight `W` | Preshuffle GEMM (`compile_preshuffle_gemm_a8` + `shuffle_weight`, once in `__init__`) — see above |
+| Standard SDPA (contiguous Q/K/V, head_dim/seq constraints) | `build_flash_attn_func_module()` |
+| **Activation @ activation**, small **M** (decode, few rows) | **`hgemm_splitk_`** |
+| **Activation @ activation**, both sides change every forward (paged KV, attention scores) | **`hgemm_splitk_`** |
+| Large M, static B weight | Preshuffle GEMM |
+
+**Do NOT** call `shuffle_weight` on K/V every forward pass to force preshuffle GEMM.
+Preshuffle is weight-stationary; per-forward shuffling defeats its purpose.
+
+Typical shapes: decode attention (`seqlen_q=1`, `M = seqlen_q * num_heads` small),
+MLA with paged KV cache, batched matmul where B varies per batch element.
+
+**Exception:** For paged decode (MLA latent cache with asymmetric qk/v dims, or
+PagedAttention k/v cache), see `flydsl_translation_attention.md` § Decode Attention — wrap
+a matching prebuilt fused kernel when one exists, otherwise use the decomposed split-K
+path described there.
+
+### Math and Layout
+
+The kernel computes:
+
+```
+C = A @ B^T
+```
+
+| Tensor | Shape | Role |
+|--------|-------|------|
+| `A` (`a`) | `(M, K)` | Left operand (e.g. Q flattened over heads) |
+| `B` (`b`) | `(N, K)` | Right operand stored row-major as `(N, K)` — **not** transposed |
+| `C` (`c`) | `(M, N)` | Output (pre-allocated) |
+
+Equivalent PyTorch: `torch.mm(A, B.T)` or `A @ B.transpose(-2, -1)` when `B` is `(N, K)`.
+
+For **Q @ K^T** with `K` of shape `(seq_len, K_dim)`, pass `B = K` (already `(N, K)`).
+
+For **attn @ V** with `V` of shape `(seq_len, V_dim)`, transpose first:
+
+```python
+vt = v.t()  # (V_dim, seq_len) — here N=V_dim, K=seq_len
+hgemm_splitk_(out, attn, vt, hgemm_kwargs=kwargs, stream=stream)
+```
+
+### High-Level API (Preferred)
+
+```python
+from kernels.hgemm_splitk import hgemm_splitk_
+
+# C, A, B: fp16 or bf16, CUDA. Shapes as above.
+hgemm_splitk_(
+    c,           # (M, N) output, pre-allocated
+    a,           # (M, K)
+    b,           # (N, K)
+    bias=None,   # optional (N,) — rarely used in translations
+    hgemm_kwargs={...},  # tile config; see below
+    stream=torch.cuda.current_stream(),
+)
+```
+
+- JIT-compiles on first call for each `(dtype, N, K, **hgemm_kwargs)` tuple (cached).
+- `M` is dynamic at launch time; **`N` and `K` are fixed at compile time** (from `b.shape`).
+- No preshuffling, no scale tensors, no `.view(-1)` requirement (internally reshapes to 2D).
+- `get_default_kwargs(m, n, k)` supplies tuned tiles for common LLM shapes; override via `hgemm_kwargs`.
+
+### Low-Level API
+
+For repeated launches with the same `(N, K)` and tile config, compile once:
+
+```python
+from kernels.hgemm_splitk import compile_hgemm_kernel, get_semaphore
+
+launch_fn = compile_hgemm_kernel(
+    "f16",          # or "bf16"
+    n=N, k=K,       # fixed at compile time
+    TILE_M=16, TILE_N=128, TILE_K=64,
+    SPLIT_K=1,
+    BLOCK_M_WARPS=1, BLOCK_N_WARPS=2, BLOCK_K_WARPS=1,
+    B_TO_LDS=True,
+    HAS_BIAS=False,
+)
+semaphore, signal = get_semaphore(stream, device)
+launch_fn(c, a, b, bias_placeholder, m, semaphore, signal, stream=stream)
+```
+
+Prefer `hgemm_splitk_()` unless you need explicit compile caching control.
+
+### Tile Configuration (`hgemm_kwargs`)
+
+| Key | Meaning |
+|-----|---------|
+| `TILE_M` | M-dimension tile (16 for small decode M) |
+| `TILE_N` | N-dimension tile; **`N` must be divisible by `TILE_N`** |
+| `TILE_K` | K-dimension tile; **`K` must be divisible by `TILE_K * SPLIT_K` logic** |
+| `SPLIT_K` | Split K across blocks (>1 improves occupancy for large K, small M) |
+| `BLOCK_M_WARPS` | Warps along M (product with N/K warps ≤ 8) |
+| `BLOCK_N_WARPS` | Warps along N |
+| `BLOCK_K_WARPS` | Warps along K (K-slicing within block) |
+| `B_TO_LDS` | Stage B matrix in LDS (often `True`) |
+
+#### Recommended starting points
+
+| M range | `TILE_M` | Notes |
+|---------|----------|-------|
+| 1–16 | 16 | Decode / few query rows |
+| 17–64 | 32 or 64 | Medium batch |
+| 64+ | 64–128 | May still use splitk; compare vs preshuffle if B is static |
+
+`TILE_N`: 64 or 128 (must divide `N`). `TILE_K`: 64 or 128/256 for large K.
+
+**Decode (small M, large K): try `SPLIT_K > 1` when profiling shows benefit.** With
+`M ≈ 16` (single batch slice) and `K ≥ 512`, split-K can raise occupancy. With
+**stacked** `M = batch * nheads` (e.g. 64) in decomposed MLA teaching kernels,
+**start with `SPLIT_K=1`** — semaphore sync often dominates at tiny per-launch M.
+See `flydsl_translation_attention.md` § Decode Attention (decomposed path).
+
+Example (single-batch MLA decode, `M=16`, `N=512`, `K=576` — profile both):
+
+```python
+gemm_kwargs = {
+    "TILE_M": 16, "TILE_N": 128, "TILE_K": 64,
+    "SPLIT_K": 2,          # >1 for small-M / large-K decode occupancy
+    "BLOCK_M_WARPS": 1, "BLOCK_N_WARPS": 2,
+    "BLOCK_K_WARPS": 1, "B_TO_LDS": True,
+}
+```
+
+### Constraints (split-K GEMM only)
+
+- **Dtypes**: `torch.float16` or `torch.bfloat16` only.
+- **`N % TILE_N == 0`** (compile-time `n` from `b.shape[0]`).
+- **`K`**: must satisfy divisibility checks in `compile_hgemm_kernel` (`K % TILE_K`, split-K splits, etc.).
+- **`M`**: dynamic; partial final M-tile handled in kernel.
+- **GPU arch**: tested on `gfx942`, `gfx950` (see FlyDSL `test_hgemm_splitk.py`).
+- **No preshuffle**: unlike `compile_preshuffle_gemm_a8`, B is used as-is.
+- When `SPLIT_K > 1`, internal semaphore buffer size limits grid (`bm * bn`).
+
+### Decomposed Attention Pattern
+
+Use when flash attention does not apply (paged KV, non-standard head dims, MLA, etc.):
+
+```python
+from kernels.hgemm_splitk import hgemm_splitk_
+from kernels.softmax_kernel import build_softmax_module
+
+# 1) scores = Q @ K^T   —  A: (M, K_qk), B: K as (seq, K_qk) -> (N=seq, K=K_qk)
+hgemm_splitk_(scores, q_flat, k, hgemm_kwargs=gemm_kwargs, stream=stream)
+
+# 2) scale + mask (element-wise / PyTorch structural ops)
+
+# 3) softmax
+softmax_fn(scores, attn, M, stream=stream)
+
+# 4) out = attn @ V  —  V^T as (N=v_dim, K=seq)
+vt = v.t().contiguous()
+hgemm_splitk_(out, attn, vt, hgemm_kwargs=gemm_kwargs, stream=stream)
+```
+
+Store `gemm_kwargs` on the module; compile once per `(N, K)` shape if `seq_len` is bounded
+(use `max_seq_len` buffers and slice, as in MLA translations).
+
+### Preshuffle GEMM vs Split-K GEMM
+
+| | Preshuffle GEMM | hgemm_splitk |
+|--|-----------------|--------------|
+| B operand | Fixed weight, shuffled once | Any `(N, K)` tensor, no shuffle |
+| Best for | Linear, conv GEMM | Dynamic activations, small M |
+| M | Dynamic (`M=0` in compile) | Dynamic at launch |
+| N, K | Dynamic at launch | **Fixed at compile** from `b.shape` |
+| Scales | Required (`empty(0)` for fp16) | Not used |
+| Launch args | All `.view(-1)` | 2D tensors OK |
+
+### Split-K Pitfalls
+
+1. **Wrong B layout**: Pass `(N, K)`, not `(K, N)`, unless you explicitly transpose to match `C = A @ B^T`.
+2. **Recompile every forward**: Changing `N` or `K` (e.g. growing `seq_len` past compile bounds) triggers new JIT. Pre-allocate for `max_seq_len` and slice.
+3. **Using preshuffle for K/V**: Do not `shuffle_weight` on cache tensors each step.
+4. **Large M + static weight**: Use preshuffle GEMM instead for better throughput.
+5. **Flash-eligible SDPA**: If Q/K/V are contiguous BSHD and constraints hold, flash attention beats decomposed splitk.
+
+### Split-K Reference Implementations
+
+- FlyDSL tests: `FlyDSL/tests/kernels/test_hgemm_splitk.py`
 
 ## GEMM + Reduction Fusion: Replace GEMM with Custom Kernel
 
@@ -269,10 +464,9 @@ handles all GEMM operations. Do NOT use `torch.mm` for fp32 GEMM.
   handles the full Q@K^T → softmax → @V pipeline natively.
 - **Shared B-matrix**: reshape `(B, M, K)` to `(B*M, K)`, use single `compile_preshuffle_gemm_a8`,
   then reshape back. B-matrix is preshuffled once.
-- **Varying B-matrix per batch**: reshape both operands so the batch is folded into the
-  M dimension. For `(B, M, K) @ (B, K, N)`: iterate over batch elements calling
-  preshuffle GEMM per element (each B-slice is preshuffled separately).
-  This is acceptable when flash attention does not apply.
+- **Varying B-matrix per batch (activations)**: fold batch into M and use `hgemm_splitk_`
+  (no preshuffle). See § Split-K GEMM (hgemm_splitk) above.
+  Use preshuffle GEMM only when each B-slice is a **static weight** shuffled once.
 
 ### Conv2d internal GEMM
 

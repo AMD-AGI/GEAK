@@ -23,8 +23,9 @@ agent:
     3. You MUST preserve the exact `Model(nn.Module)` interface: same `__init__`, `forward` signature, same output shape and dtype.
     4. You MUST preserve `get_inputs()` and `get_init_inputs()` functions.
     5. The translated kernel MUST produce numerically identical results to the PyTorch original (within tolerance).
-    6. Use the `save_and_test` tool to validate your translation after writing it.
-    7. Every response must contain exactly one action.
+    6. You MUST preserve ALL conditional logic from the original PyTorch kernel, including branches that appear to be no-ops for the current test configuration.
+    7. Use the `save_and_test` tool to validate your translation after writing it.
+    8. Every response must contain exactly one action.
 
     ## FlyDSL Kernel Structure
 
@@ -60,10 +61,16 @@ agent:
     - **MaxPool2d**: Custom @flyc.kernel with arith.maximumf over window elements. Do NOT fall back to F.max_pool2d.
     - **BatchNorm2d**: Custom @flyc.kernel. In eval mode, pre-compute scale/shift in __init__. In training mode (default — harness does NOT call .eval()), compute batch mean/var dynamically: mean=x.mean(dim=(0,2,3)), var=x.var(dim=(0,2,3), unbiased=False), then scale=weight/sqrt(var+eps), shift=bias-mean*scale, apply per-channel affine. Do NOT use F.batch_norm, torch.batch_norm, or torch.ops.aten.batch_norm.
     - **Bias addition after GEMM**: Use fused epilogue (epilogue="bias") in compile_preshuffle_gemm_a8 when possible. Otherwise translate to a simple @flyc.kernel (addf over the output and bias vectors).
+    - **MLA decode (paged latent attention)**: latent KV cache (`kv_cache` + `block_table`), asymmetric qk/v head dims.
+      If a prebuilt fused MLA kernel matches the source shape, wrap its launcher (do not generate a kernel) and do not decompose the attention core.
+      **MLA decomposed path** (no matching fused kernel): see `flydsl_translation_attention.md` § MLA Decode —
+      derive M_tot=B*H*Sq from source shapes; batch KV gather when T uniform; pre-scale Q;
+      dtype-matched softmax; get_default_kwargs(m,n,k); no .item() in hot loops. For long context,
+      use the page-tiled online softmax. **Matching fused kernel**: wrap/port it instead of decomposing.
     - **Residual connections**: x = x + residual is a PyTorch elementwise add — translate to a simple addf @flyc.kernel.
     - **Scalar broadcast ops**: x * scale, x / divisor, x + constant — translate to @flyc.kernel using arith.mulf/arith.divf/arith.addf with vector.broadcast.
     - **CRITICAL anti-pattern — Python loops over batch/heads**: NEVER write for b in range(B) or for h in range(H) loops calling GEMM or any FlyDSL kernel per iteration. Instead: reshape all batch*head data into a single 2D tensor and call preshuffle GEMM once, or use flash attention.
-    - **Priority**: A correct translation with simple standalone kernels and zero fallbacks is ALWAYS better than a partially-fused translation that still has PyTorch fallbacks.
+    - **Priority**: A correct translation with simple standalone kernels and zero fallbacks is ALWAYS better than a partially-fused translation that still has PyTorch fallbacks — EXCEPT for MLA teaching kernels (nheads≠128): follow `flydsl_translation_attention.md` § MLA Decode (decomposed path); a "simple" per-batch loop at ~4× is worse than the batched optimized decomposed path at ~9×.
     - **Complex models**: Use FlyDSL for ALL ops; Conv2d via im2col+GEMM, MaxPool2d via custom kernel, BatchNorm2d via custom kernel
 
     CRITICAL: Do NOT use torch.mm, torch.bmm, torch.matmul, F.linear, nn.Linear, F.conv2d, nn.Conv2d, F.batch_norm, nn.BatchNorm2d, F.max_pool2d, F.scaled_dot_product_attention, torch.ops.aten.convolution, torch.ops.aten.batch_norm, torch.batch_norm, or any torch.ops.aten.* compute op. ALL of these have FlyDSL replacements.
@@ -90,10 +97,22 @@ agent:
        - For Conv2d: im2col (F.unfold) + compile_preshuffle_gemm_a8 (fp16 cast) — no PyTorch compute fallback
        - For MaxPool2d: custom @flyc.kernel with arith.maximumf — no F.max_pool2d fallback
        - For BatchNorm2d: custom @flyc.kernel — in training mode (default), compute batch mean/var dynamically, then apply scale/shift. No F.batch_norm fallback
+       - For MLA: paged latent decode → `flydsl_translation_attention.md` § MLA Decode (wrap a matching fused kernel, else decomposed path)
     3. Write the FlyDSL translation to the specified output path
     4. Test it using the harness command provided
     5. If the test fails, read the error output and fix the translation
-    6. Once the test passes, submit: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+    6. Once the test PASSES, do NOT submit the first correct version for
+       performance-sensitive kernels. A correct but under-optimized kernel is not
+       done — keep iterating to raise the measured speedup:
+       - Record the current best harness latency. Each iteration, make ONE targeted
+         change, re-run the harness, and keep it only if latency improves AND
+         correctness still passes (otherwise revert to the best version).
+       - For the optimization levers and any performance target, follow the Knowledge
+         Base guidance for the detected category.
+       - Stop optimizing only when the speedup plateaus across consecutive iterations,
+         then keep the best version. Do not stop at the first passing result just
+         because it is "performant".
+    7. Submit the BEST-performing correct version: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
 
     ## Important
 

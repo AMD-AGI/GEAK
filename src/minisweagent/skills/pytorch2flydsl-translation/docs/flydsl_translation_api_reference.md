@@ -408,7 +408,8 @@ use `BLOCK_THREADS=256` and `VEC_WIDTH=8`.
 | `torch.clamp(x, min=a)` | `arith.maximumf(val, a_const)` | Custom kernel |
 | `torch.mean(x)` | Parallel reduction (see reduction patterns) | Custom kernel |
 | `torch.softmax(x)` | `build_softmax_module()` | **Pre-built** |
-| `torch.matmul(A, B)` | `compile_preshuffle_gemm_a8()` | **Pre-built** |
+| `torch.matmul(A, B)` (fixed weight B) | `compile_preshuffle_gemm_a8()` | **Pre-built** |
+| `torch.matmul` / `torch.bmm` (both activations, small M) | `hgemm_splitk_()` | **Pre-built** |
 | `nn.Linear` | `compile_preshuffle_gemm_a8()` | **Pre-built** |
 | `F.linear` | `compile_preshuffle_gemm_a8()` | **Pre-built** |
 | `F.scaled_dot_product_attention` | `build_flash_attn_func_module()` | **Pre-built** |

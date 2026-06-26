@@ -119,6 +119,62 @@ _CATEGORY_PATTERNS: dict[str, list[str]] = {
 }
 
 
+def _is_paged_decode_attention(text: str, source_path: Path) -> bool:
+    """Detect paged-decode attention kernels (MLA & PagedAttention) for KB loading.
+
+    These ``seqlen_q == 1`` paged-KV kernels are written with ``torch.matmul`` +
+    paged-cache indexing (not SDPA/MHA/``@``-transpose), so they slip past the
+    generic ``attention`` regexes. Detect them explicitly so the attention KB
+    (which holds § Decode Attention) and the gemm KB both load. Matches explicit
+    naming (docstrings, classes, fused APIs), the structural paged-cache combo
+    (paged table + cache seqlens + a KV cache), and filename stems such as
+    ``MultiHeadLatentAttention.py`` / ``PagedAttentionKVCache.py``.
+    """
+    if re.search(
+        r"MultiHeadLatent|Multi-head\s+Latent|multihead\s+latent|"
+        r"PagedAttention|Paged\s+(KV\s+Cache\s+)?Attention",
+        text,
+        re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r"mla_fwd_decode|flydsl_mla_fwd_decode|get_mla_metadata|mla_reduce",
+        text,
+    ):
+        return True
+    # Structural combo: a paged block/page table + cache seqlens + a KV cache.
+    # Covers MLA (block_table + kv_cache + headdim_qk/headdim_v) and
+    # PagedAttention (page_table + k_cache/v_cache + symmetric headdim).
+    if (
+        re.search(r"block_table|page_table", text)
+        and re.search(r"cache_seqlen", text)
+        and re.search(r"kv_cache|k_cache|v_cache", text)
+    ):
+        return True
+    if re.search(
+        r"MultiHeadLatent|\bmla\b|PagedAttention", source_path.stem, re.IGNORECASE
+    ):
+        return True
+    return False
+
+
+def _is_manual_softmax_attention(text: str) -> bool:
+    """Detect attention written manually with ``matmul`` + ``softmax``.
+
+    Kernels like MHA/SDPA compute ``softmax(Q @ K^T) @ V`` using ``torch.matmul``
+    (or ``bmm``) with a transposed operand rather than
+    ``F.scaled_dot_product_attention``, ``nn.MultiheadAttention``, or the ``@``
+    operator, so they slip past the generic ``attention`` regexes. Require BOTH a
+    matmul against a transposed operand (the ``Q @ K^T`` score step) AND a softmax,
+    so plain GEMM kernels that merely transpose an operand are not misflagged.
+    """
+    has_qkt = bool(
+        re.search(r"(?:matmul|bmm)\s*\([^)]*\.(?:transpose|mT|permute)", text)
+    )
+    has_softmax = bool(re.search(r"softmax", text))
+    return has_qkt and has_softmax
+
+
 def detect_kernel_categories(source_path: Path) -> list[str]:
     """Detect kernel categories by pattern matching the source file."""
     try:
@@ -129,6 +185,19 @@ def detect_kernel_categories(source_path: Path) -> list[str]:
     for cat, patterns in _CATEGORY_PATTERNS.items():
         if any(re.search(p, text) for p in patterns):
             categories.append(cat)
+    # Paged-decode attention kernels (MLA, PagedAttention) don't match the generic
+    # ``attention`` regexes (they use ``torch.matmul`` + paged-cache logic, not
+    # SDPA/MHA/@-transpose), so detect them explicitly and load the attention KB
+    # (which contains the § Decode Attention section) plus the gemm KB (Split-K
+    # GEMM, needed for the decomposed path).
+    if _is_paged_decode_attention(text, source_path):
+        for cat in ("attention", "gemm"):
+            if cat not in categories:
+                categories.append(cat)
+    # Manually-implemented attention (MHA, SDPA: softmax(Q@K^T)@V via torch.matmul +
+    # transpose) also misses the generic ``attention`` regexes — force the KB.
+    if _is_manual_softmax_attention(text) and "attention" not in categories:
+        categories.append("attention")
     if "attention" in categories and "reductions" not in categories:
         categories.append("reductions")
     return categories
