@@ -32,6 +32,21 @@ const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_workflow.js`;
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
+// ---- Upstream TraceLens / kernel-agent prior (OPTIONAL; forwarded by run_e2e.py as args.tracelens) ----
+// run_e2e.py resolves these paths beside the perfskills handoff and forwards ONLY the non-null ones.
+// They are a PRIOR for the Profile/Strategize/Extract phases: if analysis_md exists the Profiler skips
+// its own trace collection and builds the Top-N from TraceLens (and runs an EXTRA parse_profile pass on
+// trace_file when present); the Architect uses kernel_candidates as a routing prior. ENTIRELY ADDITIVE:
+// when args.tracelens is absent every TRACELENS_* input is '' and the run is byte-identical.
+const TL = (A.tracelens && typeof A.tracelens === 'object') ? A.tracelens : {};
+const TRACELENS_INPUTS = {
+  TRACELENS_ANALYSIS_MD: String(TL.analysis_md || ''),
+  TRACELENS_KERNEL_CANDIDATES_JSON: String(TL.kernel_candidates_json || ''),
+  TRACELENS_REPORT_JSON: String(TL.tracelens_report_json || ''),
+  TRACELENS_TRACE_FILE: String(TL.trace_file || ''),
+};
+if (TL && Object.keys(TL).length) log(`TraceLens prior present: ${Object.keys(TL).filter(k => TL[k]).join(', ') || '(none non-null)'}.`);
+
 // ---- single-kernel pass-through: if kernel_path (and no model_path), just run the kernel layer ----
 const KERNEL_PATH = A.kernel_path || '';
 const MODEL_PATH = A.model_path || '';
@@ -683,6 +698,7 @@ if (want('setup')) {
     roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
       OVERLAY_PYTHONPATH: '', EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+      ...TRACELENS_INPUTS,
     }),
     { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
   log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
@@ -692,6 +708,7 @@ if (want('setup')) {
     roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
       EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
       WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
+      ...TRACELENS_INPUTS,
     }),
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];

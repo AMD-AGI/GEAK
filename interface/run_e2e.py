@@ -25,6 +25,7 @@ path. See interface/run_e2e.md for the full contract.
 from __future__ import annotations
 
 import atexit
+import glob
 import json
 import os
 import shutil
@@ -149,11 +150,83 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         eval_dir = str(Path(h["exp_root"]) / f"e2e_{model_name}_{ts}")
     ps_args["eval_dir"] = eval_dir
+    # Bridge the upstream TraceLens / kernel-agent artifacts INTO the workflow args
+    # (not just the driver prompt) so the JS Profile/Strategize/Extract phases can
+    # use them as a prior. Only non-null paths are forwarded; when nothing is found
+    # the key is omitted entirely, so a tracelens-less run is byte-identical.
+    tl = resolve_tracelens_report(h.get("exp_root", ""))
+    tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
+    if tl_paths:
+        ps_args["tracelens"] = tl_paths
     return ps_args
+
+
+# ---------------------------------------------------------------------------
+# TraceLens / kernel-agent artifact discovery.
+# ---------------------------------------------------------------------------
+# The four artifacts live ABOVE the handoff's ``perfskills`` directory, under
+# the experiment root (the parent of ``perfskills``). ``**`` denotes one or
+# more randomly-named nested directories, so the lookup is glob based
+# (recursive) and stays generic across runs.
+_TRACELENS_ARTIFACT_PATTERNS = {
+    "analysis_md": "kernel-agent/**/tracelens/analysis.md",
+    "kernel_candidates_json": "kernel-agent/**/kernel_candidates.json",
+    "tracelens_report_json": "kernel-agent/**/tracelens/tracelens_report.json",
+    "trace_file": "runs/roofline/**/torch_trace",
+}
+
+
+def _experiment_root_from_exp_root(exp_root: str) -> str:
+    """Return the experiment root (the directory that CONTAINS ``perfskills``).
+
+    ``handoff.exp_root`` points at ``<experiment_root>/perfskills`` so the four
+    TraceLens artifacts live one level up, beside ``perfskills``.
+    """
+    norm = str(exp_root or "").rstrip("/")
+    if os.path.basename(norm) == "perfskills":
+        return os.path.dirname(norm)
+    return norm
+
+
+def _find_latest_artifact(root: str, pattern: str) -> str | None:
+    """Return the latest match for ``pattern`` under ``root`` (or None).
+
+    Matches are sorted for determinism; the timestamps embedded in the run
+    directory names sort chronologically, so the last entry is the most recent.
+    """
+    matches = sorted(glob.glob(os.path.join(root, pattern), recursive=True))
+    return matches[-1] if matches else None
+
+
+def resolve_tracelens_report(exp_root: str) -> dict:
+    """Resolve the four TraceLens artifacts beside the handoff's ``perfskills``.
+
+    Returns a dict with ``search_root`` plus the four artifact paths
+    (``analysis_md``, ``kernel_candidates_json``, ``tracelens_report_json``,
+    ``trace_file``); any artifact that cannot be located is ``None``.
+    """
+    root = _experiment_root_from_exp_root(exp_root)
+    report: dict = {"search_root": root}
+    for key, pattern in _TRACELENS_ARTIFACT_PATTERNS.items():
+        report[key] = _find_latest_artifact(root, pattern) if root else None
+    return report
 
 
 def build_prompt(ps_args: dict) -> str:
     eval_dir = ps_args.get("eval_dir", "")
+    # Locate the upstream TraceLens / kernel-agent artifacts (analysis.md,
+    # kernel_candidates.json, tracelens_report.json) plus the roofline torch
+    # trace, and surface them to the agent as a single tracelens_report block.
+    tracelens_report = resolve_tracelens_report(ps_args.get("exp_root", ""))
+    # The prompt only needs the four artifact paths, not the internal search_root.
+    tracelens_prompt_payload = {
+        k: v for k, v in tracelens_report.items() if k != "search_root"
+    }
+    tracelens_block = (
+        "\n\ntracelens_report (upstream kernel-agent / roofline artifacts; "
+        "any path is null when that artifact was not produced):\n"
+        f"  {json.dumps(tracelens_prompt_payload)}\n"
+    )
     # NOTE: the wall-clock budget is NOT surfaced in this prompt. The top driver
     # agent only invokes the Workflow tool once and waits, so it never acts on the
     # budget; enforcement lives entirely in the JS (the time_budget_s arg drives the
@@ -174,6 +247,7 @@ def build_prompt(ps_args: dict) -> str:
         f'"{eval_dir}/workflow_return.json" does not exist when the tool returns, '
         "write that exact return value there yourself with the Write tool before "
         "printing. Print nothing after the JSON line."
+        + tracelens_block
     )
 
 

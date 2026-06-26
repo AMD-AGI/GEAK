@@ -26,9 +26,13 @@ You are invoked once per kernel candidate. Read first:
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (the Architect's candidate:
 short_name, classification, extract_hint = the `module:attr` callable to hook, candidate_backends,
-regime), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`.
+regime, and — when an upstream TraceLens prior was available — OPTIONAL `source_hint` (resolved source
+file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`.
 
-1. **Locate the source.** Resolve the kernel's defining file in the installed package
+1. **Locate the source.** **If `KERNEL.source_hint`/`KERNEL.launcher_hint` is provided (TraceLens
+   pre-resolved the file/seam), look there FIRST** — but always CONFIRM by importing the package +
+   grepping the `short_name`/`module:attr` target; never trust the hint blindly (it may point at a
+   launcher/wrapper rather than the true defining file). If no hint, resolve as usual
    (`python3 -c "import sglang,os;print(os.path.dirname(sglang.__file__))"`, then grep the
    `short_name` / the `module:attr` target). Confirm it's truly editable (Triton/custom/aiter) — if
    it resolves to a library GEMM/attention, STOP and report `editable=false` (it belongs to the
@@ -102,8 +106,17 @@ GEMM, CK attention) with a clean math contract, so it does NOT need a copy of ed
 needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=N` is fine here.
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (Architect head candidate: short_name,
-op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn), `GEMM_SYNTH`
-(bool, default true), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`.
+op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn, and OPTIONAL
+TraceLens `source_hint`/`launcher_hint`/`bound_type`), `GEMM_SYNTH` (bool, default true),
+`CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`.
+
+> **TraceLens shape double-check (mandatory when the shapes came from TraceLens).** If `KERNEL.shapes`
+> originated from the upstream `analysis.md`/`kernel_candidates.json` prior, treat them ONLY as a
+> starting hint — they "不一定准" (may be inaccurate, mis-parsed from the `<br>` arg list, or for the
+> wrong regime). You MUST re-verify them against a live capture (the `capture_shapes.py` overlay below,
+> or the profiler's own torch-trace `profile_topN.json` shapes) before freezing the unittest, and use
+> the live-captured `(M,N,K)`/dtype as authoritative whenever they disagree. Note any correction in
+> `notes`.
 
 ### op task-dir contract (what op_bench.py + Op Benchmarker expect)
 ```
