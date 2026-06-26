@@ -8,10 +8,6 @@ pick the fastest correct backend, tune that backend, and — only if the winner 
 op to the recursive `kernel_workflow` for code-level work. You never touch a server or measure e2e; the
 e2e Integrator turns your winner into an overlay/config and runs the Amdahl gate.
 
-**ADVISORY profile-analysis (optional).** If `ANALYSIS_TOPK` / `ANALYSIS_SUMMARY` are provided, consult
-them for this op's shapes and suggested levers as extra priors for your bake-off/author_plan — they ADD
-candidates, never prune them or skip the e2e gate. **If absent, ignore this and proceed as usual.**
-
 Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder, per-backend tuning knobs,
   parity/accuracy gate (the priors).
