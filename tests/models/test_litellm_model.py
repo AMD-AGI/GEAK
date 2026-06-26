@@ -249,6 +249,30 @@ def _fake_litellm_response() -> MagicMock:
     return response
 
 
+def _patch_gateway_llm(resp: MagicMock):
+    """Context managers patching the LLM call for AMD-gateway traffic.
+
+    Gateway calls are forced to stream (the proxy rejects non-streaming
+    predictions), so ``litellm.completion`` returns an iterable of chunks and
+    ``stream_chunk_builder`` reassembles them. ``completion`` is still invoked
+    with the real kwargs, so header assertions on its ``call_args`` hold.
+    """
+    return (
+        patch(
+            "minisweagent.models.litellm_model.litellm.completion",
+            return_value=iter([resp]),
+        ),
+        patch(
+            "minisweagent.models.litellm_model.litellm.stream_chunk_builder",
+            return_value=resp,
+        ),
+        patch(
+            "minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost",
+            return_value=0.0,
+        ),
+    )
+
+
 _AMD_GATEWAY_API_BASE = "https://llm-api.amd.com/Anthropic"
 _NON_AMD_API_BASE = "https://api.openai.com/v1"
 
@@ -265,15 +289,8 @@ class TestLitellmModelUserHeader:
             model_name="anthropic/claude-opus-4.6",
             model_kwargs={"api_key": "k", "api_base": _AMD_GATEWAY_API_BASE},
         )
-        with (
-            patch(
-                "minisweagent.models.litellm_model.litellm.completion", return_value=_fake_litellm_response()
-            ) as comp,
-            patch(
-                "minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost",
-                return_value=0.0,
-            ),
-        ):
+        comp_patch, builder_patch, cost_patch = _patch_gateway_llm(_fake_litellm_response())
+        with comp_patch as comp, builder_patch, cost_patch:
             model.query([{"role": "user", "content": "hi"}])
         headers = comp.call_args.kwargs["extra_headers"]
         assert headers["user"] == "alice@amd.com"
@@ -290,15 +307,8 @@ class TestLitellmModelUserHeader:
                 "extra_headers": {"user": "explicit", "Ocp-Apim-Subscription-Key": "k"},
             },
         )
-        with (
-            patch(
-                "minisweagent.models.litellm_model.litellm.completion", return_value=_fake_litellm_response()
-            ) as comp,
-            patch(
-                "minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost",
-                return_value=0.0,
-            ),
-        ):
+        comp_patch, builder_patch, cost_patch = _patch_gateway_llm(_fake_litellm_response())
+        with comp_patch as comp, builder_patch, cost_patch:
             model.query([{"role": "user", "content": "hi"}])
         headers = comp.call_args.kwargs["extra_headers"]
         assert headers["user"] == "explicit"
@@ -314,15 +324,8 @@ class TestLitellmModelUserHeader:
                 "extra_headers": {"Ocp-Apim-Subscription-Key": "k"},
             },
         )
-        with (
-            patch(
-                "minisweagent.models.litellm_model.litellm.completion", return_value=_fake_litellm_response()
-            ) as comp,
-            patch(
-                "minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost",
-                return_value=0.0,
-            ),
-        ):
+        comp_patch, builder_patch, cost_patch = _patch_gateway_llm(_fake_litellm_response())
+        with comp_patch as comp, builder_patch, cost_patch:
             model.query([{"role": "user", "content": "hi"}])
         headers = comp.call_args.kwargs["extra_headers"]
         assert headers["user"] == "alice@amd.com"
@@ -392,18 +395,54 @@ class TestLitellmModelUserHeader:
                 "api_base": "https://llm-gateway-dev.apps.amdcloud.com/api/gateway/v1",
             },
         )
+        comp_patch, builder_patch, cost_patch = _patch_gateway_llm(_fake_litellm_response())
+        with comp_patch as comp, builder_patch, cost_patch:
+            model.query([{"role": "user", "content": "hi"}])
+        headers = comp.call_args.kwargs["extra_headers"]
+        assert headers["user"] == "alice@amd.com"
+
+
+class TestGatewayForcedStreaming:
+    """The AMD/core42 Primus-Safe gateway rejects non-streaming predictions
+    (opaque 400 INVALID_ARGUMENT), so LitellmModel forces ``stream=True`` and
+    reassembles the chunks for gateway traffic only."""
+
+    def test_gateway_call_forces_stream_and_reassembles(self, monkeypatch):
+        monkeypatch.setenv("GEAK_USER", "alice@amd.com")
+        model = LitellmModel(
+            model_name="anthropic/claude-opus-4.6",
+            model_kwargs={"api_key": "k", "api_base": _AMD_GATEWAY_API_BASE},
+        )
+        resp = _fake_litellm_response()
+        comp_patch, builder_patch, cost_patch = _patch_gateway_llm(resp)
+        with comp_patch as comp, builder_patch as builder, cost_patch:
+            out = model.query([{"role": "user", "content": "hi"}])
+        assert comp.call_args.kwargs["stream"] is True
+        assert builder.called
+        assert out["content"] == "hello"
+
+    def test_non_gateway_call_stays_non_streaming(self, monkeypatch):
+        monkeypatch.setenv("GEAK_USER", "alice@amd.com")
+        model = LitellmModel(
+            model_name="openai/gpt-4o",
+            model_kwargs={"api_key": "k", "api_base": _NON_AMD_API_BASE},
+        )
         with (
             patch(
-                "minisweagent.models.litellm_model.litellm.completion", return_value=_fake_litellm_response()
+                "minisweagent.models.litellm_model.litellm.completion",
+                return_value=_fake_litellm_response(),
             ) as comp,
+            patch(
+                "minisweagent.models.litellm_model.litellm.stream_chunk_builder",
+            ) as builder,
             patch(
                 "minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost",
                 return_value=0.0,
             ),
         ):
             model.query([{"role": "user", "content": "hi"}])
-        headers = comp.call_args.kwargs["extra_headers"]
-        assert headers["user"] == "alice@amd.com"
+        assert not comp.call_args.kwargs.get("stream")
+        assert not builder.called
 
 
 class TestPerCallToolsOverride:
