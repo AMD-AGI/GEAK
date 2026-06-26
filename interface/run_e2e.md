@@ -79,10 +79,43 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | `accepted_env` | `initial_extra_env` | seeds baseline env |
 | `launch_recipe` | `launch_script` | optional |
 | `exp_root` | `exp_root` | run dir root |
+| (derived from `exp_root`) | `tracelens` | auto-discovered upstream TraceLens / kernel-agent artifacts (see below); only non-null paths forwarded; key omitted entirely when none found |
 | `bench_client` / `inferencex_path` | env `BENCH_CLIENT` + `INFERENCEX_PATH` | exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
 | `bench_protocol.{random_range_ratio,num_prompts,num_warmups,seed}` | env `RANDOM_RANGE_RATIO` / `NUM_PROMPTS` / `NUM_WARMUPS` / `SEED` | `run_e2e.py:apply_bench_protocol` exports ONLY the provided keys, overriding `bench_e2e.sh` standalone defaults; absent ⇒ defaults kept (not a JS arg) |
 | — | `config_tune="false"` | caller already did config search; never double-run |
 | — | `apply_to_original="true"` | so `final/final_launch.sh` + overlay are emitted for sweep reuse |
+
+### TraceLens prior auto-discovery (owned by `run_e2e.py:resolve_tracelens_report`)
+
+An upstream orchestrator may have already profiled the SAME baseline workload with
+TraceLens and dropped its artifacts beside the handoff's `perfskills` dir (i.e.
+under the experiment root = the parent of `perfskills`). `map_args` resolves them
+by glob (each `**` is a randomly-named nested dir) and forwards the **non-null**
+paths to the workflow as `args.tracelens`:
+
+| key | glob (relative to the experiment root) | what it is |
+|---|---|---|
+| `analysis_md` | `kernel-agent/**/tracelens/analysis.md` | human TraceLens hot-kernel report |
+| `kernel_candidates_json` | `kernel-agent/**/kernel_candidates.json` | machine-readable hot-kernel list (name/category/source_file/launcher/shapes/bound_type/…) |
+| `tracelens_report_json` | `kernel-agent/**/tracelens/tracelens_report.json` | full TraceLens report (same `hot_kernels[]` shape) |
+| `trace_file` | `runs/roofline/**/torch_trace` | the roofline torch-trace **directory** (per-TP-rank `*.pt.trace.json.gz`) |
+
+Resolution prefers the parent of the `perfskills` segment in `exp_root`; if that
+path is not present on the box it falls back to the on-disk grandparent of the
+handoff file. The same four paths are also surfaced (with nulls) in the human
+`tracelens_report` block of the driver prompt.
+
+**How the workflow uses it (entirely additive — a tracelens-less run is byte-identical):**
+the Profiler reads `args.tracelens` and, **only when `analysis_md` exists, SKIPS its
+own warm-server trace collection** and builds the standardized Top-N from the
+TraceLens artifacts; **when `trace_file` also exists it runs an ADDITIONAL
+`parse_profile.py` pass** on the rank0 serving trace to recover real kernel
+symbols + reliable per-launch shapes and reconcile them (TraceLens `analysis.md`
+shapes are treated as a hint and double-checked). The System Architect uses
+`kernel_candidates.json` as an advisory routing prior (enriching candidates with
+`source_hint`/`launcher_hint`/`bound_type`) without ever overriding the measured
+`%gpu`. When `args.tracelens` is absent (or for any post-config reprofile, where
+the baseline prior is stale) the workflow profiles/strategizes exactly as before.
 
 ## `result.json` (workflow → caller)
 
