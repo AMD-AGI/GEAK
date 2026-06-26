@@ -1,0 +1,22 @@
+# Read the Docs configuration for AgentKernelArena documentation.
+# https://docs.readthedocs.io/en/stable/config-file/v2.html
+
+version: 2
+
+build:
+  os: ubuntu-22.04
+  tools:
+    python: "3.10"
+
+python:
+  install:
+    - requirements: docs/sphinx/requirements.txt
+
+sphinx:
+  configuration: docs/conf.py
+
+# Only build HTML (+ htmlzip). PDF/epub are intentionally disabled: the docs
+# contain Mermaid diagrams, which require a headless browser to render in the
+# LaTeX/PDF pipeline and are not needed for the hosted HTML site.
+formats:
+  - htmlzip

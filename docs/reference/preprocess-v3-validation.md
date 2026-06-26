@@ -1,4 +1,13 @@
+---
+myst:
+    html_meta:
+        "description": "Manual validation runbook for the GEAK v3 preprocess cutover. Covers end-to-end validation of Triton, HIP, and PyTorch-to-FlyDSL workloads and Path-A short-circuit testing."
+        "keywords": "GEAK, preprocess v3, validation, Triton, HIP, FlyDSL, PreprocessOrchestratorAgent, Path-A"
+---
+
 # Manual validation: v3 preprocess cutover
+
+This runbook gates the cutover from the legacy 5-phase preprocess pipeline to the v3 LLM-driven `PreprocessOrchestratorAgent`. Run the end-to-end validation steps below against representative workloads before authorizing deletion of the legacy code.
 
 ## Goal
 
@@ -6,7 +15,7 @@ Commit set 5a wired the v3 LLM-driven preprocess orchestrator
 (`PreprocessOrchestratorAgent`) into the CLI flow. The legacy 5-phase
 pipeline under `src/minisweagent/run/preprocess/` and the
 multi-process plumbing under `src/minisweagent/pipeline_workers/` are
-**still on disk** but are no longer on the call graph from the CLI
+still on disk but are no longer on the call graph from the CLI
 entry. This runbook is the manual gate before the legacy code gets
 deleted: run v3 end-to-end against representative workloads (Triton,
 HIP, optionally PyTorch→FlyDSL), inspect the artifacts, and only then
@@ -22,14 +31,14 @@ ask for legacy removal.
 
 Nothing else in `run/`, `agents/`, or `subagents/<name>/` changed.
 
-## Quick sanity check (no GPU required)
+## Quick confidence check (no GPU required)
 
 The dedicated v3 pytest suite was intentionally removed from this PR to
 keep the review focused on the runtime pipeline. For now, use a syntax
 check plus the manual/runner validations below:
 
 ```bash
-cd /home/upandey/unification/GEAK
+cd /path/to/GEAK
 python3 -m py_compile src/minisweagent/run/preprocess_v3/*.py \
   scripts/preprocess_v3_test_runner.py \
   scripts/preprocess_v3_triton_runner.py
@@ -37,10 +46,11 @@ python3 -m py_compile src/minisweagent/run/preprocess_v3/*.py \
 
 ## End-to-end validation
 
+
 These runs require a GPU host with the AMD LLM router configured. Each
 exercises a different language path through the v3 orchestrator.
 
-### 1. Triton fixture
+### Triton fixture
 
 A small Triton kernel that already lives in a known-good repo with
 benchmark + correctness scripts.
@@ -64,7 +74,7 @@ Expected artifacts under `./validation_runs/triton_v3/`:
 - `compute_speedup.py` (step 5 output — verifies the baseline parses)
 - `COMMANDMENT.md` (step 6 output)
 
-### 2. HIP fixture
+### HIP fixture
 
 Same shape against a HIP/ROCm kernel (`.hip` / `.cpp` source).
 
@@ -81,9 +91,9 @@ Same artifact list. The `kernel_type` field in the resulting
 language detector (`preprocess_v3.lang.detect_language`) picks this up
 from the file extension + content hints.
 
-### 3. PyTorch → FlyDSL fixture (optional — requires `FLYDSL_HOME`)
+### PyTorch → FlyDSL fixture (optional — requires `FLYDSL_HOME`)
 
-Translation runs as a **tool call** in v3 (`translate_to_flydsl`), not as
+Translation runs as a tool call in v3 (`translate_to_flydsl`), not as
 a subagent dispatch. The orchestrator calls it once when
 `source_language != target_language and target_language == "flydsl"`.
 
@@ -106,12 +116,12 @@ orchestrator's `output_dir` (the same one the
 If `FLYDSL_HOME` isn't set on the validation host, document the skip in
 the run log and move on.
 
-## How to inspect the PreprocessResult
+## How to inspect the `PreprocessResult`
 
 The v3 adapter projects the orchestrator's `PreprocessResult` into the
 legacy `preprocess_ctx` dict so downstream consumers (the round loop,
 the evaluation contract, planned-mode orchestrator) don't have to
-change. The richer typed result is **also** carried on the dict under
+change. The richer typed result is also carried on the dict under
 `v3_subagent_runs` / `v3_elapsed_s` / optionally `v3_translation`.
 
 To read the full result from a run's artifact directory:
@@ -136,7 +146,7 @@ for run in ctx.get("v3_subagent_runs", []):
 For a live run, the orchestrator log line `v3 preprocess completed in
 <n>s (success=True/False, errors=<n>)` is the easiest sanity ping.
 
-## Comparing v3 vs legacy outputs
+## Comparing v3 and legacy outputs
 
 To run the **legacy** preprocess against the same input for a side-by-side
 artifact diff, temporarily revert the wiring commit (sha `4810ab94`):
@@ -173,7 +183,8 @@ Expect:
 
 ## Path-A validation
 
-Commit set 7 added a **Path-A short-circuit** to the orchestrator. When
+
+Commit set 7 added a Path-A short-circuit to the orchestrator. When
 the task prompt carries explicit run instructions, the orchestrator
 calls the new `commandment_from_user_command` tool to render
 `COMMANDMENT.md` directly from the user's command and skips the
@@ -182,6 +193,8 @@ decision is encoded in the orchestrator's `Step 0` system-prompt
 section — it's LLM judgment, not a regex on the task.
 
 ### Example invocation
+
+Use explicit `python ...` or `./bench ...` phrasing in the `-t` string to trigger Path A.
 
 ```bash
 geak \
@@ -197,23 +210,23 @@ triggers Path A.
 
 ### Expected artifacts (Path A)
 
-Under `./validation_runs/path_a_v3/`:
+A successful Path-A run produces a smaller artifact set than Path B because no harness is generated. Check for the following under `./validation_runs/path_a_v3/`:
 
 - `CODEBASE_CONTEXT.md` / `discovery.json` — still produced by the
   cheap deterministic `run_discovery` front step, but discovery is
   irrelevant for Path A command construction.
 - `COMMANDMENT.md` — produced by `commandment_from_user_command` with
   the user's command projected into the 5 canonical sections.
-- **No `test_harness.py`** — Path A does not generate a harness; the
-  harness IS the user's run command.
-- **No subagent_run entries** for `harness-generator` or
+- No `test_harness.py` — Path A does not generate a harness; the
+  harness is the user's run command.
+- No subagent_run entries for `harness-generator` or
   `harness-verifier` in the resulting
   `preprocess_ctx`. The `v3_subagent_runs` list should be empty on a
   clean Path-A run.
 
 ### Confirming `path_taken="A"` from the run log
 
-The orchestrator records the structural decision on
+Two methods confirm which path the orchestrator chose. The orchestrator records the structural decision on
 `PreprocessResult.path_taken` and surfaces it via the adapter into
 `preprocess_ctx`. Grep the run output for either:
 
@@ -236,7 +249,7 @@ for a Path-B run.
 
 ### Partial-mode-coverage warnings
 
-If the user's command covers only one mode (e.g. `--benchmark`) and
+When the task supplies only one benchmark mode, the orchestrator infers the missing modes and marks them in `COMMANDMENT.md`. If the user's command covers only one mode (for example, `--benchmark`) and
 the LLM asks the tool to infer the others, the rendered
 `COMMANDMENT.md` carries `# PATH_A_PARTIAL_COVERAGE: <mode> inferred
 from <source-mode>` markers in the inferred sections. Grep for them
@@ -251,7 +264,7 @@ Three matches is typical for a `--benchmark`-only source command
 
 ### Reverting Path A if it misbehaves
 
-The Path-A short-circuit is orchestrator-side only. The three always-on
+If Path A produces incorrect artifacts or fails to trigger, you can disable it without reverting the full commit set. The Path-A short-circuit is orchestrator-side only. The three always-on
 subagents are unchanged. To temporarily disable Path A without
 reverting all of commit set 7, revert the system-prompt commit (commit
 3 of the set) so the LLM no longer knows about Step 0:
@@ -273,6 +286,7 @@ git revert <sha-1>..<sha-5>  # or one-by-one
 
 ## What to do if v3 fails
 
+
 1. Capture the failure: copy the run's stdout/stderr and any
    `errors` array from the `preprocess_ctx` dict.
 2. Revert the wiring commit to restore the legacy path:
@@ -285,3 +299,9 @@ git revert <sha-1>..<sha-5>  # or one-by-one
    there — that bounds the regression to v3-only.
 
 Dedicated v3 pytest coverage is intentionally deferred for a follow-up PR. For reproducible failures, add the smallest focused repro when the tests are restored.
+
+## Related topics
+
+- [GEAK agent loop](../conceptual/geak-pipeline.md) — how the preprocess stage fits into the full optimization pipeline.
+- [API reference](api-reference.md) — `geak-preprocess` CLI flags and artifact layout.
+- [Run the agent](../how-to/run-agent.md) — how to invoke GEAK end-to-end after preprocessing validates.

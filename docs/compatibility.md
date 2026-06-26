@@ -1,4 +1,13 @@
-# GEAK Compatibility Matrix
+---
+myst:
+    html_meta:
+        "description": "Verified hardware, software, and runtime combinations for GEAK. Covers ROCm versions, AMD Instinct GPUs, Python versions, kernel languages, and core Python dependencies."
+        "keywords": "GEAK, compatibility, ROCm, AMD Instinct, MI300X, MI355X, Python, Triton, HIP, FlyDSL"
+---
+
+# GEAK compatibility matrix
+
+This page lists the hardware, software, and runtime configurations that have been verified with GEAK. Use it to confirm that your GPU, ROCm version, Python version, and kernel language are supported before installing.
 
 ## Scope
 
@@ -7,11 +16,13 @@ Only verified and tested configurations are listed. Untested versions are intent
 
 ---
 
-## 1. GEAK Release
+## GEAK release
+
+The following GEAK releases are tracked with their status.
 
 | Release tag | Commit SHA | Release date | Status |
 |---|---|---|---|
-| `v3.2.1` | `c0a1f93` | 2026-06-15 | **Latest** |
+| `v3.2.1` | `c0a1f93` | 2026-06-15 | Latest |
 | `v3.2.0` | `d9a80f7` | 2026-05-21 | Stable |
 | `v3.1.0` | `1501039` | 2026-04-20 | Stable |
 | `v3.0.0` | `bc2d6d5` | 2026-04-01 | Stable |
@@ -20,7 +31,9 @@ Only verified and tested configurations are listed. Untested versions are intent
 
 ---
 
-## 2. Host / Installation Mode
+## Host and installation mode
+
+The following installation modes are verified.
 
 | Install mode | How | Status |
 |---|---|---|
@@ -33,7 +46,9 @@ Only verified and tested configurations are listed. Untested versions are intent
 
 ---
 
-## 3. Operating System
+## Operating system
+
+The following operating systems are verified.
 
 | OS | Status |
 |---|---|
@@ -41,7 +56,9 @@ Only verified and tested configurations are listed. Untested versions are intent
 
 ---
 
-## 4. Python
+## Python
+
+The following Python versions are verified.
 
 | Python version | Status | Notes |
 |---|---|---|
@@ -50,7 +67,9 @@ Only verified and tested configurations are listed. Untested versions are intent
 
 ---
 
-## 5. GPU Hardware
+## GPU hardware
+
+The following GPU models are verified.
 
 | GPU model | Architecture | Status |
 |---|---|---|
@@ -61,9 +80,11 @@ Only verified and tested configurations are listed. Untested versions are intent
 
 ---
 
-## 6. ROCm Stack
+## ROCm stack
 
-| Component | Version / Requirement | Status |
+The following ROCm versions are verified.
+
+| Component | Version or requirement | Status |
 |---|---|---|
 | ROCm | 7.2.x | Verified |
 | ROCm | 7.1.x | Verified |
@@ -72,7 +93,9 @@ Only verified and tested configurations are listed. Untested versions are intent
 
 ---
 
-## 7. Kernel Languages
+## Kernel languages
+
+The following kernel languages are verified.
 
 | Kernel language | Status |
 |---|---|
@@ -84,16 +107,20 @@ Only verified and tested configurations are listed. Untested versions are intent
 
 ---
 
-## 8. Frameworks / Target Workloads
+## Frameworks and target workloads
 
-| Framework / Workload | Status |
+The following frameworks and workloads are verified.
+
+| Framework or workload | Status |
 |---|---|
 | SGLang | Verified |
 | vLLM | Verified |
 
 ---
 
-## 9. Precision / Data Types
+## Precision and data types
+
+The following precision formats are verified.
 
 | Data type | Status | Notes |
 |---|---|---|
@@ -105,7 +132,9 @@ Only verified and tested configurations are listed. Untested versions are intent
 
 ---
 
-## 10. Core Python Dependencies
+## Core Python dependencies
+
+The following Python packages are required or optional.
 
 | Package | Version constraint | Required | Notes |
 |---|---|---|---|
@@ -133,4 +162,10 @@ pip install -e '.[full]'        # Everything (dev + langchain + swe-rex)
 ## Notes
 
 - Only verified and tested configurations are listed. Untested versions are intentionally omitted.
-- To report a verified configuration not listed here, please open a pull request.
+- To report a verified configuration not listed here, open a pull request.
+
+## Related topics
+
+- [Install GEAK](install/install.md) — installation instructions for verified configurations.
+- [What is GEAK?](what-is-geak.md) — overview of GEAK's capabilities and supported kernel types.
+- [Release notes](release-notes.md) — per-version changelog and feature history.

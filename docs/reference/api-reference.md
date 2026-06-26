@@ -1,15 +1,22 @@
+---
+myst:
+    html_meta:
+        "description": "Complete GEAK API reference: CLI entry points, model resolution order, configuration schema, environment variables, run artifact layout, and importable Python API."
+        "keywords": "GEAK, API reference, geak CLI, environment variables, Python API, configuration, run artifacts"
+---
+
 # API reference
 
 Reference for GEAK's public surfaces: the command-line entry points, the
 environment variables that tune behavior, the configuration schema, the run
 artifacts contract, and the importable Python API.
 
-For task-oriented walkthroughs see **[Quick start](quick_start.md)**; for how
-YAML is loaded and merged see **[Configuration files](configuration.md)**.
+For how YAML is loaded and merged, see [Configuration files](configuration.md).
 
 ---
 
-## 1. Command-line entry points
+## Command-line entry points
+
 
 GEAK installs the following console scripts (declared under
 `[project.scripts]` in `pyproject.toml`):
@@ -30,7 +37,7 @@ GEAK installs the following console scripts (declared under
 
 ---
 
-### 1.1 `geak`
+### `geak`
 
 Main entry point. Runs preprocessing (unless a harness/test command is
 supplied) and then the optimization round loop.
@@ -62,18 +69,14 @@ geak [OPTIONS]
 | `--exit-immediately` | | flag | off | Exit immediately (advanced). |
 | `--visual` | `-v` | flag | off | Toggle the pager-style (Textual) UI. |
 
-**Post-run behavior.** By default (unless `--debug`) two steps run after the
-loop completes:
+By default (unless `--debug`) two steps run after the loop completes:
 
-- **Patch apply** — the winning patch is applied to `--repo` on the current
-  branch and committed.
-- **Cleanup** — per-run artifacts are pruned to `final_report.json`, the
-  winning `.diff`, `geak_agent.log`, and `COMMANDMENT.md`.
+- **Patch apply:** the winning patch is applied to `--repo` on the current branch and committed.
+- **Cleanup:** per-run artifacts are pruned to `final_report.json`, the winning `.diff`, `geak_agent.log`, and `COMMANDMENT.md`.
 
-A hard-kill (wall-clock timeout) always leaves artifacts in place for
-forensic analysis, regardless of `--debug`.
+A hard-kill (wall-clock timeout) always leaves artifacts in place for forensic analysis, regardless of `--debug`.
 
-**Examples**
+Examples:
 
 ```bash
 # Natural-language, single agent
@@ -91,7 +94,7 @@ geak --repo /path/to/repo --task "Optimize the block_reduce kernel" \
 
 ---
 
-### 1.2 `geak-preprocess`
+### `geak-preprocess`
 
 Runs the preprocessing pipeline only and writes intermediate artifacts.
 
@@ -114,7 +117,7 @@ geak-preprocess <url> [OPTIONS]
 
 ---
 
-### 1.3 `geak-gemm-tuning`
+### `geak-gemm-tuning`
 
 Runs a single `GemmTuningAgent` session. Creates
 `<cwd>/optimization_logs/gemm_tuning_<timestamp>/` and uses it as the agent
@@ -127,7 +130,7 @@ geak-gemm-tuning run [OPTIONS]
 
 | Flag | Alias | Default | Description |
 |------|-------|---------|-------------|
-| `--task` | `-t` | **required** | Task / instructions for the tuning agent. |
+| `--task` | `-t` | required | Task / instructions for the tuning agent. |
 | `--config` | `-c` | — | YAML overlay; only `model_class`, `base_url`, `model_name`, `api_key` from its `model:` section override. |
 | `--model` | `-m` | from config | Override `model_name`. |
 | `--cwd` | | current dir | Base dir under which `optimization_logs/gemm_tuning_<ts>/` is created. |
@@ -139,10 +142,10 @@ geak-gemm-tuning -t "Optimize E2E perf via GEMM tuning. Benchmark: run_sglang_te
 
 ---
 
-## 2. Model resolution order
+## Model resolution order
 
-The model **name** is resolved by `get_model_name`
-(`src/minisweagent/models/__init__.py`), first hit wins:
+
+The model name is resolved by `get_model_name` (`src/minisweagent/models/__init__.py`), first hit wins:
 
 1. CLI `-m` / `--model`
 2. YAML `model.model_name`
@@ -151,7 +154,7 @@ The model **name** is resolved by `get_model_name`
 5. env `GEAK_MODEL_NAME`
 6. env `GEAK_DEFAULT_MODEL` (fallback default `openai/claude-opus-4.8`)
 
-The model **class** comes from YAML `model.model_class` or `--model-class`,
+The model class comes from YAML `model.model_class` or `--model-class`,
 mapped by `get_model_class`:
 
 | Shortcut | Class |
@@ -167,11 +170,9 @@ is also accepted. `MSWEA_MODEL_API_KEY`, when set, is copied into
 
 ---
 
-## 3. Configuration schema (`geak.yaml`)
+## Configuration schema (`geak.yaml`)
 
-Loaded after `mini_kernel_strategy_list.yaml` and deep-merged over it; a
-`--config` file is merged on top of both. See
-**[Configuration files](configuration.md)** for full details.
+The default configuration file is `src/minisweagent/config/geak.yaml`. It is loaded after `mini_kernel_strategy_list.yaml` and deep-merged over it; a `--config` file is merged on top of both. See [Configuration files](configuration.md) for the full merge rules. The schema below shows the top-level keys.
 
 ```yaml
 model:
@@ -196,16 +197,19 @@ env:
 
 ---
 
-## 4. Environment variables
+## Environment variables
+
 
 CLI flags and config are usually enough; these tune deeper behavior. Names map
 directly to the variables read across `src/minisweagent`.
 
-### Model & run
+### Model and run
+
+These variables control model selection, API credentials, and run-level limits.
 
 | Variable | Effect |
 |----------|--------|
-| `GEAK_MODEL`, `MSWEA_MODEL_NAME`, `GEAK_MODEL_NAME`, `GEAK_DEFAULT_MODEL` | Model name resolution chain (§2). |
+| `GEAK_MODEL`, `MSWEA_MODEL_NAME`, `GEAK_MODEL_NAME`, `GEAK_DEFAULT_MODEL` | Model name resolution chain. |
 | `MSWEA_MODEL_API_KEY` | Override `model_kwargs.api_key` for all backends. |
 | `AMD_LLM_API_KEY`, `LLM_GATEWAY_KEY` | AMD LLM gateway credentials (`amd_llm`). |
 | `GEAK_CONFIG` | Default config path. |
@@ -215,14 +219,18 @@ directly to the variables read across `src/minisweagent`.
 | `GEAK_TASKGEN_COST_LIMIT` | Cost cap for task generation. |
 | `MSWEA_GLOBAL_COST_LIMIT`, `MSWEA_GLOBAL_CALL_LIMIT` | Global cost / call caps. |
 
-### Parallelism & GPUs
+### Parallelism and GPUs
+
+These variables control GPU assignment and parallel worker counts.
 
 | Variable | Effect |
 |----------|--------|
 | `GEAK_GPU_DEVICE` | GPU device for profiling/runs. |
 | `GEAK_WORKERS_PER_GPU`, `GEAK_MIN_PARALLEL_WORKERS` | Parallel worker placement. |
 
-### Harness, scoring & timeouts
+### Harness, scoring, and timeouts
+
+These variables configure harness discovery, scoring signals, and per-operation timeout values.
 
 | Variable | Effect |
 |----------|--------|
@@ -234,7 +242,9 @@ directly to the variables read across `src/minisweagent`.
 | `GEAK_BASH_TIMEOUT(_S)`, `GEAK_BENCH_TIMEOUT`, `GEAK_CORRECTNESS_TIMEOUT`, `GEAK_PROFILE_TIMEOUT`, `GEAK_EXPLORE_TIMEOUT`, `GEAK_LLM_REQUEST_TIMEOUT` | Various timeouts. |
 | `GEAK_SKIP_CORRECTNESS_GATE`, `GEAK_CORRECTNESS_GATE_TIMEOUT` | Correctness gate control. |
 
-### Memory & knowledge base
+### Memory and knowledge base
+
+These variables control in-session and cross-session memory, and knowledge base read/write behavior.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -245,7 +255,9 @@ directly to the variables read across `src/minisweagent`.
 | `GEAK_MEMORY_NO_CROSS_SESSION`, `GEAK_MEMORY_NO_WORKING`, `GEAK_USE_CROSS_SESSION_MEMORY` | | Finer memory toggles. |
 | `GEAK_MEMORY_STORE_PATH`, `GEAK_CROSS_SESSION_MEMORY_URL`, `GEAK_MEMORY_API_KEY`, `GEAK_MEMORY_RETRIEVAL_LIMIT` | | Memory backend config. |
 
-### Tools, skills & subagents
+### Tools, skills, and subagents
+
+These variables control which tools and subagents are loaded and how they are resolved.
 
 | Variable | Effect |
 |----------|--------|
@@ -255,12 +267,14 @@ directly to the variables read across `src/minisweagent`.
 | `GEAK_USE_KERNEL_ANALYSIS`, `GEAK_PROFILE_EVERY_PATCH` | Analysis/profiling behavior. |
 | `GEAK_ROOT`, `GEAK_SUBAGENTS_ROOT`, `GEAK_REPO_ROOT`, `GEAK_WORK_DIR` | Root/path overrides. |
 
-> The list above is representative, not exhaustive. The authoritative set is
-> whatever `src/minisweagent` reads at runtime; grep for `GEAK_` / `MSWEA_`.
+```{note}
+The list above is representative, not exhaustive. The authoritative set is whatever `src/minisweagent` reads at runtime; grep for `GEAK_` / `MSWEA_`.
+```
 
 ---
 
-## 5. Run artifacts
+## Run artifacts
+
 
 Default output base: `optimization_logs/`. Each run gets
 `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`.
@@ -284,8 +298,7 @@ After cleanup (default, non-`--debug`), a run directory is pruned to
 
 ### Harness result contract
 
-Harnesses report results to GEAK via `GEAK_RESULT_*` environment markers in
-their stdout. Key fields:
+Harnesses communicate results back to GEAK by printing `GEAK_RESULT_*` markers to stdout. GEAK parses these markers after each benchmark run to score the patch. The following markers are supported:
 
 | Marker | Meaning |
 |--------|---------|
@@ -299,11 +312,14 @@ their stdout. Key fields:
 
 ---
 
-## 6. Python API
+## Python API
+
 
 GEAK is primarily a CLI, but a small stable surface is importable.
 
 ### `minisweagent`
+
+The top-level package exposes a small set of utilities and protocol interfaces.
 
 ```python
 from minisweagent import (
@@ -319,6 +335,8 @@ from minisweagent import (
 
 ### `minisweagent.config`
 
+The config module provides functions for resolving and loading YAML configuration files.
+
 ```python
 from minisweagent.config import (
     builtin_config_dir, get_config_path, load_config, load_agent_config,
@@ -330,6 +348,8 @@ from minisweagent.config import (
 - `load_agent_config(config_spec) -> tuple[dict, dict]` — agent + model sections.
 
 ### `minisweagent.models`
+
+The models module handles model backend selection and instantiation according to the resolution order described above.
 
 ```python
 from minisweagent.models import get_model, get_model_name, get_model_class
@@ -344,6 +364,8 @@ defaults for Claude-family names, and honors `MSWEA_MODEL_API_KEY`.
 
 ### Agents
 
+The agents module exposes the entry point for the GEMM tuning agent, which powers the `geak-gemm-tuning` CLI command.
+
 ```python
 from minisweagent.agents.gemm_tuning_agent import run_gemm_tuning_agent
 ```
@@ -354,8 +376,7 @@ from minisweagent.agents.gemm_tuning_agent import run_gemm_tuning_agent
 
 ## See also
 
-- [Quick start](quick_start.md) — install and first run.
+- [Install GEAK](../install/install.md) — install GEAK and configure a model backend.
 - [Configuration files](configuration.md) — YAML loading and merge rules.
-- [Model configuration](model_config.md) — model/backend details.
-- [Subagent guide](subagent_guide.md) — skills and subagents.
-- [Developer: MCP and native tools](developer/mcp-tools.md) — tool layer.
+- [Model configuration](model-config.md) — model/backend details.
+- [RAG filter sub-agent](subagent-guide.md) — knowledge base retrieval and sub-agent configuration.

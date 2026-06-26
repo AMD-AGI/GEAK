@@ -1,8 +1,16 @@
-# RAG Filter Sub-Agent
+---
+myst:
+    html_meta:
+        "description": "Use the GEAK RAG filter sub-agent to evaluate, deduplicate, and summarize retrieval results from MCP tools. Covers configuration, integration, custom prompts, and extension patterns."
+        "keywords": "GEAK, RAG, sub-agent, filter, MCP, retrieval-augmented generation, MCPEnabledEnvironment"
+---
+
+# RAG filter sub-agent
 
 This module provides a reusable sub-agent pattern for filtering and summarizing RAG (Retrieval-Augmented Generation) database results.
 
 ## Overview
+
 
 The RAG filter sub-agent processes retrieved chunks from RAG queries by:
 1. Evaluating chunk relevance to the original query
@@ -11,7 +19,9 @@ The RAG filter sub-agent processes retrieved chunks from RAG queries by:
 
 ## Usage
 
-### 1. Standalone Usage
+The sub-agent can be used standalone, integrated into an MCP environment, or configured with a custom system prompt. The following examples cover each approach.
+
+### Standalone usage
 
 ```python
 from minisweagent.utils.subagent import create_rag_filter_subagent
@@ -33,7 +43,7 @@ filtered_result = subagent.process(rag_chunks, query="your query")
 print(filtered_result)
 ```
 
-### 2. Integrated in MCP Environment
+### Integrated in MCP environment
 
 The sub-agent is automatically integrated into `MCPEnabledEnvironment` and processes results from RAG-based tools:
 
@@ -52,7 +62,7 @@ result = env.execute('@amd:query {"topic": "HIP optimization"}')
 # Result is now filtered and summarized
 ```
 
-### 3. Configuration Options
+### Configuration options
 
 ```python
 from minisweagent.utils.subagent import SubAgentConfig, RAGFilterSubAgent
@@ -68,7 +78,7 @@ config = SubAgentConfig(
 subagent = RAGFilterSubAgent(config)
 ```
 
-## Supported MCP Tools
+## Supported MCP tools
 
 The sub-agent automatically processes results from these MCP tools:
 - `query` / `query_knowledge` - Knowledge base queries
@@ -76,7 +86,7 @@ The sub-agent automatically processes results from these MCP tools:
 - `optimize` / `suggest_optimization` - Optimization suggestions
 - `troubleshoot` - Error troubleshooting
 
-## Disabling the Sub-Agent
+## Disabling the sub-agent
 
 To disable the sub-agent (pass-through mode):
 
@@ -90,7 +100,7 @@ env = MCPEnabledEnvironment(
 subagent = create_rag_filter_subagent(enabled=False)
 ```
 
-## Custom System Prompts
+## Custom system prompts
 
 You can customize the filtering behavior:
 
@@ -109,7 +119,7 @@ subagent = create_rag_filter_subagent(
 )
 ```
 
-## Example Script
+## Example script
 
 See `examples/test_subagent.py` for complete examples:
 
@@ -118,6 +128,8 @@ python examples/test_subagent.py
 ```
 
 ## Architecture
+
+The diagram below shows how a RAG tool call flows through the sub-agent before returning a result to the optimization agent.
 
 ```
 ┌─────────────────┐
@@ -145,7 +157,7 @@ python examples/test_subagent.py
 └─────────────────┘
 ```
 
-## Creating Additional Sub-Agents
+## Creating additional sub-agents
 
 The pattern is designed to be extensible. To create new sub-agents:
 
@@ -181,7 +193,7 @@ class MyCustomSubAgent:
         return response["content"]
 ```
 
-## Environment Variables
+## Environment variables
 
 The sub-agent respects these environment variables:
 - `AMD_LLM_API_KEY` - API key for AMD LLM Gateway
@@ -189,8 +201,16 @@ The sub-agent respects these environment variables:
 
 ## Notes
 
+Keep the following in mind when deploying or extending the sub-agent.
+
 - The sub-agent uses lazy initialization for efficiency
 - Model costs are tracked via `GLOBAL_MODEL_STATS`
 - Logging is available via the `minisweagent.utils.subagent` logger
 - Sub-agent processing adds latency but improves result quality
+
+## Related topics
+
+- [GEAK agent loop](../conceptual/geak-pipeline.md) — how the knowledge base and MCP tools fit into the optimization pipeline.
+- [API reference](api-reference.md) — environment variables for configuring the RAG sub-agent.
+- [Model configuration](model-config.md) — configure the LLM backend used by the sub-agent.
 

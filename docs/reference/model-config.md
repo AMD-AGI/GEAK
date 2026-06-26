@@ -1,10 +1,20 @@
+---
+myst:
+    html_meta:
+        "description": "Configure the LLM backend for GEAK. Covers model selection precedence, AMD LLM gateway, LiteLLM, Anthropic SDK, API key setup, CLI flags, and YAML config examples."
+        "keywords": "GEAK, model configuration, LiteLLM, AMD LLM gateway, Anthropic, API key, geak.yaml, model class"
+---
+
 # Model configuration
 
 This document explains how GEAK selects and configures the LLM backend.
 
-> If you only want to **run GEAK quickly**, see `docs/quick_start.md` and keep secrets (API keys) in environment variables.
+```{note}
+To get started quickly, see [Install GEAK](../install/install.md) and keep secrets (API keys) in environment variables.
+```
 
 ## Model selection precedence
+
 
 `geak` resolves the model name in this order (first hit wins):
 
@@ -14,6 +24,7 @@ This document explains how GEAK selects and configures the LLM backend.
 4. Environment `MSWEA_MODEL_NAME`
 
 ## Model backend (`model_class`)
+
 
 YAML `model.model_class` selects the backend. If it is **missing or empty**, `get_model_class` in `src/minisweagent/models/__init__.py` still returns `LitellmModel`.
 
@@ -27,18 +38,23 @@ You can also set it explicitly to `litellm` — that is the registered shortcut 
 
 ## API keys
 
+
 Optional global override: `MSWEA_MODEL_API_KEY` is copied into `model_kwargs.api_key` when set.
 
 In Docker-based setup, export the API key before running `scripts/run-docker.sh`.
 
-## Configure via CLI and environment variables
+## Configure using CLI and environment variables
 
 ### CLI flags
+
+Use these flags to override the model for a single run without editing any config file.
 
 - `-m` / `--model`: forces `model_name` for this run. Default `model_class` is `amd_llm`.
 - `--model-class`: forces `model_class` for this run (`litellm`, `amd_llm`, …).
 
 ### Example 1 — AMD LLM gateway
+
+Set the API key in your environment and pass the model name via `--model`.
 
 ```bash
 export AMD_LLM_API_KEY="YOUR_KEY"
@@ -49,6 +65,8 @@ geak --yolo --model claude-sonnet-4.5 -t "Your task here"
 
 ### Example 2 — LiteLLM + OpenAI
 
+Set `MSWEA_MODEL_NAME` to the provider-qualified model string and pass `--model-class litellm`.
+
 ```bash
 export MSWEA_MODEL_NAME="openai/gpt-5"
 export OPENAI_API_KEY="YOUR_KEY"
@@ -57,19 +75,23 @@ geak --model-class litellm --kernel-url /path/to/kernel/file --repo /path/to/ker
 
 ### Example 3 — LiteLLM + Anthropic
 
+Use the Anthropic provider string and supply `ANTHROPIC_API_KEY`.
+
 ```bash
 export MSWEA_MODEL_NAME="anthropic/claude-sonnet-4-5-20250929"
 export ANTHROPIC_API_KEY="YOUR_KEY"
 geak --model-class litellm --kernel-url /path/to/kernel/file --repo /path/to/kernel/repo
 ```
 
-Other LiteLLM providers (Azure, Vertex, …): set the `MSWEA_MODEL_NAME` / `GEAK_MODEL` string and provider env vars per the [LiteLLM docs](https://docs.litellm.ai/), and pass `--model-class litellm` when the merged YAML is not already LiteLLM.
+Other LiteLLM providers (Azure, Vertex, …): set the `MSWEA_MODEL_NAME` or `GEAK_MODEL` string and provider env vars per the [LiteLLM docs](https://docs.litellm.ai/), and pass `--model-class litellm` when the merged YAML is not already LiteLLM.
 
-## Configure via config file (`--config`)
+## Configure using a config file (`--config`)
 
 You can configure the model in a YAML file and pass it with `--config` (merged over the base strategy file).
 
 ### AMD LLM gateway
+
+The following YAML snippet configures GEAK to use the AMD LLM gateway with a Claude model.
 
 ```yaml
 model:
@@ -79,6 +101,8 @@ model:
 ```
 
 ### LiteLLM
+
+The following YAML snippet configures GEAK to use LiteLLM with an OpenAI-compatible model.
 
 ```yaml
 model:
@@ -91,4 +115,10 @@ model:
 ### Recommendation: keep secrets out of YAML
 
 Keep secrets in `export ...` and use YAML only for non-secret configuration like `model_name`, `model_kwargs`, and `agent`. Still pass `--config` so the file merges without storing keys in git.
+
+## Related topics
+
+- [Configuration files](configuration.md) — how GEAK loads and merges YAML configuration files.
+- [API reference](api-reference.md) — full model resolution order and all CLI flags.
+- [Install GEAK](../install/install.md) — initial setup including model configuration.
 

@@ -1,12 +1,19 @@
-# Contribution Guidelines
+---
+myst:
+    html_meta:
+        "description": "Contribution guidelines for GEAK: branching model, pull request workflow, code standards, CI checks, release process, and security policies."
+        "keywords": "GEAK, contributing, pull request, branch strategy, code review, CI, release, semantic versioning"
+---
+
+# Contribution guidelines
 
 This document describes best practices for contributing to GEAK. It covers the branching model, pull request workflow, release process, code quality standards, and CI expectations. Following these guidelines keeps the codebase healthy and makes reviews faster.
 
 ---
 
-## Branch Strategy
+## Branch strategy
 
-We use a **main + release** model with short-lived feature branches.
+GEAK uses a **main + release** model with short-lived feature branches.
 
 ```text
 feature/xxx ──► main (active development) ──► release/vX.Y (release stabilization) ──► tag vX.Y.0
@@ -22,7 +29,7 @@ fix/xxx     ──┘                                   hotfix ─────�
 | `hotfix/<topic>` | Critical fixes. Branch from the active `release/*` branch when patching a release; otherwise branch from `main`. Merge back into the source branch, then propagate to `main` if needed. | Maintainers only |
 | `docs/<topic>` | Documentation-only changes. Branch from `main`, merge back to `main`. | Any contributor |
 
-### Rules
+### Branch rules
 
 - **Never push directly to `main`.** All changes go through pull requests.
 - Day-to-day development targets **`main`**.
@@ -32,14 +39,14 @@ fix/xxx     ──┘                                   hotfix ─────�
 
 ---
 
-## Pull Request Workflow
+## Pull request workflow
 
-### 1. Before you start
+### Before you start
 
 - Check existing issues and PRs to avoid duplicate work.
-- For any non-documentation changes, please open an issue first to describe the current problem. For larger changes, we should discuss the design before implementation.
+- For any non-documentation changes, open an issue first to describe the current problem. For larger changes, discuss the design before implementation.
 
-### 2. Fork and clone
+### Fork and clone
 
 External contributors do **not** have push access to `AMD-AGI/GEAK`. Fork the repository first, then work on your fork:
 
@@ -55,7 +62,7 @@ git remote add upstream https://github.com/AMD-AGI/GEAK.git
 
 > **Maintainers** with write access can skip forking and push branches directly to `AMD-AGI/GEAK`.
 
-### 3. Create your branch
+### Create your branch
 
 Keep your `main` branch in sync with upstream before branching:
 
@@ -65,13 +72,13 @@ git checkout main && git merge upstream/main
 git checkout -b feature/my-new-feature
 ```
 
-### 4. Develop
+### Develop
 
 - Write code following the [Code Standards](#code-standards) below.
 - Add or update tests for any behavioral change.
-- Run the linter and tests locally before pushing (see [Local Checks](#local-checks)).
+- Run the linter and tests locally before pushing (see [Local checks](#local-checks)).
 
-### 5. Commit messages
+### Commit messages
 
 Follow the [Conventional Commits](https://www.conventionalcommits.org/) format:
 
@@ -81,7 +88,7 @@ Follow the [Conventional Commits](https://www.conventionalcommits.org/) format:
 <optional body>
 ```
 
-**Types:** `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`
+Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`
 
 Examples:
 
@@ -96,9 +103,9 @@ refactor(tools): extract common harness validation logic
 - Use imperative mood ("add", not "added" or "adds").
 - Reference issue numbers where applicable: `Fixes #123`.
 
-### 6. Push and open a pull request
+### Push and open a pull request
 
-Push your branch to **your fork**, then open a PR against the upstream repository:
+Push your branch to your fork, then open a PR against the upstream repository:
 
 ```bash
 git push origin feature/my-new-feature
@@ -113,35 +120,37 @@ git push origin feature/my-new-feature
   - **Related issues** — link to issues.
 - Add **exactly one** type label to describe the PR's primary intent (see [Labels](#labels) below). A PR should be focused — if you find yourself needing two type labels, split it into separate PRs.
 
-### 7. Draft PRs
+### Draft PRs
 
-Use GitHub **Draft PRs** when your work is not yet ready for formal review:
+Use GitHub draft PRs when your work is not yet ready for formal review:
 
-- **When to use**: You want early feedback on an approach, need CI to run against your changes, or want to signal to the team that you're working on something.
-- **How to create**: Click "Create pull request" ▸ select **"Create draft pull request"** from the dropdown.
-- **Behavior**: Draft PRs cannot be merged. Reviewers can leave comments but the PR won't enter the formal review queue.
-- **When ready**: Click **"Ready for review"** to convert it to a regular PR and notify reviewers.
+- **When to use:** You want early feedback on an approach, need CI to run against your changes, or want to signal to the team that you're working on something.
+- **How to create:** Click "Create pull request" ▸ select "Create draft pull request" from the dropdown.
+- **Behavior:** Draft PRs cannot be merged. Reviewers can leave comments but the PR won't enter the formal review queue.
+- **When ready:** Click "Ready for review" to convert it to a regular PR and notify reviewers.
 
 > **Tip**: Opening a Draft PR early is encouraged — it's better to get feedback on the direction before investing days of work.
 
-### 8. Code review
+### Code review
 
-- **At least 2 approval** from a maintainer is required to merge.
+- **At least 2 approvals** from a maintainer are required to merge.
 - Address review comments with new commits (do not force-push during review so reviewers can see incremental changes).
-- Once approved, the **author** squash-merges via GitHub.
+- Once approved, the author squash-merges via GitHub.
 
-### 9. After merge
+### After merge
 
 - Delete the feature branch.
 - If the change needs a release note, add an entry to the changelog (see [Releases](#release-process)).
 
 ## Code standards
 
+
 - Follow existing patterns in `src/minisweagent/` (naming, typing, error handling).
-- Run **Ruff** before pushing; fix new lint issues in touched files.
+- Run Ruff before pushing; fix new lint issues in touched files.
 - Prefer small, reviewable PRs; avoid drive-by refactors outside the stated goal.
 
 ## Local checks
+
 
 Approximate what CI runs locally before you push:
 
@@ -155,13 +164,14 @@ Adjust paths if your change is narrow. See [CI/CD](#cicd) for the full matrix on
 
 ---
 
-## CI/CD
+## CI and CD
 
 ### PR CI (triggered on every PR to `main`)
 
+
 Every PR automatically runs the following checks:
 
-1. **Lint & format** — `ruff check` and `ruff format --check`.
+1. **Lint and format** — `ruff check` and `ruff format --check`.
 2. **Correctness tests** — `pytest` runs the full test suite to verify functional correctness.
 3. **Benchmark tests** (non-blocking) — only triggered when the PR carries the `feat` label **and** touches performance-sensitive code (kernel implementations, optimization passes, etc.). Compares benchmark results against the `main` baseline and posts a summary in the PR comments. **Does not block merge** — maintainers review the benchmark results and decide whether to merge.
 
@@ -180,7 +190,7 @@ If the scheduled benchmark detects a regression beyond a defined threshold, it a
 
 ---
 
-## Release Process
+## Release process
 
 GEAK follows [Semantic Versioning](https://semver.org/): `vMAJOR.MINOR.PATCH`.
 
@@ -240,13 +250,13 @@ Hotfixes always go through the corresponding **release branch**, keeping the tag
 
 ---
 
-## Issue & Project Management
+## Issue and project management
 
 - Use **GitHub Issues** for bugs, feature requests, and tasks.
 - Use **GitHub Milestones** to group issues by release (e.g., `v3.2`).
-- Use labels consistently. There are two categories: **type labels** (exactly one per PR / issue) and **meta labels** (zero or more).
+- Use labels consistently. There are two categories: **type labels** (exactly one per PR or issue) and **meta labels** (zero or more).
 
-### Labels
+### PR and issue labels
 
 #### Type labels (mutually exclusive — pick one)
 
@@ -267,7 +277,7 @@ Every PR and issue must carry exactly one type label. This keeps each PR focused
 
 ---
 
-## Security & Secrets
+## Security and secrets
 
 - **Never commit** API keys, tokens, or credentials.
 - Use environment variables (`AMD_LLM_API_KEY`, etc.) for secrets.
@@ -291,7 +301,7 @@ Every new source file should include the SPDX header:
 
 ---
 
-## Quick Reference
+## Quick reference
 
 ```text
  Fork AMD-AGI/GEAK ──► Clone ──► Branch from main ──► Develop ──► Pre-commit + Tests
@@ -300,4 +310,4 @@ Every new source file should include the SPDX header:
  Release flow:  main ──► release/vX.Y ──► tag vX.Y.0 ──► merge back to main
 ```
 
-Thank you for contributing to GEAK!
+Thank you for contributing to GEAK.
