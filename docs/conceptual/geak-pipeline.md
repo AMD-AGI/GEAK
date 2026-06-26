@@ -72,5 +72,3 @@ At the end of a run, GEAK produces the following:
 
 - [What is GEAK?](../what-is-geak.md) — overview of GEAK's capabilities and design goals.
 - [Run the agent](../how-to/run-agent.md) — how to invoke `geak` from the command line.
-- [Adding an MCP server](../developer/mcp-tools.md) — extend GEAK with custom MCP tools.
-- [RAG filter sub-agent](../reference/subagent-guide.md) — how the knowledge base retrieval system works.

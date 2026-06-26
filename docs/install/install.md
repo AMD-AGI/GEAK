@@ -122,8 +122,6 @@ Keep secrets in `export …` and YAML only for `model_name`, `model_kwargs`, `ag
 
 - [GEAK compatibility matrix](../compatibility.md) — verify your GPU, ROCm version, and Python version before installing.
 - [Run the agent](../how-to/run-agent.md) — invoke `geak` from the command line after installation.
-- [Model configuration](../reference/model-config.md) — full reference for model backends, API keys, and YAML config.
-- [Configuration files](../reference/configuration.md) — how GEAK loads and merges YAML configuration.
 
 
 

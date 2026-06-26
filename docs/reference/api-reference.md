@@ -11,8 +11,6 @@ Reference for GEAK's public surfaces: the command-line entry points, the
 environment variables that tune behavior, the configuration schema, the run
 artifacts contract, and the importable Python API.
 
-For how YAML is loaded and merged, see [Configuration files](configuration.md).
-
 ---
 
 ## Command-line entry points
@@ -172,7 +170,7 @@ is also accepted. `MSWEA_MODEL_API_KEY`, when set, is copied into
 
 ## Configuration schema (`geak.yaml`)
 
-The default configuration file is `src/minisweagent/config/geak.yaml`. It is loaded after `mini_kernel_strategy_list.yaml` and deep-merged over it; a `--config` file is merged on top of both. See [Configuration files](configuration.md) for the full merge rules. The schema below shows the top-level keys.
+The default configuration file is `src/minisweagent/config/geak.yaml`. It is loaded after `mini_kernel_strategy_list.yaml` and deep-merged over it; a `--config` file is merged on top of both. The schema below shows the top-level keys.
 
 ```yaml
 model:
@@ -377,6 +375,3 @@ from minisweagent.agents.gemm_tuning_agent import run_gemm_tuning_agent
 ## See also
 
 - [Install GEAK](../install/install.md) — install GEAK and configure a model backend.
-- [Configuration files](configuration.md) — YAML loading and merge rules.
-- [Model configuration](model-config.md) — model/backend details.
-- [RAG filter sub-agent](subagent-guide.md) — knowledge base retrieval and sub-agent configuration.

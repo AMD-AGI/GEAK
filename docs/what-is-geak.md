@@ -55,4 +55,3 @@ A GEAK run follows this sequence:
 - [Install GEAK](install/install.md) — set up GEAK and configure a model backend.
 - [Run the agent](how-to/run-agent.md) — invoke `geak` from the command line with single-agent and parallel examples.
 - [API reference](reference/api-reference.md) — CLI flags, environment variables, and run artifact layout.
-- [Model configuration](reference/model-config.md) — choose and configure the LLM backend.

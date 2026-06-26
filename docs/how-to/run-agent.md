@@ -151,5 +151,4 @@ optimization_logs/<kernel>_<timestamp>/
 
 - [Install GEAK](../install/install.md) — set up GEAK and configure a model backend before running.
 - [API reference](../reference/api-reference.md) — complete CLI flag reference, environment variables, and artifact layout.
-- [Model configuration](../reference/model-config.md) — select and configure the LLM backend.
 - [GEAK agent loop](../conceptual/geak-pipeline.md) — understand how the optimization pipeline works.
