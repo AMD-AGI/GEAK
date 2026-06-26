@@ -1,0 +1,5 @@
+# Documentation build requirements for GEAK.
+# rocm-docs-core pulls in Sphinx, the ROCm theme, MyST parser, and the
+# external-toc extension. Pin matches docs/sphinx/requirements.in.
+rocm-docs-core==1.35.0
+sphinxcontrib-mermaid==1.0.0
