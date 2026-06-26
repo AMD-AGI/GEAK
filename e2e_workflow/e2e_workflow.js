@@ -1678,6 +1678,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
 let allAccepted = acceptedHeads.concat(acceptedKernels);
 let finalize = null, report = null, validation = null;
 let finalTput = curTput, finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
+let validatedOk = false;   // did the independent Validate produce a usable (positive) number?
 
 // --- Fix C: EVERY incomplete A/B must be finished (both legs) before final ----
 // Completeness guarantee (general, not per-kernel): an A/B that measured only the
@@ -1814,9 +1815,17 @@ if (want('final')) {
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL, E2E_REPEATS, SKILL_DIR: WORKFLOW_DIR,
     }),
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
-  finalSpeedup = validation ? validation.throughput_speedup : (finalTput / BASELINE_TPUT);
-  log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validation ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
-    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
+  // A Validate that did NOT produce a usable number (e.g. its server crashed in
+  // engine-core init) must NEVER erase the accepted same-session A/B win we
+  // already carry in finalTput/curTput. Trust the Director's independent number
+  // ONLY when it is a real positive measurement; otherwise fall back to the
+  // carried best-accepted throughput so a real, parity-checked win is never
+  // reported as 0 / no_gain downstream.
+  validatedOk = !!(validation && validation.director_verified_throughput_tok_s > 0 && validation.throughput_speedup > 0);
+  finalSpeedup = validatedOk ? validation.throughput_speedup : (BASELINE_TPUT ? finalTput / BASELINE_TPUT : finalSpeedup);
+  log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validatedOk ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
+    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}` +
+    `${validation && !validatedOk ? '; Validate produced no number — using carried accepted A/B win' : ''}). Results in ${EVAL_DIR}`);
 } else {
   log(`Phase(s) [${PHASES.join(',')}] done. Carried throughput ${curTput} tok/s. Pass the returned 'state' to the next phase invocation.`);
 }
@@ -1848,9 +1857,15 @@ const wfReturn = {
   eval_dir: EVAL_DIR,
   model_name: MODEL_NAME,
   baseline_throughput_tok_s: BASELINE_TPUT,
-  final_throughput_tok_s: validation ? validation.director_verified_throughput_tok_s : finalTput,
+  // Trust the Director's independent number ONLY when it is a real positive
+  // measurement (validatedOk). A crashed/degenerate Validate falls back to the
+  // carried accepted same-session A/B win — never 0 — so a real, parity-checked
+  // gain is not silently demoted to no_gain by run_e2e.py.
+  final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : finalTput,
   throughput_speedup: finalSpeedup,
-  validation_status: validation ? validation.validation_status : (want('final') ? 'unknown' : 'phase_partial'),
+  validation_status: validatedOk ? validation.validation_status
+    : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
+       : (want('final') ? 'unknown' : 'phase_partial')),
   output_parity: validation ? validation.output_parity : 'unknown',
   accepted_config: { flags: curFlags, env: curEnv },
   accepted_kernels: acceptedKernels,

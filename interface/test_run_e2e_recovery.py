@@ -273,6 +273,53 @@ def test_recover_redrives_our_own_recovered_persist(tmp_path):
     assert wf["accepted_config"]["flags"] == "--max-num-batched-tokens 16384"
 
 
+def test_normalize_reconciles_crashed_validate_with_accepted_win(tmp_path):
+    """The Kimi-K2.6 20260625T130314Z bug: the workflow ACCEPTED a head (A/B
+    +18.93%) but the final Validate bench CRASHED, so the live return carried
+    final_throughput_tok_s=0 / throughput_speedup=0. result.json must NOT report
+    no_gain — it reconciles from the on-disk accepted integrate A/B."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True, with_validation=False)
+    # Live return: a real accepted head, but degenerate final/speedup (crash).
+    wf = {
+        "eval_dir": str(eval_dir),
+        "baseline_throughput_tok_s": 255.049,
+        "final_throughput_tok_s": 0,
+        "throughput_speedup": 0,
+        "validation_status": "flagged_no_number_used_carried_ab",
+        "accepted_heads": [{
+            "short_name": "fused_moe_kernel_gptq_awq",
+            "op_kind": "gemm", "backend": "triton", "kind": "env",
+            "e2e_delta_pct": 16.049, "isolated": 1.5902,
+        }],
+        "accepted_kernels": [],
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "ok", "an accepted same-session win must never read as no_gain"
+    assert out["throughput_speedup"] == pytest.approx(535.352 / 461.314)
+    assert out["final_throughput_tok_s"] == pytest.approx(535.352)
+    # Provenance is honest: the number came from the disk intermediate A/B.
+    assert out["result_source"] == "disk_intermediate_win"
+    # The accepted head metadata from the live return is preserved.
+    assert out["accepted_heads"][0]["short_name"] == "fused_moe_kernel_gptq_awq"
+
+
+def test_normalize_does_not_reconcile_genuine_no_gain(tmp_path):
+    """A return that accepted NOTHING (empty heads/kernels) with speedup 1.0 is a
+    legitimate no_gain — the reconciliation guard must leave it untouched."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True, with_validation=False)
+    wf = {
+        "eval_dir": str(eval_dir),
+        "baseline_throughput_tok_s": 255.049,
+        "final_throughput_tok_s": 255.049,
+        "throughput_speedup": 1.0,
+        "accepted_heads": [],
+        "accepted_kernels": [],
+    }
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "no_gain"
+    assert out["result_source"] == "workflow_return"
+
+
 def test_result_source_no_gain(tmp_path):
     eval_dir = _make_no_gain_eval_dir(tmp_path)
     wf = rx._recover_workflow_return(eval_dir.parent)
