@@ -224,9 +224,42 @@ def _build_env(
     from minisweagent.run.postprocess.evaluation import _ensure_rocm_on_path
 
     _ensure_rocm_on_path(env)
+    _enable_compile_speedups(env)
     if extra:
         env.update(extra)
     return env
+
+
+def _enable_compile_speedups(env: dict[str, str]) -> None:
+    """Speed up kernel (re)compiles in harness/baseline subprocesses (GEAK #298).
+
+    aiter/Composable-Kernel ``.cu`` kernels recompile on every candidate (HL
+    forces ``AITER_REBUILD=1``); the heavy template build can exceed the
+    preprocess soft-cap before any optimization round runs. Two env-only,
+    universally-safe accelerants:
+
+      * ``MAX_JOBS`` — parallelize the ninja/cpp_extension build across cores
+        (aiter caps it to cores*0.8 / free-mem; we just request a high floor).
+      * ``CMAKE_*_COMPILER_LAUNCHER=ccache`` + ``CCACHE_*`` — cache unchanged
+        translation units so a small kernel edit recompiles ~its diff, not the
+        whole CK template set. ccache is the correct ninja/cmake hook (a bare
+        ``hipcc`` PATH shim is NOT honored by ninja's absolute compiler path).
+
+    Both are no-ops for fast (triton/elementwise) kernels and skipped entirely
+    when ccache is absent, so already-working kernels are unaffected. Respects
+    operator-provided values (never overrides an explicit ``MAX_JOBS``).
+    """
+    import shutil
+
+    env.setdefault("MAX_JOBS", str(max(1, (os.cpu_count() or 8) * 3 // 4)))
+    ccache = shutil.which("ccache", path=env.get("PATH"))
+    if not ccache:
+        return
+    for var in ("CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER",
+                "CMAKE_HIP_COMPILER_LAUNCHER"):
+        env.setdefault(var, "ccache")
+    env.setdefault("CCACHE_SLOPPINESS", "time_macros,include_file_mtime,include_file_ctime")
+    env.setdefault("CCACHE_MAXSIZE", "50G")
 
 
 def _benchmark_command(harness_path: Path, flag: str = "--benchmark") -> list[str]:
@@ -703,8 +736,11 @@ def collect_profile(
     # repeated timeouts. GEAK_SKIP_PROFILE short-circuits it: return a profile-less
     # (but non-error) ProfileResult so the optimizer plans "blind" and proceeds to
     # rounds instead of starving on the profiler.
-    if os.environ.get("GEAK_SKIP_PROFILE", "").strip().lower() in ("1", "true", "yes"):
-        logger.info("collect_profile: GEAK_SKIP_PROFILE set; skipping profiler-mcp (advisory)")
+    # DEFAULT: skip (the advisory profiler is high-cost / hang-prone and the
+    # optimizer measures every change directly via FULL_BENCHMARK anyway). Opt back
+    # in by explicitly setting GEAK_SKIP_PROFILE to a falsy value (0/false/no).
+    if os.environ.get("GEAK_SKIP_PROFILE", "1").strip().lower() not in ("0", "false", "no"):
+        logger.info("collect_profile: GEAK_SKIP_PROFILE set (default on); skipping profiler-mcp (advisory)")
         return ProfileResult(
             harness_path=harness_path.resolve(),
             command=command,

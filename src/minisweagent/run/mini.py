@@ -261,8 +261,8 @@ def main(
         "--total-budget-s",
         help="Override the mode's total wall-clock budget (seconds). Escape hatch for testing.",
     ),
-    scoring_target: str = typer.Option(
-        "wall",
+    scoring_target: str | None = typer.Option(
+        None,
         "--target",
         help=(
             "Which signal the harness reports as GEAK_RESULT_LATENCY_MS (the scoring metric "
@@ -270,7 +270,10 @@ def main(
             "triton.testing.do_bench (includes Python/dispatch overhead). 'kernel' = GPU-only "
             "kernel time via torch.profiler CUDA events (excludes dispatch). The dual-signal "
             "harness always reports BOTH (GEAK_RESULT_WALL_MS + GEAK_RESULT_KERNEL_MS) for "
-            "agent visibility; --target only chooses which becomes the scoring signal."
+            "agent visibility; --target only chooses which becomes the scoring signal. "
+            "Default None -> falls through to GEAK_SCORE_TARGET env -> 'kernel' (so the "
+            "documented env knob and the kernel default actually take effect; previously this "
+            "defaulted to 'wall' and silently overrode both)."
         ),
     ),
     debug: bool = typer.Option(
@@ -669,15 +672,18 @@ def main(
         return None
 
     _target_language = _resolve_target_language(kernel_type)
-    # Scoring signal precedence: explicit --target > GEAK_SCORE_TARGET env > "wall".
+    # Scoring signal precedence: explicit --target > GEAK_SCORE_TARGET env > "kernel".
     # ``kernel`` scores GPU-only kernel time (torch.profiler CUDA events), which
     # excludes host dispatch + DVFS jitter — the ±1% wall-time noise that drowns
     # sub-2% kernel gains and lets the agent over-report a noisy favorable draw.
-    # Keep ``wall`` the default (E2E-correlated, what most callers expect); the
-    # env knob lets an operator switch the whole fleet to the low-noise signal
-    # without editing per-run CLI. Generic: no per-kernel special-casing.
+    # DEFAULT is ``kernel``: wall-time scoring lets a patch "win" by collapsing
+    # kernel launches (removing host-dispatch overhead the production CUDA-graph'd /
+    # batched server already amortizes), so such wins do NOT transfer to end-to-end
+    # serving throughput. Scoring GPU kernel time keeps the optimization target
+    # aligned with what actually moves E2E. Override with --target wall /
+    # GEAK_SCORE_TARGET=wall when you specifically want the wall signal.
     scoring_target_norm = (
-        scoring_target or os.environ.get("GEAK_SCORE_TARGET") or "wall"
+        scoring_target or os.environ.get("GEAK_SCORE_TARGET") or "kernel"
     ).strip().lower()
     if scoring_target_norm not in {"wall", "kernel"}:
         logger.warning(
