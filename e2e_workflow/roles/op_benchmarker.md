@@ -52,6 +52,36 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
     `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`. **Do NOT use PyTorch TunableOp / `HIPBLASLT_TUNING_FILE`** —
     on sglang/aiter they hook the PyTorch dispatch the live path bypasses (zero engagement). For attn,
     Tier-B is the `--attention-backend` swap (a server flag the Config Tuner owns).
+  - **For an fp8 block-scale GEMM (`gemm_a8w8_blockscale` — the live op on an fp8 / a8w8_blockscale model;
+    sglang+aiter routes it through the TRITON blockscale kernel by default, which runs the UNTUNED default
+    config), the dense bf16 recipe above does NOT apply.**
+    🔒 **MANDATED LEVER (this eval) — the CK skill is the ONLY accepted route for this op.** Follow
+    `SKILL_DIR/knowledge/gemm_tuning/fp8_gemm_tuning_sglang_aiter.md` — the verified **CK** playbook —
+    in full, end to end:
+    capture the live `(M,N,K)` via its `SGLANG_DUMP_AITER_FP8_GEMM_SHAPES` / `SGLANG_LOG_FP8_BLOCK_GEMM_DISPATCH`
+    hooks, tune with aiter's CK tuner (`csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale_tune.py
+    --libtype both --mp <ALL GPUs>`, never pin to 1), switch `fp8_utils.py` to the CK `gemm_a8w8_blockscale`
+    import **as a reversible OVERLAY (never a site-packages edit)**, and deploy
+    `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned.csv>`. Return the head candidate as `winner_kind=env` with
+    `apply_env=AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<csv>` PLUS `code_patch=<fp8_utils CK-switch overlay diff>`
+    and `tuning_artifact=<tuned.csv>`; the Integrator overlays it and gates on e2e. (bpreshuffle / a4w4
+    blockscale follow the same skill with their own dump site + CK tuner.)
+    ⛔ **FORBIDDEN alternatives for this op in this eval — do NOT take any of these lighter levers, even
+    though a prior may rank them higher:** (a) the **Triton config-JSON overlay** of
+    `aiter.ops.triton.gemm_a8w8_blockscale` (dropping `gfx942-GEMM-A8W8_BLOCKSCALE-N=*-K=*.json` /
+    `AITER_TRITON_CONFIGS_PATH`); (b) the **flydsl** env-DB tune or flydsl author route; (c) the **aiter
+    bf16 DB tune** (`AITER_TUNE_GEMM`/`AITER_CONFIG_GEMM_BF16`) — that is the wrong path for fp8 blockscale.
+    These keep the slow Triton seam live and BYPASS the user's CK skill. A head result for this op that is
+    not the CK env+overlay above is a **defection**: return `gate=no_win` with `reason="non-CK lever
+    forbidden this eval"` rather than shipping a Triton-overlay/flydsl candidate. The CK path is the
+    measured win here because the baseline is the **untuned Triton default**, not a CK-default heuristic.
+    ⚠️ **Any `knowledge/learned/` card that ranks the Triton config-JSON overlay (or flydsl/aiter-bf16) as
+    the fp8-blockscale win is OBSOLETE for this eval — ignore it and follow the CK skill.**
+  - **Skill discovery — do this for EVERY GEMM head BEFORE deciding the lever:** `ls
+    SKILL_DIR/knowledge/gemm_tuning/` and read the frontmatter `description:` of each `*.md`; **FOLLOW any
+    skill whose description matches this op's quant format / backend** (e.g. fp8 block-scale → the file
+    above). A skill dropped into that directory is an authoritative, verified playbook — never skip it
+    because it is not hardcoded by name in this role.
   - Write any driver script you need into `$EVAL_DIR` (NOT the shared `scripts/`). Discover tool paths
     (e.g. gradlib) generically, never hardcode. The env winner is `winner_kind=env`.
 - **Tier C — code (author or rewrite)** (editable languages: triton/**flydsl**/hip/ck): the **workflows route**.

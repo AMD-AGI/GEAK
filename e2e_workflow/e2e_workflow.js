@@ -126,6 +126,12 @@ const HEAD_AUTHOR_MAX = parseInt(A.head_author_max != null ? A.head_author_max :
 // hits a harness fault / no-win / extraction failure, the orchestrator LOUDLY flags it (and still tries
 // the author route when a plan exists) instead of dropping the biggest lever on the floor. Default 30%.
 const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_pct : 30);
+// FAST-MODE ONLY head priority (opt-in, default ''=OFF): a regex matched against each head candidate's
+// op_kind/short_name/name; matching heads are pulled to the FRONT of the head queue BEFORE the budget
+// slice, so e.g. head_priority="gemm" guarantees the dense/scaled-GEMM head is selected AND
+// integrated/stacked FIRST. Applied ONLY when FAST_MODE is on (see the heads[] construction below);
+// default '' leaves every mode (default/fast/deep) byte-identical.
+const HEAD_PRIORITY = String(A.head_priority != null ? A.head_priority : '').trim();
 // ---- DEEP MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A long, thorough HeadKernel mode that pursues SOTA per head op via CROSS-BACKEND CO-OPTIMIZATION:
 // N backends optimize the SAME head op in parallel (one exclusive GPU lane each), continuously
@@ -773,7 +779,18 @@ const history = ST.history || { insights: [], ledger: [], milestones: [], bottle
 if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   phase('HeadKernel');
   log(`Head-kernel track: ${headQueue.length} candidate op(s), head_budget=${HEAD_BUDGET}, threshold=${HEAD_THRESHOLD_PCT}%.`);
-  const heads = headQueue.slice(0, HEAD_BUDGET).map((c, i) => ({
+  // FAST-MODE head priority: pull HEAD_PRIORITY-matching ops to the front BEFORE the budget slice, so the
+  // prioritized op (e.g. "gemm") is guaranteed selected and gated/stacked FIRST. Gated on FAST_MODE ->
+  // default/deep are byte-identical. Array.sort is stable: non-matches keep their Amdahl order, and among
+  // matches the original order is preserved (only the matched group is promoted ahead of the rest).
+  let _hq = headQueue;
+  if (FAST_MODE && HEAD_PRIORITY) {
+    const _re = new RegExp(HEAD_PRIORITY, 'i');
+    const _isPri = (c) => _re.test(`${c.op_kind || ''} ${c.short_name || ''} ${c.name || ''}`);
+    _hq = headQueue.slice().sort((a, b) => (_isPri(b) ? 1 : 0) - (_isPri(a) ? 1 : 0));
+    log(`[fast-mode] head_priority='${HEAD_PRIORITY}': ${_hq.filter(_isPri).length}/${_hq.length} head(s) match; integrate order=[${_hq.slice(0, HEAD_BUDGET).map((c) => c.short_name || c.op_kind || 'op').join(', ')}].`);
+  }
+  const heads = _hq.slice(0, HEAD_BUDGET).map((c, i) => ({
     ...c, idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
     short_name: c.short_name || `${c.op_kind || 'op'}${i}`,
   }));
