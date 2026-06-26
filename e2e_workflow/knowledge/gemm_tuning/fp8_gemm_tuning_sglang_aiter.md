@@ -198,6 +198,62 @@ from aiter import gemm_a8w8_blockscale, gemm_a8w8_bpreshuffle, get_hip_quant
 
 (Revert or guard behind a local branch if you need to compare Triton vs CK quickly.)
 
+### 9.1 CRITICAL — the activation-scale LAYOUT is per-kernel; match it to CK (do not assume)
+
+This is the single most dangerous, silent failure in this whole flow. The per-token activation scale
+has a **memory layout that each aiter kernel fixes**, and you MUST feed CK the layout *it* expects:
+
+- `aiter.ops.triton.gemm_a8w8_blockscale` (Triton) → **non-transposed** scale.
+- `aiter.gemm_a8w8_blockscale` (plain CK, the kernel this skill switches to) → **non-transposed** scale.
+- `gemm_a8w8_blockscale_bpreshuffle` (the stock non-Triton kernel) → **transposed** scale.
+
+Stock sglang `fp8_utils` computes `transpose_scale = not use_triton`, i.e. it produces the **transposed**
+layout for the non-Triton path — correct for *bpreshuffle*, **WRONG for plain CK**. If you switch the
+kernel to CK but leave that logic, every **multi-token (M≥2)** GEMM gets scrambled per-token scales →
+**~19% error → garbage output / accuracy collapse**, while the tuner's `errRatio` stays 0 and an **M=1
+smoke test looks perfectly fine** (transposing a 1-row scale is a no-op). This is exactly how a
+"fast but wrong" config ships undetected.
+
+**Do not hard-code the layout — DETECT it.** The correct value is aiter-version / kernel / GPU-arch
+coupled, so verify it empirically every run with a tiny check: run the CK kernel in BOTH scale layouts
+and compare each against the **Triton** kernel (the production-correct reference) at **M≥2**, on
+identical inputs. Run this in a scratch script on one GPU (no server, seconds). The reference must be a
+**single, layout-independent** result — derive it from Triton (or from an fp32 dequant of the
+*non-transposed* quantization); do NOT re-derive the reference from each layout's own scale tensor, or
+the wrong layout will falsely "match" itself.
+
+```python
+# scratch check — pick the activation-scale layout the CK kernel actually wants. M MUST be >=2.
+import torch, aiter
+from aiter import get_hip_quant
+from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale as triton_gemm
+ck = aiter.gemm_a8w8_blockscale
+qa = get_hip_quant(aiter.QuantType.per_1x128); FP8 = aiter.dtypes.fp8; FP8_MAX = 240.0  # e4m3fnuz
+relerr = lambda a, b: ((a.float()-b.float()).norm()/(b.float().norm()+1e-9)).item()
+M, (N, K) = 16, (5120, 5120)                      # use a LIVE (N,K) from §7; repeat per family
+w = torch.randn(N, K, device="cuda", dtype=torch.bfloat16) / K**0.5
+wf = w.float().reshape(N//128,128,K//128,128); s = wf.abs().amax((1,3),keepdim=True).clamp(min=1e-8)/FP8_MAX
+wq = (wf/s).clamp(-FP8_MAX,FP8_MAX).to(FP8).reshape(N,K); ws = s.reshape(N//128,K//128).contiguous()
+x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16) / K**0.5
+xq, xs = qa(x, quant_dtype=FP8, transpose_scale=False)
+ref = triton_gemm(xq, wq, xs, ws, dtype=torch.bfloat16)            # ONE fixed, trusted reference
+for flag in (False, True):
+    xqi, xsi = qa(x, quant_dtype=FP8, transpose_scale=flag)
+    print(f"transpose_scale={flag}:", relerr(ck(xqi, wq, xsi, ws, dtype=torch.bfloat16), ref))
+```
+
+Decision:
+- Pick the `transpose_scale` whose rel-err is ~0 (≈1e-3). Set the CK path in `fp8_utils` to that value
+  (and make the `input_scale is not None` branch consistent — e.g. do NOT transpose for CK if the winner
+  is `transpose_scale=False`).
+- If **both** layouts give large error for these shapes, CK is numerically broken here → **do not deploy
+  CK; keep the Triton baseline** (a faster-but-wrong server is a regression).
+
+For the aiter build this skill was validated against, the winner is **`transpose_scale=False`**
+(non-transposed). Treat that as the expected-but-unverified default — the check above is the source of
+truth, because at **M=1 both layouts look identical** (transposing a 1-row scale is a no-op), so this
+must be checked at M≥2.
+
 ---
 
 ## 10. Point aiter at the tuned CSV; rerun and compare
@@ -208,7 +264,28 @@ export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=/path/to/ck_gemm_json_out/a8w8_blocksca
 
 Restart SGLang with the **same** model, TP, concurrency, and benchmark flags as the baseline. Compare **e2e latency / throughput** and server logs to the baseline from §3. You should see improved performance when the hot shapes are covered by the CSV and the CK path is active.
 
-Example env block (from a working script): `GEMM_tuning_test4/run_sglang_test_fff.sh` (shape/dispatch exports assume the §5 patches are in the SGLang tree that script runs; tune `AITER_CONFIG_...` separately).
+Example env block (from a working script): `GEMM_tuning_test4/run_sglang_test_fff.sh` (shape/dispatch exports assume the §5 patches are in the SGLang tree that script runs; tune `AITER_CONFIG_...` separately). NOTE: that reference script launches **stock Triton** (no CK env/overlay) — it is a *baseline* launch, not the CK candidate. Do not use a stock launch to "validate" the CK candidate (see §10.1).
+
+### 10.1 MANDATORY correctness check — output parity on the ENGAGED CK server, at M≥2
+
+Throughput and the tuner's `errRatio` are **NOT** correctness signals — a numerically-broken CK path
+runs at full speed and `errRatio` stays 0. Before reporting any speedup, confirm the CK swap is
+numerically sound with an **output-parity check on the exact CK-engaged server**:
+
+1. **Same-server, same-config.** Launch ONE server with the CK switch + `AITER_CONFIG_...` engaged, and
+   measure against *that* server. Never validate on a separately-launched **stock** server — it silently
+   runs Triton and "passes" while the real CK candidate is broken. Confirm the CK path is actually live
+   in `server.log` (CK module loaded / "is tuned on") during the check.
+2. **Greedy (temp=0) output parity vs the Triton baseline**, on prompts long enough to drive
+   **multi-token decode (M≥2)** — short / M=1 prompts can look fine while M≥2 is garbage. Outputs must
+   match the baseline (or be coherent). This is the skill's own go/no-go: if they diverge, the CK
+   integration is wrong (almost always the §9.1 scale layout) — fix the layout (or fall back to Triton)
+   and re-check. Do not report a speedup that fails this.
+
+Note: **task-level accuracy gating (e.g. gsm8k) is decided and run by the outer GEAK workflow** (its
+accuracy-gate option), not prescribed here. This skill only guarantees the GEMM swap is numerically
+correct (the parity check above); if the workflow enables a task-accuracy gate, it must likewise run on
+the engaged CK server, not a stock stand-in.
 
 ---
 
@@ -225,7 +302,9 @@ Example env block (from a working script): `GEMM_tuning_test4/run_sglang_test_ff
 | 7 | Parse §6 log → deduped shape artifact per §7; hand off to §8’s untuned CSV builder |
 | 8 | In aiter `csrc/ck_gemm_a8w8_blockscale`: read `gemm_a8w8_blockscale_tune.py` + `--help`; build untuned **M,N,K** CSV from §7; run tuner → tuned CSV for §10 |
 | 9 | Edit `fp8_utils.py` imports: CK `gemm_a8w8_blockscale` on, Triton blockscale off |
+| 9.1 | **Detect the activation-scale layout** (§9.1 scratch check: CK vs Triton at M≥2, both layouts); set the CK path's `transpose_scale` to the winner (expected `False`/non-transposed); if both fail, keep Triton |
 | 10 | `export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=...`; rerun; compare to baseline |
+| 10.1 | **Correctness check on the ENGAGED CK server, M≥2:** greedy output parity vs Triton baseline (never throughput/`errRatio` alone). Task-accuracy gating (gsm8k) is the outer GEAK workflow's decision, not this skill's |
 
 ---
 
@@ -233,7 +312,26 @@ Example env block (from a working script): `GEMM_tuning_test4/run_sglang_test_ff
 
 - **Wrong Python / wrong tree:** §5 edits must live in the same SGLang tree / interpreter that runs **`launch_server`**.
 - **Env toggles and tree alignment:** **`SGLANG_DUMP_AITER_FP8_GEMM_SHAPES`** and **`SGLANG_LOG_FP8_BLOCK_GEMM_DISPATCH`** take effect only in the checkout where you added the §5 hooks; keep **`PYTHONPATH`** / editable installs aligned with **`launch_server`**.
-- **Shape coverage:** Missing **(M, N, K)** in the CSV may fall back to slower or default kernels—use §5 **dispatch** logging to confirm which **`w8a8_block_fp8_linear`** implementation is active.
+- **Scale-layout mismatch (SILENT, CATASTROPHIC — see §9.1):** each aiter blockscale kernel fixes its
+  own per-token activation-scale memory layout. Triton and plain CK `gemm_a8w8_blockscale` want
+  **non-transposed**; `bpreshuffle` wants **transposed**. Stock sglang's `transpose_scale = not use_triton`
+  produces the *transposed* (bpreshuffle) layout on the non-Triton path — **wrong for CK**. Feeding CK a
+  transposed scale gives **~19% error on every M≥2 GEMM → garbage / accuracy collapse**, yet `errRatio`
+  stays 0 and **M=1 smoke tests pass** (transposing a 1-row scale is a no-op). Symptom: throughput up,
+  outputs degenerate (repeated tokens, gibberish) once batch/decode has ≥2 tokens. Always run the §9.1
+  probe (M≥2) to pick the layout, and gate accuracy on the engaged server (§10.1). This convention is
+  aiter-version/arch-coupled — verify, never assume. (This is the bug that produced a "fast but wrong"
+  +77%/+124% result that passed throughput+`errRatio` but failed real generation.)
+- **Validate the candidate, not a stand-in (see §10.1):** run the parity check (and any outer
+  task-accuracy gate) on the SAME server that has the CK path engaged. A separately-launched stock server
+  silently measures Triton and "passes" while the real CK candidate is broken — this is how a broken run
+  can report a healthy accuracy number.
+- **Shape coverage:** Missing **(M, N, K)** in the CSV falls back to the CK **default** kernel for those
+  shapes (look for `not found tuned config ... use default` in the log). With the correct scale layout the
+  default is still numerically OK (just untuned/slower); coverage is a *performance* concern, not the
+  cause of gibberish — gibberish is the scale-layout bug above. Capture the live cuda-graph **decode
+  buckets** (not just a few representative M) so engaged decode shapes are tuned. Use §5 **dispatch**
+  logging to confirm which **`w8a8_block_fp8_linear`** implementation is active.
 - **Tuner CLI drift:** Always use **`python3 gemm_a8w8_blockscale_tune.py --help`** on the checked-out aiter revision; flag names and defaults can change.
 - **Skip baseline ck run:** Do not try to run ck backend fp8 benchmark without tuned csv, as it may stuck. The final goal is to correctly compare tuned ck execution with baseline (by default triton probably).
 - **Version / checkout before “clever” code fixes:** Most confusing runtime errors in this flow (including aiter JIT failures such as `NameError: name 'aiter_tensor_t' is not defined`) trace back to **§1–§2 not being satisfied**—wrong **aiter** `HEAD`, stale **submodules**, or **stale JIT** (`aiter/jit/*.so`, `aiter/jit/build/*`) from another revision. **Do not** patch around that in application code (for example adding `aiter_tensor_t` shims in `aiter/jit/core.py` or SGLang). **First** realign the tree: run the full **§2** sequence (`git checkout` the required commit, `git submodule sync` / `git submodule update --init --recursive`, remove JIT artifacts as in §2, `python setup.py develop`), confirm **`git rev-parse HEAD`**, then re-run. Only treat the failure as a genuine bug to debug in source if it **still** reproduces on that pinned, clean-JIT checkout.
