@@ -44,17 +44,12 @@ This skill provides knowledge and strategy for translating PyTorch GPU kernels t
     - Reuse persistent score/output buffers across calls; read `cache_seqlens` once via
       `.tolist()` — never `.item()` in hot loops.
     - Use `get_default_kwargs` for GEMM tiling; for long context use a page-tiled online softmax.
-  MLA specifics: asymmetric `headdim_qk` (e.g. 576) vs `headdim_v` (e.g. 512); slice V
-  from the shared latent cache. When a decode kernel is detected, GEAK loads both the
-  `attention` KB (§ Decode Attention) and the `gemm` KB
-  (`flydsl_translation_gemm.md` § Split-K GEMM).
-  Do NOT wrap the kernel in a CUDA graph to obtain the speedup: graph capture only
-  removes host-side launch overhead and is not a FlyDSL kernel improvement, so it makes
-  the comparison against the (non-captured) PyTorch baseline misleading. Measure the
-  FlyDSL kernel WITHOUT CUDA graphs so the reported uplift reflects the translation itself.
 
-CRITICAL: Do NOT use torch.matmul, F.linear, nn.Linear, or F.scaled_dot_product_attention.
-These ALL have FlyDSL pre-built replacements. PyTorch fallback is ONLY for Conv2d, MaxPool2d, BatchNorm2d.
+CRITICAL: 
+  - Do NOT use torch.matmul, F.linear, nn.Linear, or F.scaled_dot_product_attention.
+  These ALL have FlyDSL pre-built replacements. PyTorch fallback is ONLY for Conv2d, MaxPool2d, BatchNorm2d.
+  - Do NOT wrap the kernel in a CUDA graph to obtain the speedup: graph capture only
+  removes host-side launch overhead and is not a FlyDSL kernel improvement.
 
 ## Reference Documentation
 
