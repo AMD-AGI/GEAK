@@ -354,53 +354,67 @@ def main(
         if enabled is False:
             disabled_tools.append(tool_name)
 
-    # RAG MCP toggle: disable RAG tools when rag is not enabled
+    # RAG MCP toggle: disable RAG tools when rag is not enabled. RAG is
+    # best-effort — if it is enabled but the package or index cannot be
+    # provisioned (offline node, pip failure, build error), degrade to
+    # RAG-disabled and continue the optimization run instead of aborting the
+    # whole agent. Previously any provisioning failure raised and killed the
+    # run, so an environment hiccup wasted the entire kernel attempt (GH #316).
     rag_enabled = tools_cfg.get("rag", False)
+    rag_failed = False
     if rag_enabled:
-        _repo_root = get_repo_root()
-        # Auto-install rag-mcp package if missing
         try:
-            import rag_mcp  # noqa: F401
-        except ImportError:
-            logger.info("rag-mcp package not found, installing automatically...")
-            _rag_mcp_path = _repo_root / "mcp_tools" / "rag-mcp"
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-e", str(_rag_mcp_path)],
-                capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    "Auto-install of rag-mcp failed.\n\n"
-                    f"stderr:\n{result.stderr}\n\n"
-                    "Please install manually:\n"
-                    f"  pip install -e {_rag_mcp_path}"
+            _repo_root = get_repo_root()
+            # Auto-install rag-mcp package if missing
+            try:
+                import rag_mcp  # noqa: F401
+            except ImportError:
+                logger.info("rag-mcp package not found, installing automatically...")
+                _rag_mcp_path = _repo_root / "mcp_tools" / "rag-mcp"
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-e", str(_rag_mcp_path)],
+                    capture_output=True, text=True,
                 )
-            logger.info("rag-mcp installed successfully.")
-            # Refresh sys.path so the newly installed package is discoverable
-            import importlib
-            sys.path.insert(0, str(_rag_mcp_path / "src"))
-            importlib.invalidate_caches()
-            import rag_mcp  # noqa: F401
-        # Auto-build semantic index if missing
-        _index_path = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
-        _has_faiss = (_index_path / "index.faiss").exists() or (_index_path / "faiss.index").exists()
-        _has_pkl = bool(list(_index_path.glob("*.pkl"))) if _index_path.exists() else False
-        if not (_has_faiss and _has_pkl):
-            logger.info("RAG index not found at %s, building automatically...", _index_path)
-            _build_script = _repo_root / "scripts" / "build_index.py"
-            result = subprocess.run(
-                [sys.executable, str(_build_script), "--force"],
-                capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    "Auto-build of RAG index failed.\n\n"
-                    f"stderr:\n{result.stderr}\n\n"
-                    "Please build manually:\n"
-                    f"  python {_build_script} --force"
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        "Auto-install of rag-mcp failed.\n\n"
+                        f"stderr:\n{result.stderr}\n\n"
+                        "Please install manually:\n"
+                        f"  pip install -e {_rag_mcp_path}"
+                    )
+                logger.info("rag-mcp installed successfully.")
+                # Refresh sys.path so the newly installed package is discoverable
+                import importlib
+                sys.path.insert(0, str(_rag_mcp_path / "src"))
+                importlib.invalidate_caches()
+                import rag_mcp  # noqa: F401
+            # Auto-build semantic index if missing
+            _index_path = Path.home() / ".cache" / "amd-ai-devtool" / "semantic-index"
+            _has_faiss = (_index_path / "index.faiss").exists() or (_index_path / "faiss.index").exists()
+            _has_pkl = bool(list(_index_path.glob("*.pkl"))) if _index_path.exists() else False
+            if not (_has_faiss and _has_pkl):
+                logger.info("RAG index not found at %s, building automatically...", _index_path)
+                _build_script = _repo_root / "scripts" / "build_index.py"
+                result = subprocess.run(
+                    [sys.executable, str(_build_script), "--force"],
+                    capture_output=True, text=True,
                 )
-            logger.info("RAG index built successfully.")
-    else:
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        "Auto-build of RAG index failed.\n\n"
+                        f"stderr:\n{result.stderr}\n\n"
+                        "Please build manually:\n"
+                        f"  python {_build_script} --force"
+                    )
+                logger.info("RAG index built successfully.")
+        except Exception as exc:  # noqa: BLE001 — RAG is best-effort; never abort the run
+            logger.warning(
+                "RAG setup failed (%s); continuing with RAG disabled. The optimization "
+                "run proceeds without RAG retrieval tools.",
+                exc,
+            )
+            rag_failed = True
+    if (not rag_enabled) or rag_failed:
         disabled_tools.append("query")
         disabled_tools.append("optimize")
 
