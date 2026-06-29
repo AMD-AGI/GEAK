@@ -17,8 +17,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from minisweagent import get_data_dir
-
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -151,9 +149,7 @@ def _is_paged_decode_attention(text: str, source_path: Path) -> bool:
         and re.search(r"kv_cache|k_cache|v_cache", text)
     ):
         return True
-    if re.search(
-        r"MultiHeadLatent|\bmla\b|PagedAttention", source_path.stem, re.IGNORECASE
-    ):
+    if re.search(r"MultiHeadLatent|\bmla\b|PagedAttention", source_path.stem, re.IGNORECASE):
         return True
     return False
 
@@ -168,9 +164,7 @@ def _is_manual_softmax_attention(text: str) -> bool:
     matmul against a transposed operand (the ``Q @ K^T`` score step) AND a softmax,
     so plain GEMM kernels that merely transpose an operand are not misflagged.
     """
-    has_qkt = bool(
-        re.search(r"(?:matmul|bmm)\s*\([^)]*\.(?:transpose|mT|permute)", text)
-    )
+    has_qkt = bool(re.search(r"(?:matmul|bmm)\s*\([^)]*\.(?:transpose|mT|permute)", text))
     has_softmax = bool(re.search(r"softmax", text))
     return has_qkt and has_softmax
 
@@ -288,7 +282,7 @@ def load_translation_kb(
        - Translation guide (PyTorch op mapping, structural patterns, pitfalls)
        - Category-specific guides (reductions, GEMM, attention)
     """
-    kb_root = get_data_dir("skills") / "pytorch2flydsl-translation" / "docs"
+    kb_root = Path(__file__).resolve().parents[3] / "skills" / "pytorch2flydsl-translation" / "docs"
     native_pure_root = kb_root / "native-pure"
     native_root = kb_root / "native"
     sections: list[str] = []
