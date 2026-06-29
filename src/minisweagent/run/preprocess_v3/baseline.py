@@ -255,8 +255,7 @@ def _enable_compile_speedups(env: dict[str, str]) -> None:
     ccache = shutil.which("ccache", path=env.get("PATH"))
     if not ccache:
         return
-    for var in ("CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER",
-                "CMAKE_HIP_COMPILER_LAUNCHER"):
+    for var in ("CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER", "CMAKE_HIP_COMPILER_LAUNCHER"):
         env.setdefault(var, "ccache")
     env.setdefault("CCACHE_SLOPPINESS", "time_macros,include_file_mtime,include_file_ctime")
     env.setdefault("CCACHE_MAXSIZE", "50G")

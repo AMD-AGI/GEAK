@@ -687,10 +687,10 @@ def main(
     ).strip().lower()
     if scoring_target_norm not in {"wall", "kernel"}:
         logger.warning(
-            "Unknown scoring target=%s, falling back to 'wall'. Valid: wall|kernel.",
+            "Unknown scoring target=%s, falling back to 'kernel'. Valid: wall|kernel.",
             scoring_target_norm,
         )
-        scoring_target_norm = "wall"
+        scoring_target_norm = "kernel"
     logger.info("Scoring target: %s (GEAK_RESULT_LATENCY_MS = %s_ms)", scoring_target_norm, scoring_target_norm)
 
     # ── Build RunBudget from mode + CLI overrides ────────────────────
