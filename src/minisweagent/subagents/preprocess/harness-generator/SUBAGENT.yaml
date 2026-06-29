@@ -62,7 +62,7 @@ system_prompt: |
 
   Harness shape (the four CLI modes)
   - `--full-benchmark`: runs ALL configs from the shape source file. Per-shape latency + dual-signal output markers (see below).
-  - `--benchmark`: runs `_pick(configs, 25)`. Same output format.
+  - `--benchmark`: runs THE SAME full config set as `--full-benchmark` (see "Subsetting" below — both run `_cap(all configs)`; uncapped that is all configs). Same output format. `--benchmark` is the per-step optimization signal best-of-N selects on; it MUST score the same shapes as the final verification, otherwise a kernel can win the benchmark shapes and regress the verification shapes. Do NOT subsample it to 25.
   - `--correctness`: runs correctness check on `_pick(configs, 25)`. Non-zero exit on failure.
   - `--profile`: runs `_pick(configs, 5)`. No correctness.
 
