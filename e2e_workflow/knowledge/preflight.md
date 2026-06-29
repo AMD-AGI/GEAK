@@ -83,6 +83,29 @@ When `is_flydsl_available()` is true, **flydsl MUST appear in `available_backend
 via the aiter per-shape DB tune `libtype=flydsl` AND as a Tier-C author target). Do not infer its
 absence from an `import flydsl` failure — only `is_flydsl_available()` is authoritative.
 
+**Record WHY each optional backend is absent + HOW to provision it (don't just drop it).** For every
+backend NOT in `available_backends`, write an `absent_backends[<name>] = {probe, remedy}` entry to
+`env_report.json` so later phases can surface an ACTIONABLE hint instead of silently dropping a
+strategy-mandated lever (the workflow itself never installs anything — the remedy is for the operator).
+FlyDSL absence in particular has **two independent layers** — say which one is missing:
+- The probe `python3 -c "import aiter.ops.flydsl as f; f.is_flydsl_available()"` can fail at the
+  `import aiter.ops.flydsl` step (`ModuleNotFoundError: No module named 'aiter.ops.flydsl'`) → the
+  installed **`amd_aiter` build does not ship the `aiter/ops/flydsl/` wrapper** (the layer holding
+  `is_flydsl_available`, `flydsl_preshuffle_gemm_a8`, etc.). This is the usual blocker.
+- Or it imports but `is_flydsl_available()` returns False → the separate **top-level `flydsl` package**
+  (`importlib.util.find_spec("flydsl")`) is missing.
+`pip install flydsl` only fixes the SECOND layer; if the first is missing, `aiter.ops.flydsl` stays a
+`ModuleNotFoundError` even after it. A correct remedy therefore names BOTH parts, e.g.:
+```json
+"absent_backends": {
+  "flydsl": {
+    "probe": "import aiter.ops.flydsl -> ModuleNotFoundError (wrapper missing); and/or is_flydsl_available()==False",
+    "remedy": "FlyDSL needs BOTH (1) the top-level `flydsl` pip pkg (`pip install 'flydsl>=0.1.5'`, on PyPI) AND (2) aiter's `aiter/ops/flydsl/` wrapper, which ships only in a flydsl-enabled `amd_aiter` build. On this image (1) alone is insufficient: `aiter.ops.flydsl` is still ModuleNotFoundError after `pip install flydsl`. Install a flydsl-enabled `amd_aiter` build (or restore `aiter/ops/flydsl/` from a matching aiter source), then re-run. The workflow will NOT install it for you.",
+    "mandated_by": "fp8/quantized GEMM head Tier-C author (op_benchmarker default orders flydsl first)"
+  }
+}
+```
+
 **6. Tooling.** `curl`, `python3`, free disk under `EXP_ROOT`. Missing `curl` → adapters that health-
 check via curl must be adjusted (note it); low disk → `block` (traces + overlays need room).
 
@@ -108,6 +131,9 @@ Write `EVAL_DIR/env_report.md` (human) and `EVAL_DIR/env_report.json` (machine),
   "gfx": "gfx942", "gpu_ids": ["0"],
   "trace_sources": ["torch"],            // add "rocprofv3" if present
   "available_backends": ["aiter","hipblaslt","triton","flydsl"], // include "flydsl" iff aiter.ops.flydsl.is_flydsl_available(); aiter/ck/flydsl removed only if absent
+  "absent_backends": {                    // one entry per OPTIONAL backend NOT available, with an actionable remedy (see probe 5)
+    "flydsl": {"probe": "import aiter.ops.flydsl -> ModuleNotFoundError", "remedy": "needs both `pip install 'flydsl>=0.1.5'` AND a flydsl-enabled amd_aiter build (ships aiter/ops/flydsl/); pip flydsl alone is insufficient on this image", "mandated_by": "fp8 GEMM head author"}
+  },
   "port": 31037,                          // the auto-allocated port, if any
   "limitations": ["rocprofv3 absent: HW durations approximate; ranking from torch trace"],
   "verdict": "ok|degrade|block",
@@ -116,7 +142,10 @@ Write `EVAL_DIR/env_report.md` (human) and `EVAL_DIR/env_report.json` (machine),
 ```
 Downstream phases read `env_report.json`: the Profiler picks its trace sources from `trace_sources`,
 the Architect routes using `model_arch_class` + `available_backends`, the bake-off ladder uses
-`available_backends`, and tuning priors are gated on `gfx`.
+`available_backends`, and tuning priors are gated on `gfx`. The **Op Benchmarker gates its `author_plan`
+on `available_backends`** (a backend in `absent_backends` is NOT emitted as an author lane — it is
+emitted as a `backend_absent` advisory), and the **report renders `absent_backends` as a BACKEND_ABSENT
+(env-provisioning) section** so a mandated-but-missing lever is never silently dropped.
 
 > Bottom line: preflight's job is not to pass or fail — it's to **hand the rest of the run an accurate
 > picture of this machine** so every later decision is made against reality instead of assumptions.

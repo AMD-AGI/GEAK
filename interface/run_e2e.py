@@ -252,13 +252,13 @@ def build_prompt(ps_args: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Bench-client口径 alignment.
+# Bench-client measurement-protocol alignment.
 # ---------------------------------------------------------------------------
 def apply_bench_client(h: dict) -> str:
     """Decide + export the bench CLIENT so workflow bench_e2e.sh calls inherit it.
 
     handoff.bench_client: "auto" (default) | "inferencex" | "native".
-    "auto" => use InferenceX's benchmark_serving.py (口径-identical to the
+    "auto" => use InferenceX's benchmark_serving.py (measurement-protocol-identical to the
     caller's Magpie harness) when an InferenceX checkout is discoverable, else
     fall back to each backend's native client. The value is exported into the
     environment so every ``bench_e2e.sh`` invocation the agents make inherits it.
@@ -274,7 +274,7 @@ def apply_bench_client(h: dict) -> str:
     if client == "inferencex" and not ix_path:
         sys.stderr.write(
             "bench_client=inferencex requested but no INFERENCEX_PATH; "
-            "falling back to native client (口径 NOT aligned).\n"
+            "falling back to native client (measurement protocol NOT aligned).\n"
         )
         client = "native"
     os.environ["BENCH_CLIENT"] = client
@@ -282,7 +282,7 @@ def apply_bench_client(h: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Bench-protocol 口径 alignment (measurement knobs, not the client).
+# Bench-protocol measurement alignment (measurement knobs, not the client).
 # ---------------------------------------------------------------------------
 # handoff.bench_protocol key -> bench_e2e.sh / client-adapter env var.
 _BENCH_PROTOCOL_ENV = {
@@ -294,7 +294,7 @@ _BENCH_PROTOCOL_ENV = {
 
 
 def apply_bench_protocol(h: dict) -> dict:
-    """Export the caller's measurement 口径 so workflow bench_e2e.sh inherits it.
+    """Export the caller's measurement protocol so workflow bench_e2e.sh inherits it.
 
     ``handoff.bench_protocol`` carries the EXACT bench knobs the external
     orchestrator (Hyperloom) measured with — chiefly ``random_range_ratio``
@@ -793,6 +793,49 @@ def normalize_result(h: dict, wf: dict) -> dict:
     else:
         result_source = "workflow_return"
 
+    # baseline measurement-protocol cross-check (PerfSkills-E2E vs Hyperloom-E2E divergence).
+    # GEAK's measured baseline is already seeded with Hyperloom's accepted config (map_args forwards
+    # accepted_flags/accepted_env), so it should match Hyperloom's own baseline. Surface BOTH numbers
+    # plus their divergence so the caller can tell a real win from a measurement mismatch (different
+    # client/protocol/warm-vs-cold) instead of trusting a gain measured against a different baseline.
+    geak_baseline = float(
+        wf.get("baseline_throughput_tok_s")
+        or validation.get("baseline_throughput_tok_s")
+        or 0.0
+    )
+    geak_final = float(
+        wf.get("final_throughput_tok_s")
+        or validation.get("director_verified_throughput_tok_s")
+        or 0.0
+    )
+    try:
+        orch_baseline = float(h.get("raw_baseline_tput") or 0.0)
+    except (TypeError, ValueError):
+        orch_baseline = 0.0
+    baseline_basis = {
+        # GEAK's own measured baseline (Hyperloom-accepted config = fair engagement baseline; gating uses this).
+        "geak_measured_baseline_tok_s": geak_baseline or None,
+        # Hyperloom's own measured baseline forwarded in the handoff (the orchestrator reference).
+        "orchestrator_baseline_tok_s": orch_baseline or None,
+        # How far GEAK's baseline drifted from Hyperloom's - a large value flags a measurement mismatch, not a win.
+        "baseline_divergence_pct": (
+            round(100.0 * (geak_baseline - orch_baseline) / orch_baseline, 2)
+            if (geak_baseline > 0 and orch_baseline > 0) else None
+        ),
+        # Gain measured against the ORCHESTRATOR baseline (what Hyperloom sees end-to-end).
+        "gain_vs_orchestrator_baseline": (
+            round(geak_final / orch_baseline, 4)
+            if (geak_final > 0 and orch_baseline > 0) else None
+        ),
+        # Measurement-protocol provenance so the comparison is self-describing.
+        "bench_client": os.environ.get("BENCH_CLIENT", "native"),
+        "bench_protocol": h.get("bench_protocol") or {},
+        "baseline_config": {
+            "accepted_flags": h.get("accepted_flags", "") or "",
+            "accepted_env": h.get("accepted_env", "") or "",
+        },
+    }
+
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status,
@@ -810,7 +853,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         ),
         "throughput_speedup": speedup,
         "output_parity": wf.get("output_parity") or validation.get("output_parity") or "unknown",
-        # Latency口径 (median ms), aligned field names with Hyperloom. Prefer the
+        # Latency measurement protocol (median ms), aligned field names with Hyperloom. Prefer the
         # value carried on the workflow return / recovered win (e.g. the accepted
         # A/B's candidate leg), then the same-session final/baseline summaries.
         "ttft_ms": wf.get("ttft_ms") or final_summary.get("ttft_ms_median") or baseline_summary.get("ttft_ms_median"),
@@ -825,7 +868,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "metric_basis": "aggregate_output_tok_s",
         # Which bench client measured these numbers. "inferencex" => identical
         # client to Hyperloom/Magpie (benchmark_serving.py); "native" => the
-        # backend's own client (small cross-harness差异 may remain).
+        # backend's own client (small cross-harness differences may remain).
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
         # The kernels are only extracted/validated at this single workload point;
         # the caller must redo parity on out-of-regime sweep points.
@@ -834,6 +877,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "accepted_kernels": wf.get("accepted_kernels") or [],
         "accepted_heads": wf.get("accepted_heads") or [],
         "accepted_config": wf.get("accepted_config") or {},
+        # Self-describing baseline measurement-protocol + Hyperloom cross-check (see baseline_basis above).
+        "baseline_basis": baseline_basis,
         "report_path": wf.get("report_path") or str(eval_dir / "final_report.md"),
     }
 

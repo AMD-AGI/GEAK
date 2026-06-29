@@ -56,10 +56,15 @@ Steps:
    not a script). Confirm the chosen `BACKEND` stack imports/launches, `MODEL` resolves, the GPU(s)
    are visible; detect gfx, trace sources (rocprofv3?), available op backends (aiter / flydsl via
    `aiter.ops.flydsl.is_flydsl_available()` — NOT `import flydsl` / ckProfiler /
-   hipblaslt-bench?), and the model's **arch class** from its `config.json`. Degrade gracefully
+   hipblaslt-bench?), and the model's **arch class** from its `config.json`.    Degrade gracefully
    (a missing OPTIONAL tool → record a limitation, don't abort); hard-stop ONLY on a true blocker
    (no MODEL / stack / GPU) with an actionable remedy. Write `EVAL_DIR/env_report.{md,json}`
-   (downstream phases read it) plus a reproducibility note in `EVAL_DIR/env_info.txt`:
+   (downstream phases read it). **For every OPTIONAL backend that is NOT available, also write an
+   `absent_backends[<name>] = {probe, remedy, mandated_by}` entry** with an ACTIONABLE provisioning hint
+   (per `preflight.md` — e.g. flydsl needs BOTH `pip install 'flydsl>=0.1.5'` AND a flydsl-enabled
+   `amd_aiter` build that ships `aiter/ops/flydsl/`; pip flydsl alone is insufficient). This is what lets
+   the Op Benchmarker gate its author lanes and the report surface a missing lever instead of silently
+   dropping it. Also add a reproducibility note in `EVAL_DIR/env_info.txt`:
    ```bash
    python3 -c "import torch;print('torch',torch.__version__)" >> "$EVAL_DIR/env_info.txt" 2>&1
    # backend version (BACKEND-aware), e.g. sglang:

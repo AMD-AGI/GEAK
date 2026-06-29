@@ -79,6 +79,12 @@ status: DEPRECATED-FOR-THIS-EVAL
   xdl-cshuffle; the lever there is env `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<csv>`, but it yields ~1.00×
   (CK default heuristic already picks the optimal `256x128x128 intrawave_v3`). ALWAYS check which live
   path (CK vs Triton) is engaged BEFORE choosing the lever.
+- caution: **backend availability is a PROVISIONING gate, not a no-win.** The mandated CK lever needs the
+  aiter CK tuner (`csrc/ck_gemm_a8w8_blockscale/`); the FlyDSL alternative needs aiter's `aiter/ops/flydsl/`
+  wrapper AND the top-level `flydsl` pip pkg. If `env_report.absent_backends` lists either, record the
+  two-part remedy (flydsl: `pip install 'flydsl>=0.1.5'` AND a flydsl-enabled `amd_aiter` build that ships
+  `aiter/ops/flydsl/` — pip flydsl ALONE is insufficient; `aiter.ops.flydsl` stays ModuleNotFoundError) and
+  fall back to an available lever — never silently drop the head. See `gemm_tuning/fp8_gemm_tuning_sglang_aiter.md`.
 - caution: the aiter `gemm_a8w8_blockscale_bpreshuffle` path benches ~1.5× faster than the plain
   Triton blockscale kernel BUT is WRONG as a naive drop-in (op_bench Qwen3-14B-FP8: rel_err 43.6 vs the
   blockscale baseline's 0.0075) — it needs weights preshuffled first. It is the large-M prefill lever,
