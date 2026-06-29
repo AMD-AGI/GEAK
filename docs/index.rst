@@ -1,5 +1,5 @@
 .. meta::
-   :description: GEAK is an AMD AI agent that optimizes GPU kernels for ROCm. Find install guides, CLI reference, model configuration, and developer documentation.
+   :description: GEAK is an AMD AI agent that optimizes GPU kernels for ROCm. It profiles, optimizes, and validates HIP, Triton, and FlyDSL kernels using LLM-guided multi-agent search.
    :keywords: GEAK, ROCm, GPU kernel optimization, AMD, Triton, HIP, AMD Instinct, LLM agent, kernel tuning
 
 GEAK documentation

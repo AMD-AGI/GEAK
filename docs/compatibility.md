@@ -7,18 +7,13 @@ myst:
 
 # GEAK compatibility matrix
 
-This page lists the hardware, software, and runtime configurations that have been verified with GEAK. Use it to confirm that your GPU, ROCm version, Python version, and kernel language are supported before installing.
-
-## Scope
-
-This page lists verified hardware, software, runtime, and workflow combinations for GEAK.
-Only verified and tested configurations are listed. Untested versions are intentionally omitted.
+This topic lists the hardware, software, and runtime configurations that have been verified with GEAK. Use it to confirm that your GPU, ROCm version, Python version, and kernel language are supported before installing. Only verified and tested configurations are listed. Untested versions are intentionally omitted.
 
 ---
 
 ## GEAK release
 
-The following GEAK releases are tracked with their status.
+These GEAK releases are tracked with their status.
 
 | Release tag | Commit SHA | Release date | Status |
 |---|---|---|---|
@@ -33,7 +28,7 @@ The following GEAK releases are tracked with their status.
 
 ## Host and installation mode
 
-The following installation modes are verified.
+These installation modes are verified.
 
 | Install mode | How | Status |
 |---|---|---|
@@ -48,7 +43,7 @@ The following installation modes are verified.
 
 ## Operating system
 
-The following operating systems are verified.
+These operating systems are verified.
 
 | OS | Status |
 |---|---|
@@ -58,7 +53,7 @@ The following operating systems are verified.
 
 ## Python
 
-The following Python versions are verified.
+These Python versions are verified.
 
 | Python version | Status | Notes |
 |---|---|---|
@@ -69,7 +64,7 @@ The following Python versions are verified.
 
 ## GPU hardware
 
-The following GPU models are verified.
+These GPU models are verified.
 
 | GPU model | Architecture | Status |
 |---|---|---|
@@ -82,7 +77,7 @@ The following GPU models are verified.
 
 ## ROCm stack
 
-The following ROCm versions are verified.
+These ROCm versions are verified.
 
 | Component | Version or requirement | Status |
 |---|---|---|
@@ -95,7 +90,7 @@ The following ROCm versions are verified.
 
 ## Kernel languages
 
-The following kernel languages are verified.
+These kernel languages are verified.
 
 | Kernel language | Status |
 |---|---|
@@ -109,7 +104,7 @@ The following kernel languages are verified.
 
 ## Frameworks and target workloads
 
-The following frameworks and workloads are verified.
+These frameworks and workloads are verified.
 
 | Framework or workload | Status |
 |---|---|
@@ -120,7 +115,7 @@ The following frameworks and workloads are verified.
 
 ## Precision and data types
 
-The following precision formats are verified.
+These precision formats are verified.
 
 | Data type | Status | Notes |
 |---|---|---|
@@ -134,7 +129,7 @@ The following precision formats are verified.
 
 ## Core Python dependencies
 
-The following Python packages are required or optional.
+These Python packages are required or optional.
 
 | Package | Version constraint | Required | Notes |
 |---|---|---|---|

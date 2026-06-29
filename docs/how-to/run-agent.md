@@ -7,7 +7,7 @@ myst:
 
 # Run the agent
 
-The `geak` CLI accepts a kernel target and an optional test command, then runs one or more optimization agents against it. This page shows common invocation patterns, explains parallel multi-GPU runs, and documents every CLI flag.
+The `geak` CLI accepts a kernel target and an optional test command, then runs one or more optimization agents against it. This topic shows common invocation patterns, explains parallel multi-GPU runs, and documents every CLI flag.
 
 ## Examples
 
@@ -42,7 +42,6 @@ geak --num-parallel 4 \
   --task "Optimize block_reduce. Metric: Extract Bandwidth in GB/s (higher is better)" \
   --gpu-ids 0,1,2,3 
 ```
-
 
 ### End-to-end examples
 
@@ -93,13 +92,12 @@ geak -t 'Optimize the topk kernel at https://github.com/ROCm/aiter/blob/main/ait
 
 ### CLI reference
 
-
 Options match the Typer `Option` definitions in `main` (same names in `geak` / `mini`).
 
 | Option | Meaning |
 |--------|---------|
 | `-m`, `--model` | Model name. |
-| `--model-class` | For example, `litellm`, `amd_llm`. |
+| `--model-class` | For example, `litellm` and `amd_llm`. |
 | `-t`, `--task` | Task string. If it equals an existing file path, `geak` reads that file as the task body. |
 | `-y`, `--yolo` | Non-interactive / auto-confirm tool execution (sets `agent.mode` to `yolo`). Parallel runs already force `yolo` on each worker; this flag mainly affects single-agent `geak`. |
 | `-l`, `--cost-limit` | Agent cost limit (use `0` to disable). |
@@ -116,8 +114,8 @@ Options match the Typer `Option` definitions in `main` (same names in `geak` / `
 
 GEAK saves patches and test logs so the optimization progress and results are transparent.
 
-- **Default output base:** `optimization_logs/`
-- **Auto-generated run directory:** `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`
+- **Default output base**: `optimization_logs/`
+- **Auto-generated run directory**: `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`
 
 Typical structure (parallel run):
 

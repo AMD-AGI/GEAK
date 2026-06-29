@@ -16,7 +16,7 @@ artifacts contract, and the importable Python API.
 ## Command-line entry points
 
 
-GEAK installs the following console scripts (declared under
+GEAK installs these console scripts (declared under
 `[project.scripts]` in `pyproject.toml`):
 
 | Command | Module | Purpose |
@@ -51,11 +51,11 @@ geak [OPTIONS]
 | `--kernel-url` | `--kernel-path` | str | — | Target kernel source (local path or URL). |
 | `--test-command` | `--test_command` | str | — | Test command. If omitted, GEAK discovers/generates a harness during preprocess. |
 | `--model` | `-m` | str | resolved (§2 / §5) | Model name for this run. |
-| `--model-class` | | str | `amd_llm` (advanced) | Backend class shortcut (`litellm`, `amd_llm`, `anthropic_model`, …). |
+| `--model-class` | | str | `amd_llm` (advanced) | Backend class shortcut (`litellm`, `amd_llm`, `anthropic_model`, and so on). |
 | `--config` | `-c` | path | `config/geak.yaml` | Config file deep-merged over the base strategy file. |
 | `--output` | `-o` | path | auto `optimization_logs/<kernel>_<ts>/` | Output trajectory file or directory. Dotted names are treated as directories. |
 | `--num-parallel` | | int | from config | Number of parallel patch agents (isolated git worktrees). |
-| `--gpu-ids` | | str | — | Comma-separated GPU IDs, e.g. `0,1,2,3`. |
+| `--gpu-ids` | | str | — | Comma-separated GPU IDs, for example, `0,1,2,3`. |
 | `--mode` | | str | `geak.yaml` `run.mode` | Wall-clock budget profile: `quick` (~1h) or `full` (~2h). |
 | `--total-budget-s` | | float | from mode | Override the mode's total wall-clock budget (seconds). |
 | `--target` | | str | `wall` | Scoring signal: `wall` (end-to-end host latency via `triton.testing.do_bench`) or `kernel` (GPU-only kernel time via `torch.profiler`). The dual-signal harness always reports both; this only picks the scoring signal. |
@@ -67,10 +67,10 @@ geak [OPTIONS]
 | `--exit-immediately` | | flag | off | Exit immediately (advanced). |
 | `--visual` | `-v` | flag | off | Toggle the pager-style (Textual) UI. |
 
-By default (unless `--debug`) two steps run after the loop completes:
+By default (unless `--debug`), two steps run after the loop completes:
 
-- **Patch apply:** the winning patch is applied to `--repo` on the current branch and committed.
-- **Cleanup:** per-run artifacts are pruned to `final_report.json`, the winning `.diff`, `geak_agent.log`, and `COMMANDMENT.md`.
+- **Patch apply**: The winning patch is applied to `--repo` on the current branch and committed.
+- **Cleanup**: Per-run artifacts are pruned to `final_report.json`, the winning `.diff`, `geak_agent.log`, and `COMMANDMENT.md`.
 
 A hard-kill (wall-clock timeout) always leaves artifacts in place for forensic analysis, regardless of `--debug`.
 
@@ -111,7 +111,7 @@ geak-preprocess <url> [OPTIONS]
 | `--correctness-command` | | — | Compile + correctness command (build folded in). |
 | `--performance-command` | | — | Benchmark command (used for profiling + baseline). |
 | `--eval-command` | | — | Legacy single command string (prefer the split flags above). |
-| `--kernel-type` | | — | Kernel type, e.g. `pytorch2flydsl` (triggers translation). |
+| `--kernel-type` | | — | Kernel type, for example, `pytorch2flydsl` (triggers translation). |
 
 ---
 
@@ -142,7 +142,6 @@ geak-gemm-tuning -t "Optimize E2E perf via GEMM tuning. Benchmark: run_sglang_te
 
 ## Model resolution order
 
-
 The model name is resolved by `get_model_name` (`src/minisweagent/models/__init__.py`), first hit wins:
 
 1. CLI `-m` / `--model`
@@ -162,7 +161,7 @@ mapped by `get_model_class`:
 | `anthropic_model` | `AnthropicModel` — direct Anthropic SDK. |
 | `deterministic` | `DeterministicModel` — testing. |
 
-A full import path (e.g. `minisweagent.models.anthropic_model.AnthropicModel`)
+A full import path (for example, `minisweagent.models.anthropic_model.AnthropicModel`)
 is also accepted. `MSWEA_MODEL_API_KEY`, when set, is copied into
 `model_kwargs.api_key`.
 
@@ -170,7 +169,7 @@ is also accepted. `MSWEA_MODEL_API_KEY`, when set, is copied into
 
 ## Configuration schema (`geak.yaml`)
 
-The default configuration file is `src/minisweagent/config/geak.yaml`. It is loaded after `mini_kernel_strategy_list.yaml` and deep-merged over it; a `--config` file is merged on top of both. The schema below shows the top-level keys.
+The default configuration file is `src/minisweagent/config/geak.yaml`. It's loaded after `mini_kernel_strategy_list.yaml` and deep-merged over it; a `--config` file is merged on top of both. This schema shows the top-level keys:
 
 ```yaml
 model:
@@ -196,7 +195,6 @@ env:
 ---
 
 ## Environment variables
-
 
 CLI flags and config are usually enough; these tune deeper behavior. Names map
 directly to the variables read across `src/minisweagent`.
@@ -255,7 +253,7 @@ These variables control in-session and cross-session memory, and knowledge base 
 
 ### Tools, skills, and subagents
 
-These variables control which tools and subagents are loaded and how they are resolved.
+These variables control which tools and subagents are loaded and how they're resolved.
 
 | Variable | Effect |
 |----------|--------|
@@ -272,7 +270,6 @@ The list above is representative, not exhaustive. The authoritative set is whate
 ---
 
 ## Run artifacts
-
 
 Default output base: `optimization_logs/`. Each run gets
 `optimization_logs/<kernel_name>_<YYYYmmdd_HHMMSS>/`.
@@ -296,7 +293,7 @@ After cleanup (default, non-`--debug`), a run directory is pruned to
 
 ### Harness result contract
 
-Harnesses communicate results back to GEAK by printing `GEAK_RESULT_*` markers to stdout. GEAK parses these markers after each benchmark run to score the patch. The following markers are supported:
+Harnesses communicate results back to GEAK by printing `GEAK_RESULT_*` markers to stdout. GEAK parses these markers after each benchmark run to score the patch. These markers are supported:
 
 | Marker | Meaning |
 |--------|---------|
@@ -312,7 +309,6 @@ Harnesses communicate results back to GEAK by printing `GEAK_RESULT_*` markers t
 
 ## Python API
 
-
 GEAK is primarily a CLI, but a small stable surface is importable.
 
 ### `minisweagent`
@@ -327,7 +323,7 @@ from minisweagent import (
 ```
 
 - `get_repo_root() -> Path` — repository root.
-- `get_data_dir(name) -> Path` — packaged data directory (e.g. `subagents`, `skills`).
+- `get_data_dir(name) -> Path` — packaged data directory (for example, `subagents` and `skills`).
 - `resolve_entry_script(entry_script) -> Path | None` — resolve a packaged entry script.
 - `Model`, `Environment`, `Agent` — `Protocol` interfaces. `Model.query(messages, **kwargs) -> dict`; `Environment.execute(command, cwd="") -> dict`; `Agent.run(task, **kwargs) -> tuple[str, str]`.
 
@@ -357,7 +353,7 @@ name  = get_model_name(input_model_name=None, config=None)   # -> str
 cls   = get_model_class(model_name, model_class="")          # -> type
 ```
 
-`get_model` applies the resolution order in §2, sets Anthropic cache-control
+`get_model` applies the resolution order, sets Anthropic cache-control
 defaults for Claude-family names, and honors `MSWEA_MODEL_API_KEY`.
 
 ### Agents

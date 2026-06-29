@@ -7,7 +7,7 @@ myst:
 
 # Release notes
 
-This page lists what changed in each GEAK release, including new features, bug fixes, and breaking changes. For verified hardware and software combinations per release, see the [GEAK compatibility matrix](compatibility.md).
+This topic lists what changed in each GEAK release, including new features, bug fixes, and breaking changes. For verified hardware and software combinations per release, see the [GEAK compatibility matrix](compatibility.md).
 
 ## GEAK v3.2.2
 

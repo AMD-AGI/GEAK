@@ -7,20 +7,20 @@ myst:
 
 # Install GEAK
 
-Minimal steps to install GEAK and run the `geak` CLI against a kernel or repository.
+Install GEAK and run the `geak` CLI against a GPU kernel or repository. This topic covers Docker, local pip install, and model configuration for AMD LLM and LiteLLM backends.
 
 ## Prerequisites
 
-Before installing GEAK, ensure your environment meets the following requirements.
+Before installing GEAK, ensure your environment meets these requirements.
 
-- **Python** 3.10+
+- **Python** 3.10 or later
 - **Git** (parallel runs use worktrees)
 - **GPU** and the stack your kernels use — for example, Triton, PyTorch, CUDA, or compiled HIP.
-- **AMD Instinct or Radeon (ROCm):** install a normal ROCm user-space environment so tools like `rocminfo` and `rocm-smi` work when the agent inspects hardware. For HIP C++ you also need `hipcc` (and friends). `HIP_VISIBLE_DEVICES` is often set by the scheduler or your shell when pinning a card.
+- **AMD Instinct or Radeon (ROCm)**: Install a normal ROCm user-space environment so tools like `rocminfo` and `rocm-smi` work when the agent inspects hardware. For HIP C++, you also need `hipcc`. `HIP_VISIBLE_DEVICES` is often set by the scheduler or your shell when pinning a card.
 
 ## Install
 
-Clone the repository and install using pip or Docker. Run the following commands from the repository root:
+Clone the repository and install using pip or Docker. Run these commands from the repository root:
 
 ```bash
 git clone https://github.com/AMD-AGI/GEAK.git
@@ -36,16 +36,21 @@ pip install -e '.[full]'
 ```
 
 ```{note}
-`fastmcp` and `mcp[cli]` are included in the core dependencies and installed automatically with `pip install -e .`. GEAK launches the shipped MCP servers from `mcp_tools/` directly from the repository, so there is no separate `.[mcp]` extra to install.
+`fastmcp` and `mcp[cli]` are included in the core dependencies and installed automatically with `pip install -e .`. GEAK launches the shipped MCP servers from `mcp_tools/` directly from the repository, so there's no separate `.[mcp]` extra to install.
 ```
 
 ## Configure the model
 
-For Docker-based setup, export the API key before running scripts/run-docker.sh.
+For Docker-based setup, export the API key before running `scripts/run-docker.sh`.
 
-`geak` resolves the model name in this order (first hit wins): CLI `-m` / `--model`, then YAML `model.model_name`, then env `GEAK_MODEL`, then `MSWEA_MODEL_NAME`.
+`geak` resolves the model name in this order (first hit wins): 
 
-YAML `model.model_class` selects the backend. If it is missing or empty, `get_model_class` in `src/minisweagent/models/__init__.py` still returns `LitellmModel`. You can also set it explicitly to `litellm` — that is the registered shortcut for the same class in `_MODEL_CLASS_MAPPING`.
+1. CLI `-m` / `--model` 
+2. YAML `model.model_name`
+3. env `GEAK_MODEL` 
+4. `MSWEA_MODEL_NAME`.
+
+YAML `model.model_class` selects the backend. If it's missing or empty, `get_model_class` in `src/minisweagent/models/__init__.py` still returns `LitellmModel`. You can also set it explicitly to `litellm` — that is the registered shortcut for the same class in `_MODEL_CLASS_MAPPING`.
 
 | `model_class` (YAML) | Backend |
 |----------------------|---------|
@@ -91,7 +96,7 @@ export ANTHROPIC_API_KEY="YOUR_KEY"
 geak --model-class litellm --kernel-url /path/to/kernel/file --repo /path/to/kernel/repo
 ```
 
-Other LiteLLM providers (Azure, Vertex, …): set the `MSWEA_MODEL_NAME` or `GEAK_MODEL` string and provider env vars per [LiteLLM](https://docs.litellm.ai/) and pass `--model-class litellm` when the merged YAML is not already LiteLLM.
+Other LiteLLM providers (Azure, Vertex, and so on): Set the `MSWEA_MODEL_NAME` or `GEAK_MODEL` string and provider env vars per [LiteLLM](https://docs.litellm.ai/) and pass `--model-class litellm` when the merged YAML isn't already LiteLLM.
 
 ### Config file (`--config`)
 

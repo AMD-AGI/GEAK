@@ -37,16 +37,16 @@ GEAK includes a curated AMD knowledge base covering the ROCm software stack, har
 
 Additional capabilities include:
 
-- **Kernel profiler:** integrated profiling via the ROCm toolchain to identify hotspots and memory bottlenecks before optimization begins.
-- **In-session memory:** agents accumulate observations within a single run to avoid repeating failed strategies.
-- **Cross-session memory:** insights from past runs are persisted and retrieved in future runs, so GEAK improves over time on similar kernels and workloads.
+- **Kernel profiler**: Integrated profiling via the ROCm toolchain to identify hotspots and memory bottlenecks before optimization begins.
+- **In-session memory**: Agents accumulate observations within a single run to avoid repeating failed strategies.
+- **Cross-session memory**: Insights from past runs are persisted and retrieved in future runs, so GEAK improves over time on similar kernels and workloads.
 
 ## How GEAK works
 
 A GEAK run follows this sequence:
 
 1. **Preprocess** — GEAK resolves the kernel source, builds codebase context, generates or validates a test harness, captures a baseline, and profiles the kernel. The output is a `COMMANDMENT.md` contract that specifies the optimization target and evaluation rules for all agents.
-2. **Optimize** — One or more agents receive the contract and begin the profiling → patch → validation loop. Agents run in parallel on isolated Git worktrees, each on its own GPU.
+2. **Optimize** — One or more agents receive the contract and begin the **profiling → patch → validation loop**. Agents run in parallel on isolated Git worktrees, each on its own GPU.
 3. **Select** — After each round, GEAK ranks agents by verified speedup, selects the best patch, and optionally runs additional rounds.
 4. **Output** — The winning patch is applied to the repository and committed. A `final_report.json` captures the result.
 
