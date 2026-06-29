@@ -5,7 +5,7 @@ myst:
         "keywords": "GEAK, API reference, geak CLI, environment variables, Python API, configuration, run artifacts"
 ---
 
-# API reference
+# GEAK API reference
 
 Reference for GEAK's public surfaces: the command-line entry points, the
 environment variables that tune behavior, the configuration schema, the run

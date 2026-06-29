@@ -5,7 +5,7 @@ myst:
         "keywords": "GEAK, run agent, kernel optimization, GPU, CLI, parallel agents, geak CLI, Triton, HIP"
 ---
 
-# Run the agent
+# Run the GEAK agent
 
 The `geak` CLI accepts a kernel target and an optional test command, then runs one or more optimization agents against it. This topic shows common invocation patterns, explains parallel multi-GPU runs, and documents every CLI flag.
 

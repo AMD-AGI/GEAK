@@ -119,6 +119,6 @@ Keep secrets in `export ...` and use YAML only for non-secret configuration like
 ## Related topics
 
 - [Configuration files](configuration.md) — how GEAK loads and merges YAML configuration files.
-- [API reference](api-reference.md) — full model resolution order and all CLI flags.
-- [Install GEAK](../install/install.md) — initial setup including model configuration.
+- [API reference](../docs/reference/api-reference.md) — full model resolution order and all CLI flags.
+- [Install GEAK](../docs/install/install.md) — initial setup including model configuration.
 

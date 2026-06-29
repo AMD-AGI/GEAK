@@ -302,6 +302,6 @@ Dedicated v3 pytest coverage is intentionally deferred for a follow-up PR. For r
 
 ## Related topics
 
-- [GEAK agent loop](../conceptual/geak-pipeline.md) — how the preprocess stage fits into the full optimization pipeline.
-- [API reference](api-reference.md) — `geak-preprocess` CLI flags and artifact layout.
-- [Run the agent](../how-to/run-agent.md) — how to invoke GEAK end-to-end after preprocessing validates.
+- [GEAK agent loop](../docs/conceptual/geak-pipeline.md) — how the preprocess stage fits into the full optimization pipeline.
+- [API reference](../docs/reference/api-reference.md) — `geak-preprocess` CLI flags and artifact layout.
+- [Run the agent](../docs/how-to/run-agent.md) — how to invoke GEAK end-to-end after preprocessing validates.

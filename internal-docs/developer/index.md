@@ -16,4 +16,4 @@ Documentation for contributors extending GEAK behavior: prompts, tools, and conf
 
 For branching, CI, and reviews, see [Contribution guidelines](contribution-guidelines.md).
 
-For RAG sub-agent internals, see [RAG sub-agent guide](../reference/subagent-guide.md).
+For RAG sub-agent internals, see [RAG sub-agent guide](../subagent-guide.md).

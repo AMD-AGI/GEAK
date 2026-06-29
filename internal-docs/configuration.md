@@ -50,5 +50,5 @@ GEAK loads configuration in two steps:
 ## Related topics
 
 - [Model configuration](model-config.md) — select a model backend and configure API keys.
-- [API reference](api-reference.md) — full CLI flag reference including `--config` and `--mode`.
-- [Install GEAK](../install/install.md) — install GEAK and run the initial configuration.
+- [API reference](../docs/reference/api-reference.md) — full CLI flag reference including `--config` and `--mode`.
+- [Install GEAK](../docs/install/install.md) — install GEAK and run the initial configuration.

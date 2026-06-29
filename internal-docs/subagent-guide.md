@@ -210,7 +210,7 @@ Keep the following in mind when deploying or extending the sub-agent.
 
 ## Related topics
 
-- [GEAK agent loop](../conceptual/geak-pipeline.md) — how the knowledge base and MCP tools fit into the optimization pipeline.
-- [API reference](api-reference.md) — environment variables for configuring the RAG sub-agent.
+- [GEAK agent loop](../docs/conceptual/geak-pipeline.md) — how the knowledge base and MCP tools fit into the optimization pipeline.
+- [API reference](../docs/reference/api-reference.md) — environment variables for configuring the RAG sub-agent.
 - [Model configuration](model-config.md) — configure the LLM backend used by the sub-agent.
 

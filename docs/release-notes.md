@@ -5,7 +5,7 @@ myst:
     "keywords": "GEAK, release notes, changelog, ROCm, GPU kernel optimization, version history"
 ---
 
-# Release notes
+# GEAK release notes
 
 This topic lists what changed in each GEAK release, including new features, bug fixes, and breaking changes. For verified hardware and software combinations per release, see the [GEAK compatibility matrix](compatibility.md).
 
