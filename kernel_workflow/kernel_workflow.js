@@ -69,6 +69,12 @@ const KERNEL_NAME_HINT = KERNEL_PATH_ORIG.replace(/\/+$/, '').split('/').pop();
 const MODE = String(A.mode != null ? A.mode : 'optimize').trim() || 'optimize';
 const TARGET_LANGUAGE = String(A.target_language != null ? A.target_language : 'triton').trim() || 'triton';
 const OP_SPEC = A.op_spec || {};
+// When the op will run on the CUDA/HIP-graph-captured decode path (e2e sets op_spec.cuda_graph_safe=true),
+// the isolated oracle alone CANNOT catch a kernel that passes iso but host-syncs or lazily-compiles under
+// graph capture — the "wins isolated, crashes serving" class (cuda_graph_capture_unsafe / NO_BINARY_FOR_GPU).
+// This turns on an OPTIONAL capture+replay smoke in the verify step so that failure is caught at the cheap
+// isolated stage. Unset (standalone single-kernel runs / non-graph ops) => byte-identical to before.
+const REQUIRE_GRAPH_CAPTURE = !!(OP_SPEC && OP_SPEC.cuda_graph_safe === true);
 const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge' : '')).replace(/\/+$/, '');
 // Expert skills = human-authored, validated kernel recipes (perf_knowledge/expert_skills/). ADVISORY
@@ -219,6 +225,7 @@ const VERIFY_SCHEMA = obj({
   status: { type: 'string' }, correctness: { type: 'string' },
   verified_geomean: { type: 'number' }, verified_arithmetic: { type: 'number' },
   per_case: perCase, variance_note: { type: 'string' }, notes: { type: 'string' },
+  graph_safe: { type: 'string' },
 }, ['status', 'verified_geomean']);
 
 const INTEGRATE_SCHEMA = obj({
@@ -562,6 +569,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
           CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
           GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+          ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}`, schema: VERIFY_SCHEMA }
       ).then((ver) => ({ d, eng, ver, patch }));
