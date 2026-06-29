@@ -399,7 +399,29 @@ class LitellmModel:
                 model_for_call,
             )
             model_for_call = f"openai/{model_for_call}"
+        # The AMD/core42 Primus-Safe gateway (VertexGenAI backend) rejects
+        # non-streaming predictions with an opaque 400 INVALID_ARGUMENT; only
+        # streamed requests are accepted. When routed there, force streaming and
+        # reassemble the chunks into a normal ModelResponse so the rest of
+        # ``query`` (``choices[0].message`` / ``model_dump``) is unchanged.
+        # Non-gateway providers keep the original non-streaming call.
+        effective_api_base = (
+            filtered.get("api_base")
+            or (self.config.model_kwargs or {}).get("api_base")
+            or (self.config.model_kwargs or {}).get("base_url")
+        )
+        force_stream = _is_amd_llm_gateway_api_base(effective_api_base) and not filtered.get("stream")
         try:
+            if force_stream:
+                chunks = list(
+                    litellm.completion(
+                        model=model_for_call,
+                        messages=messages,
+                        timeout=request_timeout,
+                        **{**filtered, "stream": True},
+                    )
+                )
+                return litellm.stream_chunk_builder(chunks, messages=messages)
             return litellm.completion(
                 model=model_for_call,
                 messages=messages,
