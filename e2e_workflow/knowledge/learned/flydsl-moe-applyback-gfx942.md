@@ -21,7 +21,14 @@ last_seen: 2026-06-28
 - verify: startup passes `determine_available_memory` (no HIP-OOM) → `torch.compile` → `Capturing CUDA
   graphs … finished` → healthy; smoke coherent; 0 `shim failed`/`weights not converted`; then same-session
   GRAPH A/B vs Triton baseline + GSM8K parity.
-- caution: **pin FlyDSL to ONE checkout** — a stale exported `FLYDSL_ROOT` mixing kernels (code/FlyDSL) with
+- bootstrap: **do NOT hardcode a machine-specific FlyDSL path; obtain it if `import flydsl` fails.** Order:
+  (1) if `python3 -c "import flydsl, kernels.moe_gemm_2stage"` works, use it; (2) else `pip install flydsl`
+  (published wheel bundles the MLIR bindings — no LLVM/MLIR source build; pin the version); (3) else clone +
+  build at a **PINNED commit** so a remote `main` update can't drift the API:
+  `git clone https://github.com/ROCm/FlyDSL.git $ROOT/FlyDSL && git -C $ROOT/FlyDSL checkout a35627a2fef0a5a70c63536c4174674223866737`
+  then `bash scripts/build_llvm.sh -j64` (heavy; skip if MLIR_PATH set) + `bash scripts/build.sh -j64`, and
+  `export FLYDSL_ROOT=$ROOT/FlyDSL`. (a35627a = known-good for Kimi-K2.6 int4-W4A16 MoE on gfx942/MI300X.)
+- caution: **pin FlyDSL to ONE checkout** — a stale exported `FLYDSL_ROOT` mixing kernels with
   bindings from a different build fails compile with `Dynamic int_tuple leaf must be an i32 or i64 value,
   got: <unknown type>` (eager) / `gl$v` (graph). Version mismatch, NOT a torch.compile incompatibility —
   the graph path needs NO custom op. Also verify `python3 -c "import flydsl, kernels.moe_gemm_2stage as k;

@@ -121,13 +121,27 @@ installed vLLM (off by default ⇒ byte-identical stock; back up the two files f
    `vllm bench serve` (ISL/OSL/conc), plus GSM8K within noise. Quote same-session ratios only.
 
 ## Knobs & pitfalls
-- **Pin FlyDSL to ONE checkout — kernels source AND MLIR bindings from the SAME tree.** Mixing them (e.g. a
-  stale exported `FLYDSL_ROOT` from a different/older FlyDSL tree hijacking the bindings while kernels load
-  from your intended tree) fails kernel compile with `Dynamic int_tuple leaf must be an i32 or i64 value, got:
-  <unknown type>` (eager) / `... got: gl$v` (graph). This is a **version mismatch, NOT a torch.compile
-  incompatibility** — do not wrap the MoE as a custom op. Always `export FLYDSL_ROOT=<validated checkout>`
-  and confirm `python3 -c "import flydsl, kernels.moe_gemm_2stage as k; print(flydsl.__file__, k.__file__)"`
-  resolve under the same path before launch.
+- **Obtain & PIN FlyDSL — bootstrap if `import flydsl` fails; kernels source AND MLIR bindings from the SAME
+  tree.** The shim needs both `flydsl` and `kernels.moe_gemm_2stage` importable from ONE consistent build. Do
+  NOT hardcode a machine-specific checkout path; resolve in this order:
+  1. If `python3 -c "import flydsl, kernels.moe_gemm_2stage"` already works → use it (and `export FLYDSL_ROOT`
+     to that checkout if it is source-based, so the shim adds its `build-fly/python_packages`).
+  2. Else `pip install flydsl` — the published wheel bundles the MLIR python bindings (no LLVM/MLIR source
+     build needed). Pin the version for reproducibility.
+  3. Else **clone + build at a PINNED commit** (clone fresh so a remote `main` update can't drift the API):
+     ```bash
+     git clone https://github.com/ROCm/FlyDSL.git "$ROOT/FlyDSL"
+     git -C "$ROOT/FlyDSL" checkout a35627a2fef0a5a70c63536c4174674223866737   # PIN: known-good for Kimi-K2.6 int4-W4A16 MoE on gfx942/MI300X
+     bash "$ROOT/FlyDSL/scripts/build_llvm.sh" -j64   # builds LLVM/MLIR (heavy; skip if a valid MLIR_PATH is already exported)
+     bash "$ROOT/FlyDSL/scripts/build.sh"      -j64   # builds C++ + python bindings into build-fly/python_packages
+     export FLYDSL_ROOT="$ROOT/FlyDSL"
+     ```
+  **Pin pitfall:** a stale `FLYDSL_ROOT` from a DIFFERENT/older tree hijacking the bindings while kernels load
+  from another fails kernel compile with `Dynamic int_tuple leaf must be an i32 or i64 value, got: <unknown
+  type>` (eager) / `... got: gl$v` (graph) — a **version mismatch, NOT a torch.compile incompatibility** (do not
+  wrap the MoE as a custom op). Always confirm
+  `python3 -c "import flydsl, kernels.moe_gemm_2stage as k; print(flydsl.__file__, k.__file__)"` resolve under
+  the SAME tree before launch.
 - **KV headroom (CORRECTED 2026-06-26)**: in-place convert is memory-neutral ONLY IF both weight and
   scale params are re-homed (see the Mechanism GOTCHA). Once the scale-duplication leak is fixed, FlyDSL
   starts and serves at the FULL fair config — `mem 0.9`, NO `--max-model-len` cap (262144) — with
