@@ -748,6 +748,35 @@ def run_correctness_and_benchmark(
     else:
         logger.warning("No CORRECTNESS commands found in COMMANDMENT")
 
+    # --- GEAK_VERIFY_IN_LOOP: trust the in-loop full-set verified benchmark ---
+    # When the subagent's `--benchmark` already runs the FULL weighted shape set
+    # and emits GEAK_RESULT_SPEEDUP (see kernel_languages/contract.py +
+    # subagents/preprocess/harness-generator/SUBAGENT.yaml), the post-round
+    # FULL_BENCHMARK below is a redundant re-timing that ALSO times out on heavy
+    # CK/.cu rebuilds (GEAK_BENCH_TIMEOUT). Skip the FB subprocess, but KEEP the
+    # clean-worktree CORRECTNESS above — it is the only worktree-bypass guard
+    # (see contract.py "always ~1.00x" note). Adopt the already-trusted in-loop
+    # speedup as the verified value so select_best_verified_round_evaluation can
+    # rank it. Default-off => byte-identical to current behaviour.
+    if os.environ.get("GEAK_VERIFY_IN_LOOP", "").strip() == "1":
+        if round_eval.get("status") == "correctness_failed":
+            return
+        in_loop = round_eval.get("benchmark_speedup")
+        round_eval["full_benchmark"] = {
+            "verified_speedup": float(in_loop) if isinstance(in_loop, (int, float)) else None,
+            "candidate_ms": round_eval.get("candidate_shape_latency_ms"),
+            "baseline_ms": round_eval.get("baseline_shape_latency_ms"),
+            "success": True,
+            "source": "in_loop_full_benchmark",
+        }
+        logger.info(
+            "GEAK_VERIFY_IN_LOOP=1: skipping redundant post-round FULL_BENCHMARK; "
+            "adopting in-loop full-set verified_speedup=%s "
+            "(correctness re-checked in clean worktree above).",
+            round_eval["full_benchmark"]["verified_speedup"],
+        )
+        return
+
     # If neither baseline file exists, try to recapture from the COMMANDMENT
     # on the unpatched repo. This covers the case where preprocessing didn't
     # produce a baseline (e.g. non-standard harness that failed validation).
