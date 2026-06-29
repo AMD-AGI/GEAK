@@ -28,6 +28,57 @@ classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profile
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND`, `GPU_ID`, `WORKLOAD` (isl/osl/conc), `ROUND`,
 `OVERLAY_PYTHONPATH` (empty for baseline; set after a kernel change for reprofile),
 `EXTRA_SERVER_ARGS`/`EXTRA_ENV` (the current accepted config), `SKILL_DIR`.
+OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing as "not provided"):
+`TRACELENS_ANALYSIS_MD`, `TRACELENS_KERNEL_CANDIDATES_JSON`, `TRACELENS_REPORT_JSON`,
+`TRACELENS_TRACE_FILE`.
+
+### Step 0 — TraceLens fast-path (PHASE=baseline / ROUND 0 ONLY; skip entirely for any reprofile)
+
+An upstream orchestrator may already have profiled the SAME baseline workload with TraceLens. Use it to
+**avoid re-collecting a trace** when it is available:
+
+- **If `TRACELENS_ANALYSIS_MD` is a non-empty path that EXISTS on disk → SKIP the internal trace
+  collection (steps 1–2 below).** Build the standardized Top-N directly from the TraceLens artifacts
+  instead of launching the profiler bench. Prefer the machine-readable
+  `TRACELENS_KERNEL_CANDIDATES_JSON` (else `TRACELENS_REPORT_JSON`) — its `hot_kernels[]` carry, per
+  entry: `name`, `gpu_pct`, `call_count`, `duration_us`, `efficiency_percent`, `bound_type`,
+  `kernel_category`/`tracelens_category`, `source_file`/`source_path`, `kernel_path`/
+  `launcher_source_file`, `shapes`/`input_shapes` (a `<br>`-joined "(dims) dtype" list), and
+  `op_to_source_patchable`. Map them into the canonical `profile_topN.json` schema (same fields the
+  parser emits): `short_name`←name, `pct_gpu_time`←gpu_pct, `calls`←call_count,
+  `total_ms`←duration_us/1000, `avg_us`←duration_us/call_count, `shapes`/`dtypes`←parsed from the
+  `<br>` args, `classification`←map from `kernel_category`/`bound_type` (MoE/grouped-GEMM→library_gemm
+  or triton per `kernel_kind`; attention→library_attn; etc.), `editable`←`op_to_source_patchable`. Carry
+  `source_file`/`kernel_path` into each entry's `notes` (the Architect/Extractor reuse them). Write
+  `profile_topN.json` + `.md` via your own Write (you may shell out to `parse_profile.py` only if you
+  also have a trace; otherwise assemble the JSON yourself) and set `source:"tracelens"`.
+- **If `TRACELENS_TRACE_FILE` is also a non-empty path that EXISTS → run an ADDITIONAL trace-analysis
+  pass on top of analysis.md to sharpen the picture** (this is required by contract when the trace is
+  present). `TRACELENS_TRACE_FILE` is a `torch_trace` **directory** that holds one steady-state serving
+  trace PER TP rank at top level (e.g. `dp0_pp0_tp0..._rank0.*.pt.trace.json.gz`) PLUS a
+  `capture_traces/` subdir of CUDA-graph *warmup/capture* traces. `parse_profile.py` reads ONE trace, so
+  pick the **top-level rank0 serving** trace and IGNORE `capture_traces/` (graph-capture warmup would
+  mislead the ranking):
+  ```bash
+  # Prefer the top-level rank0 serving trace; never recurse into capture_traces/.
+  TLT=$(ls -1 "$TRACELENS_TRACE_FILE"/*rank0*.pt.trace.json.gz 2>/dev/null | head -1)
+  [ -z "$TLT" ] && TLT=$(ls -1 "$TRACELENS_TRACE_FILE"/*.pt.trace.json.gz "$TRACELENS_TRACE_FILE"/*.json.gz "$TRACELENS_TRACE_FILE"/*.json 2>/dev/null | head -1)
+  [ -n "$TLT" ] && python3 "$EVAL_DIR/parse_profile.py" --torch-trace "$TLT" \
+    --top 25 --out "$EVAL_DIR/profile/round_${ROUND}/profile_topN_tracelens"
+  ```
+  Then **reconcile**: the parser's per-launch `shapes`/`dtypes` are derived directly from the trace and
+  are MORE RELIABLE than the `<br>` shapes in `analysis.md` — **prefer the parser shapes for any kernel
+  that matches** (this is the mandatory shape double-check, since `analysis.md` shapes "不一定准"). Keep
+  the TraceLens ranking/`%gpu` as the primary impact signal, but cross-check that the same heads top both
+  views; note any disagreement in `notes`. Emit the final reconciled `profile_topN.json`/`.md` with
+  `source:"tracelens+trace"`.
+- **If `TRACELENS_ANALYSIS_MD` is empty/missing (or the file does not exist) → ignore TraceLens entirely
+  and run the normal collection (steps 1–5) unchanged.** Likewise, for ANY reprofile round the TraceLens
+  prior is stale (it reflects the baseline config) — ignore it and re-collect.
+
+After the fast-path you may still apply the §5 per-call distribution sanity to the resulting Top-N. Then
+return the same JSON contract below (with `source` set as above). Do NOT fail if TraceLens is partial —
+degrade to whatever is available, and if both analysis.md and trace are unusable, fall back to steps 1–5.
 
 1. Capture a trace with a warm server using the shared bench script (the adapter sets the stack's
    torch-profiler dir and runs the bounded `--profile` bench):
@@ -97,7 +148,7 @@ Return JSON:
   "round": 0,
   "profile_topN_json": "<EVAL_DIR>/profile/round_0/profile_topN.json",
   "profile_topN_md": "<EVAL_DIR>/profile/round_0/profile_topN.md",
-  "source": "torch-trace|merged",
+  "source": "torch-trace|merged|tracelens|tracelens+trace",
   "total_gpu_time_ms": 0.0,
   "top_kernels": [
     {"rank": 1, "short_name": "...", "classification": "...", "pct_gpu_time": 0.0,

@@ -64,6 +64,9 @@ admits*, not by the edit flag:
 Inputs: `EVAL_DIR`, `PROFILE_TOPN` (path to profile_topN.json + inline top entries),
 `BASELINE_THROUGHPUT`, `WORKLOAD` (isl/osl/conc → tells you prefill vs decode regime mix),
 `BUDGET` (max kernel-optimization tasks), `CONFIG_TUNE_ENABLED` (bool), `SKILL_DIR`.
+OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing as "not provided"):
+`TRACELENS_KERNEL_CANDIDATES_JSON`, `TRACELENS_REPORT_JSON`, `TRACELENS_ANALYSIS_MD`,
+`TRACELENS_TRACE_FILE`.
 
 0. Read `EVAL_DIR/env_report.json`. Let `model_arch_class` set expectations (e.g. MoE → expect
    grouped/fused-MoE GEMM in the Top-N; hybrid-mamba → expect linear-attn Triton kernels; MLA → expect
@@ -73,6 +76,19 @@ Inputs: `EVAL_DIR`, `PROFILE_TOPN` (path to profile_topN.json + inline top entri
    (use the backend playbook priors for plausible_speedup per class, keyed by `model_class`+`gfx` when
    present). Note the regime each serves (large-M shape = prefill, small-M/batch = decode). **Dedupe
    GEMMs by shape** — one bake-off per distinct (shape,dtype) covers all its launches.
+1b. **TraceLens prior (ADVISORY — only if `TRACELENS_KERNEL_CANDIDATES_JSON` / `TRACELENS_REPORT_JSON`
+   is a non-empty path that EXISTS).** Read its `hot_kernels[]`. Each entry pre-resolves things you would
+   otherwise hand to the Extractor: `source_file`/`source_path` (the patched python source),
+   `kernel_path`/`launcher_source_file` (the launcher seam), `kernel_category`/`tracelens_category`,
+   `bound_type` (memory|compute), `efficiency_percent`, and `op_to_source_patchable`. Use it ONLY to
+   (a) **cross-check** that your measured heads line up with TraceLens's hot kernels (note any
+   disagreement), and (b) **enrich** each `head_candidate`/`kernel_candidate` you emit with a
+   `source_hint` (the matching `source_file`/`source_path`), a `launcher_hint`
+   (`kernel_path`/`launcher_source_file`), and `bound_type` — so the Kernel Extractor can locate the
+   source/seam faster. **NEVER let TraceLens override the on-box measured `pct_gpu_time`/ranking — the
+   profile is the judge; TraceLens only ADDs hints/candidates, never prunes them.** Treat any `shapes` it
+   carries as a STARTING hint that the Extractor will re-verify against a live capture (they "不一定准").
+   If the prior is absent, proceed exactly as before.
 2. Partition the Top-N into FOUR routes (by what optimization the op admits, NOT by edit flag):
    - **config fast path** — service-level env/flag with no op isolation: `--attention-backend` swap,
      `--quantization fp8`, cuda-graph, torch-compile, kv-cache-dtype, scheduling/mem knobs → Config
@@ -105,12 +121,18 @@ Return JSON:
      "shapes": "[[1024,5120],[5120,34816]]", "dtype": "bf16", "regime": "prefill|decode|both",
      "transpose_b": true, "bias": false,
      "candidate_backends": ["aiter","hipblaslt","triton","ck"],
-     "amdahl_priority": 0.0, "rationale": "why this is the head; what win to expect"}
+     "amdahl_priority": 0.0, "rationale": "why this is the head; what win to expect",
+     "source_hint": "<TraceLens source_file/source_path if any, else ''>",
+     "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",
+     "bound_type": "<memory|compute|'' from TraceLens>"}
   ],
   "kernel_candidates": [
     {"id": "k0", "short_name": "...", "classification": "...", "pct_gpu_time": 0.0,
      "regime": "prefill|decode|both", "candidate_backends": ["triton","hip","ck","asm"],
-     "amdahl_priority": 0.0, "extract_hint": "which callable to hook (module:attr) + why"}
+     "amdahl_priority": 0.0, "extract_hint": "which callable to hook (module:attr) + why",
+     "source_hint": "<TraceLens source_file/source_path if any, else ''>",
+     "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",
+     "bound_type": "<memory|compute|'' from TraceLens>"}
   ],
   "drop_list": [{"short_name": "...", "why": "below Amdahl threshold"}],
   "order_of_work": ["config fast path first", "then h0 (GEMM #1)", "then k0", "..."],
