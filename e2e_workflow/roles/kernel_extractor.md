@@ -99,11 +99,21 @@ If extraction fails (can't hook the callable, no cases captured, or not editable
 
 ---
 
-## PHASE=extract_op  (HEAD kernels: dense GEMM / attention — even when `edit=N`)
+## PHASE=extract_op  (HEAD kernels: dense GEMM / attention / fused-MoE — even when `edit=N`)
 
 For the **head track** the contract is different: a head kernel is usually a LIBRARY op (hipBLASLt
 GEMM, CK attention) with a clean math contract, so it does NOT need a copy of editable source — it
 needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=N` is fine here.
+
+> **`op_kind=moe` (fused-MoE / grouped-expert GEMM) — DO NOT synthesize a dense GEMM.** A MoE head op
+> stays in the head track (it earns head priority by pct), but it is a grouped/ragged GEMM with token
+> routing, NOT a dense `A·Bᵀ`. For `op_kind=moe`, do **PHASE=extract instead** (copy the EDITABLE
+> fused_moe source subtree into `kernel_src/` + capture the REAL I/O oracle via the capture overlay),
+> and write `meta.json` with `op_kind:"moe"`, `math_contract:"grouped per-expert GEMM + routing"`, the
+> real `target_callable` = the **fused_moe/grouped_gemm dispatcher** seam (NOT `tuned_gemm:gemm_a16w16`),
+> and `build` per the kernel. Return `op_kind:"moe"`. The Op Benchmarker then optimizes it as
+> `fused_moe_grouped_gemm` via kernel_workflow — it must never be dense-GEMM baked off. The GEMM-synth
+> path below applies ONLY to `op_kind=gemm`.
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (Architect head candidate: short_name,
 op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn, and OPTIONAL
