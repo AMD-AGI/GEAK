@@ -60,15 +60,23 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
    window; add it explicitly from WORKLOAD if the capture missed it.
 3. **Copy the editable source** into `kernel_src/` (the minimal owning subtree), so the kernel layer
    and the later overlay can diff against it.
-4. **Write `unittest.py`** — backend-agnostic and IMMUTABLE:
-   - Load `reference_io.pt`; reconstruct input tensors on the GPU (honor recorded dtype/device/
-     contiguity; for in-place-output kernels, restore the pre-call buffer as input).
-   - Call the CURRENT kernel entry point (import by the meta `module:attr`, or the copied
-     `kernel_src`), compare to the golden output with dtype-appropriate tolerance (bf16/fp16
-     rtol=atol=2e-2; fp8 looser; fp32 tight). Print PASS/FAIL per case.
-   - Time baseline-vs-current per case (warmup + repeats + cuda/hip synchronize), print
-     `per_case` `baseline_ms/optimized_ms/speedup` and the geomean — identical shape to the
-     single-kernel workflow so the kernel-layer Director/verify math is unchanged.
+4. **Write `unittest.py`** — backend-agnostic and IMMUTABLE. It is the SINGLE harness: it judges
+   correctness AND measures the workload-weighted speedup; there is no separate downstream perf harness.
+   - **Correctness** on the FROZEN golden cases: load `reference_io.pt`; reconstruct input tensors on
+     the GPU (honor recorded dtype/device/contiguity; for in-place-output kernels, restore the pre-call
+     buffer as input). Call the CURRENT kernel entry point (import by the meta `module:attr`, or the
+     copied `kernel_src`), compare to the golden output with dtype-appropriate tolerance (bf16/fp16
+     rtol=atol=2e-2; fp8 looser; fp32 tight). Print PASS/FAIL per case. This set is NEVER re-weighted.
+   - **Timing** on the WORKLOAD cases when `meta.workload` is present (see step 4b): build one timing
+     case per `meta.workload.cases[]` entry, each input tensor with its OWN `dims`+`dtype` and the case's
+     `quant` operands (fp8 + scales etc., in-regime — NOT bf16), random values (perf is value-
+     independent). Time baseline-vs-current per case (warmup + repeats + cuda/hip synchronize), print
+     `per_case` `baseline_ms/optimized_ms/speedup`. If `meta.workload` is absent, fall back to timing the
+     golden/captured cases (unweighted), exactly as before.
+   - **Metric**: print the geomean AND, when `meta.workload` is present, the PRIMARY time-weighted
+     speedup `GEAK_WEIGHTED_SPEEDUP = Σ_i weight_i / Σ_i (weight_i / speedup_i)` using each case's
+     `weight`. Keep the same `per_case`/geomean print shape so the kernel-layer Director/verify math is
+     unchanged; the weighted line is additive. The baseline per case is the ORIGINAL/in-regime path.
    - It must NOT import any backend by name and must NOT read anything outside the task dir, so it
      transparently judges a triton/HIP/CK/aiter/asm reimplementation.
 5. **Finalize `meta.json`**: set `build` (false for pure-Triton; true + a build cmd for HIP/CK/asm
@@ -95,10 +103,10 @@ Return JSON:
   "notes": "granularity choice, hidden state captured, anything unusual"
 }
 ```
-**`workload_path` (optional, performance alignment).** If `PROFILE_WORKLOAD_JSON` is in your inputs
-(the profiler's per-kernel WEIGHT SIGNAL from `parse_profile.py --workload-out`), produce a
-workload spec for THIS kernel by JOINING your `meta.json` shape cases with that weight signal — do NOT
-hand-slice or hand-weight it. The join is op_kind-aware and deterministic; run:
+**4b. Workload weighting (fold into `meta.json`, performance alignment).** If `PROFILE_WORKLOAD_JSON`
+is in your inputs (the profiler's per-kernel WEIGHT SIGNAL from `parse_profile.py --workload-out`),
+produce the weighted case set for THIS kernel by JOINING your `meta.json` shape cases with that weight
+signal — do NOT hand-slice or hand-weight it. The join is op_kind-aware and deterministic; run:
 ```bash
 python3 "$SKILL_DIR/scripts/attribute_weights.py" \
   --meta "<task_dir>/meta.json" \
@@ -107,15 +115,18 @@ python3 "$SKILL_DIR/scripts/attribute_weights.py" \
   --min-regime-share 0.3 \
   --out "<task_dir>/workload.json"
 ```
-Return that path as `workload_path`. The SHAPES always come from your `meta.json` (config-derived
-M-buckets for GEMM, captured cases for attn/editable) — `attribute_weights.py` only attaches a
-time-proportional WEIGHT per case from the profile, labelling each `weight_source`
-(`trace`/`regime`/`prior`). **Set `--min-regime-share 0.3` for serving** (this run's objective): the
-profiling window is often prefill-biased and would otherwise zero-weight decode — the floor guarantees
-decode (TPOT-critical) is never optimized away. Read the tool's `notes`; if it WARNS that a regime had
-zero profiled time, mention it in your `notes`. Correctness still uses the frozen oracle — this only
-steers timing. Omit `workload_path` if no weight signal is available (kernel_workflow then runs
-unweighted). This does NOT change the immutable oracle in any way.
+Then **merge `workload.json` into `meta.json` under the `"workload"` key** (same pattern as the regime
+merge), so the immutable oracle is self-contained and `unittest.py` (step 4) reads `meta.workload.cases`
+to build its weighted TIMING cases + the time-weighted metric. Also return the path as `workload_path`
+(kernel_workflow reads it only to know the run is workload-aligned). The SHAPES always come from your
+`meta.json` (config-derived M-buckets for GEMM, captured cases for attn/editable) — `attribute_weights.py`
+only attaches a time-proportional WEIGHT per case + the in-regime `quant` operands, labelling each
+`weight_source` (`trace`/`regime`/`regime_floor`/`prior`). **Set `--min-regime-share 0.3` for serving**
+(this run's objective): the profiling window is often prefill-biased and would otherwise zero-weight
+decode — the floor guarantees decode (TPOT-critical) is never optimized away. Read the tool's `notes`
+and carry anything notable into your own `notes`. CORRECTNESS still uses the frozen golden cases
+(step 4); weighting only shapes the timing set. Omit the merge + `workload_path` if no weight signal is
+available (`unittest.py` then times unweighted).
 If extraction fails (can't hook the callable, no cases captured, or not editable), return
 `editable:false`/`unittest_smoke:"fail"` with a clear reason so the Architect re-routes or drops it.
 
@@ -161,8 +172,10 @@ Then HONOR it:
   → engine crash. This is non-negotiable for attention.
 - **Compile** (`regime.compile`): if `torch_compile`, the perf BASELINE is the COMPILED/fused path, not
   unfused eager — record the baseline against the fused path or the speedup is a strawman.
-`attribute_weights.py` re-reads `meta.regime` and will flag a `regime_warning` (e.g. seam <2% live GPU,
-fp8-KV, compiled-baseline) — if it warns, fix the extraction before proceeding.
+Building the oracle in-regime is YOUR job here — there is no downstream "regime warning"/gate to fall
+back on. If the live seam genuinely cannot be reproduced in-regime offline (e.g. the op only exists
+fused inside the torch.compile graph, or routing-dependent MoE token counts), say so in `notes` and
+report `editable:false`/drop rather than freeze an out-of-regime oracle nobody should trust.
 
 ### op task-dir contract (what op_bench.py + Op Benchmarker expect)
 ```
@@ -184,8 +197,11 @@ fp8-KV, compiled-baseline) — if it warns, fix the extraction before proceeding
 3. (Only if a real activation distribution matters) capture a real `(A,B,bias,output)` via the same
    capture overlay as PHASE=extract, save as `reference_io.pt` with keys `A,B,bias,output`.
 4. Write an immutable `unittest.py` that loads/synthesizes `A,B,bias`, computes `ref = A·Bᵀ(+bias)` with
-   the default backend once, then times the current path and checks a candidate against `ref`
-   (bf16 rtol=atol=2e-2). Same per-case/geomean print shape as the kernel-layer unittest.
+   the default (in-regime) backend once, then times the current path and checks a candidate against `ref`
+   (bf16 rtol=atol=2e-2). Same per-case/geomean print shape as the kernel-layer unittest, AND — when
+   `meta.workload` is present — its TIMING cases are the weighted `meta.workload.cases[]` (each built
+   with its own dims/dtype/`quant` operands) and it prints the time-weighted
+   `GEAK_WEIGHTED_SPEEDUP = Σ wᵢ/Σ(wᵢ/speedupᵢ)` as the PRIMARY metric (geomean stays as secondary).
 
 #### Quantized GEMM (int4/fp8 W*A16, compressed-tensors / GPTQ-AWQ / A4W4) — ANTI-CHEAT ORACLE CONTRACT (mandatory)
 For a **quantized-weight** head (e.g. the int4 W4A16 `fused_moe_kernel_gptq_awq` MoE GEMM), the naive
@@ -223,6 +239,9 @@ force real compact-operand compute:
    SERVER flag, so the Op Benchmarker delegates Tier-A attn swaps to the Config Tuner fast path; the op
    task dir mainly validates the oracle + enables Tier-C Triton-FA rewrites.
 4. Immutable `unittest.py`: load the captured tensors, run the current attention entry, check vs oracle.
+   Timing follows the SAME rule as the kernel-layer unittest: weighted `meta.workload.cases[]` (built
+   in-regime, incl. the fp8 KV layout when `regime.kv_cache_dtype==fp8`) + the time-weighted
+   `GEAK_WEIGHTED_SPEEDUP` as PRIMARY when `meta.workload` is present, else unweighted geomean.
 
 5. Finalize `meta.json` with the `reference_io_sha256` (when an oracle file exists) and smoke-test
    `op_bench.py --task <dir> --backends hipblaslt --repeats 5` (gemm) so the harness is proven before

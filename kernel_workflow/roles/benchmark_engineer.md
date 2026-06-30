@@ -6,48 +6,35 @@ the whole workflow depends on this being correct and stable. Operate on the cano
 ## Inputs
 `WORKSPACE`, `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, and `ANALYSIS` (kernel type, files, existing tests).
 
-**WORKLOAD ALIGNMENT (act ONLY if `WORKLOAD_SPEC_PATH` or `WORKLOAD_SPEC` is in your inputs; a normal
-run passes neither — then ignore this and benchmark the harness's own default cases unweighted).**
-When present, this is the real-workload shape/dtype distribution this kernel actually sees, so the
-benchmark measures what production runs — not arbitrary small/medium/large guesses. Read it (the JSON
-is the `workload-v1` schema from `parse_profile.py --workload-out`: `kernels[].cases[]`, each case =
-`{dims:[[…per-tensor shape…]], dtypes:[…per-tensor…], count, baseline_latency_ms, weight,
-weight_source}`). `WORKLOAD_SPEC` inline overrides `WORKLOAD_SPEC_PATH` (treat its `weight_source`
-as `caller`). Pick the case list for THIS kernel (match by `ANALYSIS` kernel name / `name`; if exactly
-one kernel is present, use it). Then:
-- **Benchmark EXACTLY these (dims, dtypes) cases** — one harness case per spec case, building each input
-  tensor with its own per-tensor shape AND dtype (do not collapse to a single dtype). Apply any scalar
-  params the kernel needs (eps/scale/causal/…) from `ANALYSIS`/source; random values are fine (perf is
-  value-independent — see CORRECTNESS note below).
-- **Weight each case by its `weight`** field (= that case's baseline time SHARE in the workload). The
-  PRIMARY metric is the time-weighted ratio-of-sums, expressed purely via `weight`:
-  `speedup = Σ_i weight_i / Σ_i (weight_i / speedup_i)`, where `speedup_i = baseline_i/optimized_i` is
-  the measured per-case speedup. This equals total_baseline_time / total_optimized_time — the true
-  wall-clock speedup of the kernel's total workload contribution. (Do NOT use `count` as the
-  coefficient — many cases are regime-attributed and have no per-call count; `weight` already folds in
-  both frequency and per-call cost.)
-- **`weight_source` tells you the fidelity**: `trace` = weight from a real per-call shape (precise);
-  `regime` = profiled decode/prefill total split across buckets; `regime_floor` = a serving floor was
-  applied so decode isn't ignored; `prior` = no profile signal (even weight, low confidence); `caller`
-  = caller-supplied. All cases still carry concrete `dims`+`dtypes` (from the spec/meta) — build inputs
-  from those. A case with empty `dims` cannot be benchmarked: exclude it and say so in `notes`; never
-  invent a shape.
-- **MATCH THE ONLINE REGIME (`spec.regime` + `spec.quant`) — this is what prevents "isolated win, e2e
-  loss".** The spec carries the regime resolved from the server launch flags:
-  - **Quant** (`spec.quant`): build operands in the quantized form the live kernel receives — e.g. a8w8
-    fp8: activations + weights `fp8_e4m3`, scales `fp32`, output `bf16`, per `weight_block_size`. Do NOT
-    benchmark an unquantized bf16 GEMM when the server runs fp8 (that seam is barely live online).
-  - **KV dtype** (`spec.regime.kv_cache_dtype`): if `fp8`, attention inputs/KV use the fp8 layout/stride.
-  - **Baseline must be IN-REGIME**: the speedup denominator is the live in-regime path — the quantized
-    library GEMM (hipBLASLt/Fp8LinearMethod), the fp8-KV attention, or the `torch.compile`-fused norm
-    when `spec.regime.compile == torch_compile`. NEVER an unquantized or unfused eager strawman.
-- **HEED `spec.regime_warning`.** If non-empty (seam <~2% live GPU, fp8-KV, or compiled-baseline), the
-  extraction is regime-mismatched — record it in `notes`, do NOT report a confident speedup, and prefer
-  failing loud over benchmarking a dead regime.
-- **CORRECTNESS IS DECOUPLED AND UNCHANGED.** Workload alignment shapes the PERFORMANCE measurement
-  only. Correctness still runs against the IMMUTABLE frozen oracle (`unittest.py`/`reference_io.pt`) on
-  its own recorded shapes — never re-weight, replace, or relax it. Random-valued workload-shape inputs
-  are for timing, not for judging correctness.
+**WORKLOAD ALIGNMENT.** The real-workload shape/dtype distribution is handled by the immutable
+`unittest.py` oracle itself — the Kernel Extractor bakes the weighted cases (`meta.workload.cases[]`)
+and the time-weighted metric into it. So in the common (e2e-fed) path you do NOTHING special:
+
+- **If the task dir's `unittest.py` is ALREADY workload-weighted** (it prints `GEAK_WEIGHTED_SPEEDUP`
+  / `meta.json` has a `workload` key), it is the SINGLE harness for BOTH correctness and the weighted
+  perf metric. **REUSE it verbatim, do NOT author a separate performance harness.** Point the
+  COMMANDMENT's CORRECTNESS/BENCHMARK/FULL_BENCHMARK/PROFILE at `python3 unittest.py`, and record the
+  PRIMARY metric as its `GEAK_WEIGHTED_SPEEDUP = Σ_i weight_i / Σ_i (weight_i / speedup_i)` (the
+  unweighted geomean is a secondary diagnostic). Operands/regime are already in-regime in the oracle —
+  you do not rebuild them.
+- **Only if NO weighted oracle exists but a caller passes `WORKLOAD_SPEC_PATH`/`WORKLOAD_SPEC` inline**
+  (a standalone single-kernel run, not an e2e extraction) do you build the weighted perf harness
+  yourself (Step 2). Read it (the `workload-v1` schema: `cases[]` each
+  `{dims:[[…per-tensor shape…]], dtypes:[…], weight, weight_source, quant}`; `WORKLOAD_SPEC` inline
+  overrides the path, `weight_source` becomes `caller`). Then:
+  - Benchmark EXACTLY these (dims, dtypes) cases (one harness case each, each tensor with its own shape
+    AND dtype + the case's `quant` operands — fp8+scales etc., NOT collapsed to bf16); random values
+    (perf is value-independent). A case with empty `dims` cannot be benchmarked — exclude it, say so in
+    `notes`, never invent a shape.
+  - PRIMARY metric = the time-weighted ratio-of-sums `Σ_i weight_i / Σ_i (weight_i / speedup_i)` using
+    each case's `weight` (do NOT use `count`; `weight` already folds frequency × per-call cost).
+  - Baseline must be IN-REGIME (the live quantized GEMM / fp8-KV attention / torch.compile-fused path),
+    never an unquantized or unfused-eager strawman.
+- **If neither** → benchmark the harness's own default cases unweighted (normal run, unchanged).
+
+**CORRECTNESS IS DECOUPLED AND UNCHANGED** in all cases: it runs against the IMMUTABLE frozen oracle
+(`unittest.py`/`reference_io.pt`) on its own recorded golden shapes — never re-weighted, replaced, or
+relaxed. Random-valued workload-shape inputs are for timing only.
 
 **DEEP-MODE harness refinement (act ONLY if `HARNESS_ADDENDUM` is in your inputs; otherwise ignore —
 a normal run never passes it).** The IMMUTABLE oracle (`unittest.py`/`meta.json`/`reference_io.pt`:
@@ -78,22 +65,22 @@ If a runner with compile/correctness/performance exists, USE IT — do not inven
 it to learn the exact commands and the per-case output format it prints (e.g. lines like
 `Perf: <ms> ms (<case_id>)`, or `GEAK_RESULT_LATENCY_MS=<ms>`, or a JSON performance report).
 
-**Exception — WORKLOAD_SPEC present**: keep reusing the existing runner / oracle for CORRECTNESS, but
-its timing cases are the captured/authored shapes, NOT the workload distribution. So ALSO author a
-dedicated PERFORMANCE harness (Step 2) that times the spec's (shape, dtype) cases, and point the
-COMMANDMENT's BENCHMARK/FULL_BENCHMARK/PROFILE at it while CORRECTNESS stays on the oracle.
+**Workload-weighted oracle present (the e2e-fed path)**: if `unittest.py` already prints
+`GEAK_WEIGHTED_SPEEDUP` (extractor baked `meta.workload`), it IS the perf harness too — reuse it for
+correctness AND the weighted metric; do NOT author `test_harness.py`. Skip Step 2.
 
-### 2. Create the (performance) harness
+### 2. Create the (performance) harness — only when NOT already covered by a weighted oracle
 Write `WORKSPACE/test_harness.py` when there is no usable runner, OR (even if a runner exists) when a
-WORKLOAD_SPEC is in your inputs — in the latter case it is the PERFORMANCE harness only; correctness
-stays on the oracle. Support `--correctness`, `--profile` (minimal allocations for profiler attach),
-`--benchmark` (30 iters/10 warmup), `--full-benchmark` (100 iters/10 warmup). Use CUDA events for
-timing. Print one line per case: `GEAK_RESULT_LATENCY_MS=<float>` plus a case id.
+`WORKLOAD_SPEC` is supplied inline AND the oracle `unittest.py` is NOT already workload-weighted — in
+that latter case it is the PERFORMANCE harness only; correctness stays on the oracle. Support
+`--correctness`, `--profile` (minimal allocations for profiler attach), `--benchmark` (30 iters/10
+warmup), `--full-benchmark` (100 iters/10 warmup). Use CUDA events for timing. Print one line per case:
+`GEAK_RESULT_LATENCY_MS=<float>` plus a case id.
 
 **Cases:**
 - WORKLOAD_SPEC present → one case per spec case, inputs built with each tensor's own `dims`+`dtype`
-  (+ scalar params), random values. Emit the per-case `count` (and `weight_source`) so the parser can
-  compute the time-weighted metric. Map/exclude `regime_prior` (empty-`dims`) cases as described above.
+  (+ scalar params + `quant` operands), random values. Emit the per-case `weight` (and `weight_source`)
+  so the parser can compute the time-weighted metric. Exclude empty-`dims` cases (say so in `notes`).
 - No WORKLOAD_SPEC → cover small/medium/large + parameter variations (unweighted, as before).
 
 **Baseline (perf reference) — use the ORIGINAL implementation, never an LLM naive reimplementation.**
