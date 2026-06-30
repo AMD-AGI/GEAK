@@ -135,19 +135,31 @@ def parse_torch_trace(path):
         dur = float(e.get("dur", 0.0) or 0.0)
         total_us += dur
         launches += 1
-        d = agg.setdefault(name, {"calls": 0, "total_us": 0.0, "shapes": set(), "dtypes": set()})
+        d = agg.setdefault(name, {"calls": 0, "total_us": 0.0, "shapes": set(),
+                                  "dtypes": set(), "by_case": {}})
         d["calls"] += 1
         d["total_us"] += dur
         ext = e.get("args", {}).get("External id")
+        sig = ""           # shape signature (json of non-empty input dims)
+        dtype_sig = ""     # dtype signature (json of per-tensor input types)
         if ext in op_by_ext:
             dims, types = op_by_ext[ext]
             sig = json.dumps([x for x in dims if x])
             if len(d["shapes"]) < 5:
                 d["shapes"].add(sig)
             if types:
-                for t in types:
-                    if t:
-                        d["dtypes"].add(t)
+                dts = [t for t in types if t]
+                if dts:
+                    dtype_sig = json.dumps(dts)
+                for t in dts:
+                    d["dtypes"].add(t)
+        # UNCAPPED per-(shape,dtype) breakdown — the workload model needs the full
+        # call-count distribution, not just the first 5 distinct shapes. Empty sigs
+        # (kernel launched with no linked cpu_op / no Input Dims, e.g. graph replay)
+        # collapse into one "shape unknown" bucket that build_workload() flags.
+        c = d["by_case"].setdefault((sig, dtype_sig), {"count": 0, "total_us": 0.0})
+        c["count"] += 1
+        c["total_us"] += dur
     return agg, total_us, launches
 
 
@@ -242,6 +254,67 @@ def build_summary(agg, total_us, launches, source, top_n, enrich=None):
     }
 
 
+def build_workload(agg, total_us, top_n, target=""):
+    """Per-kernel WORKLOAD MODEL: the shape+dtype case distribution a kernel actually sees in
+    the real workload, with a time-proportional weight per case.
+
+    For each kernel and each distinct (input shapes, input dtypes) it was called with, emit:
+      count                how many launches had this shape+dtype
+      baseline_latency_ms  measured per-call latency of the ORIGINAL kernel for this case
+      weight               total time this case contributes (= count * latency, in us); this is
+                           the workload-time weight the harness uses for the time-weighted metric
+      weight_source        "trace" when the shape was recovered, else "regime_prior" (shape hidden
+                           behind a graph-replay launch — count/time are real, shape is not)
+
+    This feeds the kernel_workflow harness so it benchmarks the SAME shapes/dtypes the workload
+    hits, weighted by their real wall-clock contribution. Correctness is unaffected (it stays on
+    the frozen reference_io.pt oracle); this is a performance-measurement model only.
+    """
+    items = sorted(agg.items(), key=lambda kv: kv[1]["total_us"], reverse=True)
+    if target:
+        items = [(n, d) for (n, d) in items if target.lower() in n.lower()]
+    kernels = []
+    for name, d in items[:top_n]:
+        cls, backend, editable, hint = classify(name)
+        by_case = d.get("by_case") or {}
+        cases = []
+        for (sig, dtype_sig), c in by_case.items():
+            dims = json.loads(sig) if sig else []
+            dtypes = json.loads(dtype_sig) if dtype_sig else []
+            count = c["count"]
+            tot_us = c["total_us"]
+            cases.append({
+                "dims": dims,
+                "dtypes": dtypes,
+                "count": count,
+                "baseline_latency_ms": round(tot_us / 1000.0 / max(count, 1), 6),
+                "weight": round(tot_us, 3),            # total us contributed in the workload
+                "weight_source": "trace" if dims else "regime_prior",
+            })
+        cases.sort(key=lambda x: x["weight"], reverse=True)
+        wsum = sum(x["weight"] for x in cases) or 1.0
+        for x in cases:
+            x["weight_norm"] = round(x["weight"] / wsum, 6)
+        kernels.append({
+            "name": name,
+            "short_name": short_name(name),
+            "classification": cls,
+            "backend_guess": backend,
+            "editable": editable,
+            "calls": d["calls"],
+            "total_ms": round(d["total_us"] / 1000.0, 4),
+            "pct_gpu_time": round(100.0 * d["total_us"] / total_us, 2) if total_us else 0.0,
+            "num_cases": len(cases),
+            "cases": cases,
+        })
+    return {
+        "schema": "workload-v1",
+        "total_gpu_time_ms": round(total_us / 1000.0, 4),
+        "num_kernels": len(kernels),
+        "kernels": kernels,
+    }
+
+
 def to_markdown(summ):
     L = []
     L.append(f"# Profile Top-{len(summ['top_kernels'])} — standardized summary\n")
@@ -270,6 +343,11 @@ def main():
     ap.add_argument("--rocprof-dir", default="")
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--out", default="", help="path prefix; writes <out>.json and <out>.md")
+    ap.add_argument("--workload-out", default="",
+                    help="also write the per-(shape,dtype) weighted WORKLOAD MODEL json here "
+                         "(for the kernel_workflow harness; needs --torch-trace for shapes)")
+    ap.add_argument("--target", default="",
+                    help="optional kernel-name substring filter for --workload-out")
     args = ap.parse_args()
 
     if not args.torch_trace and not args.rocprof_dir:
@@ -297,6 +375,17 @@ def main():
         with open(args.out + ".md", "w") as fh:
             fh.write(md)
         sys.stderr.write(f"wrote {args.out}.json and {args.out}.md\n")
+
+    # Workload model (shape+dtype weighted cases). Per-shape data lives only in the torch trace;
+    # rocprof alone yields shape-unknown buckets (weight_source=regime_prior). Prefer the trace agg.
+    if args.workload_out:
+        w_agg = torch_agg if torch_agg else rp_agg
+        w_tot = torch_total if torch_agg else rp_total
+        wl = build_workload(w_agg or {}, w_tot or 0.0, args.top, args.target)
+        with open(args.workload_out, "w") as fh:
+            fh.write(json.dumps(wl, indent=2))
+        sys.stderr.write(f"wrote {args.workload_out} ({wl['num_kernels']} kernels)\n")
+
     print(md)
 
 

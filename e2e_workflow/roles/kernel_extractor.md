@@ -91,9 +91,16 @@ Return JSON:
   "build": false,
   "unittest_smoke": "pass|fail",
   "reference_io_sha256": "...",
+  "workload_path": "<task_dir>/workload.json",
   "notes": "granularity choice, hidden state captured, anything unusual"
 }
 ```
+**`workload_path` (optional, performance alignment).** If `PROFILE_WORKLOAD_JSON` is in your inputs
+(the profiler's per-(shape,dtype) weighted model), slice out THIS kernel's entry (match by
+`short_name` / kernel name) and write just that kernel's `{cases:[…]}` to `<task_dir>/workload.json`,
+returning its path. kernel_workflow then benchmarks the real workload shapes weighted by their time
+contribution (correctness still uses the frozen oracle — this only steers timing). Omit the field if
+no workload model is available. This does NOT change the immutable oracle in any way.
 If extraction fails (can't hook the callable, no cases captured, or not editable), return
 `editable:false`/`unittest_smoke:"fail"` with a clear reason so the Architect re-routes or drops it.
 
@@ -108,7 +115,8 @@ needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (Architect head candidate: short_name,
 op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn, and OPTIONAL
 TraceLens `source_hint`/`launcher_hint`/`bound_type`), `GEMM_SYNTH` (bool, default true),
-`CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`.
+`CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, and OPTIONAL `PROFILE_WORKLOAD_JSON` (the profiler's
+per-(shape,dtype) weighted workload model — slice this kernel's cases into `workload_path`, see below).
 
 > **TraceLens shape double-check (mandatory when the shapes came from TraceLens).** If `KERNEL.shapes`
 > originated from the upstream `analysis.md`/`kernel_candidates.json` prior, treat them ONLY as a

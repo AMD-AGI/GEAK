@@ -119,8 +119,14 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    TRACE=$(ls -t "$PDIR"/*.json.gz "$PDIR"/*.json 2>/dev/null | head -1)
    python3 "$EVAL_DIR/parse_profile.py" --torch-trace "$TRACE" \
      ${ROCPROF_DIR:+--rocprof-dir "$ROCPROF_DIR"} \
-     --top 25 --out "$EVAL_DIR/profile/round_${ROUND}/profile_topN"
+     --top 25 --out "$EVAL_DIR/profile/round_${ROUND}/profile_topN" \
+     --workload-out "$EVAL_DIR/profile/round_${ROUND}/profile_workload.json"
    ```
+   The extra `--workload-out` writes the per-(shape,dtype) WORKLOAD MODEL (each top kernel's real
+   shape/dtype case distribution with a time-proportional weight). The Kernel Extractor slices the
+   target kernel's cases out of this so kernel_workflow benchmarks the shapes the workload actually
+   hits. It needs the torch trace's `Input Dims` (record_shapes); if shapes are absent the cases come
+   out `weight_source:"regime_prior"` — note that in `notes`. Report its path as `profile_workload_json`.
 4. Sanity-read `profile_topN.md`. Resolve any `other`-classified top entries before finishing: grep
    the `short_name` under the serving-stack package dir (sglang/vllm, from `env_info.txt`) to identify
    it, and note the correct class in `notes` so the Architect routes it right. Flag same-named kernels appearing with BOTH large-M and small-M shapes

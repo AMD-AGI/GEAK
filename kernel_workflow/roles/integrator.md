@@ -36,6 +36,9 @@ do not invent new optimizations; you compose and reconcile existing ones.
    diff stack. Respect hipify safety (template dispatch, no `<<<>>>` in macro if/else).
 5. Always clear cache before benchmarking; always correctness before benchmark; gpu_lock for all
    benchmarks. Compute per-case speedup vs `BASELINE_PER_CASE`, geomean = `exp(mean(log(...)))`.
+   **If the COMMANDMENT's METRIC is the time-weighted ratio-of-sums (workload-aligned), ALSO report
+   `weighted = Σ count_i·baseline_i / Σ count_i·optimized_i`; that is the number compared to
+   `BEST_INDIVIDUAL` (which is already the primary metric).**
 
 ## Output
 If the best combination beats `BEST_INDIVIDUAL`, save it:
@@ -51,9 +54,9 @@ cd "$WS" && git diff > "$INTEGRATE_DIR/integrated_patch.diff"   # $WS = the uniq
     {"patches": ["r1_d0","r1_d2"], "method": "incremental|hand_merge",
      "correctness": "pass|fail", "geomean": 0.0}
   ],
-  "best": {"patches": ["..."], "geomean": 0.0, "arithmetic": 0.0,
+  "best": {"patches": ["..."], "geomean": 0.0, "arithmetic": 0.0, "weighted": 0.0,
             "patch_file": "<INTEGRATE_DIR>/integrated_patch.diff",
-            "per_case": [{"name":"...","baseline_ms":0.0,"optimized_ms":0.0,"speedup":0.0}]},
+            "per_case": [{"name":"...","baseline_ms":0.0,"optimized_ms":0.0,"speedup":0.0,"count":0}]},
   "improved_over_best_individual": true,
   "conclusion": "improved|no_improvement|all_failed",
   "notes": "what combined well / what conflicted"

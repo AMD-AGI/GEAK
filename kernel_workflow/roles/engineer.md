@@ -74,7 +74,10 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
 2. **Implement** your direction (focused edits aligned with `SPECIALTY` and the knowledge patterns).
 3. **Correctness**: clear cache, run the correctness command. Debug until it passes.
 4. **Benchmark**: clear cache, run benchmark via gpu_lock. Parse per-case latency. Compute per-case
-   speedup vs `baseline_per_case` and geomean = `exp(mean(log(speedups)))`.
+   speedup vs `baseline_per_case` and geomean = `exp(mean(log(speedups)))`. **If the COMMANDMENT's
+   METRIC is the time-weighted ratio-of-sums (workload-aligned), ALSO compute and report
+   `speedup_weighted = Σ_i count_i·baseline_i / Σ_i count_i·optimized_i` using each case's `count`
+   from `baseline_per_case` — that is the PRIMARY number you optimize toward; the geomean is secondary.
 5. **Save patch** when geomean > 1.0: `cd $KERNEL_PATH && git diff > $OUTPUT_DIR/best_patch.diff`.
 6. **Iterate** a few variations (params/tiling/unroll/specialization), keeping the best. Obey
    self-monitoring: switch approach after ~8 stalled steps, force-submit after ~12, stop tuning when
@@ -91,7 +94,8 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
   "strategy": "what you actually implemented (specific)",
   "speedup_geomean": 0.0,
   "speedup_arithmetic": 0.0,
-  "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0}],
+  "speedup_weighted": 0.0,
+  "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0, "count": 0}],
   "status": "success|partial|failed",
   "patch_file": "best_patch.diff",
   "strategies_tried": ["..."],

@@ -175,8 +175,11 @@ baseline latencies recorded at benchmark setup).
 4. Run FULL_BENCHMARK with `bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <full bench cmd>`. Parse the
    per-case latencies.
 5. Compute per-case speedup = `baseline_ms / optimized_ms` using `BASELINE_TIMING`. Compute geomean
-   = `exp(mean(log(speedups)))` and arithmetic mean.
-6. Arbitration vs the TechLead's claim:
+   = `exp(mean(log(speedups)))` and arithmetic mean. **If `BASELINE_TIMING` is workload-aligned
+   (`workload_aligned:true`, per-case `count` present), ALSO compute the time-weighted ratio-of-sums
+   `Σ count_i·baseline_i / Σ count_i·optimized_i` and report it as `director_verified_speedup_weighted`
+   — that is the PRIMARY number arbitration uses below.**
+6. Arbitration vs the TechLead's claim (on the PRIMARY metric — weighted when workload-aligned, else geomean):
    - Within 10%, or Director higher → `accepted`.
    - Director LOWER than claim by >10% → `flagged` (use Director's measured numbers as official).
    - Correctness fail / patch fails to apply → `flagged`.
@@ -200,6 +203,7 @@ Return JSON:
   "kernel_name": "<name>",
   "director_verified_speedup_geomean": 0.0,
   "director_verified_speedup_arithmetic": 0.0,
+  "director_verified_speedup_weighted": 0.0,
   "tech_lead_reported_speedup_geomean": 0.0,
   "validation_status": "accepted|flagged",
   "correctness": "pass|fail",

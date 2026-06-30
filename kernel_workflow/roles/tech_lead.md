@@ -133,6 +133,12 @@ passes them):**
 - `HARNESS_ADDENDUM` — path to an e2e-refined harness addendum (which cases to weight, a cudagraph-capture
   wrapper, hard constraint gates). Plan toward the addendum's weighted target.
 
+**Workload-aligned runs (COMMANDMENT METRIC = time-weighted ratio-of-sums):** `CUMULATIVE_SPEEDUP` is
+then the time-weighted speedup, and the per-case table carries each case's `count` / time-share. Steer
+toward the cases that DOMINATE that weighted metric (high `count·latency` share) — a big win on a
+rare-but-cheap case barely moves it, while a modest win on the dominant case (often the decode bucket)
+moves it a lot. Do NOT let a high-variance speedup on a low-weight case decide the round.
+
 Your job: decide this round's directions (or stop). Re-read `geomean_levers.md` and the relevant
 optimization knowledge first.
 
@@ -296,11 +302,15 @@ table, `BASELINE_TIMING`, and `BASELINE_GEOMEAN_MS`.
    mkdir -p "$EVAL_DIR/optimized" && cp <kernel + wrapper + binding files> "$EVAL_DIR/optimized/" 2>/dev/null || true
    ```
 2. Write `EVAL_DIR/tech_lead_report.md`. Keep it concise but COMPLETE. Required sections:
-   - **Summary**: kernel, type, final geomean & arithmetic speedup, rounds, budget used / total.
+   - **Summary**: kernel, type, final speedup, rounds, budget used / total. When the run is
+     workload-aligned (COMMANDMENT METRIC = time-weighted ratio-of-sums), report the **time-weighted
+     speedup as the headline** with the unweighted geomean & arithmetic alongside; otherwise the
+     geomean is the headline (unchanged).
    - **Round-by-round**: for EACH round list EVERY engineer individually (id, specialty, strategy,
      verified speedup, success/fail + one-line reason), the integrate result, the round winner, and
      the bottleneck shift. This is the "round 1 optimized a, b, c — what were the results, what after merging; round 2 …" narrative.
-   - **Final per-test-case table** (baseline ms / optimized ms / speedup) + geomean + arithmetic.
+   - **Final per-test-case table** (baseline ms / optimized ms / speedup; + `count` & weight-share
+     when workload-aligned) + geomean + arithmetic + the time-weighted speedup.
    - **Key optimizations applied** (what + impact).
    - **What didn't work** (dead-ends from the ledger).
 
@@ -309,6 +319,7 @@ Return JSON:
 {
   "final_speedup_geomean": 0.0,
   "final_speedup_arithmetic": 0.0,
+  "final_speedup_weighted": 0.0,
   "rounds": 0,
   "budget_used": 0,
   "report_path": "<EVAL_DIR>/tech_lead_report.md",

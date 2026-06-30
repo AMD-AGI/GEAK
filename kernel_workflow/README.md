@@ -77,10 +77,30 @@ Workflow({
     mode: "optimize",          // optional: "optimize" (default, edit an existing kernel) | "author"
     target_language: "triton", // author mode: triton (always) | flydsl | hip | ck — the language to write
     op_spec: {},               // author mode: {op_kind, shapes, dtype, math_contract, regime} for the op
-    perf_knowledge_dir: ""   // optional: AMD authoring knowledge base the author_engineer reads
+    perf_knowledge_dir: "",  // optional: AMD authoring knowledge base the author_engineer reads
+    // --- workload alignment (optional; aligns the PERF harness with the real workload) ---
+    workload_spec_path: "",    // optional: path to a workload-v1 json (parse_profile.py --workload-out).
+                               //   The benchmark harness then times the EXACT (shape,dtype) cases the
+                               //   workload hits, weighted by each case's total-time contribution, and
+                               //   the PRIMARY metric becomes the time-weighted ratio-of-sums (the
+                               //   unweighted geomean is kept as a secondary diagnostic). Correctness is
+                               //   unaffected (it stays on the frozen reference_io.pt oracle).
+                               //   Also accepted as op_spec.workload_path, or op_spec.workload (inline).
   }
 })
 ```
+
+### Workload alignment (NEW)
+By default the harness benchmarks small/medium/large cases unweighted. Pass a **workload spec** to
+instead benchmark the shapes/dtypes the kernel actually sees in production, weighted by how much
+wall-clock each contributes (`weight = call_count × baseline_latency`). Generate one from a profiler
+trace with `python3 e2e_workflow/scripts/parse_profile.py --torch-trace <trace> --workload-out
+workload.json [--target <kernel_name>]`, then pass `workload_spec_path: ".../workload.json"`. The
+optimization target becomes the **time-weighted ratio-of-sums**
+`Σ count·baseline / Σ count·optimized` (true wall-clock speedup of the kernel's total workload
+contribution); the unweighted geomean is still reported. The perf **baseline is the original/extracted
+implementation**, never an LLM naive reimplementation. When invoked from the e2e layer this is wired
+automatically (profiler → extractor → `op_spec.workload_path`).
 
 ### Author mode (NEW)
 `mode="author"` is for when there is **no existing source to optimize** — a hot op (e.g. a library
