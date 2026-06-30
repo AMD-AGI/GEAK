@@ -27,3 +27,4 @@ Confidence (a hint strength, not authority): ★ noise/unverified · ★★ sing
 - engagement verification: one-shot stderr banner + log grep ★★★ — (method-verify-engagement.md)
 - e2e A/B: pinned port, interleaved, non-overlap gate ★★★ — (method-e2e-ab-harness.md)
 - cuda/HIP-graph-safe integration (the #1 e2e killer) ★★★ — (method-cudagraph-safe-integration.md)
+- native (.cu/.hip/.cpp/CK) apply-back: in-place incremental recompile, reversible ★★☆ — (native-apply-back.md)

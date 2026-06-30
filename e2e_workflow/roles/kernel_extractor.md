@@ -37,6 +37,15 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
    `short_name` / the `module:attr` target). Confirm it's truly editable (Triton/custom/aiter) — if
    it resolves to a library GEMM/attention, STOP and report `editable=false` (it belongs to the
    Config Tuner, not here).
+   - **Native (compiled-source) kernels ARE editable.** If the op resolves to a COMPILED source file
+     (`.cu/.cuh/.hip/.cpp/.cc/.cxx/.c/.h/.hpp`) that lives in a REBUILDABLE source tree (the install ships
+     the source + a discoverable build seam: a `config.yaml compile_command` / `task_runner.py` / `Makefile`
+     / `build.sh` / `build.ninja`/CMake `build/` / a torch `cpp_extension.load(name=…)` driver / an aiter
+     cpp_itfs `MD_NAME` driver up-tree), report `editable=true` and `apply_kind:"native"` with
+     `target_callable:""` (the kernel layer authors a native diff; the e2e Integrator deploys it via the
+     NATIVE patch path — in-place recompile through `overlay_setup.py add-native`). Only report
+     `editable=false` for a truly OPAQUE prebuilt library with no shipped source (e.g. closed hipBLASLt) or a
+     read-only install. Default `apply_kind:"python"` for Triton/`.py` kernels (existing behavior — unchanged).
 2. **Capture shapes + oracle** from a live server using `scripts/capture_shapes.py` via a temporary
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash

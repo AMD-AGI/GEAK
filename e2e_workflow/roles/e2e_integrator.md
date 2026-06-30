@@ -59,7 +59,9 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `GPU_ID`, `WORKLOAD`,
 (default 0.5), `E2E_REPEATS` (default 7; repeats per leg of the interleaved A/B),
 `KERNEL_RESULT` (task_dir, source_path_in_sglang, target_callable, final_patch.diff,
 verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `winner_kind`
-∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`),
+∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`;
+`apply_kind` ∈ {python (default), native} — when `native`, a `patch` is deployed via the NATIVE patch
+path (in-place recompile through `overlay_setup.py add-native`) instead of a PYTHONPATH overlay),
 `CURRENT_OVERLAY`, `CURRENT_FLAGS`/`CURRENT_ENV`, `CURRENT_THROUGHPUT`, `SKILL_DIR`.
 
 **ACCURACY GATE (only if `ACCURACY_GATE=gsm8k` is in your inputs; else use the normal parity gate).**
@@ -113,12 +115,69 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      under `_triton_kernels/...`; shadow the file the alias actually resolves to), then
      `cp` that live file into `$CAND/<dotted/module/path>.py`, apply the diff to the COPY, and `check`
      engagement via PYTHONPATH. The overlay shadows the install at import time — the live tree is never edited.
-   - **HARD RULE — never mutate site-packages.** The overlay is the ONLY integration mechanism; editing
-     `/sgl-workspace/aiter` (or any installed package) in place is forbidden (non-reversible; corrupts the
-     baseline leg since both legs then import the edit; contaminates other sessions on the box). Before AND
-     after every gate leg, assert the install is clean: `git -C /sgl-workspace/aiter status --porcelain`
-     (ignoring `*/flydsl_cache/`) MUST be empty. If you edited it while exploring, `git -C /sgl-workspace/aiter
-     checkout -- <file>` to restore before measuring. A win that only exists as a live-tree edit is `rejected`.
+   - **HARD RULE — never mutate site-packages by hand.** The Python overlay above is the ONLY integration
+     mechanism for `.py` changes; hand-editing `/sgl-workspace/aiter` (or any installed package) in place is
+     forbidden (non-reversible; corrupts the baseline leg since both legs then import the edit; contaminates
+     other sessions on the box). Before AND after every gate leg, assert the install is clean:
+     `git -C /sgl-workspace/aiter status --porcelain` (ignoring `*/flydsl_cache/`) MUST be empty. If you edited
+     it while exploring, `git -C /sgl-workspace/aiter checkout -- <file>` to restore before measuring. A win
+     that only exists as a hand-made live-tree edit is `rejected`. (The ONE sanctioned exception is the
+     **NATIVE patch path** below, which mutates the install via `overlay_setup.py add-native` — reversibly,
+     manifest-tracked, and always reverted in a `finally` — for compiled kernels that CANNOT be shadowed by a
+     PYTHONPATH overlay.)
+
+   - **NATIVE patch (a compiled-source kernel: `.cu/.cuh/.hip/.cpp/.cc/.cxx/.c/.h/.hpp`).** A PYTHONPATH
+     overlay can shadow a `.py` but NOT a compiled kernel — the change only takes effect after the package's
+     `.so`/code-object is **recompiled** in place. Detect this case from the patch: if `code_patch`/`final_patch`
+     touches any compiled-suffix file, OR `KERNEL_RESULT.apply_kind=="native"`, use this path instead of
+     `add-module`. It is general (any framework / build system) and never invents a build command — you
+     DISCOVER the install's own incremental build the same way the benchmark_engineer does, then hand it to
+     `add-native`. Steps:
+     1. **Resolve the live installed source file(s)** the diff targets (same resolution as the patch case:
+        `python3 -c "import <mod>; print(<mod>.__file__)"`; honor lazy aliases). The diff applies to the LIVE
+        file, not a `ws` copy.
+     2. **Discover the incremental build** by walking UP from the source file (marker-file driven, no
+        hardcoded abs paths) — first match wins:
+        - a `config.yaml`/`config.json` near the source declaring `compile_command`, or a `task_runner.py
+          compile` / `Makefile` / `build.sh` → use it verbatim (ninja/make are timestamp-incremental).
+        - **torch `cpp_extension.load(name=...)` / `load_inline`** in a `.py` near the source → no explicit
+          build cmd; pass `--invalidate-cache "$TORCH_EXTENSIONS_DIR/<name>"` (set `TORCH_EXTENSIONS_DIR` to a
+          per-eval dir + local-arch env as benchmark_engineer does) so it rebuilds on next import.
+        - **aiter cpp_itfs**: a driver `.py` beside the source declaring `MD_NAME` → pass
+          `--invalidate-cache "<cpp_itfs_root>/<md_name>_<hash>"` so only that module rebuilds on next call.
+        - **aiter jit / setup.py+ninja / CMake `build/` / `build.ninja`** up-tree → build only the affected
+          target (e.g. `--build-cmd "ninja -C <build> <target>"` or the editable rebuild, which ninja keeps
+          incremental).
+        - **fallback**: the package's editable rebuild (e.g. `--build-cmd "python -m pip install -e . --no-build-isolation"`),
+          and LOG that this is a COARSE (whole-package) rebuild — never silent. If no build seam is
+          discoverable at all (opaque prebuilt lib, no source, read-only install) → `gate:"rejected"` reason
+          `no_build_seam`.
+     3. **Apply reversibly + rebuild** (manifest-first, crash-safe):
+        ```bash
+        CAND="$EVAL_DIR/overlay/cand_<short_name>"; cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"
+        python3 "$SKILL_DIR/scripts/overlay_setup.py" add-native \
+          --overlay "$CAND" --target "<live installed src>" --patch "<KERNEL_RESULT.code_patch>" \
+          [--artifact "<built .so/.co/.hsaco>" ...] [--invalidate-cache "<cache dir>" ...] \
+          [--build-cmd "<discovered incremental build>"] [--build-cwd "<build root>"]
+        python3 "$SKILL_DIR/scripts/overlay_setup.py" verify-native --overlay "$CAND"   # FRESH_BUILD_OK or fail
+        ```
+        If `verify-native` reports `FRESH_BUILD_FAIL` (artifact unchanged → the build was a silent no-op),
+        do NOT measure — fix the build command/cache target, or `gate:"rejected"` reason `native_build_no_op`.
+     4. **Measure the A/B around the in-place change.** Native mutates the install GLOBALLY (it can't be
+        toggled per-leg by `OVERLAY_PYTHONPATH`), so order matters: measure the **REF leg FIRST** (install
+        still clean, `OVERLAY_PYTHONPATH="$CURRENT_OVERLAY"`), THEN `add-native`, THEN the **CAND leg**
+        (`OVERLAY_PYTHONPATH="$CURRENT_OVERLAY"` — the native change is already live in the install; any prior
+        accepted `.py` overlays stay active). For a MIXED patch (.py + native in one winner), also `add-module`
+        the `.py` parts into `$CAND` and run the CAND leg with `OVERLAY_PYTHONPATH="$CAND"`.
+     5. **ALWAYS revert (do-no-harm + crash-safe).** Wrap the CAND measurement so that on EVERY exit path
+        (accept / reject / crash / timeout) you run `python3 "$SKILL_DIR/scripts/overlay_setup.py" revert
+        --overlay "$CAND"` to restore the install byte-exact, then assert the install is clean
+        (`git -C <pkg> status --porcelain` empty). At session start the runner also calls
+        `overlay_setup.py gc-stale --root "$EVAL_DIR"` to clean any native overlay a crashed prior run left
+        applied. **Serialize**: never run two native A/Bs against the same install concurrently (the e2e gate
+        already leases all GPUs, so this holds by construction; do not parallelize native integrate legs).
+        The graph-capture-safety + memory-footprint gates below apply to native kernels exactly as to authored
+        ones.
    - **authored** (a from-scratch NEW implementation written by the kernel layer's author mode — there
      is NO installed source file to patch; instead we REBIND the op's call site to the new kernel):
      the authored implementation + its final patch live under
