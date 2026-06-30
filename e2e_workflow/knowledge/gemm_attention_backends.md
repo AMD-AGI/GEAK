@@ -158,7 +158,7 @@ e2e parity**; if it fails on a non-quant change, flag it for an accuracy eval (s
 |---|---|---|---|---|---|
 | dense GEMM | prefill (large M) | aiter(DB, races hipBLASLt/asm/**flydsl**) → hipBLASLt → CK → flydsl | aiter per-shape DB tune | **flydsl** author → Triton author (epilogue fuse / split-K) | fp8 |
 | dense GEMM | decode (M=batch) | aiter(DB, +flydsl split-K) → hipBLASLt → flydsl | aiter per-shape DB tune | **flydsl**/Triton split-K author | fp8 |
-| dense GEMM (fp8 a8w8 blockscale, sglang) | prefill/decode | **CK skill `gemm_tuning/fp8_gemm_tuning_sglang_aiter.md` (MANDATED this eval)** — capture (M,N,K) → aiter CK tuner → fp8_utils Triton→CK switch + `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE` | CK tuner (`gemm_a8w8_blockscale_tune.py --libtype both --mp <all GPUs>`) | — (Triton-overlay / flydsl / aiter-bf16 levers FORBIDDEN here; they bypass the skill) | — (already fp8) |
+| dense GEMM (fp8 a8w8 blockscale, sglang) | prefill/decode | **CK skill `gemm_tuning/fp8_gemm_tuning_sglang_aiter.md` (MANDATED this eval)** — capture (M,N,K) → aiter CK tuner → fp8_utils Triton→CK switch + `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE` | CK tuner (`gemm_a8w8_blockscale_tune.py --libtype both --mp <all GPUs>`) | — (Triton-overlay / aiter-bf16 levers FORBIDDEN here; they bypass the skill) | — (already fp8) |
 | paged attention | prefill | CK → triton → aiter | instance / FA autotune | triton FA rewrite | kv fp8 |
 | paged attention | decode | aiter → triton → CK | page-size / FA autotune | triton FA rewrite | kv fp8 |
 
