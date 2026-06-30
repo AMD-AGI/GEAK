@@ -255,8 +255,11 @@ def build_summary(agg, total_us, launches, source, top_n, enrich=None):
 
 
 def build_workload(agg, total_us, top_n, target=""):
-    """Per-kernel WORKLOAD MODEL: the shape+dtype case distribution a kernel actually sees in
-    the real workload, with a time-proportional weight per case.
+    """Per-kernel WEIGHT SIGNAL: each kernel's profiled time + (when the trace exposed them) its
+    per-(shape,dtype) call distribution. This is the raw input to `attribute_weights.py`, which JOINS
+    it with the extractor's `meta.json` shape cases (op_kind-aware) to produce the final WORKLOAD_SPEC
+    the harness consumes. This script stays kernel-type-agnostic: it never invents shapes and never
+    decides regimes — it only reports what the trace measured.
 
     For each kernel and each distinct (input shapes, input dtypes) it was called with, emit:
       count                how many launches had this shape+dtype

@@ -19,15 +19,19 @@ one kernel is present, use it). Then:
   tensor with its own per-tensor shape AND dtype (do not collapse to a single dtype). Apply any scalar
   params the kernel needs (eps/scale/causal/…) from `ANALYSIS`/source; random values are fine (perf is
   value-independent — see CORRECTNESS note below).
-- **Weight each case by `count`** (NOT by `weight`). The PRIMARY metric is the time-weighted
-  ratio-of-sums: `speedup = Σ_i count_i·baseline_i / Σ_i count_i·optimized_i`, where `baseline_i`/
-  `optimized_i` are the measured per-call latencies. This equals the true wall-clock speedup of the
-  kernel's total workload contribution. (`weight = count·baseline_latency` is the time-SHARE of each
-  case — use it only to rank/report which cases dominate, never as the metric coefficient.)
-- **`weight_source: regime_prior` cases have `dims: []`** (shape hidden behind a graph-replay launch —
-  count is real, shape is not). You cannot build inputs for an unknown shape: map such a case to the
-  decode-regime shape implied by `ANALYSIS` (keep its `count`), or exclude it and say so in `notes`.
-  Never invent a shape silently.
+- **Weight each case by its `weight`** field (= that case's baseline time SHARE in the workload). The
+  PRIMARY metric is the time-weighted ratio-of-sums, expressed purely via `weight`:
+  `speedup = Σ_i weight_i / Σ_i (weight_i / speedup_i)`, where `speedup_i = baseline_i/optimized_i` is
+  the measured per-case speedup. This equals total_baseline_time / total_optimized_time — the true
+  wall-clock speedup of the kernel's total workload contribution. (Do NOT use `count` as the
+  coefficient — many cases are regime-attributed and have no per-call count; `weight` already folds in
+  both frequency and per-call cost.)
+- **`weight_source` tells you the fidelity**: `trace` = weight from a real per-call shape (precise);
+  `regime` = profiled decode/prefill total split across buckets; `regime_floor` = a serving floor was
+  applied so decode isn't ignored; `prior` = no profile signal (even weight, low confidence); `caller`
+  = caller-supplied. All cases still carry concrete `dims`+`dtypes` (from the spec/meta) — build inputs
+  from those. A case with empty `dims` cannot be benchmarked: exclude it and say so in `notes`; never
+  invent a shape.
 - **CORRECTNESS IS DECOUPLED AND UNCHANGED.** Workload alignment shapes the PERFORMANCE measurement
   only. Correctness still runs against the IMMUTABLE frozen oracle (`unittest.py`/`reference_io.pt`) on
   its own recorded shapes — never re-weight, replace, or relax it. Random-valued workload-shape inputs
@@ -124,10 +128,10 @@ The COMMANDMENT MUST contain, with concrete commands (not placeholders):
 - `METRIC` — define the PRIMARY speedup the optimize loop is judged on:
   - **No WORKLOAD_SPEC**: unweighted geomean of per-case speedups (unchanged default).
   - **WORKLOAD_SPEC present**: the **time-weighted ratio-of-sums**
-    `speedup = Σ_i count_i·baseline_i / Σ_i count_i·optimized_i` (PRIMARY), and ALSO report the
-    unweighted geomean as a secondary diagnostic. List each case's `count` and `weight_source` so
-    every downstream agent computes the SAME number. State that this primary number is what the round
-    winner gate and the final result use. If the baseline is the flagged naive fallback, say so here.
+    `speedup = Σ_i weight_i / Σ_i (weight_i / speedup_i)` (PRIMARY), and ALSO report the unweighted
+    geomean as a secondary diagnostic. List each case's `weight` and `weight_source` so every
+    downstream agent computes the SAME number. State that this primary number is what the round winner
+    gate and the final result use. If the baseline is the flagged naive fallback, say so here.
 - `MODIFIABLE FILES` and the rules (never modify harness/COMMANDMENT/files outside the workspace;
   always run correctness before benchmark; always invoke via gpu_lock from the workspace; benchmark
   output is the source of truth).

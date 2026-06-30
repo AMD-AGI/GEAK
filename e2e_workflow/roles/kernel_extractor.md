@@ -96,11 +96,26 @@ Return JSON:
 }
 ```
 **`workload_path` (optional, performance alignment).** If `PROFILE_WORKLOAD_JSON` is in your inputs
-(the profiler's per-(shape,dtype) weighted model), slice out THIS kernel's entry (match by
-`short_name` / kernel name) and write just that kernel's `{cases:[…]}` to `<task_dir>/workload.json`,
-returning its path. kernel_workflow then benchmarks the real workload shapes weighted by their time
-contribution (correctness still uses the frozen oracle — this only steers timing). Omit the field if
-no workload model is available. This does NOT change the immutable oracle in any way.
+(the profiler's per-kernel WEIGHT SIGNAL from `parse_profile.py --workload-out`), produce a
+workload spec for THIS kernel by JOINING your `meta.json` shape cases with that weight signal — do NOT
+hand-slice or hand-weight it. The join is op_kind-aware and deterministic; run:
+```bash
+python3 "$SKILL_DIR/scripts/attribute_weights.py" \
+  --meta "<task_dir>/meta.json" \
+  --profile-weights "$PROFILE_WORKLOAD_JSON" \
+  --name-match "<the kernel's base symbol, e.g. _gemm_a8w8_blockscale_kernel>" \
+  --min-regime-share 0.3 \
+  --out "<task_dir>/workload.json"
+```
+Return that path as `workload_path`. The SHAPES always come from your `meta.json` (config-derived
+M-buckets for GEMM, captured cases for attn/editable) — `attribute_weights.py` only attaches a
+time-proportional WEIGHT per case from the profile, labelling each `weight_source`
+(`trace`/`regime`/`prior`). **Set `--min-regime-share 0.3` for serving** (this run's objective): the
+profiling window is often prefill-biased and would otherwise zero-weight decode — the floor guarantees
+decode (TPOT-critical) is never optimized away. Read the tool's `notes`; if it WARNS that a regime had
+zero profiled time, mention it in your `notes`. Correctness still uses the frozen oracle — this only
+steers timing. Omit `workload_path` if no weight signal is available (kernel_workflow then runs
+unweighted). This does NOT change the immutable oracle in any way.
 If extraction fails (can't hook the callable, no cases captured, or not editable), return
 `editable:false`/`unittest_smoke:"fail"` with a clear reason so the Architect re-routes or drops it.
 

@@ -169,13 +169,14 @@ const perCase = {
       optimized_ms: { type: 'number' },
       speedup: { type: 'number' },
       // Workload-alignment fields (present only when a WORKLOAD_SPEC drives the harness; absent
-      // on a normal unweighted run). weight = this case's total time contribution in the real
-      // workload (count * baseline_latency); it is the coefficient the time-weighted metric uses.
+      // on a normal unweighted run). weight = this case's baseline time SHARE in the real workload;
+      // it is the coefficient of the time-weighted metric Σweight / Σ(weight/speedup). count is
+      // optional/informational (regime-attributed cases have no per-call count).
       weight: { type: 'number' },
       count: { type: 'number' },
       dims: { type: 'array', items: { type: 'array', items: { type: 'number' } } },
       dtypes: { type: 'array', items: { type: 'string' } },
-      weight_source: { type: 'string' }, // trace | tracelens | regime_prior | caller
+      weight_source: { type: 'string' }, // trace | regime | regime_floor | prior | caller
     },
     required: ['name', 'speedup'],
   },
@@ -220,11 +221,11 @@ const BENCH_SCHEMA = obj({
   baseline_per_case: { type: 'array', items: { type: 'object', additionalProperties: true } },
   baseline_geomean_ms: { type: 'number' }, num_test_cases: { type: 'number' },
   // Workload-aligned outputs: present when a WORKLOAD_SPEC drove case selection + weights.
-  // baseline_weighted_total_ms = sum(weight_i * baseline_latency_i) — the denominator of the
-  // time-weighted ratio-of-sums metric. workload_aligned flags that weights are real (not 1).
+  // baseline_weighted_total_ms = the baseline time the weights represent (Σ weight_i in time units).
+  // The metric is Σ weight_i / Σ (weight_i/speedup_i). workload_aligned flags weights are real (not 1).
   workload_aligned: { type: 'boolean' },
   baseline_weighted_total_ms: { type: 'number' },
-  weights_provenance: { type: 'string' }, // e.g. "trace" | "caller" | "regime_prior" | "mixed"
+  weights_provenance: { type: 'string' }, // e.g. "trace" | "regime" | "regime_floor" | "prior" | "caller" | "mixed"
   reliable: { type: 'boolean' }, notes: { type: 'string' },
 }, ['commandment_path', 'baseline_per_case', 'baseline_geomean_ms']);
 
@@ -257,7 +258,7 @@ const ENG_SCHEMA = obj({
   engineer_id: { type: 'string' }, specialty: { type: 'string' }, task: { type: 'string' },
   strategy: { type: 'string' }, speedup_geomean: { type: 'number' }, speedup_arithmetic: { type: 'number' },
   // Time-weighted ratio-of-sums vs the TRUE baseline (PRIMARY metric when workload_aligned).
-  // = sum(weight_i*baseline_i) / sum(weight_i*optimized_i). Omitted on unweighted runs.
+  // = Σ weight_i / Σ (weight_i / speedup_i). Omitted on unweighted runs.
   speedup_weighted: { type: 'number' },
   per_case: perCase, status: { type: 'string' }, patch_file: { type: 'string' },
   strategies_tried: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },

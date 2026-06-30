@@ -176,8 +176,8 @@ baseline latencies recorded at benchmark setup).
    per-case latencies.
 5. Compute per-case speedup = `baseline_ms / optimized_ms` using `BASELINE_TIMING`. Compute geomean
    = `exp(mean(log(speedups)))` and arithmetic mean. **If `BASELINE_TIMING` is workload-aligned
-   (`workload_aligned:true`, per-case `count` present), ALSO compute the time-weighted ratio-of-sums
-   `Σ count_i·baseline_i / Σ count_i·optimized_i` and report it as `director_verified_speedup_weighted`
+   (`workload_aligned:true`, per-case `weight` present), ALSO compute the time-weighted ratio-of-sums
+   `Σ weight_i / Σ (weight_i / speedup_i)` and report it as `director_verified_speedup_weighted`
    — that is the PRIMARY number arbitration uses below.**
 6. Arbitration vs the TechLead's claim (on the PRIMARY metric — weighted when workload-aligned, else geomean):
    - Within 10%, or Director higher → `accepted`.

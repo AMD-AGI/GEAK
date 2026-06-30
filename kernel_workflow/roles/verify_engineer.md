@@ -58,9 +58,9 @@ absolute per-case latencies. The script trusts only your numbers.
    shows a regression (the PRIMARY metric ≤ 1.0). Report it as `status:"regression"` with the numbers anyway.
 6. Compute per-case speedup = `BASELINE_PER_CASE.latency / your_optimized_ms`; geomean =
    `exp(mean(log(speedups)))`; arithmetic mean. **If the COMMANDMENT's METRIC is the time-weighted
-   ratio-of-sums (workload-aligned), ALSO compute `verified_weighted = Σ count_i·baseline_i /
-   Σ count_i·optimized_i` using each case's `count` — this is the PRIMARY number; regression is judged
-   on it, not the geomean.**
+   ratio-of-sums (workload-aligned), ALSO compute `verified_weighted = Σ weight_i /
+   Σ (weight_i / speedup_i)` using each case's `weight` — this is the PRIMARY number; regression is
+   judged on it, not the geomean.**
 
 ## Return JSON
 ```json
@@ -70,7 +70,7 @@ absolute per-case latencies. The script trusts only your numbers.
   "verified_geomean": 0.0,
   "verified_arithmetic": 0.0,
   "verified_weighted": 0.0,
-  "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0, "count": 0}],
+  "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0, "weight": 0.0}],
   "variance_note": "e.g. run-to-run within 3%",
   "graph_safe": "pass|fail|n/a (only when REQUIRE_GRAPH_CAPTURE was set; omit otherwise)",
   "notes": "anything suspicious (overfit special-casing, narrow correctness, graph-capture host-sync, etc.)"
