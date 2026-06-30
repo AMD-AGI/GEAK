@@ -354,13 +354,31 @@ def main(
         if enabled is False:
             disabled_tools.append(tool_name)
 
+    # Build acceleration for CK/.cu harness compiles: cap parallel compile jobs and
+    # route the compiler through ccache (when present) so repeated candidate rebuilds
+    # are incremental instead of cold multi-hour recompiles. setdefault => never
+    # overrides an operator-provided value.
+    import shutil
+    os.environ.setdefault("MAX_JOBS", str(min((os.cpu_count() or 8), 32)))
+    if shutil.which("ccache"):
+        for _v in ("CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER", "CMAKE_HIP_COMPILER_LAUNCHER"):
+            os.environ.setdefault(_v, "ccache")
+
     # RAG MCP toggle: disable RAG tools when rag is not enabled. RAG is
     # best-effort — if it is enabled but the package or index cannot be
     # provisioned (offline node, pip failure, build error), degrade to
     # RAG-disabled and continue the optimization run instead of aborting the
     # whole agent. Previously any provisioning failure raised and killed the
     # run, so an environment hiccup wasted the entire kernel attempt (GH #316).
+    # NOTE: the prior fix only caught EXCEPTIONS — an unbounded pip install / index
+    # build that HANGS (no exception, just blocks) still consumed the whole per-kernel
+    # budget (observed: TimeoutExpired after 7800s). The subprocess calls below now
+    # carry timeouts so a hang raises TimeoutExpired -> caught here -> degrade. Set
+    # GEAK_DISABLE_RAG=1 to skip the optional RAG setup entirely.
     rag_enabled = tools_cfg.get("rag", False)
+    if rag_enabled and os.environ.get("GEAK_DISABLE_RAG", "").strip() == "1":
+        logger.info("GEAK_DISABLE_RAG=1: skipping optional RAG tools.")
+        rag_enabled = False
     rag_failed = False
     if rag_enabled:
         try:
@@ -374,6 +392,7 @@ def main(
                 result = subprocess.run(
                     [sys.executable, "-m", "pip", "install", "-e", str(_rag_mcp_path)],
                     capture_output=True, text=True,
+                    timeout=int(os.environ.get("GEAK_RAG_INSTALL_TIMEOUT", "180")),
                 )
                 if result.returncode != 0:
                     raise RuntimeError(
@@ -398,6 +417,7 @@ def main(
                 result = subprocess.run(
                     [sys.executable, str(_build_script), "--force"],
                     capture_output=True, text=True,
+                    timeout=int(os.environ.get("GEAK_RAG_INDEX_TIMEOUT", "600")),
                 )
                 if result.returncode != 0:
                     raise RuntimeError(
