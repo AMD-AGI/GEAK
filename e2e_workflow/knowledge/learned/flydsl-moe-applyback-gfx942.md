@@ -120,3 +120,18 @@ last_seen: 2026-06-28
   (GEMM1 only) cannot be rebound at a fused-op seam without a wrapper — the genuine win is the FULL fused
   shim (apply_flydsl_moe_to_vllm), not an isolated GEMM1. Routing stays POSITIVE (use the validated full
   shim); this is a seam-compatibility caution, not a blocklist.
+- **STACK LEVER #2 — GEMM2-leg fused-SwiGLU + un-replicated-X ("xrows"), stacks on the applyback for
+  +~6.5% MORE e2e (validated 2026-06-29, run e2e_…122336Z):** after the FlyDSL int4 applyback is accepted,
+  stack a second optimization on the down-proj/GEMM2 leg: fuse SwiGLU into the gemm2 launch AND stop
+  replicating X across top-k (un-expanded/`xrows` input) so stage-2 reads un-replicated activations.
+  Measured: isolated 1.207x, **e2e +6.49% (ref_med 535.53 → cand_med 570.26 tok/s), parity pass**, stacked
+  ON TOP of the +66% applyback → **combined e2e ≈ x1.79 (~570 tok/s vs ~319 baseline)**. Engagement proof:
+  `flydsl_fused_experts_impl_fused_xrows ENGAGED` on all 4 TP workers, non-fused-impl count=0, 0 fallbacks,
+  cudagraph-safe (no host-sync hang). Gate verdict was `stack` not strict `accepted` ONLY because at
+  E2E_REPEATS=2 the run distributions overlapped (cand_min 548.88 < ref_max 556.93); re-run at REPEATS≥3 to
+  bank it as `accepted`. Implementation artifacts (reusable, validated): `moe_gemm_2stage_xrows.py` +
+  `flydsl_fused_experts_impl_fused_xrows` in the shim — see
+  `test_results/e2e_moonshotai-Kimi-K2.6_20260628T122336Z/overlay/cand_moe_gemm2_0/` (`flydsl_moe_shim.py`,
+  `moe_gemm_2stage_xrows.py`, `flydsl_moe_route.py`). Apply AFTER the base applyback, same env-gating + GRAPH
+  mode; it is the realized form of the "secondary follow-up (in-kernel gather / un-expanded X / fused silu)"
+  noted under the ROOT-CAUSE-FIXED entry above. PARITY-safe; still gate e2e + GSM8K as usual.

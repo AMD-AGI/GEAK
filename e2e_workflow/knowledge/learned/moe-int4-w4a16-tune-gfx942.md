@@ -2,8 +2,8 @@
 key: int4_w4a16 fused-MoE grouped GEMM · gfx942/MI300X · vLLM
 type: lever
 confidence: ★★★
-effect: per-shape Triton config tune (winner_kind=env, ZERO HBM) → +11-18% e2e VERIFIED (iso ~1.25-1.7×); 13 re-confirms on Kimi-K2.6 (TP=8 N=256 and TP=4 N=512; isl/osl/conc=8192/1024/64)
-last_seen: 2026-06-28
+effect: per-shape Triton config tune (winner_kind=env, ZERO HBM) → +11-18% e2e VERIFIED (iso ~1.25-1.7×); 14 re-confirms on Kimi-K2.6 (TP=8 N=256 and TP=4 N=512; isl/osl/conc=8192/1024/64)
+last_seen: 2026-06-29
 ---
 # int4 W4A16 fused-MoE grouped GEMM head → the memory-free vLLM config-tune lever
 - lever (try FIRST on an int4 MoE model): vLLM ships NO tuned Triton config for an unseen
@@ -91,3 +91,9 @@ last_seen: 2026-06-28
   15362 ~1.0× — Triton JIT warms the default-tile baseline) — trust the per-bucket subprocess sweep, exactly
   the documented caution. Also emitted FlyDSL author_plan FIRST (apply_flydsl_moe_to_vllm skill validated
   +63-77% e2e) as the bigger-headroom Tier-C candidate alongside this env win.
+- source: 2026-06-29 re-derive on Kimi-K2.6 at **TP=4** (eval e2e_..._20260629T100727Z; lookup N=512). Per-bucket
+  subprocess sweep iso M=16384 1.713× / M=8192 1.658× / M=4096 1.580×, M=32 1.254×, decode no-regress M=1 1.105× /
+  M=64 1.091×, all buckets rel_err≤1e-2 (default kept where no win). 13/13 buckets written; engagement self-verified
+  (get_moe_configs loads 13 M-keys from VLLM_TUNED_CONFIG_FOLDER). 14th confirm (e2e gate pending Integrator).
+  best_known_ms (M8192 tuned)=8.23ms. flydsl absent on image → flydsl skills inert; triton route=rewrite of live
+  invoke_fused_moe_wna16_triton_kernel.
