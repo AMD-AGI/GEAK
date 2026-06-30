@@ -134,6 +134,11 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # A/B — e.g. 1 repeat per leg is enough to PROVE both legs ran). General.
     if h.get("e2e_repeats") is not None:
         ps_args["e2e_repeats"] = int(h["e2e_repeats"])
+    # Optional free-text steering hint forwarded to the workflow's System Architect
+    # (Strategize) + optimize-phase prompts via A.task. General, default-off: e.g.
+    # "only optimize compiled-source/HIP kernels; skip Triton/.py". Omitted => no hint.
+    if h.get("task"):
+        ps_args["task"] = str(h["task"])
     # Carried cross-phase state (the prior workflow return's `state`), so a
     # resume continues from where a previous phase invocation left off.
     if h.get("state"):
