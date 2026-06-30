@@ -59,10 +59,14 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `GPU_ID`, `WORKLOAD`,
 (default 0.5), `E2E_REPEATS` (default 7; repeats per leg of the interleaved A/B),
 `KERNEL_RESULT` (task_dir, source_path_in_sglang, target_callable, final_patch.diff,
 verified_isolated_speedup, pct_gpu_time; for a HEAD-op winner also: `op_kind`, `winner_kind`
-∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`;
-`apply_kind` ∈ {python (default), native} — when `native`, a `patch` is deployed via the NATIVE patch
-path (in-place recompile through `overlay_setup.py add-native`) instead of a PYTHONPATH overlay),
+∈ {env,flag,patch}, `apply_env`, `apply_flags`, `code_patch`, `tuning_artifact`, `parity_note`),
 `CURRENT_OVERLAY`, `CURRENT_FLAGS`/`CURRENT_ENV`, `CURRENT_THROUGHPUT`, `SKILL_DIR`.
+
+There is no `apply_kind` axis. The deploy mechanism for a `patch` is derived from the patch
+content itself: a hunk touching a `.py` file deploys as a PYTHONPATH overlay (reversible, add-module);
+a hunk touching a compiled-source file (`.cu/.cuh/.hip/.cpp/.cc/.cxx/.c/.cl`) deploys via the NATIVE
+path (in-place recompile through `overlay_setup.py add-native`). One winner's patch may contain both,
+in which case each hunk routes by its own suffix — the modes compose, they are not exclusive.
 
 **ACCURACY GATE (only if `ACCURACY_GATE=gsm8k` is in your inputs; else use the normal parity gate).**
 For a QUANTIZED kernel, byte-exact greedy parity is the WRONG bar (a within-tolerance kernel rounds
@@ -128,8 +132,8 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
 
    - **NATIVE patch (a compiled-source kernel: `.cu/.cuh/.hip/.cpp/.cc/.cxx/.c/.h/.hpp`).** A PYTHONPATH
      overlay can shadow a `.py` but NOT a compiled kernel — the change only takes effect after the package's
-     `.so`/code-object is **recompiled** in place. Detect this case from the patch: if `code_patch`/`final_patch`
-     touches any compiled-suffix file, OR `KERNEL_RESULT.apply_kind=="native"`, use this path instead of
+     `.so`/code-object is **recompiled** in place. Detect this case from the patch alone: if a
+     `code_patch`/`final_patch` hunk touches any compiled-suffix file, that hunk uses this path instead of
      `add-module`. It is general (any framework / build system) and never invents a build command — you
      DISCOVER the install's own incremental build the same way the benchmark_engineer does, then hand it to
      `add-native`. Steps:
@@ -169,15 +173,29 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
         (`OVERLAY_PYTHONPATH="$CURRENT_OVERLAY"` — the native change is already live in the install; any prior
         accepted `.py` overlays stay active). For a MIXED patch (.py + native in one winner), also `add-module`
         the `.py` parts into `$CAND` and run the CAND leg with `OVERLAY_PYTHONPATH="$CAND"`.
-     5. **ALWAYS revert (do-no-harm + crash-safe).** Wrap the CAND measurement so that on EVERY exit path
-        (accept / reject / crash / timeout) you run `python3 "$SKILL_DIR/scripts/overlay_setup.py" revert
-        --overlay "$CAND"` to restore the install byte-exact, then assert the install is clean
-        (`git -C <pkg> status --porcelain` empty). At session start the runner also calls
-        `overlay_setup.py gc-stale --root "$EVAL_DIR"` to clean any native overlay a crashed prior run left
-        applied. **Serialize**: never run two native A/Bs against the same install concurrently (the e2e gate
-        already leases all GPUs, so this holds by construction; do not parallelize native integrate legs).
-        The graph-capture-safety + memory-footprint gates below apply to native kernels exactly as to authored
-        ones.
+     5. **Native wins COMPOUND — keep on accept, revert only on reject/crash.** Native is just another
+        accepted-overlay layer; it must stack with prior wins (Triton/`.py` overlays AND earlier native
+        wins) exactly like the PYTHONPATH overlay does — do NOT revert an accepted native change between
+        kernels, or the run can only ever bank one native kernel. Concretely, keep TWO native overlays:
+        - a **cumulative** `$EVAL_DIR/overlay/native_accepted` (all ACCEPTED native changes; its manifest
+          accumulates) — this stays APPLIED in the install across the whole run, so every later REF leg
+          already includes it and later CAND legs stack on top.
+        - a **candidate** `$CAND_NATIVE` for the change under test (apply with `add-native --overlay
+          "$CAND_NATIVE"`).
+        On the gate outcome:
+        - **reject / crash / timeout** → `revert --overlay "$CAND_NATIVE"` (restore byte-exact), assert the
+          install matches the cumulative state (only `native_accepted` changes remain).
+        - **accept** → DO NOT revert; fold the candidate into `native_accepted` (re-apply it against that
+          overlay so its manifest records the source+artifact backups), leaving it live for subsequent
+          kernels. Carry `native_accepted` forward alongside `CURRENT_OVERLAY` (the `.py` overlay), just like
+          accepted flags/env.
+        Crash-safety: every applied change is in a manifest before it mutates the install, so
+        `overlay_setup.py gc-stale --root "$EVAL_DIR"` (run at session start) restores a crashed run's
+        install. The install is only fully reverted to pristine at **Finalize**, AFTER the bundle has
+        captured the rebuilt artifacts + a re-apply recipe (do-no-harm to the box). **Serialize**: never run
+        two native A/Bs against the same install concurrently (the e2e gate already leases all GPUs, so this
+        holds; do not parallelize native integrate legs). The graph-capture-safety + memory-footprint gates
+        below apply to native kernels exactly as to authored ones.
    - **authored** (a from-scratch NEW implementation written by the kernel layer's author mode — there
      is NO installed source file to patch; instead we REBIND the op's call site to the new kernel):
      the authored implementation + its final patch live under
@@ -338,12 +356,21 @@ Return JSON:
 Inputs: `EVAL_DIR`, the final accepted overlay, accepted config (flags/env), all accepted kernel
 patches, `BASELINE_THROUGHPUT`, `SKILL_DIR`.
 
-1. Assemble the deliverable bundle in `EVAL_DIR/final/`: the accepted overlay dir, a concatenated
-   `final_patch.diff` (all accepted kernel patches), and a `final_launch.sh` that reproduces the
-   optimized server (sets `BACKEND=<backend>`, `PYTHONPATH=<overlay>`, the accepted flags/env, and runs
-   the bench via bench_e2e.sh + its adapter). This is the spec deliverable: "complete patch + launch/benchmark script".
+1. Assemble the deliverable bundle in `EVAL_DIR/final/`: the accepted Python overlay dir, a concatenated
+   `final_patch.diff` (all accepted kernel patches — `.py` AND native), and a `final_launch.sh` that
+   reproduces the optimized server. The bundle must carry BOTH modes the run banked:
+   - **Python/Triton wins** → `PYTHONPATH=<overlay>` in `final_launch.sh` (as before).
+   - **Native (.cu/.hip/CK) wins** → copy the cumulative `native_accepted` overlay (its manifest + source
+     backups + rebuilt artifacts) into `EVAL_DIR/final/native/`, and have `final_launch.sh` **re-apply
+     native before serving** (`overlay_setup.py add-native ... --build-cmd <discovered>` per recorded entry,
+     OR drop the captured rebuilt artifacts into the install) so a fresh checkout reproduces the compiled
+     change. Both modes compose — a run that banked, say, a Triton norm + a native GEMM ships both.
 2. Do a final warm-server bench of the assembled bundle to confirm the combined result matches the
-   sum of accepted milestones (combined effects can interact). Record it.
+   sum of accepted milestones (Python + native effects can interact). Record it.
+3. **Restore the box** (do-no-harm): after the bundle has captured the native artifacts/recipe, revert the
+   install to pristine — `overlay_setup.py revert --overlay "$EVAL_DIR/overlay/native_accepted"` — and
+   assert `git -C <pkg> status --porcelain` is empty. The deliverable bundle (not a mutated site-packages)
+   is the artifact; the user re-applies via `final_launch.sh`.
 
 Return JSON:
 ```json

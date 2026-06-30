@@ -41,11 +41,14 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
      (`.cu/.cuh/.hip/.cpp/.cc/.cxx/.c/.h/.hpp`) that lives in a REBUILDABLE source tree (the install ships
      the source + a discoverable build seam: a `config.yaml compile_command` / `task_runner.py` / `Makefile`
      / `build.sh` / `build.ninja`/CMake `build/` / a torch `cpp_extension.load(name=…)` driver / an aiter
-     cpp_itfs `MD_NAME` driver up-tree), report `editable=true` and `apply_kind:"native"` with
-     `target_callable:""` (the kernel layer authors a native diff; the e2e Integrator deploys it via the
-     NATIVE patch path — in-place recompile through `overlay_setup.py add-native`). Only report
-     `editable=false` for a truly OPAQUE prebuilt library with no shipped source (e.g. closed hipBLASLt) or a
-     read-only install. Default `apply_kind:"python"` for Triton/`.py` kernels (existing behavior — unchanged).
+     cpp_itfs `MD_NAME` driver up-tree), report `editable=true` with `target_callable:""` and route to the
+     kernel layer with `target_language` ∈ {hip, ck} (the kernel layer authors a native diff against the
+     compiled source). The deploy mechanism is NOT decided here — the e2e Integrator derives it from the
+     resulting patch: any hunk touching a compiled-suffix file is deployed via the NATIVE patch path
+     (in-place recompile through `overlay_setup.py add-native`); `.py` hunks deploy as a PYTHONPATH overlay.
+     Only report `editable=false` for a truly OPAQUE prebuilt library with no shipped source (e.g. closed
+     hipBLASLt) or a read-only install. Triton/`.py` kernels remain `editable=true` with their usual
+     `target_language` (existing behavior — unchanged).
 2. **Capture shapes + oracle** from a live server using `scripts/capture_shapes.py` via a temporary
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash

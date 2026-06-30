@@ -367,7 +367,6 @@ const EXTRACT_OP_SCHEMA = obj({
   dtype: { type: 'string' }, synthesized: { type: 'boolean' }, regimes_captured: arrStr,
   candidate_backends: arrStr, reference_io_sha256: { type: 'string' },
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
-  apply_kind: { type: 'string' }, // 'python' (default) | 'native' (compiled-source kernel -> add-native in-place recompile)
   smoke: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
@@ -388,7 +387,6 @@ const EXTRACT_SCHEMA = obj({
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
   build: { type: 'boolean' }, unittest_smoke: { type: 'string' },
-  apply_kind: { type: 'string' }, // 'python' (default) | 'native'
   reference_io_sha256: { type: 'string' }, notes: { type: 'string' },
 }, ['editable', 'task_dir', 'unittest_smoke']);
 
@@ -1603,7 +1601,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       KERNEL_RESULT: { short_name: h.short_name, task_dir: ext.task_dir, op_kind: ext.op_kind,
         winner_kind: cand.winner_kind, winner_backend: cand.source,
         target_callable: ext.target_callable || h.target_callable || '',
-        apply_kind: ext.apply_kind || 'python',
         authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
         apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
         code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
@@ -1808,7 +1805,6 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND, E2E_REPEATS,
       KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
         source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
-        apply_kind: ext.apply_kind || 'python',
         final_patch: kl.final_patch, verified_isolated_speedup: kl.final_geomean, pct_gpu_time: c.pct_gpu_time },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,

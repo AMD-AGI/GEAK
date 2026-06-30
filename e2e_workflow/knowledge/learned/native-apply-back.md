@@ -13,10 +13,12 @@ last_seen: 2026-06-29
   place. So a `.cu/.hip/.cpp/CK` winner that passes the isolated oracle is otherwise rejected
   `no_rebind_seam`/`editable=false` and never reaches e2e. HL's `apply_kernel_patch` handles this but with
   hardcoded framework paths + whole-package `pip install -e .`; we do it general + incremental instead.
-- detection: a winner is NATIVE if `KERNEL_RESULT.apply_kind=="native"` OR the `code_patch`/`final_patch`
-  touches a compiled suffix `{.cu .cuh .hip .cpp .cc .cxx .c .h .hpp}`. kernel_extractor reports
-  `editable=true, apply_kind:"native"` for an op that resolves to a rebuildable native source (source +
-  a discoverable build seam shipped in the install); `editable=false` only for opaque prebuilt libs / read-only.
+- detection: there is NO `apply_kind` axis — the deploy mechanism is derived per-hunk from the patch
+  content. A hunk is NATIVE if it touches a compiled suffix `{.cu .cuh .hip .cpp .cc .cxx .c .h .hpp}`;
+  a `.py` hunk deploys as a PYTHONPATH overlay. One winner's patch may carry both → each hunk routes by
+  its own suffix; the modes compose, they are not exclusive. kernel_extractor reports `editable=true`
+  (with `target_language` hip/ck) for an op that resolves to a rebuildable native source (source + a
+  discoverable build seam shipped in the install); `editable=false` only for opaque prebuilt libs / read-only.
 - apply: framework-agnostic plumbing lives in `scripts/overlay_setup.py` (`add-native` / `verify-native` /
   `revert` / `gc-stale`); it NEVER invents a build command — the integrator DISCOVERS the install's own
   incremental build (the same way benchmark_engineer does) and passes it via `--build-cmd`/`--invalidate-cache`.
