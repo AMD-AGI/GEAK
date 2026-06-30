@@ -24,6 +24,7 @@ Confidence (a hint strength, not authority): ★ noise/unverified · ★★ sing
 - [gfx942 · prefill-dominated hybrid] stack-and-compound cluster; Amdahl pre-dispatch screen ★★★ — (editable-triton-cluster-amdahl.md)
 
 ## method (cross-model, applies to any run)
+- resolve live kernel + dispatch seam (no guessing/hardcode; classify trace→walk live source→throwaway probe; closed-lib→tune not author) ★★★ — (method-resolve-live-seam.md)
 - engagement verification: one-shot stderr banner + log grep ★★★ — (method-verify-engagement.md)
 - e2e A/B: pinned port, interleaved, non-overlap gate ★★★ — (method-e2e-ab-harness.md)
 - cuda/HIP-graph-safe integration (the #1 e2e killer) ★★★ — (method-cudagraph-safe-integration.md)

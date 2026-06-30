@@ -36,7 +36,11 @@ file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_FLAGS`/`CURRENT_
    (`python3 -c "import sglang,os;print(os.path.dirname(sglang.__file__))"`, then grep the
    `short_name` / the `module:attr` target). Confirm it's truly editable (Triton/custom/aiter) — if
    it resolves to a library GEMM/attention, STOP and report `editable=false` (it belongs to the
-   Config Tuner, not here).
+   Config Tuner, not here). **Editability is decided by the kernel the profile shows ACTUALLY ran on the
+   live path — not by the op type or a hint** — resolve + confirm the live seam per
+   `SKILL_DIR/knowledge/learned/method-resolve-live-seam.md` (classify the GPU kernel's backend family
+   from the trace, walk the live dispatch source under the server's env/shapes, confirm with a temporary
+   throwaway `[seam-probe]` passthrough). A `Cijk_*`/Tensile/hipBLASLt leaf is CLOSED → `editable=false`.
    - **Native (compiled-source) kernels ARE editable.** If the op resolves to a COMPILED source file
      (`.cu/.cuh/.hip/.cpp/.cc/.cxx/.c/.h/.hpp`) that lives in a REBUILDABLE source tree (the install ships
      the source + a discoverable build seam: a `config.yaml compile_command` / `task_runner.py` / `Makefile`
@@ -193,14 +197,31 @@ force real compact-operand compute:
 5. Finalize `meta.json` with the `reference_io_sha256` (when an oracle file exists) and smoke-test
    `op_bench.py --task <dir> --backends hipblaslt --repeats 5` (gemm) so the harness is proven before
    the bake-off.
-6. **Report a `target_callable` rebind seam** (`module:attr`) — this is where the e2e Integrator rebinds
-   the op's call site to an AUTHORED kernel. **For dense GEMM on sglang/gfx942 there IS a clean seam:
-   the live path goes through aiter's `aiter.tuned_gemm:gemm_a16w16` (and `aiter.tuned_gemm.tgemm.mm`),
-   not raw `F.linear`** — so return `target_callable="aiter.tuned_gemm:gemm_a16w16"` (or the specific
-   sglang Linear method that calls it, whichever the Integrator can monkeypatch cleanly). Confirm by
-   grepping the server for `tuned_gemm`/`gemm_a16w16` on the live path. For attention, the seam is the
-   backend forward you captured. Only return `target_callable=""` if no Python seam genuinely exists
-   (then an authored kernel can't be wired and a direct_light env winner still applies).
+6. **Report a `target_callable` rebind seam** (`module:attr`) — where the e2e Integrator rebinds the
+   op's call site to an AUTHORED kernel. **Resolve this seam, never guess it** — follow
+   `SKILL_DIR/knowledge/learned/method-resolve-live-seam.md` (the full framework-agnostic procedure).
+   In short: (1) classify the profiled GPU kernel's backend FAMILY from its trace name + owning `.so`
+   (Tensile/`Cijk_*`/`librocblas`/`libhipblaslt` = CLOSED; `triton_*`/`*_fwd_kernel` = editable `.py`;
+   `ck_*` = CK; compiled `.so` op = native-if-source-ships); (2) map it back to the launching Python
+   frame by reading the **live installed** dispatch source (the registered op / Linear.forward / the
+   attention forward — resolved by `import pkg; os.path.dirname` + grep, NOT from memory), evaluating
+   each branch against the **server's live env/flags** and the **captured shapes**; (3) CONFIRM with a
+   **temporary throwaway probe** — `setattr` a one-shot `[seam-probe] <module:attr> HIT` passthrough on
+   the resolved callable, run the same workload a few seconds, grep the log: ≥1 hit/worker → confirmed;
+   0 hits but the GPU kernel still appears → wrong seam, re-resolve (do NOT report it). The probe names
+   no backend and is deleted after.
+   - **If the resolved leaf is a CLOSED library** (Tensile/hipBLASLt/rocBLAS — the common dense-GEMM
+     case; the `Cijk_*` kernels are hipBLASLt) → there is NO authorable python/source seam. Report
+     `editable=false`, `target_callable=""` → it belongs to the **Config Tuner** (per-shape tuning DB,
+     or a flag/backend swap), not the kernel author. Do NOT return a plausible aiter/triton symbol you
+     did not confirm fires — that is exactly the 0-engagement reject this guards against.
+   - **If a flag re-routes the same op to an editable backend**, report it as a CONFIG lever (the flag
+     to flip) plus the seam it then exposes — but only after confirming (step 3) the flag's predicate
+     actually accepts THIS model's shapes; many such flags are shape-whitelisted.
+   - When decode and prefill take different branches/leaves, prefer the **nearest common chokepoint**
+     (op entry) the Integrator can patch with shape-gated fall-through, not a single leaf. For attention,
+     the seam is the backend forward you captured (confirm with the same probe). Only return
+     `target_callable=""` when no python seam genuinely exists.
 
 > **Shapes must be the REAL ones the server issues — and they MUST span BOTH regimes.** A head GEMM
 > serves many M buckets: the **decode** regime at small M = the steady-state running batch (M ≈ `WORKLOAD.conc`,

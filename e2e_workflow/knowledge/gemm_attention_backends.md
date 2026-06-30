@@ -10,12 +10,24 @@ backends) **the kernel code itself** — cheapest first.
 > Why this exists: e2e is Amdahl-dominated. A GEMM at ~78% of GPU time only needs **1.15x** to give
 > ~+10% e2e. That is a far better bet than a 1.3x on a 2% kernel. Spend budget on the head first.
 
-> **On sglang/gfx942, dense-GEMM Tier-B = aiter's per-shape DB; Tier-C = an authored Triton GEMM.**
-> The live dense-GEMM path is aiter `tuned_gemm.py` (seam `aiter.tuned_gemm:gemm_a16w16`). Tune it via
-> `AITER_TUNE_GEMM=1` capture → `gradlib/gemm_tuner.py` → deploy `AITER_CONFIG_GEMM_BF16`, and verify
-> engagement with `AITER_LOG_TUNED_CONFIG=1`. Full recipe: **`gemm_tuning/aiter_gemm_tuning.md`**. (TunableOp /
-> `HIPBLASLT_TUNING_FILE` hook the PyTorch dispatch, which this live path does not use — so they are not
-> the GEMM lever here; tune aiter / author Triton instead.)
+> **RESOLVE the live dense-GEMM path before picking a lever — it differs by framework/gfx/model and
+> must NOT be assumed.** Follow `learned/method-resolve-live-seam.md`: classify the profiled GEMM
+> kernel's backend family from the trace + owning `.so`, then walk the live dispatch source under the
+> server's env + captured shapes, and confirm with a throwaway `[seam-probe]`. Only then choose the lever.
+> - **Closed library leaf** (`Cijk_*`/Tensile → hipBLASLt/rocBLAS; the common large-M dense case) →
+>   Tier-B tuning ONLY; there is no authorable source seam. Tune the actual library: hipBLASLt solution
+>   sweep / `HIPBLASLT_TUNING_FILE` / TunableOp **if** the live path goes through the PyTorch dispatch,
+>   else the backend's own tuner.
+> - **aiter `tuned_gemm.py` leaf** (observed on sglang/gfx942; seam `aiter.tuned_gemm:gemm_a16w16`) →
+>   Tier-B = `AITER_TUNE_GEMM=1` capture → `gradlib/gemm_tuner.py` → deploy `AITER_CONFIG_GEMM_BF16`,
+>   verify with `AITER_LOG_TUNED_CONFIG=1` (recipe: `gemm_tuning/aiter_gemm_tuning.md`); Tier-C = author
+>   a Triton GEMM bound to that confirmed seam. **This is an EXAMPLE of one resolved path, not the
+>   default** — on vLLM the dense GEMM dispatches through `torch.ops.vllm.rocm_unquantized_gemm` whose
+>   branches may be hipBLASLt (closed), `aiter.ops.triton.gemm_a16w16` (a DIFFERENT module, shape-gated),
+>   or skinny C++ ops; resolve which one fires for YOUR shapes.
+> - **Editable Triton/CK leaf** → Tier-C authored rewrite bound to the confirmed seam (or Tier-B
+>   autotune within it). A flag that re-routes a closed op to an editable backend is a Tier-A/CONFIG
+>   lever — but only if its predicate accepts this model's shapes (verify, don't assume).
 
 ## The ladder (cheapest-first; each rung gated by the immutable oracle + e2e Amdahl + parity)
 
