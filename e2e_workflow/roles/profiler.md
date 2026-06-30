@@ -10,7 +10,15 @@ classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profile
 
 ## Discipline (a bad trace misroutes the whole run)
 - Profile with the EXACT ISL/OSL/concurrency as the throughput bench, AFTER warmup.
-- Bounded window (`--profile-num-steps`, default 5) so the trace stays parseable.
+- **Capture the STEADY-STATE MIX, not a cold prefill burst.** `bench_e2e.sh` (PROFILE=1) now warms a
+  saturated load and captures a mid-stream window (`adapter_profile_window`), so the trace contains
+  prefill chunks AND decode steps interleaved as the scheduler really runs them. A cold burst profiled
+  from step 0 only sees the prefill ramp (TTFT) and misses decode — if your trace has ONLY large-M
+  prefill shapes and no decode-batch entries, it was captured wrong; re-profile. Note that decode often
+  runs under a CUDA/HIP graph, so its kernels may appear WITHOUT `Input Dims` (shape-hidden); that is
+  expected — decode shapes are recovered downstream from config (decode batch = concurrency), not the
+  trace. Tune the window via `PROFILE_NUM_STEPS` / `PROFILE_WARMUP_SEC` / `PROFILE_NUM_PROMPTS`.
+- Bounded window (`--profile-num-steps`, default 40) so the trace stays parseable but spans into decode.
 - `total_gpu_time_ms` is summed kernel duration in the window — use it for RELATIVE %gpu ranking, not
   as the throughput number (that's the Director's bench).
 - Prefer BOTH sources when available: rocprofv3 gives authoritative HW durations, the torch trace

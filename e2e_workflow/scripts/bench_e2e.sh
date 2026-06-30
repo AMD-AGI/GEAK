@@ -19,7 +19,13 @@
 #   adapter_bench  NUMP MAXC PROF   -> run ONE bench (random ISL/OSL), append a result JSON line to
 #                                      $RESULT_JSONL with canonical keys (output_throughput,
 #                                      median_ttft_ms, median_tpot_ms). PROF=1 => also emit a trace
-#                                      into $PROFILE_DIR.
+#                                      into $PROFILE_DIR. Honors optional REQUEST_RATE (req/s; empty=inf)
+#                                      to stagger arrivals.
+#   adapter_profile_window          -> OPTIONAL. Capture a profiler window (PROFILE_NUM_STEPS steps,
+#                                      record_shapes) on the ALREADY-RUNNING, warm, mid-load server, so
+#                                      the trace is the real steady-state prefill+decode MIX rather than
+#                                      a cold prefill ramp. If undefined, the PROFILE step falls back to
+#                                      a (less faithful) saturated PROF=1 bench.
 #
 # KEY OUTPUTS (written to $OUT_DIR):
 #   bench_runs.jsonl       one bench result object per repeat
@@ -204,7 +210,20 @@ fi
 # ---- modes ----
 REUSE_SERVER=${REUSE_SERVER:-0}       # 1 = a warm server is already up at HOST:PORT; don't launch/kill
 PROFILE=${PROFILE:-0}                 # 1 = also capture a profiler trace
-PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-5}
+# Profiling is meant to capture the REAL continuous-batching steady state — prefill chunks and decode
+# steps interleaved as the scheduler actually runs them — NOT a cold prefill burst. So we profile a
+# WINDOW in the middle of a sustained, saturated load (see the PROFILE block below). Tunables:
+PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS:-40}   # forward steps to capture. 5 couldn't even clear prefill
+                                             # (prefill ~ceil(tot_in/chunk) steps); ~40 spans into the
+                                             # mixed decode steady state. Decode is steady so a few tens
+                                             # is plenty; >100 just bloats the trace.
+PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-15} # let the load pass the initial synchronized prefill ramp
+                                             # (≈TTFT) so the profiled window lands in the real mix.
+PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}  # >CONC so the queue stays full and short
+                                             # (range-ratio>0) requests get replaced -> phases de-sync.
+PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}            # optional req/s to stagger arrivals; empty
+                                             # = inf (max_concurrency still caps in-flight at CONC).
+PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}     # max wait for the trace file to appear.
 OUT_DIR=${OUT_DIR:-$(pwd)/e2e_bench_out}
 LOG=${LOG:-$OUT_DIR/server.log}
 
@@ -217,6 +236,7 @@ RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 # export everything the adapter reads
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
+export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
 export BENCH_TRUST_REMOTE_CODE HF_HUB_TRUST_REMOTE_CODE
 
@@ -290,11 +310,39 @@ for r in $(seq 1 "$REPEATS"); do
   adapter_bench "$NUM_PROMPTS" "$CONC" 0 || echo "!!! bench repeat $r failed (continuing)"
 done
 
-# ---- optional profile trace ----
+# ---- optional profile trace (STEADY-STATE MIX, not a cold prefill burst) ----
+# Real serving is continuous batching: at any instant some sequences are prefilling (chunks) and others
+# decoding, interleaved by the scheduler. A cold burst profiled from step 0 captures only the prefill
+# ramp (TTFT) and misses decode entirely (see knowledge/profile_parse.md). So we instead drive a
+# sustained, saturated load and profile a WINDOW once it has reached the mixed steady state.
 if [ "$PROFILE" = "1" ]; then
-  echo ">>> Profiling bench ($PROFILE_NUM_STEPS steps) ..."
   mkdir -p "$PROFILE_DIR"
-  adapter_bench "$CONC" "$CONC" 1 || echo "!!! profile run failed"
+  if declare -F adapter_profile_window >/dev/null; then
+    echo ">>> Profiling steady-state mix: warm ${PROFILE_WARMUP_SEC}s on a saturated load " \
+         "(${PROFILE_NUM_PROMPTS} prompts, conc ${CONC}${PROFILE_REQUEST_RATE:+, rate ${PROFILE_REQUEST_RATE}/s}), " \
+         "then capture ${PROFILE_NUM_STEPS} steps ..."
+    # Sustained background load (NOT timed, NOT profiled). Varied OSL (RANDOM_RANGE_RATIO>0) + more
+    # prompts than CONC means early finishers are replaced by fresh arrivals, so the in-flight
+    # sequences de-synchronize into a realistic prefill+decode mix.
+    REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
+      adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 0 >/dev/null 2>&1 &
+    _bg_load=$!
+    sleep "$PROFILE_WARMUP_SEC"
+    if kill -0 "$_bg_load" 2>/dev/null; then
+      adapter_profile_window || echo "!!! profile window failed"
+    else
+      echo "!!! background load exited before the profile window (load too short?) — falling back"
+      adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
+    fi
+    kill "$_bg_load" 2>/dev/null || true; wait "$_bg_load" 2>/dev/null || true
+  else
+    # Backend without an HTTP profiler hook: can't profile a mid-stream window, but at least avoid the
+    # pure cold burst — send more prompts so the queue stays full past the prefill ramp and the captured
+    # steps include some decode. (Still less faithful than the windowed path; note it.)
+    echo ">>> Profiling (no window hook for $BACKEND; ${PROFILE_NUM_PROMPTS} prompts, ${PROFILE_NUM_STEPS} steps) ..."
+    REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
+      adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
+  fi
   echo ">>> Trace(s) in $PROFILE_DIR"
 fi
 
