@@ -19,7 +19,7 @@ import litellm
 from tenacity import (
     before_sleep_log,
     retry,
-    retry_if_not_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -293,6 +293,64 @@ def _merge_completion_kwargs(
     return filtered
 
 
+# ---------------------------------------------------------------------------
+# Retry policy
+# ---------------------------------------------------------------------------
+#
+# The core42 SaFE proxy that fronts the gateway occasionally returns a 401 whose
+# body is ``Client is not connected to the query engine, you must call
+# connect()``. Despite the 401 status this is a *transient proxy-side* fault
+# (the proxy's upstream connection dropped mid-burst), not a credential failure:
+# the very next identical call succeeds. LiteLLM surfaces it as
+# ``litellm.exceptions.AuthenticationError`` — which, together with its parent
+# ``APIError``, sat in the no-retry exclusion list, so a single blip aborted the
+# whole optimization round. We special-case this signature so it is retried with
+# backoff, while a genuine bad-key 401 (any other AuthenticationError text)
+# stays fatal so we don't spin for minutes on an actually-invalid credential.
+
+_TRANSIENT_PROXY_AUTH_SIGNATURES: tuple[str, ...] = (
+    "not connected to the query engine",
+    "you must call connect",
+    "call connect()",
+)
+
+# Genuinely fatal — never worth a retry (mirrors the historical exclusion set,
+# minus AuthenticationError/APIError which are now decided by message below).
+_NO_RETRY_EXC: tuple[type[BaseException], ...] = (
+    litellm.exceptions.UnsupportedParamsError,
+    litellm.exceptions.NotFoundError,
+    litellm.exceptions.PermissionDeniedError,
+    litellm.exceptions.ContextWindowExceededError,
+    KeyboardInterrupt,
+)
+
+
+def _is_transient_proxy_auth_error(exc: BaseException) -> bool:
+    """True for the transient core42 proxy "query engine not connected" 401."""
+    if not isinstance(exc, litellm.exceptions.AuthenticationError):
+        return False
+    text = (getattr(exc, "message", "") or str(exc)).lower()
+    return any(sig in text for sig in _TRANSIENT_PROXY_AUTH_SIGNATURES)
+
+
+def should_retry_llm_error(exc: BaseException) -> bool:
+    """Tenacity predicate: retry transient faults, abort on genuine ones.
+
+    Order matters — the transient proxy 401 is checked *before* the generic
+    auth/APIError exclusion so it is retried even though it is an
+    ``AuthenticationError`` (subclass of ``APIError``).
+    """
+    if _is_transient_proxy_auth_error(exc):
+        return True
+    if isinstance(exc, _NO_RETRY_EXC):
+        return False
+    # A real (non-transient) auth failure or any other APIError is fatal.
+    if isinstance(exc, (litellm.exceptions.AuthenticationError, litellm.exceptions.APIError)):
+        return False
+    # Everything else (timeouts, rate limits, transient network errors) → retry.
+    return True
+
+
 class LitellmModel:
     """Query models through LiteLLM with GEAK-compatible tool and cost accounting."""
 
@@ -330,17 +388,7 @@ class LitellmModel:
         stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "10"))),
         wait=wait_exponential(multiplier=1, min=4, max=60),
         before_sleep=before_sleep_log(logger, logging.WARNING),
-        retry=retry_if_not_exception_type(
-            (
-                litellm.exceptions.UnsupportedParamsError,
-                litellm.exceptions.NotFoundError,
-                litellm.exceptions.PermissionDeniedError,
-                litellm.exceptions.ContextWindowExceededError,
-                litellm.exceptions.APIError,
-                litellm.exceptions.AuthenticationError,
-                KeyboardInterrupt,
-            )
-        ),
+        retry=retry_if_exception(should_retry_llm_error),
     )
     def _query(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
         filtered = _merge_completion_kwargs(self.config, kwargs)

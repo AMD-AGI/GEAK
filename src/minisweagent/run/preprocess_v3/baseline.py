@@ -660,9 +660,20 @@ def _invoke_profiler_mcp(
         }
         if workdir is not None:
             kwargs["workdir"] = workdir
-        with ThreadPoolExecutor(max_workers=1) as pool:
+        # Do NOT use ``with ThreadPoolExecutor(...) as pool``: its ``__exit__``
+        # calls ``shutdown(wait=True)``, which JOINS the worker thread. When the
+        # profiler hangs (e.g. ROCprofiler-SDK / LD_PRELOAD contention on a busy
+        # host), ``future.result(timeout=...)`` raises on time but the implicit
+        # join then blocks forever on the still-running worker — defeating the
+        # timeout and starving the whole preprocess budget. Manage the pool
+        # explicitly and abandon the zombie thread with ``wait=False`` so the
+        # timeout is actually honored and we fall through to a profile-less run.
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
             future = pool.submit(profile_fn, **kwargs)
             return future.result(timeout=_PROFILE_TIMEOUT_S)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
     except FuturesTimeoutError:
         logger.warning("profiler-mcp timed out after %ds", _PROFILE_TIMEOUT_S)
         return None

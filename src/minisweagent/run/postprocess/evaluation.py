@@ -749,28 +749,39 @@ def run_correctness_and_benchmark(
         logger.warning("No CORRECTNESS commands found in COMMANDMENT")
 
     # --- GEAK_VERIFY_IN_LOOP: trust the in-loop full-set verified benchmark ---
-    # When the subagent's `--benchmark` already runs the FULL weighted shape set
-    # and emits GEAK_RESULT_SPEEDUP (see kernel_languages/contract.py +
-    # subagents/preprocess/harness-generator/SUBAGENT.yaml), the post-round
-    # FULL_BENCHMARK below is a redundant re-timing that ALSO times out on heavy
-    # CK/.cu rebuilds (GEAK_BENCH_TIMEOUT). Skip the FB subprocess, but KEEP the
-    # clean-worktree CORRECTNESS above — it is the only worktree-bypass guard
-    # (see contract.py "always ~1.00x" note). Adopt the already-trusted in-loop
-    # speedup as the verified value so select_best_verified_round_evaluation can
-    # rank it. Default-off => byte-identical to current behaviour.
-    if os.environ.get("GEAK_VERIFY_IN_LOOP", "").strip() == "1":
+    # The subagent's `--benchmark` runs the SAME full config set as
+    # `--full-benchmark` (the harness contract — see SUBAGENT.yaml + contract.py;
+    # `_cap(ALL_CONFIGS)`, uncapped under GEAK_MAX_BENCHMARK_SHAPES=0), and emits
+    # GEAK_RESULT_SPEEDUP. So the post-round FULL_BENCHMARK below is a redundant
+    # re-timing of the identical shapes that also times out on heavy CK/.cu
+    # rebuilds (GEAK_BENCH_TIMEOUT). Adopt the already-trusted in-loop speedup as
+    # the verified value (so select_best_verified_round_evaluation can rank it)
+    # and skip the FB subprocess — while KEEPING the clean-worktree CORRECTNESS
+    # above, the only worktree-bypass guard (see contract.py "always ~1.00x").
+    #
+    # DEFAULT-ON: since `--benchmark == --full-benchmark` by contract, re-running
+    # FB measures nothing new. Opt back in to the separate FB pass with
+    # GEAK_VERIFY_IN_LOOP=0. The downstream HL paired same-config A/B remains the
+    # real E2E arbiter regardless, so even an optimistic micro number is caught
+    # there (NEEDS_REVIEW / no promotion) rather than silently shipped.
+    #
+    # Guard: only adopt-and-skip when we actually have a usable in-loop number.
+    # If the in-loop benchmark produced no GEAK_RESULT_SPEEDUP, fall through and
+    # run the post-round FULL_BENCHMARK so the round can still earn a value.
+    _verify_in_loop = os.environ.get("GEAK_VERIFY_IN_LOOP", "1").strip().lower() not in ("0", "false", "no")
+    _in_loop_speedup = round_eval.get("benchmark_speedup")
+    if _verify_in_loop and isinstance(_in_loop_speedup, (int, float)):
         if round_eval.get("status") == "correctness_failed":
             return
-        in_loop = round_eval.get("benchmark_speedup")
         round_eval["full_benchmark"] = {
-            "verified_speedup": float(in_loop) if isinstance(in_loop, (int, float)) else None,
+            "verified_speedup": float(_in_loop_speedup),
             "candidate_ms": round_eval.get("candidate_shape_latency_ms"),
             "baseline_ms": round_eval.get("baseline_shape_latency_ms"),
             "success": True,
             "source": "in_loop_full_benchmark",
         }
         logger.info(
-            "GEAK_VERIFY_IN_LOOP=1: skipping redundant post-round FULL_BENCHMARK; "
+            "GEAK_VERIFY_IN_LOOP (default-on): skipping redundant post-round FULL_BENCHMARK; "
             "adopting in-loop full-set verified_speedup=%s "
             "(correctness re-checked in clean worktree above).",
             round_eval["full_benchmark"]["verified_speedup"],
