@@ -791,7 +791,17 @@ if (want('setup')) {
     { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
   kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
   headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
-  log(`Strategy: ${headQueue.length} head (GEMM/attn) candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
+  // A fused-MoE / grouped-expert GEMM STAYS in the head-kernel sequence (if its pct earns it — same
+  // Amdahl priority/budget as any head op), but it must NOT be decomposed into a dense-GEMM optimization:
+  // its ragged per-expert M + token routing make a dense A·Bᵀ bake-off the wrong target and the wrong
+  // rebind seam. Force its op_kind to `moe` so the head track takes the grouped-GEMM branch
+  // (extract editable source + optimize as `fused_moe_grouped_gemm`) instead of `extract_op` dense synth.
+  const _isMoe = (c) => /(?:^|[^a-z])moe(?:[^a-z]|$)|grouped_gemm|group_gemm|ck_moe|expert/i
+    .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''}`);
+  let _moeTagged = 0;
+  for (const c of headQueue) { if (_isMoe(c) && c.op_kind !== 'moe') { c.op_kind = 'moe'; _moeTagged++; } }
+  if (_moeTagged) log(`[route-guard] ${_moeTagged} fused-MoE/grouped head op(s) kept in the head track but tagged op_kind=moe (grouped-GEMM branch, never dense-GEMM).`);
+  log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
 } else {
   // Load carried state from a prior phase invocation (args.state).
   EVAL_DIR = ST.eval_dir || EVAL_DIR_OVERRIDE;

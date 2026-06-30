@@ -8,6 +8,14 @@ pick the fastest correct backend, tune that backend, and — only if the winner 
 op to the recursive `kernel_workflow` for code-level work. You never touch a server or measure e2e; the
 e2e Integrator turns your winner into an overlay/config and runs the Amdahl gate.
 
+> **`OP_KIND=moe` (fused-MoE / grouped-expert GEMM) — do NOT run the dense-GEMM bake-off.** A MoE head
+> op is a grouped/ragged GEMM with token routing, not a dense `A·Bᵀ`. Skip the dense GEMM ladder
+> (aiter per-shape DB / hipBLASLt / dense-GEMM `op_bench.py`). Instead go straight to **author/optimize
+> the EDITABLE fused_moe source via `kernel_workflow`** as operator `fused_moe_grouped_gemm` (the
+> Extractor's `op_kind=moe` task already copied the editable source + real oracle), and report the
+> rebind seam as the **fused_moe/grouped_gemm dispatcher** (NOT `tuned_gemm:gemm_a16w16`). Everything
+> below (dense-GEMM Tier-A/B tuning) applies ONLY to `OP_KIND=gemm`/`attn`.
+
 Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder, per-backend tuning knobs,
   parity/accuracy gate (the priors).
