@@ -141,6 +141,29 @@ per-(shape,dtype) weighted workload model — slice this kernel's cases into `wo
 > the live-captured `(M,N,K)`/dtype as authoritative whenever they disagree. Note any correction in
 > `notes`.
 
+### Resolve the ONLINE REGIME first (it decides the seam, the dtypes, and the baseline)
+The #1 cause of "isolated win, e2e loss" is testing in a regime the live server never uses. Before
+capturing anything, resolve the regime from the SERVER LAUNCH FLAGS + model config and write it into
+`meta.json` so every step (oracle, dtypes, baseline, weight attribution) matches online:
+```bash
+python3 "$SKILL_DIR/scripts/parse_regime.py" \
+  --server-args "$CURRENT_FLAGS" --model-config "$MODEL_PATH/config.json" \
+  --out "<task_dir>/regime.json"
+# then merge regime.json into meta.json under the "regime" key
+```
+Then HONOR it:
+- **Quantization** (`regime.quant`): pick the seam that is LIVE under this quant. If the server runs
+  `--quantization fp8`, the real GEMM seam is the fp8 path (Fp8LinearMethod / a8w8) — an UNQUANTIZED gemm
+  seam only serves lm_head/embeddings and must NOT be extracted as if it were hot (it will mis-attribute
+  GPU% and test a dead shape → e2e loss). Build operands in the quantized form (fp8 + scales), not bf16.
+- **KV cache** (`regime.kv_cache_dtype`): if `fp8`, capture the oracle and write the kernel against the
+  **fp8 KV layout/stride**. A bf16-hardcoded KV kernel reads fp8 bytes with the wrong stride → GPU fault
+  → engine crash. This is non-negotiable for attention.
+- **Compile** (`regime.compile`): if `torch_compile`, the perf BASELINE is the COMPILED/fused path, not
+  unfused eager — record the baseline against the fused path or the speedup is a strawman.
+`attribute_weights.py` re-reads `meta.regime` and will flag a `regime_warning` (e.g. seam <2% live GPU,
+fp8-KV, compiled-baseline) — if it warns, fix the extraction before proceeding.
+
 ### op task-dir contract (what op_bench.py + Op Benchmarker expect)
 ```
 <EVAL_DIR>/kernels/<short_name>_task/

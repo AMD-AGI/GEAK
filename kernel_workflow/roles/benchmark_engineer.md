@@ -32,6 +32,18 @@ one kernel is present, use it). Then:
   = caller-supplied. All cases still carry concrete `dims`+`dtypes` (from the spec/meta) — build inputs
   from those. A case with empty `dims` cannot be benchmarked: exclude it and say so in `notes`; never
   invent a shape.
+- **MATCH THE ONLINE REGIME (`spec.regime` + `spec.quant`) — this is what prevents "isolated win, e2e
+  loss".** The spec carries the regime resolved from the server launch flags:
+  - **Quant** (`spec.quant`): build operands in the quantized form the live kernel receives — e.g. a8w8
+    fp8: activations + weights `fp8_e4m3`, scales `fp32`, output `bf16`, per `weight_block_size`. Do NOT
+    benchmark an unquantized bf16 GEMM when the server runs fp8 (that seam is barely live online).
+  - **KV dtype** (`spec.regime.kv_cache_dtype`): if `fp8`, attention inputs/KV use the fp8 layout/stride.
+  - **Baseline must be IN-REGIME**: the speedup denominator is the live in-regime path — the quantized
+    library GEMM (hipBLASLt/Fp8LinearMethod), the fp8-KV attention, or the `torch.compile`-fused norm
+    when `spec.regime.compile == torch_compile`. NEVER an unquantized or unfused eager strawman.
+- **HEED `spec.regime_warning`.** If non-empty (seam <~2% live GPU, fp8-KV, or compiled-baseline), the
+  extraction is regime-mismatched — record it in `notes`, do NOT report a confident speedup, and prefer
+  failing loud over benchmarking a dead regime.
 - **CORRECTNESS IS DECOUPLED AND UNCHANGED.** Workload alignment shapes the PERFORMANCE measurement
   only. Correctness still runs against the IMMUTABLE frozen oracle (`unittest.py`/`reference_io.pt`) on
   its own recorded shapes — never re-weight, replace, or relax it. Random-valued workload-shape inputs

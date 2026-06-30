@@ -266,12 +266,18 @@ def main():
                          "this fraction of total weight, even if the profile under-captured it (e.g. a "
                          "prefill-only window). 0 (default) = faithful to the profile. For decode-"
                          "critical serving, set e.g. 0.3 so decode is never optimized away.")
+    ap.add_argument("--live-pct-min", type=float, default=2.0,
+                    help="if the matched seam's total %%GPU in the (online-captured) profile is below "
+                         "this, flag regime_warning: the seam is probably NOT the live kernel under the "
+                         "online regime (e.g. an unquantized GEMM that only serves lm_head when the "
+                         "server runs --quantization fp8). Default 2%%.")
     ap.add_argument("--out", required=True, help="output workload-v1 json")
     args = ap.parse_args()
 
     with open(args.meta) as fh:
         meta = json.load(fh)
     op_kind = (meta.get("op_kind") or "").lower()
+    regime = meta.get("regime") or {}      # written by the extractor from parse_regime.py
     name_match = args.name_match or _base_token(meta.get("short_name", ""))
     entries = load_profile_entries(args.profile_weights, name_match)
 
@@ -299,11 +305,23 @@ def main():
     for c in cases:
         c["weight_norm"] = round(c.get("weight", 0.0) / wsum, 6)
 
+    # ---- REGIME: dtype/quant for the cases + live-seam guard ----
+    quant = _quant_block(meta, regime)
+    for c in cases:                        # stamp quant onto each case so the harness builds the
+        c.setdefault("quant", quant)       # SAME operands online uses (fp8 + scales, not bf16)
+    # live %GPU of THIS seam under the online regime (profile was captured on the real server).
+    live_pct = round(sum(float(k.get("pct_gpu_time", 0.0)) for k in entries), 3)
+    regime_warning = _regime_warnings(regime, op_kind, entries, live_pct, args.live_pct_min, notes)
+
     out = {
         "schema": "workload-v1",
         "op_kind": op_kind,
         "kernel": meta.get("short_name", ""),
         "name_match": name_match,
+        "regime": regime,                  # quant / kv_cache_dtype / compile / attention_backend
+        "quant": quant,                    # per-operand dtypes + scales for THIS kernel
+        "live_pct_gpu": live_pct,          # this seam's share of GPU time under the online regime
+        "regime_warning": regime_warning,  # non-empty => seam/regime mismatch; don't trust the weight
         "num_cases": len(cases),
         "weights_provenance": _provenance(cases),
         "cases": cases,
@@ -356,6 +374,47 @@ def _apply_regime_floor(cases, floor, notes):
             if c.get("regime") in rest_regimes:
                 c["weight"] *= scale
     notes.append(f"applied --min-regime-share {floor}: floored regimes {floored}.")
+
+
+def _quant_block(meta, regime):
+    """Per-operand dtypes + quant so the harness builds the SAME inputs the live kernel sees.
+    meta (the captured/synthesized op) wins on operand specifics; regime fills gaps from launch flags."""
+    rq = (regime or {}).get("quant") or {}
+    return {
+        "scheme": meta.get("quant_scheme") or rq.get("method") or "none",
+        "weight_dtype": meta.get("dtype") or rq.get("weight_dtype") or "",
+        "act_dtype": rq.get("act_dtype") or meta.get("dtype") or "",
+        "out_dtype": meta.get("out_dtype") or "",
+        "weight_block_size": meta.get("weight_block_size") or rq.get("block_size"),
+        "scale_dtype": "float32",
+        "kv_cache_dtype": (regime or {}).get("kv_cache_dtype", ""),
+    }
+
+
+def _regime_warnings(regime, op_kind, entries, live_pct, live_pct_min, notes):
+    """Catch the 'isolated win, e2e loss' class BEFORE optimization. Returns a warning string ('' if ok)."""
+    warns = []
+    q = (regime or {}).get("quant") or {}
+    method = (q.get("method") or "none")
+    # (1) live-seam guard: the profile is captured on the REAL online server, so the live kernel carries
+    #     the GPU time. A near-zero share means this seam isn't what the workload actually runs (the
+    #     classic unquantized-GEMM-serving-only-lm_head trap under --quantization fp8).
+    if entries and live_pct < live_pct_min:
+        warns.append(f"seam is only {live_pct}% GPU under the online regime (quant={method}); it is "
+                     f"probably NOT the live kernel — verify the seam (e.g. unquantized GEMM serving "
+                     f"only lm_head). Do NOT trust its weight/speedup for e2e.")
+    # (2) attention KV dtype: a kernel hardcoding bf16 KV will fault under fp8 KV (bf16 stride over fp8).
+    if op_kind in ("attn", "attention") and (regime or {}).get("kv_cache_dtype") in ("fp8", "fp8_e4m3", "fp8_e5m2"):
+        warns.append("online kv-cache-dtype=fp8: the attention oracle + kernel MUST use the fp8 KV "
+                     "layout/stride, else a bf16-stride read over fp8 bytes faults. Verify the captured "
+                     "KV dtype matches.")
+    # (3) compile baseline: norm/elementwise fused online via torch.compile -> eager ref is a strawman.
+    if (regime or {}).get("compile") == "torch_compile" and op_kind in ("norm", "reduction_norm", "elementwise", "rmsnorm", ""):
+        warns.append("online uses torch.compile fusion: the perf baseline must be the COMPILED/fused "
+                     "path, not unfused eager, or the speedup is a strawman.")
+    if warns:
+        notes.extend(warns)
+    return " ".join(warns)
 
 
 def _base_token(short_name):
