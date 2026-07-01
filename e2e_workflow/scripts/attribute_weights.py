@@ -88,8 +88,7 @@ def attribute_gemm(meta, entries, notes):
             mblk = grid / nblk
             is_decode = mblk <= 1.5
         if is_decode is None:
-            is_decode = False  # resolved after the loop via median split if needed
-            grid_vals[-1] = (grid, kw, k)  # mark for second pass
+            grid_vals[-1] = (grid, kw, k)  # mark for second-pass median split
             continue
         if is_decode:
             decode_us += kw
@@ -141,7 +140,7 @@ def attribute_gemm(meta, entries, notes):
             continue
         if total <= 0:
             # The profile window showed ZERO time for a regime that meta says exists. This is almost
-            # always a capture-口径 artifact (e.g. a prefill-dominated profiling window misses decode),
+            # always a capture-window artifact (e.g. a prefill-dominated profiling window misses decode),
             # NOT proof the regime is free. Emit the cases at weight 0 (prior) so they are still
             # benchmarked + visible, and warn loudly. Use --min-regime-share to floor it for serving.
             notes.append(f"WARNING: regime '{regime}' has meta buckets {buckets} but ZERO profiled "
@@ -230,7 +229,7 @@ def _distribute(mcases, regime_us, matched, notes, src="regime"):
     """THE shared case-based engine. For each meta case: if a profiled shape matched it -> trace
     weight; else split its regime's unmatched total (`regime_us[regime]`) across that regime's
     unmatched members by the size prior. A regime meta declares but the profile timed at ZERO ->
-    weight 0 prior + loud warning (a capture-口径 artifact, not proof it's free; floor it via
+    weight 0 prior + loud warning (a capture-window artifact, not proof it's free; floor it via
     --min-regime-share). `src` labels the prior weights (regime|regime_prior)."""
     out = []
     by_regime = {}
@@ -530,8 +529,11 @@ def _quant_block(meta, regime):
 
 
 def _base_token(short_name):
-    """A stable substring for matching specialized kernel names (drop shape/dim noise)."""
-    t = re.split(r"[ \d]", short_name.strip())[0] if short_name else ""
+    """A stable substring for matching specialized kernel names (drop trailing shape/dim noise).
+    Keeps embedded digits that are part of the name (e.g. a8w8) — only strips a trailing _NNN suffix."""
+    t = short_name.strip() if short_name else ""
+    t = t.split()[0]  # drop anything after whitespace (autotune params)
+    t = re.sub(r"_\d+$", "", t)  # strip trailing numeric suffix (_128, _2048)
     return t or short_name
 
 

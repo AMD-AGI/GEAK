@@ -236,7 +236,8 @@ class TestAttributeWeightsEndToEnd(unittest.TestCase):
             self.assertGreaterEqual(dshare, 0.29)
         finally:
             for p in (meta_p, prof_p, out_p):
-                os.path.exists(p) and os.unlink(p)
+                if os.path.exists(p):
+                    os.unlink(p)
 
 
 # --------------------------------------------------------------------------- #
@@ -347,6 +348,87 @@ class TestAttributeRecurrent(unittest.TestCase):
         cases = attribute_weights.attribute_generic(meta, [], [])
         self.assertEqual(cases[0]["weight"], 0.0)
         self.assertEqual(cases[0]["weight_source"], "prior")
+
+
+class TestPassthrough(unittest.TestCase):
+    """When meta has no explicit cases, _passthrough emits the profile's own per-(shape,dtype)
+    weights verbatim — the fallback for kernels the extractor didn't tag with cases."""
+    def test_passthrough_emits_profile_shapes(self):
+        entries = [{"name": "k", "short_name": "k", "cases": [
+            {"dims": [[8, 128]], "dtypes": ["bf16"], "weight": 100.0, "count": 3},
+            {"dims": [[16, 128]], "dtypes": ["bf16"], "weight": 200.0, "count": 7},
+        ]}]
+        notes = []
+        cases = attribute_weights._passthrough(entries, notes)
+        self.assertEqual(len(cases), 2)
+        self.assertTrue(all(c["weight_source"] == "trace" for c in cases))
+        self.assertAlmostEqual(cases[0]["weight"], 100.0)
+        self.assertAlmostEqual(cases[1]["weight"], 200.0)
+
+    def test_passthrough_empty_profile(self):
+        notes = []
+        cases = attribute_weights._passthrough([], notes)
+        self.assertEqual(cases, [])
+        self.assertTrue(any("nothing to weight" in n for n in notes))
+
+
+class TestRegimeFloorEdgeCases(unittest.TestCase):
+    """Edge cases in _apply_regime_floor: overflow guard, and non-GEMM (no per-case M) even split."""
+    def test_floor_overflow_skips(self):
+        cases = [
+            {"regime": "decode", "weight": 0.0, "weight_source": "prior"},
+            {"regime": "prefill", "weight": 0.0, "weight_source": "prior"},
+            {"regime": "other", "weight": 100.0, "weight_source": "regime"},
+        ]
+        notes = []
+        attribute_weights._apply_regime_floor(cases, 0.6, notes)
+        self.assertTrue(any("skipped" in n for n in notes))
+
+    def test_non_gemm_even_split(self):
+        cases = [
+            {"name": "d1", "regime": "decode", "weight": 0.0, "weight_source": "prior"},
+            {"name": "d2", "regime": "decode", "weight": 0.0, "weight_source": "prior"},
+            {"name": "p1", "regime": "prefill", "weight": 100.0, "weight_source": "regime"},
+        ]
+        notes = []
+        attribute_weights._apply_regime_floor(cases, 0.3, notes)
+        decode_cases = [c for c in cases if c["regime"] == "decode"]
+        self.assertTrue(all(c["weight_source"] == "regime_floor" for c in decode_cases))
+        self.assertAlmostEqual(decode_cases[0]["weight"], decode_cases[1]["weight"])
+        total = sum(c["weight"] for c in cases)
+        decode_share = sum(c["weight"] for c in decode_cases) / total
+        self.assertAlmostEqual(decode_share, 0.3, places=2)
+
+
+class TestAttnUnnamedSpreading(unittest.TestCase):
+    """When attention launches can't be name-classified (no decode/prefill/paged keywords), the
+    unnamed time is spread across meta regimes by size."""
+    def test_unnamed_spread_by_size(self):
+        meta = {"op_kind": "attn", "short_name": "attn",
+                "cases": [{"sig": "prefill_q2048", "dims": [[2048, 24, 128]], "dtypes": ["bf16"],
+                           "regime": "prefill"},
+                          {"sig": "decode_q1", "dims": [[64, 24, 128]], "dtypes": ["bf16"],
+                           "regime": "decode"}]}
+        entries = [{"name": "some_unknown_attn_op", "short_name": "attn",
+                    "cases": [{"dims": [], "weight": 1000.0}]}]
+        notes = []
+        cases = attribute_weights.attribute_attn(meta, entries, notes)
+        self.assertTrue(any("unnamed launches" in n for n in notes))
+        by = {c["name"]: c for c in cases}
+        self.assertGreater(by["prefill_q2048"]["weight"], by["decode_q1"]["weight"])
+        self.assertGreater(by["decode_q1"]["weight"], 0.0)
+
+
+class TestBaseToken(unittest.TestCase):
+    """_base_token should keep embedded digits (a8w8) and only strip trailing _NNN suffixes."""
+    def test_keeps_embedded_digits(self):
+        self.assertEqual(attribute_weights._base_token("_gemm_a8w8"), "_gemm_a8w8")
+
+    def test_strips_trailing_numeric_suffix(self):
+        self.assertEqual(attribute_weights._base_token("_gemm_a8w8_128"), "_gemm_a8w8")
+
+    def test_drops_whitespace_params(self):
+        self.assertEqual(attribute_weights._base_token("_gemm_a8w8 GRID_MN_8"), "_gemm_a8w8")
 
 
 class TestAttributeMoe(unittest.TestCase):
