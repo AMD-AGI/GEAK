@@ -10,7 +10,15 @@ classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profile
 
 ## Discipline (a bad trace misroutes the whole run)
 - Profile with the EXACT ISL/OSL/concurrency as the throughput bench, AFTER warmup.
-- Bounded window (`--profile-num-steps`, default 5) so the trace stays parseable.
+- **Capture the STEADY-STATE MIX, not a cold prefill burst.** `bench_e2e.sh` (PROFILE=1) now warms a
+  saturated load and captures a mid-stream window (`adapter_profile_window`), so the trace contains
+  prefill chunks AND decode steps interleaved as the scheduler really runs them. A cold burst profiled
+  from step 0 only sees the prefill ramp (TTFT) and misses decode — if your trace has ONLY large-M
+  prefill shapes and no decode-batch entries, it was captured wrong; re-profile. Note that decode often
+  runs under a CUDA/HIP graph, so its kernels may appear WITHOUT `Input Dims` (shape-hidden); that is
+  expected — decode shapes are recovered downstream from config (decode batch = concurrency), not the
+  trace. Tune the window via `PROFILE_NUM_STEPS` / `PROFILE_WARMUP_SEC` / `PROFILE_NUM_PROMPTS`.
+- Bounded window (`--profile-num-steps`, default 40) so the trace stays parseable but spans into decode.
 - `total_gpu_time_ms` is summed kernel duration in the window — use it for RELATIVE %gpu ranking, not
   as the throughput number (that's the Director's bench).
 - Prefer BOTH sources when available: rocprofv3 gives authoritative HW durations, the torch trace
@@ -119,8 +127,14 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    TRACE=$(ls -t "$PDIR"/*.json.gz "$PDIR"/*.json 2>/dev/null | head -1)
    python3 "$EVAL_DIR/parse_profile.py" --torch-trace "$TRACE" \
      ${ROCPROF_DIR:+--rocprof-dir "$ROCPROF_DIR"} \
-     --top 25 --out "$EVAL_DIR/profile/round_${ROUND}/profile_topN"
+     --top 25 --out "$EVAL_DIR/profile/round_${ROUND}/profile_topN" \
+     --workload-out "$EVAL_DIR/profile/round_${ROUND}/profile_workload.json"
    ```
+   The extra `--workload-out` writes the per-(shape,dtype) WORKLOAD MODEL (each top kernel's real
+   shape/dtype case distribution with a time-proportional weight). The Kernel Extractor slices the
+   target kernel's cases out of this so kernel_workflow benchmarks the shapes the workload actually
+   hits. It needs the torch trace's `Input Dims` (record_shapes); if shapes are absent the cases come
+   out `weight_source:"regime_prior"` — note that in `notes`. Report its path as `profile_workload_json`.
 4. Sanity-read `profile_topN.md`. Resolve any `other`-classified top entries before finishing: grep
    the `short_name` under the serving-stack package dir (sglang/vllm, from `env_info.txt`) to identify
    it, and note the correct class in `notes` so the Architect routes it right. Flag same-named kernels appearing with BOTH large-M and small-M shapes

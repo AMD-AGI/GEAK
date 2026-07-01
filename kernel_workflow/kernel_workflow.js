@@ -75,6 +75,31 @@ const OP_SPEC = A.op_spec || {};
 // This turns on an OPTIONAL capture+replay smoke in the verify step so that failure is caught at the cheap
 // isolated stage. Unset (standalone single-kernel runs / non-graph ops) => byte-identical to before.
 const REQUIRE_GRAPH_CAPTURE = !!(OP_SPEC && OP_SPEC.cuda_graph_safe === true);
+// WORKLOAD ALIGNMENT (optional). When the caller supplies the real-workload shape/dtype case
+// distribution, the benchmark harness benchmarks EXACTLY those (shape, dtype) cases, weights each
+// by its total time contribution in the workload (weight = count * baseline_latency), and the
+// optimization target becomes the time-weighted ratio-of-sums instead of an unweighted geomean.
+//   workload_spec_path : path to a workload-v1 json (produced by parse_profile.py --workload-out,
+//                        or hand-written). The benchmark_engineer reads it (JS can't touch FS).
+//   op_spec.workload   : inline cases, same shape as a workload-v1 "kernels[].cases" list (or the
+//                        full object). Takes precedence; weight_source becomes "caller".
+// Both unset => unweighted behavior, byte-identical to before. Correctness ALWAYS stays on the
+// frozen reference_io.pt oracle; this only shapes the PERFORMANCE measurement.
+const WORKLOAD_SPEC_PATH = String(A.workload_spec_path || (OP_SPEC && OP_SPEC.workload_path) || '').trim();
+const WORKLOAD_SPEC = (OP_SPEC && OP_SPEC.workload) || A.workload || null;
+const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
+  (Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length) ||
+  (WORKLOAD_SPEC && Array.isArray(WORKLOAD_SPEC.kernels) && WORKLOAD_SPEC.kernels.length));
+// PRIMARY-metric selector: prefer the time-weighted number when a workload spec is in play and the
+// agent reported one; otherwise fall back to the geomean (unweighted runs => unchanged behavior).
+const primSpeedup = (o) => {
+  if (!o) return 0;
+  const w = o.verified_weighted != null ? o.verified_weighted
+          : (o.speedup_weighted != null ? o.speedup_weighted : null);
+  if (HAS_WORKLOAD && Number.isFinite(w)) return w;
+  const g = o.verified_geomean != null ? o.verified_geomean : o.speedup_geomean;
+  return Number.isFinite(g) ? g : 0;
+};
 const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge' : '')).replace(/\/+$/, '');
 // Expert skills = human-authored, validated kernel recipes (perf_knowledge/expert_skills/). ADVISORY
@@ -143,6 +168,15 @@ const perCase = {
       baseline_ms: { type: 'number' },
       optimized_ms: { type: 'number' },
       speedup: { type: 'number' },
+      // Workload-alignment fields (present only when a WORKLOAD_SPEC drives the harness; absent
+      // on a normal unweighted run). weight = this case's baseline time SHARE in the real workload;
+      // it is the coefficient of the time-weighted metric Σweight / Σ(weight/speedup). count is
+      // optional/informational (regime-attributed cases have no per-call count).
+      weight: { type: 'number' },
+      count: { type: 'number' },
+      dims: { type: 'array', items: { type: 'array', items: { type: 'number' } } },
+      dtypes: { type: 'array', items: { type: 'string' } },
+      weight_source: { type: 'string' }, // trace | regime | regime_floor | prior | caller
     },
     required: ['name', 'speedup'],
   },
@@ -186,6 +220,12 @@ const BENCH_SCHEMA = obj({
   benchmark_cmd: { type: 'string' }, profile_cmd: { type: 'string' }, parse_hint: { type: 'string' },
   baseline_per_case: { type: 'array', items: { type: 'object', additionalProperties: true } },
   baseline_geomean_ms: { type: 'number' }, num_test_cases: { type: 'number' },
+  // Workload-aligned outputs: present when a WORKLOAD_SPEC drove case selection + weights.
+  // baseline_weighted_total_ms = the baseline time the weights represent (Σ weight_i in time units).
+  // The metric is Σ weight_i / Σ (weight_i/speedup_i). workload_aligned flags weights are real (not 1).
+  workload_aligned: { type: 'boolean' },
+  baseline_weighted_total_ms: { type: 'number' },
+  weights_provenance: { type: 'string' }, // e.g. "trace" | "regime" | "regime_floor" | "prior" | "caller" | "mixed"
   reliable: { type: 'boolean' }, notes: { type: 'string' },
 }, ['commandment_path', 'baseline_per_case', 'baseline_geomean_ms']);
 
@@ -217,6 +257,9 @@ const PLAN_SCHEMA = obj({
 const ENG_SCHEMA = obj({
   engineer_id: { type: 'string' }, specialty: { type: 'string' }, task: { type: 'string' },
   strategy: { type: 'string' }, speedup_geomean: { type: 'number' }, speedup_arithmetic: { type: 'number' },
+  // Time-weighted ratio-of-sums vs the TRUE baseline (PRIMARY metric when workload_aligned).
+  // = Σ weight_i / Σ (weight_i / speedup_i). Omitted on unweighted runs.
+  speedup_weighted: { type: 'number' },
   per_case: perCase, status: { type: 'string' }, patch_file: { type: 'string' },
   strategies_tried: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
 }, ['status', 'speedup_geomean']);
@@ -224,6 +267,7 @@ const ENG_SCHEMA = obj({
 const VERIFY_SCHEMA = obj({
   status: { type: 'string' }, correctness: { type: 'string' },
   verified_geomean: { type: 'number' }, verified_arithmetic: { type: 'number' },
+  verified_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   per_case: perCase, variance_note: { type: 'string' }, notes: { type: 'string' },
   graph_safe: { type: 'string' },
 }, ['status', 'verified_geomean']);
@@ -248,6 +292,7 @@ const COMMIT_SCHEMA = obj({
 
 const REPORT_SCHEMA = obj({
   final_speedup_geomean: { type: 'number' }, final_speedup_arithmetic: { type: 'number' },
+  final_speedup_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   rounds: { type: 'number' }, budget_used: { type: 'number' },
   report_path: { type: 'string' }, final_patch: { type: 'string' }, per_case: perCase,
 }, ['final_speedup_geomean', 'report_path', 'final_patch']);
@@ -256,6 +301,7 @@ const VALIDATE_SCHEMA = obj({
   kernel_name: { type: 'string' },
   director_verified_speedup_geomean: { type: 'number' },
   director_verified_speedup_arithmetic: { type: 'number' },
+  director_verified_speedup_weighted: { type: 'number' }, // PRIMARY when workload_aligned
   tech_lead_reported_speedup_geomean: { type: 'number' },
   validation_status: { type: 'string' }, correctness: { type: 'string' },
   per_case: perCase, applied_to_original: { type: 'string' },
@@ -423,6 +469,8 @@ const bench = await agentT(
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0],
     ANALYSIS: analysis,
     ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+    ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
+    ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
   }),
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
 if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
@@ -561,7 +609,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
     (prev) => {
       const { d, eng } = prev;
       const patch = `${d.out_dir}/best_patch.diff`;
-      if (!eng || eng.status === 'failed' || !(eng.speedup_geomean > 1.0)) {
+      if (!eng || eng.status === 'failed' || !(primSpeedup(eng) > 1.0)) {
         return { d, eng, ver: null };
       }
       return agentT(
@@ -578,12 +626,17 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
 
   const clean = results.filter(Boolean);
   const verified = clean.filter(r => r.ver && r.ver.status === 'verified' &&
-    r.ver.correctness === 'pass' && r.ver.verified_geomean > 1.0);
+    r.ver.correctness === 'pass' && primSpeedup(r.ver) > 1.0);
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
+  // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
+  // ratio-of-sums when a workload spec is active, else the unweighted geomean (unchanged behavior).
+  // The raw unweighted geomean is retained separately for the report.
   let candidates = verified.map(r => ({
     source: `engineer ${r.d.id}`, id: r.d.id, title: r.d.title, specialty: r.d.specialty,
-    geomean: r.ver.verified_geomean, arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
+    geomean: primSpeedup(r.ver), geomean_unweighted: r.ver.verified_geomean,
+    weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
+    arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch,
   }));
 
@@ -601,11 +654,16 @@ Return ONLY the worker_result.json structure as StructuredOutput.`,
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
+    const integPrim = integrate && integrate.best ? primSpeedup({
+      verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
+    }) : 0;
     if (integrate && integrate.conclusion === 'improved' && integrate.best &&
-      integrate.best.geomean > Math.max(...candidates.map(c => c.geomean))) {
+      integPrim > Math.max(...candidates.map(c => c.geomean))) {
       candidates.push({
         source: 'integrated', id: `r${round}_integrated`, title: 'integrated', specialty: 'integrate',
-        geomean: integrate.best.geomean, arithmetic: integrate.best.arithmetic || integrate.best.geomean,
+        geomean: integPrim, geomean_unweighted: integrate.best.geomean,
+        weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
+        arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
       });
     }
@@ -709,12 +767,20 @@ const validation = await agentT(
     APPLY_TO_ORIGINAL, COMMANDMENT,
     FINAL_PATCH: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
     TECH_LEAD_REPORTED_GEOMEAN: report ? report.final_speedup_geomean : cumulative,
+    ...(HAS_WORKLOAD && report && report.final_speedup_weighted != null
+        ? { TECH_LEAD_REPORTED_WEIGHTED: report.final_speedup_weighted } : {}),
     BASELINE_TIMING: BASELINE_PER_CASE,
   }),
   { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
 
 const finalGeomean = validation ? validation.director_verified_speedup_geomean : cumulative;
-log(`COMPLETE. ${KERNEL_NAME}: verified geomean ${finalGeomean ? finalGeomean.toFixed(2) : '?'}x (status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
+// PRIMARY headline: the time-weighted speedup when workload-aligned, else the geomean (unchanged).
+const finalWeighted = validation && validation.director_verified_speedup_weighted != null
+  ? validation.director_verified_speedup_weighted : null;
+const finalPrimary = HAS_WORKLOAD && Number.isFinite(finalWeighted) ? finalWeighted : finalGeomean;
+log(`COMPLETE. ${KERNEL_NAME}: verified ${HAS_WORKLOAD ? 'time-weighted' : 'geomean'} ${finalPrimary ? finalPrimary.toFixed(2) : '?'}x` +
+    `${HAS_WORKLOAD && Number.isFinite(finalGeomean) ? ` (unweighted geomean ${finalGeomean.toFixed(2)}x)` : ''}` +
+    ` (status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
 
 return {
   mode: MODE,
@@ -722,6 +788,9 @@ return {
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
   kernel_name: KERNEL_NAME,
+  workload_aligned: HAS_WORKLOAD,
+  final_speedup: finalPrimary,                 // PRIMARY metric (weighted when workload-aligned)
+  final_weighted: finalWeighted,
   final_geomean: finalGeomean,
   final_arithmetic: validation ? validation.director_verified_speedup_arithmetic : null,
   tech_lead_reported_geomean: report ? report.final_speedup_geomean : cumulative,

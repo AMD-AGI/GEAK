@@ -334,6 +334,7 @@ const SETUP_SCHEMA = obj({
 
 const PROFILE_SCHEMA = obj({
   round: { type: 'number' }, profile_topN_json: { type: 'string' }, profile_topN_md: { type: 'string' },
+  profile_workload_json: { type: 'string' }, // per-(shape,dtype) weighted workload model (optional)
   source: { type: 'string' }, total_gpu_time_ms: { type: 'number' }, top_kernels: arrObj,
   shift_note: { type: 'string' }, notes: { type: 'string' },
 }, ['profile_topN_json', 'top_kernels']);
@@ -358,6 +359,7 @@ const PLAN_SCHEMA = obj({
 const EXTRACT_OP_SCHEMA = obj({
   short_name: { type: 'string' }, op_kind: { type: 'string' }, editable: { type: 'boolean' },
   task_dir: { type: 'string' }, shapes: { type: 'object', additionalProperties: true },
+  workload_path: { type: 'string' }, // per-(shape,dtype) weighted workload model for this kernel (optional)
   dtype: { type: 'string' }, synthesized: { type: 'boolean' }, regimes_captured: arrStr,
   candidate_backends: arrStr, reference_io_sha256: { type: 'string' },
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
@@ -583,7 +585,7 @@ async function tryCorrectiveReauthor(spec) {
       fix = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
         kernel_path: spec.kernel_eval_dir || spec.task_dir, workflow_dir: KERNEL_WF_DIR,
         mode: 'optimize', target_language: spec.language || 'triton',
-        op_spec: { op_kind: spec.op_kind, shapes: spec.shapes || {}, dtype: spec.dtype || 'bf16', regime: spec.regime || '', cuda_graph_safe: true },
+        op_spec: { op_kind: spec.op_kind, shapes: spec.shapes || {}, dtype: spec.dtype || 'bf16', regime: spec.regime || '', cuda_graph_safe: true, ...(spec.workload_path ? { workload_path: spec.workload_path } : {}) },
         perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         budget: KERNEL_BUDGET, gpu_ids: spec.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
@@ -922,6 +924,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const ext = await safeAgent(
         roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH,
+          ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
           CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
           REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
           PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
@@ -971,7 +974,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const liveBaselineMs = (bake && Number.isFinite(bake.best_known_ms) && bake.best_known_ms > 0) ? bake.best_known_ms : 0;
       const deepDir = `${EVAL_DIR}/deep_head/${h.short_name}`;
       const sharedKb = `${deepDir}/SHARED_KB.md`;
-      const opSpec = { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || 'both', cuda_graph_safe: true };
+      const opSpec = { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || 'both', cuda_graph_safe: true, ...(ext.workload_path ? { workload_path: ext.workload_path } : {}) };
       const anchor = await safeAgent(
         `You are the ROOFLINE ANCHOR + shared-KB bootstrapper for DEEP cross-backend optimization of head op ${h.short_name} (${ext.op_kind}). ` +
         `Inputs: OP_TASK_DIR=${ext.task_dir}; shapes=${JSON.stringify(ext.shapes || {})}; dtype=${ext.dtype || '?'}; read ${EVAL_DIR}/env_report.json for the on-box device peak (FLOP/s + HBM bandwidth). ` +
@@ -1280,6 +1283,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const ext = await safeAgent(
           roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH,
+            ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
             CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
             REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
             PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
@@ -1349,7 +1353,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           al = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
             kernel_path: j.ext.task_dir, workflow_dir: KERNEL_WF_DIR,
             mode: j.ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
-            op_spec: { op_kind: j.ext.op_kind, shapes: j.ext.shapes || {}, dtype: j.ext.dtype || 'bf16', regime: j.h.regime || '', cuda_graph_safe: true },
+            op_spec: { op_kind: j.ext.op_kind, shapes: j.ext.shapes || {}, dtype: j.ext.dtype || 'bf16', regime: j.h.regime || '', cuda_graph_safe: true, ...(j.ext.workload_path ? { workload_path: j.ext.workload_path } : {}) },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
             budget: KERNEL_BUDGET, gpu_ids: g[0], exp_root: `${EVAL_DIR}/kernels/_exp`,
@@ -1464,6 +1468,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     const ext = await safeAgent(
       roleAgent('kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH,
+        ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
         // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
@@ -1541,7 +1546,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           al = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
             kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
             mode: ap.route === 'rewrite' ? 'optimize' : 'author', target_language: lang,
-            op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true },
+            op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || '', cuda_graph_safe: true, ...(ext.workload_path ? { workload_path: ext.workload_path } : {}) },
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
             budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
@@ -1752,6 +1757,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       roleAgent('kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
         CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
       }),
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {

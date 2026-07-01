@@ -48,6 +48,9 @@ adapter_bench() {
     extra=(--profile --profile-num-steps "$PROFILE_NUM_STEPS"
            --profile-output-dir "$PROFILE_DIR" --profile-prefix e2e)
   fi
+  # Optional request-rate (req/s) to STAGGER arrivals so sequences sit at different prefill/decode
+  # phases — used by the steady-state profiling path. Empty => inf (max_concurrency still caps).
+  [ -n "${REQUEST_RATE:-}" ] && extra+=(--request-rate "$REQUEST_RATE")
   python -m sglang.bench_serving \
     --backend sglang --base-url "$BASE_URL" --model "$MODEL" \
     --dataset-name random --random-input-len "$ISL" --random-output-len "$OSL" --random-range-ratio 1.0 \
@@ -56,4 +59,32 @@ adapter_bench() {
     --output-file "$RESULT_JSONL" "${extra[@]}"
   # sglang.bench_serving appends a result json line (output_throughput, median_ttft_ms, median_tpot_ms)
   # to --output-file, which is exactly the dispatcher's canonical schema. Nothing else to do.
+}
+
+# adapter_profile_window — capture a profiler window on the ALREADY-RUNNING, warm, mid-load server via
+# sglang's HTTP profiler, so the trace reflects the real continuous-batching steady-state mix (prefill
+# chunks + decode interleaved) instead of a cold prefill ramp. record_shapes=true so the parser gets
+# Input Dims for shape attribution. Called by bench_e2e.sh AFTER a sustained background load is warm.
+adapter_profile_window() {
+  local before after
+  before=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
+  # num_steps set => the server records that many forward steps then auto-saves (async; returns at once).
+  if ! curl -sf -X POST "${BASE_URL}/start_profile" -H 'Content-Type: application/json' \
+        -d "{\"output_dir\":\"${PROFILE_DIR}\",\"num_steps\":${PROFILE_NUM_STEPS},\"record_shapes\":true}" \
+        >/dev/null 2>&1; then
+    echo "!!! /start_profile request failed (sglang HTTP profiler unavailable?)" >&2
+    return 1
+  fi
+  # wait for a NEW trace to land (server saves after num_steps forward passes)
+  local deadline=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
+    [ "$after" -gt "$before" ] && { sleep 2; return 0; }   # +2s for the write to flush
+    sleep 3
+  done
+  # num_steps may not be honored on some builds — force a stop and re-check
+  curl -sf -X POST "${BASE_URL}/stop_profile" >/dev/null 2>&1 || true
+  sleep 3
+  after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
+  [ "$after" -gt "$before" ]
 }
